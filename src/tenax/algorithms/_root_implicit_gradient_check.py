@@ -566,6 +566,11 @@ def measure_gradient_error(
         # Casting here INSTEAD would leave ``analytic`` projecting along a
         # float64 direction while the difference shifts along its float32
         # rounding -- two slightly different directions, compared as one.
+        # ``t`` is a plain Python float by the time it gets here (the step is
+        # normalised at the top of the loop), so it is a WEAK scalar under
+        # NEP 50 and leaves this at the state's dtype.  Casting it to the
+        # state's dtype explicitly would be redundant -- and a redundancy no
+        # test can distinguish is worse than the one-line invariant above.
         intended = t * v
         shifted_data = base + intended
         # Coordinatewise, not whole-array.  A single frozen coordinate is enough
@@ -612,6 +617,16 @@ def measure_gradient_error(
     results = []
     skipped: list[str] = []
     for h in steps:
+        # Normalised to a plain Python float FIRST.  A ``np.float64`` step --
+        # what ``tuple(np.logspace(...))`` yields -- is a strong scalar under
+        # NEP 50, so it promotes anything it touches: ``t * v`` and the shifted
+        # buffer, and separately ``(realised_plus - realised_minus) / (2 * h)``,
+        # which decides the precision of the direction the projection is taken
+        # along.  A Python float is weak and leaves each at the state's own
+        # dtype, so the scan measures the map it was given rather than a
+        # float64 lift of it -- and the answer stops depending on whether the
+        # caller wrote ``1e-2`` or ``np.float64(1e-2)``.
+        h = float(h)
         try:
             (e_plus, i_plus, realised_plus), (e_minus, i_minus, realised_minus) = (
                 energy_at(h),

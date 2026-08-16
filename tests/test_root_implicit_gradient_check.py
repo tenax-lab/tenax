@@ -1516,6 +1516,44 @@ def test_a_partly_converged_scan_is_not_called_measured():
     assert "set by the differences" in report.summary(), report.summary()
 
 
+def test_numpy_scalar_steps_do_not_promote_the_map():
+    """The step is cast to the state's dtype, not only the direction.
+
+    Under NEP 50 a ``np.float64`` scalar promotes ``t * v`` and the shifted
+    buffer to float64, while the gradient was taken on the float32 tensor -- so
+    the scan would difference a different-precision map from the one under
+    test. ``tuple(np.logspace(...))`` produces exactly such steps, and it is an
+    ordinary way to write a scan.
+    """
+    data = np.full((2, 2, 2, 2, 2), 0.5, dtype=np.float32)
+    seen: list[str] = []
+
+    def quadratic(t):
+        x = jnp.asarray(t.todense())
+        seen.append(np.asarray(x).dtype.name)
+        return jnp.sum(x**2), 2.0 * x
+
+    plain = measure_gradient_error(quadratic, _wrap(data), steps=(1e-2, 1e-3))
+    plain_dtypes = set(seen)
+
+    seen.clear()
+    numpy_steps = tuple(np.array([1e-2, 1e-3]))
+    assert all(isinstance(s, np.floating) for s in numpy_steps), (
+        "fixture no longer supplies numpy scalars, so nothing would promote"
+    )
+    promoted = measure_gradient_error(quadratic, _wrap(data), steps=numpy_steps)
+
+    assert set(seen) == {"float32"}, (
+        f"numpy scalar steps evaluated the map at {sorted(set(seen))}, but the "
+        f"gradient was taken on float32"
+    )
+    assert plain_dtypes == {"float32"}, sorted(plain_dtypes)
+    assert promoted.relative_error == plain.relative_error, (
+        f"numpy scalar steps changed the measurement from "
+        f"{plain.relative_error:.6e} to {promoted.relative_error:.6e}"
+    )
+
+
 def test_a_sign_flipped_step_is_the_same_secant():
     """``h`` and ``-h`` evaluate one central difference, not two.
 
