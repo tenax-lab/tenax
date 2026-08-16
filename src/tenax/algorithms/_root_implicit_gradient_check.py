@@ -146,10 +146,19 @@ def measure_gradient_error(
 
     ``steps`` is scanned rather than fixed because a single step cannot tell a
     wrong gradient from an unresolvable difference.  The scan yields both
-    numbers in :class:`GradientErrorReport`: the smallest disagreement with the
-    finite difference, and the ``resolution`` the steps agree to among
+    numbers in :class:`GradientErrorReport`: the disagreement at the **smallest
+    usable** step magnitude, and the ``resolution`` the steps agree to among
     themselves.  ``is_resolved`` says whether the first stands clear of the
     second by ``fd_spread_tol``.
+
+    The step is chosen by ``|h|`` alone and never by which difference agrees
+    best with the gradient -- that would be circular, handing the answer to
+    whichever truncation error imitates the gradient's error.  For ``E = x^4``
+    the central difference is ``4 + 4h^2`` exactly, so ``h=0.1`` returns 4.04
+    and a supplied gradient of 4.04, 1% wrong, was matched to 1.8e-15 and
+    reported as perfect.  Whether the smallest step was itself
+    roundoff-dominated is what ``resolution`` reports, so the honest answer
+    survives either way.
 
     On a **complex** state the default direction is complex too, and a
     real-*valued* one passed explicitly is refused -- judged on the values, so
@@ -320,17 +329,33 @@ def measure_gradient_error(
     v = v.astype(base.dtype, copy=False)
 
     energy0, grad = energy_and_grad(A)
-    e0 = float(np.real(np.asarray(energy0)))
-    if not np.isfinite(e0):
+    # Finiteness of the WHOLE scalar, before ``np.real``.  Checking after the
+    # projection accepts ``complex(finite, nan)``: every energy in the scan
+    # could be non-finite while the report reads as ordinary.
+    e0_arr = np.asarray(energy0)
+    if not np.all(np.isfinite(e0_arr)):
         # Checked for the same reason every perturbed energy is: the map has to
         # be defined at the state whose gradient is being measured.  Without
         # this, a NaN here with finite neighbours yields a confident-looking
         # report about a map that is undefined where it was asked.
         raise ValueError(
-            f"the energy at the unperturbed state is {e0}, so the map is "
+            f"the energy at the unperturbed state is {e0_arr}, so the map is "
             "undefined at the state whose gradient is being measured."
         )
     grad_arr = np.asarray(grad)
+    if not np.iscomplexobj(base) and np.iscomplexobj(grad_arr):
+        imag = float(np.max(np.abs(grad_arr.imag)))
+        if imag > 0.0:
+            # ``Re(sum(g * v))`` would silently drop it.  A cotangent for a real
+            # input space has no imaginary part, so this is a malformed
+            # gradient rather than one to project: ``2x + 1j*1e30`` would
+            # otherwise report as accurate.
+            raise ValueError(
+                f"the gradient has a non-zero imaginary part (max {imag:.3e}) "
+                "but the state is real, so it is not a valid cotangent for "
+                "this input space. Taking its real part would discard that "
+                "component silently and report the gradient as accurate."
+            )
     if grad_arr.shape != base.shape:
         # ``grad_arr * v`` would happily BROADCAST a scalar or a lower-rank
         # array, and the projection then looks right: for ``E = sum(x)`` a
@@ -439,15 +464,17 @@ def measure_gradient_error(
         energy, _g = energy_and_grad(shifted)
         energy_arr = np.asarray(energy)
         energy_dtypes.append(energy_arr.dtype)
-        out = float(np.real(energy_arr))
-        if not np.isfinite(out):
+        # Whole scalar first -- see the unperturbed check above.  ``np.real``
+        # applied before this would let ``complex(finite, nan)`` through.
+        if not np.all(np.isfinite(energy_arr)):
             raise ValueError(
-                f"the energy at the perturbed state (t={t:.1e}) is {out}, so "
+                f"the energy at the perturbed state (t={t:.1e}) is "
+                f"{energy_arr}, so "
                 "the finite difference is undefined. Reported rather than "
                 "propagated: a non-finite difference makes every comparison "
                 "below fail open."
             )
-        return out
+        return float(np.real(energy_arr))
 
     results = []
     skipped: list[str] = []

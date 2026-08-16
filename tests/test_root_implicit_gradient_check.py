@@ -847,3 +847,55 @@ def test_the_advertised_cost_matches_the_number_of_evaluations():
         f"default scan made {calls['n']} evaluations, not the documented 7 "
         "(1 unperturbed + 2 per step x 3 steps)"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 12. Complex energies, imaginary gradients on real states                      #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_complex_energy_with_a_nan_imaginary_part_is_rejected():
+    """``np.real`` before the finiteness check accepts ``complex(finite, nan)``.
+
+    Every energy in the scan could then be non-finite while the report reads as
+    ordinary -- the check has to see the whole scalar first.
+    """
+
+    def nan_imag_energy(t):
+        x = jnp.asarray(t.todense())
+        return jnp.asarray(complex(float(jnp.sum(x**4)), float("nan"))), 4.0 * x**3
+
+    with pytest.raises(ValueError, match="unperturbed state"):
+        measure_gradient_error(nan_imag_energy, _quartic_state())
+
+
+def test_an_imaginary_gradient_on_a_real_state_is_rejected():
+    """``Re(sum(g * v))`` would drop it silently.
+
+    A cotangent for a real input space has no imaginary part, so ``2x + 1j*1e30``
+    is a malformed gradient rather than one to project -- and projecting it
+    reports the gradient as accurate.
+    """
+
+    def imag_grad(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**2), 2.0 * x + 1j * 1e30
+
+    with pytest.raises(ValueError, match="imaginary part"):
+        measure_gradient_error(imag_grad, _quartic_state())
+
+
+def test_a_real_valued_complex_dtype_gradient_on_a_real_state_is_allowed():
+    """Zero imaginary content is a real cotangent, whatever the dtype says.
+
+    The guard is on the values, like the direction guard -- rejecting on dtype
+    alone would refuse a legitimate gradient that merely came back promoted.
+    """
+
+    def complex_dtype_grad(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**2), (2.0 * x).astype(jnp.complex128)
+
+    report = measure_gradient_error(complex_dtype_grad, _quartic_state())
+
+    assert report.relative_error < 1e-6, report.summary()
