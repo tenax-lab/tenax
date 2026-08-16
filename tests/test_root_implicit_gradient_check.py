@@ -508,3 +508,76 @@ def test_a_state_small_enough_for_the_steps_still_works():
 
     assert report.is_resolved, report.summary()
     assert report.relative_error == pytest.approx(0.25, rel=1e-3), report.summary()
+
+
+# --------------------------------------------------------------------------- #
+# 7. Same map, same direction, and a step chosen without peeking at the answer  #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_step_is_chosen_without_consulting_the_gradient():
+    """Selecting the step by agreement with the gradient is circular.
+
+    For ``E = x^4`` the central difference is ``4 + 4h**2`` *exactly*, so at
+    ``x=1`` and ``h=0.1`` it returns 4.04.  A supplied gradient of 4.04 is 1%
+    wrong, and picking the step whose difference best matches it therefore
+    matched to 1.8e-15 and reported the wrong gradient as perfect.  The step is
+    now chosen by ``|h|`` alone, and ``resolution`` reports whether that choice
+    was any good.
+    """
+    A = _wrap(np.ones((2, 2, 2, 2, 2)))
+
+    def one_percent_wrong(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**4), 4.04 * jnp.ones_like(x)
+
+    report = measure_gradient_error(
+        one_percent_wrong, A, direction=np.ones((2, 2, 2, 2, 2)), steps=(0.1, 0.099)
+    )
+
+    assert report.relative_error > 1e-6, (
+        "the h=0.1 truncation lands exactly on the wrong gradient, so a "
+        f"selection that consults it reports ~0 -- got {report.summary()}"
+    )
+    assert report.step == pytest.approx(0.099), (
+        f"expected the smallest magnitude, got h={report.step:.3e}"
+    )
+
+
+def test_a_partially_frozen_shift_is_rejected():
+    """One frozen coordinate distorts the direction without freezing the buffer.
+
+    A whole-array equality check cannot see this: the 1e20 entry swallows the
+    step while the 1.0 entries move, so the difference follows a different
+    direction from the one ``g.v`` is projected along, and a correct gradient
+    is reported as wrong.
+    """
+    mixed = np.ones((2, 2, 2, 2, 2))
+    mixed[0, 0, 0, 0, 0] = 1e20
+
+    with pytest.raises(ValueError, match="rounds away"):
+        measure_gradient_error(_exact_pair(), _wrap(mixed))
+
+
+def test_the_shifted_state_keeps_the_input_dtype():
+    """float32 in, float32 at every finite-difference evaluation.
+
+    A float64 direction promotes the shifted buffer, and because tenax enables
+    x64 it stays promoted -- so the gradient would be taken at one precision
+    and the differences evaluated at another, which is a different numerical
+    map with different CTM tolerances.
+    """
+    seen = []
+
+    def recording(t):
+        x = jnp.asarray(t.todense())
+        seen.append(np.dtype(x.dtype).name)
+        return jnp.sum(x**4), 4.0 * x**3
+
+    data = np.random.RandomState(0).standard_normal((2, 2, 2, 2, 2)).astype(np.float32)
+    measure_gradient_error(recording, _wrap(data), steps=(1e-3, 1e-4))
+
+    assert set(seen) == {"float32"}, (
+        f"the map was evaluated at mixed precisions: {sorted(set(seen))}"
+    )
+    assert len(seen) == 5, f"expected 1 gradient + 2 steps x 2 signs, got {len(seen)}"

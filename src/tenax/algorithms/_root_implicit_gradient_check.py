@@ -238,7 +238,6 @@ def measure_gradient_error(
         )
     v = v / max_abs
     v = v / float(np.linalg.norm(v))
-
     if is_complex:
         # Judged on the VALUES, not the dtype, and on BOTH halves.  The two
         # failures are symmetric: ``Re(sum(g * v))`` with a real-valued ``v``
@@ -275,6 +274,20 @@ def measure_gradient_error(
             "in and the finite difference would not be of this map."
         )
 
+    # Only NOW cast to the state's own precision -- after the real/imaginary
+    # validation above, which the cast would otherwise silently satisfy by
+    # discarding the very imaginary part it is checking for.  This is the ONLY
+    # cast: ``analytic`` and every shifted state then use the identical
+    # direction, rather than one projecting in float64 and the other shifting
+    # in its float32 rounding.  A float32 state
+    # plus a float64 direction promotes the shifted buffer, and since tenax
+    # enables x64 the DenseTensor stays promoted, so the gradient would be
+    # taken at one precision while every finite-difference energy is evaluated
+    # at another, where CTM convergence and tolerances behave differently.
+    # That is not the same numerical map, which is the one thing this function
+    # promises to compare against.
+    v = v.astype(base.dtype, copy=False)
+
     _energy, grad = energy_and_grad(A)
     grad_arr = np.asarray(grad)
     if not np.all(np.isfinite(grad_arr)):
@@ -301,22 +314,46 @@ def measure_gradient_error(
         )
 
     def energy_at(t: float) -> float:
-        shifted_data = base + t * v
-        if np.array_equal(shifted_data, base):
-            # ``h * v`` fell below the spacing of ``base``, so the "perturbed"
-            # state is bit-identical to the original.  Both signs then return
-            # the same energy, every difference is exactly 0, and
-            # ``relative_error`` becomes ``|0 - analytic| / 1e-300`` -- inf --
-            # while ``resolution`` is 0, so ``is_resolved`` is True and a
-            # *correct* gradient is reported as infinitely wrong.  Reachable on
-            # any large-magnitude state: entries around 1e20 swallow the
-            # default steps outright.
+        # ``v`` already carries ``base``'s precision, so this inherits it.
+        # Casting here INSTEAD would leave ``analytic`` projecting along a
+        # float64 direction while the difference shifts along its float32
+        # rounding -- two slightly different directions, compared as one.
+        intended = t * v
+        shifted_data = base + intended
+        # Coordinatewise, not whole-array.  A single frozen coordinate is enough
+        # to break the measurement and does NOT make the buffer bit-identical:
+        # on a mixed-scale tensor a 1e20 entry can swallow the step while a
+        # 1.0 entry moves, so the difference follows a *distorted* direction
+        # while ``analytic`` still projects along the intended one -- reporting
+        # a correct gradient as wrong.  Compare the realised displacement to the
+        # intended one on the coordinates where the intended shift is
+        # meaningful; ordinary rounding leaves this around 1e-10.
+        realised = shifted_data - base
+        # Rounding a sum costs about ``eps * |base|`` in absolute terms, so that
+        # -- not a fixed relative figure -- is the bound a healthy coordinate
+        # must meet.  A dtype-blind threshold rejects float32 outright, where
+        # ordinary rounding is already 2.5e-04 relative.
+        eps = float(np.finfo(base.dtype).eps)
+        tol_abs = 4.0 * eps * np.abs(base)
+        # A coordinate is "frozen" when it carries real weight in the direction
+        # yet is too small for ``base`` to represent: it then contributes to
+        # ``g.v`` but not to the difference, so the two follow different
+        # directions.  Whole-array equality cannot see this -- on a mixed-scale
+        # tensor a 1e20 entry freezes while the 1.0 entries move.
+        meaningful = np.abs(intended) > 1e-12 * float(np.max(np.abs(intended)))
+        frozen = meaningful & (np.abs(intended) <= tol_abs)
+        drifted = meaningful & (np.abs(realised - intended) > tol_abs)
+        n_bad = int(np.count_nonzero(frozen | drifted))
+        if n_bad:
             raise ValueError(
-                f"the step h={t:.1e} rounds away against this state: "
-                f"base + h*v is bit-identical to base, so the finite "
-                f"difference is identically zero and measures nothing. The "
-                f"state's largest entry is {float(np.max(np.abs(base))):.2e}; "
-                "use steps large enough to change it."
+                f"the step h={t:.1e} rounds away against this state on "
+                f"{n_bad} of {int(np.count_nonzero(meaningful))} weighted "
+                f"coordinates: the shift there is below what base can "
+                f"represent, so the finite difference follows a different "
+                f"direction from the one g.v is projected along and a correct "
+                f"gradient would be reported as wrong. The state's largest "
+                f"entry is {float(np.max(np.abs(base))):.2e}; use steps large "
+                "enough to change it."
             )
         shifted = DenseTensor(jnp.asarray(shifted_data), A.indices)
         energy, _g = energy_and_grad(shifted)
@@ -342,7 +379,16 @@ def measure_gradient_error(
         rel = abs(fd - analytic) / max(abs(fd), 1e-300)
         results.append((rel, fd, h))
 
-    best_rel, best_fd, best_h = min(results, key=lambda r: r[0])
+    # Pick the step by |h| ALONE, never by how well its difference agrees with
+    # the gradient.  Selecting on agreement is circular: it hands the answer to
+    # whichever truncation error happens to imitate the gradient's error, and
+    # the two coincide exactly more often than one would guess.  For E = x^4 at
+    # x = 1 the central difference is 4 + 4h^2 exactly, so h=0.1 returns 4.04 --
+    # and a supplied gradient of 4.04, which is 1% wrong, was matched to 1.8e-15
+    # and reported as perfect.  The smallest step carries the least truncation;
+    # whether it was also small enough to be roundoff-dominated is exactly what
+    # ``resolution`` below reports, so the honest answer survives either way.
+    best_rel, best_fd, best_h = min(results, key=lambda r: abs(r[2]))
 
     # The scan's own noise floor: how far the finite differences sit from each
     # other, relative to the scale of the derivative.  Measured on the
