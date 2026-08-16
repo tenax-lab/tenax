@@ -168,18 +168,31 @@ class GradientErrorReport(NamedTuple):
 #: supposed to carry.
 _ARTEFACT_MARGIN = 3.0
 
-#: Slack on the factor-2 separation, because it is now measured on the
-#: *realised* displacements and those round independently at each endpoint: a
-#: requested ratio of exactly 2 was measured at 1.9999999999999993 on a state
-#: with a 1e12 coordinate, three ULP short, and rejecting that pair would drop
-#: a legitimately separated scan.
+#: How many ULP of the state the factor-2 separation may fall short by.
 #:
-#: Unlike the thresholds this module has had to fight, nothing sits near this
-#: one.  Rounding shortfalls are ~1e-16 relative and the degeneracy it exists
-#: to catch has a ratio near *one*, so the admissible band is six orders wide
-#: on one side and ten on the other.  Its exact position is not load-bearing.
-_SPAN_ROUNDING_SLACK = 1e-6
-_MIN_SPAN_RATIO = 2.0 * (1.0 - _SPAN_ROUNDING_SLACK)
+#: The separation is measured on the *realised* displacements, and each endpoint
+#: rounds to the state's own grid, so the coarse span comes back a little under
+#: twice the fine one: a requested ratio of exactly 2 measures 1.9999999999999993
+#: on a float64 state with a 1e12 coordinate.  The deficit is ABSOLUTE -- about
+#: one ULP of the largest coordinate -- which is why the slack is expressed in
+#: those units rather than as a relative constant.
+#:
+#: A relative constant is what this had first, and it was wrong: 1e-06 is
+#: float64 reasoning, while the same scan on complex64 falls short by 6.7e-05
+#: (34x more) and was refused outright as unable to bound its own resolution.
+#: The shortfall grows as the step shrinks relative to the state, so no fixed
+#: multiple of ``eps`` works either -- only a bound in the units the deficit
+#: actually has.
+#:
+#: Four ULP leaves margin over the one observed while staying far from the
+#: degeneracy this guards: two steps of nearly equal size fall short by about a
+#: whole span, which is many orders larger than any ULP count.
+_SPAN_SLACK_ULP = 4.0
+
+
+def _separated(coarse: float, fine: float, slack: float) -> bool:
+    """Is ``coarse`` at least twice ``fine``, allowing for endpoint rounding?"""
+    return coarse >= 2.0 * fine - slack
 
 
 def _unit_direction(shape, seed: int, *, complex_valued: bool) -> np.ndarray:
@@ -340,7 +353,7 @@ def measure_gradient_error(
     # report whose error, resolution, distortion and bound are all NaN and
     # blames incommensurable steps, which is a wrong diagnosis of a broken
     # input.  It also fails OPEN on the way: the separation check compares
-    # ``nan < _MIN_SPAN_RATIO``, which is False, so the scan proceeds.
+    # ``nan >= 2*fine - slack``, which is False, so the scan proceeds.
     if not np.all(np.isfinite(base)):
         bad = int(np.count_nonzero(~np.isfinite(base)))
         raise ValueError(
@@ -708,7 +721,10 @@ def measure_gradient_error(
     # magnitudes -- two ``h`` values that land on the same endpoints are one
     # measurement however far apart they were asked to be.
     surviving = sorted({r[7] for r in results})
-    if len(surviving) < 2 or surviving[-1] / surviving[0] < _MIN_SPAN_RATIO:
+    span_slack = (
+        _SPAN_SLACK_ULP * float(np.finfo(base.dtype).eps) * float(np.max(np.abs(base)))
+    )
+    if len(surviving) < 2 or not _separated(surviving[-1], surviving[0], span_slack):
         detail = "\n  ".join(skipped) if skipped else "(none skipped)"
         raise ValueError(
             f"only {len(surviving)} distinct realised displacement(s) remain"
@@ -833,7 +849,9 @@ def measure_gradient_error(
             by_magnitude[results[j][7]] = j
             accepted.append(j)
         magnitudes = sorted(by_magnitude)
-        if len(magnitudes) >= 2 and magnitudes[-1] / magnitudes[0] >= _MIN_SPAN_RATIO:
+        if len(magnitudes) >= 2 and _separated(
+            magnitudes[-1], magnitudes[0], span_slack
+        ):
             members = list(by_magnitude.values())
             # Ties broken by the FINEST step, not by encounter order.  Two
             # disjoint groups of equal size are otherwise resolved by however

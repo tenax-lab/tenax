@@ -1812,6 +1812,32 @@ def test_a_direction_gap_is_not_reported_as_non_convergence():
     assert np.isnan(report.unresolved_bound), report.summary()
 
 
+def test_a_single_precision_scan_is_not_refused_for_endpoint_rounding():
+    """The separation slack is in ULP of the state, not a relative constant.
+
+    The realised spans round to the state's own grid, so the coarse one comes
+    back about one ULP under twice the fine one. That deficit is *absolute*: on
+    complex64 it is 6.7e-05 in relative terms, 34x a 1e-06 relative slack, and
+    the scan was refused outright as unable to bound its own resolution --
+    while the identical scan on complex128 falls short by only 1.3e-13 and
+    passed. A relative constant cannot cover both; ULP of the state can.
+    """
+    data = (np.full((2, 2, 2, 2, 2), 1.0) + 1j * np.full((2, 2, 2, 2, 2), 1.0)).astype(
+        np.complex64
+    )
+    direction = np.ones((2, 2, 2, 2, 2)) + 1j * np.ones((2, 2, 2, 2, 2))
+
+    def linear_in_real_part(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x.real) + 0j, jnp.ones((2, 2, 2, 2, 2), dtype=jnp.complex64)
+
+    report = measure_gradient_error(
+        linear_in_real_part, _wrap(data), direction=direction, steps=(1e-2, 5e-3)
+    )
+
+    assert report.relative_error < 1e-2, report.summary()
+
+
 def test_group_members_must_agree_with_each_other_not_just_the_anchor():
     """A ball of radius ``tol`` admits members ``2 * tol`` apart.
 
