@@ -171,16 +171,43 @@ replaces** — not because the gauge got more expensive (four solves at 370 ms i
 smaller than the earlier draft used.
 
 **The fermionic default is a different problem that this design did not
-create.** A fermionic 4-bond cycle at D=2 costs 1167 ms against dense's 12.2 ms
-— **96×** — because at D=2 the block-sparse blocks are single numbers and the
-path is pure eager host dispatch, the wall documented in #566/#618. So the
-fermionic default already takes ~233 s today, and *if* fermionic BP cost matched
-dense the run would go to ~529 s, a mere ~2.3×. That "if" is exactly the
-extrapolation this section was called out for: **the gauge is not generalised to
-fermionic yet** (Phase 1, gated on §5.1), and the SU measurement above is direct
-evidence that dense timings do not transfer to this representation. The
-fermionic number is therefore left unprojected rather than guessed, and
-measuring it is a Phase 1 deliverable.
+create — and it is far worse.** A fermionic 4-bond cycle at D=2 costs 1167 ms
+against dense's 12.2 ms — **96×** — because at D=2 the block-sparse blocks are
+single numbers and the path is pure eager host dispatch, the wall documented in
+#566/#618. So the fermionic default already takes ~233 s today.
+
+An earlier draft stopped there, refusing to project the gauged cost because the
+gauge had not been generalised to fermionic — and noted that *if* fermionic BP
+matched dense timings the run would reach ~529 s, "a mere ~2.3×". **That
+hypothetical was wrong by a factor of 17, and it has now been measured
+directly.** `bp_gauge_checkerboard` in fact runs on a fermionic
+`SymmetricTensor` as-is: at D=2 it converges in 29 iterations at tol=1e-6,
+residual 6.9e-13. The cost:
+
+| | per iteration | iterations @1e-6 | per solve | per 4-bond cycle |
+|---|---|---|---|---|
+| dense | 18.5 ms | 20 | 0.37 s | 1.48 s |
+| **fermionic** | **392 ms** | 29 | **11.4 s** | **45.5 s** |
+
+Per-iteration cost is flat in tolerance — 406 / 391 / 392 / 393 ms at
+1e-2 / 1e-4 / 1e-6 / 1e-8 — so this is per-iteration dispatch, not setup, and
+the total scales linearly with iterations. Against a 1.167 s SU cycle the gauge
+is **39× the step it is gauging**, and the fermionic default goes from ~233 s to
+**~9,300 s (~2.6 hours), a ~40× regression**.
+
+**This is the second independent blocker on fermionic v1**, alongside the
+unexplained 2-site layout pin in §5.1, and unlike that one it does not need an
+experiment to discover. It is also the blocker least likely to yield: the
+21× per-iteration gap over dense is the same block-sparse eager-dispatch wall
+that #566, #618 and #630 each attacked and each closed NO-GO, concluding it is a
+JAX compile-model limit rather than an algorithmic one. A tracing pass that
+rescues the dense path (which is plain array ops) has no reason to rescue this
+one.
+
+Consequence: the §9.1 decision to drop fermionic to v2 if its gate fails now
+rests on a measurement rather than on a risk. Phase 1 should confirm this number
+on a second seed and D, and then take the decision rather than attempt the
+rescue.
 
 **It is Python, and on the dense path it is fixable.** BP's cost per *iteration*
 is flat in D and enormous relative to the work: 18.5 ms per iteration at D=2, on
@@ -357,13 +384,28 @@ that otherwise work (#881). Why a 2-site path needs it, when the stated
 justification is 1-site-only, is **not understood** and is its own Phase 1
 question. That — not the 1-site experiment — is what gates fermionic v1.
 
-### 5.2 Fermionic BP has never been run
+### 5.2 Fermionic BP runs and converges — exactness is still unproven
 
 The BP gauge was built and verified for the bosonic checkerboard. Messages on a
-graded tensor network must respect Koszul signs, and nothing has exercised that.
-Phase 1 must prove `gauge_fix` is an exact gauge transformation on a fermionic
-state (same invariance test #870 used: re-contract and compare, expect ~1e-15)
-*before* any evolution is built on it.
+graded tensor network must respect Koszul signs, and nothing had exercised that.
+
+**Run since: it works, as-is.** `bp_gauge_checkerboard` accepts a fermionic
+`SymmetricTensor` from `_initialize_fpeps` without modification and converges at
+D=2 in 65 iterations to residual 6.9e-13 (tol=1e-12), returning a plausible
+four-bond spectrum. So the generalisation Phase 1 was scoped to write may
+largely already exist. It is also, at 392 ms per iteration, catastrophically
+slow — see §2.
+
+**Converging is not being exact**, and that gap is the real Phase 1 work. A BP
+fixed point on a graded network can be self-consistent and still not be a gauge
+transformation of the original state if a Koszul sign is dropped. The invariance
+test is what decides it, and here is the obstacle: **`_torus_2x2`, the probe #870
+relies on, cannot be reused.** It calls `todense()` and contracts with
+`np.einsum`, which has no notion of exchange signs; on a fermionic state it
+computes the wrong scalar and would certify a broken gauge. Phase 1 must build
+the invariance probe out of the graded `contract()` instead, and validate the new
+probe against the old one on a *bosonic* pair first — otherwise a probe bug and a
+gauge bug are indistinguishable.
 
 ### 5.3 #869's divergence is seed-dependent at D=3 and universal from D=4
 
@@ -632,10 +674,19 @@ while the new one is unproven.
 
 Resolved 2026-08-15; the reasoning is folded into the sections named.
 
-1. **Fermionic drops to v2 if the §5.1 gate fails** — authorised in advance, so
-   it is not a question reopened under schedule pressure. Narrowed: the gate is
-   the *2-site* layout question, since the 1-site constraint is superseded by
-   #881. See §5.1.
+1. **Fermionic drops to v2 if its gates fail** — authorised in advance, so it is
+   not a question reopened under schedule pressure. There are now **two**
+   independent gates, and the second has already been measured:
+   - the *2-site* layout question of §5.1, still unexplained and still needing
+     an experiment (the 1-site constraint is superseded by #881);
+   - **cost**, §2: the fermionic gauge is 39× the SU step it gauges, taking the
+     default run from ~233 s to ~2.6 hours. This is the same block-sparse
+     eager-dispatch wall that #566, #618 and #630 each closed NO-GO, so it is
+     the gate least likely to yield to effort.
+
+   Phase 1 should confirm the cost on a second seed and D and then **take the
+   decision**, rather than spend the phase attempting a rescue that three prior
+   issues concluded is a JAX compile-model limit.
 2. **`_SUState` is a new type** (internal for v1), not the existing container
    with lambda removed.
    See §3.
