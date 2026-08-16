@@ -31,7 +31,7 @@ import pytest
 
 from tenax.algorithms.ipeps import _wrap_as_dense_tensor, sublattice_rotate_gate
 from tenax.algorithms.ipeps_simple_update import (
-    CheckerboardLambdas,
+    BondWeights,
     _make_trotter_gate_tensor,
     _simple_update_checkerboard_sweep,
     _to_physical_pair,
@@ -219,7 +219,7 @@ def test_each_leg_receives_its_own_bond_spectrum():
     ``sqrt(h_AB . h_BA)`` and is the reason the mapping lives in one function.
     """
     D, d = 3, 2
-    lam = CheckerboardLambdas(
+    lam = BondWeights(
         h_AB=jnp.asarray([1.0, 2.0, 4.0]),
         h_BA=jnp.asarray([1.0, 3.0, 9.0]),
         v_AB=jnp.asarray([1.0, 5.0, 25.0]),

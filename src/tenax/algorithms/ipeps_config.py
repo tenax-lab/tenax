@@ -542,11 +542,19 @@ class iPEPSConfig:
     #: ``|h_AB - h_BA|`` around 10-50% and a flat spectrum, against 1 of 8 with
     #: the shared spectrum.  A smaller ``dt`` did not escape it.
     #:
-    #: Turn it on for a Hamiltonian whose bonds are genuinely inequivalent
-    #: (``Jx != Jy``, or any anisotropic or dimerised model), where sharing a
-    #: spectrum is not an approximation but a wrong answer.  Prefer a physical
-    #: initial state with it: the trapped seeds converge correctly from a
-    #: Neel-like start.
+    #: Turn it on when the *state* may genuinely break the AB<->BA symmetry --
+    #: a spontaneously dimerised or valence-bond phase, where two spectra
+    #: cannot represent the answer and sharing one is not an approximation but
+    #: a wrong answer.  Prefer a physical initial state with it: the trapped
+    #: seeds converge correctly from a Neel-like start.
+    #:
+    #: It does **not** make the bonds inequivalent in the *Hamiltonian*.
+    #: :func:`~tenax.algorithms.ipeps.ipeps` takes a single ``hamiltonian_gate``
+    #: and :func:`~tenax.algorithms.ipeps_simple_update._simple_update_checkerboard_sweep`
+    #: applies that one gate in all four phases, so an anisotropic model
+    #: (``Jx != Jy``) cannot be expressed today whatever this flag is set to --
+    #: setting it would silently evolve the uniform model instead.  Per-bond
+    #: gates are #883.
     su_independent_bond_lambdas: bool = False
     ctm: CTMConfig = field(default_factory=CTMConfig)
     svd_trunc_err: float | None = None

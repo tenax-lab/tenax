@@ -81,11 +81,22 @@
   of 8 seeds against 1 of 8 shared — and seed 0, which `ipeps()` hardcodes, is
   one of the three. A smaller `dt` did not escape it.
 
-  Turn it on for a Hamiltonian whose bonds are genuinely inequivalent
-  (`Jx != Jy`, or any anisotropic or dimerised model), where sharing a spectrum
-  is not an approximation but a wrong answer, and prefer a physical initial
-  state with it. With the default off the sweep is bit-identical to the loop
-  that shipped, which a test asserts rather than assumes.
+  Turn it on when the *state* may genuinely break the AB↔BA symmetry — a
+  spontaneously dimerised or valence-bond phase, where two spectra cannot
+  represent the answer — and prefer a physical initial state with it. It does
+  **not** make the bonds inequivalent in the *Hamiltonian*: `ipeps()` takes a
+  single `hamiltonian_gate` and applies it to all four bonds, so `Jx != Jy`
+  cannot be expressed today whatever this flag is set to (#883).
+
+  With the default off the sweep reproduces the loop that shipped element for
+  element, which `test_su_sweep_consolidation.py` asserts against a literal
+  transcription of the pre-#851 loop at 9 step counts × 2 bond dimensions,
+  rather than assuming it.
+
+  `BondWeights` moved from `tenax.algorithms.ipeps_bp_gauge` to
+  `tenax.algorithms.ipeps_simple_update`, which now owns the four-bond type
+  instead of both modules defining structurally identical `NamedTuple`s. The
+  public `tenax.BondWeights` and the old import path are unchanged.
 
 - **Simple update no longer throws away the largest singular value on the
   symmetric path** (#865). The U(1)-Sz state reached *exactly* zero at step 22

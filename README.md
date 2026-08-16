@@ -320,6 +320,7 @@ config = iPEPSConfig(
 )
 energy, peps, (env_A, env_B) = ipeps(gate, None, config)
 print(f"Energy per site: {energy:.6f}")  # ~ -0.63
+```
 
 The checkerboard has **four** inequivalent bonds — `A.r<->B.l`, `B.r<->A.l`,
 `A.d<->B.u`, `B.d<->A.u` — and by default each pair shares one Schmidt
@@ -330,14 +331,20 @@ dimerising direction that four free bonds can follow. Measured at D=3 from a
 random start, four free bonds converged to a dimerised state on 3 of 8 seeds
 against 1 of 8 when shared.
 
-For a Hamiltonian whose bonds are genuinely inequivalent (`Jx != Jy`, or any
-anisotropic or dimerised model), sharing a spectrum is not an approximation but
-a wrong answer. Give each bond its own, and prefer a physical initial state:
+Give each bond its own spectrum when the *state* may genuinely break the
+AB↔BA symmetry — a spontaneously dimerised or valence-bond phase, where two
+spectra cannot represent the answer — and prefer a physical initial state with
+it:
 
 ```python
 config = iPEPSConfig(..., su_independent_bond_lambdas=True)
 ```
-```
+
+This does **not** make the bonds inequivalent in the *Hamiltonian*: `ipeps()`
+takes a single `hamiltonian_gate` and applies it to all four bonds, so an
+anisotropic model (`Jx != Jy`) cannot be expressed today regardless of this
+flag — setting it would silently evolve the uniform model. Per-bond gates are
+#883.
 
 The energy `ipeps()` reports comes from the legacy 2-site CTM, which does not
 converge on a genuinely entangled state — it sits ~0.02 above the truth. For an

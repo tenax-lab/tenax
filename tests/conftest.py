@@ -77,6 +77,14 @@ _FILE_MARKERS = {
     # from the symmetric fixed point, i.e. exactly where nobody is looking.
     # Cheap: D=2/3 simple update, no CTM anywhere (~30s total).
     "test_su_851_four_bond_lambdas.py": "core",
+    # The four-phase sweep had seven byte-identical copies, and #667 had to be
+    # applied to each by hand.  These are exact-equality checks on a handful of
+    # short sweeps (~18s, no CTM), and they are the only thing standing between
+    # the consolidation and a silent behaviour change, so they belong in the
+    # gate rather than in a bucket nothing runs on a PR.  They now also pin the
+    # #851 default: with shared spectra the sweep must still reproduce the
+    # pre-#851 loop element for element.
+    "test_su_sweep_consolidation.py": "core",
     # Root-implicit AD wiring (#715): dispatch + guard surface only, no
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).

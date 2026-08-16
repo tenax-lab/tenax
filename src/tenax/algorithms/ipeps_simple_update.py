@@ -79,7 +79,7 @@ def _truncation_base_charges(A: Tensor, leg: str) -> np.ndarray | None:
     return np.asarray(A.indices[A.labels().index(leg)].charges)
 
 
-class CheckerboardLambdas(NamedTuple):
+class BondWeights(NamedTuple):
     """The Schmidt spectra of the **four** bonds of a checkerboard unit cell.
 
     A two-site checkerboard iPEPS has two inequivalent sites, hence four
@@ -96,6 +96,13 @@ class CheckerboardLambdas(NamedTuple):
     an asymmetric initial PEPS, a dimerized phase, or simply a sweep that has
     not converged -- they do not: measured ``|h_AB - h_BA| / |h|`` reaches
     **0.28** at D=3, dt=0.05, 60 steps.
+
+    This lives here rather than in :mod:`tenax.algorithms.ipeps_bp_gauge`, which
+    is where it was first written (#870), because the simple update is the lower
+    layer and both need the same four bonds.  Two structurally identical
+    ``NamedTuple``\\ s would type-check against each other by accident, which is
+    the duplicate-implementation shape that already produced #828, #829 and
+    #842; the BP gauge imports this one under the same public name.
     """
 
     h_AB: jax.Array
@@ -104,8 +111,16 @@ class CheckerboardLambdas(NamedTuple):
     v_BA: jax.Array
 
     @classmethod
-    def ones(cls, D_h: int, D_v: int) -> CheckerboardLambdas:
-        """Unit weights on every bond -- the identity starting gauge."""
+    def ones(cls, D_h: int, D_v: int) -> BondWeights:
+        """Unweighted bonds --- the state ``Gamma_L I Gamma_R``.
+
+        This is a *state*, not a neutral initial guess: pass it only when the
+        bonds really do carry no weight, e.g. for freshly initialised random
+        ``Gamma`` tensors, or as the identity starting gauge of a sweep.
+        Passing it for an already-evolved simple-update pair discards that
+        pair's ``lambda`` and re-gauges a different state (see
+        :func:`~tenax.algorithms.ipeps_bp_gauge.bp_gauge_checkerboard`).
+        """
         return cls(
             h_AB=jnp.ones(D_h),
             h_BA=jnp.ones(D_h),
@@ -121,11 +136,11 @@ _PARTNER_BOND = {"h_AB": "h_BA", "h_BA": "h_AB", "v_AB": "v_BA", "v_BA": "v_AB"}
 
 
 def _store(
-    lambdas: CheckerboardLambdas,
+    lambdas: BondWeights,
     bond: str,
     value: jax.Array,
     independent_bonds: bool,
-) -> CheckerboardLambdas:
+) -> BondWeights:
     """Record a freshly computed spectrum on ``bond``.
 
     With ``independent_bonds=False`` it is also written to the partner bond,
@@ -135,7 +150,7 @@ def _store(
     thing, said out loud.
 
     That is the default, and deliberately so -- see
-    ``IPEPSConfig.su_independent_bond_lambdas`` for the measurements.  Sharing
+    ``iPEPSConfig.su_independent_bond_lambdas`` for the measurements.  Sharing
     the spectrum constrains the two horizontal bonds to be equal, which is
     wrong away from the fixed point but suppresses a dimerising direction that
     four free bonds can otherwise follow.
@@ -190,7 +205,7 @@ def _to_physical_tensor(
 
 
 def _to_physical_pair(
-    A: Tensor, B: Tensor, lambdas: CheckerboardLambdas
+    A: Tensor, B: Tensor, lambdas: BondWeights
 ) -> tuple[Tensor, Tensor]:
     """Both checkerboard sites out of Vidal form, each leg with its own bond.
 
@@ -226,9 +241,11 @@ def _simple_update_checkerboard_sweep(
     gate: Tensor,
     max_D: int,
     steps: int,
-    lambdas: CheckerboardLambdas | None = None,
+    lambdas: BondWeights | None = None,
     independent_bonds: bool = False,
-) -> tuple[Tensor, Tensor, CheckerboardLambdas]:
+    *,
+    phase0: int = 0,
+) -> tuple[Tensor, Tensor, BondWeights]:
     """Run ``steps`` phases of the four-bond checkerboard simple-update sweep.
 
     One canonical implementation, because there were three copies of this loop
@@ -251,15 +268,30 @@ def _simple_update_checkerboard_sweep(
 
     Returns the state in Vidal form; call :func:`_to_physical_pair` for the
     tensors a CTM should contract.
+
+    Args:
+        A, B:   Bare Vidal ``Gamma`` tensors, labels ``(u, d, l, r, phys)``.
+        gate:   Trotter gate, labels ``(si, sj, si_out, sj_out)``.
+        max_D:  Maximum bond dimension after each truncated SVD.
+        steps:  Number of phases to run (not cycles).
+        lambdas: Spectra to start from; ones if omitted.
+        independent_bonds: Give each of the four bonds its own spectrum.  Off
+                by default, which mirrors each freshly computed spectrum onto
+                its partner and so reproduces the two-lambda behaviour that
+                shipped, element for element.  See
+                :attr:`iPEPSConfig.su_independent_bond_lambdas` for the trade.
+        phase0: Phase to start the cycle on.  A caller resuming a sweep must
+                pass the phase it stopped on, or the first bond is evolved
+                twice and the second never.
     """
     if lambdas is None:
         labels = A.labels()
-        lambdas = CheckerboardLambdas.ones(
+        lambdas = BondWeights.ones(
             A.indices[labels.index("r")].dim, A.indices[labels.index("d")].dim
         )
 
     for step in range(steps):
-        phase = step % 4
+        phase = (phase0 + step) % 4
         if phase == 0:
             A, B, h_AB = _simple_update_2site_horizontal_tensor(
                 A,

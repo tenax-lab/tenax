@@ -91,6 +91,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._ctm_tensor_moves import _flow_flip_no_conj
+from tenax.algorithms.ipeps_simple_update import BondWeights
 from tenax.contraction.contractor import contract
 from tenax.core._tensor_utils import scale_bond_axis
 from tenax.core.tensor import Tensor
@@ -110,41 +111,12 @@ _S = "__s"
 _B = "__b"
 
 
-class BondWeights(NamedTuple):
-    """The Schmidt spectra of the **four** bonds of a checkerboard unit cell.
-
-    A two-site checkerboard has two inequivalent sites and therefore four
-    inequivalent nearest-neighbour bonds, not two::
-
-        h_AB : A.r <-> B.l          v_AB : A.d <-> B.u
-        h_BA : B.r <-> A.l          v_BA : B.d <-> A.u
-
-    On a translation-invariant Hamiltonian the AB and BA bonds are related by
-    the translation that swaps A and B, so they coincide at the physical fixed
-    point --- but not away from it, and BP resolves them separately (#851).
-    """
-
-    h_AB: jax.Array
-    h_BA: jax.Array
-    v_AB: jax.Array
-    v_BA: jax.Array
-
-    @classmethod
-    def ones(cls, D_h: int, D_v: int) -> BondWeights:
-        """Unweighted bonds --- the state ``Gamma_L I Gamma_R``.
-
-        This is a *state*, not a neutral initial guess: pass it only when the
-        bonds really do carry no weight, e.g. for freshly initialised random
-        ``Gamma`` tensors.  Passing it for a simple-update pair discards that
-        pair's ``lambda`` and re-gauges a different state (see
-        :func:`bp_gauge_checkerboard`).
-        """
-        return cls(
-            h_AB=jnp.ones(D_h),
-            h_BA=jnp.ones(D_h),
-            v_AB=jnp.ones(D_v),
-            v_BA=jnp.ones(D_v),
-        )
+#: Re-exported so ``from tenax.algorithms.ipeps_bp_gauge import BondWeights``
+#: keeps working.  It was defined here first (#870), but the simple update needs
+#: the same four bonds and is the lower layer, so it owns the type -- one class,
+#: not two structurally identical ``NamedTuple``\ s that would silently
+#: type-check against each other (#851).
+__all__ = ["BPGaugeInfo", "BondWeights", "bp_gauge_checkerboard"]
 
 
 class BPGaugeInfo(NamedTuple):
