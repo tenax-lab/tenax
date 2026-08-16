@@ -1105,9 +1105,14 @@ def test_resolution_pools_relative_errors_not_differences():
         # ~5.5e-02 in relative_error for reasons unrelated to the 5% error.
         return jnp.sum(d * d + 2.0 * base_j * d), 1.05 * 2.0 * x
 
+    # A uniform direction, so the two steps stay commensurable (pairwise unit
+    # distance 1.6e-16 against 2.5e-02 for the default random one). Without
+    # that they carry no convergence evidence and the scan is unresolved by
+    # construction, which would test the wrong thing.
     report = measure_gradient_error(
         five_percent_high,
         _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
         steps=(1e-4, 1e-6),
     )
 
@@ -1159,9 +1164,14 @@ def test_a_converged_scan_is_not_blocked_by_the_convergence_signal():
         d = x - base_j
         return jnp.sum(d * d + 2.0 * base_j * d), 1.05 * 2.0 * x
 
+    # A uniform direction, so the two steps stay commensurable (pairwise unit
+    # distance 1.6e-16 against 2.5e-02 for the default random one). Without
+    # that they carry no convergence evidence and the scan is unresolved by
+    # construction, which would test the wrong thing.
     report = measure_gradient_error(
         five_percent_high,
         _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
         steps=(1e-4, 1e-6),
     )
 
@@ -1175,13 +1185,16 @@ def test_a_converged_scan_is_not_blocked_by_the_convergence_signal():
     assert report.is_resolved, report.summary()
 
 
-def test_incommensurable_steps_do_not_block_a_clean_measurement():
-    """``fd_divergence`` must not pool across different realised directions.
+def test_incommensurable_steps_leave_the_result_unresolved():
+    """No commensurable pair means no convergence evidence, so nothing is settled.
 
-    ``base[0]=1e14`` moves at h=1 and freezes at h=1e-2, so the two differences
-    are different directional derivatives rather than a convergence sequence.
-    Pooling them gave ``fd_divergence`` 0.755 and blocked a 50% error that
-    ``relative_error`` had measured cleanly at both steps.
+    ``base[0]=1e14`` moves at h=1 and freezes at h=1e-2, so the differences are
+    different directional derivatives. The relative errors still agree -- 0.5 at
+    both steps -- but agreement among them proves nothing on its own, since they
+    share the gradient under test: ``sum((x-base)**3)`` on the same fixture has
+    an exact gradient and produces a consistent ``rel`` of 1.
+
+    So the error is reported and the result stays unresolved.
     """
     n = 32
     base = np.ones(n)
@@ -1202,10 +1215,41 @@ def test_incommensurable_steps_do_not_block_a_clean_measurement():
         steps=(1.0, 1e-2),
     )
 
+    assert np.isnan(report.fd_divergence), report.summary()
+    assert not report.is_resolved, (
+        "no convergence evidence must not license a definitive measurement -- "
+        f"{report.summary()}"
+    )
     assert report.relative_error == pytest.approx(0.5, rel=1e-6), report.summary()
-    assert report.is_resolved, (
-        "a cleanly measured 50% error was blocked by pooling two "
-        f"incommensurable differences -- {report.summary()}"
+
+
+def test_an_exact_gradient_is_not_declared_wrong_without_evidence():
+    """The counter-example that makes the rule necessary.
+
+    Same incommensurable fixture, but a cubic whose exact gradient is zero at
+    ``base``: every ``rel`` is exactly 1 with zero spread. Treating "no
+    evidence" as converged reported an EXACT gradient as a definitive 100%
+    error.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e14
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    def cubic_at_base(t):
+        x = jnp.asarray(t.todense())
+        d = x - base_j
+        return jnp.sum(d**3), 3.0 * d**2  # exact, and zero at base
+
+    report = measure_gradient_error(
+        cubic_at_base,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(1.0, 1e-2),
+    )
+
+    assert not report.is_resolved, (
+        f"an exact gradient was declared definitively wrong -- {report.summary()}"
     )
 
 

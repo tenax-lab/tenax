@@ -89,8 +89,10 @@ class GradientErrorReport(NamedTuple):
         genuinely 50% wrong.  Read ``fd_divergence`` before quoting the bound;
         :meth:`summary` says which case applies.
 
-      ``nan`` means no two steps probed commensurable directions, so there is
-      no convergence evidence either way -- not adverse evidence.
+      ``nan`` means no two steps probed commensurable directions.  That is an
+      absence of evidence, and it leaves the result **unresolved**: agreeing
+      relative errors cannot establish an error on their own, because they
+      share the gradient being tested.
 
     Collapsing those two into one "converged" flag is wrong: an *exact*
     gradient has every step at the roundoff floor, and calling that
@@ -656,10 +658,15 @@ def measure_gradient_error(
     # norm-drift case) and far below genuine non-convergence (~1 for the cubic
     # above), so it separates the two without reinstating the false-unresolved
     # behaviour that pooling differences produced.
-    # ``nan <= 0.25`` is False, which would fail CLOSED and block every scan
-    # with no commensurable pair.  There is no convergence evidence in that
-    # case, not adverse evidence, so it is explicitly not treated as failure.
-    converged = np.isnan(fd_divergence) or fd_divergence <= 0.25
+    # ``nan`` -- no commensurable pair, so no convergence evidence -- must NOT
+    # count as converged.  I had it the other way and it was wrong: agreeing
+    # relative errors prove nothing on their own, since they share the gradient
+    # under test.  ``E = sum((x-base)^3)`` with ``base[0]=1e14`` and steps
+    # ``(1, 1e-2)`` makes the realised directions incommensurable, every ``rel``
+    # exactly 1 with zero spread, and an EXACT gradient would be reported as a
+    # definitive 100% error.  Absence of evidence is not evidence of
+    # convergence; the scan stays unresolved and the caller picks better steps.
+    converged = fd_divergence <= 0.25  # nan compares False, which is correct here
     resolved = best_rel > fd_spread_tol * resolution and converged
 
     return GradientErrorReport(
