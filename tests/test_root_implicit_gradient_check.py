@@ -1516,6 +1516,36 @@ def test_a_partly_converged_scan_is_not_called_measured():
     assert "set by the differences" in report.summary(), report.summary()
 
 
+def test_a_denormal_scale_measurement_is_still_scale_free():
+    """No absolute floor in a denominator, at any magnitude.
+
+    ``relative_error`` is defined by being scale-free, and an absolute epsilon
+    in its denominator destroys exactly that. With a slope of 1e-310 and a
+    returned gradient twice it, a 1e-300 clamp reported 5.7e-10 -- and
+    *resolved* -- for an error that is exactly 1. The clamp only ever protected
+    a zero difference, which the cancellation check already refuses.
+    """
+    base = np.full((2, 2, 2, 2, 2), 1.0)
+    slope = 1e-310
+    assert 0 < slope < np.finfo(np.float64).tiny, (
+        "fixture no longer sits in the denormal range the clamp used to swallow"
+    )
+
+    def affine_at_denormal_scale(t):
+        x = np.asarray(t.todense())
+        return np.float64(np.sum(slope * x)), np.full((2, 2, 2, 2, 2), 2.0 * slope)
+
+    report = measure_gradient_error(
+        affine_at_denormal_scale,
+        _wrap(base),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(1e-2, 1e-3),
+    )
+
+    assert report.relative_error == pytest.approx(1.0, rel=1e-6), report.summary()
+    assert report.is_resolved, report.summary()
+
+
 @pytest.mark.parametrize("dtype", [np.int64, np.int32, np.bool_])
 def test_a_discrete_state_is_refused_rather_than_silently_unmoved(dtype):
     """A finite difference needs a continuum to move in.

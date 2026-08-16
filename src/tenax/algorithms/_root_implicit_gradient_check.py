@@ -734,7 +734,19 @@ def measure_gradient_error(
             # sat at 4.9e-12 -- a converged scan reported as no measurement.
             # Dividing each term first keeps ``fd/denom`` at +-1 and gives the
             # correct 2.0.
-            denom = max(abs(fd), 1e-300)
+            # The ACTUAL magnitude, never a floor.  An absolute epsilon in a
+            # denominator destroys the scale invariance this number is defined
+            # by: with a slope of 1e-310 and a gradient twice it, clamping to
+            # 1e-300 reports 5.7e-10 -- resolved -- for an error that is
+            # exactly 1.  The difference cannot be zero here; the cancellation
+            # check above rejects a step whose energies do not differ, so the
+            # only thing a floor could protect is a case that never arrives.
+            denom = abs(fd)
+            if denom == 0.0:
+                raise _StepUnusable(
+                    "the finite difference is exactly zero, so no relative "
+                    "error is defined against it"
+                )
             rel = abs(fd / denom - analytic_h / denom)
             if not np.isfinite(rel):
                 raise _StepUnusable(
@@ -753,7 +765,15 @@ def measure_gradient_error(
             # NORMS stay commensurable.  Raw differences under different
             # scalings are different derivatives, and pooling them reads that
             # difference as noise.
-            eff_norm = max(float(np.linalg.norm(effective)), 1e-300)
+            # Same reasoning as ``denom``: a floor here would rescale a
+            # genuinely tiny displacement and make the per-unit differences
+            # incomparable across steps.
+            eff_norm = float(np.linalg.norm(effective))
+            if eff_norm == 0.0:
+                raise _StepUnusable(
+                    "the effective displacement is identically zero, so there "
+                    "is no direction to compare along"
+                )
             # How far the two endpoints REALLY sit apart.  This, not the
             # requested ``h``, is what makes two steps distinct measurements:
             # distinct requested magnitudes can round to the same pair of
@@ -939,7 +959,10 @@ def measure_gradient_error(
     # conservative: a measurable error can be left unresolved, never the
     # reverse.
     direction_tol = float(np.sqrt(np.finfo(base.dtype).eps))
-    units = [r[5] / max(float(np.linalg.norm(r[5])), 1e-300) for r in results]
+    # ``eff_norm`` above already refused a zero displacement, so these
+    # norms are nonzero and need no floor -- one would turn a tiny
+    # displacement into a tiny 'unit' vector and break the comparison.
+    units = [r[5] / float(np.linalg.norm(r[5])) for r in results]
     best_group: list[int] = []
     best_key: tuple[Any, ...] | None = None
     for anchor in range(len(units)):
@@ -1055,7 +1078,11 @@ def measure_gradient_error(
     # unresolved rather than licensing it.
     if best_group:
         fdu = [r[6] for r in evidence]
-        fd_divergence = (max(fdu) - min(fdu)) / max(max(abs(f) for f in fdu), 1e-300)
+        scale = max(abs(f) for f in fdu)
+        # All-zero per-unit differences mean every secant vanished, which the
+        # cancellation check already refuses; a floor here would report a
+        # divergence of 0 for it and read as perfect convergence.
+        fd_divergence = (max(fdu) - min(fdu)) / scale if scale > 0.0 else float("nan")
     else:
         fd_divergence = float("nan")
 
