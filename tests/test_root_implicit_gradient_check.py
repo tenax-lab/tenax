@@ -26,6 +26,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from tenax.algorithms._root_implicit_gradient_check import (  # noqa: E402
+    _SPAN_SLACK_ULP,
     GradientErrorReport,
     measure_gradient_error,
 )
@@ -1812,6 +1813,68 @@ def test_a_direction_gap_is_not_reported_as_non_convergence():
     assert np.isnan(report.unresolved_bound), report.summary()
 
 
+def test_the_rounding_allowance_cannot_manufacture_a_separation():
+    """The allowance corrects the factor-2 requirement; it must not erase it.
+
+    On a float32 unit state, requested steps of 6.754e-07 and 3.377e-07 realise
+    spans of 2.00 and 1.50 ULP -- a ratio of 4/3. Subtracting a 4-ULP allowance
+    unconditionally accepts that, and then a smooth odd polynomial makes the two
+    neighbouring secants agree exactly: divergence 0, spread 0, and the exact
+    zero gradient of ``sum((x-1)^3)`` at ``x=1`` reported as a *resolved* 100%
+    error.
+
+    A hard floor on the ratio, applied before any allowance, refuses it.
+    """
+    base = np.ones((2, 2, 2, 2, 2), dtype=np.float32)
+    base_j = jnp.asarray(base)
+
+    def cubic_about_base(t):
+        x = jnp.asarray(t.todense())
+        d = x - base_j
+        return jnp.sum(d**3), 3.0 * d**2
+
+    with pytest.raises(ValueError, match="distinct realised displacement") as exc:
+        measure_gradient_error(
+            cubic_about_base,
+            _wrap(base),
+            direction=np.ones((2, 2, 2, 2, 2)),
+            steps=(6.754e-7, 3.377e-7),
+        )
+
+    # Both steps must survive and be measured -- the refusal has to come from
+    # the separation test, not from the steps being dropped upstream.
+    assert "only 2 distinct" in str(exc.value), str(exc.value)
+    assert "factor 1.33" in str(exc.value), str(exc.value)
+
+
+def test_a_coarse_step_on_a_huge_coordinate_does_not_refuse_the_scan():
+    """The allowance belongs to the step that set the span, not to the state.
+
+    With ``base[0]=1e15`` the coarse step's span is set by that coordinate, so
+    its allowance is 0.5, while the fine step's span is 4.4e-02 on a unit
+    coordinate. Comparing the coarse allowance against the fine span refuses a
+    scan separated by a factor of 33.9; the ratio floor is what the allowance
+    must not erode, and it is checked on the ratio itself.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e15
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    def affine(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x - base_j), jnp.ones((2, 2, 2, 2, 2))
+
+    report = measure_gradient_error(
+        affine,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(4.0, 2.0, 0.25, 0.125),
+    )
+
+    assert report.relative_error < 1e-6, report.summary()
+
+
 def test_a_single_precision_scan_is_not_refused_for_endpoint_rounding():
     """The separation slack is in ULP of the state, not a relative constant.
 
@@ -1825,14 +1888,37 @@ def test_a_single_precision_scan_is_not_refused_for_endpoint_rounding():
     data = (np.full((2, 2, 2, 2, 2), 1.0) + 1j * np.full((2, 2, 2, 2, 2), 1.0)).astype(
         np.complex64
     )
-    direction = np.ones((2, 2, 2, 2, 2)) + 1j * np.ones((2, 2, 2, 2, 2))
+    # A tiny imaginary component is what makes the endpoints round unevenly. An
+    # equal-parts direction gives a span ratio of exactly 2 and needs no
+    # allowance at all, so it would test nothing here.
+    direction = np.ones((2, 2, 2, 2, 2)) + 1j * 1e-9 * np.ones((2, 2, 2, 2, 2))
+    steps = (1e-2, 5e-3)
+
+    # The shortfall this test exists for, asserted rather than assumed.
+    v = direction / np.max(np.abs(direction))
+    v = (v / np.linalg.norm(v)).astype(np.complex64)
+    spans = []
+    for step in steps:
+        plus = (data + np.complex64(step) * v) - data
+        minus = (data - np.complex64(step) * v) - data
+        spans.append(float(np.max(np.abs(plus - minus))))
+    ratio = spans[0] / spans[1]
+    ulp = float(np.spacing(np.abs(data).flat[0]))
+    assert ratio < 2.0, (
+        f"fixture no longer needs the allowance: span ratio is {ratio:.12f}, "
+        "so a scan with no slack at all would pass"
+    )
+    assert (2.0 - ratio) * spans[1] < _SPAN_SLACK_ULP * 3.0 * ulp, (
+        f"fixture drifted past what the allowance covers: short by "
+        f"{(2.0 - ratio) * spans[1]:.3e}"
+    )
 
     def linear_in_real_part(t):
         x = jnp.asarray(t.todense())
         return jnp.sum(x.real) + 0j, jnp.ones((2, 2, 2, 2, 2), dtype=jnp.complex64)
 
     report = measure_gradient_error(
-        linear_in_real_part, _wrap(data), direction=direction, steps=(1e-2, 5e-3)
+        linear_in_real_part, _wrap(data), direction=direction, steps=steps
     )
 
     assert report.relative_error < 1e-2, report.summary()

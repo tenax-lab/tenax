@@ -187,11 +187,48 @@ _ARTEFACT_MARGIN = 3.0
 #: Four ULP leaves margin over the one observed while staying far from the
 #: degeneracy this guards: two steps of nearly equal size fall short by about a
 #: whole span, which is many orders larger than any ULP count.
+#:
+#: The ULP is taken at the coordinate that SETS the span, not at the largest
+#: coordinate of the state.  With a 1e18 entry beside unit ones the span is
+#: 3.5e-01 at a unit coordinate (ULP 2.2e-16) while the state's max scale gives
+#: 8.9e+02 -- eighteen orders too big, which refuses the scan outright.
 _SPAN_SLACK_ULP = 4.0
 
+#: The smallest separation an accepted pair can have once rounding is allowed
+#: for.  The allowance corrects the factor-2 requirement; it must never erase
+#: it, and subtracting it unconditionally does exactly that when the spans are
+#: themselves a few ULP -- 2.00 and 1.50 ULP is a ratio of 1.333, which a
+#: 4-ULP allowance accepts.  Capping the allowance at ``2 - this`` guarantees
+#: every accepted pair really is separated by at least this factor.
+_MIN_EFFECTIVE_RATIO = 1.5
 
-def _separated(coarse: float, fine: float, slack: float) -> bool:
-    """Is ``coarse`` at least twice ``fine``, allowing for endpoint rounding?"""
+
+def _separated(coarse: float, fine: float, coarse_ulp: float, fine_ulp: float) -> bool:
+    """Is ``coarse`` at least twice ``fine``, allowing for endpoint rounding?
+
+    The allowance is a *correction*, so it may never erode the requirement into
+    meaninglessness.  Subtracting it unconditionally does exactly that once the
+    displacements are themselves only a few ULP: on a float32 unit state, spans
+    of 2.00 and 1.50 ULP have a ratio of 1.333 and a 4-ULP allowance accepts
+    them, after which a smooth odd polynomial makes those two neighbouring
+    secants agree and reports its exact zero gradient as a resolved 100% error.
+
+    So the allowance is capped at what still leaves a real factor:
+    ``_MIN_EFFECTIVE_RATIO`` is the smallest separation any accepted pair can
+    have, whatever the rounding.  Above the cap the spans are quantisation, not
+    measurement, and the pair is refused rather than corrected.
+    """
+    if coarse < _MIN_EFFECTIVE_RATIO * fine:
+        # Hard floor, taken BEFORE any allowance: whatever the rounding, an
+        # accepted pair is separated by at least this factor.  Comparing the
+        # allowance against ``fine`` instead does not work -- the allowance
+        # belongs to whichever step set the span, so a coarse step on a 1e15
+        # coordinate carries a 0.5 allowance while the fine step's span is
+        # 4.4e-02, and a scan separated by a factor of 33.9 was refused.
+        return False
+    # Propagated, not the larger of the two: the margin ``coarse - 2 * fine``
+    # inherits one rounding from ``coarse`` and two from ``fine``.
+    slack = _SPAN_SLACK_ULP * (coarse_ulp + 2.0 * fine_ulp)
     return coarse >= 2.0 * fine - slack
 
 
@@ -683,7 +720,21 @@ def measure_gradient_error(
             # before it sums and so halves the exponent range it can represent,
             # which is how a displacement at 1e200 becomes ``inf`` and one at
             # 1e-200 becomes exactly 0.
-            realised_span = float(np.max(np.abs(realised_plus - realised_minus)))
+            displacement = np.abs(realised_plus - realised_minus)
+            realised_span = float(np.max(displacement))
+            # ``np.spacing`` on the ARRAY element, not on ``float(...)`` of it:
+            # the Python cast promotes to float64 and returns 2.2e-16 for a
+            # float32 state, which is the allowance for the wrong grid by
+            # nine orders and refuses every single-precision scan.
+            # The grid the span was rounded onto -- the ULP of the coordinate
+            # that SETS the span, not of the largest coordinate in the state.
+            # Those differ wildly: with a 1e18 entry alongside unit ones the
+            # span is 3.5e-01 at a unit coordinate whose ULP is 2.2e-16, while
+            # the state's own max-scale allowance would be 8.9e+02 -- eighteen
+            # orders too big, and enough to refuse the scan outright.
+            span_ulp = float(
+                np.spacing(np.abs(base).flat[int(np.argmax(displacement))])
+            )
             if realised_span == 0.0:
                 # Unreachable while the cancellation check above runs first: a
                 # zero span means the two endpoints are the same state, so the
@@ -714,17 +765,20 @@ def measure_gradient_error(
                 effective,
                 fd / eff_norm,
                 realised_span,
+                span_ulp,
             )
         )
 
     # Separation is required on the REALISED displacements, not the requested
     # magnitudes -- two ``h`` values that land on the same endpoints are one
     # measurement however far apart they were asked to be.
-    surviving = sorted({r[7] for r in results})
-    span_slack = (
-        _SPAN_SLACK_ULP * float(np.finfo(base.dtype).eps) * float(np.max(np.abs(base)))
-    )
-    if len(surviving) < 2 or not _separated(surviving[-1], surviving[0], span_slack):
+    ulp_of = {}
+    for r in results:
+        ulp_of.setdefault(r[7], r[8])
+    surviving = sorted(ulp_of)
+    if len(surviving) < 2 or not _separated(
+        surviving[-1], surviving[0], ulp_of[surviving[-1]], ulp_of[surviving[0]]
+    ):
         detail = "\n  ".join(skipped) if skipped else "(none skipped)"
         raise ValueError(
             f"only {len(surviving)} distinct realised displacement(s) remain"
@@ -850,7 +904,10 @@ def measure_gradient_error(
             accepted.append(j)
         magnitudes = sorted(by_magnitude)
         if len(magnitudes) >= 2 and _separated(
-            magnitudes[-1], magnitudes[0], span_slack
+            magnitudes[-1],
+            magnitudes[0],
+            ulp_of[magnitudes[-1]],
+            ulp_of[magnitudes[0]],
         ):
             members = list(by_magnitude.values())
             # Ties broken by the FINEST step, not by encounter order.  Two
@@ -914,7 +971,7 @@ def measure_gradient_error(
     # identical normalised differences -- and no pair can distinguish that from
     # a converged sequence.  More commensurable steps reduce the chance;
     # nothing removes it, and the docstring says so rather than implying proof.
-    best_rel, best_fd, best_h, _dist, best_analytic, _eff, _fdu, _span = min(
+    best_rel, best_fd, best_h, _dist, best_analytic, _eff, _fdu, _span, _ulp = min(
         evidence, key=lambda r: abs(r[2])
     )
 
