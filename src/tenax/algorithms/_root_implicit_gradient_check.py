@@ -694,7 +694,23 @@ def measure_gradient_error(
             # direction removes the gap instead of bounding it.
             effective = (realised_plus - realised_minus) / (2.0 * h)
             analytic_h = float(np.real(np.sum(grad_arr * effective)))
-            rel = abs(fd - analytic_h) / max(abs(fd), 1e-300)
+            # Scale BEFORE subtracting.  ``abs(fd - analytic_h)`` overflows
+            # for finite operands of opposite sign near the dtype limit: with
+            # a slope of -1e308 and a returned gradient of +1e308 the
+            # difference is 2e308, so ``rel`` came out ``inf``, ``inf - inf``
+            # made ``resolution`` and the bound NaN, and a gradient wrong by a
+            # factor of -1 was filed as *unresolved* while ``fd_divergence``
+            # sat at 4.9e-12 -- a converged scan reported as no measurement.
+            # Dividing each term first keeps ``fd/denom`` at +-1 and gives the
+            # correct 2.0.
+            denom = max(abs(fd), 1e-300)
+            rel = abs(fd / denom - analytic_h / denom)
+            if not np.isfinite(rel):
+                raise _StepUnusable(
+                    f"the relative error is {rel} -- the projected gradient "
+                    f"{analytic_h:.3e} is beyond what a difference of "
+                    f"{fd:.3e} can be compared against at this scale"
+                )
             # Kept as information, NOT as an accuracy floor: it says which
             # direction was actually probed.  A coordinate the arithmetic
             # cannot move is simply not tested, and no floor can repair that --
@@ -742,7 +758,15 @@ def measure_gradient_error(
             # 1.4529e-07 against 1.4342e-07 -- and collapsing them onto the
             # scalar makes the retained one depend on which came first, which
             # moved the reported difference and the resolution.
-            secant = (realised_plus - realised_minus).tobytes()
+            # Canonicalised across sign, because ``h`` and ``-h`` evaluate the
+            # SAME central difference -- the whole point of it being even in
+            # ``h`` -- while their raw displacement bytes are exact negatives.
+            # Keyed on the signed bytes, adding ``-4`` to ``(4, 2, .25, .125)``
+            # counted the coarse secant twice, let that group win on size, and
+            # moved the report off the fine direction it should have used.
+            forward = (realised_plus - realised_minus).tobytes()
+            reverse = (realised_minus - realised_plus).tobytes()
+            secant = min(forward, reverse)
             if realised_span == 0.0:
                 # Unreachable while the cancellation check above runs first: a
                 # zero span means the two endpoints are the same state, so the

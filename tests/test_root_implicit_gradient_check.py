@@ -1516,6 +1516,110 @@ def test_a_partly_converged_scan_is_not_called_measured():
     assert "set by the differences" in report.summary(), report.summary()
 
 
+def test_a_sign_flipped_step_is_the_same_secant():
+    """``h`` and ``-h`` evaluate one central difference, not two.
+
+    The difference is even in ``h``, so the pair is the same measurement -- but
+    their displacement vectors are exact negatives, so a key on the raw bytes
+    treated them as distinct. Adding ``-4`` to ``(4, 2, .25, .125)`` then
+    counted the coarse secant twice, let that group win on size, and moved the
+    report off the fine direction it should have used.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e15
+    shaped = base.reshape((2, 2, 2, 2, 2))
+    base_j = jnp.asarray(shaped)
+
+    def affine(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x - base_j), jnp.ones((2, 2, 2, 2, 2))
+
+    kw = dict(direction=np.ones((2, 2, 2, 2, 2)))
+    without = measure_gradient_error(
+        affine, _wrap(shaped), steps=(4.0, 2.0, 0.25, 0.125), **kw
+    )
+    with_flip = measure_gradient_error(
+        affine, _wrap(shaped), steps=(4.0, 2.0, 0.25, 0.125, -4.0), **kw
+    )
+
+    assert with_flip.step == without.step, (
+        f"adding a sign-flipped duplicate of an existing step moved the report "
+        f"from h={without.step:g} to h={with_flip.step:g}"
+    )
+    assert with_flip.resolution == without.resolution, (
+        f"the duplicate changed the resolution from {without.resolution:.6g} "
+        f"to {with_flip.resolution:.6g}"
+    )
+
+
+def test_a_sign_flipped_gradient_at_the_dtype_limit_is_measured_not_shrugged_off():
+    """``abs(fd - analytic)`` overflows for finite operands of opposite sign.
+
+    With a slope of -1e308 and a returned gradient of +1e308 the difference is
+    2e308, so the relative error came out ``inf``, ``inf - inf`` made
+    ``resolution`` and the bound NaN, and a gradient wrong by a factor of -1
+    was filed as *unresolved* -- while ``fd_divergence`` sat at 4.9e-12, which
+    is a scan that converged perfectly. Scaling before subtracting gives the
+    correct 2.0 and the failure is reported as measured.
+    """
+    base = np.full((2, 2, 2, 2, 2), 1.0)
+    one_coordinate = np.zeros((2, 2, 2, 2, 2))
+    one_coordinate[0, 0, 0, 0, 0] = 1.0
+    sel = jnp.asarray(one_coordinate)
+    huge = 1e308
+
+    def slope_with_the_wrong_sign(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(-huge * sel * x), jnp.asarray(huge * one_coordinate)
+
+    report = measure_gradient_error(
+        slope_with_the_wrong_sign,
+        _wrap(base),
+        direction=one_coordinate,
+        steps=(1e-4, 1e-5),
+    )
+
+    assert np.isfinite(report.relative_error), report.summary()
+    assert report.relative_error == pytest.approx(2.0, rel=1e-6), report.summary()
+    assert np.isfinite(report.resolution), report.summary()
+    assert np.isfinite(report.unresolved_bound), report.summary()
+    assert report.is_resolved, (
+        "a converged scan measuring a sign-flipped gradient must report it, "
+        f"not file it as unresolved -- {report.summary()}"
+    )
+
+
+def test_an_unrepresentable_relative_error_is_reported_not_propagated():
+    """Scaling first removes the overflow it can, but not the one it cannot.
+
+    A slope of 1e-200 against a returned gradient of 1e308 leaves the ratio
+    itself beyond the dtype: the difference is real, the projection is
+    1e308-ish and the difference to compare it against is 1e-200, so no finite
+    relative error exists. That is reported per step rather than propagated --
+    a non-finite ``rel`` would make ``resolution`` NaN and the whole scan read
+    as a measurement that simply did not resolve.
+    """
+    base = np.full((2, 2, 2, 2, 2), 1.0)
+    one_coordinate = np.zeros((2, 2, 2, 2, 2))
+    one_coordinate[0, 0, 0, 0, 0] = 1.0
+    sel = jnp.asarray(one_coordinate)
+
+    def tiny_slope_huge_gradient(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(1e-200 * sel * x), jnp.asarray(1e308 * one_coordinate)
+
+    with pytest.raises(ValueError, match="the relative error is inf") as exc:
+        measure_gradient_error(
+            tiny_slope_huge_gradient,
+            _wrap(base),
+            direction=one_coordinate,
+            steps=(1e-4, 1e-5),
+        )
+
+    assert "beyond what a difference of" in str(exc.value), str(exc.value)
+
+
 def test_two_secants_sharing_a_span_are_still_two_measurements():
     """A secant's identity is its whole displacement, not its largest component.
 
