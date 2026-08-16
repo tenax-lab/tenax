@@ -1253,12 +1253,14 @@ def test_an_exact_gradient_is_not_declared_wrong_without_evidence():
     )
 
 
-def test_an_unconverged_bound_is_not_an_accuracy_claim():
-    """``is_resolved=False`` has two causes and they must not read alike.
+def test_an_unconverged_bound_reflects_the_divergence():
+    """A non-converged scan must not advertise a tiny bound.
 
-    Here the relative errors agree to ~1e-16, so ``unresolved_bound`` is
-    ~1e-15 -- but the gradient is 50% wrong and the scan simply has not
-    converged. Quoting the bound as accuracy would be off by fifteen orders.
+    The relative errors agree to ~1e-16 here, so pooling them alone gave
+    ``unresolved_bound`` ~1e-15 beside a 100% error -- a bound fifteen orders
+    too optimistic. Folding ``fd_divergence`` into the floor fixes that at the
+    source: the bound now reflects how far the derivative is still moving with
+    h, rather than needing to be read together with a separate flag.
     """
     zero_state = _wrap(np.zeros((2, 2, 2, 2, 2)))
 
@@ -1270,9 +1272,9 @@ def test_an_unconverged_bound_is_not_an_accuracy_claim():
 
     assert not report.is_resolved, report.summary()
     assert report.fd_divergence > 0.25, report.summary()
-    assert report.unresolved_bound < 1e-6, (
-        "this is the trap: a tiny bound alongside a large real error -- "
-        f"{report.summary()}"
+    assert report.unresolved_bound > 1.0, (
+        "the bound must carry the divergence, not sit at the relative errors' "
+        f"own agreement -- {report.summary()}"
     )
     assert "not converged" in report.summary(), report.summary()
 
@@ -1403,4 +1405,35 @@ def test_resolution_is_scoped_to_the_evidence_group():
     assert report.is_resolved, (
         "the out-of-group fine step inflated the spread and blocked a cleanly "
         f"measured error -- {report.summary()}"
+    )
+
+
+def test_a_partly_converged_scan_is_not_called_measured():
+    """A fixed convergence cutoff can always be met by construction.
+
+    Two commensurable steps whose normalised differences are 1.2 and 1.0 give a
+    divergence of 0.167 -- under any 0.25-style cutoff -- with agreeing relative
+    errors of 0.0909, while the true derivative is 0.5 and the supplied
+    gradient is ~118% wrong. Folding the divergence into the floor removes the
+    cutoff entirely: how far the derivative is still moving with h is itself a
+    limit on what can be attributed to the gradient.
+    """
+    # E(q) = 0.5q + (73/30)q^3 - (26/15)q^5 along a single coordinate, so the
+    # central differences at h=1 and h=0.5 are exactly 1.2 and 1.0.
+    base = np.zeros((2, 2, 2, 2, 2))
+    e = np.zeros((2, 2, 2, 2, 2))
+    e[0, 0, 0, 0, 0] = 1.0
+    e_j = jnp.asarray(e)
+
+    def tuned(t):
+        q = jnp.sum(jnp.asarray(t.todense()) * e_j)
+        energy = 0.5 * q + (73.0 / 30.0) * q**3 - (26.0 / 15.0) * q**5
+        return energy, (12.0 / 11.0) * e_j
+
+    report = measure_gradient_error(tuned, _wrap(base), direction=e, steps=(1.0, 0.5))
+
+    assert report.fd_divergence == pytest.approx(1.0 / 6.0, rel=1e-3), report.summary()
+    assert not report.is_resolved, (
+        "a scan whose derivative is still moving 17% between steps must not "
+        f"yield a definitive error -- {report.summary()}"
     )

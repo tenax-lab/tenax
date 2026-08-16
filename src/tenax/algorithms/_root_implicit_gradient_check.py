@@ -74,14 +74,15 @@ class GradientErrorReport(NamedTuple):
 
     * ``True``  -- ``relative_error`` is a measurement.  A gradient that is
       wrong by 15% reports 0.15 here.
-    * ``False`` -- and it now has **two** causes, which must not be read alike:
+    * ``False`` -- and it has **two** causes, which must not be read alike:
 
-      - ``fd_divergence`` is small (or ``nan``): the disagreement did not stand
+      - ``fd_divergence`` is a small number: the disagreement did not stand
         clear of the floor, so the gradient is accurate to about
         ``unresolved_bound`` -- ``fd_spread_tol * resolution``, the quantity
         actually compared against.  A tiny bound is good news; a large one
         means the steps need adjusting.
-      - ``fd_divergence`` exceeds its bound: **the scan did not converge**, and
+      - ``fd_divergence`` is ``nan``, or large enough to dominate the floor:
+        **the scan did not converge or was indeterminate**, and
         ``unresolved_bound`` is then not an accuracy claim at all.  For
         ``E(q) = 0.9798q + 2.0202q^3`` with steps ``(1, 0.1)`` and a returned
         directional gradient of 1.5, both relative errors are 0.5 and their
@@ -656,6 +657,13 @@ def measure_gradient_error(
     # tolerance.
     rels = [r[0] for r in evidence]
     resolution = max(rels) - min(rels)
+    # ``fd_divergence`` is folded in below rather than compared against a
+    # separate cutoff.  Any fixed cutoff can be met by construction -- with a
+    # 0.25 bound, two commensurable steps whose differences are 1.2 and 1.0
+    # give divergence 0.167, agreeing relative errors of 0.0909, and a
+    # "measured" verdict on a gradient that is 118% wrong.  How far the
+    # derivative is still moving with h is itself a limit on what can be
+    # attributed to the gradient, so it belongs in the floor.
 
     # ...but the relative errors SHARE the gradient under test, so they can
     # agree perfectly while the differences have not converged at all.
@@ -671,6 +679,8 @@ def measure_gradient_error(
         fd_divergence = (max(fdu) - min(fdu)) / max(max(abs(f) for f in fdu), 1e-300)
     else:
         fd_divergence = float("nan")
+
+    resolution = max(resolution, 0.0 if np.isnan(fd_divergence) else fd_divergence)
 
     # Reported from the same group.  This does not make a two-point check
     # sound: two steps can agree by coincidence rather than convergence --
@@ -696,22 +706,14 @@ def measure_gradient_error(
     # The error is a *measurement* only when it stands clear of that floor by
     # ``fd_spread_tol``.  Below the floor it is an upper bound instead, which
     # is the good case and must not be reported as a failed measurement.
-    # Both must hold: the error stands clear of the errors' own scatter, AND
-    # the differences converged.  The 0.25 bound sits far above the scale drift
-    # that made pooling the differences alone unusable (1.0e-02 on the #884
-    # norm-drift case) and far below genuine non-convergence (~1 for the cubic
-    # above), so it separates the two without reinstating the false-unresolved
-    # behaviour that pooling differences produced.
     # ``nan`` -- no commensurable pair, so no convergence evidence -- must NOT
-    # count as converged.  I had it the other way and it was wrong: agreeing
-    # relative errors prove nothing on their own, since they share the gradient
-    # under test.  ``E = sum((x-base)^3)`` with ``base[0]=1e14`` and steps
-    # ``(1, 1e-2)`` makes the realised directions incommensurable, every ``rel``
-    # exactly 1 with zero spread, and an EXACT gradient would be reported as a
-    # definitive 100% error.  Absence of evidence is not evidence of
-    # convergence; the scan stays unresolved and the caller picks better steps.
-    converged = fd_divergence <= 0.25  # nan compares False, which is correct here
-    resolved = best_rel > fd_spread_tol * resolution and converged
+    # count as converged.  Agreeing relative errors prove nothing on their own,
+    # since they share the gradient under test: ``E = sum((x-base)^3)`` with
+    # ``base[0]=1e14`` and steps ``(1, 1e-2)`` makes the realised directions
+    # incommensurable, every ``rel`` exactly 1 with zero spread, and an EXACT
+    # gradient would be reported as a definitive 100% error.  Absence of
+    # evidence is not evidence of convergence.
+    resolved = not np.isnan(fd_divergence) and best_rel > fd_spread_tol * resolution
 
     return GradientErrorReport(
         relative_error=best_rel,
