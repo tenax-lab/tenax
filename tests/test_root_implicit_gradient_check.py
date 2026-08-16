@@ -458,3 +458,53 @@ def test_a_nan_energy_at_a_perturbed_state_is_reported():
 
     with pytest.raises(ValueError, match="energy at the perturbed state"):
         measure_gradient_error(nan_at_shift, _quartic_state())
+
+
+# --------------------------------------------------------------------------- #
+# 6. Both halves of a complex direction, and steps that survive the state       #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_purely_imaginary_direction_is_refused():
+    """The symmetric case to the real-direction one, and equally blind.
+
+    ``Re(sum(g * v))`` with ``v = i*w`` samples only the imaginary coordinates,
+    so an arbitrarily corrupted *real* part pairs to exactly zero. The guard
+    has to require both halves, not just the one that was found first.
+    """
+    w = np.random.RandomState(6).standard_normal((2, 2, 2, 2, 2))
+
+    with pytest.raises(ValueError, match="no real component"):
+        measure_gradient_error(_complex_pair(), _complex_state(), direction=1j * w)
+
+
+def test_a_complex_direction_on_a_real_state_is_refused():
+    """The shifted state would leave the space the gradient was taken in."""
+    rng = np.random.RandomState(7)
+    v = rng.standard_normal((2, 2, 2, 2, 2)) + 1j * rng.standard_normal((2, 2, 2, 2, 2))
+
+    with pytest.raises(ValueError, match="state is real"):
+        measure_gradient_error(_exact_pair(), _quartic_state(), direction=v)
+
+
+def test_steps_that_round_away_against_the_state_are_reported():
+    """A shift below the state's ULP measures nothing, and says so.
+
+    With entries around 1e20 the default steps do not change the buffer at all,
+    so both signs return the same energy and every difference is exactly zero.
+    ``relative_error`` then becomes ``|0 - analytic| / 1e-300`` -- inf -- while
+    ``resolution`` is 0, so without this check ``is_resolved`` is True and a
+    *correct* gradient is reported as infinitely wrong.
+    """
+    huge = _wrap(np.full((2, 2, 2, 2, 2), 1e20))
+
+    with pytest.raises(ValueError, match="rounds away"):
+        measure_gradient_error(_exact_pair(), huge)
+
+
+def test_a_state_small_enough_for_the_steps_still_works():
+    """The rounds-away guard must not reject ordinary states."""
+    report = measure_gradient_error(_exact_pair(1.25), _quartic_state())
+
+    assert report.is_resolved, report.summary()
+    assert report.relative_error == pytest.approx(0.25, rel=1e-3), report.summary()

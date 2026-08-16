@@ -240,25 +240,40 @@ def measure_gradient_error(
     v = v / float(np.linalg.norm(v))
 
     if is_complex:
-        # Judged on the VALUES, not the dtype.  A real-valued direction stored
-        # in a complex array is exactly as blind as a real one: its imaginary
-        # components are zero, so ``Re(sum(g * v))`` pairs the whole imaginary
-        # half of the gradient to zero and an error living there is reported as
-        # perfect.  Checking ``iscomplexobj`` instead was the same mistake as
-        # counting step entries rather than distinct magnitudes -- guarding an
-        # adjacent property and calling it the property.
-        imag_content = float(np.max(np.abs(v.imag))) if np.iscomplexobj(v) else 0.0
-        if imag_content < 1e-12 * float(np.max(np.abs(v))):
-            raise ValueError(
-                "direction has no imaginary component but the state is "
-                "complex, so the finite difference would sample only the real "
-                "coordinates and any error in the gradient's imaginary "
-                "components would pair to exactly zero -- a wrong gradient "
-                "would be reported as perfect. Pass a genuinely complex "
-                "direction, or omit it for a random one. (A real-valued array "
-                "cast to a complex dtype is still real-valued and is refused "
-                "for the same reason.)"
-            )
+        # Judged on the VALUES, not the dtype, and on BOTH halves.  The two
+        # failures are symmetric: ``Re(sum(g * v))`` with a real-valued ``v``
+        # pairs the gradient's imaginary components to exactly zero, and with a
+        # purely imaginary ``v`` it pairs the real ones to zero instead.  Either
+        # way half the gradient is unsampled and an arbitrarily large error
+        # living there reports as perfect.  A real array cast to a complex
+        # dtype is still real-valued, which is why this is not an
+        # ``iscomplexobj`` check.
+        v_scale = float(np.max(np.abs(v)))
+        halves = (
+            ("real", float(np.max(np.abs(v.real)))),
+            ("imaginary", float(np.max(np.abs(v.imag)))),
+        )
+        for missing, content in halves:
+            if content < 1e-12 * v_scale:
+                # The half that is ABSENT from ``v`` is the half of the
+                # gradient that goes unsampled; what remains is the other one.
+                sampled = "imaginary" if missing == "real" else "real"
+                raise ValueError(
+                    f"direction has no {missing} component but the state is "
+                    f"complex, so the finite difference would sample only the "
+                    f"{sampled} coordinates and any error in the gradient's "
+                    f"{missing} components would pair to exactly zero -- a "
+                    "wrong gradient would be reported as perfect. Pass a "
+                    "direction with both, or omit it for a random one. (A "
+                    "real-valued array cast to a complex dtype is still "
+                    "real-valued and is refused for the same reason.)"
+                )
+    elif np.iscomplexobj(v) and float(np.max(np.abs(v.imag))) > 0.0:
+        raise ValueError(
+            "direction has an imaginary component but the state is real, so "
+            "the shifted state would leave the space the gradient was taken "
+            "in and the finite difference would not be of this map."
+        )
 
     _energy, grad = energy_and_grad(A)
     grad_arr = np.asarray(grad)
@@ -286,7 +301,24 @@ def measure_gradient_error(
         )
 
     def energy_at(t: float) -> float:
-        shifted = DenseTensor(jnp.asarray(base + t * v), A.indices)
+        shifted_data = base + t * v
+        if np.array_equal(shifted_data, base):
+            # ``h * v`` fell below the spacing of ``base``, so the "perturbed"
+            # state is bit-identical to the original.  Both signs then return
+            # the same energy, every difference is exactly 0, and
+            # ``relative_error`` becomes ``|0 - analytic| / 1e-300`` -- inf --
+            # while ``resolution`` is 0, so ``is_resolved`` is True and a
+            # *correct* gradient is reported as infinitely wrong.  Reachable on
+            # any large-magnitude state: entries around 1e20 swallow the
+            # default steps outright.
+            raise ValueError(
+                f"the step h={t:.1e} rounds away against this state: "
+                f"base + h*v is bit-identical to base, so the finite "
+                f"difference is identically zero and measures nothing. The "
+                f"state's largest entry is {float(np.max(np.abs(base))):.2e}; "
+                "use steps large enough to change it."
+            )
+        shifted = DenseTensor(jnp.asarray(shifted_data), A.indices)
         energy, _g = energy_and_grad(shifted)
         out = float(np.real(energy))
         if not np.isfinite(out):
