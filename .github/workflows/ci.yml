@@ -17,6 +17,27 @@ on:
     - cron: "0 7 * * *"  # 07:00 UTC daily
   workflow_dispatch:
 
+# One run per pull request, not one per push.  Without this every push queues a
+# complete new matrix and nothing supersedes anything: a single afternoon of
+# review iterations on #884 left a dozen full runs queued on obsolete commits,
+# which is pure waste on its own and becomes a real blocker whenever Actions
+# capacity is short -- the head commit sits behind runs nobody wants.
+#
+# ``cancel-in-progress`` is deliberately CONDITIONAL, and this is the part that
+# matters: cancelling a ``merge_group`` run reports a cancelled required check
+# to the merge queue, which fails the merge and drops the PR from the queue.
+# Pushes to ``main`` and the daily scheduled run must not be cancelled either --
+# they are the standing signal for the non-core buckets (#740).  So only
+# ``pull_request`` runs are superseded; everything else serialises within its
+# group instead.
+#
+# The group key uses the PR number where there is one.  ``github.ref`` alone
+# would be wrong for ``merge_group``, whose refs are unique per queue entry, and
+# would group unrelated events together on ``main``.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: Tests (Python ${{ matrix.python-version }})
