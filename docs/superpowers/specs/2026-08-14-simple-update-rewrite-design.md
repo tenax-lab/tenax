@@ -306,6 +306,31 @@ as "warm ≈ cold" below, seen from the other side — BP's fixed point belongs 
 the physical state, so the parameterisation it starts from moves the cost by
 about one iteration and the answer not at all.
 
+**What that table could not see, and what does now (added 2026-08-17).** Every
+column above passes the weights back into the probe, so all of them test the
+*Vidal* reading. The claim this section actually rests on — that the returned
+pair alone is the state, and dropping the weights loses only a report — was
+asserted nowhere, in the spec or in the tests. The first implementation of
+`gauge_fix` consequently returned `bp_gauge_checkerboard`'s Vidal pair unchanged
+while its docstring promised the absorbed one, and no test could tell:
+
+| reading of `gauge_fix`'s output | dense D=2 | dense D=3 |
+|---|---|---|
+| as Vidal — weights passed back in | 3.7e-15 | 1.7e-14 |
+| as absorbed — **weights dropped**, as documented | **1.25e+00** | **8.9e-01** |
+
+Comparisons here must normalise: BP deliberately rescales `Gamma` and
+max-normalises `lambda`, and the torus is degree 4 in each site tensor, so a raw
+relative norm reports 6.5e-01 for the reading that is exact to 3.7e-15. Getting
+that wrong makes the probe fail and pass for the wrong reasons.
+
+`gauge_fix` now absorbs before returning, so the convention holds at the call
+boundary as written above, and the guard that was missing asserts **both**
+directions — dropping the weights must leave the state alone, *and* feeding them
+back must move it, since a one-sided assertion would still pass on the defect it
+is meant to catch. Re-absorbing is not a harmless redundancy: it puts
+`lambda**1.5` on every bond, which is #667's mechanism verbatim.
+
 **API surface, decided:** `_su_step`, `_su_evolve` and `_SUState` are **internal**
 for v1 — hence the leading underscores above — matching the private
 `_simple_update_checkerboard_sweep` they replace — v1 is a drop-in behind
