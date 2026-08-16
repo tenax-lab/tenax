@@ -806,9 +806,32 @@ def measure_gradient_error(
     best_group: list[int] = []
     for anchor in range(len(units)):
         by_magnitude: dict[float, int] = {}
+        accepted: list[int] = []
         for j in range(len(units)):
-            if float(np.linalg.norm(units[j] - units[anchor])) <= direction_tol:
-                by_magnitude.setdefault(results[j][7], j)
+            if float(np.linalg.norm(units[j] - units[anchor])) > direction_tol:
+                continue
+            if results[j][7] in by_magnitude:
+                continue
+            # PAIRWISE, not just against the anchor.  A ball of radius ``tol``
+            # admits members up to ``2 * tol`` from each other, so "close to
+            # the anchor" is not "close to each other" -- the property that
+            # actually has to hold, since every pair in the group is used to
+            # bound every other.  Measured on a float32 three-step scan: two
+            # steps 2.2556e-04 from the anchor, both inside
+            # ``sqrt(eps)=3.4527e-04``, sitting 4.5113e-04 apart.  Commensurable
+            # is a relation between the steps, not between each step and a
+            # representative.
+            #
+            # Greedy, so the group is a clique rather than the largest clique.
+            # Erring small is the safe direction here: a smaller group can only
+            # withhold a measurement, never license one.
+            if any(
+                float(np.linalg.norm(units[j] - units[m])) > direction_tol
+                for m in accepted
+            ):
+                continue
+            by_magnitude[results[j][7]] = j
+            accepted.append(j)
         magnitudes = sorted(by_magnitude)
         if len(magnitudes) >= 2 and magnitudes[-1] / magnitudes[0] >= _MIN_SPAN_RATIO:
             members = list(by_magnitude.values())

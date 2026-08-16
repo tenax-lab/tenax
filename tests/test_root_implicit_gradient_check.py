@@ -1812,6 +1812,78 @@ def test_a_direction_gap_is_not_reported_as_non_convergence():
     assert np.isnan(report.unresolved_bound), report.summary()
 
 
+def test_group_members_must_agree_with_each_other_not_just_the_anchor():
+    """A ball of radius ``tol`` admits members ``2 * tol`` apart.
+
+    This float32 scan puts the coarse step 2.2556e-04 from each of the other
+    two -- both inside ``sqrt(eps) = 3.4527e-04`` -- while those two sit
+    4.5113e-04 apart, outside it. Anchored on the coarse step, all three pool,
+    and the incommensurable pair doubles ``fd_divergence`` from 3.50e-02 to
+    6.77e-02. With ``fd_spread_tol`` at its default of 10 that lifts the floor
+    from 0.35 to 0.68 and *hides* a cleanly measured 50% error.
+
+    The weights are set so the true directional derivative is small enough for
+    the direction gap to matter, but not so small that the commensurable pair
+    is affected too: the whole point is that one pair is usable and the other
+    is not.
+    """
+    n = 32
+    base = np.full(n, 2.1335, dtype=np.float32)
+    base[0] = np.float32(1.250975e2)
+    shaped = base.reshape((2, 2, 2, 2, 2))
+    raw_direction = np.ones(n)
+    raw_direction[0] = 1.368e-3
+    h = 0.008455788366392545
+    steps = (h * 4, h * 2, h)
+
+    # The geometry this test exists for, asserted rather than assumed: two
+    # steps inside the tolerance of a third but outside it from each other.
+    v = raw_direction / np.max(np.abs(raw_direction))
+    v = (v / np.linalg.norm(v)).astype(np.float32)
+    units = {}
+    for step in steps:
+        t = np.float32(step)
+        plus = (base + t * v) - base
+        minus = (base - t * v) - base
+        eff = plus.astype(np.float64) - minus.astype(np.float64)
+        units[step] = eff / np.linalg.norm(eff)
+    tol = float(np.sqrt(np.finfo(np.float32).eps))
+    to_anchor = [float(np.linalg.norm(units[s] - units[steps[0]])) for s in steps[1:]]
+    between = float(np.linalg.norm(units[steps[1]] - units[steps[2]]))
+    assert all(0.0 < d <= tol for d in to_anchor), (
+        f"fixture lost its geometry: anchor distances {to_anchor} vs tol {tol}"
+    )
+    assert between > tol, (
+        f"fixture lost its geometry: the far pair is {between:.4e}, inside "
+        f"the {tol:.4e} tolerance, so nothing is being excluded"
+    )
+
+    base_j = jnp.asarray(shaped)
+    w = np.zeros(n, dtype=np.float32)
+    w[0] = 1.0
+    w[1:] = np.float32(0.0346 / 31)
+    w_j = jnp.asarray(w.reshape((2, 2, 2, 2, 2)))
+
+    def fifty_percent_high(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(w_j * (x - base_j)), 1.5 * w_j
+
+    report = measure_gradient_error(
+        fifty_percent_high,
+        _wrap(shaped),
+        direction=raw_direction.reshape((2, 2, 2, 2, 2)),
+        steps=steps,
+    )
+
+    assert report.relative_error == pytest.approx(0.5, rel=1e-3), report.summary()
+    assert report.is_resolved, (
+        "a pair 4.5113e-04 apart was pooled because both sit inside the "
+        f"tolerance of a third step, hiding a measured 50% error -- "
+        f"{report.summary()}"
+    )
+    assert report.fd_divergence < 5e-2, report.summary()
+
+
 def test_ordinary_float64_rounding_still_pools():
     """The tighter tolerance must not make well-scaled scans indeterminate.
 
