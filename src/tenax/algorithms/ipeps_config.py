@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 from typing import Literal, NamedTuple
 
 import jax
@@ -523,6 +523,8 @@ class iPEPSConfig:
     max_bond_dim: int = 2
     num_imaginary_steps: int = 100
     dt: float = 0.01
+    #: ``su_independent_bond_lambdas`` is declared at the end of this class,
+    #: keyword-only, so that it holds no positional slot -- see there.
     ctm: CTMConfig = field(default_factory=CTMConfig)
     svd_trunc_err: float | None = None
     gate_order: str = "sequential"
@@ -708,6 +710,47 @@ class iPEPSConfig:
     gs_checkpoint_path: str | None = None
     gs_checkpoint_every: int = 10
     gs_resume: bool = False
+
+    # Everything below is keyword-only.  Inserting a field among the ones
+    # above silently rebinds existing positional calls: this option first
+    # landed in slot 4, where ``iPEPSConfig(D, steps, dt, CTMConfig(chi=10))``
+    # bound the CTMConfig to it -- truthy, so it enabled independent bonds
+    # *and* dropped the CTM settings, with no exception raised.
+    _: KW_ONLY
+
+    #: Track a separate Schmidt spectrum for each of the checkerboard's **four**
+    #: bonds instead of one horizontal and one vertical for all four (#851).
+    #:
+    #: Off by default, and the default is not a placeholder for "not finished
+    #: yet" -- it is a measured trade.  The four bonds are ``A.r<->B.l``,
+    #: ``B.r<->A.l``, ``A.d<->B.u`` and ``B.d<->A.u``; sharing two spectra
+    #: between them is wrong away from the fixed point, where they were measured
+    #: to differ by up to 23% (horizontal) and 31% (vertical) during the
+    #: transient.  But on a *translation-invariant* Hamiltonian they coincide at
+    #: the fixed point -- measured agreement 1.2e-06 -- so the shared spectrum
+    #: is asymptotically correct there and buys nothing at convergence.
+    #:
+    #: What it costs is robustness.  Sharing a spectrum forces the two
+    #: horizontal bonds equal, which projects out the dimerising direction; four
+    #: free bonds can follow it.  On isotropic Heisenberg at D=3 from a random
+    #: start, 3 of 8 seeds converged to a horizontally dimerised state with
+    #: ``|h_AB - h_BA|`` around 10-50% and a flat spectrum, against 1 of 8 with
+    #: the shared spectrum.  A smaller ``dt`` did not escape it.
+    #:
+    #: Turn it on when the *state* may genuinely break the AB<->BA symmetry --
+    #: a spontaneously dimerised or valence-bond phase, where two spectra
+    #: cannot represent the answer and sharing one is not an approximation but
+    #: a wrong answer.  Prefer a physical initial state with it: the trapped
+    #: seeds converge correctly from a Neel-like start.
+    #:
+    #: It does **not** make the bonds inequivalent in the *Hamiltonian*.
+    #: :func:`~tenax.algorithms.ipeps.ipeps` takes a single ``hamiltonian_gate``
+    #: and :func:`~tenax.algorithms.ipeps_simple_update._simple_update_checkerboard_sweep`
+    #: applies that one gate in all four phases, so an anisotropic model
+    #: (``Jx != Jy``) cannot be expressed today whatever this flag is set to --
+    #: setting it would silently evolve the uniform model instead.  Per-bond
+    #: gates are #883.
+    su_independent_bond_lambdas: bool = False
 
     def __post_init__(self):
         import warnings

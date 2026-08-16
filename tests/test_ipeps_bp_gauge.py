@@ -111,8 +111,10 @@ def _simple_update(A, B, *, phases, rotate):
     gate_t = _make_trotter_gate_tensor(
         sublattice_rotate_gate(gate) if rotate else gate, 0.05, site_tensor=A
     )
-    A, B, lam_h, lam_v = _simple_update_checkerboard_sweep(A, B, gate_t, D, phases)
-    return A, B, BondWeights(h_AB=lam_h, h_BA=lam_h, v_AB=lam_v, v_BA=lam_v)
+    # The sweep returns the four bonds itself now (#851); with the default
+    # shared spectra ``h_AB is h_BA`` and ``v_AB is v_BA``, which is what this
+    # used to rebuild by hand.
+    return _simple_update_checkerboard_sweep(A, B, gate_t, D, phases)
 
 
 def _direction(t):

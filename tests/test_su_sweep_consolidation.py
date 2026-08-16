@@ -26,6 +26,13 @@ is correct.  It is not (#851: two stored spectra for four inequivalent bonds,
 so ``steps % 4`` selects which bond's gauge is stamped on the lattice).  This
 file only guarantees that consolidating the copies changed nothing, so that the
 real fix lands in one place instead of seven.
+
+Since #851 landed, that reference transcription does double duty.  The sweep now
+carries four spectra, but ``su_independent_bond_lambdas`` is **off** by default
+and the default mirrors each freshly computed spectrum onto its partner bond --
+which is what one ``lam_h`` written by phases 0 and 2 did.  Asserting the
+default against this literal copy of the pre-#851 loop is what turns that
+sentence from a claim into a measurement, at every residue mod 4.
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ import pytest
 
 from tenax.algorithms.ipeps import _wrap_as_dense_tensor
 from tenax.algorithms.ipeps_simple_update import (
+    BondWeights,
     _make_trotter_gate_tensor,
     _simple_update_2site_horizontal_tensor,
     _simple_update_2site_vertical_tensor,
@@ -100,10 +108,16 @@ def test_the_shared_sweep_reproduces_the_open_coded_loop(D, steps):
     gate = _make_trotter_gate_tensor(_heisenberg_gate(), 0.05, site_tensor=A0)
 
     rA, rB, r_h, r_v = _reference_sweep(A0, B0, gate, D, steps)
-    sA, sB, s_h, s_v = _simple_update_checkerboard_sweep(A0, B0, gate, D, steps)
+    sA, sB, lam = _simple_update_checkerboard_sweep(A0, B0, gate, D, steps)
 
-    np.testing.assert_array_equal(np.asarray(s_h), np.asarray(r_h))
-    np.testing.assert_array_equal(np.asarray(s_v), np.asarray(r_v))
+    # The shared default writes each spectrum to its partner, so both
+    # horizontal bonds carry what the single ``lam_h`` carried.  Asserted
+    # rather than assumed -- it is the whole content of the default.
+    np.testing.assert_array_equal(np.asarray(lam.h_BA), np.asarray(lam.h_AB))
+    np.testing.assert_array_equal(np.asarray(lam.v_BA), np.asarray(lam.v_AB))
+
+    np.testing.assert_array_equal(np.asarray(lam.h_AB), np.asarray(r_h))
+    np.testing.assert_array_equal(np.asarray(lam.v_AB), np.asarray(r_v))
     np.testing.assert_array_equal(np.asarray(sA.todense()), np.asarray(rA.todense()))
     np.testing.assert_array_equal(np.asarray(sB.todense()), np.asarray(rB.todense()))
 
@@ -119,33 +133,53 @@ def test_resuming_a_sweep_matches_running_it_in_one_go():
     A0, B0 = _pair(D)
     gate = _make_trotter_gate_tensor(_heisenberg_gate(), 0.05, site_tensor=A0)
 
-    oA, oB, o_h, o_v = _simple_update_checkerboard_sweep(A0, B0, gate, D, gate_steps)
+    oA, oB, o_lam = _simple_update_checkerboard_sweep(A0, B0, gate, D, gate_steps)
 
-    pA, pB, p_h, p_v = _simple_update_checkerboard_sweep(A0, B0, gate, D, 3)
-    pA, pB, p_h, p_v = _simple_update_checkerboard_sweep(
-        pA, pB, gate, D, gate_steps - 3, lam_h=p_h, lam_v=p_v, phase0=3
+    pA, pB, p_lam = _simple_update_checkerboard_sweep(A0, B0, gate, D, 3)
+    pA, pB, p_lam = _simple_update_checkerboard_sweep(
+        pA, pB, gate, D, gate_steps - 3, lambdas=p_lam, phase0=3
     )
 
-    np.testing.assert_allclose(np.asarray(p_h), np.asarray(o_h), rtol=0, atol=0)
+    np.testing.assert_allclose(
+        np.asarray(p_lam.h_AB), np.asarray(o_lam.h_AB), rtol=0, atol=0
+    )
     np.testing.assert_allclose(
         np.asarray(pA.todense()), np.asarray(oA.todense()), rtol=0, atol=0
     )
 
 
 def test_to_physical_pair_matches_calling_to_physical_tensor_twice():
-    """The pair helper is the two existing calls, not a new convention."""
-    D = 3
-    A, B = _pair(D)
-    lam_h = jnp.linspace(1.0, 0.2, D)
-    lam_v = jnp.linspace(1.0, 0.5, D)
+    """The pair helper is the two existing calls, not a new convention.
 
-    pA, pB = _to_physical_pair(A, B, lam_h, lam_v)
+    Four *distinct* spectra, because A and B are mirror images rather than
+    copies: ``A.r`` and ``B.l`` are the same bond.  With one ``lam_h`` for both
+    sites the two calls took identical arguments, so a mirrored mapping was
+    invisible here; four distinct spectra make a swap fail.
+    """
+    D = 3
+    lam = BondWeights(
+        h_AB=jnp.linspace(1.0, 0.2, D),
+        h_BA=jnp.linspace(1.0, 0.3, D),
+        v_AB=jnp.linspace(1.0, 0.4, D),
+        v_BA=jnp.linspace(1.0, 0.5, D),
+    )
+    A, B = _pair(D)
+
+    pA, pB = _to_physical_pair(A, B, lam)
 
     np.testing.assert_array_equal(
         np.asarray(pA.todense()),
-        np.asarray(_to_physical_tensor(A, lam_h, lam_v).todense()),
+        np.asarray(
+            _to_physical_tensor(
+                A, lam_u=lam.v_BA, lam_d=lam.v_AB, lam_l=lam.h_BA, lam_r=lam.h_AB
+            ).todense()
+        ),
     )
     np.testing.assert_array_equal(
         np.asarray(pB.todense()),
-        np.asarray(_to_physical_tensor(B, lam_h, lam_v).todense()),
+        np.asarray(
+            _to_physical_tensor(
+                B, lam_u=lam.v_AB, lam_d=lam.v_BA, lam_l=lam.h_AB, lam_r=lam.h_BA
+            ).todense()
+        ),
     )

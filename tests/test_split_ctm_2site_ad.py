@@ -76,9 +76,9 @@ def _build_su_xxz(delta, D=2, d=2, n_steps=80, dt=0.05, seed=7):
 
     gate = _make_trotter_gate_tensor(H, dt, site_tensor=A)
     # Four-bond checkerboard sweep + symmetric gauge, mirroring ``ipeps()``
-    # after #667.  See the same comment in ``_build_su_neel``.
-    A, B, lam_h, lam_v = _simple_update_checkerboard_sweep(A, B, gate, D, n_steps)
-    return _to_physical_pair(A, B, lam_h, lam_v)
+    # after #667 and #851.  See the same comment in ``_build_su_neel``.
+    A, B, lambdas = _simple_update_checkerboard_sweep(A, B, gate, D, n_steps)
+    return _to_physical_pair(A, B, lambdas)
 
 
 def test_converge_split_env_2site_matches_forward(su_state):
