@@ -107,7 +107,9 @@ def main() -> None:
         energy, gap = run(H, cfg, steps, key)
         print(f"{steps:>8}  {energy:>12.6f}  {gap:>9.4f}")
     print("-" * 56)
-    print("gap ~ 0 => uniform state; gap > 0 => genuine checkerboard CDW.")
+    print("gap > 0 => real charge order.  gap ~ 0 => no CHARGE order; it does")
+    print("NOT mean one tensor would do -- the gap is a one-body probe, and a")
+    print("dimerised state reads ~0 while still needing two sites.")
 
 
 if __name__ == "__main__":

@@ -132,17 +132,20 @@ def su_pair():
 def midgap_pair():
     """A pair whose gap sits **mid-range**, for the gauge tests.
 
-    At ``V=4`` the gap is 1.0004 ungauged, 1.0001 under the correct gauge and
-    0.9998 under a *mispaired* one -- the observable is saturated, so it barely
-    moves for a state change that is real and large.  An invariance test on a
-    saturated observable proves close to nothing: it would pass on a diagnostic
-    that had been replaced by ``return 1.0``.
+    At ``V=4`` the gap is 1.000437 ungauged, 1.000059 under the correct gauge
+    and 0.999419 under a *mispaired* one -- the observable is saturated, so it
+    barely moves for a state change that is real and large.  An invariance test
+    on a saturated observable proves close to nothing: it would pass on a
+    diagnostic that had been replaced by ``return 1.0``.
 
-    ``V=1`` puts the gap at ~0.27, in the responsive part of its range, and as a
-    bonus puts the energy at ~1.5 rather than the ~0 that #392 produces at
-    ``V=4`` -- which matters because the energy is the witness that the gauge is
-    inert, and a witness keyed to a quantity that is ~0 degenerates into an
-    absolute bar ten times its own magnitude.
+    The energy witness is worse than weak there, it is **inverted**: on that
+    fixture the mispaired gauge moves ``E`` by 2.080e-03 while the *correct*
+    gauge moves it by 3.195e-03, so no bar separates them in the right
+    direction at all.  The cause is #392 -- with no chemical potential ``E`` is
+    ~0 at ``V=4`` (-1.9e-03 here), so the residuals are noise about nothing.
+
+    ``V=1`` puts the gap at ~0.27, in the responsive part of its range, and the
+    energy at ~1.5, which restores both witnesses.
     """
     cfg = FPEPSConfig(D=2, t=1.0, V=1.0, dt=0.05)
     H = spinless_fermion_gate(cfg)
@@ -156,9 +159,22 @@ def midgap_pair():
 #: sides are asserted -- see ``test_a_mispaired_gauge_is_caught``.  Raising a bar
 #: to rescue the invariance test breaks the mutation test and vice versa, which
 #: is the property that makes this a guard rather than a decoration.
-GAUGE_CHI, GAUGE_SWEEPS = 4, 12
-BAR_E = 0.25  # measured: correct 1.00e-01, mispaired 7.00e-01
-BAR_GAP = 0.14  # measured: correct 6.75e-02, mispaired 2.88e-01
+#:
+#: 40 sweeps rather than 12.  The correct-gauge residual is CTM truncation, so
+#: it falls with convergence while the mispaired one does not -- measured, going
+#: 12 -> 40 sweeps takes the energy residual 1.004e-01 -> 2.357e-02 and the gap
+#: residual 6.747e-02 -> 1.295e-02, while the mispaired energy residual *rises*
+#: from 6.997e-01 to 4.307.  That is worth ~90 s per environment: at 12 sweeps
+#: the mispaired gap cleared its bar by only 1.2x, which is not a bracket, it is
+#: a coin toss.
+#:
+#: Both bars are the geometric mean of the pair they separate, so the margin is
+#: the same on each side and neither test is the fragile one.
+GAUGE_CHI, GAUGE_SWEEPS = 4, 40
+#: correct 2.357e-02 (12.7x under), mispaired 4.307 (14.4x over)
+BAR_E = 0.3
+#: correct 1.295e-02 (3.6x under), mispaired 1.710e-01 (3.6x over)
+BAR_GAP = 0.047
 
 
 def _observables(A, B, H):
@@ -166,11 +182,24 @@ def _observables(A, B, H):
     envs = ctm_split_tensor_2site(
         A, B, GAUGE_CHI, max_iter=GAUGE_SWEEPS, conv_tol=1e-10
     )
-    E = float(compute_energy_split_ctm_tensor_2site(A, B, *envs, H, d=2))
+    d = A.indices[A.labels().index("phys")].dim
+    E = float(compute_energy_split_ctm_tensor_2site(A, B, *envs, H, d=d))
     return E, sublattice_gap(A, B, *envs)
 
 
-def test_the_gap_is_invariant_under_a_bond_gauge(midgap_pair):
+@pytest.fixture(scope="module")
+def midgap_baseline(midgap_pair):
+    """``(A, B, H, E, gap)`` for the ungauged pair -- computed once, not twice.
+
+    Both gauge tests need the ungauged numbers to compare against, and a CTM at
+    these settings is ~90 s.
+    """
+    A, B, H = midgap_pair
+    E, gap = _observables(A, B, H)
+    return A, B, H, E, gap
+
+
+def test_the_gap_is_invariant_under_a_bond_gauge(midgap_baseline):
     """The state does not change, so the diagnostic must not either.
 
     The gauge leaves every physical observable alone by construction -- each
@@ -183,26 +212,30 @@ def test_the_gap_is_invariant_under_a_bond_gauge(midgap_pair):
     diagnostic would move with it, and this test would fail on the fix and pass
     on the defect.
 
-    **Why the bars are 1e-1 and not 1e-3.**  The environment is re-converged on
+    **Why the bars are 1e-2 and not 1e-3.**  The environment is re-converged on
     the gauged pair, and a CTM at finite chi truncates in a basis the gauge
     moves, so the two runs are not algebraically the same calculation.  The
-    residual is therefore CTM truncation, not the metric, and on an *unsaturated*
-    fixture it is genuinely of order 1e-1: measured here 1.00e-01 (energy) and
-    6.75e-02 (gap).  A saturated fixture would report much smaller numbers --
-    at V=4 the gap moves by 4e-04 -- but only because a saturated observable
-    barely moves for anything, including for a state change that is real and
-    large.  That is not precision, it is insensitivity, and it is exactly what
-    ``midgap_pair`` exists to avoid.
+    residual is therefore CTM truncation, not the metric -- which is checkable
+    and was checked: it falls 4-5x when the sweep count goes 12 -> 40 (energy
+    1.004e-01 -> 2.357e-02, gap 6.747e-02 -> 1.295e-02), while the mispaired
+    residual does not fall at all (its energy residual *rises*, 6.997e-01 ->
+    4.307).  A metric defect would not care how well the environment converged.
+
+    A saturated fixture reports much smaller numbers -- at V=4 the gap moves by
+    3.779e-04 -- but only because a saturated observable barely moves for
+    anything, including for a state change that is real and large.  That is
+    insensitivity, not precision, and on that fixture the energy witness is
+    *inverted*: the mispaired gauge moves E by 2.080e-03 against the correct
+    gauge's own 3.195e-03, so no bar separates them in the right direction at
+    all.  This is why ``midgap_pair`` exists.
 
     What makes the bar meaningful is not its size but that it is **bracketed**:
     ``test_a_mispaired_gauge_is_caught`` requires the same constants to fail on
     a transformation that is *not* a gauge, so neither bar can be moved in
     either direction without breaking one of the two tests.
     """
-    A, B, H = midgap_pair
+    A, B, H, E, gap = midgap_baseline
     A_g, B_g = _bond_gauge(A, B)
-
-    E, gap = _observables(A, B, H)
     E_g, gap_g = _observables(A_g, B_g, H)
 
     assert 0.05 < gap < 0.95, (
@@ -228,27 +261,73 @@ def test_the_gap_is_invariant_under_a_bond_gauge(midgap_pair):
     )
 
 
-def test_a_mispaired_gauge_is_caught(midgap_pair):
+def test_the_mispairing_stays_a_single_relocated_inverse(midgap_pair):
+    """The severity of the mutation is pinned, so it cannot be inflated.
+
+    ``BAR_E`` and ``BAR_GAP`` are bracketed from both sides, but the *violence*
+    of the mutation that pins them from below is a free knob: making the
+    mispairing more destructive would ease ``test_a_mispaired_gauge_is_caught``
+    and nothing would object.  This closes that.
+
+    The mispaired transform must be exactly "one bond's inverse on the wrong
+    leg" and nothing more, which is a statement about the tensors and needs no
+    environment:
+
+    * ``A`` is untouched by the mutation -- it only ever moves a factor on ``B``.
+    * ``B_mispaired`` is ``B_correct`` with ``h_AB``'s factor taken off ``l`` and
+      put onto ``r``: the same numbers, relocated across one bond.
+
+    If someone strengthens ``_GAUGE`` for the mutation only, mispairs a second
+    bond, or reaches for a different perturbation entirely, this fails.
+    """
+    A, B, _H = midgap_pair
+    A_c, B_c = _bond_gauge(A, B)
+    A_m, B_m = _bond_gauge(A, B, mispair=True)
+
+    np.testing.assert_allclose(
+        np.asarray(A_m.todense()),
+        np.asarray(A_c.todense()),
+        rtol=1e-13,
+        atol=1e-15,
+        err_msg="the mispairing touched A; it must only relocate a factor on B",
+    )
+
+    g_hAB = _GAUGE[0]
+    want = scale_bond_axis(scale_bond_axis(B_c, "l", g_hAB), "r", 1.0 / g_hAB)
+    np.testing.assert_allclose(
+        np.asarray(B_m.todense()),
+        np.asarray(want.todense()),
+        rtol=1e-13,
+        atol=1e-15,
+        err_msg=(
+            "the mispairing is not a single relocated inverse -- it has been "
+            "made more violent than the mutation the bars are calibrated "
+            "against, which weakens test_a_mispaired_gauge_is_caught"
+        ),
+    )
+
+
+def test_a_mispaired_gauge_is_caught(midgap_baseline):
     """The bars above must fail on something that is *not* a gauge.
 
     This is the mutation check, kept in the suite rather than run once by hand.
     ``_bond_gauge(mispair=True)`` applies the identical per-leg factors but puts
     ``h_AB``'s inverse on ``B.r`` instead of ``B.l``.  Nothing cancels on that
     bond, so the physical state genuinely moves -- and both witnesses must say
-    so, or they are decorations.
+    so, or they are decorations.  How far it may move is itself pinned, by
+    ``test_the_mispairing_stays_a_single_relocated_inverse``.
 
-    Measured on ``midgap_pair`` at chi=4, 12 sweeps: the energy moves 7.00e-01
-    against the correct gauge's 1.00e-01, and the gap 2.88e-01 against 6.75e-02.
+    Measured on ``midgap_pair`` at chi=4, 40 sweeps: the energy moves 4.307
+    against the correct gauge's 2.357e-02, and the gap 1.710e-01 against
+    1.295e-02.
     ``BAR_E`` and ``BAR_GAP`` sit between the two, so this test and the one
     above bracket them from opposite sides.  A previous version of the guard
     used ``abs(E - E_g) < 2e-2 * max(abs(E), 1.0)`` on the V=4 fixture, where
     ``E ~ 0`` (#392) collapsed the relative bar to an absolute 2e-2 -- ten times
     the whole magnitude of ``E`` -- and this mutation passed it.
     """
-    A, B, H = midgap_pair
+    A, B, H, E, gap = midgap_baseline
     A_m, B_m = _bond_gauge(A, B, mispair=True)
-
-    E, gap = _observables(A, B, H)
     E_m, gap_m = _observables(A_m, B_m, H)
 
     assert abs(E - E_m) > BAR_E, (
