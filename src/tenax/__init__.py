@@ -249,6 +249,15 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "tenax.algorithms.ipeps_bp_gauge",
         "bp_gauge_checkerboard",
     ),
+    # _root_implicit_gradient_check
+    "GradientErrorReport": (
+        "tenax.algorithms._root_implicit_gradient_check",
+        "GradientErrorReport",
+    ),
+    "measure_gradient_error": (
+        "tenax.algorithms._root_implicit_gradient_check",
+        "measure_gradient_error",
+    ),
     # ipeps_config
     "CTMConfig": ("tenax.algorithms.ipeps_config", "CTMConfig"),
     "CTMEnvironment": ("tenax.algorithms.ipeps_config", "CTMEnvironment"),
@@ -468,6 +477,8 @@ __all__ = [
     "heisenberg_u1sz_init_pair",
     "ipeps",
     "bp_gauge_checkerboard",
+    "GradientErrorReport",
+    "measure_gradient_error",
     "BondWeights",
     "BPGaugeInfo",
     "sublattice_rotate_gate",

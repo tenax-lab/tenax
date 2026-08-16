@@ -4,6 +4,41 @@
 
 ### Added
 
+- **`measure_gradient_error`: root-implicit gradient accuracy can be measured,
+  and cannot be predicted** (#785). The root-implicit engines report a root
+  residual, a covariant residual, an adjoint residual and a `usable_rank`, and
+  none of them is a gradient-quality signal. The residual is *anti-correlated*
+  with gradient error: on a rank-matched pair at χ=4 the physical simple-update
+  state carries the **larger** covariant residual (8.49e-06 against 6.85e-06)
+  and a gradient **13× more accurate** (2.9e-07 against 3.8e-06), so a gate
+  tightened onto it would reject the good state and admit the bad one.
+
+  Six candidate surrogates were measured against a directional finite
+  difference across nine states spanning ten orders of gradient error. All six
+  failed, and the negative results are recorded in the module docstring so they
+  are not re-derived: `usable_rank` ties states whose gradients differ 13×;
+  `s[usable_rank-1]/s[0]` is identically 1 when every direction collapses, so
+  the worst states score best; `retained_smin_rtol` inverts on the rank-matched
+  pair and moves five orders with χ (3.0e-08 → 2.1e-13) on a state whose
+  gradient error does not move at all; the adjoint amplification
+  `‖F̄‖/‖ȳ‖` is structurally ≈1 because `F = X'/⟨X,X'⟩ − X` makes `∂F/∂y` a
+  small perturbation of `−I`; and the site tensor's own conditioning, despite a
+  −0.80 log-log correlation, spans **170,000×** in gradient error across a 14%
+  change in conditioning (5.97e-06 against 1.01e+00).
+
+  So the honest position is measurement, not prediction. `measure_gradient_error`
+  takes any engine's `energy_and_grad` and finite-differences *that same
+  callable*, needing no reference implementation. It reports two numbers:
+  `relative_error`, and the `resolution` the step scan can actually resolve.
+  `is_resolved` says which regime you are in — below the floor, the gradient is
+  simply accurate to about `resolution`, which is the good case and is
+  deliberately not reported as a failure. Nothing calls it automatically: it
+  costs several CTM convergences, which is why #785 rejected an FD probe inside
+  the optimizer loop. Run it once on a representative state before a long run.
+
+  Measured on D=2, χ ∈ {4, 8}, dense asymmetric engine. The symmetric and
+  multisite engines are untested, as #785's "Not established" says.
+
 - **`bp_gauge_checkerboard`: the bond weights simple update stores are not the
   Schmidt spectra they are read as** (#869). Simple update takes each bond's
   spectrum straight from the SVD that produced it and never recomputes it, but
