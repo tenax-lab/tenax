@@ -454,54 +454,62 @@ def measure_gradient_error(
         # after cancellation (contributions 1e-13, 1, -1+5e-14 sum to 1.5e-13
         # while the L1 total is 2). The projection is the quantity that has to
         # survive, so it is the one to test.
-        # FIRST, gradient-free: did the perturbation go where it was asked?
-        # The projection test below weights by ``grad_arr``, which is the value
-        # UNDER TEST -- so a gradient that is wrong by being *zero* on a frozen
-        # coordinate makes both projections omit it and the check passes.
-        # Measured on a centred affine map with ``base[0]=1e20`` and an
-        # all-ones direction: with the true gradient the projection drift is
-        # 3.1e-02, with a returned gradient whose first entry is 0 it is
-        # 5.4e-12, while this direction check reads 1.8e-01 either way.  The
-        # experiment cannot be validated by the quantity it is testing.
-        step_norm = float(np.linalg.norm(intended))
-        direction_drift = float(np.linalg.norm(realised - intended)) / max(
-            step_norm, 1e-300
-        )
-        if direction_drift > 1e-2:
-            raise _StepUnusable(
-                f"the step h={t:.1e} rounds away against this state: the "
-                f"realised displacement differs from the intended direction by "
-                f"{direction_drift:.2e} in norm, so the difference does not "
-                f"follow the direction g.v is taken along. The state's largest "
-                f"entry is {float(np.max(np.abs(base))):.2e}; use steps large "
-                "enough to change it."
+        # PER COORDINATE, and gradient-free.  A coordinate that fails to move
+        # as asked cannot be tolerated at any size, because its contribution to
+        # dE is exactly what the gradient under test would have to tell us --
+        # and that is the value being checked.  Measured: with ``base[0]=1e20``,
+        # 0.5% of the direction's norm on that coordinate, a true gradient of
+        # 1000 there and a returned gradient of 0, both a norm-relative check
+        # and a gradient-weighted one accept it while the directional
+        # derivative is ~47.7% wrong.  A norm-relative displacement error is
+        # simply not a bound on derivative error.
+        #
+        # 1e-2 separates the two phenomena cleanly and is measured, not chosen:
+        #
+        #     max per-coordinate relative displacement error
+        #       float64 smooth             8.3e-11
+        #       float32 smooth             1.4e-03
+        #       float64 one frozen (1e20)  1.0e+00
+        #
+        # Smooth rounding moves every coordinate; freezing loses one whole.
+        moved = intended != 0
+        if np.any(moved):
+            coord_drift = float(
+                np.max(
+                    np.abs(realised[moved] - intended[moved]) / np.abs(intended[moved])
+                )
             )
-        # SECOND, gradient-weighted: a coordinate can be negligible in the
-        # direction yet dominate ``g.v`` (tiny ``v_i``, huge ``g_i``), where the
-        # norm check above reads ~1e-14 and sees nothing.  The two catch
-        # disjoint failures and both are needed.
+            # Reject on COMPLETE loss only.  A coordinate that does not move at
+            # all contributes an unknown amount to dE and nothing bounds it --
+            # only the gradient under test could say, which is the value being
+            # checked.  Partial rounding is different in kind: the residual
+            # ratio is < 1 and carries into the floor below, so it needs no
+            # threshold.  A flat per-coordinate cutoff would also be wrong,
+            # since relative rounding is worst on the SMALLEST direction
+            # components (float32 reaches 1.2e-02 there with nothing frozen).
+            n_frozen = int(np.count_nonzero(realised[moved] == 0))
+            if n_frozen:
+                raise _StepUnusable(
+                    f"the step h={t:.1e} rounds away against this state: "
+                    f"{n_frozen} coordinate(s) did not move at all. What they "
+                    f"contribute to dE cannot be bounded without trusting the "
+                    f"gradient being tested, so the measurement is refused "
+                    f"rather than reported with a floor that would not hold. "
+                    f"The state's largest entry is "
+                    f"{float(np.max(np.abs(base))):.2e}; use steps large enough "
+                    "to change it."
+                )
+        else:
+            coord_drift = 0.0
+        # What survives is smooth rounding, whose effect on the derivative IS
+        # bounded: with every coordinate within ``coord_drift`` relatively,
+        # ``|g.realised - g.intended| <= coord_drift * sum|g_i intended_i|``.
+        # Under cancellation that L1 can far exceed the signed projection, so
+        # the ratio is carried into the floor rather than assumed to be 1.
         proj_intended = float(np.real(np.sum(grad_arr * intended)))
-        proj_realised = float(np.real(np.sum(grad_arr * realised)))
-        drift = abs(proj_realised - proj_intended)
-        scale = max(abs(proj_intended), 1e-300)
-        # 1e-2, from measurement rather than taste: rounding ALONE distorts the
-        # projection by up to 1.4e-03 in float32 (base 0.5, h=1e-4), so a 1e-3
-        # cut would reject float32 outright, while a frozen coordinate gives
-        # O(1) and the cancellation case 0.67.  A distortion under this bound
-        # biases the comparison by at most that much, which is documented on
-        # the function rather than hidden.
-        projection_drift = drift / scale
-        if projection_drift > 1e-2:
-            raise _StepUnusable(
-                f"the step h={t:.1e} rounds away against this state: the "
-                f"difference would follow a direction whose projected "
-                f"derivative is {projection_drift:.2e} away from the one g.v "
-                f"is taken along, so a correct gradient would read as wrong. "
-                f"The state's largest entry is "
-                f"{float(np.max(np.abs(base))):.2e}; use steps large enough to "
-                "change it."
-            )
-        accepted_drift.append(max(direction_drift, projection_drift))
+        l1 = float(np.sum(np.abs(grad_arr * intended)))
+        amplification = l1 / max(abs(proj_intended), 1e-300)
+        accepted_drift.append(min(coord_drift * amplification, 1.0))
         shifted = DenseTensor(jnp.asarray(shifted_data), A.indices)
         energy, _g = energy_and_grad(shifted)
         energy_arr = np.asarray(energy)

@@ -1005,40 +1005,105 @@ def test_the_displacement_is_validated_without_using_the_gradient():
         )
 
 
-def test_tolerated_direction_drift_floors_the_resolution():
-    """An accepted distortion is a systematic bias, not noise.
+def test_a_frozen_coordinate_is_refused_rather_than_bounded():
+    """A norm-relative displacement error is NOT a bound on derivative error.
 
-    Every step follows the same slightly-wrong direction, so the spread between
-    them stays near zero: a ~0.5% drift with an exact gradient would otherwise
-    be reported as a *resolved* 0.5% error. The tolerated drift is floored into
-    ``resolution`` so the scan cannot claim to resolve below it.
+    An earlier version tolerated a distortion under 1% and folded it into
+    ``resolution``. That floor does not hold: with ``base[0]=1e20``, 0.5% of the
+    direction's norm on that coordinate, a true gradient of 1000 there and a
+    returned gradient of 0, both a norm-relative check and a gradient-weighted
+    one accept the step while the directional derivative is ~47.7% wrong, and
+    the quoted floor was ~6.7%.
+
+    What a frozen coordinate contributes to dE is exactly what the gradient
+    under test would have to tell us, so it cannot be bounded and the step is
+    refused. Partial rounding is different in kind: its residual ratio is < 1
+    and is carried into the floor instead.
     """
     n = 32
     base = np.ones(n)
-    base[0] = 1e20  # freezes coordinate 0
+    base[0] = 1e20
     v = np.ones(n)
-    v[0] = 0.005 * np.sqrt(n)  # ~0.5% of the direction's norm sits there
-
-    # Centred, so |E| stays small: an uncentred sum over a 1e20 entry trips the
-    # energy-cancellation guard first and never reaches the drift logic.
+    v[0] = 0.005 * np.sqrt(n)
     base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
 
-    def affine(t):
+    def affine_with_hole(t):
         x = jnp.asarray(t.todense())
-        return jnp.sum(x - base_j), jnp.ones((2, 2, 2, 2, 2))
+        g = np.ones(n)
+        g[0] = 0.0  # the returned gradient hides the lost coordinate
+        return jnp.sum(x - base_j), jnp.asarray(g).reshape((2, 2, 2, 2, 2))
 
-    report = measure_gradient_error(
-        affine,
-        _wrap(base.reshape((2, 2, 2, 2, 2))),
-        direction=v.reshape((2, 2, 2, 2, 2)),
+    with pytest.raises(ValueError, match="did not move at all"):
+        measure_gradient_error(
+            affine_with_hole,
+            _wrap(base.reshape((2, 2, 2, 2, 2))),
+            direction=v.reshape((2, 2, 2, 2, 2)),
+        )
+
+
+def test_partial_rounding_is_carried_into_the_floor_not_refused():
+    """Rounding that merely perturbs every coordinate stays measurable.
+
+    Relative rounding is worst on the SMALLEST direction components -- float32
+    reaches 1.2e-02 there with nothing frozen -- so a flat per-coordinate cutoff
+    would reject ordinary float32 scans. Nothing is lost outright, the residual
+    ratio is < 1, and the bound holds.
+    """
+    data = np.full((2, 2, 2, 2, 2), 0.5, dtype=np.float32)
+
+    def quadratic(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**2), 2.0 * x
+
+    report = measure_gradient_error(quadratic, _wrap(data), steps=(1e-3, 1e-4))
+
+    assert report.relative_error < 1e-2, report.summary()
+
+
+def test_accepted_rounding_raises_the_floor():
+    """Tolerated per-coordinate rounding must appear in ``resolution``.
+
+    Every step carries the same rounding, so it never shows in their spread: on
+    this float32 scan the differences agree closely while each coordinate is
+    displaced by up to ~1.2e-02 relatively. Without the floor the scan would
+    claim to resolve far below a distortion it accepted.
+    """
+    data = np.full((2, 2, 2, 2, 2), 0.5, dtype=np.float32)
+
+    def quadratic(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**2), 2.0 * x
+
+    report = measure_gradient_error(quadratic, _wrap(data), steps=(1e-3, 1e-4))
+
+    assert report.resolution > 1e-2, (
+        "accepted per-coordinate rounding was not carried into the floor: "
+        f"{report.summary()}"
+    )
+    assert not report.is_resolved, report.summary()
+
+
+def test_cancellation_amplifies_the_accepted_rounding_floor():
+    """The bound is ``coord_drift * L1/|signed|``, not ``coord_drift``.
+
+    A displacement error of ``d`` per coordinate perturbs the derivative by at
+    most ``d * sum|g_i v_i|``; under cancellation that L1 far exceeds the signed
+    projection, so assuming a ratio of 1 understates the floor. A mixed-sign
+    direction on the same float32 state moves it from ~2.4e-02 to ~7e-01.
+    """
+    data = np.full((2, 2, 2, 2, 2), 0.5, dtype=np.float32)
+    v = np.random.RandomState(4).standard_normal(data.shape)
+
+    def quadratic(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**2), 2.0 * x
+
+    plain = measure_gradient_error(quadratic, _wrap(data), steps=(1e-3, 1e-4))
+    cancelling = measure_gradient_error(
+        quadratic, _wrap(data), direction=v, steps=(1e-3, 1e-4)
     )
 
-    assert report.resolution >= 1e-3, (
-        "the tolerated drift was not folded into the floor: "
-        f"resolution={report.resolution:.2e} while the direction is distorted "
-        f"by ~0.5% -- {report.summary()}"
-    )
-    assert not report.is_resolved, (
-        "a correct gradient must not be reported as resolvedly wrong when the "
-        f"error is the scan's own direction bias -- {report.summary()}"
+    assert cancelling.resolution > 10.0 * plain.resolution, (
+        "the L1/|signed| amplification is not in the floor -- "
+        f"cancelling={cancelling.summary()} plain={plain.summary()}"
     )
