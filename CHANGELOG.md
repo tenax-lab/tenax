@@ -64,6 +64,49 @@
 
 ### Fixed
 
+- **Each checkerboard bond can now carry its own Schmidt spectrum**
+  (#851, opt-in via `su_independent_bond_lambdas`). The four-phase sweep
+  evolves `A.r<->B.l`, `A.d<->B.u`, `B.r<->A.l` and `B.d<->A.u`, but stored one
+  horizontal and one vertical spectrum for all four, so phases 0 and 2 wrote
+  the same slot and `num_imaginary_steps % 4` decided which bond's gauge was
+  stamped onto the lattice. Measured during the transient, the paired bonds
+  differ by up to 23% (horizontal) and 31% (vertical).
+
+  **Off by default, and that is a measured trade rather than a staged
+  migration.** On a translation-invariant Hamiltonian the paired bonds coincide
+  at the fixed point — agreement 1.2e-06 — so sharing costs nothing at
+  convergence, while four free bonds can follow a dimerising direction that the
+  shared spectrum projects out. At D=3 from a random start, independent bonds
+  converged to a dimerised state (`|h_AB - h_BA|` 10–50%, flat spectrum) on 3
+  of 8 seeds against 1 of 8 shared — and seed 0, which `ipeps()` hardcodes, is
+  one of the three. A smaller `dt` did not escape it.
+
+  Turn it on when the *state* may genuinely break the AB↔BA symmetry — a
+  spontaneously dimerised or valence-bond phase, where two spectra cannot
+  represent the answer — and prefer a physical initial state with it. It does
+  **not** make the bonds inequivalent in the *Hamiltonian*: `ipeps()` takes a
+  single `hamiltonian_gate` and applies it to all four bonds, so `Jx != Jy`
+  cannot be expressed today whatever this flag is set to (#883).
+
+  With the default off the sweep reproduces the loop that shipped element for
+  element, which `test_su_sweep_consolidation.py` asserts against a literal
+  transcription of the pre-#851 loop at 9 step counts × 2 bond dimensions,
+  rather than assuming it.
+
+  The option is **keyword-only** and declared at the end of `iPEPSConfig`, so
+  it occupies no positional slot. It first landed between `dt` and `ctm`, where
+  the previously valid `iPEPSConfig(D, steps, dt, CTMConfig(chi=10))` bound the
+  `CTMConfig` to a boolean field — truthy, so it enabled independent bonds
+  *and* silently discarded the CTM settings without raising. `optimize_gs_ad`
+  derives its own config for the simple-update warm start and now forwards the
+  setting; without it, opting in gave the optimizer a shared-spectrum
+  initialisation for exactly the dimerised case the option exists to represent.
+
+  `BondWeights` moved from `tenax.algorithms.ipeps_bp_gauge` to
+  `tenax.algorithms.ipeps_simple_update`, which now owns the four-bond type
+  instead of both modules defining structurally identical `NamedTuple`s. The
+  public `tenax.BondWeights` and the old import path are unchanged.
+
 - **Simple update no longer throws away the largest singular value on the
   symmetric path** (#865). The U(1)-Sz state reached *exactly* zero at step 22
   — every bond weight zero, `|A| = 0`, the RDM's trace 0 and its normalisation

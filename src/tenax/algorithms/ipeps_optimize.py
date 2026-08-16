@@ -2543,11 +2543,18 @@ def _optimize_gs_ad_2site(
         if config.su_init:
             from tenax.algorithms.ipeps import ipeps
 
+            # Every field this derives has to be forwarded explicitly, and
+            # ``su_independent_bond_lambdas`` is the one that decides what
+            # *state* the warm start produces: without it a caller who opted
+            # into four independent spectra silently got the shared-spectrum
+            # initialisation here, which is exactly the dimerised case the
+            # option exists for (#851).
             su_config = iPEPSConfig(
                 max_bond_dim=D,
                 num_imaginary_steps=config.num_imaginary_steps,
                 dt=config.dt,
                 ctm=config.ctm,
+                su_independent_bond_lambdas=config.su_independent_bond_lambdas,
             )
             _, (A_su, B_su), _ = ipeps(gate, None, su_config)
             AB_init = (A_su, B_su)

@@ -244,7 +244,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "xxz_gate": ("tenax.algorithms.ipeps", "xxz_gate"),
     # ipeps_bp_gauge
     "BPGaugeInfo": ("tenax.algorithms.ipeps_bp_gauge", "BPGaugeInfo"),
-    "BondWeights": ("tenax.algorithms.ipeps_bp_gauge", "BondWeights"),
+    "BondWeights": ("tenax.algorithms.ipeps_simple_update", "BondWeights"),
     "bp_gauge_checkerboard": (
         "tenax.algorithms.ipeps_bp_gauge",
         "bp_gauge_checkerboard",

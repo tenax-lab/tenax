@@ -938,17 +938,17 @@ def _build_su_neel(D=2, d=2, n_steps=80, dt=0.05):
     B = B * (1.0 / float(B.norm()))
 
     gate = _make_trotter_gate_tensor(H, dt, site_tensor=A)
-    # All FOUR checkerboard bonds, then out of Vidal form -- the two corrections
-    # #667 made to ``ipeps()``, which this fixture has to mirror or it does not
-    # build the state its docstring claims.  A 2-phase loop leaves
-    # (B.r<->A.l) and (B.d<->A.u) with no Schmidt weight at all, and returning
-    # the bare Gamma hands the CTM a state with no bond weights on any leg.
-    # This used to open-code the sweep; it was one of five copies.  The
-    # per-step renormalisation it also did is redundant -- the update routines
-    # normalise each site internally, which is why ``ipeps()`` does not repeat
-    # it.
-    A, B, lam_h, lam_v = _simple_update_checkerboard_sweep(A, B, gate, D, n_steps)
-    return _to_physical_pair(A, B, lam_h, lam_v)
+    # All FOUR checkerboard bonds, each with its own Schmidt spectrum, then out
+    # of Vidal form -- the shared sweep that ``ipeps()`` runs, which this
+    # fixture has to mirror or it does not build the state its docstring
+    # claims.  It used to open-code the loop, and so carried both defects the
+    # sweep exists to fix: a 2-phase loop leaves (B.r<->A.l) and (B.d<->A.u)
+    # with no Schmidt weight at all (#667), and storing two spectra for the
+    # four bonds stamps whichever horizontal phase ran last onto every
+    # horizontal leg, making the state depend on ``n_steps % 4`` (#851).
+    # The sweep normalizes each site inside the update, as ``ipeps()`` relies on.
+    A, B, lambdas = _simple_update_checkerboard_sweep(A, B, gate, D, n_steps)
+    return _to_physical_pair(A, B, lambdas)
 
 
 def test_split_2site_energy_matches_fused_convergent():

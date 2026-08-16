@@ -431,18 +431,30 @@ def ipeps(
     gate = _make_trotter_gate_tensor(hamiltonian_gate, config.dt, site_tensor=A)
 
     # Simple update iterations — cycle through all FOUR bonds of the
-    # checkerboard unit cell.  Evolving only (A.r<->B.l) and (A.d<->B.u), as
-    # this loop used to, leaves (B.r<->A.l) and (B.d<->A.u) untouched: A is then
-    # always the left/top site of every gate, so it only ever picks up bond
-    # weight on its r/d legs and half the lattice bonds end up with none at all.
-    # That state is spuriously dimerized and its 1-site RDM is indefinite (#667).
-    A, B, lam_h, lam_v = _simple_update_checkerboard_sweep(
-        A, B, gate, D, config.num_imaginary_steps
+    # checkerboard unit cell, tracking a separate Schmidt spectrum for each.
+    #
+    # Evolving only (A.r<->B.l) and (A.d<->B.u) leaves (B.r<->A.l) and
+    # (B.d<->A.u) untouched: A is then always the left/top site of every gate,
+    # so it only ever picks up bond weight on its r/d legs and half the lattice
+    # bonds end up with none at all.  That state is spuriously dimerized and its
+    # 1-site RDM is indefinite (#667).
+    #
+    # Storing one horizontal and one vertical spectrum for the four bonds is
+    # the separate defect #851: phases 0 and 2 wrote the same slot, so
+    # ``num_imaginary_steps % 4`` decided whether the AB or the BA bond's gauge
+    # was stamped onto the whole lattice.
+    A, B, lambdas = _simple_update_checkerboard_sweep(
+        A,
+        B,
+        gate,
+        D,
+        config.num_imaginary_steps,
+        independent_bonds=config.su_independent_bond_lambdas,
     )
 
-    # The loop keeps the state in Vidal form; the CTM contracts the physical
-    # (symmetric-gauge) tensor, with sqrt(lambda) on all four legs.
-    A, B = _to_physical_pair(A, B, lam_h, lam_v)
+    # The sweep keeps the state in Vidal form; the CTM contracts the physical
+    # (symmetric-gauge) tensor, with each leg's own sqrt(lambda).
+    A, B = _to_physical_pair(A, B, lambdas)
 
     # CTM environment (uses dense arrays)
     A_dense = A.todense()

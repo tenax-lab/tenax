@@ -60,6 +60,10 @@ def evolve_physical_site(A, gate, D, n_steps=40, dt=0.05):
     * It discarded the gate's *right*-site output (``A, _, lam_h = ...``), so
       ``A`` only ever received the left-site update.  Both sites are now kept.
 
+    It also shared one horizontal and one vertical spectrum between the four
+    bonds, which made the result depend on ``n_steps % 4`` (#851); the sweep
+    helper now tracks all four.
+
     Note this helper currently has **no callers**, so nothing exercises it; it
     is fixed rather than deleted to keep the module's stated contract honest.
     """
@@ -70,8 +74,8 @@ def evolve_physical_site(A, gate, D, n_steps=40, dt=0.05):
     )
 
     tg = _make_trotter_gate_tensor(gate, dt, site_tensor=A)
-    A, _B, lam_h, lam_v = _simple_update_checkerboard_sweep(A, A, tg, D, n_steps)
-    A_phys, _ = _to_physical_pair(A, _B, lam_h, lam_v)
+    A, B, lambdas = _simple_update_checkerboard_sweep(A, A, tg, D, n_steps)
+    A_phys, _B_phys = _to_physical_pair(A, B, lambdas)
     A, _ = max_abs_normalize(A_phys)
     return A
 

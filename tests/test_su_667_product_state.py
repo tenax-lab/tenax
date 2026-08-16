@@ -67,8 +67,26 @@ def _energy_1x1(A, gate, chi: int = 16) -> float:
 
 @pytest.fixture(scope="module")
 def su_d2():
-    """The D=2 reference run, shared -- this file is in the required gate."""
-    return _run_su(2)
+    """The D=2 reference run, shared -- this file is in the required gate.
+
+    600 steps rather than the 200 that sufficed before #851, because that 200
+    was never evidence of convergence.  With one horizontal and one vertical
+    spectrum stamped onto all four bonds, ``A`` and ``B`` were handed the *same*
+    gauge by construction, so ``E_1x1(A) == E_1x1(B)`` held to 1e-16 at any
+    step count -- an identity, not a measurement.  Four independent spectra make
+    the equality a real statement about reaching the uniform fixed point, and it
+    converges geometrically: measured ``|E_A - E_B|`` at dt=0.05 is
+
+        200 steps  4.7e-08     350 steps  2.5e-12     500 steps  8.9e-16
+        250 steps  1.9e-09     400 steps  8.5e-14     600 steps  5.6e-16
+
+    so 600 sits at the machine-precision floor, seven orders below the 1e-8 the
+    uniformity test asserts.  The tolerance is deliberately left tight: a
+    *structural* asymmetry between the AB and BA bonds would be flat in the step
+    count, not decaying, and would still miss 1e-8 by orders of magnitude.
+    Costs ~2.2s against ~0.9s; the 1x1 CTM in ``_energy_1x1`` dominates anyway.
+    """
+    return _run_su(2, steps=600)
 
 
 def test_simple_update_does_not_converge_to_the_product_state(su_d2):

@@ -107,11 +107,13 @@ def part_b_2site(D: int, chi: int, steps: int, seed: int) -> None:
     A, B = heisenberg_u1sz_init_pair(D=D, key=jax.random.PRNGKey(seed))
     H = heisenberg_gate_u1sz()
     gate = _make_trotter_gate_tensor(H, 0.1, site_tensor=A)
-    # All four bonds of the checkerboard, and the physical tensor rebuilt from
-    # the Vidal form afterwards -- driving only (A.r<->B.l)/(A.d<->B.u) leaves
-    # half the lattice bonds with no Schmidt weight (#667).
-    A, B, lam_h, lam_v = _simple_update_checkerboard_sweep(A, B, gate, D, steps)
-    A, B = _to_physical_pair(A, B, lam_h, lam_v)
+    # All four bonds of the checkerboard, each with its own Schmidt spectrum,
+    # and the physical tensor rebuilt from the Vidal form afterwards -- driving
+    # only (A.r<->B.l)/(A.d<->B.u) leaves half the lattice bonds with no bond
+    # weight (#667), and sharing one spectrum between the AB and BA bonds makes
+    # the result depend on ``steps % 4`` (#851).
+    A, B, lambdas = _simple_update_checkerboard_sweep(A, B, gate, D, steps)
+    A, B = _to_physical_pair(A, B, lambdas)
 
     print(
         f"  after {steps} SU steps: |A|={float(A.norm()):.4f} "
