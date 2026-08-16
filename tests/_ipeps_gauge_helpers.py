@@ -313,8 +313,8 @@ def _middle_bond_pair(tensors: list) -> tuple[np.ndarray, np.ndarray]:
     looks like a BP defect -- so ``test_ipeps_gauge.py`` also asserts that the
     crossed pairing *does* fail, which pins the claim rather than assuming it.
     On the block-sparse arm it is pinned a second, structural way: the two
-    bonds there carry *different charge multiplicities*, so the gauged pair's
-    own index metadata says which bond is which (see
+    bonds there carry *different charge multiplicities*, so the pair's own
+    index metadata says which bond is which (see
     :func:`_sym_chain_pair_as_peps`).
     """
     sv = FiniteMPS.from_tensors(tensors).compute_singular_values().singular_values
@@ -534,7 +534,21 @@ def _sym_chain_middle_spectra(a, b, vl, vr, L: int) -> tuple[np.ndarray, np.ndar
     labels and its middle-bond/parity logic (:func:`_chain_site_labels`,
     :func:`_middle_bond_pair`) and differing only where the two paths genuinely
     do: how a site is built and how the open ends are capped.
+
+    ``L`` must be **even**, unlike the dense twin, and the check is worth its
+    line.  Both caps take a vector of length ``mult(_SYM_VIRT_BA, +1) == 2``,
+    which is right for ``a``'s left leg and for ``b``'s right leg.  For odd
+    ``L`` the last site is ``a``, whose *right* leg has multiplicity 1 in that
+    sector, so the cap would either silently take the wrong slice or raise a
+    shape error several frames away from the cause.
     """
+    if L % 2 != 0:
+        raise ValueError(
+            f"L must be even: the right cap assumes the last site is `b` "
+            f"(right leg _SYM_VIRT_BA, multiplicity 2 in sector "
+            f"{_SYM_EDGE_CHARGE}); at odd L it is `a`, whose right leg is "
+            f"_SYM_VIRT_AB with multiplicity 1 there.  Got L={L}."
+        )
     tensors = []
     for i in range(L):
         t = a if i % 2 == 0 else b
@@ -587,8 +601,17 @@ def _sym_chain_pair_as_peps(a, b) -> tuple[SymmetricTensor, SymmetricTensor]:
     Because ``dual`` negates charges, the PEPS bond spaces are the duals of the
     MPS ones: ``h_AB`` (``A.r`` / ``B.l``) ends up with multiplicities
     ``[1, 1, 2]`` over sectors ``[-1, 0, 1]`` and ``h_BA`` (``A.l`` / ``B.r``)
-    with ``[2, 1, 1]``.  They are different, which is the point --
-    ``test_ipeps_gauge.py`` reads them back off the *gauged* pair.
+    with ``[2, 1, 1]``.  They are different, which is the point.
+
+    ``test_ipeps_gauge.py`` asserts those flows and those spaces on the pair
+    this function **returns**, before ``gauge_fix`` sees it.  That is
+    deliberate and was learned the hard way: the *gauged* pair cannot witness
+    the inversion, because ``gauge_fix`` derives each horizontal leg from its
+    own ``eigh``/``svd`` bond and stamps the shipped flows on it whatever it
+    was handed, so with the two ``.dual()`` calls removed the gauged metadata
+    comes back bit-identical and the whole anchor still passes.  If you change
+    what this function returns, that input assertion is the one that will tell
+    you.
     """
     sym = U1Symmetry()
 

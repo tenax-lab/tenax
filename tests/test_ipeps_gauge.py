@@ -52,6 +52,7 @@ from tenax.algorithms.ipeps_gauge import (
     torus_2x2_sign_free,
 )
 from tenax.core._tensor_utils import scale_bond_axis
+from tenax.core.index import FlowDirection
 
 ABSORB_TOL = 1e-13
 
@@ -563,6 +564,27 @@ def test_bp_weights_are_the_chains_schmidt_values():
     and perturbing a single reference singular value by 1e-6 moves the
     comparison to between 2.2e-07 and 1.0e-06, i.e. five to six orders above
     the gate, so the tolerance is not doing the work.
+
+    **Certified outside tenax.**  Everything above runs through tenax --
+    ``FiniteMPS.compute_singular_values`` for the reference, ``contract`` /
+    ``eigh`` / ``svd`` for the subject -- so agreement between them is not by
+    itself independent.  The infinite chain's spectra were therefore rebuilt
+    from the transfer matrix's left and right fixed points in Python
+    ``decimal``, importing nothing from tenax but the two site tensors.  Exact
+    for the ``float64`` tensors this seed draws, truncated to 32 digits::
+
+        h_AB  0.96732762280898837899360109180522
+              0.23086689230373387723744625441654
+              0.10416414807156935624729313135820
+              0.01129506287064498789186875888256
+        h_BA  0.92503143833487241612154711250545
+              0.37454306530169057931648786267052
+              0.05593437791937427037005353223542
+              0.03009444622024623806971961761028
+
+    If this test ever fails, those are what tell a regression from a
+    re-derivation: a changed seed or a changed builder moves them, a broken
+    ``gauge_fix`` does not.
     """
     a, b, vl, vr = _chain_pair()
 
@@ -646,6 +668,17 @@ _SYM_BOND_SECTORS = {
     "h_BA": ([-1, 0, 1], [2, 1, 1]),
 }
 
+#: The flows the shipped iPEPS convention puts on the two horizontal legs
+#: (``ipeps._wrap_as_dense_tensor``, ``ipeps.heisenberg_u1sz_init_pair``,
+#: ``fermionic_ipeps._build_initial_fpeps_tensor``).  An MPS site is left IN /
+#: right OUT, so reaching this *is* the flow inversion.
+_SYM_PEPS_FLOWS = {"l": FlowDirection.OUT, "r": FlowDirection.IN}
+
+
+def _sectors_of(idx):
+    """``(sectors, multiplicities)`` of a ``TensorIndex``, as plain ints."""
+    return ([int(q) for q in idx.sectors], [int(m) for m in idx.multiplicities])
+
 
 @pytest.mark.core
 def test_bp_weights_are_the_symmetric_chains_schmidt_values():
@@ -669,12 +702,14 @@ def test_bp_weights_are_the_symmetric_chains_schmidt_values():
     as the PEPS pair.
 
     Marked ``core`` for the reason the dense anchor's docstring gives.  It
-    costs 14.3 s bare and 20.1 s under the coverage instrumentation the suite
-    runs with -- about 9.8 s of that is ``gauge_fix``'s 25 BP sweeps, which are
-    block-sparse and host-bound, and 2.4 s the two reference chains.  That is
-    2x the dense anchor and it is the largest single test in the required gate
-    that this branch adds; it buys the only ground truth the block-sparse gauge
-    has.
+    costs 13.7 s bare and 19.5 s under the coverage instrumentation the suite
+    runs with (three and two repeats, spread under 2%) -- most of it
+    ``gauge_fix``'s 25 BP sweeps, which are block-sparse and host-bound, plus
+    ~2.4 s for the two reference chains.  That is 2.4x the dense anchor and the
+    largest single test this branch adds to the required gate; it buys the only
+    ground truth the block-sparse gauge has.  There is no cheap lever: dropping
+    ``tol`` to 1e-13 saves 2 sweeps of 25 and cuts the margin under the gate
+    from 987x to 85x, and 1e-12 saves 4 and leaves 5x, which is unusable.
 
     Six claims:
 
@@ -687,10 +722,20 @@ def test_bp_weights_are_the_symmetric_chains_schmidt_values():
        charged dimension-1 sector was dropped.  (The companion "and the value
        is 1.0" check the plan once had cannot fail -- ``lam / max(lam)`` is
        exactly 1.0 on a length-1 vector -- so it is not repeated here.)
-    5. Every horizontal bond of the *gauged* pair still carries the charge
-       sectors and multiplicities it started with.  Nothing on the dense path
-       can make this claim, and it is the half of the bookkeeping that survives
-       ``_as_spectrum``'s sort.
+    5. The charge bookkeeping, in two halves, because one object cannot carry
+       both claims.  On the **input** pair: the horizontal legs have the
+       shipped iPEPS flows (``l`` OUT / ``r`` IN) over the *dualised* charge
+       spaces, i.e. the flow inversion actually happened.  On the **gauged**
+       pair: every horizontal bond still carries the sectors and
+       multiplicities it started with, i.e. the gauge moved no states between
+       charge sectors.  Neither claim exists on the dense path at all.
+
+       The split is not tidiness.  This task's review replaced both
+       ``.dual()`` calls with the bare MPS indices -- no inversion -- and the
+       whole test still passed, twice: ``gauge_fix`` rebuilds each horizontal
+       leg from its own ``eigh``/``svd`` bond, so the *gauged* metadata is
+       identical under both conventions and is structurally blind to the one
+       thing this arm exists to pin.
     6. ``info.converged``.
 
     Measured on this branch (seed 30, spin-1 physical, chi=4, ``L=60``
@@ -704,6 +749,26 @@ def test_bp_weights_are_the_symmetric_chains_schmidt_values():
     and perturbing any single reference singular value by 1e-6 moves the
     comparison to between 8.4e-08 and 1.0e-06, four to six orders above the
     gate.
+
+    **Certified outside tenax**, the same way the dense anchor is and for the
+    same reason -- both sides of the comparison above are tenax code, so their
+    agreement is not independent of tenax.  Rebuilt from the transfer matrix's
+    left and right fixed points in Python ``decimal``; exact for the
+    ``float64`` tensors seed 30 draws, truncated to 32 digits::
+
+        h_AB  0.99427402003591040195305550186645
+              0.08453854492747805197392288081348
+              0.06518798423820836634457954834226
+              0.00478896796125356249540515639037
+        h_BA  0.75797768426499114645172401877520
+              0.64403699904936766172236098989718
+              0.10331921524594954594674073374516
+              0.00336359520860306414572422435044
+
+    Two independent derivations agree on every digit shown: this one and the
+    reviewer's, which used the same method but its own implementation.  BP
+    against that truth, rather than against the finite chain, is 7.85e-16
+    (``h_AB``) and 9.42e-16 (``h_BA``).
     """
     a, b, vl, vr = _sym_chain_pair()
 
@@ -721,6 +786,34 @@ def test_bp_weights_are_the_symmetric_chains_schmidt_values():
     )
 
     A, B = _sym_chain_pair_as_peps(a, b)
+
+    # Claim 5, first half, and it has to be read off the *input* pair.  The
+    # review of this task showed why: replacing both ``.dual()`` calls with the
+    # bare MPS indices -- no inversion at all -- leaves the *gauged* pair's
+    # metadata bit-identical, because gauge_fix rebuilds each horizontal leg
+    # from its own eigh/SVD bond and puts the shipped flows on it either way.
+    # Every other assertion in this test passed under that mutation, twice.
+    for site, t in (("A", A), ("B", B)):
+        labels = t.labels()
+        for leg, want_flow in _SYM_PEPS_FLOWS.items():
+            idx = t.indices[labels.index(leg)]
+            bond = _INDEPENDENT_BOND_OF[(site, leg)]
+            assert idx.flow == want_flow, (
+                f"{site}.{leg} has flow {idx.flow.name}, not {want_flow.name}: "
+                f"the subject is not in the convention gauge_fix will be handed "
+                f"by the simple update (l OUT / r IN).  An MPS site is left IN / "
+                f"right OUT, so this is the flow inversion "
+                f"_sym_chain_pair_as_peps exists to perform -- if it was "
+                f"simplified away, put it back rather than relaxing this."
+            )
+            assert _sectors_of(idx) == _SYM_BOND_SECTORS[bond], (
+                f"{site}.{leg} (bond {bond}) carries {_sectors_of(idx)}, not "
+                f"{_SYM_BOND_SECTORS[bond]}.  The inversion must negate the "
+                f"charges as well as flip the flow (TensorIndex.dual), with the "
+                f"block keys moved to match; flipping the flow alone does not "
+                f"conserve and negating alone is not the shipped convention."
+            )
+
     A_g, B_g, w, info = gauge_fix(A, B, **_ANCHOR_BP_KW)
     assert info.converged, (
         f"BP did not converge on a symmetric chain, where it is exact: "
@@ -734,6 +827,16 @@ def test_bp_weights_are_the_symmetric_chains_schmidt_values():
     ref_AB, ref_BA = hi_s
     got_AB, got_BA = _as_spectrum(w.h_AB), _as_spectrum(w.h_BA)
     for bond, got, want in (("h_AB", got_AB, ref_AB), ("h_BA", got_BA, ref_BA)):
+        # Before subtracting.  numpy broadcasts a length-1 weight vector
+        # against the length-4 reference -- a collapsed bond scored 9.95e-01
+        # rather than raising, when that was reachable -- and a length-2 one
+        # raises a bare ValueError with no context.  Both are lost charge
+        # sectors; both should arrive as this assertion rather than as either.
+        assert got.shape == want.shape == (4,), (
+            f"BP's {bond} came back with shape {got.shape} against a reference "
+            f"of shape {want.shape}; a bond that changed dimension is a lost "
+            f"charge sector, not a numerical difference"
+        )
         err = float(np.max(np.abs(got - want)))
         assert err < _ANCHOR_TOL, (
             f"BP's {bond} is {err:.3e} away from the symmetric chain's exact "
@@ -761,15 +864,19 @@ def test_bp_weights_are_the_symmetric_chains_schmidt_values():
             f"{v.shape}; gauge_fix has its bonds crossed"
         )
 
+    # Claim 5, second half: the *gauge* moved no states between charge sectors.
+    # Blind to the flow convention -- gauge_fix rebuilds these legs from its own
+    # eigh/SVD bonds, so only the input check above can see that -- and blind to
+    # a mis-built subject too, which the input check now rejects first.  What is
+    # left is the real claim: a gauge_fix that redistributes weight across
+    # charges (#865) or pairs legs by position (#834) lands here.  Proved
+    # discriminating by swapping the two expected entries, which fails.
     for site, t in (("A", A_g), ("B", B_g)):
         labels = t.labels()
         for leg in ("l", "r"):
             idx = t.indices[labels.index(leg)]
             bond = _INDEPENDENT_BOND_OF[(site, leg)]
-            got_sectors = (
-                [int(q) for q in idx.sectors],
-                [int(m) for m in idx.multiplicities],
-            )
+            got_sectors = _sectors_of(idx)
             assert got_sectors == _SYM_BOND_SECTORS[bond], (
                 f"gauging changed the charge content of {site}.{leg} (bond "
                 f"{bond}): {got_sectors} vs {_SYM_BOND_SECTORS[bond]}.  The "
