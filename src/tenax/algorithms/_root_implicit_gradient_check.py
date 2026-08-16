@@ -96,6 +96,7 @@ class GradientErrorReport(NamedTuple):
     is_resolved: bool
     unresolved_bound: float
     direction_distortion: float
+    fd_divergence: float
 
     def summary(self) -> str:
         if self.is_resolved:
@@ -111,6 +112,11 @@ class GradientErrorReport(NamedTuple):
                 f"gradient error {self.relative_error:.2e} not resolved "
                 f"against a floor of {self.unresolved_bound:.2e}"
             )
+            if self.fd_divergence > 0.25:
+                verdict += (
+                    f"; the finite differences themselves disagree by "
+                    f"{self.fd_divergence:.2e}, so the scan has not converged"
+                )
         return (
             f"{verdict} at h={self.step:.1e} "
             f"(analytic {self.analytic:.10e}, fd {self.finite_difference:.10e})"
@@ -593,6 +599,16 @@ def measure_gradient_error(
     # difference arbitrarily.  The quantity was wrong, not the tolerance.
     rels = [r[0] for r in results]
     resolution = max(rels) - min(rels)
+
+    # ...but the relative errors SHARE the gradient under test, so they can
+    # agree perfectly while the finite differences have not converged at all.
+    # ``E = sum(x^3)`` at ``x = 0`` has an exact gradient of zero and every
+    # central difference proportional to ``h^2``: each ``rel`` is exactly 1, the
+    # spread is 0, and an exact gradient would be reported as a *resolved* 100%
+    # error.  So a gradient-independent convergence signal is kept alongside --
+    # do the differences themselves agree, per unit displacement?
+    fdu = [r[6] for r in results]
+    fd_divergence = (max(fdu) - min(fdu)) / max(max(abs(f) for f in fdu), 1e-300)
     # A tolerated direction distortion is a floor on what this scan can resolve.
     # Every step carries the same one, so it never shows up in their spread: a
     # 0.5% drift with a near-zero spread would otherwise report a correct
@@ -603,7 +619,13 @@ def measure_gradient_error(
     # The error is a *measurement* only when it stands clear of that floor by
     # ``fd_spread_tol``.  Below the floor it is an upper bound instead, which
     # is the good case and must not be reported as a failed measurement.
-    resolved = best_rel > fd_spread_tol * resolution
+    # Both must hold: the error stands clear of the errors' own scatter, AND
+    # the differences converged.  The 0.25 bound sits far above the scale drift
+    # that made pooling the differences alone unusable (1.0e-02 on the #884
+    # norm-drift case) and far below genuine non-convergence (~1 for the cubic
+    # above), so it separates the two without reinstating the false-unresolved
+    # behaviour that pooling differences produced.
+    resolved = best_rel > fd_spread_tol * resolution and fd_divergence <= 0.25
 
     return GradientErrorReport(
         relative_error=best_rel,
@@ -612,6 +634,7 @@ def measure_gradient_error(
         step=best_h,
         resolution=resolution,
         is_resolved=resolved,
+        fd_divergence=fd_divergence,
         unresolved_bound=fd_spread_tol * resolution,
         direction_distortion=direction_distortion,
     )

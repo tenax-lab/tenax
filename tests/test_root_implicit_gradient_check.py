@@ -1116,3 +1116,54 @@ def test_resolution_pools_relative_errors_not_differences():
         "a real 5% error was marked unresolved by a floor built from the "
         f"differences rather than the relative errors -- {report.summary()}"
     )
+
+
+def test_an_unconverged_scan_is_not_resolved_by_agreeing_errors():
+    """The relative errors share the gradient, so they can agree while lying.
+
+    ``E = sum(x**3)`` at ``x = 0`` has an exact gradient of zero and every
+    central difference proportional to ``h**2``: each ``rel`` is exactly 1 and
+    their spread is 0, so pooling them alone reports an *exact* gradient as a
+    resolved 100% error. The differences themselves span 1e4x across the
+    default steps, which is the gradient-independent signal that catches it.
+    """
+    zero_state = _wrap(np.zeros((2, 2, 2, 2, 2)))
+
+    def cubic(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**3), 3.0 * x**2  # exact: zero at x = 0
+
+    report = measure_gradient_error(cubic, zero_state)
+
+    assert report.fd_divergence > 0.25, report.summary()
+    assert not report.is_resolved, (
+        "an exact gradient was reported as a resolved 100% error because the "
+        f"relative errors agreed while the scan had not converged -- "
+        f"{report.summary()}"
+    )
+    assert "not converged" in report.summary(), report.summary()
+
+
+def test_a_converged_scan_is_not_blocked_by_the_convergence_signal():
+    """The bound must not reinstate the false-unresolved behaviour.
+
+    The #884 norm-drift case has ``fd_divergence`` ~1.0e-02 -- real scale drift,
+    not non-convergence -- and must still resolve its genuine 5% error.
+    """
+    n = 32
+    base = np.full(n, 1e8)
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    def five_percent_high(t):
+        x = jnp.asarray(t.todense())
+        d = x - base_j
+        return jnp.sum(d * d + 2.0 * base_j * d), 1.05 * 2.0 * x
+
+    report = measure_gradient_error(
+        five_percent_high,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        steps=(1e-4, 1e-6),
+    )
+
+    assert report.fd_divergence < 0.25, report.summary()
+    assert report.is_resolved, report.summary()
