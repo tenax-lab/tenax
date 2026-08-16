@@ -31,6 +31,37 @@ def _symmetric_pair(D: int = D, seed: int = 0):
 _PAIRS = {"dense": _dense_pair, "symmetric": _symmetric_pair}
 
 
+def _fermionic_pair(D: int = 2, seed: int = 0):
+    """A random ``FermionParity`` checkerboard pair, same legs and flows.
+
+    Deliberately **not** in ``_PAIRS``.  ``test_ipeps_bp_gauge.py``
+    parametrises four tests over ``list(_PAIRS)``, all of which assert that
+    ``bp_gauge_checkerboard`` is an exact gauge; adding a fermionic entry
+    would silently extend those assertions to the graded case, which is
+    exactly the open question (#882) that is deliberately left unanswered
+    here.  Callers that want it must ask for it by name.
+    """
+    from tenax.algorithms.fermionic_ipeps import (
+        FPEPSConfig,
+        _build_initial_fpeps_tensor,
+    )
+
+    cfg = FPEPSConfig(D=D)
+    kA, kB = jax.random.split(jax.random.PRNGKey(seed))
+    A = _build_initial_fpeps_tensor(cfg, kA)
+    B = _build_initial_fpeps_tensor(cfg, kB)
+    return A * (1.0 / float(A.norm())), B * (1.0 / float(B.norm()))
+
+
+#: Pair builders the CTM witness runs on: dense plus one *block-sparse*
+#: fermionic path.  The U(1)-Sz ``"symmetric"`` pair is left out on cost
+#: grounds -- its CTM is the slowest of the three and it adds no coverage the
+#: other two lack (dense covers the dense contraction path, fermionic covers
+#: the block-sparse one *and* the Koszul-carrying ``fuse`` in the double
+#: layer).  It was measured in scratch and behaves like the other two.
+_WITNESS_PAIRS = {"dense": _dense_pair, "fermionic": _fermionic_pair}
+
+
 def _udlrp(t):
     """``t`` as a plain array in ``(u, d, l, r, phys)`` order."""
     labels = t.labels()
