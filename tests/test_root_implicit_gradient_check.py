@@ -1598,3 +1598,43 @@ def test_a_rounding_floor_cannot_hide_an_imaginary_derivative_either():
             direction=np.ones((2, 2, 2, 2, 2)),
             steps=(2e-2, 1e-2),
         )
+
+
+@pytest.mark.parametrize("tol", [1.1, 1.5, 4.0 / 3.0 + 1e-9, 10.0, 1000.0])
+def test_no_multiplier_can_license_an_unconverged_measurement(tol):
+    """The convergence requirement is not scaled by ``fd_spread_tol``.
+
+    For the exact gradient of ``sum(x**3)`` at zero with steps ``(1, 0.5)``,
+    ``relative_error`` is 1 against a divergence of 0.75. Letting the caller's
+    multiplier govern convergence meant ``tol=1.1`` declared an exact gradient
+    100% wrong, and raising the minimum multiplier only moves that boundary --
+    4/3 clears this example and the next construction sits under it. The
+    artefact margin is fixed instead, so no multiplier admits it.
+    """
+    zero_state = _wrap(np.zeros((2, 2, 2, 2, 2)))
+
+    def cubic(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**3), 3.0 * x**2  # exact: zero at x = 0
+
+    report = measure_gradient_error(
+        cubic, zero_state, steps=(1.0, 0.5), fd_spread_tol=tol
+    )
+
+    assert not report.is_resolved, (
+        f"fd_spread_tol={tol} licensed a definitive error on a scan whose "
+        f"derivative is still moving by {report.fd_divergence:.2f} -- "
+        f"{report.summary()}"
+    )
+
+
+def test_a_converged_scan_is_unaffected_by_the_artefact_margin():
+    """The margin must not block errors that are genuinely measured.
+
+    A 50% error on a scan whose differences agree to ~1e-16 has nothing
+    attributable to non-convergence, so it stays resolved.
+    """
+    report = measure_gradient_error(_exact_pair(1.5), _quartic_state())
+
+    assert report.is_resolved, report.summary()
+    assert report.relative_error == pytest.approx(0.5, rel=1e-3), report.summary()

@@ -152,6 +152,14 @@ class GradientErrorReport(NamedTuple):
         )
 
 
+#: How many times the reported error must exceed the finite differences' own
+#: divergence before it is called measured.  Not caller-tunable on purpose: it
+#: bounds the fraction of the error that non-convergence could explain, and a
+#: caller loosening it would be loosening exactly the guarantee the number is
+#: supposed to carry.
+_ARTEFACT_MARGIN = 3.0
+
+
 def _unit_direction(shape, seed: int, *, complex_valued: bool) -> np.ndarray:
     """A random unit direction, complex when the state is.
 
@@ -774,7 +782,33 @@ def measure_gradient_error(
     # incommensurable, every ``rel`` exactly 1 with zero spread, and an EXACT
     # gradient would be reported as a definitive 100% error.  Absence of
     # evidence is not evidence of convergence.
-    resolved = not np.isnan(fd_divergence) and best_rel > fd_spread_tol * resolution
+    # Two conditions, and the second is deliberately NOT scaled by the
+    # caller's multiplier.
+    #
+    # ``fd_spread_tol`` says how far the error must exceed the errors' own
+    # scatter.  Letting it also govern the convergence requirement means any
+    # value close enough to 1 admits a scan whose derivative is still moving as
+    # much as the error itself: for the exact gradient of ``sum(x**3)`` at zero
+    # with steps ``(1, 0.5)``, ``relative_error`` is 1 against a divergence of
+    # 0.75, so ``fd_spread_tol=1.1`` declared an exact gradient 100% wrong.
+    # Raising the minimum multiplier only moves that boundary -- 4/3 clears
+    # this example and the next construction sits under it.
+    #
+    # ``_ARTEFACT_MARGIN`` fixes the share of the reported error that
+    # non-convergence could account for.  At 3, at most a third of it can be
+    # artefact, so what remains is a real statement about the gradient however
+    # the multiplier is set.
+    #
+    # The ``isnan`` clause is redundant -- ``best_rel > margin * nan`` is
+    # already False -- and kept explicit anyway: leaning on NaN comparison
+    # semantics silently is what produced the earlier fail-open bugs here, and
+    # a reader should not have to rederive it.  Its mutant is therefore an
+    # equivalent one, reported rather than kept.
+    resolved = (
+        not np.isnan(fd_divergence)
+        and best_rel > fd_spread_tol * resolution
+        and best_rel > _ARTEFACT_MARGIN * fd_divergence
+    )
 
     return GradientErrorReport(
         relative_error=best_rel,
