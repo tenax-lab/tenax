@@ -63,10 +63,23 @@ every bond — its update kept only ``U`` from each SVD, so ``A`` received the
 left/top half of every gate and never the right/bottom half, and the state
 collapsed to a product state regardless of ``dt``.
 
-``sublattice_gap(A, B, env_A, env_B)`` reports whether a run actually produced a
-checkerboard: the trace distance between the two sublattices' one-site reduced
-density matrices, traced out of the two-site RDM the energy already uses. It is
-0 for a uniform state and 1 for the fully polarised occupied/empty checkerboard.
+``sublattice_gap(A, B, env_A, env_B)`` measures **charge order** between the two
+sublattices: the trace distance between their one-site reduced density matrices,
+traced out of the two-site RDM the energy already uses. For spinless fermions
+``FermionParity`` forbids the off-diagonal entries, so this is exactly
+``|<n_A> - <n_B>|`` — the CDW order parameter, ~0 at ``V=0`` and 1 for the fully
+polarised occupied/empty checkerboard.
+
+```{warning}
+It is a **one-body** probe, and a zero does not mean one tensor would do. A
+``0`` says the two *one-site* RDMs coincide; it says nothing about two-site
+structure. A columnar-dimer or bond-ordered state has identical on-site
+densities on both sublattices, reads ``0``, and is still genuinely two-site. A
+nonzero value is positive evidence of charge order; the converse does not hold.
+To rule out two-site order in general, compare a two-site observable — e.g. the
+horizontal against the vertical bond energy of the pair.
+```
+
 Do **not** use ``||A - B||`` or a ``T T†`` leg fingerprint instead — neither is
 invariant under the bond gauge ``T -> G T``, so both measure the representation
 rather than the state.
@@ -83,8 +96,13 @@ exact ``E = 0`` eigenstates and the sweep is observed to settle on them.
   pipeline: simple update + CTM + energy. Returns
   ``(energy, (A, B), (env_A, env_B))``. ``initial_tensor`` takes either an
   ``(A, B)`` pair — the form this returns, so its own output restarts it — or a
-  single tensor, which starts both sublattices from the same place.
-- ``sublattice_gap(A, B, env_A, env_B)`` — checkerboard/CDW diagnostic, above.
+  single tensor, which starts both sublattices from the same place. A restart
+  is **not** a continuation: the sweep always begins from ``BondWeights.ones``,
+  so its first cycle treats the outer legs as unweighted while the tensors
+  handed in already carry ``sqrt(lambda)``. ``fpeps(N)`` is not ``fpeps(N/2)``
+  restarted for another ``N/2``.
+- ``sublattice_gap(A, B, env_A, env_B)`` — charge-order diagnostic, above; a
+  one-body probe, so a zero does not certify that one tensor would suffice.
 - ``spinless_fermion_gate(config)`` — build the t-V model gate from an
   ``FPEPSConfig`` (it reads ``t`` and ``V``).
 - ``FPEPSConfig`` — configuration dataclass.

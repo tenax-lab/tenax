@@ -587,16 +587,26 @@ every bond, so its update kept only `U` from each SVD and gave `A` the left/top
 half of every gate and never the right/bottom half — the state went to a product
 state regardless of `dt`, and then to exactly `0.0`.
 
-`sublattice_gap(A, B, env_A, env_B)` is how you check what a run produced: the
-trace distance between the two sublattices' one-site reduced density matrices,
-traced out of the two-site RDM the energy already uses. `0` means the two sites
-are locally identical (no CDW, and a single tensor would do); `1` means they are
-perfectly distinguishable. For spinless fermions it is essentially
-`|<n_A> - <n_B>|`, the CDW order parameter, so it should grow with `V`. A value
-above 1 means the environment's RDM is not PSD (#854) — measured up to 1.07 at
-χ=4 on a deliberately under-converged environment, against a few `1e-4` once the
-CTM has settled. It is not clipped: the excess tells you χ or the sweep count is
-too small, and clipping would hide that inside a plausible-looking 1.0.
+`sublattice_gap(A, B, env_A, env_B)` measures **charge order** between the two
+sublattices: the trace distance between their one-site reduced density matrices,
+traced out of the two-site RDM the energy already uses. For spinless fermions
+`FermionParity` forbids the off-diagonal entries, so each RDM is diagonal in the
+occupation basis and this is exactly `|<n_A> - <n_B>|`, the CDW order parameter
+— ~0 at `V=0` (free fermions, no charge order) up to 1 for the fully polarised
+occupied/empty checkerboard.
+
+**It is a one-body probe, and a zero does not mean one tensor would do.** A
+`0` says the two *one-site* RDMs coincide; it says nothing about two-site
+structure. A columnar-dimer or bond-ordered state has identical on-site
+densities on both sublattices, reads `0` here, and is still genuinely two-site.
+A nonzero value is positive evidence of charge order; the converse does not
+hold. To rule out two-site order in general, compare a two-site observable
+instead — e.g. the horizontal against the vertical bond energy of the pair.
+
+A value above 1 means the environment's RDM is not PSD (#854) — measured up to
+1.07 at χ=4 on a deliberately under-converged environment, against a few `1e-4`
+once the CTM has settled. It is not clipped: the excess tells you χ or the sweep
+count is too small, and clipping would hide that inside a plausible-looking 1.0.
 
 Do **not** compare the two sublattices with `||A - B||`, or with any fingerprint
 built from `T T†` on a virtual leg. A simple-update tensor is defined only up to
@@ -612,6 +622,12 @@ The returned pair is in physical (CTM-contractable) form, which is also the form
 energy, pair, envs = fpeps(H, config, initial_tensor=pair)   # continues
 energy, pair, envs = fpeps(H, config, initial_tensor=A)      # both sites from A
 ```
+
+A restart is not a continuation. The sweep always begins from
+`BondWeights.ones`, so its first cycle treats the outer legs as unweighted while
+the tensors you hand back already carry `sqrt(λ)`. `fpeps(N)` is therefore not
+`fpeps(N/2)` fed back for another `N/2` — use a restart to continue annealing,
+not to reproduce a longer single run.
 
 Two standing caveats. Simple update on this path is **seed-dependent**: over
 seeds 0–4 at 600 steps, the fraction whose bond spectrum survives is 4/5 at D=2,

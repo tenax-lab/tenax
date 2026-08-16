@@ -4,9 +4,12 @@
 tensor were **exactly 0.0**, by step 10 at D=2 with a 200-step default.  Root
 cause is #667 in a module #844 never touched: ``sigma`` was stored as the new
 lambda *and* ``sqrt(sigma)`` was absorbed into ``Gamma``, so the next step's
-``_absorb_lambdas`` scaled that bond by lambda again and it carried
+lambda-absorption scaled that bond by lambda again and it carried
 ``lambda**1.5``.  #667's own title says "fermionic -> zero norm"; only the
-bosonic half was fixed.
+bosonic half was fixed.  (That 1-site path, and the ``_absorb_lambdas`` helper
+it ran on, are deleted -- ``fpeps()`` goes through the shared checkerboard
+sweep.  These guards remain because the failure mode is a property of storing
+lambda at all, which #882 is what actually removes.)
 
 Measured before the fix, D=2, dt=0.05, ``min(lam_h)`` per step::
 
@@ -30,18 +33,36 @@ from tenax.algorithms.fermionic_ipeps import (
     FPEPSConfig,
     _fpeps_simple_update,
     _initialize_fpeps,
+    _trotter_gate,
     spinless_fermion_gate,
 )
+from tenax.algorithms.ipeps_simple_update import _simple_update_checkerboard_sweep
 
 jax.config.update("jax_enable_x64", True)
 
 
-def _run(D=2, steps=40, dt=0.05, V=0.0, seed=0):
-    """Returns ``(A, B, lambdas)`` -- the pair and all **four** bond spectra."""
+def _run(D=2, steps=40, dt=0.05, V=0.0, seed=0, independent=False):
+    """Returns ``(A, B, lambdas)`` -- the pair and all **four** bond spectra.
+
+    ``independent=True`` drives the shared sweep directly instead of going
+    through :func:`_fpeps_simple_update`, which ships the shared-spectrum
+    default on purpose (the CDW does not need four free bonds -- see that
+    function's docstring).
+
+    Only the leg-to-bond mapping test asks for it, and it needs it in order to
+    *be* a test.  With shared spectra ``lam.h_AB is lam.h_BA`` -- the same array
+    object, not merely equal values -- so any reference built out of the four
+    fields collapses to two, and a transposed or duplicated mapping satisfies it
+    just as well as the correct one.
+    """
     cfg = FPEPSConfig(D=D, t=1.0, V=V, dt=dt, num_imaginary_steps=steps)
     H = spinless_fermion_gate(cfg)
     A = _initialize_fpeps(cfg, jax.random.PRNGKey(seed))
-    return _fpeps_simple_update(A, H, max_D=D, dt=dt, steps=steps)
+    if not independent:
+        return _fpeps_simple_update(A, H, max_D=D, dt=dt, steps=steps)
+    return _simple_update_checkerboard_sweep(
+        A, A, _trotter_gate(H, dt), D, 4 * steps, None, True
+    )
 
 
 @pytest.mark.parametrize("steps", [10, 40])
@@ -80,11 +101,16 @@ def test_the_lambda_normalisation_is_relative_not_additive():
     a spectrum whose maximum is well below 1 -- the next absorb shrinks the
     state further and the runaway closes in two steps (#748, #865).
 
-    So this asserts on the *normalisation the fermionic module uses*, fed a
+    So this asserts on the *normalisation the fermionic path uses*, fed a
     spectrum at that scale.  Asserting ``max(lam) == 1`` on an ordinary run
     cannot distinguish the two implementations and passes on the defect.
+
+    Imported from ``ipeps_simple_update``, which is where it lives and now the
+    only place the fermionic sweep can reach it: the 1-site fermionic update
+    that used to re-import it was deleted with the rest of the dead two-lambda
+    path.
     """
-    from tenax.algorithms.fermionic_ipeps import _normalise_lambda
+    from tenax.algorithms.ipeps_simple_update import _normalise_lambda
 
     tiny = jnp.array([1e-15, 1e-16])
     out = _normalise_lambda(tiny)
@@ -98,21 +124,40 @@ def test_the_lambda_normalisation_is_relative_not_additive():
 
 
 def test_the_physical_tensor_carries_each_bond_weight_once():
-    """A bond must pick up ``lambda``, not ``lambda**2``.
+    """A bond must pick up ``lambda``, not ``lambda**2``, on *its own* leg.
 
     Both ends of every bond contribute, so the physical tensor takes
     ``sqrt(lambda)`` on each leg.  Absorbing the full ``lambda`` squares every
     bond weight of the lattice.
 
-    Built through the shared ``_to_physical_pair`` rather than a fermionic copy
-    of it: a two-lambda fermionic helper cannot say which of the two horizontal
-    bonds ``A.l`` carries, and stamping one onto both is #851.  The reference
-    below therefore names each leg's bond explicitly.
+    **Run with four independent spectra on purpose.**  The shipped default
+    shares them, and under it ``lam.h_AB is lam.h_BA`` -- the same array object.
+    The reference below would then collapse to ``{u: v, d: v, l: h, r: h}`` for
+    both sites and could not tell the correct leg-to-bond map from a transposed
+    or duplicated one: it would pass on the very defect it names.  With four
+    distinct spectra it discriminates, which the guard at the top asserts rather
+    than assumes.
+
+    This is a claim about ``_to_physical_pair``'s mapping, not about the
+    fermionic default.  ``test_su_851_four_bond_lambdas.py`` pins the same
+    mapping from the bosonic side.
     """
     from tenax.algorithms.ipeps_simple_update import _to_physical_pair
 
     D = 2
-    A, B, lam = _run(D=D, steps=20)
+    A, B, lam = _run(D=D, steps=20, independent=True)
+
+    # The premise: four spectra that actually differ. Without this the rest of
+    # the test is vacuous, so assert it rather than trusting the flag.
+    for a, b in (("h_AB", "h_BA"), ("v_AB", "v_BA")):
+        split = float(
+            np.linalg.norm(np.asarray(getattr(lam, a)) - np.asarray(getattr(lam, b)))
+        )
+        assert split > 1e-6, (
+            f"{a} and {b} agree to {split:.2e} -- the four spectra are not "
+            f"distinguishable, so the leg-to-bond check below proves nothing"
+        )
+
     A_phys, B_phys = _to_physical_pair(A, B, lam)
 
     for name, t in (("A", A_phys), ("B", B_phys)):

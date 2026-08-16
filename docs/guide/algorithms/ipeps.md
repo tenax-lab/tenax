@@ -438,6 +438,9 @@ as a `SymmetricTensor` with `FermionParity` charges. The simple update uses
 signs at every leg crossing.
 
 The state and environment are **pairs** (#878): the t-V ground state at finite
-`V` is a checkerboard charge-density wave, which is inherently two-site. See
-[Fermionic iPEPS (fPEPS)](fpeps.md) for `sublattice_gap`, the warm-restart form,
-and the two standing caveats (seed dependence, and #392's uncertified energy).
+`V` is a checkerboard charge-density wave, which is inherently two-site.
+`sublattice_gap` measures that charge order — it is a one-body probe, so a
+nonzero value is evidence of a CDW but a zero does *not* certify that a single
+tensor would suffice. See [Fermionic iPEPS (fPEPS)](fpeps.md) for the full
+statement, the warm-restart form, and the two standing caveats (seed
+dependence, and #392's uncertified energy).

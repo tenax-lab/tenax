@@ -185,40 +185,68 @@ print("Spectrum:", jnp.sort(evals))                 # Free: [-t, 0, 0, +t]
 ## Stage 3: Run fPEPS
 
 The `fpeps()` function runs the full pipeline: random initialization →
-simple update (imaginary time evolution) → CTM energy evaluation.
+2-site checkerboard simple update (imaginary time evolution) → split-CTM energy
+evaluation.
 
 ```python
-from tenax import FPEPSConfig, fpeps, spinless_fermion_gate
+from tenax import FPEPSConfig, fpeps, spinless_fermion_gate, sublattice_gap
 import jax
 
 config = FPEPSConfig(
     D=2,
     t=1.0,
-    V=0.0,
-    dt=0.01,
+    V=4.0,
+    dt=0.05,
     num_imaginary_steps=200,
     ctm_chi=8,
     ctm_max_iter=50,
 )
 
 gate = spinless_fermion_gate(config)
-energy, A_opt, env = fpeps(gate, config, key=jax.random.PRNGKey(42))
+energy, (A, B), (env_A, env_B) = fpeps(gate, config, key=jax.random.PRNGKey(42))
 print(f"Energy per site: {energy:.6f}")
+print(f"Charge order:    {sublattice_gap(A, B, env_A, env_B):.4f}")
 ```
 
 ### Return values
 
+**The state and environment are pairs** (changed in #878). The t-V ground state
+at finite `V` is a checkerboard charge-density wave, which is inherently
+two-site; the 1-site ansatz that preceded this made `A` both ends of every bond,
+so its update kept only `U` from each SVD and the state collapsed to a product
+state regardless of `dt`.
+
 | Value | Type | Description |
 |-------|------|-------------|
-| `energy` | float | Variational energy per site |
-| `A_opt` | SymmetricTensor | Optimized site tensor, shape (D,D,D,D,2) |
-| `env` | CTMTensorEnv | Converged CTM environment |
+| `energy` | float | Energy per site (see the caveat below — **not** certified) |
+| `(A, B)` | tuple[SymmetricTensor, SymmetricTensor] | The two sublattice tensors, shape (D,D,D,D,2) each, in physical (CTM-contractable) form |
+| `(env_A, env_B)` | tuple[SplitCTMTensorEnv, SplitCTMTensorEnv] | The coupled converged environments |
 
-### Starting from an existing tensor
+`sublattice_gap(A, B, env_A, env_B)` is the trace distance between the two
+sublattices' one-site RDMs — for spinless fermions exactly `|<n_A> - <n_B>|`,
+the CDW order parameter. It runs ~0 at `V=0` to 1 for the fully polarised
+checkerboard. It is a **one-body** probe: a nonzero value is evidence of charge
+order, but a zero does **not** prove one tensor would suffice (a columnar-dimer
+state reads 0 and is still two-site). Do not use `||A - B||` or a `T T†` leg
+fingerprint instead — neither is invariant under the bond gauge `T -> G T`.
+
+⚠️ **Two standing caveats.** The sweep is **seed-dependent** (over seeds 0–4 at
+600 steps the surviving fraction is 4/5 at D=2, 2/5 at D=3, 4/5 at D=4, 4/5 at
+D=6), and the **absolute energy is not certified** (#392): `H` has no chemical
+potential, so both the empty state and the fully polarised checkerboard are
+exact `E = 0` eigenstates and the sweep is observed to settle on them.
+
+### Starting from an existing pair
 
 ```python
-energy, A_opt, env = fpeps(gate, config, initial_tensor=A_prev, key=key)
+energy, pair, envs = fpeps(gate, config, initial_tensor=pair, key=key)   # continue
+energy, pair, envs = fpeps(gate, config, initial_tensor=A_prev, key=key) # both from A
 ```
+
+A restart is not a continuation: the sweep always begins from
+`BondWeights.ones`, so its first cycle treats the outer legs as unweighted while
+the tensors handed in already carry `sqrt(lambda)`. `fpeps(N)` is not
+`fpeps(N/2)` restarted for another `N/2`.
 
 ---
 
@@ -334,16 +362,21 @@ for D in [2, 3, 4]:
 ### V-scan (phase diagram)
 
 ```python
+from tenax import sublattice_gap
+
 for V in [0.0, 0.5, 1.0, 2.0, 4.0]:
     config = FPEPSConfig(D=2, t=1.0, V=V, dt=0.01,
                          num_imaginary_steps=300, ctm_chi=8)
     gate = spinless_fermion_gate(config)
-    E, _, _ = fpeps(gate, config, key=jax.random.PRNGKey(0))
-    print(f"V={V:.1f}: E/site = {E:.8f}")
+    E, (A, B), (env_A, env_B) = fpeps(gate, config, key=jax.random.PRNGKey(0))
+    print(f"V={V:.1f}: E/site = {E:.8f}  CDW = "
+          f"{sublattice_gap(A, B, env_A, env_B):.4f}")
 ```
 
 At large V/t, the system transitions from a metallic phase to a
-charge-density-wave (CDW) insulator.
+charge-density-wave (CDW) insulator. **Read the CDW column, not the energy**:
+the absolute energy is not certified (#392), so it cannot locate the transition,
+whereas `sublattice_gap` is the order parameter itself.
 
 ---
 
@@ -357,6 +390,9 @@ charge-density-wave (CDW) insulator.
 | Flat energy vs D | Trotter error dominates | Reduce dt first, then increase D |
 | "Charge mismatch" error | Wrong FlowDirection | Check IN/OUT pairing on gate legs |
 | Dense tensor where SymmetricTensor expected | Used jnp array directly | Wrap with `SymmetricTensor.from_dense()` |
+| `E ≈ 0` and `sublattice_gap ≈ 0` | Sweep settled on the empty state — an exact `E = 0` eigenstate, since `H` has no chemical potential (#392) | Not a code bug; try another seed, and read `sublattice_gap` rather than `E` |
+| Bond spectrum has a zero entry | Seed-dependent collapse (surviving seeds 0–4: 4/5 at D=2, **2/5 at D=3**, 4/5 at D=4, 4/5 at D=6) | Try another seed; check the spectrum, never the norm — the update normalises last, so `|A|` reads 1.0 right up to the step it is exactly 0 |
+| `fpeps(N)` ≠ `fpeps(N/2)` restarted | The sweep restarts from `BondWeights.ones` while the returned pair already carries `sqrt(λ)` | Expected; use restarts to continue annealing, not to reproduce a longer run |
 
 ---
 

@@ -11,11 +11,11 @@ sweep over SU step counts that prints what the run actually produced:
 
   * ``E`` -- energy per site from the coupled ``(env_A, env_B)`` fixed point.
   * ``gap`` -- :func:`~tenax.sublattice_gap`, the trace distance between the two
-    sublattices' one-site reduced density matrices.  This is the charge-density
-    wave order parameter: ~0 means the sweep collapsed to a uniform state that a
-    single tensor would describe just as well, and a nonzero value means the
-    returned pair is carrying real checkerboard structure.  Expect it to grow
-    with ``V``.
+    sublattices' one-site reduced density matrices.  For spinless fermions this
+    is exactly ``|<n_A> - <n_B>|``, the charge-density-wave order parameter, so
+    expect it to grow with ``V``.  A nonzero value means the returned pair is
+    carrying real charge order; a ~0 does **not** prove a single tensor would
+    do, because a one-body probe cannot see two-site (e.g. dimer) order.
 
 Two things this will show you that are **not** bugs in the script:
 

@@ -27,6 +27,9 @@ import numpy as np
 import pytest
 
 from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
+from tenax.algorithms._split_ctm_tensor_energy import (
+    compute_energy_split_ctm_tensor_2site,
+)
 from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.algorithms.fermionic_ipeps import (
     FPEPSConfig,
@@ -107,6 +110,12 @@ def test_the_gap_is_invariant_under_a_bond_gauge(su_pair):
     it is reading the representation, not the state, and cannot be used to
     decide whether the two sublattices differ.
 
+    "By construction" is checked, not assumed: the energy from the same two
+    environments must agree across the gauge before any claim is made about the
+    diagnostic.  Otherwise a mis-written gauge -- an inverse on the wrong leg --
+    would move the state, a *correct* diagnostic would move with it, and this
+    test would fail on the fix and pass on the defect.
+
     The tolerance is 2e-2 rather than machine precision, and the reason is the
     CTM, not the metric: the environment is re-converged on the gauged pair, and
     a CTM at finite chi truncates in a basis the gauge moves, so the two runs
@@ -130,8 +139,29 @@ def test_the_gap_is_invariant_under_a_bond_gauge(su_pair):
     )
 
     kw = dict(max_iter=12, conv_tol=1e-10)
-    gap = sublattice_gap(A, B, *ctm_split_tensor_2site(A, B, CHI, **kw))
-    gap_g = sublattice_gap(A_g, B_g, *ctm_split_tensor_2site(A_g, B_g, CHI, **kw))
+    envs, envs_g = (
+        ctm_split_tensor_2site(A, B, CHI, **kw),
+        ctm_split_tensor_2site(A_g, B_g, CHI, **kw),
+    )
+
+    # Prove the premise before using it. `_bond_gauge` is *claimed* inert, and
+    # everything below is worthless if it is not -- a gauge with a typo (an
+    # inverse on the wrong leg, say) changes the state, and then a diagnostic
+    # that moved would be reporting correctly and this test would be pinning a
+    # bug as the fix. The energy is a physical observable computed from the same
+    # environments, so it is the right witness.
+    d = A.indices[A.labels().index("phys")].dim
+    H = spinless_fermion_gate(FPEPSConfig(D=2, t=1.0, V=4.0))
+    E = float(compute_energy_split_ctm_tensor_2site(A, B, *envs, H, d=d))
+    E_g = float(compute_energy_split_ctm_tensor_2site(A_g, B_g, *envs_g, H, d=d))
+    assert abs(E - E_g) < 2e-2 * max(abs(E), 1.0), (
+        f"the 'gauge' moved the energy from {E:.10f} to {E_g:.10f} -- it is not "
+        f"a gauge transformation, so nothing this test asserts below is about "
+        f"gauge invariance"
+    )
+
+    gap = sublattice_gap(A, B, *envs)
+    gap_g = sublattice_gap(A_g, B_g, *envs_g)
 
     assert gap > 1e-2, (
         f"gap {gap:.3e} on a V=4 t-V pair: the fixture is not exercising a "
