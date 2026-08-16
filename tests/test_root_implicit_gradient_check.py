@@ -977,3 +977,58 @@ def test_a_wrong_gradient_is_still_caught_on_a_distorted_direction():
 
     assert report.is_resolved, report.summary()
     assert report.relative_error == pytest.approx(0.5, rel=1e-6), report.summary()
+
+
+def test_steps_probing_different_directions_cannot_bound_each_other():
+    """Pooled spread is only noise if every step moved the same coordinates.
+
+    A coordinate that moves at the coarse step and freezes at the fine one
+    makes the two differences *different derivatives*. Their spread then
+    measures that difference: weighting the coordinate heavily gives a
+    ``resolution`` around 0.77 which marks a 50% error unresolved, even though
+    the fine step measured it exactly.
+    """
+    n = 32
+    base = np.ones(n)
+    # 1e14 is the load-bearing value: ULP(1e14) is 1.56e-02, which sits
+    # between the coarse step's displacement there (1.77e-01) and the fine
+    # step's (1.77e-03). So the coordinate moves at h=1 and freezes at h=1e-2,
+    # and the two unit directions differ by 1.73e-01. Picked by scanning --
+    # 1e12 rounds but never freezes and the pairwise distance is only 6e-03,
+    # which the guard correctly ignores.
+    base[0] = 1e14
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+    weights = np.ones(n)
+    weights[0] = 100.0
+
+    def weighted_affine(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(jnp.asarray(weights.reshape((2, 2, 2, 2, 2))) * (x - base_j)), (
+            jnp.asarray(weights.reshape((2, 2, 2, 2, 2)))
+        )
+
+    with pytest.raises(ValueError, match="probe different directions"):
+        measure_gradient_error(
+            weighted_affine,
+            _wrap(base.reshape((2, 2, 2, 2, 2))),
+            direction=np.ones((2, 2, 2, 2, 2)),
+            steps=(1.0, 1e-2),
+        )
+
+
+def test_ordinary_rounding_still_counts_as_the_same_direction():
+    """The guard must not reject scans whose steps merely round differently.
+
+    Every step distorts the direction slightly -- float32 reaches ~1e-2 on the
+    smallest components -- so the tolerance has to sit above that or ordinary
+    float32 scans are refused.
+    """
+    data = np.full((2, 2, 2, 2, 2), 0.5, dtype=np.float32)
+
+    def quadratic(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**2), 2.0 * x
+
+    report = measure_gradient_error(quadratic, _wrap(data), steps=(1e-3, 1e-4))
+
+    assert report.relative_error < 1e-2, report.summary()

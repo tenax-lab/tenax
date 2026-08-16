@@ -533,7 +533,7 @@ def measure_gradient_error(
             # has to hold.
             skipped.append(f"h={h:.1e}: {exc}")
             continue
-        results.append((rel, fd, h, step_distortion, analytic_h))
+        results.append((rel, fd, h, step_distortion, analytic_h, effective))
 
     surviving = sorted({abs(r[2]) for r in results})
     if len(surviving) < 2 or surviving[-1] / surviving[0] < 2.0:
@@ -558,7 +558,29 @@ def measure_gradient_error(
     # and reported as perfect.  The smallest step carries the least truncation;
     # whether it was also small enough to be roundoff-dominated is exactly what
     # ``resolution`` below reports, so the honest answer survives either way.
-    best_rel, best_fd, best_h, _dist, best_analytic = min(
+    # The steps must probe the SAME direction before their spread can be read
+    # as noise.  Each ``analytic_h`` now matches its own difference, but pooling
+    # differences taken along unequal effective directions measures how much
+    # those directions differ -- not how noisy the scan is.  Codex's case: a
+    # coordinate that moves at h=1 and freezes at h=0.01, weighted 100, gives
+    # ``resolution`` 0.77 and hides a 0.5 error the fine step measured exactly.
+    units = [r[5] / max(float(np.linalg.norm(r[5])), 1e-300) for r in results]
+    spread_between_directions = max(
+        (float(np.linalg.norm(a - b)) for a in units for b in units), default=0.0
+    )
+    if spread_between_directions > 5e-2:
+        raise ValueError(
+            f"the steps probe different directions (unit displacements differ "
+            f"by up to {spread_between_directions:.2e}), so their spread "
+            f"measures that difference rather than the scan's noise and cannot "
+            f"bound it. Per-step distortion from the requested direction: "
+            + ", ".join(f"h={r[2]:.1e}: {r[3]:.2e}" for r in results)
+            + ". Use steps that move the same coordinates -- a state whose "
+            "entries span many orders will freeze different ones at different "
+            "step sizes."
+        )
+
+    best_rel, best_fd, best_h, _dist, best_analytic, _eff = min(
         results, key=lambda r: abs(r[2])
     )
     direction_distortion = max(r[3] for r in results)
