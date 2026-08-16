@@ -1526,3 +1526,47 @@ def test_roundoff_sized_imaginary_residue_is_tolerated():
     report = measure_gradient_error(nearly_real, _quartic_state())
 
     assert report.relative_error < 1e-6, report.summary()
+
+
+def test_a_real_offset_cannot_hide_an_imaginary_derivative():
+    """The guard is on the imaginary VARIATION, not its size.
+
+    ``1e20 + 1e10*sum(x) + 1j*5e9*sum(x)`` has an imaginary value only 5e-11 of
+    the real offset, so a value-scaled threshold passes it -- and the scan would
+    then differentiate the real part alone while accepting a gradient that omits
+    an imaginary derivative half as large. A constant cancels in a difference,
+    which is why the difference is what gets checked.
+    """
+    ones = jnp.ones((2, 2, 2, 2, 2))
+
+    def offset_complex(t):
+        x = jnp.asarray(t.todense())
+        q = jnp.sum(x)
+        return 1e20 + 1e10 * q + 1j * 5e9 * q, 1e10 * ones
+
+    with pytest.raises(ValueError, match="imaginary part varies"):
+        measure_gradient_error(
+            offset_complex, _wrap(np.ones((2, 2, 2, 2, 2))), steps=(1e-2, 1e-4)
+        )
+
+
+def test_a_large_real_offset_alone_still_measures():
+    """The same objective without the imaginary term must still work.
+
+    Otherwise the guard would be rejecting the offset rather than the complex
+    part -- the failure mode the previous version had in reverse.
+    """
+    ones = jnp.ones((2, 2, 2, 2, 2))
+
+    def offset_real(t):
+        x = jnp.asarray(t.todense())
+        return 1e20 + 1e10 * jnp.sum(x), 1e10 * ones
+
+    report = measure_gradient_error(
+        offset_real, _wrap(np.ones((2, 2, 2, 2, 2))), steps=(1e-2, 1e-4)
+    )
+
+    # It measures rather than raising. The number is not tight -- |E| ~ 1e20
+    # swamps a 1e10-scale difference, so the scan honestly reports the error as
+    # sitting at its own floor -- but that is precision, not the complex guard.
+    assert report.relative_error <= report.unresolved_bound, report.summary()

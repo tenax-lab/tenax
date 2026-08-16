@@ -152,34 +152,6 @@ class GradientErrorReport(NamedTuple):
         )
 
 
-def _reject_complex_energy(energy_arr: np.ndarray, where: str) -> None:
-    """A genuinely complex energy is not what a directional derivative measures.
-
-    ``float(np.real(...))`` would silently drop the imaginary part and validate
-    the gradient of ``Re(E)`` alone: ``E = sum(x**2) + 1j*sum(x)`` with the
-    gradient ``2x`` then reports as accurate although that gradient does not
-    differentiate the callable's output.  A physical energy computed in complex
-    arithmetic carries only roundoff there, so the threshold is relative and
-    well above it.
-    """
-    imag = (
-        float(np.max(np.abs(np.imag(energy_arr))))
-        if np.iscomplexobj(energy_arr)
-        else 0.0
-    )
-    if imag == 0.0:
-        return
-    scale = max(float(np.max(np.abs(np.real(energy_arr)))), imag)
-    if imag > 1e-10 * scale:
-        raise ValueError(
-            f"the energy at {where} has a non-zero imaginary part "
-            f"({imag:.3e}, {imag / max(scale, 1e-300):.1e} relative), so it is "
-            "not a real objective. Taking its real part would validate the "
-            "gradient of Re(E) alone while reporting it as the gradient of the "
-            "callable. Return a real energy, or the real part explicitly."
-        )
-
-
 def _unit_direction(shape, seed: int, *, complex_valued: bool) -> np.ndarray:
     """A random unit direction, complex when the state is.
 
@@ -411,7 +383,6 @@ def measure_gradient_error(
     # projection accepts ``complex(finite, nan)``: every energy in the scan
     # could be non-finite while the report reads as ordinary.
     e0_arr = np.asarray(energy0)
-    _reject_complex_energy(e0_arr, "the unperturbed state")
     if not np.all(np.isfinite(e0_arr)):
         # Checked for the same reason every perturbed energy is: the map has to
         # be defined at the state whose gradient is being measured.  Without
@@ -520,7 +491,6 @@ def measure_gradient_error(
         energy, _g = energy_and_grad(shifted)
         energy_arr = np.asarray(energy)
         energy_dtypes.append(energy_arr.dtype)
-        _reject_complex_energy(energy_arr, f"the perturbed state (t={t:.1e})")
         # Whole scalar first -- see the unperturbed check above.  ``np.real``
         # applied before this would let ``complex(finite, nan)`` through.
         if not np.all(np.isfinite(energy_arr)):
@@ -534,13 +504,17 @@ def measure_gradient_error(
         # The REALISED displacement comes back with the energy.  Everything
         # downstream is compared along the direction the arithmetic actually
         # produced, so this is data rather than a validation input.
-        return float(np.real(energy_arr)), realised
+        return (
+            float(np.real(energy_arr)),
+            float(np.imag(energy_arr)) if np.iscomplexobj(energy_arr) else 0.0,
+            realised,
+        )
 
     results = []
     skipped: list[str] = []
     for h in steps:
         try:
-            (e_plus, realised_plus), (e_minus, realised_minus) = (
+            (e_plus, i_plus, realised_plus), (e_minus, i_minus, realised_minus) = (
                 energy_at(h),
                 energy_at(-h),
             )
@@ -568,6 +542,26 @@ def measure_gradient_error(
                     "did differ. Near a stationary point, or with a large additive "
                     "constant in the energy, use a direction with more signal or "
                     "remove the offset."
+                )
+            # A genuinely complex objective is refused -- but on the imaginary
+            # part's VARIATION, not its size.  Scaling against ``|Re(E)|`` lets
+            # an additive real constant hide it: ``1e20 + 1e10*sum(x) +
+            # 1j*5e9*sum(x)`` has an imaginary value only 5e-11 of the offset,
+            # and the scan would differentiate the real part alone while
+            # accepting a gradient that omits an imaginary derivative half as
+            # large.  A constant cancels in a difference, so the difference is
+            # what to look at.  The floor keeps the roundoff residue that any
+            # real objective evaluated in complex arithmetic carries.
+            imag_span = abs(i_plus - i_minus)
+            noise = 4.0 * _energy_eps() * max(abs(e_plus), abs(e_minus))
+            if imag_span > max(1e-10 * span, noise):
+                raise ValueError(
+                    f"the energy's imaginary part varies by {imag_span:.3e} "
+                    f"across h={h:.1e}, against {span:.3e} for the real part, "
+                    "so this is not a real objective. Differencing the real "
+                    "part alone would validate the gradient of Re(E) while "
+                    "reporting it as the gradient of the callable. Return a "
+                    "real energy, or its real part explicitly."
                 )
             fd = (e_plus - e_minus) / (2.0 * h)
             if not np.isfinite(fd):
