@@ -160,20 +160,38 @@ def midgap_pair():
 #: to rescue the invariance test breaks the mutation test and vice versa, which
 #: is the property that makes this a guard rather than a decoration.
 #:
-#: 40 sweeps rather than 12.  The correct-gauge residual is CTM truncation, so
-#: it falls with convergence while the mispaired one does not -- measured, going
-#: 12 -> 40 sweeps takes the energy residual 1.004e-01 -> 2.357e-02 and the gap
-#: residual 6.747e-02 -> 1.295e-02, while the mispaired energy residual *rises*
-#: from 6.997e-01 to 4.307.  That is worth ~90 s per environment: at 12 sweeps
-#: the mispaired gap cleared its bar by only 1.2x, which is not a bracket, it is
-#: a coin toss.
+#: 40 sweeps rather than 12, which buys a wider bracket on the gap: at 12 sweeps
+#: with the constants of the day the separation was 2.06x on the mispaired side
+#: (dgap 2.882e-01 against BAR_GAP 0.14), and here it is 3.6x.  That is what the
+#: extra ~90 s per environment is for.
 #:
-#: Both bars are the geometric mean of the pair they separate, so the margin is
-#: the same on each side and neither test is the fragile one.
+#: **These constants are calibrated at exactly chi=4 / 40 sweeps and do not
+#: survive a change of either.**  Do not raise ``GAUGE_SWEEPS`` for "better
+#: convergence": the environment does not converge here at all (``conv_tol``
+#: 1e-10 is met at no sweep in any of the three runs -- the corner spectrum is
+#: still moving by ~1e-01 at sweep 40), and the residual is **non-monotone** in
+#: sweeps.  Measured ``dgap`` for the correct gauge: 6.7e-02 (12), 5.4e-02 (20),
+#: 1.2e-01 (30), 5.2e-02 (35), 1.6e-02 (38), 6.1e-02 (39), 1.3e-02 (40).  With
+#: the bars below, the invariance test *fails* at 12, 20, 30, 35 and 39 sweeps
+#: and passes only at 38 and 40.  The separation is a property of this operating
+#: point, not a convergence trend, and an innocent-looking bump to the sweep
+#: count will turn this file red for reasons that read as inexplicable.
+#:
+#: For the same reason the 3.6x below is a *separation*, not a robustness
+#: margin: perturbing the input pair by 2.7e-12 relative moves the
+#: mutation-side margin to 1.73x and ``E_mispaired`` from 5.79 to 0.42 -- an
+#: O(1) response to a 1e-12 input.  Determinism holds within one binary; it
+#: should not be expected to survive a different BLAS.  This file is
+#: ``algorithm``-bucketed (see ``tests/conftest.py``), so it is deselected by
+#: the ``-m core`` required checks and a flake lands on the full suite rather
+#: than on the merge gate.
 GAUGE_CHI, GAUGE_SWEEPS = 4, 40
-#: correct 2.357e-02 (12.7x under), mispaired 4.307 (14.4x over)
+#: correct 2.357e-02 (12.7x under), mispaired 4.307 (14.4x over).  0.3 rather
+#: than the exact geometric mean 0.3186, so the two sides are comparable but
+#: not equal.
 BAR_E = 0.3
-#: correct 1.295e-02 (3.6x under), mispaired 1.710e-01 (3.6x over)
+#: correct 1.295e-02 (3.6x under), mispaired 1.710e-01 (3.6x over).  This one
+#: is the geometric mean to four figures (0.04705).
 BAR_GAP = 0.047
 
 
@@ -212,14 +230,17 @@ def test_the_gap_is_invariant_under_a_bond_gauge(midgap_baseline):
     diagnostic would move with it, and this test would fail on the fix and pass
     on the defect.
 
-    **Why the bars are 1e-2 and not 1e-3.**  The environment is re-converged on
-    the gauged pair, and a CTM at finite chi truncates in a basis the gauge
-    moves, so the two runs are not algebraically the same calculation.  The
-    residual is therefore CTM truncation, not the metric -- which is checkable
-    and was checked: it falls 4-5x when the sweep count goes 12 -> 40 (energy
-    1.004e-01 -> 2.357e-02, gap 6.747e-02 -> 1.295e-02), while the mispaired
-    residual does not fall at all (its energy residual *rises*, 6.997e-01 ->
-    4.307).  A metric defect would not care how well the environment converged.
+    **Why the bars are 3e-1 and 4.7e-2 rather than something tiny.**  The
+    environment is re-converged on the gauged pair, and a CTM at finite chi
+    truncates in a basis the gauge moves, so the two runs are not algebraically
+    the same calculation and the correct gauge leaves a residual of its own:
+    2.357e-02 (energy) and 1.295e-02 (gap) here.
+
+    That residual is an artefact of *this* operating point and not a
+    convergence error being driven down -- the environment never converges at
+    these settings, and the residual is non-monotone in the sweep count.  See
+    the note on ``GAUGE_SWEEPS`` above before changing anything about how the
+    environments are built.
 
     A saturated fixture reports much smaller numbers -- at V=4 the gap moves by
     3.779e-04 -- but only because a saturated observable barely moves for
