@@ -787,19 +787,22 @@ def test_an_unusable_spread_tolerance_is_rejected(bad):
         measure_gradient_error(_exact_pair(), _quartic_state(), fd_spread_tol=bad)
 
 
-def test_zero_spread_tolerance_is_refused():
-    """Zero bypasses the floor, including the divergence folded into it.
+@pytest.mark.parametrize("bad", [0.0, 0.5, 1.0])
+def test_a_multiplier_at_or_below_one_is_refused(bad):
+    """``fd_spread_tol`` is how far the error must EXCEED the floor.
 
-    ``resolved = rel > tol * resolution`` with ``tol = 0`` marks every nonzero
-    error resolved however badly the differences diverge: the exact gradient of
-    ``sum(x**3)`` at zero has ``relative_error`` 1 and ``fd_divergence`` 0.9999
-    and would be declared definitively 100% wrong. It was legal until the
-    divergence moved into the floor and the separate convergence gate went
-    away -- so this is a consequence of that simplification, not an oversight
-    in it.
+    At or below 1 an error merely equal to the floor counts as measured: the
+    exact gradient of ``sum(x**3)`` at zero has ``relative_error`` 1 against a
+    resolution of 0.9999, so ``tol=1.0`` declares it definitively 100% wrong.
+    Zero is worse still -- it bypasses the floor entirely, including the
+    divergence folded into it.
+
+    Both were legal at some point on this branch: zero until the divergence
+    moved into the floor, and one until it was noticed that "exceed" was doing
+    no work at a multiplier of exactly 1.
     """
-    with pytest.raises(ValueError, match="strictly positive"):
-        measure_gradient_error(_exact_pair(1.5), _quartic_state(), fd_spread_tol=0.0)
+    with pytest.raises(ValueError, match="greater than 1"):
+        measure_gradient_error(_exact_pair(1.5), _quartic_state(), fd_spread_tol=bad)
 
 
 def test_the_advertised_cost_matches_the_number_of_evaluations():

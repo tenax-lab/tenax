@@ -81,13 +81,13 @@ class GradientErrorReport(NamedTuple):
         ``unresolved_bound`` -- ``fd_spread_tol * resolution``, the quantity
         actually compared against.  A tiny bound is good news; a large one
         means the steps need adjusting.
-      - ``fd_divergence`` is ``nan``, or large enough to dominate the floor:
-        **the scan did not converge or was indeterminate**, and
-        ``unresolved_bound`` is then not an accuracy claim at all.  For
-        ``E(q) = 0.9798q + 2.0202q^3`` with steps ``(1, 0.1)`` and a returned
-        directional gradient of 1.5, both relative errors are 0.5 and their
-        spread is ~8e-16, so the bound reads ~8e-15 while the gradient is
-        genuinely 50% wrong.  Read ``fd_divergence`` before quoting the bound;
+      - ``fd_divergence`` is large enough to dominate the floor: **the scan
+        did not converge**.  The bound then carries that divergence, so it is
+        honest but wide -- a 50% error left unresolved this way has a bound of
+        at least 50%, not a misleadingly tiny one.
+      - ``fd_divergence`` is ``nan``: **indeterminate**, no two steps probed
+        commensurable directions.  Here and only here the bound can be tiny and
+        meaningless at the same time, because nothing constrained it.
         :meth:`summary` says which case applies.
 
       ``nan`` means no two steps probed commensurable directions.  That is an
@@ -254,19 +254,20 @@ def measure_gradient_error(
     # disagreement then satisfies ``best_rel > tol * 0``, and a one-step
     # truncation artifact is reported as a resolved measurement -- defeating
     # the guard this check exists to be.
-    if not (np.isfinite(fd_spread_tol) and fd_spread_tol > 0.0):
+    if not (np.isfinite(fd_spread_tol) and fd_spread_tol > 1.0):
         # This number decides which branch the report is read as.  Negative
         # makes ``best_rel > tol * resolution`` true for essentially any error,
         # so everything looks resolved; NaN makes it false always, so every
         # result lands in the documented "better than resolvable" branch.
         raise ValueError(
-            f"fd_spread_tol must be finite and strictly positive, got "
-            f"{fd_spread_tol!r}. It controls how the report is interpreted: a "
-            "negative value marks any error resolved, NaN marks every one "
-            "unresolved (the branch that reads as good news), and zero "
-            "bypasses the floor altogether -- including the divergence folded "
-            "into it, so an exact gradient on an unconverged scan would be "
-            "called definitively wrong."
+            f"fd_spread_tol must be finite and greater than 1, got "
+            f"{fd_spread_tol!r}. It is the factor by which the error must "
+            "EXCEED the floor, so anything at or below 1 lets an error merely "
+            "equal to the floor count as measured: at 1.0 the exact gradient "
+            "of sum(x**3) at zero, whose relative error is 1 against a "
+            "resolution of 0.9999, is declared definitively 100% wrong. "
+            "Negative marks any error resolved, and NaN marks every one "
+            "unresolved -- the branch that reads as good news."
         )
     magnitudes = {abs(float(h)) for h in steps}
     if 0.0 in magnitudes:

@@ -537,10 +537,11 @@ print(report.summary())
 # `relative_error` is a measurement only when `is_resolved`. When it is not,
 # check `fd_divergence`: only a SMALL value means the gradient is accurate to
 # about `unresolved_bound` (= `fd_spread_tol * resolution`) — the good case.
-# A large one means the scan did not converge, and NaN means no two steps
-# probed commensurable directions so the scan is indeterminate. In both of
-# those `unresolved_bound` is not an accuracy claim at all: a 50%-wrong
-# gradient can sit behind a ~8e-15 bound.
+# A large one means the scan did not converge — the bound then carries that
+# divergence, so it is honest but wide. NaN means no two steps probed
+# commensurable directions, so the scan is indeterminate and the bound is
+# unconstrained: that is the one case where it can be both tiny and
+# meaningless.
 
 # Quasiparticle excitations (Ponsioen et al. 2022)
 momenta = make_momentum_path("brillouin", num_points=20)
