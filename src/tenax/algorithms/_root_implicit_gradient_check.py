@@ -552,9 +552,23 @@ def measure_gradient_error(
             # large.  A constant cancels in a difference, so the difference is
             # what to look at.  The floor keeps the roundoff residue that any
             # real objective evaluated in complex arithmetic carries.
+            # Compared against the REAL span alone.  An absolute floor derived
+            # from ``|E|`` reintroduces exactly the defect this guard was
+            # rewritten to fix, one level down: at ``|E| = 1e20`` that floor is
+            # ~8.9e+04 and swallows an imaginary variation of 1.2e+04 -- an
+            # imaginary derivative 30% the size of the real one, hidden by an
+            # offset that changes no derivative at all.
+            #
+            # No floor is needed.  The cancellation check above has already
+            # established that ``span`` is above the energy's own rounding, so
+            # a ratio against it is meaningful; and a real objective evaluated
+            # in complex arithmetic keeps its imaginary residue proportional to
+            # the energy, so the ratio stays at ~1e-15 rather than at 1e-6.
+            # Where the residue really is within 1e-6 of the signal, the scan
+            # cannot tell an imaginary derivative from noise, and refusing is
+            # the honest answer.
             imag_span = abs(i_plus - i_minus)
-            noise = 4.0 * _energy_eps() * max(abs(e_plus), abs(e_minus))
-            if imag_span > max(1e-10 * span, noise):
+            if imag_span > 1e-6 * span:
                 raise ValueError(
                     f"the energy's imaginary part varies by {imag_span:.3e} "
                     f"across h={h:.1e}, against {span:.3e} for the real part, "

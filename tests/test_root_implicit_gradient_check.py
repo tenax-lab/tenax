@@ -1570,3 +1570,28 @@ def test_a_large_real_offset_alone_still_measures():
     # swamps a 1e10-scale difference, so the scan honestly reports the error as
     # sitting at its own floor -- but that is precision, not the complex guard.
     assert report.relative_error <= report.unresolved_bound, report.summary()
+
+
+def test_a_rounding_floor_cannot_hide_an_imaginary_derivative_either():
+    """The absolute floor was the same offset defect one level down.
+
+    ``1e20 + 1e6*sum(x) + 1j*3e5*sum(x)`` at steps ``(2e-2, 1e-2)`` keeps both
+    imaginary spans (~1.2e+04) under a ``4*eps*|E|`` floor of ~8.9e+04, so the
+    scan accepted a gradient omitting an imaginary derivative 30% the size of
+    the real one. The floor is gone: the comparison is against the real span,
+    which the cancellation check has already shown to be above the noise.
+    """
+    ones = jnp.ones((2, 2, 2, 2, 2))
+
+    def offset_complex(t):
+        x = jnp.asarray(t.todense())
+        q = jnp.sum(x)
+        return 1e20 + 1e6 * q + 1j * 3e5 * q, 1e6 * ones
+
+    with pytest.raises(ValueError, match="imaginary part varies"):
+        measure_gradient_error(
+            offset_complex,
+            _wrap(np.ones((2, 2, 2, 2, 2))),
+            direction=np.ones((2, 2, 2, 2, 2)),
+            steps=(2e-2, 1e-2),
+        )
