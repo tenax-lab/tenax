@@ -1165,5 +1165,69 @@ def test_a_converged_scan_is_not_blocked_by_the_convergence_signal():
         steps=(1e-4, 1e-6),
     )
 
-    assert report.fd_divergence < 0.25, report.summary()
+    # Its two steps are not commensurable -- the fine one quantises, so the
+    # realised directions differ by more than the grouping tolerance -- and the
+    # convergence check therefore stands down rather than blocking on an
+    # artefact. ``nan`` here means "no evidence", not "diverged".
+    assert np.isnan(report.fd_divergence) or report.fd_divergence < 0.25, (
+        report.summary()
+    )
     assert report.is_resolved, report.summary()
+
+
+def test_incommensurable_steps_do_not_block_a_clean_measurement():
+    """``fd_divergence`` must not pool across different realised directions.
+
+    ``base[0]=1e14`` moves at h=1 and freezes at h=1e-2, so the two differences
+    are different directional derivatives rather than a convergence sequence.
+    Pooling them gave ``fd_divergence`` 0.755 and blocked a 50% error that
+    ``relative_error`` had measured cleanly at both steps.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e14
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+    weights = np.ones(n)
+    weights[0] = 100.0
+    w_j = jnp.asarray(weights.reshape((2, 2, 2, 2, 2)))
+
+    def half_too_high(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(w_j * (x - base_j)), 1.5 * w_j
+
+    report = measure_gradient_error(
+        half_too_high,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(1.0, 1e-2),
+    )
+
+    assert report.relative_error == pytest.approx(0.5, rel=1e-6), report.summary()
+    assert report.is_resolved, (
+        "a cleanly measured 50% error was blocked by pooling two "
+        f"incommensurable differences -- {report.summary()}"
+    )
+
+
+def test_an_unconverged_bound_is_not_an_accuracy_claim():
+    """``is_resolved=False`` has two causes and they must not read alike.
+
+    Here the relative errors agree to ~1e-16, so ``unresolved_bound`` is
+    ~1e-15 -- but the gradient is 50% wrong and the scan simply has not
+    converged. Quoting the bound as accuracy would be off by fifteen orders.
+    """
+    zero_state = _wrap(np.zeros((2, 2, 2, 2, 2)))
+
+    def cubic(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**3), 3.0 * x**2
+
+    report = measure_gradient_error(cubic, zero_state)
+
+    assert not report.is_resolved, report.summary()
+    assert report.fd_divergence > 0.25, report.summary()
+    assert report.unresolved_bound < 1e-6, (
+        "this is the trap: a tiny bound alongside a large real error -- "
+        f"{report.summary()}"
+    )
+    assert "not converged" in report.summary(), report.summary()

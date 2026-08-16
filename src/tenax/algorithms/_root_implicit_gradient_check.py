@@ -74,14 +74,23 @@ class GradientErrorReport(NamedTuple):
 
     * ``True``  -- ``relative_error`` is a measurement.  A gradient that is
       wrong by 15% reports 0.15 here.
-    * ``False`` -- the disagreement does not stand clear of the floor, so the
-      honest reading is "the gradient is accurate to about
-      ``unresolved_bound``", which is ``fd_spread_tol * resolution`` and is the
-      quantity actually compared against.  Quoting ``resolution`` itself would
-      overstate what the scan established: an error of 1e-02 against a
-      resolution of 2e-03 lands in this branch, and it is not below 2e-03.  A
-      tiny bound is then good news; a large one means this scan could not tell
-      you anything and the steps need adjusting.
+    * ``False`` -- and it now has **two** causes, which must not be read alike:
+
+      - ``fd_divergence`` is small (or ``nan``): the disagreement did not stand
+        clear of the floor, so the gradient is accurate to about
+        ``unresolved_bound`` -- ``fd_spread_tol * resolution``, the quantity
+        actually compared against.  A tiny bound is good news; a large one
+        means the steps need adjusting.
+      - ``fd_divergence`` exceeds its bound: **the scan did not converge**, and
+        ``unresolved_bound`` is then not an accuracy claim at all.  For
+        ``E(q) = 0.9798q + 2.0202q^3`` with steps ``(1, 0.1)`` and a returned
+        directional gradient of 1.5, both relative errors are 0.5 and their
+        spread is ~8e-16, so the bound reads ~8e-15 while the gradient is
+        genuinely 50% wrong.  Read ``fd_divergence`` before quoting the bound;
+        :meth:`summary` says which case applies.
+
+      ``nan`` means no two steps probed commensurable directions, so there is
+      no convergence evidence either way -- not adverse evidence.
 
     Collapsing those two into one "converged" flag is wrong: an *exact*
     gradient has every step at the roundoff floor, and calling that
@@ -112,7 +121,7 @@ class GradientErrorReport(NamedTuple):
                 f"gradient error {self.relative_error:.2e} not resolved "
                 f"against a floor of {self.unresolved_bound:.2e}"
             )
-            if self.fd_divergence > 0.25:
+            if self.fd_divergence > 0.25:  # nan compares False: no evidence
                 verdict += (
                     f"; the finite differences themselves disagree by "
                     f"{self.fd_divergence:.2e}, so the scan has not converged"
@@ -607,8 +616,30 @@ def measure_gradient_error(
     # spread is 0, and an exact gradient would be reported as a *resolved* 100%
     # error.  So a gradient-independent convergence signal is kept alongside --
     # do the differences themselves agree, per unit displacement?
-    fdu = [r[6] for r in results]
-    fd_divergence = (max(fdu) - min(fdu)) / max(max(abs(f) for f in fdu), 1e-300)
+    #
+    # Only across COMMENSURABLE directions, though.  Differences taken along
+    # different realised directions are different derivatives, not a
+    # convergence sequence -- a coordinate that moves at the coarse step and
+    # freezes at the fine one gives ``fd_divergence`` 0.755 and would block a
+    # cleanly measured 50% error.  Steps are grouped by their unit direction
+    # and the largest group is used; when no two steps are commensurable there
+    # is no convergence evidence either way, and the check stands down rather
+    # than blocking on an artefact.
+    units = [r[5] / max(float(np.linalg.norm(r[5])), 1e-300) for r in results]
+    best_group: list[int] = []
+    for anchor in range(len(units)):
+        group = [
+            j
+            for j in range(len(units))
+            if float(np.linalg.norm(units[j] - units[anchor])) <= 1e-3
+        ]
+        if len(group) > len(best_group):
+            best_group = group
+    if len(best_group) >= 2:
+        fdu = [results[j][6] for j in best_group]
+        fd_divergence = (max(fdu) - min(fdu)) / max(max(abs(f) for f in fdu), 1e-300)
+    else:
+        fd_divergence = float("nan")
     # A tolerated direction distortion is a floor on what this scan can resolve.
     # Every step carries the same one, so it never shows up in their spread: a
     # 0.5% drift with a near-zero spread would otherwise report a correct
@@ -625,7 +656,11 @@ def measure_gradient_error(
     # norm-drift case) and far below genuine non-convergence (~1 for the cubic
     # above), so it separates the two without reinstating the false-unresolved
     # behaviour that pooling differences produced.
-    resolved = best_rel > fd_spread_tol * resolution and fd_divergence <= 0.25
+    # ``nan <= 0.25`` is False, which would fail CLOSED and block every scan
+    # with no commensurable pair.  There is no convergence evidence in that
+    # case, not adverse evidence, so it is explicitly not treated as failure.
+    converged = np.isnan(fd_divergence) or fd_divergence <= 0.25
+    resolved = best_rel > fd_spread_tol * resolution and converged
 
     return GradientErrorReport(
         relative_error=best_rel,
