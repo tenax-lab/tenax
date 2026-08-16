@@ -2,13 +2,18 @@
 
 ``fpeps()`` returns two site tensors because the t-V ground state at finite
 ``V`` is a checkerboard charge-density wave, which is inherently two-site.  The
-diagnostic that ships with it has one job: tell a caller whether the returned
-pair really *is* a checkerboard, or whether the sweep collapsed to a uniform
-state that a single tensor would describe just as well.
+diagnostic that ships with it has one job: tell a caller how much **charge
+order** the returned pair carries.
 
-The first version could not do that job.  It compared the singular values of
-each leg's Gram matrix ``M = T T†``, and those are not gauge invariant: under a
-bond gauge ``T -> G T`` the matrix goes to ``G M G†``, whose spectrum moves
+It is a **one-body** probe, and these tests are careful not to claim otherwise.
+A nonzero value is evidence of charge order; a zero is not evidence that one
+tensor would have sufficed, because a columnar-dimer or bond-ordered state has
+identical on-site densities on both sublattices and reads zero while being
+genuinely two-site.
+
+The first version could not measure even that.  It compared the singular values
+of each leg's Gram matrix ``M = T T†``, and those are not gauge invariant: under
+a bond gauge ``T -> G T`` the matrix goes to ``G M G†``, whose spectrum moves
 unless ``G`` is unitary -- and simple update's gauge is not.  So it reported a
 difference between two *representations*, not between two states.  This is the
 same trap as ``||A - B|| ~ 1.7`` on a provably uniform pair.
@@ -71,18 +76,33 @@ def _gram_gap(A, B):
     return max(gaps)
 
 
-def _bond_gauge(A, B, g_hAB, g_hBA, g_vAB, g_vBA):
+#: The gauge factors, one per checkerboard bond. Diagonal in the charge basis so
+#: the FermionParity block structure survives, and deliberately **not** unitary
+#: -- a unitary gauge would leave even the Gram spectrum alone and prove nothing.
+_GAUGE = (
+    np.array([2.0, 0.5]),  # h_AB
+    np.array([1.5, 0.8]),  # h_BA
+    np.array([0.7, 1.3]),  # v_AB
+    np.array([1.1, 2.2]),  # v_BA
+)
+
+
+def _bond_gauge(A, B, mispair=False):
     """Insert ``G G^-1`` on each of the four checkerboard bonds.
 
     Every bond of the infinite lattice gets a factor and its inverse on the two
     tensors it joins, so the contracted network -- and therefore every physical
-    observable -- is unchanged.  The gauges are diagonal in the charge basis, so
-    the FermionParity block structure survives, and they are *not* unitary,
-    which is the whole point: a unitary gauge would leave even the Gram spectrum
-    alone and the test would prove nothing.
+    observable -- is unchanged.
+
+    ``mispair=True`` puts ``h_AB``'s inverse on ``B.r`` instead of ``B.l``.  The
+    per-leg factors are identical; only the *pairing* is wrong, so it is not a
+    gauge at all and the state really does move.  It exists so the guards below
+    can be shown to fail on it -- a witness that cannot fail is not a witness,
+    which is the whole subject of this file.
     """
+    g_hAB, g_hBA, g_vAB, g_vBA = _GAUGE
     A = scale_bond_axis(A, "r", g_hAB)  # h_AB: A.r <-> B.l
-    B = scale_bond_axis(B, "l", 1.0 / g_hAB)
+    B = scale_bond_axis(B, "r" if mispair else "l", 1.0 / g_hAB)
     B = scale_bond_axis(B, "r", g_hBA)  # h_BA: B.r <-> A.l
     A = scale_bond_axis(A, "l", 1.0 / g_hBA)
     A = scale_bond_axis(A, "d", g_vAB)  # v_AB: A.d <-> B.u
@@ -94,7 +114,13 @@ def _bond_gauge(A, B, g_hAB, g_hBA, g_vAB, g_vBA):
 
 @pytest.fixture(scope="module")
 def su_pair():
-    """A short D=2 t-V simple-update run, in physical (CTM-contractable) form."""
+    """A short D=2 t-V simple-update run at V=4, physical (CTM-contractable).
+
+    Strong CDW: the gap saturates at ~1.0 here, which is what makes it the right
+    end of the V response in ``test_the_gap_tracks_the_charge_density_wave`` --
+    and exactly what makes it the *wrong* fixture for the gauge test, see
+    ``midgap_pair``.
+    """
     cfg = FPEPSConfig(D=2, t=1.0, V=4.0, dt=0.05)
     H = spinless_fermion_gate(cfg)
     A0 = _initialize_fpeps(cfg, jax.random.PRNGKey(3))
@@ -102,83 +128,139 @@ def su_pair():
     return _to_physical_pair(A, B, lam)
 
 
-def test_the_gap_is_invariant_under_a_bond_gauge(su_pair):
+@pytest.fixture(scope="module")
+def midgap_pair():
+    """A pair whose gap sits **mid-range**, for the gauge tests.
+
+    At ``V=4`` the gap is 1.0004 ungauged, 1.0001 under the correct gauge and
+    0.9998 under a *mispaired* one -- the observable is saturated, so it barely
+    moves for a state change that is real and large.  An invariance test on a
+    saturated observable proves close to nothing: it would pass on a diagnostic
+    that had been replaced by ``return 1.0``.
+
+    ``V=1`` puts the gap at ~0.27, in the responsive part of its range, and as a
+    bonus puts the energy at ~1.5 rather than the ~0 that #392 produces at
+    ``V=4`` -- which matters because the energy is the witness that the gauge is
+    inert, and a witness keyed to a quantity that is ~0 degenerates into an
+    absolute bar ten times its own magnitude.
+    """
+    cfg = FPEPSConfig(D=2, t=1.0, V=1.0, dt=0.05)
+    H = spinless_fermion_gate(cfg)
+    A0 = _initialize_fpeps(cfg, jax.random.PRNGKey(3))
+    A, B, lam = _fpeps_simple_update(A0, H, max_D=cfg.D, dt=cfg.dt, steps=8)
+    return (*_to_physical_pair(A, B, lam), H)
+
+
+#: CTM settings and the bracket the two gauge tests share.  ``BAR_*`` sits
+#: *between* the measured correct-gauge and mispaired-gauge residuals, and both
+#: sides are asserted -- see ``test_a_mispaired_gauge_is_caught``.  Raising a bar
+#: to rescue the invariance test breaks the mutation test and vice versa, which
+#: is the property that makes this a guard rather than a decoration.
+GAUGE_CHI, GAUGE_SWEEPS = 4, 12
+BAR_E = 0.25  # measured: correct 1.00e-01, mispaired 7.00e-01
+BAR_GAP = 0.14  # measured: correct 6.75e-02, mispaired 2.88e-01
+
+
+def _observables(A, B, H):
+    """``(E, gap)`` from a freshly converged environment for this pair."""
+    envs = ctm_split_tensor_2site(
+        A, B, GAUGE_CHI, max_iter=GAUGE_SWEEPS, conv_tol=1e-10
+    )
+    E = float(compute_energy_split_ctm_tensor_2site(A, B, *envs, H, d=2))
+    return E, sublattice_gap(A, B, *envs)
+
+
+def test_the_gap_is_invariant_under_a_bond_gauge(midgap_pair):
     """The state does not change, so the diagnostic must not either.
 
-    The gauge below leaves every physical observable alone by construction --
-    each bond carries a factor and its inverse.  A diagnostic that moves under
-    it is reading the representation, not the state, and cannot be used to
-    decide whether the two sublattices differ.
+    The gauge leaves every physical observable alone by construction -- each
+    bond carries a factor and its inverse.  A diagnostic that moves under it is
+    reading the representation, not the state.
 
     "By construction" is checked, not assumed: the energy from the same two
     environments must agree across the gauge before any claim is made about the
-    diagnostic.  Otherwise a mis-written gauge -- an inverse on the wrong leg --
-    would move the state, a *correct* diagnostic would move with it, and this
-    test would fail on the fix and pass on the defect.
+    diagnostic.  Otherwise a mis-written gauge would move the state, a *correct*
+    diagnostic would move with it, and this test would fail on the fix and pass
+    on the defect.
 
-    The tolerance is 2e-2 rather than machine precision, and the reason is the
-    CTM, not the metric: the environment is re-converged on the gauged pair, and
-    a CTM at finite chi truncates in a basis the gauge moves, so the two runs
-    are not algebraically the same calculation.  Measured on this fixture the
-    residual runs 6.4e-05 (chi=8, 40 sweeps), 1.1e-04 (chi=8, 80), 3.8e-04
-    (chi=4, 12), 1.1e-03 (chi=4, 8), 2.2e-03 (chi=4, 20), 3.8e-03 (chi=6, 12).
-    Note it does **not** fall monotonically with chi -- it tracks how converged
-    the two runs are, and sits at or below the CTM's own sweep-to-sweep motion
-    at the same settings (1.5e-02 at chi=4 between 10 and 40 sweeps).  The
-    metric this replaced moves by **27** on the same pair, three orders of
-    magnitude above any of that, so no tolerance in this range confuses them.
+    **Why the bars are 1e-1 and not 1e-3.**  The environment is re-converged on
+    the gauged pair, and a CTM at finite chi truncates in a basis the gauge
+    moves, so the two runs are not algebraically the same calculation.  The
+    residual is therefore CTM truncation, not the metric, and on an *unsaturated*
+    fixture it is genuinely of order 1e-1: measured here 1.00e-01 (energy) and
+    6.75e-02 (gap).  A saturated fixture would report much smaller numbers --
+    at V=4 the gap moves by 4e-04 -- but only because a saturated observable
+    barely moves for anything, including for a state change that is real and
+    large.  That is not precision, it is insensitivity, and it is exactly what
+    ``midgap_pair`` exists to avoid.
+
+    What makes the bar meaningful is not its size but that it is **bracketed**:
+    ``test_a_mispaired_gauge_is_caught`` requires the same constants to fail on
+    a transformation that is *not* a gauge, so neither bar can be moved in
+    either direction without breaking one of the two tests.
     """
-    A, B = su_pair
-    A_g, B_g = _bond_gauge(
-        A,
-        B,
-        np.array([2.0, 0.5]),
-        np.array([1.5, 0.8]),
-        np.array([0.7, 1.3]),
-        np.array([1.1, 2.2]),
-    )
+    A, B, H = midgap_pair
+    A_g, B_g = _bond_gauge(A, B)
 
-    kw = dict(max_iter=12, conv_tol=1e-10)
-    envs, envs_g = (
-        ctm_split_tensor_2site(A, B, CHI, **kw),
-        ctm_split_tensor_2site(A_g, B_g, CHI, **kw),
-    )
+    E, gap = _observables(A, B, H)
+    E_g, gap_g = _observables(A_g, B_g, H)
 
-    # Prove the premise before using it. `_bond_gauge` is *claimed* inert, and
-    # everything below is worthless if it is not -- a gauge with a typo (an
-    # inverse on the wrong leg, say) changes the state, and then a diagnostic
-    # that moved would be reporting correctly and this test would be pinning a
-    # bug as the fix. The energy is a physical observable computed from the same
-    # environments, so it is the right witness.
-    d = A.indices[A.labels().index("phys")].dim
-    H = spinless_fermion_gate(FPEPSConfig(D=2, t=1.0, V=4.0))
-    E = float(compute_energy_split_ctm_tensor_2site(A, B, *envs, H, d=d))
-    E_g = float(compute_energy_split_ctm_tensor_2site(A_g, B_g, *envs_g, H, d=d))
-    assert abs(E - E_g) < 2e-2 * max(abs(E), 1.0), (
-        f"the 'gauge' moved the energy from {E:.10f} to {E_g:.10f} -- it is not "
-        f"a gauge transformation, so nothing this test asserts below is about "
-        f"gauge invariance"
+    assert 0.05 < gap < 0.95, (
+        f"gap {gap:.4f} is at the edge of its range -- a saturated observable "
+        f"is invariant under everything, so the assertions below would be weak "
+        f"even if they passed"
     )
-
-    gap = sublattice_gap(A, B, *envs)
-    gap_g = sublattice_gap(A_g, B_g, *envs_g)
-
-    assert gap > 1e-2, (
-        f"gap {gap:.3e} on a V=4 t-V pair: the fixture is not exercising a "
-        f"checkerboard at all, so the invariance below would be vacuous"
+    assert abs(E - E_g) < BAR_E, (
+        f"the 'gauge' moved the energy from {E:.8f} to {E_g:.8f} -- it is not a "
+        f"gauge transformation, so nothing below is about gauge invariance"
     )
-    assert abs(gap - gap_g) < 2e-2, (
-        f"sublattice_gap moved from {gap:.10f} to {gap_g:.10f} under a pure "
-        f"bond gauge -- it is measuring the gauge, not the state (#881 P2-3)"
+    assert abs(gap - gap_g) < BAR_GAP, (
+        f"sublattice_gap moved from {gap:.8f} to {gap_g:.8f} under a pure bond "
+        f"gauge -- it is measuring the gauge, not the state (#881 P2-3)"
     )
 
     # And the metric this replaced does move, by orders of magnitude more than
-    # the tolerance above.  This is the finding, pinned: 0.077 -> 27.0, a factor
-    # of 350, on a pair whose physical state did not change at all.
+    # either bar.  This is the finding, pinned.
     gram, gram_g = _gram_gap(A, B), _gram_gap(A_g, B_g)
     assert abs(gram - gram_g) > 1.0, (
         f"the Gram metric read {gram:.6f} -> {gram_g:.6f} under the same gauge; "
         f"if it no longer moves, this test has stopped discriminating"
+    )
+
+
+def test_a_mispaired_gauge_is_caught(midgap_pair):
+    """The bars above must fail on something that is *not* a gauge.
+
+    This is the mutation check, kept in the suite rather than run once by hand.
+    ``_bond_gauge(mispair=True)`` applies the identical per-leg factors but puts
+    ``h_AB``'s inverse on ``B.r`` instead of ``B.l``.  Nothing cancels on that
+    bond, so the physical state genuinely moves -- and both witnesses must say
+    so, or they are decorations.
+
+    Measured on ``midgap_pair`` at chi=4, 12 sweeps: the energy moves 7.00e-01
+    against the correct gauge's 1.00e-01, and the gap 2.88e-01 against 6.75e-02.
+    ``BAR_E`` and ``BAR_GAP`` sit between the two, so this test and the one
+    above bracket them from opposite sides.  A previous version of the guard
+    used ``abs(E - E_g) < 2e-2 * max(abs(E), 1.0)`` on the V=4 fixture, where
+    ``E ~ 0`` (#392) collapsed the relative bar to an absolute 2e-2 -- ten times
+    the whole magnitude of ``E`` -- and this mutation passed it.
+    """
+    A, B, H = midgap_pair
+    A_m, B_m = _bond_gauge(A, B, mispair=True)
+
+    E, gap = _observables(A, B, H)
+    E_m, gap_m = _observables(A_m, B_m, H)
+
+    assert abs(E - E_m) > BAR_E, (
+        f"a mispaired gauge moved the energy only {abs(E - E_m):.3e} "
+        f"({E:.8f} -> {E_m:.8f}), inside BAR_E={BAR_E} -- the energy witness in "
+        f"test_the_gap_is_invariant_under_a_bond_gauge cannot fail, so it is "
+        f"not checking anything"
+    )
+    assert abs(gap - gap_m) > BAR_GAP, (
+        f"a mispaired gauge moved the gap only {abs(gap - gap_m):.3e} "
+        f"({gap:.8f} -> {gap_m:.8f}), inside BAR_GAP={BAR_GAP} -- the "
+        f"invariance assertion cannot fail, so it is not checking anything"
     )
 
 

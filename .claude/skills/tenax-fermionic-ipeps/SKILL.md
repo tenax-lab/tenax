@@ -288,25 +288,52 @@ l (OUT)—A—r (IN)
 
 ## Stage 6: The Simple Update Algorithm
 
-Under the hood, `fpeps()` performs imaginary time evolution with
-alternating horizontal and vertical bond updates:
+Under the hood, `fpeps()` runs imaginary time evolution over the **four** bonds
+of a two-site checkerboard cell. A two-site cell has two inequivalent sites and
+therefore four inequivalent nearest-neighbour bonds, not two:
+
+```
+h_AB : A.r <-> B.l      v_AB : A.d <-> B.u
+h_BA : B.r <-> A.l      v_BA : B.d <-> A.u
+```
 
 1. **Compute Trotter gate**: exp(−δτ H) via eigendecomposition of H
-2. **Horizontal update**: Contract two sites across horizontal bond →
-   apply gate → SVD to re-split → truncate to D → update bond weights
-3. **Vertical update**: Same for the vertical bond
-4. **Repeat** for `num_imaginary_steps` iterations
-5. **Absorb bond weights** into site tensor → run CTM → compute energy
+2. **Four-phase cycle**, one phase per bond, in order `h_AB → v_AB → h_BA →
+   v_BA`. Each phase contracts the two sites across its bond → applies the gate
+   → SVDs to re-split → truncates to D → stores that bond's new spectrum.
+3. **Repeat** for `num_imaginary_steps` cycles (so every bond is evolved once
+   per step)
+4. **Convert to physical form**: `sqrt(λ)` onto **each of the four legs of both
+   sites**, so every bond of the lattice picks up `sqrt(λ)·sqrt(λ) = λ` exactly
+   once — both ends contribute
+5. Run the coupled two-site split-CTM → compute energy
+
+Steps 2 and 4 are where the earlier 1-site version went wrong, and both failures
+are worth knowing because they are easy to re-introduce:
+
+- Driving only a horizontal and a vertical bond leaves `h_BA` and `v_BA`
+  unevolved and the state spuriously dimerised (#667). It has to be all four.
+- Absorbing the **full** λ in step 4 rather than `sqrt(λ)` squares every bond
+  weight of the returned state (#878).
 
 The bond weights (λ vectors) approximate the environment during updates
 (like mean-field). This is why it's called "simple" update — the full
-environment is only used at the end for energy evaluation.
+environment is only used at the end for energy evaluation. Note this is also
+why the stored λ drift from the true Schmidt values: a non-unitary gate on a
+neighbouring bond changes this bond's spectrum and it is never recomputed
+(#869 — `bp_gauge_checkerboard` re-derives them if you need to read λ as a
+spectrum).
 
 ### What to watch for
 
-- **Energy not decreasing** → dt too large (Trotter error). Reduce dt.
+- **Energy not decreasing** → dt too large (Trotter error). Reduce dt. But note
+  the absolute energy is not certified on this path (#392) — read
+  `sublattice_gap` for whether the state is doing anything.
 - **NaN in tensors** → dt too large or gate not Hermitian.
 - **Energy converged but too high** → D too small, or CTM χ too small.
+- **A zero in the bond spectrum** → the seed-dependent collapse. Check the
+  *spectrum*, never the norm: the update normalises last, so `|A|` reads a
+  healthy 1.0 right up to the step where it is exactly 0.
 - **Bond lambdas all equal** → system may not have converged; try more steps.
 
 ---

@@ -532,12 +532,18 @@ def fpeps(
         bond weights live outside it, and a restart that reset them to ones
         would silently continue from a different state.
 
-        :func:`sublattice_gap` on ``(A, B, env_A, env_B)`` says whether the pair
-        really is a checkerboard or has collapsed to a uniform state.  Measured
-        on an 8-step D=2 sweep at chi=4 it tracks the interaction that drives
-        the order, as it must: **0.037** at ``V=0`` (free fermions, no charge
-        order at all), **0.270** at ``V=1``, **0.900** at ``V=2`` and **1.000**
-        at ``V=4`` -- the fully polarised occupied/empty checkerboard.
+        :func:`sublattice_gap` on ``(A, B, env_A, env_B)`` measures the **charge
+        order** between the two sublattices.  Measured on an 8-step D=2 sweep at
+        chi=4 it tracks the interaction that drives that order, as it must:
+        **0.037** at ``V=0`` (free fermions, no charge order at all), **0.270**
+        at ``V=1``, **0.900** at ``V=2`` and **1.000** at ``V=4`` -- the fully
+        polarised occupied/empty checkerboard.
+
+        Read it in one direction only.  A nonzero value is evidence the pair
+        carries real charge order; a zero is **not** evidence that one tensor
+        would have done, because it is a one-body probe and a dimerised or
+        bond-ordered state has identical on-site densities on both sublattices.
+        See :func:`sublattice_gap` for the full statement.
     """
     from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
     from tenax.algorithms._split_ctm_tensor_energy import (
