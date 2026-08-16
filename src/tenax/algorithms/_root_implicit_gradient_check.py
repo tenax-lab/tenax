@@ -90,9 +90,14 @@ class GradientErrorReport(NamedTuple):
         :meth:`summary` says which case applies.
 
       ``nan`` means no two steps probed commensurable directions.  That is an
-      absence of evidence, and it leaves the result **unresolved**: agreeing
-      relative errors cannot establish an error on their own, because they
-      share the gradient being tested.
+      absence of evidence, and it leaves the result **unresolved** and the
+      bound meaningless -- not the good case.  Agreeing relative errors cannot
+      establish an error on their own, because they share the gradient being
+      tested.
+
+    The convergence check is evidence, not proof: two steps can agree by
+    coincidence rather than by converging, and no pair can tell those apart.
+    More commensurable steps make it less likely.
 
     Collapsing those two into one "converged" flag is wrong: an *exact*
     gradient has every step at the roundoff floor, and calling that
@@ -123,7 +128,13 @@ class GradientErrorReport(NamedTuple):
                 f"gradient error {self.relative_error:.2e} not resolved "
                 f"against a floor of {self.unresolved_bound:.2e}"
             )
-            if self.fd_divergence > 0.25:  # nan compares False: no evidence
+            if self.fd_divergence != self.fd_divergence:  # nan
+                verdict += (
+                    "; no two steps probed commensurable directions, so the "
+                    "scan is indeterminate and this floor is not an accuracy "
+                    "claim"
+                )
+            elif self.fd_divergence > 0.25:
                 verdict += (
                     f"; the finite differences themselves disagree by "
                     f"{self.fd_divergence:.2e}, so the scan has not converged"
@@ -582,9 +593,6 @@ def measure_gradient_error(
     # and reported as perfect.  The smallest step carries the least truncation;
     # whether it was also small enough to be roundoff-dominated is exactly what
     # ``resolution`` below reports, so the honest answer survives either way.
-    best_rel, best_fd, best_h, _dist, best_analytic, _eff, _fdu = min(
-        results, key=lambda r: abs(r[2])
-    )
     direction_distortion = max(r[3] for r in results)
 
     # The scan's own noise floor: how far the finite differences sit from each
@@ -642,6 +650,21 @@ def measure_gradient_error(
         fd_divergence = (max(fdu) - min(fdu)) / max(max(abs(f) for f in fdu), 1e-300)
     else:
         fd_divergence = float("nan")
+
+    # Select from the group the evidence is about.  ``best_group`` can hold only
+    # the coarser steps while the smallest |h| sits outside it, so the reported
+    # number would be the one step the convergence check never looked at.
+    #
+    # This does not make a two-point check sound: two steps can agree by
+    # coincidence rather than convergence -- ``E(q) = q^3 - 102.4 q^5`` is
+    # constructed so h=0.5 and h=0.25 give identical normalised differences --
+    # and no pair can distinguish that from a converged sequence.  More
+    # commensurable steps reduce the chance; nothing removes it, and the
+    # docstring says so rather than implying the check is a proof.
+    evidence = [results[j] for j in best_group] if len(best_group) >= 2 else results
+    best_rel, best_fd, best_h, _dist, best_analytic, _eff, _fdu = min(
+        evidence, key=lambda r: abs(r[2])
+    )
     # A tolerated direction distortion is a floor on what this scan can resolve.
     # Every step carries the same one, so it never shows up in their spread: a
     # 0.5% drift with a near-zero spread would otherwise report a correct

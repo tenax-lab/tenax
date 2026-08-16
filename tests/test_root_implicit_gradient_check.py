@@ -1275,3 +1275,56 @@ def test_an_unconverged_bound_is_not_an_accuracy_claim():
         f"{report.summary()}"
     )
     assert "not converged" in report.summary(), report.summary()
+
+
+def test_the_reported_step_comes_from_the_group_the_evidence_is_about():
+    """``best_group`` can exclude the smallest |h|, leaving the report unchecked.
+
+    With ``base[0]=1e14`` and steps ``(0.5, 0.25, 0.125)`` the two coarse steps
+    realise one direction and the finest realises another, so the convergence
+    evidence covers the coarse pair while the reported number came from the
+    step nothing had examined.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e14
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    def affine(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x - base_j), jnp.ones((2, 2, 2, 2, 2))
+
+    report = measure_gradient_error(
+        affine,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(0.5, 0.25, 0.125),
+    )
+
+    assert report.step in (0.5, 0.25), (
+        "the reported step must come from the commensurable group the "
+        f"convergence check examined, got h={report.step:.3g}"
+    )
+
+
+def test_an_indeterminate_scan_says_so_rather_than_quoting_a_floor():
+    """NaN divergence is indeterminate, and the summary must not imply a bound."""
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e14
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    def half_too_high(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x - base_j), 1.5 * jnp.ones((2, 2, 2, 2, 2))
+
+    report = measure_gradient_error(
+        half_too_high,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(1.0, 1e-2),
+    )
+
+    assert np.isnan(report.fd_divergence), report.summary()
+    assert not report.is_resolved, report.summary()
+    assert "indeterminate" in report.summary(), report.summary()

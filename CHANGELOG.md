@@ -30,11 +30,12 @@
   takes any engine's `energy_and_grad` and finite-differences *that same
   callable*, needing no reference implementation. It reports two numbers:
   `relative_error`, and the `resolution` the step scan can actually resolve.
-  `is_resolved` says which regime you are in, and `False` has two causes: with a
-  small (or NaN) `fd_divergence` the gradient is simply accurate to about
-  `unresolved_bound` (= `fd_spread_tol * resolution`), which is the good case
-  and deliberately not reported as a failure; with a large one the scan did not
-  converge and the bound is not an accuracy claim at all. Nothing calls it automatically: it
+  `is_resolved` says which regime you are in, and `False` has three causes: only
+  a *small* `fd_divergence` means the gradient is accurate to about
+  `unresolved_bound` (= `fd_spread_tol * resolution`), the good case and
+  deliberately not a failure; a large one means the scan did not converge; and
+  NaN means no two steps probed commensurable directions, so the scan is
+  indeterminate. In the latter two the bound is not an accuracy claim at all. Nothing calls it automatically: it
   costs several CTM convergences, which is why #785 rejected an FD probe inside
   the optimizer loop. Run it once on a representative state before a long run.
 
