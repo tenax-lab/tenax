@@ -423,15 +423,21 @@ signs (fermionic anticommutation).
 
 ```python
 import jax
-from tenax import FPEPSConfig, spinless_fermion_gate, fpeps
+from tenax import FPEPSConfig, spinless_fermion_gate, fpeps, sublattice_gap
 
-config = FPEPSConfig(D=2, ctm_chi=8, num_imaginary_steps=200, dt=0.01)
+config = FPEPSConfig(D=2, ctm_chi=8, num_imaginary_steps=200, dt=0.05, V=4.0)
 gate = spinless_fermion_gate(config)
-energy, A_opt, env = fpeps(gate, config, key=jax.random.PRNGKey(0))
+energy, (A, B), (env_A, env_B) = fpeps(gate, config, key=jax.random.PRNGKey(0))
 print(f"Energy per site: {energy:.6f}")
+print(f"CDW gap: {sublattice_gap(A, B, env_A, env_B):.4f}")
 ```
 
 The `spinless_fermion_gate()` builds $H = -t \sum (c^\dagger_i c_j + \text{h.c.}) + V \sum n_i n_j$
 as a `SymmetricTensor` with `FermionParity` charges. The simple update uses
 `contract()` and `svd()` which automatically compute Koszul
-signs at every leg crossing. Energy is evaluated via dense CTM fallback.
+signs at every leg crossing.
+
+The state and environment are **pairs** (#878): the t-V ground state at finite
+`V` is a checkerboard charge-density wave, which is inherently two-site. See
+[Fermionic iPEPS (fPEPS)](fpeps.md) for `sublattice_gap`, the warm-restart form,
+and the two standing caveats (seed dependence, and #392's uncertified energy).

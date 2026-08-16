@@ -201,6 +201,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "tenax.algorithms.fermionic_ipeps",
         "spinless_fermion_gate",
     ),
+    "sublattice_gap": ("tenax.algorithms.fermionic_ipeps", "sublattice_gap"),
     # hotrg
     "HOTRGConfig": ("tenax.algorithms.hotrg", "HOTRGConfig"),
     "hotrg": ("tenax.algorithms.hotrg", "hotrg"),
@@ -528,6 +529,7 @@ __all__ = [
     "fpeps",
     "optimize_fpeps_ad",
     "spinless_fermion_gate",
+    "sublattice_gap",
     # iPEPS Excitations
     "ExcitationConfig",
     "ExcitationResult",

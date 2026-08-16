@@ -19,6 +19,7 @@ Reference:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -26,14 +27,19 @@ import numpy as np
 
 from tenax.algorithms._tensor_utils import safe_inv_lambda, scale_bond_axis
 from tenax.algorithms.ipeps_simple_update import (
+    BondWeights,
     _normalise_lambda,
     _simple_update_checkerboard_sweep,
+    _to_physical_pair,
 )
 from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+
+if TYPE_CHECKING:
+    from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
 
 
 @dataclass
@@ -231,30 +237,6 @@ def _absorb_lambdas(
     return result
 
 
-def _to_physical_fpeps_tensor(
-    gamma: SymmetricTensor, lam_h: jax.Array, lam_v: jax.Array
-) -> SymmetricTensor:
-    """Convert a Vidal ``Gamma`` to the physical fPEPS tensor.
-
-    ``sqrt(lambda)`` on all four legs, so that every bond of the lattice picks
-    up ``sqrt(lambda) * sqrt(lambda) = lambda`` exactly once -- both ends of a
-    bond contribute.  This is the fermionic counterpart of the bosonic
-    :func:`~tenax.algorithms.ipeps_simple_update._to_physical_tensor`.
-
-    ``fpeps()`` used :func:`_absorb_lambdas` here, which applies the *full*
-    ``lambda`` to each leg, so every bond of the returned state carried
-    ``lambda**2`` (#878).
-    """
-    out = scale_bond_axis(gamma, "u", jnp.sqrt(lam_v))
-    out = scale_bond_axis(out, "d", jnp.sqrt(lam_v))
-    out = scale_bond_axis(out, "l", jnp.sqrt(lam_h))
-    out = scale_bond_axis(out, "r", jnp.sqrt(lam_h))
-    norm = float(out.norm())
-    if norm > EPS:
-        out = out * (1.0 / norm)
-    return out
-
-
 def _fpeps_simple_update_horizontal(
     A: SymmetricTensor,
     gate: SymmetricTensor,
@@ -438,7 +420,8 @@ def _fpeps_simple_update(
     max_D: int,
     dt: float,
     steps: int,
-) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array, jax.Array]:
+    B: SymmetricTensor | None = None,
+) -> tuple[SymmetricTensor, SymmetricTensor, BondWeights]:
     """Run simple update for a given number of steps, on a **2-site** cell.
 
     Runs the shared checkerboard sweep rather than the 1-site routines above,
@@ -456,63 +439,132 @@ def _fpeps_simple_update(
 
     **The two sublattices are returned separately, and that is not cosmetic.**
     The t-V ground state is a charge-density wave at finite ``V`` -- charge
-    order on the checkerboard -- which no single tensor can represent. Measured
-    after 200 steps, the gauge-invariant sublattice gap (:func:`sublattice_gap`)
-    is 2.7e-01 at D=2/V=0, 5.0e-01 at D=3/V=0 and 1.4e+00 at D=2/V=4. Collapsing
-    the pair back to one tensor would hand the CTM a state the sweep never
-    produced.
+    order on the checkerboard -- which no single tensor can represent.  Ask
+    :func:`sublattice_gap` of the result to see whether a given run actually
+    produced one; the measured numbers are quoted on :func:`fpeps`, along with
+    the standing caveat that neither this nor #878 certifies the energy (#392).
+    Collapsing the pair back to one tensor would hand the CTM a state the sweep
+    never produced.
+
+    All **four** bond spectra are carried through as a
+    :class:`~tenax.algorithms.ipeps_simple_update.BondWeights`, not two.  The
+    two-lambda return this replaced made the answer depend on ``steps % 4``:
+    phases 0 and 2 both wrote ``lam_h``, so whichever ran last was stamped onto
+    both horizontal bonds by ``_to_physical_pair`` (#851).
+
+    ``independent_bonds`` is left at its default ``False``, so ``h_AB`` and
+    ``h_BA`` share a spectrum (and likewise the vertical pair).  That is a
+    deliberate choice for this Hamiltonian, not an oversight: the checkerboard
+    charge-density wave is symmetric under reflection through a site, which maps
+    ``A.r<->B.l`` onto ``B.r<->A.l``, so the two horizontal bonds carry the same
+    Schmidt spectrum in the state this sweep is trying to reach -- the CDW
+    breaks the *site* symmetry, which is what ``A != B`` expresses, and not the
+    bond symmetry.  Freeing the two bonds buys nothing there and costs the
+    robustness measured in
+    :attr:`~tenax.algorithms.ipeps_config.iPEPSConfig.su_independent_bond_lambdas`
+    (a dimerising direction that four free bonds can follow), which this path
+    can least afford: its survival is already seed-dependent at every ``D``.
 
     Args:
-        A:                Initial fPEPS site tensor; both sublattices start here.
+        A:                Initial fPEPS site tensor for sublattice A.
         hamiltonian_gate: 2-site Hamiltonian (SymmetricTensor).
         max_D:            Maximum bond dimension.
         dt:               Imaginary time step.
         steps:            Number of simple update steps.  The sweep runs four
                           phases per step, so each of the four bonds is evolved
                           once per step.
+        B:                Initial tensor for sublattice B.  Defaults to ``A``,
+                          which starts both sublattices from the same tensor;
+                          the sweep breaks the symmetry itself.
 
     Returns:
-        (A_opt, B_opt, lam_h, lam_v) after all steps.
+        ``(A_opt, B_opt, lambdas)`` after all steps, in Vidal form -- call
+        :func:`~tenax.algorithms.ipeps_simple_update._to_physical_pair` for the
+        tensors a CTM should contract.
     """
     gate = _trotter_gate(hamiltonian_gate, dt)
     # Four phases per step, so each of the four checkerboard bonds is evolved
     # once per step -- the same imaginary time per bond as the old two-phase
     # loop delivered for its two.
-    return _simple_update_checkerboard_sweep(A, A, gate, max_D, 4 * steps)
-
-
-def sublattice_gap(A: SymmetricTensor, B: SymmetricTensor) -> float:
-    """How far the two checkerboard sublattices are from coinciding.
-
-    The 1-site fPEPS ansatz and :func:`fermionic_ctm` describe a
-    translation-invariant state, so representing a checkerboard result with a
-    single tensor is faithful only when the two sublattices agree.
-
-    Compared through a gauge-invariant fingerprint rather than ``||A - B||``:
-    a simple-update tensor is defined only up to a bond gauge, so the naive norm
-    measures the gauge and not the state -- it stays ~1.7 even when the two are
-    provably the same physical tensor.  The spectrum of each leg's reduced
-    matrix is invariant under that gauge freedom.
-    """
-    gaps = []
-    for leg in ("u", "d", "l", "r"):
-        sa, sb = (
-            np.sort(np.linalg.svd(_leg_matrix(t, leg), compute_uv=False))[::-1]
-            for t in (A, B)
-        )
-        scale = max(float(sa[0]), 1e-300)
-        gaps.append(float(np.linalg.norm(sa - sb) / scale))
-    return max(gaps)
-
-
-def _leg_matrix(t: SymmetricTensor, leg: str) -> np.ndarray:
-    """``M[i,j] = sum_rest T[i,rest] conj(T[j,rest])`` for one virtual leg."""
-    labels = t.labels()
-    arr = np.asarray(t.todense())
-    arr = np.moveaxis(arr, labels.index(leg), 0).reshape(
-        arr.shape[labels.index(leg)], -1
+    return _simple_update_checkerboard_sweep(
+        A, A if B is None else B, gate, max_D, 4 * steps
     )
-    return arr @ arr.conj().T
+
+
+def sublattice_gap(
+    A: SymmetricTensor,
+    B: SymmetricTensor,
+    env_A: SplitCTMTensorEnv,
+    env_B: SplitCTMTensorEnv,
+) -> float:
+    """Does the returned pair really carry a charge-density wave?
+
+    The t-V ground state at finite ``V`` is a checkerboard CDW, which is
+    inherently two-site: it is the *only* reason :func:`fpeps` returns a pair
+    rather than one tensor.  This answers the question that makes the pair worth
+    returning -- do the two sublattices hold different physics, or has the sweep
+    collapsed to a uniform state that a single tensor would describe just as
+    well?
+
+    It is the trace distance between the two sublattices' one-site reduced
+    density matrices, obtained by tracing out one site of the two-site RDM the
+    energy is already computed from::
+
+        rho_A = Tr_B rho_AB     rho_B = Tr_A rho_AB
+        gap   = 0.5 * ||rho_A - rho_B||_1
+
+    Reading it: ``0`` means the two sites are locally identical (no CDW), ``1``
+    means they are perfectly distinguishable (the fully polarised
+    occupied/empty checkerboard).  For spinless fermions the RDMs are nearly
+    diagonal in the occupation basis, so the gap is essentially
+    ``|<n_A> - <n_B>|``, the CDW order parameter.
+
+    **This replaces a Gram-matrix fingerprint that did not measure the state.**
+    The singular values of ``M = T T†`` on one virtual leg are *not* invariant
+    under a PEPS bond gauge: under ``T -> G T`` the matrix goes to ``G M G†``,
+    whose spectrum moves unless ``G`` is unitary, and simple update's gauge is
+    not.  The same trap is why ``||A - B||`` is worthless here -- it stays ~1.7
+    when the two tensors are provably the same physical state.  A reduced
+    density matrix has no such freedom: the bond gauge cancels between the ket
+    and bra layers of the environment contraction.
+
+    It is also block-sparse throughout.  The Gram version called ``todense()``
+    on the full rank-5 site tensor -- a ``D**4 * d`` array -- once per leg on
+    each of the two sites, so eight of them per call, for an answer that is a
+    ``d``-by-``d`` matrix.  Nothing here densifies anything larger than the
+    ``d**4`` RDM.
+
+    Args:
+        A, B:           The two checkerboard site tensors, in **physical**
+                        (CTM-contractable) form -- the pair :func:`fpeps`
+                        returns, not the bare Vidal ``Gamma``.
+        env_A, env_B:   Their converged ``SplitCTMTensorEnv`` environments, the
+                        pair :func:`fpeps` returns alongside the state.
+
+    Returns:
+        The trace distance.  It is in ``[0, 1]`` by construction *for genuine
+        density matrices*, and a value outside that range is the environment
+        telling you its RDM is not PSD (#854 warns about the same thing on the
+        energy path) -- measured up to **1.07** at chi=4 on a deliberately
+        under-converged environment, against a few ``1e-4`` once the CTM has
+        settled.  It is deliberately **not** clipped: the excess is a usable
+        signal that the environment is too small or too few sweeps, and
+        clipping would hide it inside a plausible-looking 1.0.
+    """
+    from tenax.algorithms._split_ctm_tensor_energy import _rdm2x1_split_tensor_2site
+
+    # (s1_A_ket, s2_B_ket, s1_A_bra, s2_B_bra), already trace-normalised.
+    rho = np.asarray(_rdm2x1_split_tensor_2site(A, B, env_A, env_B))
+    rho_A = np.einsum("abcb->ac", rho)
+    rho_B = np.einsum("abad->bd", rho)
+    # The two-site RDM is trace-normalised, so both traces are 1 already; divide
+    # anyway so a caller handing in an unnormalised environment gets a distance
+    # between density matrices rather than a number scaled by the norm.
+    rho_A = rho_A / max(abs(np.trace(rho_A)), 1e-300)
+    rho_B = rho_B / max(abs(np.trace(rho_B)), 1e-300)
+    diff = rho_A - rho_B
+    diff = 0.5 * (diff + diff.conj().T)
+    return float(0.5 * np.sum(np.abs(np.linalg.eigvalsh(diff))))
 
 
 # ------------------------------------------------------------------ #
@@ -608,7 +660,9 @@ def compute_energy_fermionic_ctm(A, env, hamiltonian_gate):
 def fpeps(
     hamiltonian_gate: SymmetricTensor,
     config: FPEPSConfig,
-    initial_tensor: SymmetricTensor | None = None,
+    initial_tensor: SymmetricTensor
+    | tuple[SymmetricTensor, SymmetricTensor]
+    | None = None,
     key: jax.Array | None = None,
 ) -> tuple[float, tuple[SymmetricTensor, SymmetricTensor], object]:
     """Run fPEPS: simple update optimization + CTM energy evaluation.
@@ -619,45 +673,75 @@ def fpeps(
     ``dt``.  It also cannot represent the charge-density wave that is the t-V
     ground state at finite ``V``.
 
+    .. warning::
+        The **absolute energy is not certified** (#392), and this fix does not
+        change that.  ``H`` carries no chemical potential, so both the empty
+        state and the fully polarised checkerboard are exact ``E = 0``
+        eigenstates -- fixed points of imaginary time that are not the ground
+        state -- and the sweep is observed to settle on them: at 200 steps,
+        D=2, ``V=0``, it reports ``E = -6e-05`` where the half-filled answer is
+        about ``-1.6 t``.  :func:`sublattice_gap` tells you *which* state you
+        landed on; it does not tell you it is the ground state.
+
     Args:
         hamiltonian_gate: 2-site Hamiltonian as SymmetricTensor.
         config:           FPEPSConfig.
-        initial_tensor:   Optional initial site tensor; both sublattices start
-                          from it.  If None, random init.
+        initial_tensor:   Either an ``(A, B)`` pair -- the form this function
+                          returns, so its own output restarts it -- or a single
+                          tensor, which starts both sublattices from the same
+                          place and lets the sweep break the symmetry itself.
+                          ``None`` for a random start.
         key:              JAX random key (used if initial_tensor is None).
 
     Returns:
-        ``(energy, (A_opt, B_opt), (env_A, env_B))``.  **Changed in #878**: the
-        state and environment are now pairs.  ``sublattice_gap(A_opt, B_opt)``
-        says how far the two sublattices are from coinciding -- it is 0.2 to 1.4
-        on the measured configurations, so the pair is carrying real structure,
-        not a duplicated tensor.
+        ``(energy, (A, B), (env_A, env_B))``.  **Changed in #878**: the state
+        and environment are now pairs.
+
+        The pair is in **physical** form -- the tensors the returned
+        environments were converged on, each virtual leg already carrying
+        ``sqrt(lambda)`` -- so it round-trips: hand it straight back as
+        ``initial_tensor`` and the restart begins on the state that was
+        returned.  Returning the bare Vidal ``Gamma`` instead would not: the
+        bond weights live outside it, and a restart that reset them to ones
+        would silently continue from a different state.
+
+        :func:`sublattice_gap` on ``(A, B, env_A, env_B)`` says whether the pair
+        really is a checkerboard or has collapsed to a uniform state.  Measured
+        on an 8-step D=2 sweep at chi=4 it tracks the interaction that drives
+        the order, as it must: **0.037** at ``V=0`` (free fermions, no charge
+        order at all), **0.270** at ``V=1``, **0.900** at ``V=2`` and **1.000**
+        at ``V=4`` -- the fully polarised occupied/empty checkerboard.
     """
     from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
     from tenax.algorithms._split_ctm_tensor_energy import (
         compute_energy_split_ctm_tensor_2site,
     )
-    from tenax.algorithms.ipeps_simple_update import _to_physical_pair
 
-    if initial_tensor is not None:
-        A = initial_tensor
+    if isinstance(initial_tensor, tuple):
+        A, B = initial_tensor
+    elif initial_tensor is not None:
+        A, B = initial_tensor, initial_tensor
     else:
         if key is None:
             key = jax.random.PRNGKey(0)
-        A = _initialize_fpeps(config, key)
+        A = B = _initialize_fpeps(config, key)
 
-    A_opt, B_opt, lam_h, lam_v = _fpeps_simple_update(
+    A_opt, B_opt, lambdas = _fpeps_simple_update(
         A,
         hamiltonian_gate,
         max_D=config.D,
         dt=config.dt,
         steps=config.num_imaginary_steps,
+        B=B,
     )
 
     # sqrt(lambda) on each leg, so every bond of the lattice picks it up exactly
     # once.  The old code used ``_absorb_lambdas`` (full lambda), which squared
-    # every bond weight of the returned state (#878).
-    A_phys, B_phys = _to_physical_pair(A_opt, B_opt, lam_h, lam_v)
+    # every bond weight of the returned state (#878).  All four spectra are
+    # passed, not two: ``_to_physical_pair`` maps each leg to *its own* bond, so
+    # ``A.r`` and ``B.l`` get the same weight and ``A.l`` gets the other
+    # horizontal bond's rather than a copy of it (#851).
+    A_phys, B_phys = _to_physical_pair(A_opt, B_opt, lambdas)
 
     env_A, env_B = ctm_split_tensor_2site(
         A_phys,
@@ -671,4 +755,4 @@ def fpeps(
         A_phys, B_phys, env_A, env_B, hamiltonian_gate, d=d
     )
 
-    return float(energy), (A_opt, B_opt), (env_A, env_B)
+    return float(energy), (A_phys, B_phys), (env_A, env_B)

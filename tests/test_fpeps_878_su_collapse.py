@@ -37,14 +37,11 @@ jax.config.update("jax_enable_x64", True)
 
 
 def _run(D=2, steps=40, dt=0.05, V=0.0, seed=0):
-    """Returns ``(A, lam_h, lam_v)`` -- ``B`` dropped, these assert on bonds."""
+    """Returns ``(A, B, lambdas)`` -- the pair and all **four** bond spectra."""
     cfg = FPEPSConfig(D=D, t=1.0, V=V, dt=dt, num_imaginary_steps=steps)
     H = spinless_fermion_gate(cfg)
     A = _initialize_fpeps(cfg, jax.random.PRNGKey(seed))
-    A_opt, _B_opt, lam_h, lam_v = _fpeps_simple_update(
-        A, H, max_D=D, dt=dt, steps=steps
-    )
-    return A_opt, lam_h, lam_v
+    return _fpeps_simple_update(A, H, max_D=D, dt=dt, steps=steps)
 
 
 @pytest.mark.parametrize("steps", [10, 40])
@@ -53,10 +50,15 @@ def test_the_bond_spectrum_does_not_collapse_to_zero(steps):
 
     ``> 0`` rather than ``isfinite``: the failure produced a finite, entirely
     zero answer, so every finiteness check passed on it.
-    """
-    A, lam_h, lam_v = _run(steps=steps)
 
-    for name, lam in (("lam_h", lam_h), ("lam_v", lam_v)):
+    All four checkerboard bonds are checked, not one horizontal and one
+    vertical: with two spectra the sweep's phases 2 and 3 overwrote the ones
+    phases 0 and 1 produced, so a check on ``lam_h`` alone never saw the
+    ``B.r<->A.l`` bond at all (#851).
+    """
+    A, B, lambdas = _run(steps=steps)
+
+    for name, lam in zip(lambdas._fields, lambdas, strict=True):
         arr = np.asarray(lam)
         assert float(np.max(arr)) > 0.0, (
             f"{name} collapsed to all-zero after {steps} steps -- #878"
@@ -65,7 +67,8 @@ def test_the_bond_spectrum_does_not_collapse_to_zero(steps):
             f"{name} = {arr} after {steps} steps: a dead bond direction is how "
             f"the lambda**1.5 runaway starts (#878)"
         )
-    assert float(A.norm()) > 0.0, "the site tensor collapsed to zero"
+    for name, site in (("A", A), ("B", B)):
+        assert float(site.norm()) > 0.0, f"site tensor {name} collapsed to zero"
 
 
 def test_the_lambda_normalisation_is_relative_not_additive():
@@ -98,31 +101,43 @@ def test_the_physical_tensor_carries_each_bond_weight_once():
     """A bond must pick up ``lambda``, not ``lambda**2``.
 
     Both ends of every bond contribute, so the physical tensor takes
-    ``sqrt(lambda)`` on each leg -- exactly what the bosonic
-    ``_to_physical_tensor`` does.  Absorbing the full ``lambda`` squares every
+    ``sqrt(lambda)`` on each leg.  Absorbing the full ``lambda`` squares every
     bond weight of the lattice.
+
+    Built through the shared ``_to_physical_pair`` rather than a fermionic copy
+    of it: a two-lambda fermionic helper cannot say which of the two horizontal
+    bonds ``A.l`` carries, and stamping one onto both is #851.  The reference
+    below therefore names each leg's bond explicitly.
     """
-    from tenax.algorithms.fermionic_ipeps import _to_physical_fpeps_tensor
+    from tenax.algorithms.ipeps_simple_update import _to_physical_pair
 
     D = 2
-    A, lam_h, lam_v = _run(D=D, steps=20)
-    phys = _to_physical_fpeps_tensor(A, lam_h, lam_v)
+    A, B, lam = _run(D=D, steps=20)
+    A_phys, B_phys = _to_physical_pair(A, B, lam)
 
-    assert float(phys.norm()) > 0.0, "physical tensor collapsed to zero"
+    for name, t in (("A", A_phys), ("B", B_phys)):
+        assert float(t.norm()) > 0.0, f"physical tensor {name} collapsed to zero"
 
     # sqrt, not full lambda: scaling a leg by lam instead of sqrt(lam) changes
     # the tensor unless lam is all ones, so compare against the explicit build.
+    # A and B are mirror images -- A.r and B.l are the *same* bond -- so the leg
+    # to bond map is not the same for the two sites.
     from tenax.core._tensor_utils import scale_bond_axis
 
-    want = scale_bond_axis(A, "u", jnp.sqrt(lam_v))
-    want = scale_bond_axis(want, "d", jnp.sqrt(lam_v))
-    want = scale_bond_axis(want, "l", jnp.sqrt(lam_h))
-    want = scale_bond_axis(want, "r", jnp.sqrt(lam_h))
-    want = want * (1.0 / float(want.norm()))
-
-    got = np.asarray(phys.todense())
-    ref = np.asarray(want.todense())
-    np.testing.assert_allclose(got, ref, rtol=1e-12, atol=1e-14)
+    for got_t, legs in (
+        (A_phys, {"u": lam.v_BA, "d": lam.v_AB, "l": lam.h_BA, "r": lam.h_AB}),
+        (B_phys, {"u": lam.v_AB, "d": lam.v_BA, "l": lam.h_AB, "r": lam.h_BA}),
+    ):
+        want = A if got_t is A_phys else B
+        for leg, weight in legs.items():
+            want = scale_bond_axis(want, leg, jnp.sqrt(weight))
+        want = want * (1.0 / float(want.norm()))
+        np.testing.assert_allclose(
+            np.asarray(got_t.todense()),
+            np.asarray(want.todense()),
+            rtol=1e-12,
+            atol=1e-14,
+        )
 
 
 @pytest.mark.xfail(
@@ -149,9 +164,9 @@ def test_a_nominally_D3_state_uses_its_third_bond_direction():
     it by choosing a luckier seed -- that is precisely the mistake that made
     #869's diagnosis narrower than its title.
     """
-    _A, lam_h, _lam_v = _run(D=3, steps=40)
+    _A, _B, lam = _run(D=3, steps=40)
 
-    arr = np.sort(np.asarray(lam_h))[::-1]
+    arr = np.sort(np.asarray(lam.h_AB))[::-1]
     arr = arr / arr[0]
     assert arr[2] > 1e-3, (
         f"D=3 bond spectrum {arr} has a negligible third direction -- the "

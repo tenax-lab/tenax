@@ -291,12 +291,15 @@ class TestFPEPSSimpleUpdate:
         key = jax.random.PRNGKey(0)
         A = _initialize_fpeps(cfg, key)
         H = spinless_fermion_gate(cfg)
-        # #878: 2-site checkerboard, so both sublattices are returned.
-        A_opt, B_opt, lam_h, lam_v = _fpeps_simple_update(
+        # #878: 2-site checkerboard, so both sublattices are returned, and
+        # #851: all four bond spectra, as a BondWeights.
+        A_opt, B_opt, lambdas = _fpeps_simple_update(
             A, H, max_D=cfg.D, dt=cfg.dt, steps=5
         )
         assert isinstance(A_opt, SymmetricTensor)
+        assert isinstance(B_opt, SymmetricTensor)
         assert jnp.all(jnp.isfinite(A_opt.todense()))
+        assert set(lambdas._fields) == {"h_AB", "h_BA", "v_AB", "v_BA"}
 
     def test_simple_update_changes_tensor(self):
         """20 steps of imaginary time evolution should change A."""
@@ -306,7 +309,7 @@ class TestFPEPSSimpleUpdate:
         A_before = A.todense()
         H = spinless_fermion_gate(cfg)
         # #878: 2-site checkerboard, so both sublattices are returned.
-        A_opt, B_opt, lam_h, lam_v = _fpeps_simple_update(
+        A_opt, B_opt, _lambdas = _fpeps_simple_update(
             A, H, max_D=cfg.D, dt=cfg.dt, steps=20
         )
         A_after = A_opt.todense()
@@ -326,7 +329,7 @@ class TestFPEPSSimpleUpdate:
         cfg = FPEPSConfig(D=D, t=1.0, V=0.0, dt=0.01)
         A = _initialize_fpeps(cfg, jax.random.PRNGKey(0))
         H = spinless_fermion_gate(cfg)
-        A_opt, B_opt, _, _ = _fpeps_simple_update(A, H, max_D=cfg.D, dt=cfg.dt, steps=5)
+        A_opt, B_opt, _ = _fpeps_simple_update(A, H, max_D=cfg.D, dt=cfg.dt, steps=5)
         # #558's contract holds for BOTH sublattices now, not just one.
         for name, site in (("A", A_opt), ("B", B_opt)):
             for axis_label in ("u", "d", "l", "r"):

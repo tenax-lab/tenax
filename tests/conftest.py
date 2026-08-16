@@ -94,6 +94,15 @@ _FILE_MARKERS = {
     # 10/20/40-step sweeps here run 280 s locally -- two orders of magnitude
     # above anything else in `core`.
     "test_fpeps_878_su_collapse.py": "algorithm",
+    # The fPEPS sublattice diagnostic (#881 review).  ``fpeps()`` returns two
+    # tensors only because the t-V ground state is a checkerboard CDW, and this
+    # is the probe that says whether a given run produced one -- a wrong answer
+    # from it is a wrong answer about the whole reason the return type changed.
+    # The first version compared leg Gram spectra, which are not gauge
+    # invariant, so it reported a difference between representations; these pin
+    # the replacement against an explicit non-unitary bond gauge.  Same cost
+    # bracket as its `algorithm` neighbours (short D=2 sweeps + chi=8 CTM).
+    "test_fpeps_881_sublattice_gap.py": "algorithm",
     # Root-implicit AD wiring (#715): dispatch + guard surface only, no
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).

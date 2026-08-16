@@ -1,24 +1,38 @@
 #!/usr/bin/env python3
-"""Gradient-free spinless-fermion (t-V) forward-CTM pipeline + collapse probe.
+"""Gradient-free spinless-fermion (t-V) forward-CTM pipeline.
 
-Goal: SU -> forward FermionParity CTM -> energy, with NO autodiff (sidesteps
-the large-D symmetric-AD wall).  The CTM+energy *machinery* is single-site and
-verified sound here; the blocker is the fermionic simple update, which collapses
-the state.
+Goal: 2-site checkerboard simple update -> forward FermionParity split-CTM ->
+energy, with NO autodiff (sidesteps the large-D symmetric-AD wall).
 
-What this script demonstrates (all block-sparse FermionParity SymmetricTensors):
+This script started life as the reproducer for #878, where the fermionic simple
+update drove the state to exactly 0.0 by step 10 and ``fpeps()`` reported a
+perfectly finite energy of 0.0 on the corpse.  That is fixed, so it is now a
+sweep over SU step counts that prints what the run actually produced:
 
-  * ``steps=0`` (fresh random init, just normalized): ``fermionic_ctm`` +
-    ``compute_energy_fermionic_ctm`` return a finite, NONZERO energy -> the
-    forward CTM + energy path itself is correct.
-  * ``steps>=2``: the SU-updated tensor still has unit norm but the CTM energy
-    collapses to exactly 0.0 (environment/RDM structural zero).
-  * ``steps>=~10``: the SU output tensor norm itself collapses to 0.
+  * ``E`` -- energy per site from the coupled ``(env_A, env_B)`` fixed point.
+  * ``gap`` -- :func:`~tenax.sublattice_gap`, the trace distance between the two
+    sublattices' one-site reduced density matrices.  This is the charge-density
+    wave order parameter: ~0 means the sweep collapsed to a uniform state that a
+    single tensor would describe just as well, and a nonzero value means the
+    returned pair is carrying real checkerboard structure.  Expect it to grow
+    with ``V``.
 
-Caveat this exposes: ``fpeps(H, cfg)`` runs SU then CTM and returns the energy,
-but the shipped test only asserts ``jnp.isfinite(energy)`` -- and 0.0 is finite,
-so the collapse is not caught.  Treat this script as a reproducer, not a
-converged t-V benchmark.
+Two things this will show you that are **not** bugs in the script:
+
+  * The sweep is **seed-dependent**.  ``--seed 3`` (the default) survives at
+    D=2; ``--seed 1`` does not -- its bond spectrum is already ``[1, 1.0e-02]``
+    after two steps and ``[1, 3.5e-07]`` after five, and everything downstream
+    reads 0 from then on.  Over seeds 0-4 at 600 steps the surviving fraction is
+    4/5 at D=2, 2/5 at D=3, 4/5 at D=4, 4/5 at D=6.
+  * The **energy is not certified** (#392).  ``H`` has no chemical potential, so
+    the empty state and the fully polarised checkerboard are both exact ``E = 0``
+    eigenstates -- fixed points of imaginary time that are not the ground state
+    -- and the sweep settles on them.  Read ``gap`` to see which one you got;
+    do not read ``E`` as a variational energy.
+
+The collapse guards themselves live in ``tests/test_fpeps_878_su_collapse.py``
+and assert on the bond *spectrum*, never the norm -- the update normalises last,
+so ``|A|`` reads a healthy 1.0 right up to the step where it is exactly 0.
 
 Usage::
 
@@ -29,6 +43,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import dataclasses
 
 import jax
 
@@ -36,33 +51,20 @@ jax.config.update("jax_enable_x64", True)
 
 from tenax.algorithms.fermionic_ipeps import (  # noqa: E402
     FPEPSConfig,
-    _absorb_lambdas,
-    _fpeps_simple_update,
-    _initialize_fpeps,
-    _normalize_tensor,
-    compute_energy_fermionic_ctm,
-    fermionic_ctm,
+    fpeps,
     spinless_fermion_gate,
+    sublattice_gap,
 )
 
 
-def energy_after_su(A0, H, cfg, steps):
-    """Run `steps` of fermionic SU, then forward CTM + energy.
+def run(H, cfg, steps, key):
+    """Run `steps` of 2-site fermionic SU, then forward split-CTM + energy.
 
-    Returns (norm_after_su, energy) — energy is None if the tensor collapsed.
+    Returns ``(energy, gap)``.
     """
-    if steps == 0:
-        A_abs = _normalize_tensor(A0)
-    else:
-        A_opt, lam_h, lam_v = _fpeps_simple_update(
-            A0, H, max_D=cfg.D, dt=cfg.dt, steps=steps
-        )
-        A_abs = _normalize_tensor(_absorb_lambdas(A_opt, lam_h, lam_v))
-    n = float(A_abs.norm())
-    if n == 0.0:
-        return n, None
-    env = fermionic_ctm(A_abs, cfg)
-    return n, float(compute_energy_fermionic_ctm(A_abs, env, H))
+    cfg = dataclasses.replace(cfg, num_imaginary_steps=steps)
+    energy, (A, B), (env_A, env_B) = fpeps(H, cfg, key=key)
+    return energy, sublattice_gap(A, B, env_A, env_B)
 
 
 def main() -> None:
@@ -72,7 +74,9 @@ def main() -> None:
     p.add_argument("--t", type=float, default=1.0, help="hopping")
     p.add_argument("--dt", type=float, default=0.05)
     p.add_argument("--chi", type=int, default=8)
-    p.add_argument("--seed", type=int, default=1)
+    # Seed 3 survives at D=2; seed 1 does not.  See the module docstring -- this
+    # is a documented property of the sweep, not a choice that hides one.
+    p.add_argument("--seed", type=int, default=3)
     p.add_argument(
         "--steps-sweep",
         nargs="+",
@@ -92,26 +96,18 @@ def main() -> None:
         ctm_conv_tol=1e-8,
     )
     H = spinless_fermion_gate(cfg)
-    A0 = _initialize_fpeps(cfg, jax.random.PRNGKey(args.seed))
+    key = jax.random.PRNGKey(args.seed)
 
-    print("\nSpinless t-V forward-CTM: fermionic SU-collapse probe")
+    print("\nSpinless t-V forward split-CTM, 2-site checkerboard")
     print(f"D={args.D}  t={args.t}  V={args.V}  dt={args.dt}  chi={args.chi}")
-    print(f"fresh init |A0| = {float(A0.norm()):.4f}")
     print("-" * 56)
-    print(f"{'SU steps':>8}  {'|A_abs|':>9}  {'E':>12}   note")
+    print(f"{'SU steps':>8}  {'E':>12}  {'CDW gap':>9}")
     print("-" * 56)
     for steps in args.steps_sweep:
-        n, E = energy_after_su(A0, H, cfg, steps)
-        if E is None:
-            print(f"{steps:>8}  {n:>9.4f}  {'-':>12}   tensor collapsed to 0")
-        else:
-            note = "OK (nonzero)" if abs(E) > 1e-9 else "energy collapsed to 0"
-            print(f"{steps:>8}  {n:>9.4f}  {E:>12.6f}   {note}")
+        energy, gap = run(H, cfg, steps, key)
+        print(f"{steps:>8}  {energy:>12.6f}  {gap:>9.4f}")
     print("-" * 56)
-    print(
-        "Expected: steps=0 nonzero (machinery OK); steps>=2 energy->0; "
-        "steps>=~10 norm->0."
-    )
+    print("gap ~ 0 => uniform state; gap > 0 => genuine checkerboard CDW.")
 
 
 if __name__ == "__main__":
