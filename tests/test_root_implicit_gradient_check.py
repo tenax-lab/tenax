@@ -787,14 +787,19 @@ def test_an_unusable_spread_tolerance_is_rejected(bad):
         measure_gradient_error(_exact_pair(), _quartic_state(), fd_spread_tol=bad)
 
 
-def test_zero_spread_tolerance_is_allowed():
-    """Zero is degenerate but coherent: any nonzero error counts as resolved."""
-    report = measure_gradient_error(
-        _exact_pair(1.5), _quartic_state(), fd_spread_tol=0.0
-    )
+def test_zero_spread_tolerance_is_refused():
+    """Zero bypasses the floor, including the divergence folded into it.
 
-    assert report.is_resolved, report.summary()
-    assert report.relative_error == pytest.approx(0.5, rel=1e-3), report.summary()
+    ``resolved = rel > tol * resolution`` with ``tol = 0`` marks every nonzero
+    error resolved however badly the differences diverge: the exact gradient of
+    ``sum(x**3)`` at zero has ``relative_error`` 1 and ``fd_divergence`` 0.9999
+    and would be declared definitively 100% wrong. It was legal until the
+    divergence moved into the floor and the separate convergence gate went
+    away -- so this is a consequence of that simplification, not an oversight
+    in it.
+    """
+    with pytest.raises(ValueError, match="strictly positive"):
+        measure_gradient_error(_exact_pair(1.5), _quartic_state(), fd_spread_tol=0.0)
 
 
 def test_the_advertised_cost_matches_the_number_of_evaluations():
@@ -1489,3 +1494,35 @@ def test_the_report_does_not_depend_on_the_order_of_steps():
     assert forward.step == pytest.approx(0.125), (
         f"ties must go to the finest step, got h={forward.step:.3g}"
     )
+
+
+def test_a_complex_energy_is_refused_rather_than_reduced_to_its_real_part():
+    """``float(np.real(...))`` would validate the gradient of Re(E) alone.
+
+    ``E = sum(x**2) + 1j*sum(x)`` with the gradient ``2x`` reports as accurate
+    although that gradient does not differentiate the callable's output.
+    """
+
+    def complex_energy(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**2) + 1j * jnp.sum(x), 2.0 * x
+
+    with pytest.raises(ValueError, match="imaginary part"):
+        measure_gradient_error(complex_energy, _quartic_state())
+
+
+def test_roundoff_sized_imaginary_residue_is_tolerated():
+    """A real objective computed in complex arithmetic is still real.
+
+    The guard has to be relative and well above roundoff, or every complex-dtype
+    CTM energy would be refused for carrying a ~1e-16 residue.
+    """
+
+    def nearly_real(t):
+        x = jnp.asarray(t.todense())
+        e = jnp.sum(x**2)
+        return e + 1j * e * 1e-15, 2.0 * x
+
+    report = measure_gradient_error(nearly_real, _quartic_state())
+
+    assert report.relative_error < 1e-6, report.summary()

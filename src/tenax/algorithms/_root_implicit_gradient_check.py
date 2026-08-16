@@ -152,6 +152,34 @@ class GradientErrorReport(NamedTuple):
         )
 
 
+def _reject_complex_energy(energy_arr: np.ndarray, where: str) -> None:
+    """A genuinely complex energy is not what a directional derivative measures.
+
+    ``float(np.real(...))`` would silently drop the imaginary part and validate
+    the gradient of ``Re(E)`` alone: ``E = sum(x**2) + 1j*sum(x)`` with the
+    gradient ``2x`` then reports as accurate although that gradient does not
+    differentiate the callable's output.  A physical energy computed in complex
+    arithmetic carries only roundoff there, so the threshold is relative and
+    well above it.
+    """
+    imag = (
+        float(np.max(np.abs(np.imag(energy_arr))))
+        if np.iscomplexobj(energy_arr)
+        else 0.0
+    )
+    if imag == 0.0:
+        return
+    scale = max(float(np.max(np.abs(np.real(energy_arr)))), imag)
+    if imag > 1e-10 * scale:
+        raise ValueError(
+            f"the energy at {where} has a non-zero imaginary part "
+            f"({imag:.3e}, {imag / max(scale, 1e-300):.1e} relative), so it is "
+            "not a real objective. Taking its real part would validate the "
+            "gradient of Re(E) alone while reporting it as the gradient of the "
+            "callable. Return a real energy, or the real part explicitly."
+        )
+
+
 def _unit_direction(shape, seed: int, *, complex_valued: bool) -> np.ndarray:
     """A random unit direction, complex when the state is.
 
@@ -254,16 +282,19 @@ def measure_gradient_error(
     # disagreement then satisfies ``best_rel > tol * 0``, and a one-step
     # truncation artifact is reported as a resolved measurement -- defeating
     # the guard this check exists to be.
-    if not (np.isfinite(fd_spread_tol) and fd_spread_tol >= 0.0):
+    if not (np.isfinite(fd_spread_tol) and fd_spread_tol > 0.0):
         # This number decides which branch the report is read as.  Negative
         # makes ``best_rel > tol * resolution`` true for essentially any error,
         # so everything looks resolved; NaN makes it false always, so every
         # result lands in the documented "better than resolvable" branch.
         raise ValueError(
-            f"fd_spread_tol must be finite and non-negative, got "
+            f"fd_spread_tol must be finite and strictly positive, got "
             f"{fd_spread_tol!r}. It controls how the report is interpreted: a "
-            "negative value marks any error resolved, and NaN marks every one "
-            "unresolved, which is the branch that reads as good news."
+            "negative value marks any error resolved, NaN marks every one "
+            "unresolved (the branch that reads as good news), and zero "
+            "bypasses the floor altogether -- including the divergence folded "
+            "into it, so an exact gradient on an unconverged scan would be "
+            "called definitively wrong."
         )
     magnitudes = {abs(float(h)) for h in steps}
     if 0.0 in magnitudes:
@@ -380,6 +411,7 @@ def measure_gradient_error(
     # projection accepts ``complex(finite, nan)``: every energy in the scan
     # could be non-finite while the report reads as ordinary.
     e0_arr = np.asarray(energy0)
+    _reject_complex_energy(e0_arr, "the unperturbed state")
     if not np.all(np.isfinite(e0_arr)):
         # Checked for the same reason every perturbed energy is: the map has to
         # be defined at the state whose gradient is being measured.  Without
@@ -488,6 +520,7 @@ def measure_gradient_error(
         energy, _g = energy_and_grad(shifted)
         energy_arr = np.asarray(energy)
         energy_dtypes.append(energy_arr.dtype)
+        _reject_complex_energy(energy_arr, f"the perturbed state (t={t:.1e})")
         # Whole scalar first -- see the unperturbed check above.  ``np.real``
         # applied before this would let ``complex(finite, nan)`` through.
         if not np.all(np.isfinite(energy_arr)):
