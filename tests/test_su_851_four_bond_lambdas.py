@@ -359,3 +359,83 @@ def test_the_config_default_is_off():
     from tenax.algorithms.ipeps_config import iPEPSConfig
 
     assert iPEPSConfig().su_independent_bond_lambdas is False
+
+
+# --------------------------------------------------------------------------- #
+# The option has to *reach* the sweep, and must not disturb what was already    #
+# reachable.  Both were found by review on #880, not by the tests above.        #
+# --------------------------------------------------------------------------- #
+
+
+def test_adding_the_option_did_not_move_any_positional_config_slot():
+    """``iPEPSConfig(D, steps, dt, ctm)`` still means what it always meant.
+
+    The option first landed in slot 4, between ``dt`` and ``ctm``.  A caller
+    using the previously valid positional form then bound their ``CTMConfig``
+    to a boolean field -- and because a ``CTMConfig`` is truthy, that silently
+    *enabled* independent bonds while dropping every CTM setting, with no
+    exception anywhere.  It is keyword-only now, at the end of the class.
+    """
+    from dataclasses import fields
+
+    from tenax import CTMConfig, iPEPSConfig
+
+    positional = [f.name for f in fields(iPEPSConfig) if f.kw_only is False]
+    assert positional[:4] == ["max_bond_dim", "num_imaginary_steps", "dt", "ctm"], (
+        f"positional slots moved: {positional[:4]} -- an existing "
+        f"iPEPSConfig(D, steps, dt, ctm) call now binds different fields"
+    )
+    assert "su_independent_bond_lambdas" not in positional, (
+        "su_independent_bond_lambdas must stay keyword-only; giving it a "
+        "positional slot is what caused the silent rebinding in the first place"
+    )
+
+    cfg = iPEPSConfig(2, 100, 0.01, CTMConfig(chi=7))
+    assert cfg.ctm.chi == 7, "the 4th positional argument is no longer `ctm`"
+    assert cfg.su_independent_bond_lambdas is False
+
+
+def test_the_ad_warm_start_inherits_the_bond_mode(monkeypatch):
+    """``optimize_gs_ad`` derives its own config for the SU initialisation.
+
+    It builds a fresh ``iPEPSConfig`` rather than passing the caller's through,
+    so every field it needs has to be forwarded by hand.  This one decides what
+    *state* the warm start produces: dropping it handed the optimizer a
+    shared-spectrum initialisation for precisely the dimerised case the option
+    exists to represent.
+
+    The recorder raises immediately, so this pins the plumbing without running
+    an optimization -- the mechanism, not the convergence.
+    """
+    import tenax.algorithms.ipeps as ipeps_mod
+    from tenax import CTMConfig, iPEPSConfig
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    class _Stop(Exception):
+        pass
+
+    seen = {}
+
+    def _recorder(gate, AB_init, su_config):
+        seen["flag"] = su_config.su_independent_bond_lambdas
+        raise _Stop
+
+    monkeypatch.setattr(ipeps_mod, "ipeps", _recorder)
+
+    for requested in (True, False):
+        seen.clear()
+        cfg = iPEPSConfig(
+            max_bond_dim=2,
+            num_imaginary_steps=4,
+            dt=0.05,
+            ctm=CTMConfig(chi=4, max_iter=2),
+            unit_cell="2site",
+            gs_num_steps=1,
+            su_independent_bond_lambdas=requested,
+        )
+        with pytest.raises(_Stop):
+            optimize_gs_ad(_heisenberg_gate(), None, cfg)
+        assert seen["flag"] is requested, (
+            f"asked for su_independent_bond_lambdas={requested}, the SU warm "
+            f"start got {seen['flag']} -- the derived config dropped it"
+        )

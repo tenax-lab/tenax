@@ -93,6 +93,15 @@
   transcription of the pre-#851 loop at 9 step counts × 2 bond dimensions,
   rather than assuming it.
 
+  The option is **keyword-only** and declared at the end of `iPEPSConfig`, so
+  it occupies no positional slot. It first landed between `dt` and `ctm`, where
+  the previously valid `iPEPSConfig(D, steps, dt, CTMConfig(chi=10))` bound the
+  `CTMConfig` to a boolean field — truthy, so it enabled independent bonds
+  *and* silently discarded the CTM settings without raising. `optimize_gs_ad`
+  derives its own config for the simple-update warm start and now forwards the
+  setting; without it, opting in gave the optimizer a shared-spectrum
+  initialisation for exactly the dimerised case the option exists to represent.
+
   `BondWeights` moved from `tenax.algorithms.ipeps_bp_gauge` to
   `tenax.algorithms.ipeps_simple_update`, which now owns the four-bond type
   instead of both modules defining structurally identical `NamedTuple`s. The
