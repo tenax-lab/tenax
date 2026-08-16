@@ -535,7 +535,9 @@ report = measure_gradient_error(
 )
 print(report.summary())
 # `relative_error` is a measurement only when `is_resolved`; otherwise the
-# gradient is accurate to about `resolution`, which is the good case.
+# gradient is accurate to about `unresolved_bound` (= `fd_spread_tol *
+# resolution`, the quantity actually compared against), which is the good
+# case. Quoting `resolution` alone overstates it by `fd_spread_tol`.
 
 # Quasiparticle excitations (Ponsioen et al. 2022)
 momenta = make_momentum_path("brillouin", num_points=20)

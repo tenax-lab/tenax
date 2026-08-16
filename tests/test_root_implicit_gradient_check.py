@@ -976,3 +976,30 @@ def test_the_unresolved_summary_quotes_the_bound_it_compared_against():
     assert report.unresolved_bound == pytest.approx(10.0 * report.resolution)
     assert f"{report.unresolved_bound:.2e}" in report.summary()
     assert "below the measurement resolution" not in report.summary()
+
+
+def test_the_displacement_is_validated_without_using_the_gradient():
+    """The experiment cannot be validated by the quantity it is testing.
+
+    The projection check weights by ``grad_arr``, so a gradient that is wrong
+    by being *zero* on a frozen coordinate makes both projections omit it and
+    the drift reads as ~0. Measured on this state: 3.1e-02 with the true
+    gradient, 5.4e-12 with the returned one, while the gradient-free norm check
+    reads 1.8e-01 either way.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e20
+
+    def centred_affine_with_hole(t):
+        x = jnp.asarray(t.todense()).reshape(-1)
+        g = np.ones(n)
+        g[0] = 0.0  # wrong exactly where the step is about to freeze
+        return jnp.sum(x - jnp.asarray(base)), jnp.asarray(g).reshape((2, 2, 2, 2, 2))
+
+    with pytest.raises(ValueError, match="rounds away"):
+        measure_gradient_error(
+            centred_affine_with_hole,
+            _wrap(base.reshape((2, 2, 2, 2, 2))),
+            direction=np.ones((2, 2, 2, 2, 2)),
+        )

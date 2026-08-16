@@ -448,6 +448,32 @@ def measure_gradient_error(
         # after cancellation (contributions 1e-13, 1, -1+5e-14 sum to 1.5e-13
         # while the L1 total is 2). The projection is the quantity that has to
         # survive, so it is the one to test.
+        # FIRST, gradient-free: did the perturbation go where it was asked?
+        # The projection test below weights by ``grad_arr``, which is the value
+        # UNDER TEST -- so a gradient that is wrong by being *zero* on a frozen
+        # coordinate makes both projections omit it and the check passes.
+        # Measured on a centred affine map with ``base[0]=1e20`` and an
+        # all-ones direction: with the true gradient the projection drift is
+        # 3.1e-02, with a returned gradient whose first entry is 0 it is
+        # 5.4e-12, while this direction check reads 1.8e-01 either way.  The
+        # experiment cannot be validated by the quantity it is testing.
+        step_norm = float(np.linalg.norm(intended))
+        direction_drift = float(np.linalg.norm(realised - intended)) / max(
+            step_norm, 1e-300
+        )
+        if direction_drift > 1e-2:
+            raise _StepUnusable(
+                f"the step h={t:.1e} rounds away against this state: the "
+                f"realised displacement differs from the intended direction by "
+                f"{direction_drift:.2e} in norm, so the difference does not "
+                f"follow the direction g.v is taken along. The state's largest "
+                f"entry is {float(np.max(np.abs(base))):.2e}; use steps large "
+                "enough to change it."
+            )
+        # SECOND, gradient-weighted: a coordinate can be negligible in the
+        # direction yet dominate ``g.v`` (tiny ``v_i``, huge ``g_i``), where the
+        # norm check above reads ~1e-14 and sees nothing.  The two catch
+        # disjoint failures and both are needed.
         proj_intended = float(np.real(np.sum(grad_arr * intended)))
         proj_realised = float(np.real(np.sum(grad_arr * realised)))
         drift = abs(proj_realised - proj_intended)
