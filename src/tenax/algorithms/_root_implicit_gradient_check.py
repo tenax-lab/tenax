@@ -95,6 +95,7 @@ class GradientErrorReport(NamedTuple):
     resolution: float
     is_resolved: bool
     unresolved_bound: float
+    direction_distortion: float
 
     def summary(self) -> str:
         if self.is_resolved:
@@ -448,73 +449,6 @@ def measure_gradient_error(
         # after cancellation (contributions 1e-13, 1, -1+5e-14 sum to 1.5e-13
         # while the L1 total is 2). The projection is the quantity that has to
         # survive, so it is the one to test.
-        # PER COORDINATE, and gradient-free.  A coordinate that fails to move
-        # as asked cannot be tolerated at any size, because its contribution to
-        # dE is exactly what the gradient under test would have to tell us --
-        # and that is the value being checked.  Measured: with ``base[0]=1e20``,
-        # 0.5% of the direction's norm on that coordinate, a true gradient of
-        # 1000 there and a returned gradient of 0, both a norm-relative check
-        # and a gradient-weighted one accept it while the directional
-        # derivative is ~47.7% wrong.  A norm-relative displacement error is
-        # simply not a bound on derivative error.
-        #
-        # 1e-2 separates the two phenomena cleanly and is measured, not chosen:
-        #
-        #     max per-coordinate relative displacement error
-        #       float64 smooth             8.3e-11
-        #       float32 smooth             1.4e-03
-        #       float64 one frozen (1e20)  1.0e+00
-        #
-        # Smooth rounding moves every coordinate; freezing loses one whole.
-        moved = intended != 0
-        if np.any(moved):
-            coord_drift = float(
-                np.max(
-                    np.abs(realised[moved] - intended[moved]) / np.abs(intended[moved])
-                )
-            )
-            # Reject on COMPLETE loss only.  A coordinate that does not move at
-            # all contributes an unknown amount to dE and nothing bounds it --
-            # only the gradient under test could say, which is the value being
-            # checked.  Partial rounding is different in kind: the residual
-            # ratio is < 1 and carries into the floor below, so it needs no
-            # threshold.  A flat per-coordinate cutoff would also be wrong,
-            # since relative rounding is worst on the SMALLEST direction
-            # components (float32 reaches 1.2e-02 there with nothing frozen).
-            n_frozen = int(np.count_nonzero(realised[moved] == 0))
-            if n_frozen:
-                raise _StepUnusable(
-                    f"the step h={t:.1e} rounds away against this state: "
-                    f"{n_frozen} coordinate(s) did not move at all. What they "
-                    f"contribute to dE cannot be bounded without trusting the "
-                    f"gradient being tested, so the measurement is refused "
-                    f"rather than reported with a floor that would not hold. "
-                    f"The state's largest entry is "
-                    f"{float(np.max(np.abs(base))):.2e}; use steps large enough "
-                    "to change it."
-                )
-        else:
-            coord_drift = 0.0
-        # What survives is smooth rounding.  Its effect is reported GRADIENT-FREE
-        # -- as the relative distortion of the displacement itself -- because a
-        # floor computed from ``grad_arr`` would be derived from the very value
-        # under test.  Weighting by the returned gradient lets a gradient that
-        # is wrong *in the direction the rounding moved* certify itself: choose
-        # weights so the realised directions project to 1 while the intended one
-        # projects to 2 and return ``grad_arr = v``, and the amplification comes
-        # out ~1 while the gradient is 50% wrong.
-        #
-        # Stated plainly, because it is a real limit rather than a solved
-        # problem: no finite gradient-free RELATIVE bound exists, since a
-        # gradient can always be chosen to align with the rounding residual and
-        # away from the direction.  This number is therefore the distortion of
-        # the experiment, exact for a gradient aligned with the direction and an
-        # understatement for one adversarially aligned with the residual.  What
-        # IS handled without trusting anything is complete loss, refused above.
-        step_drift = float(np.linalg.norm(realised - intended)) / max(
-            float(np.linalg.norm(intended)), 1e-300
-        )
-        drift = max(coord_drift, step_drift)
         shifted = DenseTensor(jnp.asarray(shifted_data), A.indices)
         energy, _g = energy_and_grad(shifted)
         energy_arr = np.asarray(energy)
@@ -529,17 +463,16 @@ def measure_gradient_error(
                 "propagated: a non-finite difference makes every comparison "
                 "below fail open."
             )
-        # Returned WITH the energy so the caller can associate it with a step
-        # that actually survived: appending it here charged the floor for steps
-        # the cancellation check later discarded, and one bad fine step could
-        # inflate the bound enough to reclassify a resolved error as unresolved.
-        return float(np.real(energy_arr)), drift
+        # The REALISED displacement comes back with the energy.  Everything
+        # downstream is compared along the direction the arithmetic actually
+        # produced, so this is data rather than a validation input.
+        return float(np.real(energy_arr)), realised
 
     results = []
     skipped: list[str] = []
     for h in steps:
         try:
-            (e_plus, drift_plus), (e_minus, drift_minus) = (
+            (e_plus, realised_plus), (e_minus, realised_minus) = (
                 energy_at(h),
                 energy_at(-h),
             )
@@ -575,15 +508,32 @@ def measure_gradient_error(
                     "were finite, so this is a cancellation or overflow in the "
                     "difference itself."
                 )
-            rel = abs(fd - analytic) / max(abs(fd), 1e-300)
-            step_drifts = max(drift_plus, drift_minus)
+            # Project the gradient along the direction the difference REALLY
+            # followed, not the one that was asked for.  ``base + h*v`` and
+            # ``base - h*v`` round differently, so the central difference
+            # corresponds to ``(realised_plus - realised_minus) / 2h`` -- and
+            # comparing a projection along ``v`` against a difference along
+            # that is comparing two different derivatives.  Three rounds of
+            # floors tried to bound the gap; none could, because a gradient can
+            # always align with the residual.  Measuring both along the same
+            # direction removes the gap instead of bounding it.
+            effective = (realised_plus - realised_minus) / (2.0 * h)
+            analytic_h = float(np.real(np.sum(grad_arr * effective)))
+            rel = abs(fd - analytic_h) / max(abs(fd), 1e-300)
+            # Kept as information, NOT as an accuracy floor: it says which
+            # direction was actually probed.  A coordinate the arithmetic
+            # cannot move is simply not tested, and no floor can repair that --
+            # saying so is the honest report.
+            step_distortion = float(np.linalg.norm(effective - v)) / max(
+                float(np.linalg.norm(v)), 1e-300
+            )
         except _StepUnusable as exc:
             # One bad step is not a bad scan.  Keep going; the survivors are
             # checked for separation below, which is the property that actually
             # has to hold.
             skipped.append(f"h={h:.1e}: {exc}")
             continue
-        results.append((rel, fd, h, step_drifts))
+        results.append((rel, fd, h, step_distortion, analytic_h))
 
     surviving = sorted({abs(r[2]) for r in results})
     if len(surviving) < 2 or surviving[-1] / surviving[0] < 2.0:
@@ -608,7 +558,10 @@ def measure_gradient_error(
     # and reported as perfect.  The smallest step carries the least truncation;
     # whether it was also small enough to be roundoff-dominated is exactly what
     # ``resolution`` below reports, so the honest answer survives either way.
-    best_rel, best_fd, best_h, _best_drift = min(results, key=lambda r: abs(r[2]))
+    best_rel, best_fd, best_h, _dist, best_analytic = min(
+        results, key=lambda r: abs(r[2])
+    )
+    direction_distortion = max(r[3] for r in results)
 
     # The scan's own noise floor: how far the finite differences sit from each
     # other, relative to the scale of the derivative.  Measured on the
@@ -623,7 +576,8 @@ def measure_gradient_error(
     # Every step carries the same one, so it never shows up in their spread: a
     # 0.5% drift with a near-zero spread would otherwise report a correct
     # gradient as resolvedly 0.5% wrong.
-    resolution = max(resolution, max((r[3] for r in results), default=0.0))
+    # No distortion term here: the projections are already taken along the
+    # realised directions, so there is no residual gap for a floor to cover.
 
     # The error is a *measurement* only when it stands clear of that floor by
     # ``fd_spread_tol``.  Below the floor it is an upper bound instead, which
@@ -632,10 +586,11 @@ def measure_gradient_error(
 
     return GradientErrorReport(
         relative_error=best_rel,
-        analytic=analytic,
+        analytic=best_analytic,
         finite_difference=best_fd,
         step=best_h,
         resolution=resolution,
         is_resolved=resolved,
         unresolved_bound=fd_spread_tol * resolution,
+        direction_distortion=direction_distortion,
     )

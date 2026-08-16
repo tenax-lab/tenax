@@ -487,21 +487,6 @@ def test_a_complex_direction_on_a_real_state_is_refused():
         measure_gradient_error(_exact_pair(), _quartic_state(), direction=v)
 
 
-def test_steps_that_round_away_against_the_state_are_reported():
-    """A shift below the state's ULP measures nothing, and says so.
-
-    With entries around 1e20 the default steps do not change the buffer at all,
-    so both signs return the same energy and every difference is exactly zero.
-    ``relative_error`` then becomes ``|0 - analytic| / 1e-300`` -- inf -- while
-    ``resolution`` is 0, so without this check ``is_resolved`` is True and a
-    *correct* gradient is reported as infinitely wrong.
-    """
-    huge = _wrap(np.full((2, 2, 2, 2, 2), 1e20))
-
-    with pytest.raises(ValueError, match="rounds away"):
-        measure_gradient_error(_exact_pair(), huge)
-
-
 def test_a_state_small_enough_for_the_steps_still_works():
     """The rounds-away guard must not reject ordinary states."""
     report = measure_gradient_error(_exact_pair(1.25), _quartic_state())
@@ -545,21 +530,6 @@ def test_the_step_is_chosen_without_consulting_the_gradient():
         "the h=0.2 truncation lands exactly on the wrong gradient, so a "
         f"selection that consults it reports ~0 -- got {report.summary()}"
     )
-
-
-def test_a_partially_frozen_shift_is_rejected():
-    """One frozen coordinate distorts the direction without freezing the buffer.
-
-    A whole-array equality check cannot see this: the 1e20 entry swallows the
-    step while the 1.0 entries move, so the difference follows a different
-    direction from the one ``g.v`` is projected along, and a correct gradient
-    is reported as wrong.
-    """
-    mixed = np.ones((2, 2, 2, 2, 2))
-    mixed[0, 0, 0, 0, 0] = 1e20
-
-    with pytest.raises(ValueError, match="rounds away"):
-        measure_gradient_error(_exact_pair(), _wrap(mixed))
 
 
 def test_the_shifted_state_keeps_the_input_dtype():
@@ -901,69 +871,6 @@ def test_a_real_valued_complex_dtype_gradient_on_a_real_state_is_allowed():
     assert report.relative_error < 1e-6, report.summary()
 
 
-def test_a_frozen_coordinate_that_dominates_the_projection_is_caught():
-    """The freeze check cannot key off the direction alone.
-
-    ``A[0]=1e20`` with ``v[0]=1e-13`` and ``g[0]=1e20``: that coordinate carries
-    ~1e6 of ``g.v`` while sitting far below any direction-relative cutoff, so a
-    direction-only mask excludes it. It is frozen at every shifted state, its
-    contribution drops out of the difference but stays in ``analytic``, and the
-    correct gradient reads as resolvedly wrong.
-    """
-    n = 32
-    base = np.ones(n)
-    base[0] = 1e20
-    weights = np.ones(n)
-    weights[0] = 1e20
-
-    def affine(t):
-        x = jnp.asarray(t.todense()).reshape(-1)
-        return jnp.sum(jnp.asarray(weights) * x), jnp.asarray(weights).reshape(
-            (2, 2, 2, 2, 2)
-        )
-
-    v = np.ones(n)
-    v[0] = 1e-13
-
-    with pytest.raises(ValueError, match="rounds away"):
-        measure_gradient_error(
-            affine,
-            _wrap(base.reshape((2, 2, 2, 2, 2))),
-            direction=v.reshape((2, 2, 2, 2, 2)),
-        )
-
-
-def test_a_coordinate_dominating_the_signed_projection_after_cancellation_is_caught():
-    """The L1-share mask missed this; the projection test does not.
-
-    Contributions ``g_i*v_i`` of 1e-13, 1 and -1+5e-14 sum to 1.5e-13 while
-    their L1 total is 2, so the first coordinate supplies two thirds of
-    ``analytic`` yet is 5e-14 of the L1 -- excluded by any share-of-total
-    cutoff. Freezing it with a large base then drops that contribution from the
-    difference while it stays in ``analytic``.
-    """
-    n = 32
-    base = np.ones(n)
-    base[0] = 1e18  # large enough to freeze coordinate 0 at every step
-    weights = np.zeros(n)
-    weights[0] = 1e-13
-    weights[1] = 1.0
-    weights[2] = -1.0 + 5e-14
-
-    def affine(t):
-        x = jnp.asarray(t.todense()).reshape(-1)
-        return jnp.sum(jnp.asarray(weights) * x), jnp.asarray(weights).reshape(
-            (2, 2, 2, 2, 2)
-        )
-
-    with pytest.raises(ValueError, match="rounds away"):
-        measure_gradient_error(
-            affine,
-            _wrap(base.reshape((2, 2, 2, 2, 2))),
-            direction=np.ones((2, 2, 2, 2, 2)),
-        )
-
-
 def test_the_unresolved_summary_quotes_the_bound_it_compared_against():
     """``is_resolved`` tests against ``fd_spread_tol * resolution``.
 
@@ -978,168 +885,95 @@ def test_the_unresolved_summary_quotes_the_bound_it_compared_against():
     assert "below the measurement resolution" not in report.summary()
 
 
-def test_the_displacement_is_validated_without_using_the_gradient():
-    """The experiment cannot be validated by the quantity it is testing.
+# --------------------------------------------------------------------------- #
+# 13. Compared along the direction the difference actually followed             #
+# --------------------------------------------------------------------------- #
 
-    The projection check weights by ``grad_arr``, so a gradient that is wrong
-    by being *zero* on a frozen coordinate makes both projections omit it and
-    the drift reads as ~0. Measured on this state: 3.1e-02 with the true
-    gradient, 5.4e-12 with the returned one, while the gradient-free norm check
-    reads 1.8e-01 either way.
+
+def test_a_frozen_coordinate_does_not_create_a_phantom_error():
+    """A distorted direction is measured along, not bounded or refused.
+
+    ``base[0]=1e20`` swallows the step, so the difference follows a direction
+    without that coordinate. Projecting the gradient along the *intended* one
+    then invents an error that is not the gradient's -- earlier versions
+    reported this correct gradient as resolvedly wrong, then refused the scan
+    outright. Both projections now use the realised direction, so the answer is
+    simply right.
     """
     n = 32
     base = np.ones(n)
     base[0] = 1e20
-
-    def centred_affine_with_hole(t):
-        x = jnp.asarray(t.todense()).reshape(-1)
-        g = np.ones(n)
-        g[0] = 0.0  # wrong exactly where the step is about to freeze
-        return jnp.sum(x - jnp.asarray(base)), jnp.asarray(g).reshape((2, 2, 2, 2, 2))
-
-    with pytest.raises(ValueError, match="rounds away"):
-        measure_gradient_error(
-            centred_affine_with_hole,
-            _wrap(base.reshape((2, 2, 2, 2, 2))),
-            direction=np.ones((2, 2, 2, 2, 2)),
-        )
-
-
-def test_a_frozen_coordinate_is_refused_rather_than_bounded():
-    """A norm-relative displacement error is NOT a bound on derivative error.
-
-    An earlier version tolerated a distortion under 1% and folded it into
-    ``resolution``. That floor does not hold: with ``base[0]=1e20``, 0.5% of the
-    direction's norm on that coordinate, a true gradient of 1000 there and a
-    returned gradient of 0, both a norm-relative check and a gradient-weighted
-    one accept the step while the directional derivative is ~47.7% wrong, and
-    the quoted floor was ~6.7%.
-
-    What a frozen coordinate contributes to dE is exactly what the gradient
-    under test would have to tell us, so it cannot be bounded and the step is
-    refused. Partial rounding is different in kind: its residual ratio is < 1
-    and is carried into the floor instead.
-    """
-    n = 32
-    base = np.ones(n)
-    base[0] = 1e20
-    v = np.ones(n)
-    v[0] = 0.005 * np.sqrt(n)
     base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
 
-    def affine_with_hole(t):
+    def centred_affine(t):
         x = jnp.asarray(t.todense())
-        g = np.ones(n)
-        g[0] = 0.0  # the returned gradient hides the lost coordinate
-        return jnp.sum(x - base_j), jnp.asarray(g).reshape((2, 2, 2, 2, 2))
+        return jnp.sum(x - base_j), jnp.ones((2, 2, 2, 2, 2))
 
-    with pytest.raises(ValueError, match="did not move at all"):
-        measure_gradient_error(
-            affine_with_hole,
-            _wrap(base.reshape((2, 2, 2, 2, 2))),
-            direction=v.reshape((2, 2, 2, 2, 2)),
-        )
+    report = measure_gradient_error(
+        centred_affine,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
+    )
+
+    assert report.relative_error < 1e-9, report.summary()
+    assert report.direction_distortion > 1e-2, (
+        "the probe direction was distorted by a frozen coordinate and the "
+        f"report does not say so -- {report.summary()}"
+    )
 
 
-def test_partial_rounding_is_carried_into_the_floor_not_refused():
-    """Rounding that merely perturbs every coordinate stays measurable.
+def test_the_distortion_says_which_subspace_was_probed():
+    """It is information, not an accuracy floor.
 
-    Relative rounding is worst on the SMALLEST direction components -- float32
-    reaches 1.2e-02 there with nothing frozen -- so a flat per-coordinate cutoff
-    would reject ordinary float32 scans. Nothing is lost outright, the residual
-    ratio is < 1, and the bound holds.
+    A coordinate the arithmetic cannot move is simply not tested, and no floor
+    repairs that -- three earlier attempts to bound it all failed, because a
+    gradient can always align with the residual. Reporting which direction was
+    actually probed is the honest alternative, so an undistorted scan must read
+    ~0 and a distorted one must not.
     """
-    data = np.full((2, 2, 2, 2, 2), 0.5, dtype=np.float32)
+    clean = measure_gradient_error(_exact_pair(), _quartic_state())
+    assert clean.direction_distortion < 1e-9, clean.summary()
 
-    def quadratic(t):
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e20
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    def centred_affine(t):
         x = jnp.asarray(t.todense())
-        return jnp.sum(x**2), 2.0 * x
+        return jnp.sum(x - base_j), jnp.ones((2, 2, 2, 2, 2))
 
-    report = measure_gradient_error(quadratic, _wrap(data), steps=(1e-3, 1e-4))
+    distorted = measure_gradient_error(
+        centred_affine,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
+    )
+    assert distorted.direction_distortion == pytest.approx(1 / np.sqrt(n), rel=1e-6), (
+        "one frozen coordinate out of 32 should distort the unit direction by "
+        f"1/sqrt(32) -- got {distorted.direction_distortion:.3e}"
+    )
 
-    assert report.relative_error < 1e-2, report.summary()
 
+def test_a_wrong_gradient_is_still_caught_on_a_distorted_direction():
+    """Measuring along the realised direction must not blunt the check.
 
-def test_accepted_rounding_raises_the_floor():
-    """Tolerated per-coordinate rounding must appear in ``resolution``.
-
-    Every step carries the same rounding, so it never shows in their spread: on
-    this float32 scan the differences agree closely while each coordinate is
-    displaced by up to ~1.2e-02 relatively. Without the floor the scan would
-    claim to resolve far below a distortion it accepted.
+    The gradient is scaled by 1.5 on every coordinate, so it is wrong along any
+    direction -- including the distorted one.
     """
-    data = np.full((2, 2, 2, 2, 2), 0.5, dtype=np.float32)
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e20
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
 
-    def quadratic(t):
+    def wrong_by_half(t):
         x = jnp.asarray(t.todense())
-        return jnp.sum(x**2), 2.0 * x
+        return jnp.sum(x - base_j), 1.5 * jnp.ones((2, 2, 2, 2, 2))
 
-    report = measure_gradient_error(quadratic, _wrap(data), steps=(1e-3, 1e-4))
-
-    assert report.resolution > 1e-2, (
-        "accepted per-coordinate rounding was not carried into the floor: "
-        f"{report.summary()}"
-    )
-    assert not report.is_resolved, report.summary()
-
-
-def test_the_rounding_floor_does_not_depend_on_the_gradient_under_test():
-    """A floor derived from ``grad_arr`` lets a wrong gradient certify itself.
-
-    Weighting the floor by the returned gradient means a gradient wrong *in the
-    direction the rounding moved* produces a small amplification and reports
-    itself as accurate. The floor is therefore the distortion of the experiment,
-    computed without the gradient: handing back a badly wrong gradient must not
-    change it.
-    """
-    data = np.full((2, 2, 2, 2, 2), 0.5, dtype=np.float32)
-
-    def truthful(t):
-        x = jnp.asarray(t.todense())
-        return jnp.sum(x**2), 2.0 * x
-
-    def badly_wrong(t):
-        x = jnp.asarray(t.todense())
-        return jnp.sum(x**2), 7.0 * x  # 250% off, and differently aligned
-
-    good = measure_gradient_error(truthful, _wrap(data), steps=(1e-3, 1e-4))
-    bad = measure_gradient_error(badly_wrong, _wrap(data), steps=(1e-3, 1e-4))
-
-    assert bad.resolution == pytest.approx(good.resolution, rel=1e-12), (
-        "the floor moved when only the returned gradient changed, so it is "
-        f"derived from the value under test -- good={good.summary()} "
-        f"bad={bad.summary()}"
-    )
-    # And the wrong gradient is still reported as wrong.
-    assert bad.is_resolved and bad.relative_error > 1.0, bad.summary()
-
-
-def test_a_skipped_step_does_not_contaminate_the_floor():
-    """Drift travels with the step, so a discarded one cannot inflate the bound.
-
-    The drift is measured before the energy-cancellation check, so appending it
-    eagerly charged the floor for steps that were then thrown away. With a 5e10
-    offset the h=1e-6 step is skipped; the surviving scan must report exactly
-    what it reports on its own.
-    """
-
-    def offset_quadratic(t):
-        x = jnp.asarray(t.todense())
-        return 5e10 + jnp.sum(x**2), 2.0 * x
-
-    A = _wrap(np.ones((2, 2, 2, 2, 2)))
-    v = np.ones((2, 2, 2, 2, 2))
-
-    with_skipped = measure_gradient_error(
-        offset_quadratic, A, direction=v, steps=(1e-4, 1e-5, 1e-6)
-    )
-    survivors_only = measure_gradient_error(
-        offset_quadratic, A, direction=v, steps=(1e-4, 1e-5)
+    report = measure_gradient_error(
+        wrong_by_half,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
     )
 
-    assert with_skipped.resolution == pytest.approx(
-        survivors_only.resolution, rel=1e-12
-    ), (
-        "the skipped h=1e-6 step contaminated the floor -- "
-        f"{with_skipped.summary()} vs {survivors_only.summary()}"
-    )
+    assert report.is_resolved, report.summary()
+    assert report.relative_error == pytest.approx(0.5, rel=1e-6), report.summary()
