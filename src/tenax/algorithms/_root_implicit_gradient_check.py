@@ -874,6 +874,7 @@ def measure_gradient_error(
     direction_tol = float(np.sqrt(np.finfo(base.dtype).eps))
     units = [r[5] / max(float(np.linalg.norm(r[5])), 1e-300) for r in results]
     best_group: list[int] = []
+    best_key: tuple[Any, ...] | None = None
     for anchor in range(len(units)):
         by_magnitude: dict[float, int] = {}
         accepted: list[int] = []
@@ -910,20 +911,43 @@ def measure_gradient_error(
             ulp_of[magnitudes[0]],
         ):
             members = list(by_magnitude.values())
-            # Ties broken by the FINEST step, not by encounter order.  Two
-            # disjoint groups of equal size are otherwise resolved by however
-            # ``steps`` happened to be written: the same magnitudes as
-            # ``(4, 2, .25, .125)`` reported h=2 and error 0.2, reversed they
-            # reported h=.125 and 9.8e-04.  Smallest |h| also matches the
-            # documented selection policy.
-            if best_group:
-                better = (len(members), -min(magnitudes)) > (
-                    len(best_group),
-                    -min(results[j][7] for j in best_group),
-                )
-            else:
-                better = True
-            if better:
+            # Ranked by a TOTAL order, so no comparison can end in a tie that
+            # encounter order then settles.  Size and finest step alone are not
+            # total: two cliques that share their finest member have identical
+            # keys, and a strict ``>`` keeps whichever ``steps`` happened to
+            # produce first -- which changed ``fd_divergence``, ``resolution``
+            # and even ``is_resolved`` with the same steps written backwards.
+            # The last component is arbitrary but deterministic, and it only
+            # ever decides between groups that are equal in every measured
+            # property above it.
+            #
+            # Every component is a MEASURED value, never an index: indices
+            # move when ``steps`` is reordered, so a tiebreak on them would
+            # reintroduce the order dependence it is meant to remove.  The
+            # trailing tuples are sorted, hence permutation-invariant, and
+            # together they fix every quantity the report is built from -- so
+            # a group that ties on all of them produces an identical report
+            # and the choice between them cannot be observed.
+            #
+            #   more members            -- more evidence
+            #   finer smallest span     -- matches the reported-step policy
+            #   tighter agreement       -- better commensurability
+            #   then the measurements themselves
+            key = (
+                len(members),
+                -min(magnitudes),
+                -max(
+                    float(np.linalg.norm(units[a] - units[b]))
+                    for a in members
+                    for b in members
+                ),
+                tuple(magnitudes),
+                tuple(sorted(results[j][6] for j in members)),
+                tuple(sorted(results[j][0] for j in members)),
+                tuple(sorted(abs(results[j][2]) for j in members)),
+            )
+            if best_key is None or key > best_key:
+                best_key = key
                 best_group = members
 
     evidence = [results[j] for j in best_group] if best_group else results

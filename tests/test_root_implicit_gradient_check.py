@@ -1516,6 +1516,68 @@ def test_a_partly_converged_scan_is_not_called_measured():
     assert "set by the differences" in report.summary(), report.summary()
 
 
+@pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
+def test_every_permutation_of_steps_gives_the_identical_report(seed):
+    """Group selection must be a function of the measurements, not their order.
+
+    Ranking cliques by ``(size, finest span)`` alone is not a total order: two
+    that share their finest member tie, and a strict comparison then keeps
+    whichever ``steps`` produced first. The remedy is a key that ends in
+    measured, sorted -- hence permutation-invariant -- values, never in member
+    indices, which move when the steps are reordered and would reintroduce
+    exactly the dependence being removed.
+
+    Shuffling every scan is the direct statement of the property, and it holds
+    whether or not any particular fixture reaches the tie.
+    """
+    rng = np.random.RandomState(seed)
+    n = 32
+    base = np.ones(n)
+    base[0] = 10.0 ** rng.uniform(6, 15)
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+    scale = 1.0 + rng.uniform(0.0, 0.5)
+
+    def affine(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x - base_j), scale * jnp.ones((2, 2, 2, 2, 2))
+
+    steps = [4.0, 2.0, 0.25, 0.125]
+    state = _wrap(base.reshape((2, 2, 2, 2, 2)))
+    direction = np.ones((2, 2, 2, 2, 2))
+    reference = measure_gradient_error(
+        affine, state, direction=direction, steps=tuple(steps)
+    )
+
+    for _ in range(6):
+        shuffled = list(steps)
+        rng.shuffle(shuffled)
+        got = measure_gradient_error(
+            affine, state, direction=direction, steps=tuple(shuffled)
+        )
+        # Field by field, with NaN equal to NaN. Tuple equality would fail on
+        # an indeterminate scan for the same reason the module never compares
+        # against NaN directly: `nan != nan`, so two identical reports would
+        # read as different and this test would flag order dependence that is
+        # not there.
+        differing = [
+            name
+            for name, a, b in zip(reference._fields, reference, got)
+            if not (
+                a == b
+                or (
+                    isinstance(a, float)
+                    and isinstance(b, float)
+                    and np.isnan(a)
+                    and np.isnan(b)
+                )
+            )
+        ]
+        assert not differing, (
+            f"order {shuffled} changed {differing}: {got.summary()}, "
+            f"but {steps} gave {reference.summary()}"
+        )
+
+
 def test_the_report_does_not_depend_on_the_order_of_steps():
     """Equal-sized commensurable groups must not be settled by encounter order.
 
