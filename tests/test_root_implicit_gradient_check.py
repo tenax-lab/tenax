@@ -1516,6 +1516,72 @@ def test_a_partly_converged_scan_is_not_called_measured():
     assert "set by the differences" in report.summary(), report.summary()
 
 
+def test_two_secants_sharing_a_span_are_still_two_measurements():
+    """A secant's identity is its whole displacement, not its largest component.
+
+    These two fine steps realise exactly the same span, 8.156300e-04, while
+    moving coordinate 0 by 1.4529e-07 against 1.4342e-07 -- different endpoint
+    pairs with an identical maximum. Deduplicating on the scalar collapsed them
+    and kept whichever came first, so swapping the two moved the reported
+    difference from 5.568006e+00 to 5.568149e+00 and the resolution from
+    7.62e-08 to 1.15e-07.
+    """
+    n = 32
+    base = np.ones(n, dtype=np.float32)
+    base[0] = np.float32(0.012875822)
+    shaped = base.reshape((2, 2, 2, 2, 2))
+    raw_direction = np.ones(n)
+    raw_direction[0] = 0.00017699427
+    steps = (0.0090818945, 0.0022705324, 0.0022704736)
+
+    # The collision this test exists for, asserted rather than assumed.
+    v = raw_direction / np.max(np.abs(raw_direction))
+    v = (v / np.linalg.norm(v)).astype(np.float32)
+    displacements = []
+    for step in steps[1:]:
+        t = np.float32(step)
+        displacements.append(((base + t * v) - base) - ((base - t * v) - base))
+    spans = [float(np.max(np.abs(d))) for d in displacements]
+    assert spans[0] == spans[1], (
+        f"fixture lost its collision: spans {spans} are no longer equal, so "
+        "nothing is being deduplicated onto a shared maximum"
+    )
+    assert not np.array_equal(displacements[0], displacements[1]), (
+        "fixture lost its collision: the two displacements are identical, so "
+        "they really are one measurement"
+    )
+
+    base_j = jnp.asarray(shaped)
+
+    def quadratic_with_slope(t):
+        x = jnp.asarray(t.todense())
+        r = x - base_j
+        return jnp.sum(r * r) + jnp.sum(r), 2.0 * r + 1.0
+
+    swapped = (steps[0], steps[2], steps[1])
+    first = measure_gradient_error(
+        quadratic_with_slope,
+        _wrap(shaped),
+        direction=raw_direction.reshape((2, 2, 2, 2, 2)),
+        steps=steps,
+    )
+    second = measure_gradient_error(
+        quadratic_with_slope,
+        _wrap(shaped),
+        direction=raw_direction.reshape((2, 2, 2, 2, 2)),
+        steps=swapped,
+    )
+
+    assert first.finite_difference == second.finite_difference, (
+        f"swapping two steps with a shared span moved the difference from "
+        f"{first.finite_difference:.6e} to {second.finite_difference:.6e}"
+    )
+    assert first.resolution == second.resolution, (
+        f"swapping two steps with a shared span moved the resolution from "
+        f"{first.resolution:.6g} to {second.resolution:.6g}"
+    )
+
+
 @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
 def test_every_permutation_of_steps_gives_the_identical_report(seed):
     """Group selection must be a function of the measurements, not their order.

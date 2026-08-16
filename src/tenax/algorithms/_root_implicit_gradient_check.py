@@ -735,6 +735,14 @@ def measure_gradient_error(
             span_ulp = float(
                 np.spacing(np.abs(base).flat[int(np.argmax(displacement))])
             )
+            # The identity of a secant is the WHOLE displacement, not its
+            # largest component.  Two steps can share a maximum while moving a
+            # different coordinate differently -- measured on a float32 state,
+            # two steps with span 8.156300e-04 apart at coordinate 0 by
+            # 1.4529e-07 against 1.4342e-07 -- and collapsing them onto the
+            # scalar makes the retained one depend on which came first, which
+            # moved the reported difference and the resolution.
+            secant = (realised_plus - realised_minus).tobytes()
             if realised_span == 0.0:
                 # Unreachable while the cancellation check above runs first: a
                 # zero span means the two endpoints are the same state, so the
@@ -766,15 +774,19 @@ def measure_gradient_error(
                 fd / eff_norm,
                 realised_span,
                 span_ulp,
+                secant,
             )
         )
 
     # Separation is required on the REALISED displacements, not the requested
     # magnitudes -- two ``h`` values that land on the same endpoints are one
     # measurement however far apart they were asked to be.
-    ulp_of = {}
+    # Keyed on the span for the extremes check, but the retained ULP is the
+    # smallest rather than the first seen, so equal spans with different grids
+    # cannot make the allowance depend on the order of ``steps``.
+    ulp_of: dict[float, float] = {}
     for r in results:
-        ulp_of.setdefault(r[7], r[8])
+        ulp_of[r[7]] = min(ulp_of.get(r[7], r[8]), r[8])
     surviving = sorted(ulp_of)
     if len(surviving) < 2 or not _separated(
         surviving[-1], surviving[0], ulp_of[surviving[-1]], ulp_of[surviving[0]]
@@ -876,12 +888,12 @@ def measure_gradient_error(
     best_group: list[int] = []
     best_key: tuple[Any, ...] | None = None
     for anchor in range(len(units)):
-        by_magnitude: dict[float, int] = {}
+        seen_secants: set[bytes] = set()
         accepted: list[int] = []
         for j in range(len(units)):
             if float(np.linalg.norm(units[j] - units[anchor])) > direction_tol:
                 continue
-            if results[j][7] in by_magnitude:
+            if results[j][9] in seen_secants:
                 continue
             # PAIRWISE, not just against the anchor.  A ball of radius ``tol``
             # admits members up to ``2 * tol`` from each other, so "close to
@@ -901,16 +913,21 @@ def measure_gradient_error(
                 for m in accepted
             ):
                 continue
-            by_magnitude[results[j][7]] = j
+            seen_secants.add(results[j][9])
             accepted.append(j)
-        magnitudes = sorted(by_magnitude)
-        if len(magnitudes) >= 2 and _separated(
-            magnitudes[-1],
-            magnitudes[0],
-            ulp_of[magnitudes[-1]],
-            ulp_of[magnitudes[0]],
+        # Extremes by VALUE, with the ULP as the tiebreak, so two members that
+        # share a span cannot make the pair depend on which was stored first.
+        members = accepted
+        if len(members) >= 2:
+            coarse = max(members, key=lambda j: (results[j][7], results[j][8]))
+            fine = min(members, key=lambda j: (results[j][7], results[j][8]))
+        magnitudes = sorted(results[j][7] for j in members)
+        if len(members) >= 2 and _separated(
+            results[coarse][7],
+            results[fine][7],
+            results[coarse][8],
+            results[fine][8],
         ):
-            members = list(by_magnitude.values())
             # Ranked by a TOTAL order, so no comparison can end in a tie that
             # encounter order then settles.  Size and finest step alone are not
             # total: two cliques that share their finest member have identical
@@ -995,8 +1012,8 @@ def measure_gradient_error(
     # identical normalised differences -- and no pair can distinguish that from
     # a converged sequence.  More commensurable steps reduce the chance;
     # nothing removes it, and the docstring says so rather than implying proof.
-    best_rel, best_fd, best_h, _dist, best_analytic, _eff, _fdu, _span, _ulp = min(
-        evidence, key=lambda r: abs(r[2])
+    (best_rel, best_fd, best_h, _dist, best_analytic, _eff, _fdu, _span, _ulp, _sig) = (
+        min(evidence, key=lambda r: abs(r[2]))
     )
 
     direction_distortion = max(r[3] for r in results)
