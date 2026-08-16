@@ -31,8 +31,9 @@
   callable*, needing no reference implementation. It reports two numbers:
   `relative_error`, and the `resolution` the step scan can actually resolve.
   `is_resolved` says which regime you are in — below the floor, the gradient is
-  simply accurate to about `resolution`, which is the good case and is
-  deliberately not reported as a failure. Nothing calls it automatically: it
+  simply accurate to about `unresolved_bound` (= `fd_spread_tol *
+  resolution`, the quantity actually compared against), which is the good
+  case and is deliberately not reported as a failure. Nothing calls it automatically: it
   costs several CTM convergences, which is why #785 rejected an FD probe inside
   the optimizer loop. Run it once on a representative state before a long run.
 

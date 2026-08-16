@@ -1003,3 +1003,42 @@ def test_the_displacement_is_validated_without_using_the_gradient():
             _wrap(base.reshape((2, 2, 2, 2, 2))),
             direction=np.ones((2, 2, 2, 2, 2)),
         )
+
+
+def test_tolerated_direction_drift_floors_the_resolution():
+    """An accepted distortion is a systematic bias, not noise.
+
+    Every step follows the same slightly-wrong direction, so the spread between
+    them stays near zero: a ~0.5% drift with an exact gradient would otherwise
+    be reported as a *resolved* 0.5% error. The tolerated drift is floored into
+    ``resolution`` so the scan cannot claim to resolve below it.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e20  # freezes coordinate 0
+    v = np.ones(n)
+    v[0] = 0.005 * np.sqrt(n)  # ~0.5% of the direction's norm sits there
+
+    # Centred, so |E| stays small: an uncentred sum over a 1e20 entry trips the
+    # energy-cancellation guard first and never reaches the drift logic.
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    def affine(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x - base_j), jnp.ones((2, 2, 2, 2, 2))
+
+    report = measure_gradient_error(
+        affine,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=v.reshape((2, 2, 2, 2, 2)),
+    )
+
+    assert report.resolution >= 1e-3, (
+        "the tolerated drift was not folded into the floor: "
+        f"resolution={report.resolution:.2e} while the direction is distorted "
+        f"by ~0.5% -- {report.summary()}"
+    )
+    assert not report.is_resolved, (
+        "a correct gradient must not be reported as resolvedly wrong when the "
+        f"error is the scan's own direction bias -- {report.summary()}"
+    )

@@ -413,6 +413,12 @@ def measure_gradient_error(
         """
 
     energy_dtypes: list = []
+    # Drift that was ACCEPTED, per evaluation.  It is a systematic bias, not
+    # noise: every step follows the same slightly-wrong direction, so their
+    # spread stays near zero and ``resolution`` would claim to resolve below a
+    # distortion the scan knowingly tolerated.  Floored into ``resolution``
+    # below instead.
+    accepted_drift: list[float] = []
 
     def _energy_eps() -> float:
         """Machine epsilon of the precision the energies actually came back in."""
@@ -484,15 +490,18 @@ def measure_gradient_error(
         # O(1) and the cancellation case 0.67.  A distortion under this bound
         # biases the comparison by at most that much, which is documented on
         # the function rather than hidden.
-        if drift > 1e-2 * scale:
+        projection_drift = drift / scale
+        if projection_drift > 1e-2:
             raise _StepUnusable(
                 f"the step h={t:.1e} rounds away against this state: the "
                 f"difference would follow a direction whose projected "
-                f"derivative is {drift / scale:.2e} away from the one g.v is "
-                f"taken along, so a correct gradient would read as wrong. The "
-                f"state's largest entry is {float(np.max(np.abs(base))):.2e}; "
-                "use steps large enough to change it."
+                f"derivative is {projection_drift:.2e} away from the one g.v "
+                f"is taken along, so a correct gradient would read as wrong. "
+                f"The state's largest entry is "
+                f"{float(np.max(np.abs(base))):.2e}; use steps large enough to "
+                "change it."
             )
+        accepted_drift.append(max(direction_drift, projection_drift))
         shifted = DenseTensor(jnp.asarray(shifted_data), A.indices)
         energy, _g = energy_and_grad(shifted)
         energy_arr = np.asarray(energy)
@@ -589,6 +598,11 @@ def measure_gradient_error(
     fds = [r[1] for r in results]
     scale = max(abs(analytic), max(abs(f) for f in fds), 1e-300)
     resolution = (max(fds) - min(fds)) / scale
+    # A tolerated direction distortion is a floor on what this scan can resolve.
+    # Every step carries the same one, so it never shows up in their spread: a
+    # 0.5% drift with a near-zero spread would otherwise report a correct
+    # gradient as resolvedly 0.5% wrong.
+    resolution = max(resolution, max(accepted_drift, default=0.0))
 
     # The error is a *measurement* only when it stands clear of that floor by
     # ``fd_spread_tol``.  Below the floor it is an upper bound instead, which
