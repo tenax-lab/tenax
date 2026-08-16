@@ -157,8 +157,27 @@ def test_an_unconverged_finite_difference_is_reported_not_hidden():
 
 
 def test_one_step_is_refused_because_it_cannot_detect_its_own_truncation():
-    with pytest.raises(ValueError, match="at least two values"):
+    with pytest.raises(ValueError, match="at least two distinct magnitudes"):
         measure_gradient_error(_exact_pair(), _quartic_state(), steps=(1e-5,))
+
+
+@pytest.mark.parametrize("steps", [(1e-5, 1e-5), (1e-5, -1e-5), (-1e-5, 1e-5)])
+def test_two_steps_of_one_magnitude_are_refused(steps):
+    """A one-step scan wearing two entries defeats the resolution guard.
+
+    The central difference is even in ``h``, so both of these evaluate the
+    *same* difference twice: ``resolution`` comes out exactly 0, every nonzero
+    disagreement satisfies ``best_rel > tol * 0``, and a pure truncation
+    artifact would be reported as a resolved measurement -- the precise thing
+    the single-step check exists to prevent.
+    """
+    with pytest.raises(ValueError, match="at least two distinct magnitudes"):
+        measure_gradient_error(_exact_pair(1.2), _quartic_state(), steps=steps)
+
+
+def test_a_zero_step_is_refused():
+    with pytest.raises(ValueError, match="nonzero"):
+        measure_gradient_error(_exact_pair(), _quartic_state(), steps=(0.0, 1e-5))
 
 
 def test_a_symmetric_tensor_is_refused_rather_than_silently_perturbed():

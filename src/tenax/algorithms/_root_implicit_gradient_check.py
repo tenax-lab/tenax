@@ -172,7 +172,10 @@ def measure_gradient_error(
                          default, complex when the state is.  Normalised on
                          entry either way, since the relative error is
                          scale-free only if it is.
-        steps:           Finite-difference steps to scan.
+        steps:           Finite-difference steps to scan.  At least two
+                         distinct magnitudes: the central difference is even in
+                         ``h``, so repeated or sign-flipped entries measure the
+                         same difference twice and report zero resolution.
         seed:            Seed for the default random direction.
         fd_spread_tol:   How far the error must stand clear of the resolution
                          floor to count as measured rather than bounded.
@@ -187,11 +190,23 @@ def measure_gradient_error(
             "symmetry-allowed sectors, so the shifted state is not a valid "
             "tensor and the finite difference would not be of this map."
         )
-    if len(steps) < 2:
+    # Two *distinct magnitudes*, not two entries.  A central difference is even
+    # in h, so (1e-5, 1e-5) and (1e-5, -1e-5) both produce the identical
+    # difference twice: ``resolution`` comes out exactly 0, every nonzero
+    # disagreement then satisfies ``best_rel > tol * 0``, and a one-step
+    # truncation artifact is reported as a resolved measurement -- defeating
+    # the guard this check exists to be.
+    magnitudes = {abs(float(h)) for h in steps}
+    if 0.0 in magnitudes:
+        raise ValueError(f"steps must all be nonzero; got {steps!r}.")
+    if len(magnitudes) < 2:
         raise ValueError(
-            f"steps must contain at least two values so the scan can say whether "
-            f"the finite difference converged; got {steps!r}. A single step "
-            "cannot separate a wrong gradient from an unconverged difference."
+            f"steps must contain at least two distinct magnitudes so the scan "
+            f"can measure its own resolution; got {steps!r}, which has "
+            f"{len(magnitudes)}. The central difference is even in h, so "
+            "repeated or sign-flipped steps evaluate the same difference twice "
+            "and report a resolution of exactly zero -- which would mark any "
+            "one-step truncation artifact as a resolved measurement."
         )
 
     base = np.asarray(A.todense())
