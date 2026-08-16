@@ -42,6 +42,14 @@
   to them would have been reported as below the resolution. The asymmetric
   engine takes complex states (#721), so that was reachable.
 
+  Non-finite results fail **closed**. `nan > x` is False, so a NaN gradient
+  reaching the comparison would have set `is_resolved=False` — the branch that
+  means "better than the scan can resolve" — and reported an error below a NaN
+  floor. That is #787 and the #772 residual gate failing open, one level up,
+  and it is reachable: #772 *was* this engine returning NaN gradients on a
+  physical state. A non-finite gradient, directional derivative, perturbed
+  energy or difference now raises.
+
   Measured on D=2, χ ∈ {4, 8}, dense asymmetric engine. The symmetric and
   multisite engines are untested, as #785's "Not established" says.
 

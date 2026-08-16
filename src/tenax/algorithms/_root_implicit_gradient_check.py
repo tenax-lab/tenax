@@ -220,16 +220,52 @@ def measure_gradient_error(
     v = v / norm
 
     _energy, grad = energy_and_grad(A)
-    analytic = float(np.real(np.sum(np.asarray(grad) * v)))
+    grad_arr = np.asarray(grad)
+    if not np.all(np.isfinite(grad_arr)):
+        # Fail closed.  ``nan > x`` is False, so letting a NaN through would set
+        # ``is_resolved=False`` -- the branch documented as "the gradient is
+        # better than the scan can resolve" -- and ``summary()`` would report
+        # an error below a NaN floor.  A NaN gradient is the #772 failure the
+        # optimizer explicitly handles, so it is reachable and must not be
+        # dressed up as the good case.
+        n_bad = int(np.count_nonzero(~np.isfinite(grad_arr)))
+        raise ValueError(
+            f"the gradient has {n_bad} non-finite entries, so its accuracy "
+            "cannot be measured. This is the #772 shape -- a root-implicit "
+            "gradient going NaN on a physical state -- and it is reported "
+            "rather than classified, because a NaN compares False against "
+            "every threshold and would otherwise be indistinguishable from a "
+            "gradient too accurate to resolve."
+        )
+    analytic = float(np.real(np.sum(grad_arr * v)))
+    if not np.isfinite(analytic):
+        raise ValueError(
+            f"the directional derivative g.v is {analytic}, so there is "
+            "nothing to compare a finite difference against."
+        )
 
     def energy_at(t: float) -> float:
         shifted = DenseTensor(jnp.asarray(base + t * v), A.indices)
         energy, _g = energy_and_grad(shifted)
-        return float(np.real(energy))
+        out = float(np.real(energy))
+        if not np.isfinite(out):
+            raise ValueError(
+                f"the energy at the perturbed state (t={t:.1e}) is {out}, so "
+                "the finite difference is undefined. Reported rather than "
+                "propagated: a non-finite difference makes every comparison "
+                "below fail open."
+            )
+        return out
 
     results = []
     for h in steps:
         fd = (energy_at(h) - energy_at(-h)) / (2.0 * h)
+        if not np.isfinite(fd):
+            raise ValueError(
+                f"the finite difference at h={h:.1e} is {fd}; the energies "
+                "were finite, so this is a cancellation or overflow in the "
+                "difference itself."
+            )
         rel = abs(fd - analytic) / max(abs(fd), 1e-300)
         results.append((rel, fd, h))
 

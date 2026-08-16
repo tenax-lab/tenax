@@ -338,3 +338,56 @@ def test_a_real_direction_on_a_complex_state_is_refused():
             _complex_state(),
             direction=np.random.RandomState(2).standard_normal((2, 2, 2, 2, 2)),
         )
+
+
+# --------------------------------------------------------------------------- #
+# 5. Non-finite results fail CLOSED, not into the "good" branch                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_nan_gradient_is_reported_not_classified_as_unresolved():
+    """The #884 review's second finding, and a defect class this repo knows.
+
+    ``nan > x`` is False, so a NaN reaching the ``is_resolved`` comparison sets
+    it to ``False`` -- the branch documented as "the gradient is better than
+    the scan can resolve" -- and ``summary()`` then reports an error below a
+    NaN floor.  That is #787 (a NaN cotangent reported as 0.0, i.e. perfect)
+    and the #772 residual gate failing open, one level up.
+
+    A NaN gradient here is reachable: #772 *was* the asymmetric root-implicit
+    engine returning them on a physical simple-update state.
+    """
+
+    def nan_grad(A):
+        x = jnp.asarray(A.todense())
+        g = 4.0 * x**3
+        return jnp.sum(x**4), g.at[0, 0, 0, 0, 0].set(jnp.nan)
+
+    with pytest.raises(ValueError, match="non-finite entries"):
+        measure_gradient_error(nan_grad, _quartic_state())
+
+
+def test_an_infinite_gradient_is_refused_too():
+    def inf_grad(A):
+        x = jnp.asarray(A.todense())
+        g = 4.0 * x**3
+        return jnp.sum(x**4), g.at[0, 0, 0, 0, 0].set(jnp.inf)
+
+    with pytest.raises(ValueError, match="non-finite entries"):
+        measure_gradient_error(inf_grad, _quartic_state())
+
+
+def test_a_nan_energy_at_a_perturbed_state_is_reported():
+    """The gradient can be finite while the shifted energy is not."""
+    calls = {"n": 0}
+
+    def nan_at_shift(A):
+        x = jnp.asarray(A.todense())
+        calls["n"] += 1
+        # The unshifted call comes first and must stay finite, so the failure
+        # is specifically in the finite difference rather than the gradient.
+        energy = jnp.sum(x**4) if calls["n"] == 1 else jnp.nan
+        return energy, 4.0 * x**3
+
+    with pytest.raises(ValueError, match="energy at the perturbed state"):
+        measure_gradient_error(nan_at_shift, _quartic_state())
