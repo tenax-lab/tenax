@@ -251,3 +251,90 @@ def test_the_residual_is_anticorrelated_with_gradient_error_on_a_rank_matched_pa
         f"  physical: {phys_err.summary()}\n"
         f"  spiked:   {spike_err.summary()}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 4. Complex states -- a real probe direction is blind to half the gradient     #
+# --------------------------------------------------------------------------- #
+
+
+def _complex_state(seed=0):
+    rng = np.random.RandomState(seed)
+    data = rng.standard_normal((2, 2, 2, 2, 2)) + 1j * rng.standard_normal(
+        (2, 2, 2, 2, 2)
+    )
+    return _wrap(data)
+
+
+def _complex_pair(imag_scale=1.0):
+    """Real-valued energy of a complex tensor, with its exact JAX gradient.
+
+    ``imag_scale != 1`` corrupts **only** the imaginary components, which is
+    precisely the error a real probe direction cannot see: it pairs to exactly
+    zero in ``Re(sum(g * v))`` when ``v`` is real.
+    """
+
+    def _energy(z):
+        return jnp.sum(jnp.abs(z) ** 2) + jnp.real(jnp.sum(z**3))
+
+    def energy_and_grad(A):
+        x = jnp.asarray(A.todense())
+        g = jax.grad(_energy)(x)
+        g = g.real + 1j * imag_scale * g.imag
+        return _energy(x), g
+
+    return energy_and_grad
+
+
+def test_a_complex_state_is_probed_with_a_complex_direction():
+    """The exact complex gradient measures as correct.
+
+    Also pins the pairing convention: JAX's complex cotangents pair
+    **unconjugated**, so the directional derivative is ``Re(sum(g * v))``.
+    Measured against a finite difference, the conjugated form gives an
+    unrelated number (0.888 against -1.893), so getting this backwards would
+    invent an enormous error on every complex state.
+    """
+    report = measure_gradient_error(_complex_pair(), _complex_state())
+
+    assert report.relative_error < 1e-6, report.summary()
+
+
+def test_an_error_only_in_the_imaginary_part_is_detected():
+    """The #884 review finding: a real direction cannot see it at all.
+
+    With a real ``v`` the corrupted imaginary components contribute exactly
+    zero to ``Re(sum(g * v))``, so this check would report a badly wrong
+    gradient as accurate.  The default direction is complex when the state is,
+    and this is the regression test for that.
+    """
+    A = _complex_state()
+    report = measure_gradient_error(_complex_pair(imag_scale=4.0), A)
+
+    assert report.is_resolved, report.summary()
+    assert report.relative_error > 1e-2, (
+        f"an imaginary-part error of 4x measured as {report.relative_error:.2e} "
+        f"-- the probe direction is not seeing the imaginary half"
+    )
+
+    # And the blindness is real, not hypothetical: force a real direction and
+    # the same corrupted gradient measures as perfect.
+    real_v = np.real(np.asarray(A.todense())) * 0 + np.random.RandomState(
+        1
+    ).standard_normal(A.todense().shape)
+    blind = measure_gradient_error(
+        _complex_pair(imag_scale=4.0), A, direction=real_v.astype(complex)
+    )
+    assert blind.relative_error < 1e-6, (
+        "a real direction was expected to be blind to the imaginary error; if "
+        "this now fails the blindness argument needs rechecking"
+    )
+
+
+def test_a_real_direction_on_a_complex_state_is_refused():
+    with pytest.raises(ValueError, match="real but the state is complex"):
+        measure_gradient_error(
+            _complex_pair(),
+            _complex_state(),
+            direction=np.random.RandomState(2).standard_normal((2, 2, 2, 2, 2)),
+        )

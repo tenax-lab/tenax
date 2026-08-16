@@ -104,9 +104,20 @@ class GradientErrorReport(NamedTuple):
         )
 
 
-def _unit_direction(shape, seed: int) -> np.ndarray:
+def _unit_direction(shape, seed: int, *, complex_valued: bool) -> np.ndarray:
+    """A random unit direction, complex when the state is.
+
+    A real direction on a complex state samples only the real coordinates, and
+    ``Re(sum(g * v))`` with real ``v`` cannot see the gradient's imaginary
+    components at all -- an arbitrarily large error confined to them pairs to
+    exactly zero and this check would report it as below its resolution.  The
+    asymmetric engine takes complex states (#721), so that is reachable, not
+    hypothetical.
+    """
     rng = np.random.RandomState(seed)
     v = rng.standard_normal(shape)
+    if complex_valued:
+        v = v + 1j * rng.standard_normal(shape)
     return v / np.linalg.norm(v)
 
 
@@ -139,6 +150,16 @@ def measure_gradient_error(
     themselves.  ``is_resolved`` says whether the first stands clear of the
     second by ``fd_spread_tol``.
 
+    On a **complex** state the default direction is complex too, and a real one
+    passed explicitly is refused.  ``Re(sum(g * v))`` with real ``v`` pairs the
+    gradient's imaginary components to exactly zero, so an arbitrarily large
+    error confined to them would be reported as below the resolution -- the
+    asymmetric engine takes complex states (#721), so that is reachable.  The
+    pairing is deliberately *unconjugated*, which is JAX's convention for
+    complex cotangents; the conjugated form gives an unrelated number (measured
+    0.888 against a finite difference of -1.893) and would invent an enormous
+    error on every complex state.
+
     Only :class:`~tenax.core.tensor.DenseTensor` is supported.  Perturbing a
     ``SymmetricTensor``'s buffer by a dense direction leaves the symmetry
     sectors, so the shifted state would not be a valid tensor at all -- and the
@@ -148,8 +169,9 @@ def measure_gradient_error(
         energy_and_grad: ``A -> (energy, gradient)``.
         A:               The state to measure at.
         direction:       Perturbation direction; a seeded random unit vector by
-                         default.  Normalised on entry either way, since the
-                         relative error is scale-free only if it is.
+                         default, complex when the state is.  Normalised on
+                         entry either way, since the relative error is
+                         scale-free only if it is.
         steps:           Finite-difference steps to scan.
         seed:            Seed for the default random direction.
         fd_spread_tol:   How far the error must stand clear of the resolution
@@ -173,13 +195,25 @@ def measure_gradient_error(
         )
 
     base = np.asarray(A.todense())
+    is_complex = np.iscomplexobj(base)
     v = (
-        _unit_direction(base.shape, seed)
+        _unit_direction(base.shape, seed, complex_valued=is_complex)
         if direction is None
         else np.asarray(direction)
     )
     if v.shape != base.shape:
         raise ValueError(f"direction has shape {v.shape}, expected {base.shape}")
+    if is_complex and not np.iscomplexobj(v):
+        # A real direction on a complex state is blind to the whole imaginary
+        # half of the gradient, so it is refused rather than quietly measuring
+        # less than the caller thinks.  Passing an explicitly complex-typed
+        # array of real values is allowed -- that is a deliberate choice.
+        raise ValueError(
+            "direction is real but the state is complex, so the finite "
+            "difference would sample only the real coordinates and any error "
+            "in the gradient's imaginary components would pair to exactly "
+            "zero. Pass a complex direction, or omit it for a random one."
+        )
     norm = float(np.linalg.norm(v))
     if norm == 0.0:
         raise ValueError("direction is the zero vector")
