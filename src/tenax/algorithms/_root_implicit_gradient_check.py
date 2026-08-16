@@ -74,10 +74,14 @@ class GradientErrorReport(NamedTuple):
 
     * ``True``  -- ``relative_error`` is a measurement.  A gradient that is
       wrong by 15% reports 0.15 here.
-    * ``False`` -- the disagreement is at or below the floor, so the honest
-      reading is "the gradient is accurate to about ``resolution``".  A tiny
-      ``resolution`` is then good news; a large one means this scan could not
-      tell you anything and the steps need adjusting.
+    * ``False`` -- the disagreement does not stand clear of the floor, so the
+      honest reading is "the gradient is accurate to about
+      ``unresolved_bound``", which is ``fd_spread_tol * resolution`` and is the
+      quantity actually compared against.  Quoting ``resolution`` itself would
+      overstate what the scan established: an error of 1e-02 against a
+      resolution of 2e-03 lands in this branch, and it is not below 2e-03.  A
+      tiny bound is then good news; a large one means this scan could not tell
+      you anything and the steps need adjusting.
 
     Collapsing those two into one "converged" flag is wrong: an *exact*
     gradient has every step at the roundoff floor, and calling that
@@ -90,14 +94,21 @@ class GradientErrorReport(NamedTuple):
     step: float
     resolution: float
     is_resolved: bool
+    unresolved_bound: float
 
     def summary(self) -> str:
         if self.is_resolved:
             verdict = f"gradient error {self.relative_error:.2e}"
         else:
+            # Quote the bound that was actually compared against, not
+            # ``resolution`` alone.  ``is_resolved`` tests against
+            # ``fd_spread_tol * resolution``, so an error of 1e-02 against a
+            # resolution of 2e-03 lands here -- and saying "below 2e-03" would
+            # claim the gradient is five times better than the scan
+            # established.
             verdict = (
-                f"gradient error below the measurement resolution "
-                f"{self.resolution:.2e} (reported {self.relative_error:.2e})"
+                f"gradient error {self.relative_error:.2e} not resolved "
+                f"against a floor of {self.unresolved_bound:.2e}"
             )
         return (
             f"{verdict} at h={self.step:.1e} "
@@ -401,22 +412,6 @@ def measure_gradient_error(
         for it throws away the other steps' perfectly good data.
         """
 
-    # Which coordinates actually matter to ``g.v``.  The displacement check
-    # below cannot key off the direction alone: a coordinate with a tiny ``v_i``
-    # but a huge ``g_i`` dominates the projection while sitting far under any
-    # direction-relative cutoff.  With ``A[0]=1e20``, ``v[0]=1e-13`` and
-    # ``g[0]=1e20`` that one coordinate carries ~1e6 of ``analytic`` and is
-    # frozen at every shifted state -- excluded from the check, its contribution
-    # silently drops out of the difference and the correct gradient reads as
-    # resolvedly wrong.
-    contribution = np.abs(grad_arr * v)
-    contribution_total = float(np.sum(contribution))
-    significant = (
-        contribution > 1e-12 * contribution_total
-        if contribution_total > 0.0
-        else np.zeros_like(contribution, dtype=bool)
-    )
-
     energy_dtypes: list = []
 
     def _energy_eps() -> float:
@@ -444,43 +439,33 @@ def measure_gradient_error(
         # intended one on the coordinates where the intended shift is
         # meaningful; ordinary rounding leaves this around 1e-10.
         realised = shifted_data - base
-        # Rounding a sum costs about ``eps * |base|`` in absolute terms, so that
-        # -- not a fixed relative figure -- is the bound a healthy coordinate
-        # must meet.  A dtype-blind threshold rejects float32 outright, where
-        # ordinary rounding is already 2.5e-04 relative.
-        eps = float(np.finfo(base.dtype).eps)
-        # Rounding ``base + intended`` costs about ``eps`` times the magnitude
-        # of the SUM, so the bound has to follow whichever term dominates.
-        # Using ``|base|`` alone rejects a state with tiny nonzero entries: at
-        # ``base = 3.85e-08`` with ``h*v = 1e-05`` the realised shift is off by
-        # 1.69e-21 against a bound of 3.42e-23, and a perfectly good scan was
-        # refused as "rounds away".
-        tol_abs = 4.0 * eps * np.maximum(np.abs(base), np.abs(intended))
-        # A coordinate is "frozen" when it carries real weight in the direction
-        # yet is too small for ``base`` to represent: it then contributes to
-        # ``g.v`` but not to the difference, so the two follow different
-        # directions.  Whole-array equality cannot see this -- on a mixed-scale
-        # tensor a 1e20 entry freezes while the 1.0 entries move.
-        # A coordinate matters if it carries weight in the DIRECTION or if it
-        # contributes to the PROJECTION -- either is enough for its freezing to
-        # corrupt the comparison, so the mask is the union rather than the
-        # direction test alone.
-        meaningful = significant | (
-            np.abs(intended) > 1e-12 * float(np.max(np.abs(intended)))
-        )
-        frozen = meaningful & (np.abs(intended) <= tol_abs)
-        drifted = meaningful & (np.abs(realised - intended) > tol_abs)
-        n_bad = int(np.count_nonzero(frozen | drifted))
-        if n_bad:
+        # Compare the projected derivative the difference will actually follow
+        # against the one ``analytic`` assumes.  This replaces every
+        # per-coordinate mask: those kept guarding an adjacent property --
+        # first the direction's own magnitude, which misses a coordinate with
+        # tiny ``v_i`` and huge ``g_i``; then the contribution's share of the
+        # L1 total, which misses a coordinate that dominates the *signed* sum
+        # after cancellation (contributions 1e-13, 1, -1+5e-14 sum to 1.5e-13
+        # while the L1 total is 2). The projection is the quantity that has to
+        # survive, so it is the one to test.
+        proj_intended = float(np.real(np.sum(grad_arr * intended)))
+        proj_realised = float(np.real(np.sum(grad_arr * realised)))
+        drift = abs(proj_realised - proj_intended)
+        scale = max(abs(proj_intended), 1e-300)
+        # 1e-2, from measurement rather than taste: rounding ALONE distorts the
+        # projection by up to 1.4e-03 in float32 (base 0.5, h=1e-4), so a 1e-3
+        # cut would reject float32 outright, while a frozen coordinate gives
+        # O(1) and the cancellation case 0.67.  A distortion under this bound
+        # biases the comparison by at most that much, which is documented on
+        # the function rather than hidden.
+        if drift > 1e-2 * scale:
             raise _StepUnusable(
-                f"the step h={t:.1e} rounds away against this state on "
-                f"{n_bad} of {int(np.count_nonzero(meaningful))} weighted "
-                f"coordinates: the shift there is below what base can "
-                f"represent, so the finite difference follows a different "
-                f"direction from the one g.v is projected along and a correct "
-                f"gradient would be reported as wrong. The state's largest "
-                f"entry is {float(np.max(np.abs(base))):.2e}; use steps large "
-                "enough to change it."
+                f"the step h={t:.1e} rounds away against this state: the "
+                f"difference would follow a direction whose projected "
+                f"derivative is {drift / scale:.2e} away from the one g.v is "
+                f"taken along, so a correct gradient would read as wrong. The "
+                f"state's largest entry is {float(np.max(np.abs(base))):.2e}; "
+                "use steps large enough to change it."
             )
         shifted = DenseTensor(jnp.asarray(shifted_data), A.indices)
         energy, _g = energy_and_grad(shifted)
@@ -591,4 +576,5 @@ def measure_gradient_error(
         step=best_h,
         resolution=resolution,
         is_resolved=resolved,
+        unresolved_bound=fd_spread_tol * resolution,
     )

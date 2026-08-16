@@ -931,3 +931,48 @@ def test_a_frozen_coordinate_that_dominates_the_projection_is_caught():
             _wrap(base.reshape((2, 2, 2, 2, 2))),
             direction=v.reshape((2, 2, 2, 2, 2)),
         )
+
+
+def test_a_coordinate_dominating_the_signed_projection_after_cancellation_is_caught():
+    """The L1-share mask missed this; the projection test does not.
+
+    Contributions ``g_i*v_i`` of 1e-13, 1 and -1+5e-14 sum to 1.5e-13 while
+    their L1 total is 2, so the first coordinate supplies two thirds of
+    ``analytic`` yet is 5e-14 of the L1 -- excluded by any share-of-total
+    cutoff. Freezing it with a large base then drops that contribution from the
+    difference while it stays in ``analytic``.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e18  # large enough to freeze coordinate 0 at every step
+    weights = np.zeros(n)
+    weights[0] = 1e-13
+    weights[1] = 1.0
+    weights[2] = -1.0 + 5e-14
+
+    def affine(t):
+        x = jnp.asarray(t.todense()).reshape(-1)
+        return jnp.sum(jnp.asarray(weights) * x), jnp.asarray(weights).reshape(
+            (2, 2, 2, 2, 2)
+        )
+
+    with pytest.raises(ValueError, match="rounds away"):
+        measure_gradient_error(
+            affine,
+            _wrap(base.reshape((2, 2, 2, 2, 2))),
+            direction=np.ones((2, 2, 2, 2, 2)),
+        )
+
+
+def test_the_unresolved_summary_quotes_the_bound_it_compared_against():
+    """``is_resolved`` tests against ``fd_spread_tol * resolution``.
+
+    Quoting ``resolution`` alone would claim the gradient is ``fd_spread_tol``
+    times more accurate than the scan established.
+    """
+    report = measure_gradient_error(_exact_pair(), _quartic_state())
+
+    assert not report.is_resolved, report.summary()
+    assert report.unresolved_bound == pytest.approx(10.0 * report.resolution)
+    assert f"{report.unresolved_bound:.2e}" in report.summary()
+    assert "below the measurement resolution" not in report.summary()
