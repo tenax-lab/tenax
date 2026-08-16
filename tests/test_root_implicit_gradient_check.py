@@ -1083,27 +1083,63 @@ def test_accepted_rounding_raises_the_floor():
     assert not report.is_resolved, report.summary()
 
 
-def test_cancellation_amplifies_the_accepted_rounding_floor():
-    """The bound is ``coord_drift * L1/|signed|``, not ``coord_drift``.
+def test_the_rounding_floor_does_not_depend_on_the_gradient_under_test():
+    """A floor derived from ``grad_arr`` lets a wrong gradient certify itself.
 
-    A displacement error of ``d`` per coordinate perturbs the derivative by at
-    most ``d * sum|g_i v_i|``; under cancellation that L1 far exceeds the signed
-    projection, so assuming a ratio of 1 understates the floor. A mixed-sign
-    direction on the same float32 state moves it from ~2.4e-02 to ~7e-01.
+    Weighting the floor by the returned gradient means a gradient wrong *in the
+    direction the rounding moved* produces a small amplification and reports
+    itself as accurate. The floor is therefore the distortion of the experiment,
+    computed without the gradient: handing back a badly wrong gradient must not
+    change it.
     """
     data = np.full((2, 2, 2, 2, 2), 0.5, dtype=np.float32)
-    v = np.random.RandomState(4).standard_normal(data.shape)
 
-    def quadratic(t):
+    def truthful(t):
         x = jnp.asarray(t.todense())
         return jnp.sum(x**2), 2.0 * x
 
-    plain = measure_gradient_error(quadratic, _wrap(data), steps=(1e-3, 1e-4))
-    cancelling = measure_gradient_error(
-        quadratic, _wrap(data), direction=v, steps=(1e-3, 1e-4)
+    def badly_wrong(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**2), 7.0 * x  # 250% off, and differently aligned
+
+    good = measure_gradient_error(truthful, _wrap(data), steps=(1e-3, 1e-4))
+    bad = measure_gradient_error(badly_wrong, _wrap(data), steps=(1e-3, 1e-4))
+
+    assert bad.resolution == pytest.approx(good.resolution, rel=1e-12), (
+        "the floor moved when only the returned gradient changed, so it is "
+        f"derived from the value under test -- good={good.summary()} "
+        f"bad={bad.summary()}"
+    )
+    # And the wrong gradient is still reported as wrong.
+    assert bad.is_resolved and bad.relative_error > 1.0, bad.summary()
+
+
+def test_a_skipped_step_does_not_contaminate_the_floor():
+    """Drift travels with the step, so a discarded one cannot inflate the bound.
+
+    The drift is measured before the energy-cancellation check, so appending it
+    eagerly charged the floor for steps that were then thrown away. With a 5e10
+    offset the h=1e-6 step is skipped; the surviving scan must report exactly
+    what it reports on its own.
+    """
+
+    def offset_quadratic(t):
+        x = jnp.asarray(t.todense())
+        return 5e10 + jnp.sum(x**2), 2.0 * x
+
+    A = _wrap(np.ones((2, 2, 2, 2, 2)))
+    v = np.ones((2, 2, 2, 2, 2))
+
+    with_skipped = measure_gradient_error(
+        offset_quadratic, A, direction=v, steps=(1e-4, 1e-5, 1e-6)
+    )
+    survivors_only = measure_gradient_error(
+        offset_quadratic, A, direction=v, steps=(1e-4, 1e-5)
     )
 
-    assert cancelling.resolution > 10.0 * plain.resolution, (
-        "the L1/|signed| amplification is not in the floor -- "
-        f"cancelling={cancelling.summary()} plain={plain.summary()}"
+    assert with_skipped.resolution == pytest.approx(
+        survivors_only.resolution, rel=1e-12
+    ), (
+        "the skipped h=1e-6 step contaminated the floor -- "
+        f"{with_skipped.summary()} vs {survivors_only.summary()}"
     )
