@@ -519,28 +519,31 @@ def test_the_step_is_chosen_without_consulting_the_gradient():
     """Selecting the step by agreement with the gradient is circular.
 
     For ``E = x^4`` the central difference is ``4 + 4h**2`` *exactly*, so at
-    ``x=1`` and ``h=0.1`` it returns 4.04.  A supplied gradient of 4.04 is 1%
-    wrong, and picking the step whose difference best matches it therefore
-    matched to 1.8e-15 and reported the wrong gradient as perfect.  The step is
-    now chosen by ``|h|`` alone, and ``resolution`` reports whether that choice
-    was any good.
+    ``x=1``, ``h=0.2`` returns 4.16.  A supplied gradient of 4.16 is 4% wrong,
+    and picking the step whose difference best matches it selects h=0.2 and
+    reports the wrong gradient as perfect.  The step is chosen by ``|h|`` alone
+    instead, and ``resolution`` reports whether that choice was any good.
+
+    The two steps are 20x apart so the separation requirement is satisfied --
+    the circularity is about which step is *selected*, not about how close the
+    steps are.
     """
     A = _wrap(np.ones((2, 2, 2, 2, 2)))
 
-    def one_percent_wrong(t):
+    def four_percent_wrong(t):
         x = jnp.asarray(t.todense())
-        return jnp.sum(x**4), 4.04 * jnp.ones_like(x)
+        return jnp.sum(x**4), 4.16 * jnp.ones_like(x)
 
     report = measure_gradient_error(
-        one_percent_wrong, A, direction=np.ones((2, 2, 2, 2, 2)), steps=(0.1, 0.099)
+        four_percent_wrong, A, direction=np.ones((2, 2, 2, 2, 2)), steps=(0.2, 0.01)
     )
 
-    assert report.relative_error > 1e-6, (
-        "the h=0.1 truncation lands exactly on the wrong gradient, so a "
-        f"selection that consults it reports ~0 -- got {report.summary()}"
-    )
-    assert report.step == pytest.approx(0.099), (
+    assert report.step == pytest.approx(0.01), (
         f"expected the smallest magnitude, got h={report.step:.3e}"
+    )
+    assert report.relative_error > 1e-2, (
+        "the h=0.2 truncation lands exactly on the wrong gradient, so a "
+        f"selection that consults it reports ~0 -- got {report.summary()}"
     )
 
 
@@ -581,3 +584,61 @@ def test_the_shifted_state_keeps_the_input_dtype():
         f"the map was evaluated at mixed precisions: {sorted(set(seen))}"
     )
     assert len(seen) == 5, f"expected 1 gradient + 2 steps x 2 signs, got {len(seen)}"
+
+
+# --------------------------------------------------------------------------- #
+# 8. Cancellation in the subtraction, and steps too close to bound each other   #
+# --------------------------------------------------------------------------- #
+
+
+def test_an_energy_offset_that_swallows_the_difference_is_reported():
+    """Cancellation in the SUBTRACTION, which the displacement guard cannot see.
+
+    The shifted tensors genuinely differ, but ``ULP(1e20) = 1.6e+04`` swallows
+    the ~1e-05 energy change, so every difference is exactly 0, ``resolution``
+    is 0, and a *correct* gradient reports as ~1e300 wrong with
+    ``is_resolved=True``. The same shape arises near a stationary point.
+    """
+
+    def offset_energy(t):
+        x = jnp.asarray(t.todense())
+        return 1e20 + jnp.sum(x**2), 2.0 * x
+
+    with pytest.raises(ValueError, match="rounding floor of the energy"):
+        measure_gradient_error(offset_energy, _wrap(np.ones((2, 2, 2, 2, 2))))
+
+
+def test_the_same_energy_without_the_offset_measures_fine():
+    """The offset is the problem, not the map -- the guard must not over-reject."""
+
+    def plain_energy(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**2), 2.0 * x
+
+    report = measure_gradient_error(plain_energy, _wrap(np.ones((2, 2, 2, 2, 2))))
+
+    assert report.relative_error < 1e-6, report.summary()
+
+
+@pytest.mark.parametrize("steps", [(0.1, 0.099), (1e-5, 1.5e-5)])
+def test_steps_too_close_together_are_refused(steps):
+    """Nearby steps share their truncation, so their spread cannot bound it.
+
+    The central difference's error is ``C*h^2``; two steps a factor ``r`` apart
+    differ in bias by ``r^2 - 1``, which at ``r = 1.01`` is 2%. Measured on
+    ``E = x^4`` with ``(0.1, 0.099)``: spread 1.97e-04 against a *common* error
+    of 9.71e-03, so ``resolution`` understates the truncation ~50x and the
+    report calls a correct gradient resolvedly wrong.
+    """
+    with pytest.raises(ValueError, match="separated by at least"):
+        measure_gradient_error(_exact_pair(), _quartic_state(), steps=steps)
+
+
+def test_well_separated_steps_are_accepted():
+    """The separation guard must not reject the default scan."""
+    report = measure_gradient_error(
+        _exact_pair(1.4), _quartic_state(), steps=(1e-4, 1e-6)
+    )
+
+    assert report.is_resolved, report.summary()
+    assert report.relative_error == pytest.approx(0.4, rel=1e-3), report.summary()

@@ -200,6 +200,25 @@ def measure_gradient_error(
     magnitudes = {abs(float(h)) for h in steps}
     if 0.0 in magnitudes:
         raise ValueError(f"steps must all be nonzero; got {steps!r}.")
+    # Distinct is not enough -- they have to be SEPARATED.  The central
+    # difference's truncation is ``C*h^2``, so two steps a factor ``r`` apart
+    # have biases differing by ``r^2 - 1``: at ``r = 1.01`` the spread is 2% of
+    # the bias they SHARE, so ``resolution`` understates the real truncation by
+    # ~50x and the report calls a correct gradient resolvedly wrong.  Measured
+    # on E = x^4 with steps (0.1, 0.099): spread 1.97e-04 against a common
+    # error of 9.71e-03.  ``r >= 2`` makes ``r^2 - 1 = 3``, so the spread is the
+    # same order as the bias and can stand in for it.
+    if len(magnitudes) >= 2:
+        ordered = sorted(magnitudes)
+        ratio = ordered[-1] / ordered[0]
+        if ratio < 2.0:
+            raise ValueError(
+                f"steps span only a factor {ratio:.3g} in magnitude; they must "
+                f"be separated by at least 2x. Nearby steps share almost all of "
+                f"their O(h^2) truncation, so their spread measures how close "
+                f"they are to each other rather than how wrong either is, and "
+                f"``resolution`` would understate the real error. Got {steps!r}."
+            )
     if len(magnitudes) < 2:
         raise ValueError(
             f"steps must contain at least two distinct magnitudes so the scan "
@@ -367,9 +386,31 @@ def measure_gradient_error(
             )
         return out
 
+    energy_eps = float(np.finfo(base.dtype).eps)
     results = []
     for h in steps:
-        fd = (energy_at(h) - energy_at(-h)) / (2.0 * h)
+        e_plus, e_minus = energy_at(h), energy_at(-h)
+        # Cancellation in the SUBTRACTION, which the displacement guard above
+        # cannot see: the tensors genuinely differ, but the energies do not.
+        # Near a stationary point, or with a large constant offset, the change
+        # falls under the spacing of the energy value itself -- for
+        # E = 1e20 + sum(x^2), ULP(1e20) is 1.6e+04 and a 1e-05 change vanishes,
+        # so every difference is exactly 0, ``resolution`` is 0, and a correct
+        # gradient is reported as ~1e300 wrong with ``is_resolved=True``.
+        span = abs(e_plus - e_minus)
+        floor = 4.0 * energy_eps * max(abs(e_plus), abs(e_minus))
+        if span <= floor:
+            raise ValueError(
+                f"at h={h:.1e} the two perturbed energies differ by {span:.3e}, "
+                f"at or below the {floor:.3e} rounding floor of the energy "
+                f"itself (|E| ~ {max(abs(e_plus), abs(e_minus)):.3e}), so the "
+                "difference carries no signal. This is cancellation in the "
+                "subtraction rather than in the state -- the shifted tensors "
+                "did differ. Near a stationary point, or with a large additive "
+                "constant in the energy, use a direction with more signal or "
+                "remove the offset."
+            )
+        fd = (e_plus - e_minus) / (2.0 * h)
         if not np.isfinite(fd):
             raise ValueError(
                 f"the finite difference at h={h:.1e} is {fd}; the energies "
