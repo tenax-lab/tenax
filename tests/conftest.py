@@ -76,6 +76,15 @@ _FILE_MARKERS = {
     # the consolidation and a silent behaviour change, so they belong in the
     # gate rather than in a bucket nothing runs on a PR.
     "test_su_sweep_consolidation.py": "core",
+    # #878's collapse guards (fpeps() returned exactly 0.0 by step 10).  These
+    # assert on the bond SPECTRUM, never the norm -- `_normalize_tensor` runs
+    # last in the update, so |A| reads a healthy 1.0 right up to the step where
+    # it is exactly 0, and `isfinite` passes on the corpse.  They belong in
+    # `algorithm` rather than the merge gate purely on cost: a fermionic 4-bond
+    # cycle is ~1.2 s at D=2 (block-sparse eager dispatch, #566/#618), so the
+    # 10/20/40-step sweeps here run 280 s locally -- two orders of magnitude
+    # above anything else in `core`.
+    "test_fpeps_878_su_collapse.py": "algorithm",
     # Root-implicit AD wiring (#715): dispatch + guard surface only, no
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).
