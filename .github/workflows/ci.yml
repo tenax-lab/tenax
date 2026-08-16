@@ -31,11 +31,16 @@ on:
 # ``pull_request`` runs are superseded; everything else serialises within its
 # group instead.
 #
-# The group key uses the PR number where there is one.  ``github.ref`` alone
-# would be wrong for ``merge_group``, whose refs are unique per queue entry, and
-# would group unrelated events together on ``main``.
+# Non-PR runs get a UNIQUE group, not a shared one keyed on the ref, and
+# ``cancel-in-progress: false`` is not enough to make sharing safe: GitHub keeps
+# at most one *pending* run per group and cancels the older pending one whatever
+# that flag says -- the flag only protects the run that is already executing.
+# Grouping every ``main`` push, scheduled run and manual dispatch under
+# ``CI-refs/heads/main`` would therefore drop exactly the non-core signal this
+# block claims to protect (#740), whenever two land close together.
+# ``github.run_id`` is unique per run, so those events never contend at all.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
