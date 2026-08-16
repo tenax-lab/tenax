@@ -779,3 +779,71 @@ def test_the_scan_still_fails_when_too_few_steps_survive():
             direction=np.ones((2, 2, 2, 2, 2)),
             steps=(1e-4, 1e-5, 1e-6),
         )
+
+
+# --------------------------------------------------------------------------- #
+# 11. The unperturbed state, and the knob that decides how the report reads     #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_non_finite_unperturbed_energy_is_rejected():
+    """The map must be defined at the state whose gradient is measured.
+
+    A NaN here with finite neighbours would otherwise yield a confident report
+    about a map that is undefined exactly where it was asked.
+    """
+    calls = {"n": 0}
+
+    def nan_at_base(t):
+        x = jnp.asarray(t.todense())
+        calls["n"] += 1
+        energy = jnp.nan if calls["n"] == 1 else jnp.sum(x**4)
+        return energy, 4.0 * x**3
+
+    with pytest.raises(ValueError, match="unperturbed state"):
+        measure_gradient_error(nan_at_base, _quartic_state())
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("-inf")])
+def test_an_unusable_spread_tolerance_is_rejected(bad):
+    """``fd_spread_tol`` decides which branch the report is read as.
+
+    Negative makes ``best_rel > tol * resolution`` true for essentially any
+    error, so everything reads as a resolved measurement; NaN makes it false
+    always, so everything lands in the branch that means "better than the scan
+    can resolve" -- the one that reads as good news.
+    """
+    with pytest.raises(ValueError, match="fd_spread_tol"):
+        measure_gradient_error(_exact_pair(), _quartic_state(), fd_spread_tol=bad)
+
+
+def test_zero_spread_tolerance_is_allowed():
+    """Zero is degenerate but coherent: any nonzero error counts as resolved."""
+    report = measure_gradient_error(
+        _exact_pair(1.5), _quartic_state(), fd_spread_tol=0.0
+    )
+
+    assert report.is_resolved, report.summary()
+    assert report.relative_error == pytest.approx(0.5, rel=1e-3), report.summary()
+
+
+def test_the_advertised_cost_matches_the_number_of_evaluations():
+    """The docstring promises seven convergences by default; count them.
+
+    The module docstring said "four" while the function docstring said "six",
+    and neither counted the unperturbed call -- a stale claim someone would
+    budget a run against.
+    """
+    calls = {"n": 0}
+
+    def counting(t):
+        x = jnp.asarray(t.todense())
+        calls["n"] += 1
+        return jnp.sum(x**4), 4.0 * x**3
+
+    measure_gradient_error(counting, _quartic_state())
+
+    assert calls["n"] == 7, (
+        f"default scan made {calls['n']} evaluations, not the documented 7 "
+        "(1 unperturbed + 2 per step x 3 steps)"
+    )

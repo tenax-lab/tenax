@@ -37,7 +37,8 @@ site conditioning            2200x spread in gradient error across a
 
 So the honest position is that the accuracy of a root-implicit gradient can be
 *measured* but not *predicted*, and this module measures it.  It is deliberately
-not called from the engines: it costs four extra CTM convergences, which is far
+not called from the engines: with the default three steps it costs **seven** CTM
+convergences -- two per step plus one at the unperturbed state -- which is far
 too much per optimizer step, and #785 rejected exactly that.  Run it once on a
 representative state before committing to a long optimization, the way one
 checks a discretization before a production run.
@@ -139,9 +140,9 @@ def measure_gradient_error(
     gradient against the map it claims to differentiate and needs no external
     reference implementation.
 
-    **Cost: two energy evaluations per step**, each a full CTM convergence, so
-    six with the default three steps.  That is why nothing calls this
-    automatically.
+    **Cost: two energy evaluations per step**, each a full CTM convergence, plus
+    one at the unperturbed state -- seven with the default three steps.  That is
+    why nothing calls this automatically.
 
     ``steps`` is scanned rather than fixed because a single step cannot tell a
     wrong gradient from an unresolvable difference.  The scan yields both
@@ -197,6 +198,17 @@ def measure_gradient_error(
     # disagreement then satisfies ``best_rel > tol * 0``, and a one-step
     # truncation artifact is reported as a resolved measurement -- defeating
     # the guard this check exists to be.
+    if not (np.isfinite(fd_spread_tol) and fd_spread_tol >= 0.0):
+        # This number decides which branch the report is read as.  Negative
+        # makes ``best_rel > tol * resolution`` true for essentially any error,
+        # so everything looks resolved; NaN makes it false always, so every
+        # result lands in the documented "better than resolvable" branch.
+        raise ValueError(
+            f"fd_spread_tol must be finite and non-negative, got "
+            f"{fd_spread_tol!r}. It controls how the report is interpreted: a "
+            "negative value marks any error resolved, and NaN marks every one "
+            "unresolved, which is the branch that reads as good news."
+        )
     magnitudes = {abs(float(h)) for h in steps}
     if 0.0 in magnitudes:
         raise ValueError(f"steps must all be nonzero; got {steps!r}.")
@@ -307,7 +319,17 @@ def measure_gradient_error(
     # promises to compare against.
     v = v.astype(base.dtype, copy=False)
 
-    _energy, grad = energy_and_grad(A)
+    energy0, grad = energy_and_grad(A)
+    e0 = float(np.real(np.asarray(energy0)))
+    if not np.isfinite(e0):
+        # Checked for the same reason every perturbed energy is: the map has to
+        # be defined at the state whose gradient is being measured.  Without
+        # this, a NaN here with finite neighbours yields a confident-looking
+        # report about a map that is undefined where it was asked.
+        raise ValueError(
+            f"the energy at the unperturbed state is {e0}, so the map is "
+            "undefined at the state whose gradient is being measured."
+        )
     grad_arr = np.asarray(grad)
     if grad_arr.shape != base.shape:
         # ``grad_arr * v`` would happily BROADCAST a scalar or a lower-rank
