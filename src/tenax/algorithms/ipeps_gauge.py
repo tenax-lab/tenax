@@ -158,9 +158,17 @@ def torus_2x2_sign_free(A: Tensor, B: Tensor, weights: BondWeights) -> Tensor:
         fermionic gauge.  ``contract`` does not apply Koszul signs -- that is a
         deliberate choice (#555, ``contraction/contractor.py``), justified for
         *planar* networks, "the only kind Tenax's CTM/RDM/energy code uses".
-        Signs enter Tenax only through ``SymmetricTensor.transpose``, ``fuse``
-        and the ``linalg`` decompositions; ``bar()`` applies none, and this
-        function calls none of them.  So it is categorically sign-free, and a
+        Koszul signs enter Tenax through exactly two groups of call sites, and
+        the enumeration is checkable by grepping ``_koszul_sign`` (defined in
+        ``core/tensor.py``) rather than by memory: ``SymmetricTensor.transpose``
+        is one of them, and the ``linalg`` decompositions -- svd (three
+        variants), rsvd, qr (two), eigh -- are the other seven.  ``fuse`` is
+        **not** among them, despite an earlier version of this warning saying
+        so: ``_fuse_indices_symmetric`` permutes each block with a bare
+        ``jnp.transpose`` and never asks the symmetry for a parity, and the
+        ``Symmetry.fuse`` methods are charge-addition rules with nothing to do
+        with statistics.  ``bar()`` applies no sign either.  This function
+        calls nothing in either group, so it is categorically sign-free, and a
         closed 2x2 torus is exactly the non-planar case that carve-out
         excludes -- its wrap-around edges cross the interior.  Measured on
         ``FermionParity`` pairs it is value-identical to the ``np.einsum``
@@ -212,7 +220,7 @@ def ctm_rdm2x1_planar(
 ) -> jax.Array:
     """The horizontal 2x1 reduced density matrix, via converged CTM.
 
-    A gauge-invariance witness that is valid **for fermions**, which
+    The gauge-invariance witness that is **usable on fermions**, which
     :func:`torus_2x2_sign_free` is not.  The whole point is that this stays
     inside the regime the contractor's sign convention is documented for:
     #555 declines to auto-apply Koszul signs and justifies that for *planar*
@@ -220,6 +228,14 @@ def ctm_rdm2x1_planar(
     code -- ``ctm_tensor_2site`` then ``_rdm2x1_tensor_2site`` -- so the
     contraction is sign-correct by the same argument that makes the shipped
     fermionic energies sign-correct.  A closed torus is not.
+
+    That validity is *inherited*, not independently established: it is exactly
+    as strong as #555's planar carve-out and no stronger.  Task 5 measured a
+    state on which that convention and the Koszul sign
+    ``SymmetricTensor.transpose`` applies disagree, and did **not** settle
+    which of the two is wrong (#882 §5.2).  So read this as "the same sign
+    convention the shipped fermionic energies use", not as "certified
+    graded-correct".
 
     Gauge-invariant because it is a *physical* observable of the state, not a
     function of the tensors' parametrisation: the environment is re-derived
@@ -232,6 +248,30 @@ def ctm_rdm2x1_planar(
     The returned matrix is trace-normalised by ``_rdm2x1_tensor_2site``, so an
     overall rescale of ``A`` or ``B`` -- which ``bp_gauge_checkerboard`` does
     every bond, deliberately -- cannot show up as a false difference.
+
+    **Resolution differs by arm, and the good number is the dense one.**  CTM
+    keeps only ``chi`` environment states and a gauge changes the virtual basis
+    that truncation is taken in, so an exactly-gauged pair does not reproduce
+    the ungauged one to machine precision; the residual is the witness's noise
+    floor.  On a *dense* pair that floor falls steeply with ``chi`` (D=2:
+    5.5e-04 at ``chi=4`` down to 2.5e-09 at ``chi=32``).  On a *fermionic* pair
+    at D=2 it does not: 3.13e-03 (``chi=6``), 1.06e-03 (``chi=8``), 1.24e-03
+    (``chi=12``) -- a plateau around 1e-3 over a 2x change in ``chi``.  All five
+    numbers are from ``task-4-report.md``; none was re-measured here.
+
+    Two consequences, and no third.  (1) A fermionic violation smaller than
+    ~1e-3 at small ``chi`` is invisible to this witness, so compare against a
+    known-exact gauge on the same state at the same ``chi``, never against
+    zero.  (2) Flat-in-``chi`` is this project's own defect signature, so that
+    plateau is **not** established as truncation -- it is unexplained.  A
+    gauge-strength scan was once offered as independent evidence that it is
+    truncation; it is not independent, because as the gauge tends to the
+    identity the gauged and reference runs become the same computation and the
+    displacement must fall whatever the cause.  The question is deferred, not
+    answered: see #882 §5.2.  (Related, and also deferred: at D=3 the fermionic
+    floor *does* fall, 2.24e-03 at ``chi=8`` to 6.25e-04 at ``chi=20``, per
+    ``task-5-report.md`` §1 -- so the plateau may be specific to D=2, where
+    both parity sectors have size 1.)
 
     Args:
         A, B:      Checkerboard site tensors, labels ``(u,d,l,r,phys)``.

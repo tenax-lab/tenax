@@ -34,6 +34,24 @@ _PAIRS = {"dense": _dense_pair, "symmetric": _symmetric_pair}
 def _fermionic_pair(D: int = 2, seed: int = 0):
     """A random ``FermionParity`` checkerboard pair, same legs and flows.
 
+    **The default is D=2 while ``_dense_pair``/``_symmetric_pair`` default to
+    D=3**, so pass ``D`` explicitly whenever two builders are iterated together
+    -- both shipped call sites do.  Kept at 2 because every measured number in
+    ``task-4-report.md`` was taken there and re-pointing it would invalidate
+    them for no gain in this round.
+
+    D=2 is not a general operating point for a *gauge-structure* question.
+    ``_build_initial_fpeps_tensor`` builds every virtual leg from
+    ``virt_charges = [i % 2 for i in range(D)]`` (``fermionic_ipeps.py:167``),
+    so at D=2 each leg carries parity sectors ``{0: 1, 1: 1}``: every
+    parity-preserving matrix on it is 1x1 per sector, hence diagonal, and a
+    non-diagonal parity-preserving gauge cannot be expressed at all.  Anything
+    asking whether a gauge is exact *in general* needs D >= 3 (this is why
+    deferred Task 5 was re-pointed there; #882 §5.2).  The witness tests in
+    ``test_ipeps_gauge.py`` use D=2 deliberately -- they gauge with an explicit
+    diagonal matrix whose answer is known a priori, which is a claim about the
+    *witness*, not about non-diagonal gauges.
+
     Deliberately **not** in ``_PAIRS``.  ``test_ipeps_bp_gauge.py``
     parametrises four tests over ``list(_PAIRS)``, all of which assert that
     ``bp_gauge_checkerboard`` is an exact gauge; adding a fermionic entry
@@ -57,8 +75,19 @@ def _fermionic_pair(D: int = 2, seed: int = 0):
 #: fermionic path.  The U(1)-Sz ``"symmetric"`` pair is left out on cost
 #: grounds -- its CTM is the slowest of the three and it adds no coverage the
 #: other two lack (dense covers the dense contraction path, fermionic covers
-#: the block-sparse one *and* the Koszul-carrying ``fuse`` in the double
-#: layer).  It was measured in scratch and behaves like the other two.
+#: the block-sparse one and the graded one).  It was measured in scratch and
+#: behaves like the other two.
+#:
+#: An earlier version of this comment said the fermionic entry also covers "the
+#: Koszul-carrying ``fuse`` in the double layer".  It does not: ``fuse`` carries
+#: no Koszul sign (``_fuse_indices_symmetric`` permutes blocks with a bare
+#: ``jnp.transpose``; grep ``_koszul_sign`` -- only ``SymmetricTensor.transpose``
+#: and the ``linalg`` decompositions call it).
+#:
+#: The two builders here have **different default D** -- 3 for ``_dense_pair``,
+#: 2 for ``_fermionic_pair`` -- so iterating this dict without an explicit ``D``
+#: silently compares two bond dimensions.  Both call sites in
+#: ``test_ipeps_gauge.py`` pass ``D=2`` explicitly; keep it that way.
 _WITNESS_PAIRS = {"dense": _dense_pair, "fermionic": _fermionic_pair}
 
 

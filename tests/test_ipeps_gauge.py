@@ -313,6 +313,12 @@ def test_sign_free_probe_sees_the_known_bosonic_gauge_invariance(kind):
 #: fuse and no decomposition, so no sign convention can enter.  That is what
 #: makes it a usable calibration input for the graded case: unlike BP, the
 #: answer is known a priori.
+#:
+#: Diagonal is also all that D=2 can express on the fermionic arm: its virtual
+#: parity sectors are ``{0: 1, 1: 1}``, so every parity-preserving matrix is
+#: 1x1 per sector (see ``_fermionic_pair``).  The tests below are claims about
+#: the *witness*, not about non-diagonal gauges; a witness calibrated only on
+#: diagonal gauges needs D >= 3 to say more (#882 §5.2).
 _GAUGE_G = jnp.array([1.7, 0.55])
 
 _WITNESS_CHI = 8
@@ -343,11 +349,30 @@ def test_planar_witness_separates_a_real_gauge_from_a_mispaired_one(kind):
     Note the control does **not** go to machine precision, and must not be
     asserted to.  CTM truncates the environment to ``chi`` states and a gauge
     changes the virtual basis that truncation is taken in, so at finite
-    ``chi`` the two runs keep slightly different subspaces.  Measured, that
-    floor falls with ``chi`` (dense, D=2: 5.5e-4 at chi=4 down to 2.5e-09 at
-    chi=32) and with the strength of the gauge (fermionic, D=2, chi=8:
-    1.1e-03 at ratio 3.09 down to 1.5e-05 at ratio 1.008), which is the
-    signature of truncation rather than a defect -- it is flat in neither.
+    ``chi`` the two runs keep slightly different subspaces.
+
+    What that floor does with ``chi`` differs by arm, and only the dense one
+    behaves like truncation (all numbers from ``task-4-report.md``; none
+    re-measured here):
+
+    - dense, D=2: 5.5e-04 at chi=4 down to 2.5e-09 at chi=32 -- falls steeply.
+    - fermionic, D=2: 3.13e-03 (chi=6), 1.06e-03 (chi=8), 1.24e-03 (chi=12) --
+      a plateau around 1e-3.
+
+    Flat in ``chi`` is this project's own defect signature, so the fermionic
+    floor is **not** established as truncation; it is unexplained, and the
+    question is deferred to #882 §5.2.  A gauge-strength scan was previously
+    offered here as a second, independent scaling that settled it.  It is not
+    independent: as the gauge tends to the identity the gauged run and the
+    reference run become the *same computation*, so the displacement must fall
+    whatever the cause.  Both observations are descriptive only.
+
+    None of that weakens what this test asserts, which is the **separation**
+    between control and mutation, and holds on both arms (measured at the
+    shipped chi=8: 5800x dense, 882x fermionic, against a 100x gate).  It does
+    mean the ``ctl < 1e-2`` bound is a bound on a *plateau* on the fermionic
+    arm rather than on something known to vanish, so it must not be tightened
+    without re-measuring that arm.
     """
     A, B = _WITNESS_PAIRS[kind](D=2)
     base = ctm_rdm2x1_planar(A, B, **_WITNESS_KW)
@@ -365,8 +390,8 @@ def test_planar_witness_separates_a_real_gauge_from_a_mispaired_one(kind):
 
     assert ctl < 1e-2, (
         f"{kind}: an exact diagonal gauge moved the witness by {ctl:.3e}.  That "
-        f"is far above the finite-chi truncation floor and means the witness is "
-        f"not measuring a gauge-invariant quantity."
+        f"is far above this witness's finite-chi noise floor on either arm and "
+        f"means it is not measuring a gauge-invariant quantity."
     )
     assert mut > 0.1, (
         f"{kind}: a mispaired gauge -- which changes the physical state -- moved "
@@ -383,12 +408,23 @@ def test_planar_witness_separates_a_real_gauge_from_a_mispaired_one(kind):
 def test_planar_witness_floor_shrinks_with_chi():
     """Pin the *trend*, so a future defect cannot hide inside the floor.
 
-    The control residual above is a finite-``chi`` truncation artefact, and
-    the way to keep that claim honest is to require it to behave like one.
-    A genuine contraction defect -- a dropped sign, a mispaired leg -- would
-    sit at a fixed size no matter how much environment it is given, so
-    "shrinks with chi" is what distinguishes the two.  Dense only: this needs
-    several CTM runs and the dense path is by far the cheapest.
+    The control residual above is a finite-``chi`` truncation artefact **on
+    the dense arm**, and the way to keep that claim honest is to require it to
+    behave like one.  A genuine contraction defect -- a dropped sign, a
+    mispaired leg -- would sit at a fixed size no matter how much environment
+    it is given, so "shrinks with chi" is what distinguishes the two.
+    Measured here: 718x across chi 6 -> 16 (``task-4-report.md``).
+
+    Dense only, and **not** merely because it is the cheapest arm: the
+    fermionic arm does not pass this.  Its floor at D=2 is 3.13e-03 (chi=6),
+    1.06e-03 (chi=8), 1.24e-03 (chi=12) -- about 2.5x across a 2x change in
+    ``chi``, against the 10x required below (``task-4-report.md``).
+    Parametrising this over ``_WITNESS_PAIRS`` would therefore fail, and it
+    would be reporting something real rather than being flaky.  That is
+    recorded rather than asserted because this round may not spend a fermionic
+    CTM run; the question is deferred to #882 §5.2.  So read this test as
+    validating the *dense* witness only -- it says nothing about the fermionic
+    one, which the docstring on :func:`ctm_rdm2x1_planar` describes instead.
     """
     A, B = _WITNESS_PAIRS["dense"](D=2)
     A_g = scale_bond_axis(A, "r", _GAUGE_G)
