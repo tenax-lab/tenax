@@ -97,15 +97,34 @@ def test_a_wrong_gradient_measures_as_wrong_by_the_right_amount(scale, want):
     assert report.relative_error == pytest.approx(want, rel=1e-3), report.summary()
 
 
-def test_the_direction_is_normalised_so_the_error_is_scale_free():
-    """A caller-supplied direction of any length gives the same relative error."""
+@pytest.mark.parametrize("scale", [1e-6, 1e6, 1e-200, 1e200])
+def test_the_direction_is_normalised_so_the_error_is_scale_free(scale):
+    """A caller-supplied direction of any length gives the same relative error.
+
+    The outer two scales are the load-bearing ones.  ``np.linalg.norm`` squares
+    before summing, so it halves the usable exponent range: at ``1e200`` it
+    overflows to ``inf`` and ``v / inf`` collapses the direction to exactly
+    zero, at which point ``analytic``, the finite difference and ``resolution``
+    are all 0 and a 30%-wrong gradient reports as unresolvably accurate.  At
+    ``1e-200`` the same square underflows the norm to 0 instead.  This is the
+    #870 trap; normalising by max-abs first is the fix.
+    """
     A = _quartic_state()
     v = np.random.RandomState(3).standard_normal(A.todense().shape)
 
-    small = measure_gradient_error(_exact_pair(1.3), A, direction=v * 1e-6)
-    large = measure_gradient_error(_exact_pair(1.3), A, direction=v * 1e6)
+    report = measure_gradient_error(_exact_pair(1.3), A, direction=v * scale)
 
-    assert small.relative_error == pytest.approx(large.relative_error, rel=1e-6)
+    assert report.is_resolved, report.summary()
+    assert report.relative_error == pytest.approx(0.3, rel=1e-3), report.summary()
+
+
+def test_a_non_finite_direction_is_refused():
+    A = _quartic_state()
+    v = np.random.RandomState(3).standard_normal(A.todense().shape)
+    v[0, 0, 0, 0, 0] = np.inf
+
+    with pytest.raises(ValueError, match="non-finite entries"):
+        measure_gradient_error(_exact_pair(), A, direction=v)
 
 
 def test_the_best_step_is_reported_not_the_worst():

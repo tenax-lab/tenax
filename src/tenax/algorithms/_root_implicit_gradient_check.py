@@ -219,10 +219,25 @@ def measure_gradient_error(
     )
     if v.shape != base.shape:
         raise ValueError(f"direction has shape {v.shape}, expected {base.shape}")
-    norm = float(np.linalg.norm(v))
-    if norm == 0.0:
+    # Rescale by max-abs BEFORE taking the norm.  ``norm`` squares before it
+    # sums, so it halves the usable exponent range: a finite direction with
+    # components above ~1e154 (float64) overflows it to ``inf``, the zero-vector
+    # check passes, ``v / inf`` collapses every component to exactly 0, and then
+    # ``analytic``, the finite difference and ``resolution`` are all 0 -- so an
+    # arbitrarily wrong gradient reports as more accurate than the scan can
+    # resolve.  Below ~1e-162 the same square underflows the norm to 0 instead.
+    # This is the #870 trap (four sites in the BP gauge) and the fix is the
+    # same: divide by ``max_abs`` first, after which every component is <= 1 and
+    # the norm lands in ``[1, sqrt(N)]``.
+    max_abs = float(np.max(np.abs(v)))
+    if max_abs == 0.0:
         raise ValueError("direction is the zero vector")
-    v = v / norm
+    if not np.isfinite(max_abs):
+        raise ValueError(
+            "direction has non-finite entries, so it cannot be normalised."
+        )
+    v = v / max_abs
+    v = v / float(np.linalg.norm(v))
 
     if is_complex:
         # Judged on the VALUES, not the dtype.  A real-valued direction stored
