@@ -384,21 +384,74 @@ that otherwise work (#881). Why a 2-site path needs it, when the stated
 justification is 1-site-only, is **not understood** and is its own Phase 1
 question. That — not the 1-site experiment — is what gates fermionic v1.
 
-### 5.2 Fermionic BP runs and converges — exactness is still unproven
+### 5.2 Fermionic BP converges to a gauge that is **not exact** — measured, and localised
+
+**ANSWERED, 2026-08-16.** This section originally recorded an open question. It
+now records a result, and the answer is the unwelcome one. The evidence below
+was produced by an experiment that was stopped part-way when the bosonic path
+took priority; its measurements and its unlanded test code are preserved in
+`.superpowers/sdd/2026-08-16-simple-update-rewrite/` (`task-5-report.md`,
+`task-5-wip.patch`). **Nothing here is on `main`.**
 
 The BP gauge was built and verified for the bosonic checkerboard. Messages on a
 graded tensor network must respect Koszul signs, and nothing had exercised that.
 
-**Run since: it works, as-is.** `bp_gauge_checkerboard` accepts a fermionic
-`SymmetricTensor` from `_initialize_fpeps` without modification and converges at
-D=2 in 65 iterations to residual 6.9e-13 (tol=1e-12), returning a plausible
-four-bond spectrum. So the generalisation Phase 1 was scoped to write may
-largely already exist. It is also, at 392 ms per iteration, catastrophically
-slow — see §2.
+**It runs.** `bp_gauge_checkerboard` accepts a fermionic `SymmetricTensor` from
+`_initialize_fpeps` without modification and converges — D=2 in 65 iterations to
+residual 6.9e-13, D=3 in 28 iterations to 6.2e-13 — returning a plausible
+four-bond spectrum. It is also, at 392 ms per iteration, catastrophically slow
+(§2).
 
-**Converging is not being exact**, and that gap is the real Phase 1 work. A BP
-fixed point on a graded network can be self-consistent and still not be a gauge
-transformation of the original state if a Koszul sign is dropped.
+**Converging is not being exact, and here it is not exact.** Against the planar
+witness of §5.2a, at D=3 and χ=20:
+
+| | displacement |
+|---|---|
+| BP gauge | **7.28e-02** |
+| a gauge that is exact by construction, same state, same χ | 6.25e-04 |
+| ratio | **116×** |
+
+The floor is set by a non-diagonal, parity-block-diagonal gauge whose inverse is
+analytic and whose round-trip was verified to ~1e-16 with no environment at all
+(gauge one bond, contract the two sites over exactly that bond, compare
+elementwise — exact for any statistics). BP's displacement is also **flat in χ**
+— 6.68e-02 at χ=8 against 7.28e-02 at χ=20 — while the floor falls 3.6× over the
+same range. Flat in χ is this project's defect signature; falling with χ is
+truncation.
+
+**Localised to a single sign.** `_reorder` (`ipeps_bp_gauge.py:255`) routes
+through `SymmetricTensor.transpose`, which applies a Koszul sign. Suppressing
+that one sign:
+
+- drops the displacement to 8.93e-04 — 1.43× the floor, i.e. into the noise;
+- makes the D=2 gauge exactly per-leg (sign mismatches 6/16 → 0/16, rectangle
+  identity 2.000e+00 → 5e-15);
+- leaves the BP fixed point itself untouched.
+
+That is a diagnosis, not a fix: the right correction may be to apply a
+*compensating* sign elsewhere rather than to delete this one, and deciding that
+needs the graded-network derivation, not a bisection. **Deferred with the rest
+of the fermionic line** (§9.1) — it changes nothing bosonic, since
+`SymmetricTensor.transpose` returns the identity sign on a non-graded symmetry.
+
+**D=2 cannot express this question, and nearly hid it.** `fermionic_ipeps.py:167`
+sets `virt_charges = [i % 2 for i in range(D)]`, so at D=2 the parity sectors
+have sizes {0: 1, 1: 1} and *every* parity-preserving matrix on a virtual leg is
+1×1. Every parity-preserving gauge at D=2 is therefore diagonal, and the
+sign-carrying decompositions have no non-trivial block to act on. The first run
+of this experiment was specified at D=2 and would have reported "BP is exact on a
+graded network" — an artefact of sector structure, not a measurement. The same
+trap appears in the mutation suite: "inverse not transposed on the far end" is a
+**no-op at D=2** (1.06e-16) and 2.86–3.37 at D=3. Any fermionic gauge work must
+run at D≥3; D=4 gives 2×2 blocks in both sectors. U(1)-Sz is not a substitute —
+its D=3 charges `[0, 1, -1]` also give all sectors size 1.
+
+**Cost, for whoever resumes.** One D=3/χ=20 witness solve is 46 s warm, ~390 s
+cold (a fresh process pays 250–300 s of import and compile). `max_iter=20` agrees
+with `max_iter=40` to 1.96e-13 — four thousand times below the effect being
+measured — and halves the cost; the CTM does not exit early on `conv_tol`, so
+this is a straight 2× saving. `gauge_fix` itself is 29 s at D=3. D=4 was never
+run.
 
 **The obstacle is sharper than an earlier draft of this section understood, and
 it rules out the probe that draft prescribed.** `_torus_2x2` — the probe #870
@@ -413,9 +466,17 @@ probe out of the graded `contract()` instead", is **not available**:
   kind Tenax's CTM/RDM/energy code uses — no signs are needed… For future
   non-planar applications an explicit `twist` primitive can be added."* No
   `twist` primitive exists.
-- Signs enter **only** through `SymmetricTensor.transpose`, `fuse`, and the
-  `linalg` decompositions (`_koszul_sign` at `linalg.py:374, 764, 1042, 1271`).
-  `bar()` applies none (`tensor.py:302-312`).
+- Signs enter **only** through `SymmetricTensor.transpose` and the `linalg`
+  decompositions. `_koszul_sign` is defined at `core/tensor.py:104` and called
+  from exactly eight places: `linalg.py:374, 764, 1042, 1271, 1450, 1650, 2046`
+  and `core/tensor.py:1167` (`transpose`). `bar()` applies none
+  (`tensor.py:302-312`). *(Corrected 2026-08-17: an earlier version of this list
+  also named `fuse`. It carries no sign — the `fuse` methods in `core/symmetry.py`
+  are charge-fusion rules that combine charge arrays, and
+  `_fuse_indices_symmetric` reorders with a bare `jnp.transpose`. The conclusion
+  below is unchanged, but this list is what a reader uses to decide whether some
+  other contraction is sign-safe, so a wrong member makes that decision wrong in
+  both directions.)*
 - A closed 2×2 torus is precisely the **non-planar** case that carve-out
   excludes: its wrap-around edges cross the interior.
 
@@ -428,6 +489,11 @@ Note the asymmetry this creates: `bp_gauge_checkerboard` **is** sign-aware,
 because it goes through `eigh`. The gauge machinery and any torus probe
 therefore use different sign conventions, and a sign-level defect in the gauge
 is exactly what such a probe cannot see.
+
+That was written as a hazard. It turned out to be a description of the actual
+defect: the fault localised above sits in `SymmetricTensor.transpose`'s sign,
+inside the gauge — precisely the class the torus is blind to. Had the re-scope
+not happened, the torus would have certified this gauge as exact.
 
 **Decided: use a planar witness instead of a closed amplitude.** Gauge
 invariance is tested by a quantity the library can already contract correctly —
