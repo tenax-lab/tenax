@@ -899,3 +899,35 @@ def test_a_real_valued_complex_dtype_gradient_on_a_real_state_is_allowed():
     report = measure_gradient_error(complex_dtype_grad, _quartic_state())
 
     assert report.relative_error < 1e-6, report.summary()
+
+
+def test_a_frozen_coordinate_that_dominates_the_projection_is_caught():
+    """The freeze check cannot key off the direction alone.
+
+    ``A[0]=1e20`` with ``v[0]=1e-13`` and ``g[0]=1e20``: that coordinate carries
+    ~1e6 of ``g.v`` while sitting far below any direction-relative cutoff, so a
+    direction-only mask excludes it. It is frozen at every shifted state, its
+    contribution drops out of the difference but stays in ``analytic``, and the
+    correct gradient reads as resolvedly wrong.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e20
+    weights = np.ones(n)
+    weights[0] = 1e20
+
+    def affine(t):
+        x = jnp.asarray(t.todense()).reshape(-1)
+        return jnp.sum(jnp.asarray(weights) * x), jnp.asarray(weights).reshape(
+            (2, 2, 2, 2, 2)
+        )
+
+    v = np.ones(n)
+    v[0] = 1e-13
+
+    with pytest.raises(ValueError, match="rounds away"):
+        measure_gradient_error(
+            affine,
+            _wrap(base.reshape((2, 2, 2, 2, 2))),
+            direction=v.reshape((2, 2, 2, 2, 2)),
+        )

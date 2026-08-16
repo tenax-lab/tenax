@@ -401,6 +401,22 @@ def measure_gradient_error(
         for it throws away the other steps' perfectly good data.
         """
 
+    # Which coordinates actually matter to ``g.v``.  The displacement check
+    # below cannot key off the direction alone: a coordinate with a tiny ``v_i``
+    # but a huge ``g_i`` dominates the projection while sitting far under any
+    # direction-relative cutoff.  With ``A[0]=1e20``, ``v[0]=1e-13`` and
+    # ``g[0]=1e20`` that one coordinate carries ~1e6 of ``analytic`` and is
+    # frozen at every shifted state -- excluded from the check, its contribution
+    # silently drops out of the difference and the correct gradient reads as
+    # resolvedly wrong.
+    contribution = np.abs(grad_arr * v)
+    contribution_total = float(np.sum(contribution))
+    significant = (
+        contribution > 1e-12 * contribution_total
+        if contribution_total > 0.0
+        else np.zeros_like(contribution, dtype=bool)
+    )
+
     energy_dtypes: list = []
 
     def _energy_eps() -> float:
@@ -445,7 +461,13 @@ def measure_gradient_error(
         # ``g.v`` but not to the difference, so the two follow different
         # directions.  Whole-array equality cannot see this -- on a mixed-scale
         # tensor a 1e20 entry freezes while the 1.0 entries move.
-        meaningful = np.abs(intended) > 1e-12 * float(np.max(np.abs(intended)))
+        # A coordinate matters if it carries weight in the DIRECTION or if it
+        # contributes to the PROJECTION -- either is enough for its freezing to
+        # corrupt the comparison, so the mask is the union rather than the
+        # direction test alone.
+        meaningful = significant | (
+            np.abs(intended) > 1e-12 * float(np.max(np.abs(intended)))
+        )
         frozen = meaningful & (np.abs(intended) <= tol_abs)
         drifted = meaningful & (np.abs(realised - intended) > tol_abs)
         n_bad = int(np.count_nonzero(frozen | drifted))
