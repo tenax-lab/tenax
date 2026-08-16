@@ -88,8 +88,10 @@ class GradientErrorReport(NamedTuple):
         honest but wide -- a 50% error left unresolved this way has a bound of
         at least 50%, not a misleadingly tiny one.
       - ``fd_divergence`` is ``nan``: **indeterminate**, no two steps probed
-        commensurable directions.  Here and only here the bound can be tiny and
-        meaningless at the same time, because nothing constrained it.
+        commensurable directions.  ``unresolved_bound`` is ``nan`` too, because
+        nothing constrained it and a finite number here would be invented --
+        relative errors that share the gradient under test agree with each
+        other for free, so the invented number could even be small.
         :meth:`summary` says which case applies.
 
       ``nan`` means no two steps probed commensurable directions.  That is an
@@ -127,27 +129,32 @@ class GradientErrorReport(NamedTuple):
             # gradient is five times better than the scan established.
             # ``unresolved_bound`` is the threshold ``is_resolved`` itself
             # uses -- both clauses of it -- so the two cannot disagree.
-            verdict = (
-                f"gradient error {self.relative_error:.2e} not resolved "
-                f"against a floor of {self.unresolved_bound:.2e}"
-            )
             if self.fd_divergence != self.fd_divergence:  # nan
-                verdict += (
-                    "; no two steps probed commensurable directions, so the "
-                    "scan is indeterminate and this floor is not an accuracy "
-                    "claim"
+                # No floor to quote -- the bound is NaN because nothing
+                # constrained it.  Printing "a floor of nan" would invite the
+                # reader to treat it as a number that came out badly rather
+                # than as a measurement that was never established.
+                verdict = (
+                    f"gradient error {self.relative_error:.2e} not resolved: no "
+                    "two steps probed commensurable directions, so the scan is "
+                    "indeterminate and no floor was established"
                 )
-            elif self.fd_divergence > 0.0 and self.fd_divergence >= self.resolution:
-                # No threshold: say so exactly when the differences, rather
-                # than the errors' own scatter, are what set the floor.  A
-                # ``0.25`` gate here would still make 0.24 and 0.26 read
-                # qualitatively differently after the classifier stopped using
-                # one.
-                verdict += (
-                    f"; that floor is set by the differences still moving "
-                    f"{self.fd_divergence:.2e} between steps rather than by "
-                    "the errors' own scatter"
+            else:
+                verdict = (
+                    f"gradient error {self.relative_error:.2e} not resolved "
+                    f"against a floor of {self.unresolved_bound:.2e}"
                 )
+                if self.fd_divergence > 0.0 and self.fd_divergence >= self.resolution:
+                    # No threshold: say so exactly when the differences, rather
+                    # than the errors' own scatter, are what set the floor.  A
+                    # ``0.25`` gate here would still make 0.24 and 0.26 read
+                    # qualitatively differently after the classifier stopped
+                    # using one.
+                    verdict += (
+                        f"; that floor is set by the differences still moving "
+                        f"{self.fd_divergence:.2e} between steps rather than by "
+                        "the errors' own scatter"
+                    )
         return (
             f"{verdict} at h={self.step:.1e} "
             f"(analytic {self.analytic:.10e}, fd {self.finite_difference:.10e})"
@@ -160,6 +167,19 @@ class GradientErrorReport(NamedTuple):
 #: caller loosening it would be loosening exactly the guarantee the number is
 #: supposed to carry.
 _ARTEFACT_MARGIN = 3.0
+
+#: Slack on the factor-2 separation, because it is now measured on the
+#: *realised* displacements and those round independently at each endpoint: a
+#: requested ratio of exactly 2 was measured at 1.9999999999999993 on a state
+#: with a 1e12 coordinate, three ULP short, and rejecting that pair would drop
+#: a legitimately separated scan.
+#:
+#: Unlike the thresholds this module has had to fight, nothing sits near this
+#: one.  Rounding shortfalls are ~1e-16 relative and the degeneracy it exists
+#: to catch has a ratio near *one*, so the admissible band is six orders wide
+#: on one side and ten on the other.  Its exact position is not load-bearing.
+_SPAN_ROUNDING_SLACK = 1e-6
+_MIN_SPAN_RATIO = 2.0 * (1.0 - _SPAN_ROUNDING_SLACK)
 
 
 def _unit_direction(shape, seed: int, *, complex_valued: bool) -> np.ndarray:
@@ -619,6 +639,34 @@ def measure_gradient_error(
             # scalings are different derivatives, and pooling them reads that
             # difference as noise.
             eff_norm = max(float(np.linalg.norm(effective)), 1e-300)
+            # How far the two endpoints REALLY sit apart.  This, not the
+            # requested ``h``, is what makes two steps distinct measurements:
+            # distinct requested magnitudes can round to the same pair of
+            # states, and then the same secant is counted twice as independent
+            # evidence.  On a float32 scalar at 0.75, steps of 1.2 and 0.6 ULP
+            # both realise the same +-1-ULP endpoints, so both normalised
+            # differences are identical, the divergence is 0, and an exact
+            # gradient is reported as a *resolved* 100% error.
+            #
+            # ``max`` of the absolute values rather than a norm: a norm squares
+            # before it sums and so halves the exponent range it can represent,
+            # which is how a displacement at 1e200 becomes ``inf`` and one at
+            # 1e-200 becomes exactly 0.
+            realised_span = float(np.max(np.abs(realised_plus - realised_minus)))
+            if realised_span == 0.0:
+                # Unreachable while the cancellation check above runs first: a
+                # zero span means the two endpoints are the same state, so the
+                # energies are identical and that check has already rejected
+                # the step.  Kept because the separation test below DIVIDES by
+                # the smallest span, so if that check is ever moved or
+                # narrowed, the failure here would be a ZeroDivisionError from
+                # a line that has nothing to do with the cause.  No mutant is
+                # carried for it -- it cannot be reached through the public
+                # API, and a test that pretended otherwise would be fiction.
+                raise _StepUnusable(
+                    "the two endpoints are the same state, so the difference "
+                    "is identically zero"
+                )
         except _StepUnusable as exc:
             # One bad step is not a bad scan.  Keep going; the survivors are
             # checked for separation below, which is the property that actually
@@ -626,14 +674,26 @@ def measure_gradient_error(
             skipped.append(f"h={h:.1e}: {exc}")
             continue
         results.append(
-            (rel, fd, h, step_distortion, analytic_h, effective, fd / eff_norm)
+            (
+                rel,
+                fd,
+                h,
+                step_distortion,
+                analytic_h,
+                effective,
+                fd / eff_norm,
+                realised_span,
+            )
         )
 
-    surviving = sorted({abs(r[2]) for r in results})
-    if len(surviving) < 2 or surviving[-1] / surviving[0] < 2.0:
+    # Separation is required on the REALISED displacements, not the requested
+    # magnitudes -- two ``h`` values that land on the same endpoints are one
+    # measurement however far apart they were asked to be.
+    surviving = sorted({r[7] for r in results})
+    if len(surviving) < 2 or surviving[-1] / surviving[0] < _MIN_SPAN_RATIO:
         detail = "\n  ".join(skipped) if skipped else "(none skipped)"
         raise ValueError(
-            f"only {len(surviving)} usable step magnitude(s) remain"
+            f"only {len(surviving)} distinct realised displacement(s) remain"
             + (
                 f", spanning a factor {surviving[-1] / surviving[0]:.3g}"
                 if len(surviving) >= 2
@@ -683,20 +743,24 @@ def measure_gradient_error(
     # Grouped by realised unit direction, because differences taken along
     # different directions are different derivatives -- a coordinate that moves
     # at the coarse step and freezes at the fine one is not a convergence
-    # sequence.  Deduplicated by |h| and required to span a factor of two,
-    # because ``(0.5, -0.5)`` is the SAME central difference counted twice: its
-    # divergence is identically zero, which would manufacture convergence
-    # evidence out of one measurement.  The up-front ``steps`` validation
-    # cannot cover this -- a subset can violate what the whole satisfies.
+    # sequence.  Deduplicated by REALISED DISPLACEMENT and required to span a
+    # factor of two, because ``(0.5, -0.5)`` is the SAME central difference
+    # counted twice: its divergence is identically zero, which would
+    # manufacture convergence evidence out of one measurement.  Keying on the
+    # requested ``|h|`` misses the other way that happens -- two magnitudes
+    # that round to the same endpoints are also one measurement, and float32
+    # reaches that regime with ordinary-looking steps.  The up-front ``steps``
+    # validation cannot cover either -- a subset can violate what the whole
+    # satisfies.
     units = [r[5] / max(float(np.linalg.norm(r[5])), 1e-300) for r in results]
     best_group: list[int] = []
     for anchor in range(len(units)):
         by_magnitude: dict[float, int] = {}
         for j in range(len(units)):
             if float(np.linalg.norm(units[j] - units[anchor])) <= 1e-3:
-                by_magnitude.setdefault(abs(results[j][2]), j)
+                by_magnitude.setdefault(results[j][7], j)
         magnitudes = sorted(by_magnitude)
-        if len(magnitudes) >= 2 and magnitudes[-1] / magnitudes[0] >= 2.0:
+        if len(magnitudes) >= 2 and magnitudes[-1] / magnitudes[0] >= _MIN_SPAN_RATIO:
             members = list(by_magnitude.values())
             # Ties broken by the FINEST step, not by encounter order.  Two
             # disjoint groups of equal size are otherwise resolved by however
@@ -707,7 +771,7 @@ def measure_gradient_error(
             if best_group:
                 better = (len(members), -min(magnitudes)) > (
                     len(best_group),
-                    -min(abs(results[j][2]) for j in best_group),
+                    -min(results[j][7] for j in best_group),
                 )
             else:
                 better = True
@@ -759,11 +823,9 @@ def measure_gradient_error(
     # identical normalised differences -- and no pair can distinguish that from
     # a converged sequence.  More commensurable steps reduce the chance;
     # nothing removes it, and the docstring says so rather than implying proof.
-    best_rel, best_fd, best_h, _dist, best_analytic, _eff, _fdu = min(
+    best_rel, best_fd, best_h, _dist, best_analytic, _eff, _fdu, _span = min(
         evidence, key=lambda r: abs(r[2])
     )
-
-    direction_distortion = max(r[3] for r in results)
 
     direction_distortion = max(r[3] for r in results)
 
@@ -817,10 +879,22 @@ def measure_gradient_error(
     # two cannot drift apart again.  ``max`` is not used to fold in the
     # divergence, because ``max`` with ``nan`` returns whichever argument came
     # first -- the ordering trap this module has already been bitten by.
-    unresolved_bound = fd_spread_tol * resolution
-    if not np.isnan(fd_divergence):
-        unresolved_bound = max(unresolved_bound, _ARTEFACT_MARGIN * fd_divergence)
-    resolved = not np.isnan(fd_divergence) and best_rel > unresolved_bound
+    if np.isnan(fd_divergence):
+        # Indeterminate: no two steps probed commensurable directions, so
+        # nothing constrained the floor.  Publishing ``fd_spread_tol *
+        # resolution`` here would put a *finite* number on a scan that
+        # established none -- and it can be small, since relative errors that
+        # share the gradient under test agree with each other for free.  NaN is
+        # both the honest value and the one that keeps the invariant intact:
+        # ``best_rel > nan`` is False, so no separate clause is needed to hold
+        # the verdict down, and ``is_resolved`` stays exactly
+        # ``relative_error > unresolved_bound`` with no exception to document.
+        unresolved_bound = float("nan")
+    else:
+        unresolved_bound = max(
+            fd_spread_tol * resolution, _ARTEFACT_MARGIN * fd_divergence
+        )
+    resolved = best_rel > unresolved_bound
 
     return GradientErrorReport(
         relative_error=best_rel,

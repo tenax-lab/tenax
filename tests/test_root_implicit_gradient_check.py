@@ -742,7 +742,7 @@ def test_the_scan_still_fails_when_too_few_steps_survive():
         x = jnp.asarray(t.todense())
         return 1e18 + jnp.sum(x**2), 2.0 * x
 
-    with pytest.raises(ValueError, match="usable step magnitude"):
+    with pytest.raises(ValueError, match="distinct realised displacement"):
         measure_gradient_error(
             big_offset,
             _wrap(np.ones((2, 2, 2, 2, 2))),
@@ -1338,6 +1338,69 @@ def test_an_indeterminate_scan_says_so_rather_than_quoting_a_floor():
     assert np.isnan(report.fd_divergence), report.summary()
     assert not report.is_resolved, report.summary()
     assert "indeterminate" in report.summary(), report.summary()
+    # An indeterminate scan established no floor, so the bound is NaN rather
+    # than a finite number nothing constrained. This is what keeps
+    # `is_resolved` exactly `relative_error > unresolved_bound`: here the error
+    # is 0.5 while `fd_spread_tol * resolution` would have been 0.0, so a
+    # finite bound would have made the documented invariant false.
+    assert np.isnan(report.unresolved_bound), report.summary()
+    assert report.relative_error > 0.0, report.summary()
+    assert "floor of" not in report.summary(), report.summary()
+
+
+def test_is_resolved_is_exactly_the_advertised_comparison():
+    """The invariant the docstring and README promise, with no exception.
+
+    Every regime -- measured, unresolved against a floor, unconverged, and
+    indeterminate -- must satisfy ``is_resolved == (relative_error >
+    unresolved_bound)``. NaN carries the indeterminate case: the comparison is
+    false without a separate clause to hold the verdict down, and a clause is
+    what previously let the two definitions drift apart.
+    """
+    n = 32
+    ones = np.ones((2, 2, 2, 2, 2))
+    scans = []
+
+    # measured: a 50% error on a scan that agrees to roundoff
+    scans.append((_exact_pair(1.5), _quartic_state(), (1e-3, 5e-4), ones))
+    # unresolved against a floor: an exact gradient
+    scans.append((_exact_pair(1.0), _quartic_state(), (1e-3, 5e-4), ones))
+    # unconverged: cubic at its inflection, every rel identically 1
+    zero = np.zeros((2, 2, 2, 2, 2))
+
+    def cubic(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x**3), 3.0 * x**2
+
+    scans.append((cubic, _wrap(zero), (1.0, 0.5), ones))
+    # indeterminate: a frozen coordinate makes the two steps incommensurable
+    base = np.ones(n)
+    base[0] = 1e14
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    def half_too_high(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x - base_j), 1.5 * ones
+
+    scans.append(
+        (half_too_high, _wrap(base.reshape((2, 2, 2, 2, 2))), (1.0, 1e-2), ones)
+    )
+
+    regimes = set()
+    for fn, state, steps, direction in scans:
+        report = measure_gradient_error(fn, state, direction=direction, steps=steps)
+        assert report.is_resolved == (
+            report.relative_error > report.unresolved_bound
+        ), f"invariant broken: {report.summary()}"
+        regimes.add(
+            "indeterminate"
+            if np.isnan(report.fd_divergence)
+            else ("measured" if report.is_resolved else "bounded")
+        )
+
+    assert regimes == {"measured", "bounded", "indeterminate"}, (
+        f"the scan set stopped covering every regime, reached {sorted(regimes)}"
+    )
 
 
 def test_duplicate_magnitudes_are_not_convergence_evidence():
@@ -1667,6 +1730,117 @@ def test_the_published_floor_is_the_threshold_that_was_applied(tol):
     assert report.unresolved_bound >= report.relative_error, (
         f"floor {report.unresolved_bound:.3e} sits below the rejected error "
         f"{report.relative_error:.3e} at fd_spread_tol={tol}"
+    )
+
+
+def test_steps_that_round_onto_the_same_endpoints_are_one_measurement():
+    """Distinct requested magnitudes can realise identical states.
+
+    On float32 at 0.75 the ULP is 5.96e-08, so steps of 1.2 and 0.6 ULP both
+    land on the same +-1-ULP endpoints. Keyed on the requested ``|h|`` they
+    look like two magnitudes a factor 2 apart, and being the same secant their
+    normalised differences agree exactly -- divergence 0, spread 0. For
+    ``E(x)=(x-0.75)^3``, whose gradient at 0.75 is exactly zero, that reported
+    a *resolved* 100% error on an exact gradient.
+
+    Keyed on the realised displacement they are one measurement, which cannot
+    bound its own resolution, so the scan refuses instead.
+    """
+    base = np.full((2, 2, 2, 2, 2), 0.75, dtype=np.float32)
+    base_j = jnp.asarray(base)
+
+    # The direction is normalised to unit length, so a requested ``h`` shifts
+    # each coordinate by ``h/sqrt(32)``. Both of these land in
+    # ``[0.5, 1.5) * ulp(0.75)`` and therefore round to the same 1-ULP
+    # endpoints; picking the raw ULP multiples instead shrinks the shift below
+    # half an ULP, and then the steps are dropped as cancellation and this
+    # tests nothing.
+    steps = (4e-7, 2e-7)
+
+    def affine(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x - base_j), jnp.ones((2, 2, 2, 2, 2))
+
+    with pytest.raises(ValueError, match="distinct realised displacement") as exc:
+        measure_gradient_error(
+            affine,
+            _wrap(base),
+            direction=np.ones((2, 2, 2, 2, 2)),
+            steps=steps,
+        )
+
+    # "only 1", not "only 0": both steps must SURVIVE and collapse onto one
+    # displacement. Zero survivors would mean they were dropped upstream and
+    # the deduplication under test was never reached.
+    assert "only 1 distinct" in str(exc.value), str(exc.value)
+
+
+def test_a_collapsed_pair_is_not_convergence_evidence_for_its_own_group():
+    """The same collapse, where the up-front check cannot catch it.
+
+    A third, coarser step gives two distinct realised displacements overall, so
+    the scan proceeds. Within the fine group the two steps still round onto the
+    same endpoints -- and they are alone there, because the coarse step moves a
+    4096-valued coordinate that both fine steps freeze, putting it on a
+    different realised direction.
+
+    Keyed on the requested ``|h|`` that group looks like two magnitudes a
+    factor 2 apart whose secants agree exactly, so the divergence is 0 and a
+    gradient that is 100% wrong is reported as *measured*.
+    """
+    n = 32
+    base = np.full(n, 0.75, dtype=np.float32)
+    base[0] = 4096.0
+    shaped = base.reshape((2, 2, 2, 2, 2))
+    base_j = jnp.asarray(shaped)
+
+    def affine_but_twice_too_steep(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x - base_j), 2.0 * jnp.ones((2, 2, 2, 2, 2))
+
+    report = measure_gradient_error(
+        affine_but_twice_too_steep,
+        _wrap(shaped),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(4e-3, 4e-7, 2e-7),
+    )
+
+    assert np.isnan(report.fd_divergence), (
+        "two steps that realised the same endpoints were counted as "
+        f"independent convergence evidence -- {report.summary()}"
+    )
+    assert not report.is_resolved, report.summary()
+
+
+def test_a_realised_factor_two_survives_endpoint_rounding():
+    """The separation is measured on realised displacements, which round.
+
+    ``base[0]=1e12`` with steps ``(1.0, 0.5)`` realises a ratio of
+    1.9999999999999993 -- three ULP short of the requested 2, because each
+    endpoint rounds on its own. A bare ``>= 2.0`` drops that pair and reports
+    an indeterminate scan on a perfectly separated one.
+    """
+    n = 32
+    base = np.ones(n)
+    base[0] = 1e12
+    base_j = jnp.asarray(base.reshape((2, 2, 2, 2, 2)))
+
+    # Affine, so the directional derivative is nonzero at ``base``. A symmetric
+    # quadratic about ``base`` would have ``E(+h) == E(-h)`` exactly and every
+    # step would be dropped as cancellation, testing nothing about the span.
+    def affine(t):
+        x = jnp.asarray(t.todense())
+        return jnp.sum(x - base_j), jnp.ones((2, 2, 2, 2, 2))
+
+    report = measure_gradient_error(
+        affine,
+        _wrap(base.reshape((2, 2, 2, 2, 2))),
+        direction=np.ones((2, 2, 2, 2, 2)),
+        steps=(1.0, 0.5),
+    )
+
+    assert not np.isnan(report.fd_divergence), (
+        f"endpoint rounding dropped a legitimately separated pair -- {report.summary()}"
     )
 
 
