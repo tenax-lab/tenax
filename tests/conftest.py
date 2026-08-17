@@ -29,6 +29,13 @@ _FILE_MARKERS = {
     "test_ipeps.py": "algorithm",
     "test_ipeps_bp_gauge.py": "algorithm",
     "test_ipeps_gauge.py": "algorithm",
+    # #882 Task 7: the dense BP solve is one traced ``lax.while_loop``, which
+    # is what makes re-gauging every simple-update step affordable.  Guards
+    # traced-vs-eager parity, the compile-cache key (a second compilation costs
+    # more than the whole re-gauging budget and is invisible to wall-clock),
+    # and the budget itself.  The one wall-clock assertion also carries
+    # ``@pytest.mark.timing`` so it can be deselected on a loaded machine.
+    "test_ipeps_gauge_perf.py": "algorithm",
     "test_ipeps_core.py": "core",
     "test_auto_mpo.py": "algorithm",
     "test_ad_utils.py": "algorithm",

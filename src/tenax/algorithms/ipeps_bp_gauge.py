@@ -80,28 +80,76 @@ What one sweep does
 
 The four bonds touch a different leg of each tensor, so their gauge
 transformations commute and are applied together.
+
+Why the dense path is traced
+----------------------------
+Simple update re-gauges after *every* step, so a solve is on the step budget
+rather than the run budget.  Run eagerly one sweep costs **18.9 ms**, of which
+almost nothing is arithmetic: the identical arithmetic under ``jit`` is
+**0.034 ms**, so the eager sweep is ~99.8% host overhead.  (Measured on a quiet
+128-core machine at ``JAX_PLATFORMS=cpu``: a D=2 simple-update-evolved pair
+solves in 26 sweeps, 490.6 ms eager against 2.48 ms traced.)  The carrier is
+~300 eager dispatches per sweep plus tenax-level Python -- label bookkeeping,
+``TensorIndex`` construction, ``opt_einsum`` expression lookup.  The host-side
+``float()``/``bool()`` syncs are a *minority* contributor: there are exactly 18
+per sweep, and removing all of them without a traced loop is worth perhaps
+1.2-1.4x, not 200x.  So the fix is to trace the whole solve, which removes all
+three at once.
+
+:func:`_bp_solve_traced` is that: one ``lax.while_loop`` over a six-slot carry,
+compiled once per ``(D, dtype, max_iter, tol)`` and reused by every subsequent
+solve.  ``lax.while_loop`` rather than a Python loop over a jitted body is not
+a preference -- 26 sweeps of a jitted *body* still costs 26 dispatches, which
+alone exceeds the per-solve budget.
+
+The remaining cost is **compile**, and it is the binding one: 84 ms to trace and
+lower plus 214 ms of XLA, on a 324-equation sweep body, *flat in D* (214/216/224
+ms at D=2/3/4 -- structure-bound, not array-size-bound, unlike #633's CTM
+finding).  Against the rewrite's 450 ms budget for a 100-step run that is 66%
+before a single solve runs; see ``tests/test_ipeps_gauge_perf.py``, which
+records the shortfall rather than hiding it.
+
+``SymmetricTensor`` stays on the eager loop, because it cannot be traced today:
+``_eigh_symmetric`` derives the output bond's charges from eigenvalue
+*magnitudes* via ``np.array(...)``, and rerouting through the traceable
+symmetric SVD instead hits ``_zero_subrank_singular_values``, whose relative
+floor snaps small bond weights to exactly zero and broke the gauge by 4.9e-01
+on 2 of 8 fixtures.  Both live outside this module.  The sweep body is shared
+verbatim between the two loops, so there is one implementation of the physics
+and only the driver differs.
 """
 
 from __future__ import annotations
 
-import math
+from functools import partial
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from jax import lax
 
 from tenax.algorithms._ctm_tensor_moves import _flow_flip_no_conj
+
+# Re-exported so ``from tenax.algorithms.ipeps_bp_gauge import BondWeights``
+# keeps working.  It was defined here first (#870), but the simple update needs
+# the same four bonds and is the lower layer, so it owns the type -- one class,
+# not two structurally identical ``NamedTuple``s that would silently
+# type-check against each other (#851).
 from tenax.algorithms.ipeps_simple_update import BondWeights
 from tenax.contraction.contractor import contract
 from tenax.core._tensor_utils import scale_bond_axis
-from tenax.core.tensor import Tensor
+from tenax.core.tensor import DenseTensor, Tensor
 from tenax.linalg import eigh, svd
 
-__all__ = ["BondWeights", "BPGaugeInfo", "bp_gauge_checkerboard"]
+__all__ = ["BPGaugeInfo", "BondWeights", "bp_gauge_checkerboard"]
 
 # Relative cutoff for the 1/sqrt(w) pseudo-inverse of a message.  A message
 # eigenvalue at zero is a bond direction the state does not use; inverting it
 # would turn 0 into inf rather than project it out.
+#
+# Kept as a ``jnp.where`` mask rather than a rank-truncating slice: the mask
+# leaves the ``__k`` bond dimension static, which is what makes the traced
+# carry shape-stable.  A dynamic slice here would break the while_loop.
 _PINV_CUTOFF = 1e-12
 
 _BRA = "__bra"
@@ -110,13 +158,10 @@ _K2 = "__k2"
 _S = "__s"
 _B = "__b"
 
-
-#: Re-exported so ``from tenax.algorithms.ipeps_bp_gauge import BondWeights``
-#: keeps working.  It was defined here first (#870), but the simple update needs
-#: the same four bonds and is the lower layer, so it owns the type -- one class,
-#: not two structurally identical ``NamedTuple``\ s that would silently
-#: type-check against each other (#851).
-__all__ = ["BPGaugeInfo", "BondWeights", "bp_gauge_checkerboard"]
+#: Guard against ``0/0`` in the relative residual.  Reachable only through a
+#: weight vector the entry point's validation would have rejected, so it is a
+#: floor rather than a policy.
+_RESIDUAL_FLOOR = 1e-300
 
 
 class BPGaugeInfo(NamedTuple):
@@ -234,22 +279,122 @@ def _rescale(t: Tensor) -> Tensor:
     return t * (1.0 / jnp.where(m > 0, m, 1.0))
 
 
-def _is_representable(
-    gam: dict[str, Tensor], new_weights: dict[str, jax.Array]
-) -> bool:
+def _is_representable(gam: dict[str, Tensor], new_weights) -> jax.Array:
     """Is the iterate still a state, rather than an overflow artefact?
 
     Checked every sweep because the convergence test cannot see this: an
     all-zero iterate is an absorbing fixed point that reports ``residual = 0``.
+
+    Both clauses matter, and the ``> 0`` one is not implied by finiteness: zero
+    is finite, and ``norm(0 - 0) / max(0, 1e-300)`` is 0, which passes any
+    tolerance.  Losing that clause does not crash -- it produces a confidently
+    "converged" corpse.
+
+    Returns a **0-d ``jnp`` bool**, not a Python ``bool``, so the traced driver
+    can use it inside a ``while_loop``; the eager driver wraps it in ``bool()``.
+    Scale-invariant by construction (max-abs, no norm), so an unobservable
+    prefactor of 1e-200 or 1e200 is healthy.
+
+    Args:
+        gam:         ``{"A": ..., "B": ...}`` site tensors.
+        new_weights: The sweep's candidate bond weights.  Any pytree of weight
+                     vectors -- a :class:`BondWeights` from :func:`_sweep`, or
+                     a plain ``dict`` from a unit test.
     """
+    ok = jnp.asarray(True)
     for t in gam.values():
-        n = float(t.max_abs())
-        if not math.isfinite(n) or n <= 0.0:
-            return False
-    for w in new_weights.values():
-        if not bool(jnp.all(jnp.isfinite(w))) or float(jnp.max(w)) <= 0.0:
-            return False
-    return True
+        n = t.max_abs()
+        ok = ok & jnp.isfinite(n) & (n > 0.0)
+    for w in jax.tree_util.tree_leaves(new_weights):
+        ok = ok & jnp.all(jnp.isfinite(w)) & (jnp.max(w) > 0.0)
+    return ok
+
+
+def _sweep_is_healthy(gam: dict[str, Tensor], new_weights, sweep) -> jax.Array:
+    """Health gate on one completed sweep; ``sweep`` is its 0-based index.
+
+    A thin seam over :func:`_is_representable`, which does the actual work and
+    ignores ``sweep``.  It exists because the two drivers must be testable the
+    same way: inside ``lax.while_loop`` there is no host-side call count, so a
+    test cannot place an injected failure at a chosen sweep by counting calls
+    the way it can on the eager loop.  Passing the index -- which both drivers
+    have anyway, as the Python loop variable and as the carry's ``done`` slot --
+    makes ``lambda gam, w, sweep: sweep < 2`` a valid injection on both.
+
+    ``done`` equals the sweep index at this point in either driver, because the
+    counter is incremented *after* this check and the loop stops the first time
+    it fails.
+    """
+    return _is_representable(gam, new_weights)
+
+
+def _residual(new: BondWeights, old: BondWeights) -> jax.Array:
+    """Largest relative change across the four bond weights, as a 0-d array.
+
+    ``jnp.max`` over a stacked vector rather than Python ``max`` over four
+    ``float()``s: the point is that this is called from inside a traced loop,
+    where a host sync is not available.  Two consequences on the eager path
+    too, since both drivers share it -- residuals move at the 1e-15 level
+    (measured 7.0562e-13 vs 7.0430e-13 on the same state), and NaN now
+    *propagates* instead of depending on Python's comparison order.
+    """
+    return jnp.max(
+        jnp.stack(
+            [
+                jnp.linalg.norm(n - o)
+                / jnp.maximum(jnp.linalg.norm(o), _RESIDUAL_FLOOR)
+                for n, o in zip(new, old, strict=True)
+            ]
+        )
+    )
+
+
+def _sweep(
+    gam: dict[str, Tensor], weights: BondWeights
+) -> tuple[dict[str, Tensor], BondWeights]:
+    """One BP sweep: recompute all eight messages, then re-gauge all four bonds.
+
+    The physics, shared **verbatim** by the eager and the traced driver so
+    there is one implementation of it and only the loop differs.  Pure: the
+    input ``gam`` is not mutated, which is what lets the rollback be a
+    rejection of the candidate rather than a restore from a saved copy.
+
+    Every step is a gauge transformation, so the returned pair represents the
+    same physical state as the input pair -- to machine precision, on all four
+    bonds at once.
+    """
+    msg = {
+        (site, leg): _message(gam[site], site, leg, weights)
+        for site in ("A", "B")
+        for leg in _LEGS
+    }
+
+    gam = dict(gam)
+    new_weights: dict[str, jax.Array] = {}
+    for bond, (site_L, leg_L), (site_R, leg_R) in _BONDS:
+        gam[site_L], gam[site_R], new_weights[bond] = _gauge_bond(
+            gam[site_L],
+            gam[site_R],
+            leg_L,
+            leg_R,
+            msg[(site_L, leg_L)],
+            msg[(site_R, leg_R)],
+            getattr(weights, bond),
+        )
+        # Rescale after every *bond*, not once per sweep.  ``X_inv`` is a
+        # pseudo-inverse square root, so a bond whose message has small
+        # eigenvalues multiplies ``||Gamma||`` by a large factor; letting four
+        # of them compound before any rescale walks the iterate out of f64.
+        # Measured on an SU-evolved U(1)-Sz D=3 state, per-sweep rescaling
+        # reached ||Gamma|| ~ 1e112 by sweep 59 and then inf, after which
+        # normalising returns exactly zero.  An overall scale on Gamma is not
+        # physical and lambda is separately max-normalised, so doing it more
+        # often cannot move the fixed point -- and ``_rescale`` performs no
+        # sync and is free under trace, so there is no performance reason to
+        # hoist it out of this loop either.
+        for site in (site_L, site_R):
+            gam[site] = _rescale(gam[site])
+    return gam, BondWeights(**new_weights)
 
 
 def _reorder(t: Tensor, labels: tuple[str, ...]) -> Tensor:
@@ -266,6 +411,246 @@ def _reorder(t: Tensor, labels: tuple[str, ...]) -> Tensor:
     return t.transpose(tuple(current.index(lab) for lab in labels))
 
 
+def _restore_caller_structure(t: Tensor, like: Tensor) -> Tensor:
+    """Hand back the caller's axis order -- and, on a dense pair, its metadata.
+
+    A swept tensor differs from its input in two ways.  ``contract`` returns
+    legs in its own order, which :func:`_reorder` has always undone.  And
+    :func:`_gauge_bond` stamps the flow its own SVD produced on every virtual
+    leg -- ``IN`` on the left/upper end, ``OUT`` on the right/lower one -- which
+    nothing undid: handed a pair using the opposite convention, the solve
+    silently returned every virtual flow inverted.  That is not hypothetical.
+    ``_simple_update_checkerboard_sweep``'s own output is such a pair, so the
+    caller this module exists for was hitting it, and
+    ``test_the_solve_converges_and_hands_back_the_same_tensor_structure``
+    ("flows must survive, or callers break silently") passed only because every
+    fixture it runs on already used this module's convention.
+
+    On a ``DenseTensor`` the flows are inert -- ``contract`` pairs legs by
+    label, and the #834 flow check is opt-in *and* satisfied under either
+    convention, since each message is built from the very ``Gamma`` it will be
+    contracted against -- so restoring them is metadata-only and makes that
+    promise true for every input.
+
+    A ``SymmetricTensor``'s indices are **not** restored.  There the charges are
+    load-bearing, rewriting them would be exactly #834's silent mis-pairing, and
+    the symmetric path keeps the stamped metadata it has always returned.
+    """
+    t = _reorder(t, like.labels())
+    if isinstance(t, DenseTensor) and isinstance(like, DenseTensor):
+        return DenseTensor(t.todense(), like.indices)
+    return t
+
+
+def _use_traced_loop(A: Tensor, B: Tensor) -> bool:
+    """Does this pair take the traced driver?
+
+    ``DenseTensor`` yes, ``SymmetricTensor`` no -- see the module docstring for
+    the two blockers on the symmetric path, both of which live in files this
+    module does not own.  The dispatch is a named function rather than an
+    inline ``isinstance`` so a test can pin the two drivers against each other
+    on the *same* dense input, which is the only way to check that tracing did
+    not move the answer.
+    """
+    return isinstance(A, DenseTensor) and isinstance(B, DenseTensor)
+
+
+def _validate_weights(weights: BondWeights) -> None:
+    """Reject a weight vector that is not a state, before anything else runs.
+
+    Eager and outside the traced region on purpose: it is the documented
+    ``ValueError`` and a traced solve cannot raise one.
+
+    **One** host sync on the happy path, not eight.  The per-bond loop it
+    replaced synced twice per bond, and at ~2.7 ms per warm solve that is not
+    noise -- the whole traced solve is 0.8 ms.  The failing path re-reads the
+    offending bond, which costs a second pass only when it is about to raise.
+    """
+    ok = jnp.stack([jnp.all(jnp.isfinite(w)) & (jnp.max(w) > 0.0) for w in weights])
+    if bool(jnp.all(ok)):
+        return
+    bond = BondWeights._fields[int(jnp.argmin(ok))]
+    raise ValueError(
+        f"weights.{bond} is not a usable bond weight (max "
+        f"{float(jnp.max(getattr(weights, bond))):.3g}).  Every weight vector "
+        f"must be finite with at least one positive entry: it is half the "
+        f"state being gauged, and the convergence test divides by its norm."
+    )
+
+
+def _prepare(
+    A: Tensor, B: Tensor, weights: BondWeights
+) -> tuple[dict[str, Tensor], BondWeights]:
+    """Put the pair and its weights at unit scale.  Shared by both drivers.
+
+    Before the first message, not just between sweeps: ``_message`` squares
+    ``Gamma`` *and* multiplies three incoming weights into it, so a caller's
+    overall scale of 1e-200 or 1e200 -- physically the same state -- would
+    under/overflow the very first message and the solve would fail on a state
+    it handles fine at unit scale.
+
+    Normalising ``lambda`` is free, and not merely harmless: ``_gauge_bond`` is
+    already exactly scale-invariant in ``lam`` -- scaling it scales the SVD's
+    ``s`` by the same factor and ``lam_new = s / max(s)`` is unchanged -- so
+    this cannot move the answer.  It also makes the first sweep's residual
+    meaningful, which otherwise compares a max-1 output against whatever
+    convention the caller's input used.
+
+    The traced driver calls this *inside* its jit, so on the dense path it
+    costs no eager dispatches at all.
+    """
+    return (
+        {"A": _rescale(A), "B": _rescale(B)},
+        BondWeights(*(w / jnp.max(w) for w in weights)),
+    )
+
+
+def _bp_solve_eager(
+    gam: dict[str, Tensor],
+    weights: BondWeights,
+    max_iter: int,
+    tol: float,
+) -> tuple[dict[str, Tensor], BondWeights, BPGaugeInfo]:
+    """The Python-loop driver.  Used for ``SymmetricTensor``, and as the
+    reference the traced driver is checked against.
+
+    Two host syncs per sweep (the health gate and the residual) and ~300 eager
+    dispatches, which is what makes it 18.9 ms/sweep -- 555x the traced path's
+    0.034 ms -- and why a dense pair does not come here.
+    """
+    residual = float("inf")
+    done = 0
+
+    for sweep in range(max_iter):
+        cand_gam, cand_weights = _sweep(gam, weights)
+
+        if not bool(_sweep_is_healthy(cand_gam, cand_weights, sweep)):
+            # Reject the candidate; do not call it converged.  ``_sweep`` does
+            # not mutate its input, so ``gam``/``weights`` still hold the last
+            # healthy iterate -- which is an exact gauge of the caller's state,
+            # merely unconverged.  No saved copy is involved, so the two cannot
+            # drift apart.
+            residual = float("inf")
+            break
+
+        gam, done = cand_gam, sweep + 1
+        residual = float(_residual(cand_weights, weights))
+        weights = cand_weights
+        if residual < tol:
+            return gam, weights, BPGaugeInfo(done, residual, True)
+
+    # ``done``, not ``max_iter``: a health rollback stops early, and reporting
+    # the cap would claim sweeps that never ran.
+    return gam, weights, BPGaugeInfo(done, residual, False)
+
+
+@partial(jax.jit, static_argnums=(3, 4))
+def _bp_solve_traced(
+    A: Tensor,
+    B: Tensor,
+    weights: BondWeights,
+    max_iter: int,
+    tol: float,
+):
+    """The whole solve as one ``lax.while_loop``.  Dense only.
+
+    Compiled once per ``(D, dtype, carry treedef, max_iter, tol)`` and reused,
+    which is the property the cost of re-gauging every simple-update step rests
+    on: compile is the binding term, not steady state.  ``max_iter`` and ``tol``
+    are static so the loop's exit conditions are literals; varying either costs
+    a recompile, so a caller sweeping tolerances should expect one compile per
+    distinct value.
+
+    Carry, six slots::
+
+        gam        {"A", "B"} site *arrays*     (dict of jax.Array)
+        weights    the four bond weights        (BondWeights)
+        residual   last healthy sweep's residual, or inf
+        done       completed *healthy* sweeps
+        converged  reached ``tol`` on a healthy sweep
+        dead       the last sweep left f64
+
+    **Arrays, not ``Tensor``s, and the index metadata is a closure constant.**
+    ``TensorIndex`` is pytree *aux* data, and a swept tensor is not
+    metadata-identical to its input: ``contract`` permutes the legs and
+    ``_gauge_bond`` stamps its own flows (see
+    :func:`_restore_caller_structure`).  With ``Tensor``s in the carry that
+    changes the treedef between iterations and ``while_loop`` fails with
+    ``Mismatch custom node data`` -- which is precisely what a
+    simple-update-evolved pair triggers, since its virtual flows are the
+    opposite of this module's.  Carrying bare arrays removes the aux data
+    entirely, so the carry is stable by construction rather than by a
+    coincidence of conventions, and its shapes are visibly fixed -- the property
+    the ``_PINV_CUTOFF`` mask exists to preserve.
+
+    ``converged`` and ``dead`` are separate slots rather than one ``stop`` flag
+    because the two exits carry different payloads: the tolerance exit reports
+    the residual it reached, the health rollback reports ``inf`` and
+    ``converged=False``.
+
+    No ``last_good`` slot is needed.  At every loop boundary the last good
+    iterate *is* the carry, so the rollback is not a restore but a **rejection
+    of the candidate**: ``carry_out = where(healthy, candidate, carry_in)``.
+    That halves the carry and removes the failure mode where two copies of
+    ``gam`` drift apart.
+
+    .. warning::
+        Not reverse-mode differentiable.  ``lax.while_loop`` has no reverse
+        rule, and the ``where``-select would leak NaN under ``grad`` even where
+        the primal is clean.  A differentiable gauge would need ``scan`` with a
+        fixed trip count and a sticky ``frozen`` flag, which pays for every
+        unused sweep; nothing needs it today.
+    """
+    gam, weights = _prepare(A, B, weights)
+    # Traced once per compile, then constant for every call that reuses it.
+    like = dict(gam)
+
+    def as_tensors(arrays: dict[str, jax.Array]) -> dict[str, Tensor]:
+        return {s: DenseTensor(a, like[s].indices) for s, a in arrays.items()}
+
+    def as_arrays(tensors: dict[str, Tensor]) -> dict[str, jax.Array]:
+        return {
+            s: _restore_caller_structure(t, like[s]).todense()
+            for s, t in tensors.items()
+        }
+
+    init = (
+        {s: t.todense() for s, t in gam.items()},
+        weights,
+        # ``inf`` in the residual slot has to carry exactly the dtype the body
+        # will write there or the carry is inconsistent, so take it from the
+        # residual itself rather than guessing.  The dead arithmetic is DCE'd.
+        jnp.full_like(_residual(weights, weights), jnp.inf),
+        jnp.zeros((), jnp.int32),
+        jnp.zeros((), bool),
+        jnp.zeros((), bool),
+    )
+
+    def cond(carry):
+        _, _, _, done, converged, dead = carry
+        return ~(converged | dead) & (done < max_iter)
+
+    def body(carry):
+        arr_in, w_in, _, done, _, _ = carry
+        cand_gam, cand_weights = _sweep(as_tensors(arr_in), w_in)
+        ok = _sweep_is_healthy(cand_gam, cand_weights, done)
+        res = _residual(cand_weights, w_in)
+        accept = lambda cand, prev: jnp.where(ok, cand, prev)  # noqa: E731
+        return (
+            jax.tree_util.tree_map(accept, as_arrays(cand_gam), arr_in),
+            jax.tree_util.tree_map(accept, cand_weights, w_in),
+            jnp.where(ok, res, jnp.inf),
+            # After the health gate, never before: ``done`` counts completed
+            # *healthy* sweeps.
+            done + ok.astype(jnp.int32),
+            ok & (res < tol),
+            ~ok,
+        )
+
+    arr, weights, residual, done, converged, dead = lax.while_loop(cond, body, init)
+    return as_tensors(arr), weights, residual, done, converged, dead
+
+
 def bp_gauge_checkerboard(
     A: Tensor,
     B: Tensor,
@@ -280,6 +665,19 @@ def bp_gauge_checkerboard(
     transformation, exact to machine precision --- but its bond weights are now
     the self-consistent BP messages rather than whatever the last SVD left
     behind.
+
+    A **dense** pair takes the traced driver: input validation, the initial
+    rescale and the weight normalisation stay on the host, the solve itself is
+    one compiled ``lax.while_loop``, and three casts rebuild
+    :class:`BPGaugeInfo` -- so three host syncs for the whole solve, down from
+    18 per sweep.  A ``SymmetricTensor`` pair takes the eager Python loop, which
+    is unchanged; see the module docstring for why it cannot be traced yet.
+    Both share the sweep body verbatim.
+
+    .. warning::
+        The dense path is **not reverse-mode differentiable** -- see
+        :func:`_bp_solve_traced`.  Nothing in ``src`` differentiates through
+        this today.
 
     ``weights`` is **required**, and is not an initial guess: in Vidal form the
     state is ``... Gamma_A lambda Gamma_B ...``, so the incoming ``lambda`` is
@@ -314,99 +712,27 @@ def bp_gauge_checkerboard(
         >>> info.converged                                  # doctest: +SKIP
         True
     """
-    for bond, w in zip(BondWeights._fields, weights, strict=True):
-        if not bool(jnp.all(jnp.isfinite(w))) or float(jnp.max(w)) <= 0.0:
-            raise ValueError(
-                f"weights.{bond} is not a usable bond weight (max "
-                f"{float(jnp.max(w)):.3g}).  Every weight vector must be finite "
-                f"with at least one positive entry: it is half the state being "
-                f"gauged, and the convergence test divides by its norm."
-            )
+    _validate_weights(weights)
 
-    order = {"A": A.labels(), "B": B.labels()}
-    # Before the first message, not just between sweeps: ``_message`` squares
-    # Gamma, so a caller's overall scale of 1e-200 or 1e200 -- physically the
-    # same state -- would under/overflow the very first message and the solve
-    # would fail on a state it handles fine at unit scale.
-    gam = {"A": _rescale(A), "B": _rescale(B)}
-    # And the same for lambda, for the same reason: ``_message`` multiplies
-    # three incoming weights into each tensor, so a scaled weight vector
-    # overflows just as a scaled Gamma does.  Free, and not merely harmless:
-    # ``_gauge_bond`` is already exactly scale-invariant in ``lam`` -- scaling
-    # it scales the SVD's ``s`` by the same factor and ``lam_new = s / max(s)``
-    # is unchanged -- so this cannot move the answer.  It also makes the first
-    # sweep's residual meaningful, which otherwise compares a max-1 output
-    # against whatever convention the caller's input used.
-    weights = BondWeights(*(w / jnp.max(w) for w in weights))
-    residual = float("inf")
-    # Any completed sweep is an exact gauge of the input, so the last healthy
-    # iterate is a valid -- merely unconverged -- answer to fall back to.
-    last_good = (dict(gam), weights)
-    done = 0
-
-    for sweep in range(max_iter):
-        msg = {
-            (site, leg): _message(gam[site], site, leg, weights)
-            for site in ("A", "B")
-            for leg in _LEGS
-        }
-
-        new_weights: dict[str, jax.Array] = {}
-        for bond, (site_L, leg_L), (site_R, leg_R) in _BONDS:
-            gam[site_L], gam[site_R], new_weights[bond] = _gauge_bond(
-                gam[site_L],
-                gam[site_R],
-                leg_L,
-                leg_R,
-                msg[(site_L, leg_L)],
-                msg[(site_R, leg_R)],
-                getattr(weights, bond),
-            )
-            # Rescale after every *bond*, not once per sweep.  ``X_inv`` is a
-            # pseudo-inverse square root, so a bond whose message has small
-            # eigenvalues multiplies ``||Gamma||`` by a large factor; letting
-            # four of them compound before any rescale walks the iterate out of
-            # f64.  Measured on an SU-evolved U(1)-Sz D=3 state, per-sweep
-            # rescaling reached ||Gamma|| ~ 1e112 by sweep 59 and then inf,
-            # after which normalising returns exactly zero.  An overall scale on
-            # Gamma is not physical and lambda is separately max-normalised, so
-            # doing it more often cannot move the fixed point.
-            for site in (site_L, site_R):
-                gam[site] = _rescale(gam[site])
-
-        if not _is_representable(gam, new_weights):
-            # Do not hand back the corpse, and do not call it converged.  The
-            # residual test cannot see this on its own: once both weight sets
-            # are zero, ``norm(0 - 0) / max(0, 1e-300)`` is 0, which passes any
-            # tolerance.  Zero is an absorbing fixed point, not a solution.
-            gam, weights = last_good
-            residual = float("inf")
-            break
-
-        done = sweep + 1
-
-        residual = max(
-            float(
-                jnp.linalg.norm(new_weights[b] - getattr(weights, b))
-                / jnp.maximum(jnp.linalg.norm(getattr(weights, b)), 1e-300)
-            )
-            for b in new_weights
+    if _use_traced_loop(A, B):
+        gam, weights, residual, done, converged, _ = _bp_solve_traced(
+            A, B, weights, max_iter, tol
         )
-        weights = BondWeights(**new_weights)
-        last_good = (dict(gam), weights)
-        if residual < tol:
-            return (
-                _reorder(gam["A"], order["A"]),
-                _reorder(gam["B"], order["B"]),
-                weights,
-                BPGaugeInfo(sweep + 1, residual, True),
-            )
+        # The only host syncs in the whole traced solve: three, to rebuild
+        # ``BPGaugeInfo`` at its documented ``(int, float, bool)`` type.  A 0-d
+        # array would satisfy ``assert info.converged`` *silently*, and would
+        # fail ``info.residual == float("inf")`` loudly.
+        info = BPGaugeInfo(int(done), float(residual), bool(converged))
+    else:
+        gam, weights, info = _bp_solve_eager(*_prepare(A, B, weights), max_iter, tol)
 
-    # ``done``, not ``max_iter``: a health rollback stops early, and reporting
-    # the cap would claim sweeps that never ran.
+    # The caller's structure is handed back.  On the traced path this is
+    # already a no-op -- that driver restores it every sweep, because it has to
+    # -- and it is kept because it is what makes the two drivers agree on what
+    # they return, and what documents the contract.
     return (
-        _reorder(gam["A"], order["A"]),
-        _reorder(gam["B"], order["B"]),
+        _restore_caller_structure(gam["A"], A),
+        _restore_caller_structure(gam["B"], B),
         weights,
-        BPGaugeInfo(done, residual, False),
+        info,
     )

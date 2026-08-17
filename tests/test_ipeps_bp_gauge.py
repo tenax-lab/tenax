@@ -16,6 +16,7 @@ on dense input.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -77,6 +78,28 @@ def _direction(t):
     """
     m = float(np.max(np.abs(t)))
     return t / m if m > 0.0 else t
+
+
+@pytest.fixture
+def retraced():
+    """Make a monkeypatch inside the traced solve actually take effect.
+
+    The dense driver is one jitted ``lax.while_loop``, and its cache key is
+    ``(shape, dtype, treedef, max_iter, tol)`` -- it does **not** include the
+    module globals the body reads.  So patching something the body calls is
+    honoured only if the entry is retraced, and the entry the patched run
+    leaves behind would poison any later test that happens to match the same
+    key.  Clearing on both sides is what makes such a test mean what it says.
+
+    ``clear_cache()`` on the one jitted function, not ``jax.clear_caches()``:
+    the global version also evicts every *eager* op the session has compiled,
+    which costs the next test ~170 ms of re-compilation for no benefit here.
+    """
+    import tenax.algorithms.ipeps_bp_gauge as bp
+
+    bp._bp_solve_traced.clear_cache()
+    yield
+    bp._bp_solve_traced.clear_cache()
 
 
 def _two_site(gam_L, gam_R, leg_L, leg_R, lam):
@@ -190,6 +213,55 @@ def test_the_solve_converges_and_hands_back_the_same_tensor_structure(kind):
         assert w.max() > 0.0, f"{kind}: {name} came back all zero"
 
 
+def test_a_dense_pair_whose_flows_are_not_this_modules_keeps_its_own():
+    """The structure check above, on a pair that does *not* start canonical.
+
+    ``_gauge_bond`` stamps the flow its SVD produced on every virtual leg --
+    ``IN`` on the left/upper end of each bond, ``OUT`` on the right/lower one --
+    so the returned flows used to be that convention whatever the caller's were.
+    Every fixture the test above runs on already uses it, so nothing could see
+    the difference.
+
+    ``_simple_update_checkerboard_sweep``'s output does not: it comes back with
+    all five legs inverted relative to ``_wrap_as_dense_tensor`` (measured:
+    ``u`` OUT->IN, ``d`` IN->OUT, ``l`` OUT->IN, ``r`` IN->OUT, ``phys``
+    IN->OUT).  That is the pair this module exists to re-gauge, so "flows must
+    survive" was false for the only caller that matters.
+
+    Dense only.  On a ``SymmetricTensor`` the charges are load-bearing and
+    rewriting the metadata would be #834's silent mis-pairing, so that path
+    keeps the stamped flows it has always returned.
+    """
+    A, B, stored = _simple_update(*_dense_pair(), phases=40, rotate=True)
+    flows = [int(i.flow) for i in A.indices]
+    canonical = [int(i.flow) for i in _dense_pair()[0].indices]
+    assert flows != canonical, (
+        "the simple update's output now uses this module's flow convention, so "
+        "this test no longer probes anything -- find another non-canonical pair "
+        "or delete it, do not weaken it"
+    )
+
+    A2, B2, weights, info = bp_gauge_checkerboard(A, B, stored, max_iter=400, tol=1e-13)
+    assert info.converged, f"BP did not converge ({info.residual:.2e})"
+
+    for original, gauged, tag in ((A, A2, "A"), (B, B2, "B")):
+        assert gauged.labels() == original.labels(), f"{tag}: axis order changed"
+        assert [int(i.flow) for i in gauged.indices] == [
+            int(i.flow) for i in original.indices
+        ], f"{tag}: flows changed"
+
+    # And restoring the metadata did not buy that by moving the state.
+    rel = float(
+        np.max(
+            np.abs(
+                _direction(_torus_2x2(A2, B2, weights))
+                - _direction(_torus_2x2(A, B, stored))
+            )
+        )
+    )
+    assert rel < GAUGE_TOL, f"the solve moved the state by {rel:.3e}"
+
+
 @pytest.mark.parametrize("phases", [1, 4, 8])
 def test_an_su_evolved_symmetric_state_does_not_walk_out_of_f64(phases):
     """The iterate must stay representable, and a corpse must not be certified.
@@ -288,42 +360,65 @@ def test_the_health_predicate_rejects_every_way_an_iterate_dies():
     A, _ = _dense_pair()
     healthy = {"h_AB": jnp.ones(D)}
 
-    assert _is_representable({"A": A}, healthy)
+    def ok(gam, weights):
+        """The predicate as a Python ``bool``, and pinned to 0-d.
+
+        It returns a **0-d jnp array** now, because the traced driver calls it
+        inside a ``lax.while_loop``.  Truthiness of a 0-d array is well defined,
+        so the assertions below would still read correctly -- but only as long
+        as it stays 0-d, and a predicate that started returning one entry per
+        bond would make ``assert not ...`` raise rather than fail.  Pin the
+        shape here so that change is caught at its source.
+        """
+        got = _is_representable(gam, weights)
+        assert got.shape == (), f"health predicate returned shape {got.shape}"
+        return bool(got)
+
+    assert ok({"A": A}, healthy)
     # Representable, not unit-scaled: an unobservable prefactor is not a defect,
     # and a norm-based predicate would reject both of these -- ||Gamma|| is 0 at
     # 1e-200 and inf at 1e200 because it squares before it sums.
-    assert _is_representable({"A": A * 1e-200}, healthy), "small scale rejected"
-    assert _is_representable({"A": A * 1e200}, healthy), "large scale rejected"
-    assert not _is_representable({"A": A * 0.0}, healthy), "zero Gamma accepted"
-    assert not _is_representable({"A": A * jnp.inf}, healthy), "inf Gamma accepted"
-    assert not _is_representable({"A": A * jnp.nan}, healthy), "nan Gamma accepted"
-    assert not _is_representable({"A": A}, {"h_AB": jnp.zeros(D)}), "zero lambda"
-    assert not _is_representable({"A": A}, {"h_AB": jnp.array([1.0, jnp.nan, 0.1])}), (
+    assert ok({"A": A * 1e-200}, healthy), "small scale rejected"
+    assert ok({"A": A * 1e200}, healthy), "large scale rejected"
+    assert not ok({"A": A * 0.0}, healthy), "zero Gamma accepted"
+    assert not ok({"A": A * jnp.inf}, healthy), "inf Gamma accepted"
+    assert not ok({"A": A * jnp.nan}, healthy), "nan Gamma accepted"
+    assert not ok({"A": A}, {"h_AB": jnp.zeros(D)}), "zero lambda"
+    assert not ok({"A": A}, {"h_AB": jnp.array([1.0, jnp.nan, 0.1])}), (
         "nan lambda accepted"
     )
+    # The four bonds arrive as a ``BondWeights`` from ``_sweep`` and as a plain
+    # dict from here, so the predicate has to read both.
+    assert ok({"A": A}, BondWeights.ones(D, D))
+    assert not ok({"A": A}, BondWeights.ones(D, D)._replace(v_BA=jnp.zeros(D)))
 
 
-def test_an_unrepresentable_sweep_rolls_back_and_is_not_certified(monkeypatch):
+@pytest.mark.parametrize("kind", list(_PAIRS))
+def test_an_unrepresentable_sweep_rolls_back_and_is_not_certified(
+    monkeypatch, kind, retraced
+):
     """The solve must honour the predicate: return the last good gauge, say so.
 
     Driven by a mocked health signal rather than by finding an input that still
     overflows -- what is being tested is the loop's *reaction*, and a real
     overflow would only make the test hostage to whichever state still triggers
     it.
+
+    Injected at ``_sweep_is_healthy``, keyed on the **sweep index**, rather than
+    by counting calls.  The dense pair now runs inside a ``lax.while_loop``,
+    whose body is traced exactly once, so a host-side counter would fire once
+    and never reach the third sweep -- it would silently test nothing.  The
+    index is what both drivers have (the Python loop variable; the carry's
+    ``done`` slot), so one injection covers the traced and the eager path, and
+    running this on both pair kinds is what pins that they react identically.
     """
     import tenax.algorithms.ipeps_bp_gauge as bp
 
-    A, B = _dense_pair()
+    A, B = _PAIRS[kind]()
     w0 = BondWeights.ones(D, D)
     before = _torus_2x2(A, B, w0)
 
-    calls = {"n": 0}
-
-    def dies_on_the_third_sweep(gam, new_weights):
-        calls["n"] += 1
-        return calls["n"] < 3
-
-    monkeypatch.setattr(bp, "_is_representable", dies_on_the_third_sweep)
+    monkeypatch.setattr(bp, "_sweep_is_healthy", lambda gam, weights, sweep: sweep < 2)
     A2, B2, weights, info = bp.bp_gauge_checkerboard(A, B, w0, max_iter=50, tol=0.0)
 
     assert not info.converged, "an unrepresentable iterate was certified"
