@@ -38,15 +38,47 @@ import time
 
 import numpy as np
 
-# n = chi * D**2 for the (D, chi) the dense CTM actually runs at, plus the
-# per-device tile width T_A.  T_A must divide the per-device shard and should be
-# >= 128 or cuSolverMg is extremely slow; these assume 2 devices.
+# n = chi * D**2 for the (D, chi) the dense CTM actually runs at, plus a
+# preferred per-device tile width T_A.  These T_A are tuned for **two** devices;
+# on any other device count they are re-derived by ``tile_width`` below, because
+# the constraint is on the per-device shard and not on n.
 CASES = [
-    # (D, chi, n, T_A)
+    # (D, chi, n, T_A preferred at 2 devices)
     (4, 32, 512, 128),
     (6, 48, 1728, 288),
     (8, 64, 4096, 512),
 ]
+
+#: cuSolverMg is extremely slow below this tile width, so a case that cannot
+#: reach it on the mesh in front of us is refused rather than measured.
+MIN_TILE = 128
+
+
+def tile_width(n: int, n_dev: int, preferred: int) -> int | None:
+    """A legal ``T_A`` for ``n`` split over ``n_dev`` devices, or ``None``.
+
+    ``T_A`` tiles the *per-device shard*, not the matrix, so it depends on the
+    device count -- and the values in :data:`CASES` are tuned for two.  Left
+    unchecked, a 4-GPU host silently runs ``n=1728`` with 432-column shards
+    against ``T_A=288`` (not a divisor), and an 8-GPU host breaks two of the
+    three cases.  Deriving it here is what lets the same script run on a 2-, 4-
+    or 8-GPU node without quietly measuring something else.
+
+    Returns ``preferred`` when it is still legal, so a two-device run reproduces
+    exactly what was tuned; otherwise the largest legal divisor; otherwise
+    ``None``, meaning this case cannot be evaluated on this mesh.
+    """
+    if n % n_dev:
+        return None
+    shard = n // n_dev
+    if shard < MIN_TILE:
+        return None
+    if preferred <= shard and shard % preferred == 0:
+        return preferred
+    return max(
+        (t for t in range(MIN_TILE, shard + 1) if shard % t == 0),
+        default=None,
+    )
 
 
 def _fail(msg: str, code: int = 2) -> None:
@@ -146,9 +178,22 @@ def main() -> int:
     import jaxmg
 
     devs = jax.devices()
+    limit = os.environ.get("BENCH846_GPUS")
+    if limit:
+        try:
+            n_want = int(limit)
+        except ValueError:
+            _fail(f"BENCH846_GPUS={limit!r} is not an integer")
+        if not 2 <= n_want <= len(devs):
+            _fail(
+                f"BENCH846_GPUS={n_want} but {len(devs)} device(s) are visible; "
+                f"cuSolverMg needs at least 2"
+            )
+        devs = devs[:n_want]
     mesh = Mesh(np.array(devs), ("gpus",))
     spec = P("gpus", None)
-    print(f"devices: {devs}\n")
+    print(f"devices ({len(devs)}): {devs}")
+    print("(set BENCH846_GPUS=N to measure a subset -- T_A is re-derived for N)\n")
 
     @jax.jit
     def ref_eigh(m):
@@ -159,7 +204,14 @@ def main() -> int:
     print("-" * len(header))
 
     worth_it = []
-    for D, chi, n, t_a in CASES:
+    for D, chi, n, t_a_pref in CASES:
+        t_a = tile_width(n, len(devs), t_a_pref)
+        if t_a is None:
+            print(
+                f"{D:>3} {chi:>4} {n:>6} {'--':>5} {'':>10} {'SKIPPED':>10} {'':>8}  "
+                f"no tile width >= {MIN_TILE} divides the {n}/{len(devs)} shard"
+            )
+            continue
         rng = np.random.default_rng(0)
         a = rng.normal(size=(n, n))
         rho = np.asarray((a + a.T) / 2.0, dtype=np.float64)
