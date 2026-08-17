@@ -7,27 +7,31 @@ deletes it by making it unrepresentable rather than by fixing it a fifth time.
 A guard on the dataclass is cheap and it is the only thing that stays true as
 the module grows.
 
-``_su_step`` then needs three separate guards, because a step can be wrong in
-three ways that no single reading sees:
+``_su_step`` then needs **four** separate guards, because a step can be wrong in
+four ways and no one reading sees more than one of them:
 
-* **form** -- is the output a well-formed absorbed-form pair, i.e. one the next
-  ``gauge_fix`` can gauge without moving it?  On the block-sparse path this is
-  where a charge mis-pairing would show up, and a mis-pairing does not raise,
-  it converges to a different state (#834, #602).
 * **state** -- is it the *gated* state?  Checked exactly, by stepping with no
   truncation and comparing the 2x2 torus against the gate applied to the input
   torus.  This is also the no-op control: a step that returns its input scores
   3.1e-02 to 4.1e-02 where a correct one scores 8.8e-15 to 9.5e-15.
 * **split** -- is ``sqrt(sigma)`` on *both* ends of the bond, rather than all
   of it on one?
+* **truncation** -- of the singular values available, are these the largest
+  ``max_D``?  Nothing above looks at *which* survived: an ``_su_step`` keeping
+  the **smallest** ``max_D`` -- retaining 0.0000 of the spectral weight -- once
+  passed all 23 dense tests here with every other reading clean.
+* **gaugeability** -- can the next step's ``gauge_fix`` still solve on this
+  output?  That is a convergence check and nothing more; see
+  ``test_su_step_output_can_still_be_gauged`` for why its former state-equality
+  half was removed rather than kept as decoration.
 
-The third cannot be folded into the other two, and that is arithmetic rather
-than a gap in the probes.  A diagonal weight factors arbitrarily between the
-two legs it joins without changing the contracted value, so ``sqrt(s)`` at both
-ends and ``s`` at one end are the same physical *state*; every closed-network
-reading in this tree, the torus included, calls them equal.  Nor do the first
-two follow from the third: a squared bond weight is a different state that is
-still, formally, a perfectly good absorbed pair.
+The first three are mutually blind, and for the first two that is arithmetic
+rather than a gap in the probes.  A diagonal weight factors arbitrarily between
+the two legs it joins without changing the contracted value, so ``sqrt(s)`` at
+both ends and ``s`` at one end are the same physical *state*; every
+closed-network reading in this tree, the torus included, calls them equal.  Nor
+does the state guard follow from the split guard: a squared bond weight is a
+different state that is still, formally, a perfectly good absorbed pair.
 ``test_the_bond_guards_see_different_mutations`` measures both directions on
 mutations built in the test itself, so neither claim rests on argument.
 """
@@ -46,13 +50,21 @@ from _ipeps_gauge_helpers import (  # tests/ is on sys.path
     assert_leg_split,
 )
 
+import tenax.algorithms.ipeps_su as ipeps_su_module
 from tenax.algorithms.ipeps import heisenberg_gate
-from tenax.algorithms.ipeps_bp_gauge import BondWeights
+from tenax.algorithms.ipeps_bp_gauge import BondWeights, BPGaugeInfo
 from tenax.algorithms.ipeps_gauge import gauge_fix, torus_2x2_sign_free
 from tenax.algorithms.ipeps_simple_update import _make_trotter_gate_tensor
-from tenax.algorithms.ipeps_su import _BOND_ENDS, _su_step, _SUState
+from tenax.algorithms.ipeps_su import (
+    _BOND_ENDS,
+    _align_gate_to_ket,
+    _su_step,
+    _SUState,
+)
 from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core._tensor_utils import scale_bond_axis
+from tenax.core.index import TensorIndex
+from tenax.core.tensor import DenseTensor
 
 
 @pytest.mark.parametrize("kind", ["dense", "symmetric"])
@@ -160,6 +172,22 @@ _BONDS = ("h_AB", "h_BA", "v_AB", "v_BA")
 #: the bond, not of which of the four it is.  The exhaustive four-bond sweep,
 #: which is where a transposed leg map would show, runs on ``dense``.
 _CASES = [("dense", b) for b in _BONDS] + [("symmetric", b) for b in ("h_AB", "v_BA")]
+
+#: Cells for the truncation-quality guard, which needs **two** extra steps per
+#: cell (a truncated one and an untruncated reference at the same ``dt``) and so
+#: costs 76 s on a symmetric cell against 0.6 s on a dense one.  All four dense
+#: bonds, and ``h_AB`` on symmetric -- the symmetric cell is not optional, since
+#: ``base_charges`` is *ignored* on the dense path (``linalg.svd``'s own
+#: docstring), so #865 has no dense arm to be caught on.
+_TRUNCATION_CASES = [("dense", b) for b in _BONDS] + [("symmetric", "h_AB")]
+
+#: Time step for the truncation guard.  At ``dt=0.05`` the truncation drops
+#: 0.04% of the weight and pinning ``base_charges`` is *inert* -- measured, the
+#: kept spectrum is identical to the unpinned one at ``max_D=3`` and at
+#: ``max_D=2``.  At ``dt=2.0`` it drops 27% (dense) / 26% (symmetric) and the
+#: pin bites: it keeps 0.43903 where the top three are 1, 0.9915, 0.46407.
+#: A guard for #865 has to run where #865 is visible.
+_TRUNCATION_DT = 2.0
 
 #: Which two physical legs of the 2x2 torus each bond's gate acts on, as
 #: ``((si_axis, sj_axis), (si_axis, sj_axis))`` into the torus's
@@ -354,12 +382,12 @@ def su():
                 pairs[kind] = _PAIRS[kind](D=D)
             return pairs[kind]
 
-        def step(self, kind, bond, max_D=D):
-            key = (kind, bond, max_D)
+        def step(self, kind, bond, max_D=D, dt=0.05):
+            key = (kind, bond, max_D, dt)
             if key not in steps:
                 A, B = self.pair(kind)
                 steps[key] = _su_step(
-                    _SUState.from_pair(A, B), _gate(A), max_D=max_D, bond=bond
+                    _SUState.from_pair(A, B), _gate(A, dt=dt), max_D=max_D, bond=bond
                 )
             return steps[key]
 
@@ -367,47 +395,42 @@ def su():
 
 
 @pytest.mark.parametrize("kind,bond", _CASES)
-def test_su_step_output_is_still_absorbed_form(kind, bond, su):
-    """After a step, ``gauge_fix`` must still be exact on the output (§6.2a).
+def test_su_step_output_can_still_be_gauged(kind, bond, su):
+    """The next step's ``gauge_fix`` converges on this step's output.
 
-    ``_su_step`` hands its output straight to the next step's gauge, so a
-    return value that is not a well-formed absorbed-form pair makes every later
-    step gauge a different object -- silently, since the tensors still have
-    plausible shapes and finite entries.  On the block-sparse path "well
-    formed" means concretely that the two ends of the new bond carry charge
-    arrays the block matching pairs the way the dense path would; a mismatch
-    there does not raise, it converges to a different state (#834, #602).
+    This is what survives of the plan's §6.2a round-trip, and the shrinkage is
+    measured rather than editorial.  That guard also asserted that the re-gauge
+    did not move the state, and **that assertion fired on none of ten
+    mutations** -- including one whose output is numerically zero
+    (``keep_smallest``, 0.00% of the spectral weight kept, round-trip reading
+    7.892e-15).  It could not have: ``gauge_fix`` *is* a gauge, so it preserves
+    whatever state it is handed, well-formed or not.  Nor is the block-sparse
+    justification it carried reachable -- a new-bond charge mis-pairing that
+    keeps flow and dim cannot be built as a valid ``SymmetricTensor``
+    (``__init__`` raises on the conservation check), and one that flips a flow
+    is caught by ``test_su_step_returns_the_convention_it_accepts`` first.  An
+    assertion nobody can make fail is decoration, so it is gone.
 
-    **Both sides are read with ``ones``.**  ``gauge_fix`` returns an *absorbed*
-    pair with its weights alongside as a diagnostic, so reading its output as
-    ``torus(A2, B2, w2)`` double-counts every bond -- that is #667's mechanism,
-    worth 9.0e-02 to 8.4e-01 depending on the pair, and it is what an earlier
-    draft of this test did.
+    The convergence assertion left behind has teeth, and has been watched to
+    use them: with the gate's flows left unaligned, this fires on symmetric
+    ``v_BA`` at ``100 sweeps, residual 1.399e-01``.  What it guards is that the
+    step's output is still something BP can solve -- the property the *next*
+    step depends on, since the gauge sets the basis its truncation is taken in.
+    ``_su_step`` now warns on the same condition (see its *Warns*), so this
+    pins the warning's trigger as well.
 
-    What this does **not** catch, and it is arithmetic rather than an
-    oversight: neither a wrong share between the two ends of the bond nor a
-    wrong total on it.  Both leave a perfectly well-formed absorbed pair --
-    of some other state in the second case -- and ``gauge_fix`` is a gauge, so
-    it preserves whatever state it is handed.  This is a *form* guard;
-    ``test_su_step_applies_the_gate_across_the_bond`` pins the state and
-    ``test_su_step_splits_sqrt_sigma_into_both_ends`` pins the share.
+    The other two properties are pinned elsewhere and neither is claimed here:
+    ``test_su_step_applies_the_gate_across_the_bond`` pins the state,
+    ``test_su_step_splits_sqrt_sigma_into_both_ends`` pins the share between
+    the two ends, and ``test_su_step_keeps_the_largest_singular_values`` pins
+    what the truncation kept.
     """
     stepped = su.step(kind, bond)
-
-    before = torus_2x2_sign_free(stepped.A, stepped.B, _ones_for(stepped.A))
-    A2, B2, _w2, info = gauge_fix(stepped.A, stepped.B)
-    after = torus_2x2_sign_free(A2, B2, _ones_for(A2))
-
+    _A2, _B2, _w2, info = gauge_fix(stepped.A, stepped.B)
     assert info.converged, (
         f"{kind} {bond}: BP did not converge on the step output in "
-        f"{info.iterations} sweeps (residual {info.residual:.3e})"
-    )
-    rel = _torus_rel(after, before)
-    assert rel < 1e-11, (
-        f"{kind} {bond}: gauge_fix after _su_step moved the state by {rel:.3e}. "
-        f"The step returned something that is not a well-formed absorbed-form "
-        f"pair -- check the new bond's flows and charges against the legs they "
-        f"replace."
+        f"{info.iterations} sweeps (residual {info.residual:.3e}).  The next "
+        f"step would truncate in the basis this failed solve left behind."
     )
 
 
@@ -536,6 +559,23 @@ def test_su_step_returns_the_convention_it_accepts(kind, bond, su):
     naively the bond legs and the physical leg all come back inverted;
     ``_BOND_ENDS`` and ``_align_gate_to_ket`` are what put them back, and this
     is the test that says so.
+
+    **Charges are checked as a multiset, not element-wise, and the asymmetry is
+    deliberate.**  The internal ``gauge_fix`` derives every *untouched* virtual
+    leg afresh from its own ``eigh``/``svd``, so their charge layouts come back
+    permuted -- measured, symmetric ``h_AB``: ``A.u`` and ``A.d``
+    ``(0,1,-1) -> (-1,0,1)``, ``A.l`` and ``B.r`` ``-> (1,-1,0)``, while the
+    *updated* bond ``A.r``/``B.l`` keeps ``(0,1,-1)``.  That permutation is
+    benign and asserting against it would fail on correct code.  What is not
+    benign is a changed multiset, which would mean a charge sector had been
+    created or destroyed, so that is what is pinned.
+
+    ``phys`` is checked **element-wise**, because it is the one leg a caller
+    holds a matching object for: a gate is built once from the initial pair and
+    reused for every step, and ``_align_gate_to_ket`` refuses a gate whose
+    charges do not match the site's element-wise.  A permuted ``phys`` would
+    therefore turn a working run into a hard failure -- or, without that check,
+    into a silent mis-pairing.  Measured, it is stable at ``(1,-1)``.
     """
     A, B = su.pair(kind)
     stepped = su.step(kind, bond)
@@ -554,6 +594,24 @@ def test_su_step_returns_the_convention_it_accepts(kind, bond, su):
                 f"{kind} {bond} {name}: leg {i_after.label} came back at "
                 f"dim {i_after.dim}, was {i_before.dim}"
             )
+            q_before = np.sort(np.asarray(i_before.charges))
+            q_after = np.sort(np.asarray(i_after.charges))
+            assert np.array_equal(q_before, q_after), (
+                f"{kind} {bond} {name}: leg {i_after.label} came back carrying "
+                f"the charge multiset {list(q_after)}, was {list(q_before)} -- "
+                f"a sector was created or destroyed, not merely re-ordered"
+            )
+        i_before = before.indices[before.labels().index("phys")]
+        i_after = after.indices[after.labels().index("phys")]
+        assert np.array_equal(
+            np.asarray(i_before.charges), np.asarray(i_after.charges)
+        ), (
+            f"{kind} {bond} {name}: phys came back as "
+            f"{list(np.asarray(i_after.charges))}, was "
+            f"{list(np.asarray(i_before.charges))}.  A gate is built once from "
+            f"the initial pair and reused every step; a permuted phys makes it "
+            f"pair the wrong basis states."
+        )
 
 
 def test_the_bond_guards_see_different_mutations(su):
@@ -617,9 +675,16 @@ def test_the_bond_guards_see_different_mutations(su):
     )
 
     ref = torus_2x2_sign_free(stepped.A, stepped.B, _ones_for(stepped.A))
-    assert (
-        float(np.max(np.abs(_gram(pair[site_i], leg_i) - _gram(pair[site_j], leg_j))))
-        < 1e-11
+    # The unmutated baseline both readings are compared against below.  It
+    # restates the split guard's first assertion on purpose: the two mutants
+    # are derived from *this* pair, so if it were already split-asymmetric the
+    # "one_sided fires / squared is blind" contrast would mean nothing.
+    baseline_split = float(
+        np.max(np.abs(_gram(pair[site_i], leg_i) - _gram(pair[site_j], leg_j)))
+    )
+    assert baseline_split < 1e-11, (
+        f"the unmutated step this test mutates is already split-asymmetric "
+        f"({baseline_split:.3e}); the contrast below would be meaningless"
     )
 
     seen = {}
@@ -656,3 +721,123 @@ def test_su_step_rejects_an_unknown_bond(su):
     A, B = su.pair("dense")
     with pytest.raises(ValueError, match="bond must be one of"):
         _su_step(_SUState.from_pair(A, B), _gate(A), max_D=D, bond="h")
+
+
+@pytest.mark.parametrize("kind,bond", _TRUNCATION_CASES)
+def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
+    """The truncation keeps the top ``max_D``, not some other ``max_D``.
+
+    Nothing else in this file looks at *which* singular values survived, and
+    the hole was not theoretical: an ``_su_step`` mutated to keep the
+    **smallest** ``max_D`` values -- retaining 0.0000 of the spectral weight,
+    kept ``sigma = [0, 0, 0]`` -- passed all 23 dense tests with every other
+    guard reading clean.  Two independent reasons, both now closed here:
+    ``test_su_step_applies_the_gate_across_the_bond`` steps at ``_FULL_RANK``
+    and so never truncates at all, and ``_bond_spectrum`` re-derives its
+    reference from the *stepped* state, so it agrees with whatever was kept by
+    construction.
+
+    The reference has to come from a **different** step: the untruncated one at
+    the same ``dt``, whose bond spectrum is the full ``sigma`` of the very
+    ``theta`` the truncated step formed (both start from the same state and the
+    internal ``gauge_fix`` is deterministic).  Then "kept == top ``max_D``" is
+    an assertion about the truncation and not a restatement of it.
+
+    This is also the only executable coverage of ``base_charges=None``, brief
+    constraint #3 and one of the four bugs the rewrite exists to delete (#865).
+    Pinning the new bond's per-sector keep counts to the old bond's layout
+    stops the SVD taking the globally largest values; here it keeps 0.43903
+    where the top three are 1, 0.9915, 0.46407, a relative error of 2.504e-02
+    against a guard at 1e-11.  It shows up **only** on the symmetric arm and
+    **only** at a ``dt`` where truncation bites -- see ``_TRUNCATION_DT``.
+    """
+    full = su.step(kind, bond, max_D=_FULL_RANK, dt=_TRUNCATION_DT)
+    kept = su.step(kind, bond, max_D=D, dt=_TRUNCATION_DT)
+
+    sigma_full = np.sort(_bond_spectrum(full, bond, _FULL_RANK))[::-1]
+    sigma_kept = np.sort(_bond_spectrum(kept, bond, D))[::-1]
+
+    dropped = 1.0 - float(np.sum(sigma_kept**2) / np.sum(sigma_full**2))
+    assert dropped > 0.05, (
+        f"{kind} {bond}: the truncation discards only {dropped:.4f} of the "
+        f"weight at dt={_TRUNCATION_DT}, so this test is not exercising a real "
+        f"truncation and cannot see a wrong keep set"
+    )
+    assert len(sigma_kept) == D, (
+        f"{kind} {bond}: kept {len(sigma_kept)} singular values, expected {D}"
+    )
+
+    err = float(np.max(np.abs(sigma_kept - sigma_full[:D])) / sigma_full[0])
+    assert err < 1e-11, (
+        f"{kind} {bond}: the step kept {sigma_kept / sigma_full[0]} where the "
+        f"largest {D} of the untruncated spectrum are "
+        f"{sigma_full[:D] / sigma_full[0]} (relative error {err:.3e}).  The "
+        f"truncation is not taking the globally largest singular values -- "
+        f"check that base_charges is None (#865), which pins the per-sector "
+        f"keep counts and stops it doing so."
+    )
+
+
+def test_su_step_warns_when_the_gauge_did_not_converge(su, monkeypatch):
+    """A failed BP solve is surfaced, not swallowed.
+
+    ``_su_step`` cannot fail on this and must not: the state is still correct,
+    only the *basis the truncation is taken in* is worse than it should be.
+    That is precisely the shape of defect this project keeps being bitten by --
+    #870's residual fell monotonically to 9.8e-12 while certifying a state that
+    had gone to zero -- so a silent degradation on every step of a 100-step
+    run is not acceptable either.
+
+    The trigger is real: with the gate's flows unaligned, BP hits
+    ``max_iter=100`` at residual 1.399e-01 on a symmetric ``v_BA`` step.  It is
+    reproduced here by monkeypatching ``gauge_fix`` rather than by constructing
+    such a pair, because the cheapest genuine one costs 38 s and the thing
+    under test is the *reporting*, not BP.
+    """
+    A, B = su.pair("dense")
+    real = ipeps_su_module.gauge_fix
+
+    def _unconverged(*args, **kwargs):
+        A2, B2, w2, _info = real(*args, **kwargs)
+        return A2, B2, w2, BPGaugeInfo(100, 1.399e-01, False)
+
+    monkeypatch.setattr(ipeps_su_module, "gauge_fix", _unconverged)
+    with pytest.warns(RuntimeWarning, match=r"gauge_fix did not converge"):
+        _su_step(_SUState.from_pair(A, B), _gate(A), max_D=D, bond="h_AB")
+
+
+@pytest.mark.parametrize(
+    "broken,match",
+    [
+        ("flow", "must carry the same flow"),
+        ("charges", "Block matching pairs by charge value"),
+    ],
+)
+def test_su_step_rejects_a_gate_that_does_not_match_the_site(broken, match, su):
+    """A gate whose input legs do not match ``phys`` is refused, not repaired.
+
+    ``_align_gate_to_ket`` flips flows, which fixes the one mismatch that *is*
+    repairable.  The other two are not, and both mis-pair silently rather than
+    raising: block matching goes by charge **value**, so a gate whose ``si``
+    charges are a permutation of the site's contracts the wrong physical basis
+    states together and returns a plausible number, and a gate whose ``si`` and
+    ``sj`` disagree on flow cannot be aligned by any single flip.
+    """
+    A, _B = su.pair("symmetric")
+    gate = _gate(A)
+    labels = list(gate.labels())
+    indices = list(gate.indices)
+    if broken == "flow":
+        indices[labels.index("sj")] = indices[labels.index("sj")].flip_flow()
+    else:
+        idx = indices[labels.index("si")]
+        indices[labels.index("si")] = TensorIndex.from_charges(
+            idx.symmetry,
+            np.asarray(idx.charges)[::-1].copy(),
+            idx.flow,
+            label=idx.label,
+        )
+    broken_gate = DenseTensor(gate.todense(), tuple(indices))
+
+    with pytest.raises(ValueError, match=match):
+        _align_gate_to_ket(broken_gate, A)

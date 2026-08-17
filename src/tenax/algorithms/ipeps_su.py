@@ -25,7 +25,10 @@ entry point arrives in #882's Phase 4, once ``ipeps()`` is wired to it.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
+
+import numpy as np
 
 from tenax.algorithms._tensor_utils import absorb_sqrt_singular_values
 from tenax.algorithms.ipeps_gauge import gauge_fix
@@ -195,6 +198,30 @@ def _align_gate_to_ket(gate: Tensor, site: Tensor) -> Tensor:
     ``[1, 0.700, 0.420]`` dense.  Reported, not fixed here -- this module does
     not own that file.)
 
+    **The mechanism, exactly**, because "it is #834's class" is not precise
+    enough to act on and the obvious detector does *not* fire.  With ``theta``'s
+    ``si``/``sj`` ``IN`` and the gate's ``si``/``sj`` also ``IN``, each product
+    block's output key comes out as ``Q_theta - 2 (q_si + q_sj)``, which equals
+    ``Q_theta`` only on the ``q_si + q_sj == 0`` sector; every other product
+    lands on a key the output indices do not carry and is dropped by the
+    per-block loop.  Measured, 278 blocks survive against 434 with the flows
+    aligned (``||theta||`` 9.555 against 13.982).  Flipping all four gate flows
+    makes the sum telescope back to ``Q_theta`` and nothing is dropped.
+    ``contractor._leg_pairing_fault`` would **not** flag the bad pairing --
+    same flows with element-wise equal charges is its early ``return None`` --
+    and it is ``TENAX_STRICT_CONTRACT``-gated in any case, so the loss is
+    silent by two independent routes.
+
+    **A second symptom, same cause.**  Because ``U``'s new leg is stamped
+    ``OUT`` and ``si_out`` is ``OUT``, the shipped path also hands back ``A.r``
+    ``OUT`` (was ``IN``) and ``A.phys`` ``OUT`` (was ``IN``) after every call:
+    it inverts the bond and physical flows on top of dropping blocks.  Here the
+    bond half is handled by :data:`_BOND_ENDS`' choice of which end takes the
+    ``U`` side, and the physical half by this function -- with the gate aligned,
+    ``si_out`` comes back ``IN``, which is the site's own convention.
+    ``test_su_step_returns_the_convention_it_accepts`` fires on ``phys`` if
+    this call is removed, on the dense path as well as the symmetric one.
+
     Flipping **all four** flows, not two: the condition a block must satisfy is
     that its net charge is the identity, and negating every leg's contribution
     negates the net, so a charge-*conserving* gate keeps exactly the blocks it
@@ -202,10 +229,46 @@ def _align_gate_to_ket(gate: Tensor, site: Tensor) -> Tensor:
     conserve charge raises here rather than silently losing blocks.
 
     Idempotent: a gate already dual to the ket is returned untouched, so a
-    caller who builds one correctly is not punished for it.
+    caller who builds one correctly is not punished for it -- and once
+    ``_make_trotter_gate_tensor`` is fixed to build ``si`` ``OUT``, this
+    becomes a no-op automatically.  **That is this workaround's removal
+    trigger**; delete it when the gate builder is corrected, not before.
+
+    Args:
+        gate: Two-site gate, labels ``(si, sj, si_out, sj_out)``.
+        site: A site tensor of the pair the gate will act on.
+
+    Returns:
+        ``gate``, or the same gate with every flow flipped.
+
+    Raises:
+        ValueError: if the gate's two input legs disagree on flow, or if either
+            carries a different charge array from the site's ``phys`` leg.
+            Neither is repairable by flipping flows, and both mis-pair
+            *silently*: block matching is by charge **value**, so a gate whose
+            ``si`` charges are a permutation of the site's would contract the
+            wrong physical basis states together and return a plausible number.
     """
     phys = site.indices[site.labels().index("phys")]
-    si = gate.indices[gate.labels().index("si")]
+    labels = gate.labels()
+    si = gate.indices[labels.index("si")]
+    sj = gate.indices[labels.index("sj")]
+    if si.flow != sj.flow:
+        raise ValueError(
+            f"gate legs si ({si.flow.name}) and sj ({sj.flow.name}) must carry "
+            f"the same flow; both contract against a site's phys leg, so no "
+            f"single flip can align both."
+        )
+    for name, idx in (("si", si), ("sj", sj)):
+        if not np.array_equal(np.asarray(idx.charges), np.asarray(phys.charges)):
+            raise ValueError(
+                f"gate leg {name} carries charges {list(np.asarray(idx.charges))} "
+                f"but the site's phys leg carries "
+                f"{list(np.asarray(phys.charges))}.  Block matching pairs by "
+                f"charge value, so this would contract the wrong physical "
+                f"basis states together without raising.  Build the gate with "
+                f"``_make_trotter_gate_tensor(..., site_tensor=A)``."
+            )
     if si.flow != phys.flow:
         return gate
     indices = tuple(idx.flip_flow() for idx in gate.indices)
@@ -228,8 +291,13 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
        are the BP fixed-point spectrum *already absorbed into that pair*.  They
        are dropped here.  Absorbing them again would put ``lambda**1.5`` on
        every bond, which is #667's mechanism verbatim and has shipped on this
-       very function once already; measured, feeding them back moves the state
-       by 9.0e-02 to 8.4e-01 depending on the pair.
+       very function once already.  Measured *here*, re-absorbing them inside
+       this function moves the stepped state by 2.7e-01 (dense ``h_AB`` and
+       ``h_BA``) and 2.8e-01 (``v_AB``, ``v_BA``), independently reproduced at
+       2.663e-01.  (``gauge_fix``'s own docstring quotes 9.0e-02 to 8.4e-01 for
+       the same mistake; that is Phase 1's measurement of re-absorbing at
+       *its* boundary, on a range of pairs, and is not a number about this
+       function.)
     2. Contract the two sites sharing ``bond`` across it, and apply ``gate`` to
        the two open physical legs (see :func:`_align_gate_to_ket` for why the
        gate's flows are checked first).
@@ -275,10 +343,44 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
 
     Returns:
         A new :class:`_SUState`, in absorbed form, with the same leg order,
-        flows and (untouched-leg) charges as the input.
+        leg labels, flows and dimensions as the input.
+
+        **Not the same per-leg charge layout**, and the way it moves is the
+        opposite of what one would guess.  The *updated* bond keeps its layout;
+        every *untouched* virtual leg is permuted, by the internal
+        ``gauge_fix``, which derives each leg afresh from its own
+        ``eigh``/``svd``.  Measured, symmetric ``D=3``, one ``h_AB`` step::
+
+            A.u  (0,1,-1) -> (-1,0,1)   changed    A.r  (0,1,-1) -> (0,1,-1)
+            A.d  (0,1,-1) -> (-1,0,1)   changed    B.l  (0,1,-1) -> (0,1,-1)
+            A.l  (0,1,-1) -> ( 1,-1,0)  changed    B.r  (0,1,-1) -> ( 1,-1,0)
+
+        The *multiset* is preserved on every leg, so no sector is created or
+        lost, ``phys`` is stable at ``(1,-1)`` so a gate built once from the
+        initial pair stays valid, and the layout settles after the first call,
+        so there is no churn.  What it does mean is that **a stepped tensor and
+        a freshly built one must not be paired on a shared bond**:
+        ``A_stepped.l = (1,-1,0)`` against ``B_fresh.r = (0,1,-1)`` is #834's
+        silent mis-pairing, since block matching goes by charge value and dense
+        contraction by position.  Evolve both sites of a pair together, which
+        is what ``_su_step`` and the evolve loop above it do.
 
     Raises:
-        ValueError: if ``bond`` is not one of the four.
+        ValueError: if ``bond`` is not one of the four, or if ``gate``'s input
+            legs do not match the site's ``phys`` leg (see
+            :func:`_align_gate_to_ket`).
+
+    Warns:
+        RuntimeWarning: if the internal ``gauge_fix`` did not converge.  The
+            gauge sets the basis the truncation is taken in, so a failed solve
+            does not raise anything and does not corrupt the state -- it
+            quietly costs truncation quality on *every* step of a run.  That is
+            live rather than hypothetical: with the gate's flows left
+            unaligned, BP hit ``max_iter=100`` at residual 1.399e-01 on a
+            symmetric ``v_BA`` step and this function returned normally.  #870
+            is the standing reason to distrust a silent BP: there, a residual
+            falling monotonically to 9.8e-12 certified a state that had already
+            gone to zero.
 
     Note:
         ``max_D`` should equal the pair's current bond dimension unless all
@@ -315,9 +417,22 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
             f"(#667)."
         )
 
-    # Absorbed form in, absorbed form out.  ``weights`` and ``info`` are a
-    # report, not state: see stage 1 above for what re-absorbing them costs.
-    A, B, _weights, _info = gauge_fix(state.A, state.B)
+    # Absorbed form in, absorbed form out.  ``weights`` is a report, not state:
+    # see stage 1 above for what re-absorbing it costs.  ``info`` is not a
+    # report -- it is the only thing that can tell a caller the truncation
+    # basis was derived from a solve that never converged, so it is checked
+    # rather than dropped (see *Warns*).
+    A, B, _weights, info = gauge_fix(state.A, state.B)
+    if not info.converged:
+        warnings.warn(
+            f"gauge_fix did not converge before the {bond} update: "
+            f"{info.iterations} sweeps, residual {info.residual:.3e}.  The "
+            f"truncation below is taken in the basis that solve left behind, "
+            f"so this step's kept singular values are not the state's -- "
+            f"silently, and on every step if the cause persists.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     pair = {"A": A, "B": B}
     (site_i, leg_i), (site_j, leg_j) = _BOND_ENDS[bond]
 
@@ -346,7 +461,15 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
     F_j, F_i = absorb_sqrt_singular_values(U, sigma, Vh, _NEW_BOND)
 
     def _rebuild(F: Tensor, renames: dict[str, str], leg: str, phys: str) -> Tensor:
-        back = {new: old for old, new in renames.items() if old != leg}
+        # ``leg`` and ``"phys"`` are both excluded from the inverse map: the
+        # SVD replaced the first with ``_NEW_BOND`` and the gate replaced the
+        # second with ``si_out``/``sj_out``, so neither of their forward names
+        # survives on ``F``.  Leaving them in worked -- ``relabels`` ignores a
+        # key it does not find -- but it put two entries on ``"phys"`` and read
+        # as though the gate's input leg were still there.
+        back = {
+            new: old for old, new in renames.items() if old != leg and old != "phys"
+        }
         back[_NEW_BOND] = leg
         back[phys] = "phys"
         return _reorder(F.relabels(back), _SITE_LABELS)
