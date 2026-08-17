@@ -17,9 +17,14 @@ four ways and no one reading sees more than one of them:
 * **split** -- is ``sqrt(sigma)`` on *both* ends of the bond, rather than all
   of it on one?
 * **truncation** -- of the singular values available, are these the largest
-  ``max_D``?  Nothing above looks at *which* survived: an ``_su_step`` keeping
-  the **smallest** ``max_D`` -- retaining 0.0000 of the spectral weight -- once
-  passed all 23 dense tests here with every other reading clean.
+  ``max_D``, and are they attached to the right singular *vectors*?  Nothing
+  above looks at either: an ``_su_step`` keeping the **smallest** ``max_D``
+  -- retaining 0.0000 of the spectral weight -- once passed all 23 dense tests
+  here with every other reading clean, and one keeping the top ``max_D``
+  *values* against the bottom ``max_D`` *vectors* passed all 28 with the
+  spectrum reading itself at 9.5e-16 while returning a state **orthogonal** to
+  the correct one.  Spectra are blind to which subspace they describe, so this
+  guard carries a second, subspace-level assertion.
 * **gaugeability** -- can the next step's ``gauge_fix`` still solve on this
   output?  That is a convergence check and nothing more; see
   ``test_su_step_output_can_still_be_gauged`` for why its former state-equality
@@ -280,18 +285,14 @@ def _gram(t, leg):
     return np.asarray(m.todense())
 
 
-def _bond_spectrum(state, bond, max_D):
-    """The Schmidt spectrum of ``state`` across ``bond``, independent of the split.
+def _theta_labels(bond):
+    """The rename maps and SVD leg groups for reassembling ``bond``'s ``theta``.
 
-    Reassembles the two-site tensor and takes its singular values.  Because
-    ``F_j F_i = U sqrt(sigma) sqrt(sigma) Vh = U diag(sigma) Vh`` however the
-    ``sqrt`` was shared out between the two factors, this number is the same
-    for a correct split, a one-sided one, and anything in between -- which is
-    exactly what makes it a valid reference for the split check rather than a
-    restatement of it.
+    Written out once so :func:`_two_site_tensor` and every reader of the tensor
+    it returns agree on which leg is which without importing ``_su_step``'s own
+    private names for them.
     """
     (site_i, leg_i), (site_j, leg_j) = _BOND_ENDS[bond]
-    pair = {"A": state.A, "B": state.B}
 
     def rename(leg, prefix, phys):
         out = {lg: prefix + lg for lg in ("u", "d", "l", "r") if lg != leg}
@@ -301,18 +302,76 @@ def _bond_spectrum(state, bond, max_D):
 
     ren_i = rename(leg_i, "__i", "__pi")
     ren_j = rename(leg_j, "__j", "__pj")
-    theta = contract(pair[site_j].relabels(ren_j), pair[site_i].relabels(ren_i))
+    left = [ren_j[lg] for lg in ("u", "d", "l", "r") if lg != leg_j] + ["__pj"]
+    right = [ren_i[lg] for lg in ("u", "d", "l", "r") if lg != leg_i] + ["__pi"]
+    return (site_i, ren_i), (site_j, ren_j), left, right
+
+
+def _two_site_tensor(state, bond):
+    """The two sites sharing ``bond``, contracted across it.
+
+    This is the ``theta`` an ``_su_step`` on ``bond`` produced: ``F_j F_i``,
+    which is ``U sqrt(sigma) sqrt(sigma) Vh = U diag(sigma) Vh`` however the
+    ``sqrt`` was shared out between the two factors.  Two states stepped from
+    the *same* input at the same ``dt`` give tensors on identical outer legs --
+    the internal ``gauge_fix`` is deterministic and the truncation touches only
+    the bond -- so they are directly comparable, element for element.
+    """
+    (site_i, ren_i), (site_j, ren_j), _left, _right = _theta_labels(bond)
+    pair = {"A": state.A, "B": state.B}
+    return contract(pair[site_j].relabels(ren_j), pair[site_i].relabels(ren_i))
+
+
+def _bond_spectrum(state, bond, max_D, base_charges=None):
+    """The Schmidt spectrum of ``state`` across ``bond``, independent of the split.
+
+    Reassembles the two-site tensor and takes its singular values.  Because
+    ``F_j F_i`` is the same object however the ``sqrt`` was shared out between
+    the two factors, this number is the same for a correct split, a one-sided
+    one, and anything in between -- which is exactly what makes it a valid
+    reference for the split check rather than a restatement of it.
+
+    ``base_charges`` is exposed so a test can build the **pinned** truncation of
+    the same ``theta`` and show that this configuration can tell the two apart
+    (#865).  It is ``None`` for every reading of the step itself.
+    """
+    _ends_i, _ends_j, left, right = _theta_labels(bond)
     _U, sigma, _Vh, _full = truncated_svd(
-        theta,
-        left_labels=[ren_j[lg] for lg in ("u", "d", "l", "r") if lg != leg_j]
-        + ["__pj"],
-        right_labels=[ren_i[lg] for lg in ("u", "d", "l", "r") if lg != leg_i]
-        + ["__pi"],
+        _two_site_tensor(state, bond),
+        left_labels=left,
+        right_labels=right,
         new_bond_label="__reference_bond",
         max_singular_values=max_D,
-        base_charges=None,
+        base_charges=base_charges,
     )
     return np.asarray(sigma)
+
+
+def _theta_cosine(state_a, state_b, bond):
+    """``<theta_a, theta_b> / (||theta_a|| ||theta_b||)`` across ``bond``.
+
+    The **subspace** reading, and the only one in this file that is not blind to
+    a truncation that keeps the right singular *values* attached to the wrong
+    singular *vectors*.  Every spectrum-based reading here -- the truncation
+    guard's own, the Gram/split guard, :func:`_bond_spectrum` -- is invariant
+    under replacing the kept subspace with any other orthonormal one of the same
+    dimension, because a spectrum does not know what it is a spectrum *of*.
+
+    For a correct truncation ``theta_kept = P theta_full`` with ``P`` the
+    orthogonal projector onto the top-``max_D`` subspace, so the inner product
+    is ``sum(kept sigma**2)`` and this returns exactly
+    ``sqrt(1 - dropped)``.  Keeping the bottom ``max_D`` vectors instead makes
+    the two tensors orthogonal and this returns 0.
+
+    ``bar()`` supplies the conjugate with flows flipped, so every leg pairs; the
+    contraction is closed and the result is a scalar.
+    """
+    ta = _two_site_tensor(state_a, bond)
+    tb = _two_site_tensor(state_b, bond)
+    num = float(
+        np.asarray(contract(ta, tb.bar(), output_labels=[]).todense()).reshape(())
+    )
+    return num / (float(ta.norm()) * float(tb.norm()))
 
 
 def _apply_gate_to_torus(T, G, axes):
@@ -576,6 +635,21 @@ def test_su_step_returns_the_convention_it_accepts(kind, bond, su):
     charges do not match the site's element-wise.  A permuted ``phys`` would
     therefore turn a working run into a hard failure -- or, without that check,
     into a silent mis-pairing.  Measured, it is stable at ``(1,-1)``.
+
+    Both charge assertions have been **watched to fail**, which matters because
+    they are vacuous on the dense arm (every charge there is 0) and because the
+    last assertion in this file that could not fail had to be deleted:
+
+    * *multiset* -- pin the SVD's ``base_charges`` to the trivial layout
+      (``zeros(max_D)``): ``A.r`` comes back carrying ``[0, 0, 0]`` where the
+      pair had ``[-1, 0, 1]``, at the same dimension and the same flow, so no
+      other assertion here sees it;
+    * *element-wise* ``phys`` -- have ``_align_gate_to_ket`` **dualise** the
+      gate rather than flip its flows (negating the charges as well): ``phys``
+      comes back ``[-1, 1]`` where it was ``[1, -1]`` -- a permutation, so the
+      multiset check above is blind to it by construction.
+
+    Each fires on both symmetric cells and neither fires anything else.
     """
     A, B = su.pair(kind)
     stepped = su.step(kind, bond)
@@ -751,22 +825,60 @@ def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
     against a guard at 1e-11.  It shows up **only** on the symmetric arm and
     **only** at a ``dt`` where truncation bites -- see ``_TRUNCATION_DT``.
     """
+    A, B = su.pair(kind)
     full = su.step(kind, bond, max_D=_FULL_RANK, dt=_TRUNCATION_DT)
     kept = su.step(kind, bond, max_D=D, dt=_TRUNCATION_DT)
+    (site_i, leg_i), (site_j, leg_j) = _BOND_ENDS[bond]
 
     sigma_full = np.sort(_bond_spectrum(full, bond, _FULL_RANK))[::-1]
     sigma_kept = np.sort(_bond_spectrum(kept, bond, D))[::-1]
-
     dropped = 1.0 - float(np.sum(sigma_kept**2) / np.sum(sigma_full**2))
+
+    # --- the two meta-assertions: this cell can see both failure modes -------
     assert dropped > 0.05, (
         f"{kind} {bond}: the truncation discards only {dropped:.4f} of the "
         f"weight at dt={_TRUNCATION_DT}, so this test is not exercising a real "
         f"truncation and cannot see a wrong keep set"
     )
-    assert len(sigma_kept) == D, (
-        f"{kind} {bond}: kept {len(sigma_kept)} singular values, expected {D}"
-    )
+    if kind == "symmetric":
+        # ``dropped`` alone does NOT establish that #865 is visible here, and
+        # the gap is measured rather than imagined: at dt=0.05, max_D=2 this
+        # same cell drops 0.11580 of the weight -- 2.3x the gate above -- while
+        # the pinned and unpinned truncations are byte-identical (1.606e-16).
+        # So build the pin from the same ``theta`` and require it to separate.
+        # ``base_charges`` is a *multiset* through ``_derive_charges`` (which
+        # slices, and whose keep counts are a histogram), so the input pair's
+        # leg charges pin exactly as the gauged pair's permutation of them do.
+        src = {"A": A, "B": B}[site_i]
+        pin = np.asarray(src.indices[src.labels().index(leg_i)].charges)
+        sigma_pinned = np.sort(_bond_spectrum(full, bond, D, base_charges=pin))[::-1]
+        sep = float(np.max(np.abs(sigma_pinned - sigma_kept)) / sigma_full[0])
+        assert sep > 1e-3, (
+            f"{kind} {bond}: pinning base_charges to {list(pin)} keeps the "
+            f"same spectrum as not pinning it (separation {sep:.3e}), so this "
+            f"cell cannot see #865 and the assertion below is not covering it. "
+            f"dt={_TRUNCATION_DT} was chosen to make it visible; re-measure "
+            f"before changing it."
+        )
+    else:
+        # ``linalg.svd`` documents base_charges as "Ignored on the dense path",
+        # so there is no pin to separate from here and no meta-assertion to
+        # make.  Measured: separation 4.8e-16 (h_AB), i.e. exactly nothing.
+        # This is why _TRUNCATION_CASES carries a symmetric cell at all.
+        pass
 
+    # --- what was kept: the right VALUES ... --------------------------------
+    for name, site, leg in (
+        (site_i, kept.A if site_i == "A" else kept.B, leg_i),
+        (site_j, kept.A if site_j == "A" else kept.B, leg_j),
+    ):
+        got = site.indices[site.labels().index(leg)].dim
+        assert got == D, (
+            f"{kind} {bond}: end {name}'s bond leg came back at dim {got}, "
+            f"expected {D}.  (Asserted on the tensor rather than on "
+            f"len(sigma_kept): _bond_spectrum caps its own SVD at D, so it "
+            f"could only ever see a step that kept too FEW.)"
+        )
     err = float(np.max(np.abs(sigma_kept - sigma_full[:D])) / sigma_full[0])
     assert err < 1e-11, (
         f"{kind} {bond}: the step kept {sigma_kept / sigma_full[0]} where the "
@@ -775,6 +887,31 @@ def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
         f"truncation is not taking the globally largest singular values -- "
         f"check that base_charges is None (#865), which pins the per-sector "
         f"keep counts and stops it doing so."
+    )
+
+    # --- ... attached to the right VECTORS ----------------------------------
+    # Everything above is a spectrum reading, and a spectrum is invariant under
+    # swapping the kept subspace for any other orthonormal one of the same
+    # dimension.  The two assertions are therefore complementary, and measured
+    # to be so -- dense h_AB, dt=2.0, both gating at 1e-11:
+    #
+    #   mutation                     spectrum err   subspace gap
+    #   correct                      4.762e-16      0.000e+00
+    #   top values, bottom vectors   9.525e-16      8.532e-01   <- only this
+    #   keep the smallest max_D      1.000e+00      5.603e-18   <- only above
+    #
+    # The middle row passes every other test in this file (28 dense cells)
+    # while returning a state ORTHOGONAL to the correct one: cos = -0.000000
+    # where a projection onto the top-3 subspace must give 0.853179.
+    cos = _theta_cosine(kept, full, bond)
+    expected = float(np.sqrt(1.0 - dropped))
+    gap = abs(cos - expected)
+    assert gap < 1e-11, (
+        f"{kind} {bond}: the truncated step overlaps the untruncated one by "
+        f"{cos:.6f} where a projection onto the top-{D} subspace must give "
+        f"sqrt(1 - dropped) = {expected:.6f} (gap {gap:.3e}).  The kept "
+        f"singular values are attached to the wrong singular vectors: the "
+        f"spectrum is right and the retained subspace is not."
     )
 
 
