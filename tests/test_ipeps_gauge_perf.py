@@ -459,23 +459,35 @@ def test_every_solve_in_a_run_hits_one_compiled_entry(entry):
     n_solves, D, _ = _budget()
     pairs = [_dense_pair(D=D, seed=k) for k in range(5)]
 
+    # Everything below counts entries **relative to this baseline**, never
+    # against zero.  ``_cache_size()`` is a private nanobind method with no
+    # documented post-clear value, and on the macOS arm64 jaxlib 0.10.2 build it
+    # returns a *negative* number after a bucket-long run: this file failed CI at
+    # `assert -10 == 0` on the very first line, in a bucket where
+    # ``conftest.py``'s RSS-gated ``pytest_runtest_teardown`` has been calling
+    # global ``jax.clear_caches()`` after every test since peak RSS crossed 6 GB.
+    # Not reproducible on Linux -- neither the plain sequence nor the same run
+    # with that threshold forced to 0 (29 passed) -- so treat the absolute value
+    # as unspecified and the *differences* as the contract.  All three claims
+    # below survive an arbitrary constant offset unchanged.
     cache_of().clear_cache()
-    assert cache_of()._cache_size() == 0, "cache not cleared"
+    base = cache_of()._cache_size()
 
     for i in range(n_solves):
         info = solve(*pairs[i % len(pairs)])
         assert info.iterations > 0, f"solve {i} did nothing: {info}"
 
-    assert cache_of()._cache_size() == 1, (
-        f"{n_solves} solves through {entry} produced {cache_of()._cache_size()} "
-        f"compiled entries; every one of them must reuse the same trace or the "
-        f"XLA compile is paid again and the re-gauging budget is gone"
+    assert cache_of()._cache_size() - base == 1, (
+        f"{n_solves} solves through {entry} produced "
+        f"{cache_of()._cache_size() - base} compiled entries; every one of them "
+        f"must reuse the same trace or the XLA compile is paid again and the "
+        f"re-gauging budget is gone"
     )
 
     # A different bond dimension is a different key -- obvious, and it is what
     # makes the assertion above non-vacuous.
     solve(*_dense_pair(D=3))
-    assert cache_of()._cache_size() == 2, (
+    assert cache_of()._cache_size() - base == 2, (
         "a different bond dimension did not produce a second entry, so the "
         "assertion above cannot distinguish 'one compile' from 'no counter'"
     )
@@ -491,7 +503,7 @@ def test_every_solve_in_a_run_hits_one_compiled_entry(entry):
     # module's onto it (``test_gauge_fix_hands_back_the_callers_leg_flows``).
     # This assertion is what would notice if that stopped being true.
     solve(*_su_evolved_pair(D))
-    assert cache_of()._cache_size() == 3, (
+    assert cache_of()._cache_size() - base == 3, (
         "a pair with inverted virtual flows reused an existing entry; the flows "
         "are aux data and must be part of the key"
     )
