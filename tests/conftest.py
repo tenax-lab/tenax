@@ -39,6 +39,10 @@ _FILE_MARKERS = {
     # machine-independent ratio and the other withdraws under coverage or on a
     # slow box rather than reporting a number it cannot measure.
     "test_ipeps_gauge_perf.py": "algorithm",
+    # #882 Phase 2: the simple-update engine with no stored bond spectrum.
+    # Every test runs at least one BP gauge solve (and the split guard runs
+    # three), which puts it well past the `core` budget.
+    "test_ipeps_su.py": "algorithm",
     "test_ipeps_core.py": "core",
     "test_auto_mpo.py": "algorithm",
     "test_ad_utils.py": "algorithm",
