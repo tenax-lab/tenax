@@ -63,6 +63,7 @@ from tenax.algorithms.ipeps_simple_update import _make_trotter_gate_tensor
 from tenax.algorithms.ipeps_su import (
     _BOND_ENDS,
     _align_gate_to_ket,
+    _su_evolve,
     _su_step,
     _SUState,
 )
@@ -978,3 +979,342 @@ def test_su_step_rejects_a_gate_that_does_not_match_the_site(broken, match, su):
 
     with pytest.raises(ValueError, match=match):
         _align_gate_to_ket(broken_gate, A)
+
+
+# --- _su_evolve (#882 Task 11) -------------------------------------------
+#
+# Everything below runs on the **dense** arm and says so once here rather than
+# four times.  A symmetric ``_su_step`` costs 38 s (see ``_CASES``), so the
+# cheapest symmetric statement any of these could make -- a two-step evolve --
+# is 76 s on its own, against a budget of 90 s for the whole of Task 11.  What
+# a symmetric cell would add is block-sparse *algebra*, and none of it happens
+# here: ``_su_evolve`` picks bond names off a tuple and calls ``_su_step``,
+# whose own symmetric cells already cover the charge bookkeeping.  The one
+# block-sparse-specific hazard the loop does own -- a bond coming back below
+# ``max_D`` because a charge block truncated away entirely -- is reachable
+# without paying for BP, and
+# ``test_su_evolve_names_the_step_that_broke_bond_uniformity`` reaches it.
+
+#: The cycle order asserted below.  Written out here rather than imported from
+#: ``ipeps_su._SU_CYCLE`` so the assertion is a second, independent statement of
+#: it instead of a tautology -- the same discipline ``_TORUS_GATE_AXES`` uses.
+#: Its source is ``_simple_update_checkerboard_sweep``'s own phase table
+#: (``ipeps_simple_update.py:255-260``): ``phase 0 -> h_AB``, ``1 -> v_AB``,
+#: ``2 -> h_BA``, ``3 -> v_BA``.
+_EXPECTED_CYCLE = ("h_AB", "v_AB", "h_BA", "v_BA")
+
+
+def _torus(state):
+    """The 2x2 torus of an absorbed-form pair -- the state reading used below."""
+    return torus_2x2_sign_free(state.A, state.B, _ones_for(state.A))
+
+
+def _bond_dims(state):
+    """Each bond's dimension, read through ``_BOND_ENDS``' ``IN`` end."""
+    pair = {"A": state.A, "B": state.B}
+    return {
+        bond: pair[site].indices[pair[site].labels().index(leg)].dim
+        for bond, ((site, leg), _other) in _BOND_ENDS.items()
+    }
+
+
+def test_su_evolve_has_no_steps_mod_4_dependence(su):
+    """#851: stopping the sweep at different phases must not change the state.
+
+    The defect this replaces stored one horizontal and one vertical spectrum for
+    four inequivalent bonds, so phases 0 and 2 wrote the same slot and
+    ``steps % 4`` decided which bond's gauge was stamped on the lattice.  With
+    nothing stored there is nothing to stamp, and under a ``dt=0`` gate at
+    ``max_D == D`` the statement is *exact* rather than approximate: each step
+    is a gauge plus a lossless re-split, so the state is unmoved.  Measured,
+    dense ``D=3``: ``steps`` 5, 6, 7, 8 land 1.8e-14, 2.6e-14, 1.9e-14, 2.7e-14
+    from ``steps=4``, and ``steps=4`` lands 1.9e-14 from the input.
+
+    **This test is necessary and it is not sufficient, and the second half is
+    not a caveat but the reason the next two tests exist.**  An ``_su_evolve``
+    that ignores ``steps`` and returns its input passes it *exactly*, at
+    ``d = 0`` -- better than the correct implementation does.  The last
+    assertion below says so out loud by pinning the ``dt=0`` invariance it
+    depends on; the guards that can tell a working loop from ``return state``
+    are ``test_su_evolve_actually_evolves`` and
+    ``test_su_evolve_visits_four_distinct_bonds_per_cycle``, both of which use a
+    real gate.
+
+    What it *is* sufficient for is the defect it is named after, and all three
+    assertions have been watched failing (guards at 1e-12 / 1e-11 / 1e-11):
+
+    ===================================================  ==========  =========
+    mutation                                             reading     fires
+    ===================================================  ==========  =========
+    #851: stamp the last phase's spectrum on its twin    1.000e-01   ``d``
+    #667: re-absorb ``gauge_fix``'s weights every step   1.487e-01   ``d``
+    #667: re-absorb them once, after the loop            9.110e-07   ``d``
+    a stray diagonal on ``phys`` after the loop          3.725e-01   ``held``
+    the gate built at ``dt=0.05`` instead of ``0``       3.077e-02   ``off``
+    ===================================================  ==========  =========
+
+    The third and fourth rows are the interesting ones.  A *terminal* distortion
+    is the same for every ``steps >= 1``, so one might expect ``d`` to be blind
+    to it -- but each run leaves the bond in its own basis, and a distortion
+    that does not commute with that basis shows up in ``d`` anyway (row 3, and
+    a fixed one-sided bond weight at 1.745e-01).  Only a distortion on ``phys``,
+    which *does* commute with the bond gauge, gets past ``d``; that is the case
+    ``held`` exists for, and it is why ``held`` is an assertion rather than a
+    comment.
+    """
+    A, B = su.pair("dense")
+    state = _SUState.from_pair(A, B)
+    identity = _gate(A, dt=0.0)
+
+    # The premise: dt=0 really is the identity, so "the state must not move" is
+    # a statement about the loop and not about the gate.  Measured 3.1e-16.
+    off = float(
+        np.max(np.abs(np.asarray(identity.todense()).reshape(4, 4) - np.eye(4)))
+    )
+    assert off < 1e-12, f"the dt=0 gate is not the identity (max |G - I| = {off:.3e})"
+
+    ref = _torus(_su_evolve(state, identity, max_D=D, steps=4))
+    for n in (5, 6, 7, 8):
+        got = _torus(_su_evolve(state, identity, max_D=D, steps=n))
+        d = _torus_rel(got, ref)
+        assert d < 1e-11, (
+            f"steps={n} differs from steps=4 by {d:.3e} under a dt=0 gate -- "
+            f"where the sweep stops is deciding the answer (#851)"
+        )
+
+    held = _torus_rel(_torus(state), ref)
+    assert held < 1e-11, (
+        f"a dt=0 evolve moved the state by {held:.3e}; each step should be a "
+        f"gauge plus a lossless re-split at max_D == D.  (This assertion is "
+        f"also what makes the blindness above explicit: it is exactly why a "
+        f"do-nothing _su_evolve passes this test.)"
+    )
+
+
+def test_su_evolve_actually_evolves(su):
+    """The no-op control: a real gate moves the state, and ``steps`` decides how far.
+
+    The test above cannot make this statement -- under ``dt=0`` a do-nothing
+    loop is *indistinguishable from a correct one*, so something has to fail on
+    ``return state`` or nothing in this file does.  Every reading here is taken
+    from a separate full run out of the same input, so it also pins that
+    ``_su_evolve`` is a pure function of ``steps`` rather than of call order.
+
+    Measured, dense ``D=3``, ``dt=0.05``, against guards at 1e-3:
+
+    ========================  =========  ================
+    reading                   correct    ``return state``
+    ========================  =========  ================
+    ``steps=4`` vs input      4.99e-02   0
+    consecutive ``n``/``n-1`` 1.7-2.0e-02  0
+    ========================  =========  ================
+
+    ``steps=0`` is checked by identity rather than by distance: it must be the
+    input object, which no distance reading could distinguish from an
+    unnecessary gauge-and-resplit round trip.
+    """
+    A, B = su.pair("dense")
+    gate = _gate(A)
+    state = _SUState.from_pair(A, B)
+
+    assert _su_evolve(state, gate, max_D=D, steps=0) is state, (
+        "steps=0 must return the input pair itself, not a re-gauged copy of it"
+    )
+
+    T = {n: _torus(_su_evolve(state, gate, max_D=D, steps=n)) for n in range(6)}
+
+    moved = _torus_rel(T[4], T[0])
+    assert moved > 1e-3, (
+        f"four steps of a dt=0.05 gate moved the state by only {moved:.3e} -- "
+        f"_su_evolve is not evolving.  A loop that returns its input scores 0 "
+        f"here and still passes the steps % 4 test above, exactly."
+    )
+
+    for n in range(1, 6):
+        d = _torus_rel(T[n], T[n - 1])
+        assert d > 1e-3, (
+            f"steps={n} and steps={n - 1} give the same state ({d:.3e}), so "
+            f"the loop is not running the step count it was asked for"
+        )
+
+
+def test_su_evolve_visits_four_distinct_bonds_per_cycle(su, monkeypatch):
+    """Four consecutive steps update four *different* bonds, in the shipped order.
+
+    A checkerboard unit cell has four inequivalent nearest-neighbour bonds, and
+    an implementation that gates ``h_AB`` four times passes both tests above:
+    it moves the state, ``steps`` still decides how far, and under ``dt=0`` it
+    is still the identity.  What it produces is the spuriously dimerised state
+    of #667 -- ``A`` only ever picks up weight on its ``r`` leg and half the
+    lattice bonds get none at all.
+
+    Two independent readings, because neither alone is enough:
+
+    * **Which bonds** -- a recorder wrapped round ``_su_step`` (which really
+      runs, so this costs nothing but the eight steps).  It is the only reading
+      that can state "four *distinct*" and "period 4" directly, and it pins the
+      order as well.  The expected order is written out in ``_EXPECTED_CYCLE``
+      from ``_simple_update_checkerboard_sweep``'s phase table rather than
+      imported from the implementation's own constant.
+    * **What that buys** -- the recorder is a claim about calls, not about
+      physics, so the second half evolves one bond four times by hand and
+      requires the result to differ.  Measured against a four-bond cycle at
+      ``dt=0.05``, dense ``D=3``: 5.7e-02 (4x ``h_AB``), 4.5e-02 (``v_AB``),
+      5.3e-02 (``h_BA``), 6.2e-02 (``v_BA``), all against a guard at 1e-3.
+
+    The **order** is deliberately not asserted through the state, and that is
+    measured too: a cycle re-ordered to ``(h_AB, h_BA, v_AB, v_BA)`` lands
+    4.4e-04 away, a hundredth of the single-bond contrast and merely a different
+    Trotter ordering.  Coverage is physics; order is a convention, so the
+    recorder pins it and the state reading does not pretend to.
+
+    **The second half is not belt-and-braces, and it took a mutation to prove
+    it.**  Every loop-level defect trips the recorder first, so the obvious
+    reading is that the state contrast is decoration.  It is not: an
+    ``_su_step`` that ignores the ``bond`` it is handed and always evolves
+    ``h_AB`` leaves the recorder showing a perfect ``h_AB, v_AB, h_BA, v_BA``
+    and is caught *only* here, at 0.000e+00 against a guard of 1e-3.  That is
+    the lying-recorder case in full, and it is the one an implementation that
+    stops routing through ``_su_step`` would also land in.
+
+    ``_asymmetric_hamiltonian`` matters here for its documented reason: with a
+    plain Heisenberg gate the torus cannot tell an ``h_AB`` update from an
+    ``h_BA`` one at all.
+    """
+    A, B = su.pair("dense")
+    gate = _gate(A)
+    state = _SUState.from_pair(A, B)
+
+    seen = []
+    real_step = ipeps_su_module._su_step
+
+    def _record(st, g, max_D, bond):
+        seen.append(bond)
+        return real_step(st, g, max_D, bond)
+
+    monkeypatch.setattr(ipeps_su_module, "_su_step", _record)
+    _su_evolve(state, gate, max_D=D, steps=8)
+    monkeypatch.undo()
+
+    assert len(seen) == 8, f"eight steps were asked for, {len(seen)} were run: {seen}"
+    assert set(seen[:4]) == set(_BOND_ENDS), (
+        f"the first cycle updated {seen[:4]} -- the four bonds of a checkerboard "
+        f"cell are {sorted(_BOND_ENDS)}, and evolving a subset leaves the state "
+        f"dimerised (#667)"
+    )
+    assert tuple(seen) == _EXPECTED_CYCLE * 2, (
+        f"the cycle ran {tuple(seen)}, expected {_EXPECTED_CYCLE * 2} -- the "
+        f"phase order _simple_update_checkerboard_sweep ships, which Phase 4 "
+        f"re-points ipeps() at"
+    )
+
+    cycled = _torus(_su_evolve(state, gate, max_D=D, steps=4))
+    for bond in _BOND_ENDS:
+        stuck = state
+        for _ in range(4):
+            stuck = _su_step(stuck, gate, max_D=D, bond=bond)
+        d = _torus_rel(_torus(stuck), cycled)
+        assert d > 1e-3, (
+            f"four steps on {bond} alone give a state {d:.3e} from a full "
+            f"four-bond cycle -- this reading cannot see a loop that never "
+            f"leaves one bond"
+        )
+
+
+@pytest.mark.parametrize("max_D", [D - 1, D + 1])
+def test_su_evolve_rejects_a_max_D_the_pair_does_not_have(max_D, su):
+    """``max_D`` is the pair's dimension, not a truncation knob -- and it is checked.
+
+    ``gauge_fix`` reads one ``D_h`` off ``A.r`` and one ``D_v`` off ``A.d`` and
+    hands each to *both* bonds of that orientation, so a pair whose two
+    horizontal bonds differ cannot be gauged.  A step sets the bond it updates
+    to ``max_D`` whatever it was, so any ``max_D != D`` makes the pair
+    non-uniform immediately and the *next* step dies four frames down inside
+    ``absorb_weights`` with ``cannot reshape array of shape (4,) into shape
+    [1, 1, 3, 1, 1]``.
+
+    The last half measures that mechanism instead of quoting it, and it is what
+    makes this guard a statement about ``_su_evolve`` rather than about a
+    docstring.  It also corrects two things the plan assumed:
+
+    * **shrinking is no more available than growing** -- ``max_D=2`` from
+      ``D=3`` leaves exactly the same non-uniform pair as ``max_D=4`` does, and
+      dies at the same place (measured on both the dense and the symmetric
+      arm);
+    * **completing whole cycles does not rescue it** -- the failure is at step
+      index **1**, inside the first cycle, so there is no cycle boundary to
+      defer growth to.
+
+    **The message is matched on ``the input pair``, not on the shared prefix,
+    and that is the whole difference between this test having teeth and not.**
+    ``_su_evolve`` checks the same invariant after every step, and that check
+    fires on the pair step 0 leaves behind -- so a build with the *input* check
+    deleted still raises a ``ValueError`` whose text starts identically, one
+    wasted step later.  Watched: matching only ``needs all four bonds at
+    max_D`` passed with the input check removed.  The ``steps=0`` case below
+    closes the same hole from the other side, since no post-step check runs at
+    all there.
+    """
+    A, B = su.pair("dense")
+    gate = _gate(A)
+    state = _SUState.from_pair(A, B)
+
+    with pytest.raises(ValueError, match="the input pair carries"):
+        _su_evolve(state, gate, max_D=max_D, steps=4)
+
+    with pytest.raises(ValueError, match="the input pair carries"):
+        _su_evolve(state, gate, max_D=max_D, steps=0)
+
+    stepped = _su_step(state, gate, max_D=max_D, bond="h_AB")
+    dims = _bond_dims(stepped)
+    assert dims == {"h_AB": max_D, "h_BA": D, "v_AB": D, "v_BA": D}, (
+        f"one step at max_D={max_D} left the bonds at {dims}; this guard exists "
+        f"because that pair is not gaugeable, so if the step no longer produces "
+        f"it the guard needs re-deriving, not deleting"
+    )
+    # Watched failing: an ``_su_step`` that drops ``max_singular_values``
+    # reports ``{'h_AB': 54, 'h_BA': 3, 'v_AB': 3, 'v_BA': 3}`` here -- still
+    # non-uniform, so the ValueError above still raises and only this line
+    # notices that the premise moved.
+
+
+def test_su_evolve_rejects_a_negative_step_count(su):
+    """``range(-1)`` is empty, so a negative count would silently do nothing."""
+    A, B = su.pair("dense")
+    state = _SUState.from_pair(A, B)
+    with pytest.raises(ValueError, match="steps must be non-negative"):
+        _su_evolve(state, _gate(A), max_D=D, steps=-1)
+
+
+def test_su_evolve_names_the_step_that_broke_bond_uniformity(su, monkeypatch):
+    """A bond that shrinks mid-run is reported here, not as a reshape error later.
+
+    Real rather than defensive: on the block-sparse path a truncation can empty
+    a charge block, and ``linalg.svd`` then returns a bond below ``max_D``.
+    From that point the pair is non-uniform and the *next* step's ``gauge_fix``
+    fails inside ``absorb_weights``, several frames below the caller and naming
+    neither the step nor the bond -- which is how the same shape cost this
+    branch a debugging session already.  So ``_su_evolve`` re-checks its
+    invariant after every step and says which one broke it.
+
+    Reproduced by monkeypatching ``_su_step`` rather than by finding a
+    symmetric truncation that empties a block: the thing under test is the
+    *reporting*, one symmetric step costs 38 s, and a pair engineered to lose a
+    sector would pin the SVD's block bookkeeping rather than this loop.  The
+    same trade ``test_su_step_warns_when_the_gauge_did_not_converge`` makes.
+    """
+    A, B = su.pair("dense")
+    state = _SUState.from_pair(A, B)
+    small = _SUState.from_pair(*_PAIRS["dense"](D=D - 1))
+    real_step = ipeps_su_module._su_step
+    calls = {"n": 0}
+
+    def _shrinks_on_the_second(st, g, max_D, bond):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return small
+        return real_step(st, g, max_D, bond)
+
+    monkeypatch.setattr(ipeps_su_module, "_su_step", _shrinks_on_the_second)
+    with pytest.raises(ValueError, match=r"the pair after step 1 \(v_AB\)"):
+        _su_evolve(state, _gate(A), max_D=D, steps=4)

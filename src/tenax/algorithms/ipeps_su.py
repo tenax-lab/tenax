@@ -66,6 +66,27 @@ _BOND_ENDS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     "v_BA": (("B", "d"), ("A", "u")),
 }
 
+#: The four bonds in the order one cycle visits them.
+#:
+#: Deliberately the phase order
+#: ``ipeps_simple_update._simple_update_checkerboard_sweep`` already ships --
+#: ``phase 0: h_AB, 1: v_AB, 2: h_BA, 3: v_BA`` -- so that Phase 4 can re-point
+#: ``ipeps()`` at :func:`_su_evolve` without also re-timing the Trotter
+#: ordering underneath it.  Any permutation covering all four is as valid a
+#: second-order-free Trotter split, and the difference is small but real:
+#: measured, ``(h_AB, h_BA, v_AB, v_BA)`` lands 4.4e-04 from this order after
+#: four dense ``D=3`` steps at ``dt=0.05``, against 4.5e-02 to 6.2e-02 for
+#: evolving any *single* bond four times.  So the order is worth pinning by
+#: assertion (``test_su_evolve_visits_four_distinct_bonds_per_cycle`` writes it
+#: out independently) and is not worth trying to detect from the state.
+#:
+#: Alternating the two orientations rather than doing both horizontals first is
+#: not arbitrary either: it is what makes the *partial* cycles interesting.
+#: ``steps=2`` under this order has evolved one horizontal and one vertical
+#: bond, so the state is not dimerised along an axis the way ``h_AB, h_BA``
+#: would leave it (#667's shape).
+_SU_CYCLE: tuple[str, ...] = ("h_AB", "v_AB", "h_BA", "v_BA")
+
 #: Working labels, ``__``-prefixed so they cannot collide with a site leg
 #: (``u``, ``d``, ``l``, ``r``, ``phys``) or a gate leg (``si``, ``sj``,
 #: ``si_out``, ``sj_out``).
@@ -482,3 +503,178 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
         site_i: _rebuild(F_i, ren_i, leg_i, "si_out"),
     }
     return _SUState(A=out["A"], B=out["B"])
+
+
+def _bond_dims(state: _SUState) -> dict[str, int]:
+    """Each bond's dimension, read off the ``IN`` end named in :data:`_BOND_ENDS`.
+
+    One end is enough: an ``_su_step`` builds both ends of the bond it updates
+    from the same SVD, so they share a dimension by construction, and the three
+    it does not touch are returned untransformed.
+    """
+    pair = {"A": state.A, "B": state.B}
+    dims = {}
+    for bond, ((site, leg), _other) in _BOND_ENDS.items():
+        t = pair[site]
+        dims[bond] = t.indices[t.labels().index(leg)].dim
+    return dims
+
+
+def _require_uniform_bonds(state: _SUState, max_D: int, where: str) -> None:
+    """Refuse a pair whose four bonds are not all at ``max_D``.
+
+    **The precondition is much stronger than "do not grow ``D`` mid-cycle", and
+    the difference is measured rather than reasoned.**  ``gauge_fix`` reads one
+    ``D_h`` off ``A.r`` and one ``D_v`` off ``A.d`` and hands each to *both*
+    bonds of that orientation (``ipeps_gauge._identity_weights``), so a pair
+    whose two horizontal bonds differ cannot be gauged at all.  An
+    :func:`_su_step` sets the bond it updates to ``max_D`` whatever it was
+    before, so any ``max_D != D`` makes the pair non-uniform on the **first**
+    step and the **second** step then dies inside ``absorb_weights`` --
+    ``TypeError: cannot reshape array of shape (4,) into shape [1, 1, 3, 1, 1]``,
+    four frames below the caller.  Measured on ``D=3``, dense and symmetric,
+    stepping ``h_AB`` then ``v_AB``::
+
+        max_D=2 (shrink)   step 0 -> A.r = 2, A.l = 3    step 1 RAISES
+        max_D=4 (grow)     step 0 -> A.r = 4, A.l = 3    step 1 RAISES
+        max_D=3 (match)    step 0 -> A.r = 3             step 1, 2, 3 all fine
+
+    Two consequences, both of which contradict the obvious reading:
+
+    * **Shrinking is no more available than growing.**  Both leave the same
+      non-uniform pair.
+    * **"Complete whole cycles" does not rescue it.**  The failure is at step
+      index 1, inside the first cycle, so there is no cycle boundary to defer
+      growth to; a run of ``steps=4`` with ``max_D=4`` from ``D=3`` gets one
+      step in, not four.
+
+    ``D`` therefore changes between runs, not within one -- which is how
+    ``ipeps()`` already uses it, building the pair at ``config.max_bond_dim``
+    and passing that same number as ``max_D`` (``ipeps.py:408``).  Growing a
+    converged state is a re-initialisation (pad the pair, then evolve at the new
+    ``D``), and it is out of scope for this module.
+
+    Args:
+        state:  The pair to check.
+        max_D:  The dimension every virtual bond must already have.
+        where:  Human-readable position, used in the message only.
+
+    Raises:
+        ValueError: if any of the four bonds is not at ``max_D``.
+    """
+    dims = _bond_dims(state)
+    off = {bond: d for bond, d in dims.items() if d != max_D}
+    if off:
+        raise ValueError(
+            f"_su_evolve needs all four bonds at max_D={max_D}, but {where} "
+            f"carries {dims} -- off on {sorted(off)}.  Each step re-derives "
+            f"the gauge with gauge_fix, "
+            f"which reads a single D_h off A.r and a single D_v off A.d and "
+            f"applies each to both bonds of that orientation, so a pair whose "
+            f"bonds disagree cannot be gauged -- the next step would die inside "
+            f"absorb_weights with a reshape error rather than here.  max_D is "
+            f"the dimension this pair already has; changing D means building a "
+            f"new pair at the new D and evolving that, not passing a different "
+            f"max_D to this call."
+        )
+
+
+def _su_evolve(state: _SUState, gate: Tensor, max_D: int, steps: int) -> _SUState:
+    """Run ``steps`` simple-update steps, cycling over the four bonds.
+
+    **No lambda in the signature and none between the steps.**  That is the
+    whole of what this function adds over :func:`_su_step`, and it is the point
+    of #882's Phase 2: contrast
+    ``ipeps_simple_update._simple_update_checkerboard_sweep``, which threads
+    ``lam_h``/``lam_v`` and a ``phase0`` through the loop and hands back two
+    spectra.  Here the only thing carried from one step to the next is the pair
+    itself, in absorbed form, and each step re-derives its own gauge -- so
+    there is no cached spectrum for a non-unitary gate on another bond to
+    invalidate (#667, #851, #865, #869).
+
+    ``steps`` counts **bonds**, not cycles, matching the shipped convention
+    (``ipeps_simple_update.py:276``, "Number of phases to run (not cycles)"), so
+    Phase 4 can pass ``config.num_imaginary_steps`` through unchanged.  The
+    cycle order is :data:`_SU_CYCLE`.
+
+    **Where ``steps`` stops no longer decides the answer.**  That is #851's
+    actual symptom: two stored spectra covered four inequivalent bonds, phases 0
+    and 2 wrote the same slot, and ``steps % 4`` chose which bond's gauge got
+    stamped on the lattice.  With nothing stored, stopping mid-cycle leaves the
+    pair exactly as many gates as were applied and nothing else.  Under a
+    ``dt=0`` gate the property is *exact*: measured, dense ``D=3``, ``steps`` 5
+    through 8 land 1.8e-14 to 2.7e-14 from ``steps=4``.
+
+    That test cannot fail on a broken implementation, though, and the trap is
+    worth naming here because the plan shipped it as the headline check: with a
+    ``dt=0`` gate at ``max_D == D``, an ``_su_evolve`` that ignores ``steps``
+    and returns its input satisfies it at ``d = 0`` exactly.  The guards with
+    teeth are the real-gate ones -- ``test_su_evolve_actually_evolves``
+    (a no-op scores 5.0e-02 at ``steps=4``) and
+    ``test_su_evolve_visits_four_distinct_bonds_per_cycle`` (evolving one bond
+    four times scores 4.5e-02 to 6.2e-02).
+
+    No ``phase0``.  The signature is fixed by #882 §11 and every call starts the
+    cycle at ``h_AB``, so a caller that resumes by calling this a second time
+    evolves ``h_AB`` twice and the last bond of the previous call's cycle never
+    -- the hazard ``_simple_update_checkerboard_sweep``'s ``phase0`` exists to
+    document.  Resume by asking for the total number of steps in one call, not
+    by chaining.  (Chaining is not *wrong*, only a different Trotter ordering;
+    nothing here goes stale across the boundary, which is exactly what the
+    lambda-free carry buys.)
+
+    Args:
+        state: The pair, in absorbed form, with all four bonds at ``max_D``.
+        gate:  Two-site gate, labels ``(si, sj, si_out, sj_out)``, built once
+               from the initial pair -- ``phys`` is stable under a step, so it
+               stays valid for the whole run (see :func:`_su_step`'s *Returns*).
+        max_D: Bond dimension.  Must be the dimension the pair already has; see
+               :func:`_require_uniform_bonds` for why this is not a truncation
+               knob.
+        steps: Number of **bonds** to update.  ``0`` returns ``state`` itself.
+
+    Returns:
+        A new :class:`_SUState` in the same convention as the input -- same leg
+        order, labels, flows and dimensions -- so a run compiles the traced
+        gauge once.  ``steps=0`` returns the input object unchanged.
+
+    Raises:
+        ValueError: if ``steps`` is negative, or if the pair's bonds are not all
+            at ``max_D`` -- checked on the input *and* after every step, so a
+            symmetric run that loses a charge sector mid-cycle is reported with
+            the step index that lost it instead of as a reshape error inside the
+            next ``gauge_fix``.
+
+    Warns:
+        RuntimeWarning: once per step whose internal ``gauge_fix`` did not
+            converge, from :func:`_su_step`.  Not deduplicated here on purpose:
+            Python's default filter already shows a given warning once per
+            location, and a run where the gauge stops converging partway is
+            exactly the silent-degradation shape #870 is a standing reminder of.
+
+    Performance:
+        Dense ``D=3``, warm: **0.018 s for 4 steps, 0.053 s for 12** -- linear,
+        ~4.4 ms a step, after a ~1.6 s first call that compiles the traced
+        gauge.  Symmetric ``D=3`` takes the eager BP route at **~38 s a step**
+        (``ipeps_gauge``'s *Performance*), so a symmetric hundred-step evolve is
+        an hour and does not belong in a test suite; the tests here evolve on
+        the dense arm and cover the block-sparse algebra through
+        :func:`_su_step`'s own symmetric cells.
+
+        Nothing is renormalised, and nothing needs to be: ``gauge_fix`` rescales
+        its input by max-abs before the first BP message
+        (``ipeps_bp_gauge._prepare``), so each step's SVD sees a unit-scale pair
+        whatever the previous one left behind.  That is what stops the norm
+        runaway of #870, where ``||Gamma||`` grew 300x an iteration into an f64
+        ``inf``.
+    """
+    if steps < 0:
+        raise ValueError(f"steps must be non-negative; got {steps}.")
+    _require_uniform_bonds(state, max_D, "the input pair")
+
+    for i in range(steps):
+        bond = _SU_CYCLE[i % len(_SU_CYCLE)]
+        state = _su_step(state, gate, max_D=max_D, bond=bond)
+        _require_uniform_bonds(state, max_D, f"the pair after step {i} ({bond})")
+
+    return state
