@@ -195,8 +195,11 @@ def _align_gate_to_ket(gate: Tensor, site: Tensor) -> Tensor:
     so positional pairing *is* the intended pairing.  The shipped
     ``_simple_update_2site_horizontal_tensor`` inherits the discrepancy: on
     that pair it returns ``lambda = [1, 0.723, 0.656]`` block-sparse against
-    ``[1, 0.700, 0.420]`` dense.  Reported, not fixed here -- this module does
-    not own that file.)
+    ``[1, 0.700, 0.420]`` dense.  Filed as **#889**, not fixed here -- this
+    module does not own that file.  **Delete this function when #889 lands**,
+    and with it ``_su_step``'s call at the ``theta`` contraction: an aligned
+    gate makes it the identity, and leaving it in place would then flip the
+    flows back the wrong way.)
 
     **The mechanism, exactly**, because "it is #834's class" is not precise
     enough to act on and the obvious detector does *not* fire.  With ``theta``'s
