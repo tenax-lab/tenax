@@ -14,10 +14,19 @@ them a second time loses the state, by order unity.
 
 from __future__ import annotations
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+# The module, not just its names: ``gauge_fix`` reaches through it for the
+# driver dispatch and the solve body, so that a test which patches something in
+# there -- ``_use_traced_loop`` to force the eager driver onto a dense pair,
+# ``_sweep_is_healthy`` to inject a rollback -- is honoured here too.  Bound by
+# value they would not be, and the two drivers could then only be compared
+# through ``bp_gauge_checkerboard``, i.e. never through this function.
+import tenax.algorithms.ipeps_bp_gauge as _bp
 from tenax.algorithms.ipeps_bp_gauge import (
     _BOND_OF,
     _LEGS,
@@ -59,6 +68,78 @@ def absorb_weights(A: Tensor, B: Tensor, weights: BondWeights) -> tuple[Tensor, 
     return out["A"], out["B"]
 
 
+def _identity_weights(A: Tensor) -> BondWeights:
+    """``BondWeights.ones`` at this pair's two bond dimensions.
+
+    Correct as the *incoming* weights precisely because the pair is in absorbed
+    form: it already carries its own ``lambda``, so the bonds between the
+    tensors handed to the solve really are unweighted.  Read off ``A``'s ``r``
+    and ``d`` legs rather than assuming a square ``D``: the chain anchor's PEPS
+    embedding has dimension-1 vertical legs.
+    """
+    labels = A.labels()
+    return BondWeights.ones(
+        A.indices[labels.index("r")].dim, A.indices[labels.index("d")].dim
+    )
+
+
+@partial(jax.jit, static_argnums=(2, 3))
+def _gauge_fix_traced(A: Tensor, B: Tensor, max_iter: int, tol: float):
+    """:func:`gauge_fix`'s dense route, whole, behind **one** jit boundary.
+
+    Everything :func:`gauge_fix` does is in here except the three casts that
+    rebuild :class:`BPGaugeInfo` at its documented ``(int, float, bool)`` type.
+    That is the point.  Tracing the solve alone (Task 7) left the boundary
+    around it eager, and on a warm D=2 solve the boundary was the *majority* of
+    the cost: 2.47 ms total, of which the ``lax.while_loop`` was 0.89 ms and the
+    rest was ``BondWeights.ones``, the entry point's validation and casts, and
+    -- the bulk -- :func:`absorb_weights`' eight ``scale_bond_axis`` calls, each
+    an eager dispatch with an eager ``jnp.sqrt`` in front of it.  Eight tiny
+    dispatches cost far more than the arithmetic they carry, which is the same
+    99.75%-host shape the sweep itself had.  Measured here: **0.91-0.94 ms**,
+    from 2.47.  Re-gauging every simple-update step is on the *step* budget, so
+    that 1.5 ms is multiplied by ``num_imaginary_steps``, and it is what took
+    the #882 gate from 528 ms to **379-391 ms** against a 450 ms budget (and
+    the cold-process accounting from 702 ms to 402-422), over six fresh
+    processes on a quiet 128-core box.
+
+    ``_validate_weights`` is deliberately not called: the weights here are
+    :func:`_identity_weights`' own ``ones``, so there is no caller input to
+    reject and the documented ``ValueError`` is unreachable.  The pair itself is
+    not validated by that function on any path.
+
+    **Cache key.**  ``(A, B)`` are pytrees whose ``TensorIndex`` metadata is
+    *aux* data, so the key is shape, dtype **and flow convention**, plus the
+    static ``max_iter``/``tol``.  The flow half is not a curiosity: a
+    simple-update-evolved pair has its four virtual flows inverted relative to
+    ``_wrap_as_dense_tensor``, so mixing two conventions inside one run costs a
+    second ~285 ms compile -- most of the budget.  What keeps a run to one
+    convention is ``_restore_caller_structure`` handing each caller its own
+    metadata back instead of stamping this module's onto it;
+    ``test_every_solve_in_a_run_hits_one_compiled_entry`` pins all three splits.
+
+    Calls :func:`~tenax.algorithms.ipeps_bp_gauge._bp_solve`, the unjitted
+    driver, rather than its jitted alias: a nested ``jit`` traces and inlines
+    correctly but leaves the inner executable cache empty, so the counter that
+    gate reads would sit at zero while the real key lives out here.
+    """
+    weights = _identity_weights(A)
+    gam, w, residual, done, converged, _ = _bp._bp_solve(A, B, weights, max_iter, tol)
+    A_out, B_out = absorb_weights(gam["A"], gam["B"], w)
+    # Already true by construction -- the driver rebuilds every iterate on the
+    # caller's own indices -- and applied anyway, because it is free under trace
+    # and it is what makes "absorbed form in, absorbed form out" a property of
+    # this function rather than of something it calls.
+    return (
+        _bp._restore_caller_structure(A_out, A),
+        _bp._restore_caller_structure(B_out, B),
+        w,
+        residual,
+        done,
+        converged,
+    )
+
+
 def gauge_fix(
     A: Tensor,
     B: Tensor,
@@ -70,12 +151,13 @@ def gauge_fix(
 
     Absorbed form in, absorbed form out.  Takes no incoming weights, because
     there are none to hand over: the pair already carries them.  Internally
-    this is ``bp_gauge_checkerboard`` with ``BondWeights.ones`` -- correct
-    precisely because the absorbed tensors already *are*
-    ``Gamma_A lambda Gamma_B`` -- followed by :func:`absorb_weights` on the
-    Vidal pair that comes back, which is what keeps the boundary convention
-    intact.  Vidal form therefore exists only *between* those two calls and is
-    never returned (#882 §3).
+    this is the BP solve started from ``BondWeights.ones`` -- correct precisely
+    because the absorbed tensors already *are* ``Gamma_A lambda Gamma_B`` --
+    followed by :func:`absorb_weights` on the Vidal pair that comes back, which
+    is what keeps the boundary convention intact.  Vidal form therefore exists
+    only *between* those two steps and is never returned (#882 §3).  On a dense
+    pair the two steps are one compiled call and Vidal form never reaches the
+    host at all; see *Performance* below.
 
     Args:
         A, B:     Absorbed-form site tensors, labels ``(u,d,l,r,phys)``.
@@ -94,12 +176,34 @@ def gauge_fix(
         is the ``lambda**1.5`` mechanism of #667 verbatim.  Measured, feeding
         it back moves the state by 9.0e-02 to 8.4e-01 depending on the pair
         (``test_gauge_fix_returns_an_absorbed_pair_not_a_vidal_one``).
+
+    Performance:
+        A **dense** pair takes :func:`_gauge_fix_traced` -- the solve *and* the
+        conversion back to absorbed form as one compiled call, so a warm solve
+        is ~0.92 ms rather than 2.47 and the only host syncs left are the three
+        casts below.  A ``SymmetricTensor`` pair takes the eager route
+        (``bp_gauge_checkerboard`` then :func:`absorb_weights`), which is the
+        original code path, unchanged and bit-identical; the two blockers on
+        tracing it live outside both modules and are named in
+        ``ipeps_bp_gauge``'s docstring.
     """
-    labels = A.labels()
-    D_h = A.indices[labels.index("r")].dim
-    D_v = A.indices[labels.index("d")].dim
+    if _bp._use_traced_loop(A, B):
+        A_out, B_out, weights, residual, done, converged = _gauge_fix_traced(
+            A, B, max_iter, tol
+        )
+        # The whole traced route's host syncs, all three of them, and they are
+        # not optional: ``BPGaugeInfo`` is documented as ``(int, float, bool)``,
+        # and a 0-d array would satisfy ``assert info.converged`` *silently*
+        # while failing ``info.residual == float("inf")`` loudly.
+        return (
+            A_out,
+            B_out,
+            weights,
+            BPGaugeInfo(int(done), float(residual), bool(converged)),
+        )
+
     A_v, B_v, weights, info = bp_gauge_checkerboard(
-        A, B, BondWeights.ones(D_h, D_v), tol=tol, max_iter=max_iter
+        A, B, _identity_weights(A), tol=tol, max_iter=max_iter
     )
     # bp_gauge_checkerboard returns Vidal ``Gamma lambda Gamma``, which is its
     # documented and correct contract.  Converting here rather than there is

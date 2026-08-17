@@ -96,12 +96,20 @@ per sweep, and removing all of them without a traced loop is worth perhaps
 1.2-1.4x, not 200x.  So the fix is to trace the whole solve, which removes all
 three at once.
 
-:func:`_bp_solve_traced` is that: one ``lax.while_loop`` over a six-slot carry,
+:func:`_bp_solve` is that: one ``lax.while_loop`` over a six-slot carry,
 compiled once per ``(D, dtype, carry treedef, max_iter, tol)`` and reused by
 every subsequent solve.  ``lax.while_loop`` rather than a Python loop over a
 jitted body is not a preference: at 0.143 ms per dispatch a jitted *body* costs
 3.7 ms for a 26-sweep solve, which is 1.5x the whole traced solve and eats the
 entire warm allowance on its own.
+
+It is kept **jittable rather than jitted**, with :data:`_bp_solve_traced` as the
+boundary this module's own entry point uses, because the solve is not the whole
+of what a caller wants compiled: ``ipeps_gauge.gauge_fix`` wraps it together
+with ``absorb_weights`` in one jit, and *that* boundary is what a
+simple-update step pays.  Left as two nested jits the outer one still works, but
+the inner executable cache stays empty and the one-compile gate would be
+counting a cache nothing reaches.
 
 The remaining cost is **compile**, and it is the binding one: 84 ms to trace and
 lower plus 214 ms of XLA, on a 324-equation sweep body, *flat in D* (214/216/224
@@ -122,7 +130,6 @@ and only the driver differs.
 
 from __future__ import annotations
 
-from functools import partial
 from typing import NamedTuple
 
 import jax
@@ -548,8 +555,7 @@ def _bp_solve_eager(
     return gam, weights, BPGaugeInfo(done, residual, False)
 
 
-@partial(jax.jit, static_argnums=(3, 4))
-def _bp_solve_traced(
+def _bp_solve(
     A: Tensor,
     B: Tensor,
     weights: BondWeights,
@@ -557,6 +563,15 @@ def _bp_solve_traced(
     tol: float,
 ):
     """The whole solve as one ``lax.while_loop``.  Dense only.
+
+    Traceable, and deliberately **not** jitted itself -- :data:`_bp_solve_traced`
+    is the jitted entry point, and a caller that wants a *wider* boundary calls
+    this instead so the solve is inlined into its own trace.
+    ``ipeps_gauge.gauge_fix`` does exactly that: nesting ``jit`` inside ``jit``
+    would work, but it would leave ``_bp_solve_traced``'s executable cache empty
+    while the real key lives on the outer entry, which is the counter the
+    one-compile gate reads.  One function, two boundaries, no second copy of the
+    driver.
 
     Compiled once per ``(D, dtype, carry treedef, max_iter, tol)`` and reused,
     which is the property the cost of re-gauging every simple-update step rests
@@ -655,6 +670,13 @@ def _bp_solve_traced(
     return as_tensors(arr), weights, residual, done, converged, dead
 
 
+#: :func:`_bp_solve` as a compiled entry point -- the boundary
+#: :func:`bp_gauge_checkerboard` uses.  ``max_iter`` and ``tol`` are static, so
+#: the loop's exit conditions are literals and a caller sweeping tolerances pays
+#: one compile per distinct value.
+_bp_solve_traced = jax.jit(_bp_solve, static_argnums=(3, 4))
+
+
 def bp_gauge_checkerboard(
     A: Tensor,
     B: Tensor,
@@ -682,7 +704,7 @@ def bp_gauge_checkerboard(
 
     .. warning::
         The dense path is **not reverse-mode differentiable** -- see
-        :func:`_bp_solve_traced`.  Nothing in ``src`` differentiates through
+        :func:`_bp_solve`.  Nothing in ``src`` differentiates through
         this today.
 
     ``weights`` is **required**, and is not an initial guess: in Vidal form the

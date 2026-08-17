@@ -89,6 +89,20 @@
     clean. It fails loudly, and nothing in `src` differentiates through this;
     a differentiable gauge would need `scan` with a fixed trip count.
 
+  **`gauge_fix` is traced end to end**, not just the solve inside it. Tracing
+  the solve alone left the boundary around it eager, and that boundary was the
+  *majority* of a warm call: of 2.47 ms at D=2, the `lax.while_loop` was
+  0.89 ms and the rest was `BondWeights.ones`, the entry point's validation and
+  `BPGaugeInfo` casts, and above all `absorb_weights`' eight `scale_bond_axis`
+  dispatches. Compiling the whole of `gauge_fix` as one jit — `absorb_weights`
+  included, so Vidal form never reaches the host — takes a warm call to
+  **~0.92 ms**. Re-gauging every simple-update step is on the *step* budget, so
+  a default 100-step D=2 run falls from 528 ms to **379–391 ms**; from a cold
+  interpreter, where the eager boundary also cost ~150 ms of first-touch
+  compilation for tiny ops, 702 ms to **402–422 ms**. The public signature and
+  return contract are unchanged, `BPGaugeInfo` is still `(int, float, bool)`,
+  and a `SymmetricTensor` pair still takes the eager route bit-identically.
+
 ### Fixed
 
 - **Each checkerboard bond can now carry its own Schmidt spectrum**

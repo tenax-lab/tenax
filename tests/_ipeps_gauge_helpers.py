@@ -35,19 +35,29 @@ def retraced():
     test that happens to match the same key.  Clearing on both sides is what
     makes such a test mean what it says.
 
-    ``clear_cache()`` on the one jitted function, not ``jax.clear_caches()``:
+    **Both** compiled entry points, because there are two boundaries around the
+    same solve: ``bp_gauge_checkerboard`` calls it through ``_bp_solve_traced``,
+    while ``gauge_fix`` inlines it into the wider ``_gauge_fix_traced`` so that
+    ``absorb_weights`` is compiled with it.  A fixture that cleared only one of
+    them would silently stop working for whichever test used the other.
+
+    ``clear_cache()`` on the two jitted functions, not ``jax.clear_caches()``:
     the global version also evicts every *eager* op the session has compiled,
-    which costs the next test ~170 ms of re-compilation and, in the timing
+    which costs the next test ~150 ms of re-compilation and, in the timing
     tests, would be charged to the thing being measured.
 
     Import it into a test module to use it -- pytest collects fixtures from the
     module namespace, so ``from _ipeps_gauge_helpers import retraced`` is enough.
     """
     from tenax.algorithms.ipeps_bp_gauge import _bp_solve_traced
+    from tenax.algorithms.ipeps_gauge import _gauge_fix_traced
 
-    _bp_solve_traced.clear_cache()
+    entries = (_bp_solve_traced, _gauge_fix_traced)
+    for e in entries:
+        e.clear_cache()
     yield
-    _bp_solve_traced.clear_cache()
+    for e in entries:
+        e.clear_cache()
 
 
 def _dense_pair(D: int = D, seed: int = 0):

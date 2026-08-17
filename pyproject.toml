@@ -115,8 +115,11 @@ markers = [
     # but NOTHING IN THIS REPO PASSES THAT FLAG TODAY: .github/workflows/ci.yml
     # runs the non-core bucket as -m "not core and not slow", so these do
     # execute on GitHub runners.  Wiring it in needs a token with the `workflow`
-    # scope.  Until then the marked tests must assert something a slow runner
-    # can still satisfy -- see the note in tests/test_ipeps_gauge_perf.py.
+    # scope.  Until then a marked test must either assert something a slow
+    # runner can still satisfy, or establish that its number is measurable here
+    # and skip when it is not -- note the "--cov=tenax" in addopts above, which
+    # instruments the Python-bound half of any compile measurement.  See the
+    # note in tests/test_ipeps_gauge_perf.py.
     "timing: reports a wall-clock measurement; needs a quiet machine",
 ]
 filterwarnings = [
