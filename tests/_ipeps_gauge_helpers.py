@@ -96,7 +96,7 @@ def _fermionic_pair(D: int = 2, seed: int = 0):
     *witness*, not about non-diagonal gauges.
 
     Deliberately **not** in ``_PAIRS``.  ``test_ipeps_bp_gauge.py``
-    parametrises four tests over ``list(_PAIRS)``, all of which assert that
+    parametrises five tests over ``list(_PAIRS)``, all of which assert that
     ``bp_gauge_checkerboard`` is an exact gauge; adding a fermionic entry
     would silently extend those assertions to the graded case, which is
     exactly the open question (#882) that is deliberately left unanswered
@@ -206,8 +206,9 @@ def _torus_2x2(A, B, weights):
     Exactly gauge invariant, and the only probe here that covers all four bonds
     at once: every bond appears twice, each time with the gauge on one end and
     its inverse on the other, so a gauge that fails to cancel shows up.
-    ``_two_site`` cannot do this -- it leaves three legs open per site, so a
-    gauge on any of them survives uncancelled and the comparison is meaningless.
+    ``test_ipeps_bp_gauge.py``'s ``_two_site`` cannot do this -- it leaves three
+    legs open per site, so a gauge on any of them survives uncancelled and the
+    comparison is meaningless.
 
     Sites ``A(0,0) B(1,0) / B(0,1) A(1,1)``.  Each site carries the weight of
     the bond leaving its ``r`` and ``d`` legs, which places each of the four

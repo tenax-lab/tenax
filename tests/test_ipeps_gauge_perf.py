@@ -14,8 +14,11 @@ gate at 528 ms against 450, because what was left around it was eager: the
 2.47 ms warm solve -- more than the solve.  Task 7b put the whole of
 ``gauge_fix`` behind one jit, ``absorb_weights`` included, taking a warm solve
 to **~0.92 ms** and the gate to **379-391 ms, inside budget**;
-``test_re_gauging_every_step_fits_the_simple_update_budget`` at the bottom of
-this file now asserts it rather than recording a shortfall.
+``test_re_gauging_every_step_fits_the_simple_update_budget`` in this file now
+asserts it rather than recording a shortfall -- **but only when it is run with
+``--no-cov``**, which this repo's ``addopts`` do not do by default.  See that
+test's own docstring for the exact invocation and for why the gate withdraws
+instead of failing.
 
 So the three things worth guarding here are not "is it fast" but:
 
@@ -648,6 +651,29 @@ def test_re_gauging_every_step_fits_the_simple_update_budget(record_property):
     **379-391 ms**, six fresh processes, load1 ~5-9 of 128 on a quiet 128-core
     machine.  Of that, 288-300 ms is the one compile and ~92 ms is the 99 warm
     solves.  The budget was not moved to meet it.
+
+    **Asserted in no configuration this repo runs by default**, which is a
+    property of the repo rather than of the gate, and is why it is spelled out
+    here.  ``pyproject.toml``'s ``addopts`` carry ``--cov=tenax`` and condition
+    1 below skips under coverage, so of the four ways this repo runs pytest:
+
+    * required CI (``-m core``) -- **not collected**; ``conftest.py`` maps this
+      file to ``algorithm``;
+    * ``fast-other`` (``-m "not core and not slow"``, with ``--cov``) --
+      collected, **skipped**;
+    * the ``slow`` bucket (``-m slow``) -- **not collected**; this test carries
+      ``timing``, not ``slow``;
+    * plain local ``uv run pytest`` -- collected, **skipped**.
+
+    To actually evaluate the budget::
+
+        JAX_PLATFORMS=cpu uv run pytest tests/test_ipeps_gauge_perf.py \\
+            -k re_gauging_every_step --no-cov -s
+
+    ``-s`` because the number is ``print``ed on a pass as well as a fail.  Do
+    not "fix" the skip by weakening the budget or by dropping ``--cov`` from
+    ``addopts``; the measurement genuinely cannot be made under a Python
+    tracer, and the two withdraw conditions below are what keep that honest.
 
     The compile is flat in ``D`` -- 214 ms of XLA at D=2, 216 at D=3, 224 at
     D=4, on a sweep body of 324 jaxpr equations -- so it is structure-bound

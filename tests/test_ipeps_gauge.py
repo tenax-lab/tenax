@@ -8,21 +8,36 @@ A sqrt(lam) . sqrt(lam) B == A lam B -- and that is what this file proves.
 The convention is a contract on gauge_fix's *output* as much as its input: the
 pair it returns must already be the state, with the weights carried alongside
 as a diagnostic.  Reading a returned pair with its own weights and reading it
-with ones() cannot both be right, and only one test here distinguishes them --
-test_gauge_fix_returns_an_absorbed_pair_not_a_vidal_one.  Every other test in
-this file is blind to the difference by construction, which is how the output
-form was wrong for four commits.
+with ones() cannot both be right, and
+test_gauge_fix_returns_an_absorbed_pair_not_a_vidal_one is the test that exists
+to separate them.  It is not the only one that would notice, and an earlier
+version of this docstring said it was: that claim was measured and is FALSE.
+Reverting gauge_fix to return Vidal also fires
+test_gauge_fix_matches_the_vidal_route, which reads the gauge_fix route with
+ones() and gates at 1e-12 -- see that test's docstring for the per-cell
+numbers.  The distinction matters because "everything else is blind" reads as a
+licence to put w2 back into test_gauge_fix_matches_the_vidal_route's state
+comparison, and it is not one: that comparison reading ones() is precisely what
+makes the second test see the output form at all.  What was true is the
+*history* -- before 4d2bc00 every test here passed the weights back in, which
+is how the output form stayed wrong for four commits.
 
 Runs on the symmetric path too: a flow mistake there collapses charge sectors
 rather than raising, and the dense path cannot see it.
 
-The last test in the file is a different kind of claim from the rest.  Every
-other test here -- and every acceptance criterion in Phase 1 -- is a
+The last two tests in the file are a different kind of claim from the rest.
+Every other test here -- and every acceptance criterion in Phase 1 -- is a
 *self-consistency* check: the state did not move, the two routes agree, the
-witness separates.  ``test_bp_weights_are_the_chains_schmidt_values`` compares
-BP's output against an answer known a priori, because a chain is a tree and BP
-is exact on trees.  It is the only such anchor available (#882 §6.3), so if it
-fails, nothing measured downstream of it means anything.
+witness separates.  ``test_bp_weights_are_the_chains_schmidt_values`` and its
+block-sparse twin ``test_bp_weights_are_the_symmetric_chains_schmidt_values``
+compare BP's output against an answer known a priori, because a chain is a tree
+and BP is exact on trees.  That is the only anchor geometry available (#882
+§6.3) -- the loopy square lattice admits no valid reference spectrum -- so if
+either fails, nothing measured downstream of it means anything.  Both are
+@pytest.mark.core and both assert their reference against a spectrum derived
+outside tenax (_CHAIN_TRUTH / _SYM_CHAIN_TRUTH); without that assertion the
+live comparison is tenax against tenax and a common-mode defect in the shared
+contract/svd/eigh machinery passes both sides.
 """
 
 from __future__ import annotations
@@ -41,6 +56,7 @@ from _ipeps_gauge_helpers import (  # tests/ is on sys.path
     _sym_chain_pair,
     _sym_chain_pair_as_peps,
     _torus_2x2,
+    _udlrp,
     assert_leg_split,
 )
 
@@ -56,28 +72,109 @@ from tenax.core.index import FlowDirection
 
 ABSORB_TOL = 1e-13
 
+#: The ``(kind, D)`` grid for the two tests that run a **full BP solve** per
+#: cell, with the expensive cell marked ``slow``.
+#:
+#: ``conftest.py`` maps this file to ``algorithm``, and
+#: ``pytest_collection_modifyitems`` withholds a file marker only when that
+#: marker is ``core``; an ``algorithm`` file's tests therefore keep *both*
+#: markers.  That is what makes this work: the two non-core buckets select
+#: ``not core and not slow``, so the ``slow`` half deselects these cells from
+#: ``fast-other``, while the ``slow`` bucket (``-m slow``, run on push to main
+#: and behind the ``run-full-tests`` label) picks them up.  Nothing is lost.
+#:
+#: Measured here, ``--no-cov``, load1 ~6 of 128: ``symmetric D=3`` costs
+#: **219.2 s** in ``matches_the_vidal_route`` and **158.3 s** in
+#: ``returns_an_absorbed_pair``.  That second figure is 2x what it was before
+#: the ``gauged`` assertion, which runs a second block-sparse BP solve; the
+#: solve is eager and host-bound (#566/#618) and is essentially the whole cost.
+#: Together with the fermionic witness that is ~9 min taken out of
+#: ``fast-other``.  The ``symmetric D=2`` cells stay -- 63.1 s and 49.8 s --
+#: because they are affordable and they keep the block-sparse path covered on
+#: every PR.  The ids are pinned to what the two stacked ``parametrize``
+#: decorators used to produce, so ``-k`` selections and the review transcript
+#: still name the same cells.
+#:
+#: The ``core`` chain anchors below are deliberately **not** here: they are the
+#: only externally certified claims in the rewrite and must stay in the required
+#: gate.
+_KIND_D_SOLVE_CASES = [
+    pytest.param("dense", 2, id="2-dense"),
+    pytest.param("dense", 3, id="3-dense"),
+    pytest.param("symmetric", 2, id="2-symmetric"),
+    pytest.param("symmetric", 3, id="3-symmetric", marks=pytest.mark.slow),
+]
+
 
 def _unit(x):
     return x / np.linalg.norm(x)
 
 
 def _torus_rel(x, y):
-    """Distance between two torus readings **as states**.
+    """Distance between two torus readings **as states**: normalise, then compare.
 
-    Comparison convention, used by every state-equality assertion here: both
-    sides are normalised and the overall sign is free.  ``gauge_fix`` rescales
-    each site tensor by max-abs and max-normalises each weight vector -- both
-    deliberate, both unobservable -- and the torus is degree 4 in every site
-    tensor, so an overall factor is *expected* and is not a state difference.
-    Skipping the normalisation scores a reading that is exact to 1e-15 at
-    6.5e-01 instead, which is how this defect was first mis-measured.
+    Used by three call sites in two tests: one in the Vidal-route test and two
+    in the absorbed-form guard.  It is **not** "the convention every
+    state-equality assertion here uses", as this docstring once said -- four
+    other tests compare torus readings inline with ``_unit(...)`` and a plain
+    norm, which is this minus the ``todense()`` handling.  That is not an
+    oversight worth consolidating: those four compare two *arrays* and never a
+    ``SymmetricTensor``.
+
+    The normalisation is the whole content.  ``gauge_fix`` rescales each site
+    tensor by max-abs and max-normalises each weight vector -- both deliberate,
+    both unobservable -- so an overall factor is *expected* and is not a state
+    difference.  Skipping it does not merely inflate the number, it makes it
+    **meaningless in either direction**, because the torus inherits whatever
+    scale the two site tensors happen to carry.  Measured on readings that
+    agree to ~1e-15 once normalised:
+
+    * absorbed-form call sites (:func:`torus_2x2_sign_free`): 3.2e-02
+      (dense D=2), 1.1e+00 (dense D=3), 1.2e+01 (symmetric D=2), 2.2e+01
+      (symmetric D=3) -- inflated, which is how this defect was first
+      mis-measured;
+    * the Vidal-route call site (``_torus_2x2`` against a ``Gamma`` pair):
+      1.2e-19, 3.4e-16, 1.8e-92, 1.5e-93 -- *deflated*, and a raw threshold
+      there would pass anything at all.
+
+    **No sign freedom, deliberately.**  An earlier version took
+    ``min(|a-b|, |a+b|)`` on the grounds that the torus is "degree 4 in every
+    site tensor".  It is not: ``_TORUS_COPIES`` puts ``A`` at A00/A11 and ``B``
+    at B10/B01, so the network is degree **2** in each, ``A -> -A`` gives
+    ``(+1)``, and there is no overall sign to accommodate.  Measured, the
+    ``+`` branch was dead: ``|a+b|`` scored 2.000 in all four cells of both
+    tests (1.813-1.998 for the ``as_vidal`` reading), so ``min`` always took
+    ``|a-b|`` and the branch only stood ready to *weaken* a future comparison
+    for a reason that does not exist.  Per-column ``+-1`` freedom from the
+    eigh/SVD inside ``_sqrt_pinv`` is real, but it cancels here -- every bond
+    is closed, carrying the sign on one end and its inverse on the other --
+    which is exactly why :func:`_abs_gap` needs an ``abs()`` and this does not.
 
     Accepts a ``Tensor`` or an array; the torus is a ``(d,d,d,d)`` object, so
     densifying it is cheap even on the symmetric path.
     """
     a = _unit(np.asarray(x.todense() if hasattr(x, "todense") else x).ravel())
     b = _unit(np.asarray(y.todense() if hasattr(y, "todense") else y).ravel())
-    return float(min(np.linalg.norm(a - b), np.linalg.norm(a + b)))
+    return float(np.linalg.norm(a - b))
+
+
+def _abs_gap(x, y):
+    """Elementwise ``max| |x| - |y| |`` on two site tensors, in ``(u,d,l,r,phys)``.
+
+    A comparison of the tensors themselves rather than of a contraction of
+    them, which is the point: every closed-network probe in this file is gauge
+    invariant by design and therefore cannot witness that a gauge was applied.
+
+    The ``abs()`` is not slack.  The eigh/SVD inside ``_sqrt_pinv`` fixes each
+    output column only up to a sign, so two runs of the same solve can differ
+    by a diagonal ``+-1`` on a virtual leg; that sign cancels in every closed
+    contraction and is unobservable, but a bare elementwise comparison would
+    see it.  ``test_ipeps_gauge_perf.py``'s module docstring documents the same
+    freedom, measured: ``|A_eager - A_traced| = 2.000e+00`` while
+    ``||A_eager| - |A_traced|| = 1.0e-13``.  What ``abs()`` does *not* hide is
+    a different gauge, which changes magnitudes.
+    """
+    return float(np.max(np.abs(np.abs(_udlrp(x)) - np.abs(_udlrp(y)))))
 
 
 @pytest.mark.parametrize("kind", ["dense", "symmetric"])
@@ -139,8 +236,7 @@ def test_absorbed_form_is_the_same_state(kind, D):
     )
 
 
-@pytest.mark.parametrize("kind", ["dense", "symmetric"])
-@pytest.mark.parametrize("D", [2, 3])
+@pytest.mark.parametrize("kind,D", _KIND_D_SOLVE_CASES)
 def test_gauge_fix_matches_the_vidal_route(kind, D):
     """gauge_fix on absorbed input reaches the Vidal call's state AND fixed point.
 
@@ -155,6 +251,17 @@ def test_gauge_fix_matches_the_vidal_route(kind, D):
     was testing agreement between the routes, which is real, and not the
     returned form, which nothing tested; see
     ``test_gauge_fix_returns_an_absorbed_pair_not_a_vidal_one``.
+
+    **Since that fix, this test does see the output form**, and the ``ones``
+    on the ``gauge_fix`` side is load-bearing rather than cosmetic.  Measured:
+    reverting ``gauge_fix`` to return the Vidal pair moves the state
+    comparison to **1.398e+00** (dense D=2), **9.938e-01** (dense D=3),
+    **7.102e-01** (symmetric D=2) and **9.457e-01** (symmetric D=3), against
+    the 1e-12 gate below.  So do not "simplify" that ``ones`` back to ``w2``:
+    it would restore the blindness the module docstring describes, and this
+    test would go back to checking route agreement only.  What this still
+    cannot see is an identity ``gauge_fix`` -- both sides move together --
+    which is what the ``gauged`` assertion in the companion test is for.
     """
     A, B = _PAIRS[kind](D=D)
     w = BondWeights(
@@ -180,28 +287,29 @@ def test_gauge_fix_matches_the_vidal_route(kind, D):
         assert d < 1e-10, f"{kind} D={D} bond {f}: different fixed point ({d:.3e})"
 
 
-@pytest.mark.parametrize("kind", ["dense", "symmetric"])
-@pytest.mark.parametrize("D", [2, 3])
+@pytest.mark.parametrize("kind,D", _KIND_D_SOLVE_CASES)
 def test_gauge_fix_returns_an_absorbed_pair_not_a_vidal_one(kind, D):
-    """Drop the weights and the state must be unchanged.  Both directions.
+    """The returned pair IS the state, and it is the *gauged* one.  Three ways.
 
     This is the claim the whole absorbed-form convention rests on and it was
-    asserted nowhere: every other test in this file passes ``gauge_fix``'s
-    weights back into the torus, so all of them exercise the *Vidal* reading
-    and none of them can tell the two apart.  Phase 2's ``_su_step`` holds no
-    spectrum -- ``_SUState`` has nowhere to put one (#882 §3) -- so if the
-    returned pair is not already the state, the step silently evolves a
-    different one and reports a plausible, wrong energy.  That is #667 and
-    #865 verbatim.
+    asserted nowhere: before ``4d2bc00`` every other test in this file passed
+    ``gauge_fix``'s weights back into the torus, so all of them exercised the
+    *Vidal* reading and none of them could tell the two apart.  Phase 2's
+    ``_su_step`` holds no spectrum -- ``_SUState`` has nowhere to put one
+    (#882 §3) -- so if the returned pair is not already the state, the step
+    silently evolves a different one and reports a plausible, wrong energy.
+    That is #667 and #865 verbatim.
 
-    The second assertion is what makes this a *discriminating* guard rather
-    than one that merely accepts an absorbed pair: feeding the weights back in
-    double-counts them, so the Vidal reading has to break.  A test that only
-    checked the first direction would still pass if ``weights`` silently
-    degenerated to all-ones, which is the trivial way to satisfy it.
+    ``as_vidal`` is what makes the first two a *discriminating* pair rather
+    than a guard that merely accepts an absorbed pair: feeding the weights back
+    in double-counts them, so the Vidal reading has to break.  A test that only
+    checked ``dropped`` would still pass if ``weights`` silently degenerated to
+    all-ones, which is the trivial way to satisfy it.
 
-    Measured on this branch, before and after the fix (``gauge_fix`` output,
-    torus read the two ways, normalised and sign-free)::
+    Measured on this branch, before and after ``4d2bc00`` (``gauge_fix``
+    output, torus read the two ways, normalised; "sign-free" in
+    :func:`torus_2x2_sign_free`'s sense, i.e. no Koszul signs, not a free
+    overall sign -- there is none, see :func:`_torus_rel`)::
 
         pair          before: +ones    +w2  |  after: +ones      +w2
         dense D=2         1.252e+00  4e-15  |     3.7e-15  3.983e-01
@@ -213,6 +321,54 @@ def test_gauge_fix_returns_an_absorbed_pair_not_a_vidal_one(kind, D):
     1.25 and only the Vidal reading was exact.  The thresholds below sit
     between the two columns with room to spare -- the tightest discriminating
     cell is symmetric D=2 at 9.0e-02, 9x above the 1e-2 gate.
+
+    **``gauged`` is the third assertion and it is a different kind of claim.**
+    ``dropped`` and ``as_vidal`` are both readings of a *closed torus*, which is
+    exactly gauge invariant -- that is what it is for -- and so is every other
+    state-equality probe on this branch (``_torus_2x2``,
+    :func:`torus_2x2_sign_free`, :func:`ctm_rdm2x1_planar`).  A probe that
+    cannot see a gauge cannot see the *absence* of one either.  Mutate
+    ``gauge_fix`` to ``return A, B, weights, info`` -- the caller's own
+    un-gauged pair, with the correctly solved weights -- and, without
+    ``gauged``, the entire branch stays green: ``dropped`` is then *exactly*
+    zero (its reference is built from the same input pair), ``as_vidal`` still
+    fires because the weights are right, and both ``core`` chain anchors
+    discard the returned pair.  Measured under that mutation, ``dropped`` is
+    ``0.000e+00`` in **all four** cells and ``as_vidal`` is 6.08e-01 / 6.88e-01
+    / 4.83e-01 / 2.89e-01 -- every one of them passing.
+
+    That matters because Phase 2 truncates using the returned weights **in the
+    returned pair's basis**.  An implementation that gauges correctly and hands
+    back the wrong representative truncates in the wrong basis -- a plausible,
+    wrong energy, the #667/#865 shape -- with all of Phase 1 green.
+
+    So ``gauged`` compares the returned pair *elementwise* against the same
+    state solved through the other entry point, ``bp_gauge_checkerboard`` +
+    :func:`absorb_weights`, which is the composition ``gauge_fix`` promises to
+    be.  It is **not** a traced-vs-eager cross-check (``bp_gauge_checkerboard``
+    dispatches on tensor type exactly as ``gauge_fix`` does, so the dense arm
+    is traced on both sides; ``test_ipeps_gauge_perf.py`` owns that comparison);
+    it is a check that ``gauge_fix`` applied *a* gauge at all, and the right
+    one.  Measured, shipped against identity-mutant::
+
+        dense D=2      0.00e+00   vs   2.545e-01
+        dense D=3      0.00e+00   vs   5.955e-01
+        symmetric D=2  0.00e+00   vs   2.155e+00
+        symmetric D=3  0.00e+00   vs   2.255e+00
+
+    Bit-identical when correct, on both tensor types; the 1e-11 gate below has
+    ten orders of margin against the smallest mutant value (2.5e-01, dense
+    D=2).  The gate is 1e-11 rather than 0.0 only so that a future jaxlib whose
+    two entry points reassociate differently does not fail for a reason that is
+    not a defect; nothing measured needs the slack.
+
+    Two more principled-looking discriminators were tried and are refuted by
+    measurement -- do not reach for them.  *Idempotence* (re-gauge the output,
+    expect ~1 sweep): the pair is not idempotent, re-gauging takes 45 sweeps at
+    D=2 and 31 at D=3 against 44/32 for the raw pair, so a sweep-count guard is
+    dead on arrival (the *weights* are idempotent to 4.6e-13; the pair is not).
+    *Message off-diagonality*: separates only 3.15e-01 from 4.93e-01 on dense
+    D=2 and is exactly 0.00e+00 on both arms of the symmetric path.
     """
     A, B = _PAIRS[kind](D=D)
     ones = BondWeights.ones(D, D)
@@ -233,6 +389,22 @@ def test_gauge_fix_returns_an_absorbed_pair_not_a_vidal_one(kind, D):
         f"{kind} D={D}: reading gauge_fix's output as Vidal moved the state by "
         f"only {as_vidal:.3e}, so this guard cannot tell an absorbed pair from "
         f"a Vidal one.  Either the weights came back trivial or the pair did."
+    )
+
+    # The one assertion here that is NOT gauge invariant.  See the docstring:
+    # without it nothing on this branch distinguishes gauge_fix from an
+    # identity function.
+    ref_A, ref_B = absorb_weights(
+        *bp_gauge_checkerboard(A, B, ones, tol=1e-12, max_iter=400)[:3]
+    )
+    gauged = max(_abs_gap(A2, ref_A), _abs_gap(B2, ref_B))
+    assert gauged < 1e-11, (
+        f"{kind} D={D}: gauge_fix's pair differs elementwise (up to per-column "
+        f"sign) from bp_gauge_checkerboard + absorb_weights on the same input "
+        f"by {gauged:.3e}.  gauge_fix is documented as exactly that "
+        f"composition, and this is the only assertion on the branch that is "
+        f"not gauge invariant -- an identity gauge_fix scores 2.5e-01 to "
+        f"2.3e+00 here and passes everything else."
     )
 
 
@@ -344,7 +516,20 @@ def _rdm_rel(x, y):
     return float(np.linalg.norm(np.asarray(x) - np.asarray(y)) / np.linalg.norm(y))
 
 
-@pytest.mark.parametrize("kind", list(_WITNESS_PAIRS))
+#: ``_WITNESS_PAIRS`` again, with the fermionic arm marked ``slow``.  It runs
+#: **three** block-sparse CTM convergences at chi=8 and costs 167 s against the
+#: dense arm's 18 -- a fermionic CTM in the ``fast-other`` bucket -- and the
+#: fermionic line is deferred to #882 §5.2 anyway, so it belongs in the bucket
+#: that runs on push to main rather than on every PR.  Derived from ``_WITNESS_PAIRS`` rather than
+#: written out, so adding an arm there cannot silently skip this decision.  The
+#: ids stay ``[dense]`` / ``[fermionic]``.
+_WITNESS_CASES = [
+    pytest.param(k, marks=[pytest.mark.slow] if k == "fermionic" else [])
+    for k in _WITNESS_PAIRS
+]
+
+
+@pytest.mark.parametrize("kind", _WITNESS_CASES)
 def test_planar_witness_separates_a_real_gauge_from_a_mispaired_one(kind):
     """The CTM/RDM witness must move on a broken gauge and not on a real one.
 
@@ -431,15 +616,20 @@ def test_planar_witness_floor_shrinks_with_chi():
     Measured here: 718x across chi 6 -> 16 (``task-4-report.md``).
 
     Dense only, and **not** merely because it is the cheapest arm: the
-    fermionic arm does not pass this.  Its floor at D=2 is 3.13e-03 (chi=6),
-    1.06e-03 (chi=8), 1.24e-03 (chi=12) -- about 2.5x across a 2x change in
-    ``chi``, against the 10x required below (``task-4-report.md``).
-    Parametrising this over ``_WITNESS_PAIRS`` would therefore fail, and it
-    would be reporting something real rather than being flaky.  That is
-    recorded rather than asserted because this round may not spend a fermionic
-    CTM run; the question is deferred to #882 §5.2.  So read this test as
-    validating the *dense* witness only -- it says nothing about the fermionic
-    one, which the docstring on :func:`ctm_rdm2x1_planar` describes instead.
+    fermionic arm is not expected to pass this.  Its floor at D=2 is 3.13e-03
+    (chi=6), 1.06e-03 (chi=8), 1.24e-03 (chi=12) -- about 2.5x across a 2x
+    change in ``chi``, against the 10x required below (``task-4-report.md``).
+
+    That "would therefore fail" is an **inference, not a measurement**, and the
+    gap is worth naming: the cited fermionic data stops at chi=12, while the
+    assertion below compares chi=6 against chi=**16**.  Nobody has run the
+    fermionic arm at chi=16, so what is established is a ~2.5x drop over 6->12
+    where 10x over 6->16 is required -- strong, but not the same statement.
+    Running it would cost a fermionic CTM at chi=16 (~2-3 min each), which this
+    round does not spend; the question is deferred to #882 §5.2.  So read this
+    test as validating the *dense* witness only -- it says nothing about the
+    fermionic one, which the docstring on :func:`ctm_rdm2x1_planar` describes
+    instead.
     """
     A, B = _WITNESS_PAIRS["dense"](D=2)
     A_g = scale_bond_axis(A, "r", _GAUGE_G)
@@ -500,12 +690,72 @@ def _as_spectrum(x):
     is a *multiset* -- the block-sparse path orders it by charge sector rather
     than by size -- so its order carries nothing to preserve.
 
-    This is deliberately not ``_torus_rel``: that compares two readings of a
-    *tensor* and allows an overall sign, which is meaningless for a vector of
-    singular values.
+    This is deliberately not ``_torus_rel``: that normalises a whole *tensor*
+    to unit 2-norm after flattening it, which for a bond spectrum would be the
+    same arithmetic but for the wrong reason -- and it does not sort, which a
+    multiset comparison needs.
     """
     v = np.sort(np.asarray(x))[::-1]
     return v / np.linalg.norm(v)
+
+
+#: The infinite chain's two horizontal-bond spectra for the ``_chain_pair``
+#: draw, **derived outside tenax**: rebuilt from the 2-site transfer matrix's
+#: left and right fixed points in Python ``decimal``, importing nothing from
+#: tenax but the two ``float64`` site tensors.  Truncated to 32 digits.
+#:
+#: This is the half of the anchor that makes it an anchor.  Everything else in
+#: the test compares tenax against tenax -- ``FiniteMPS.compute_singular_values``
+#: for the reference, ``contract``/``eigh``/``svd`` for the subject -- and a
+#: common-mode defect in the shared machinery (#834's class) passes both sides.
+#: Asserting the *reference* against these numbers puts the external
+#: certification inside the required gate instead of in a review transcript.
+#:
+#: Measured on this branch: the tenax reference at ``L=100`` agrees with these
+#: to **8.3e-17** (``h_AB``) and **2.8e-17** (``h_BA``), four orders under
+#: ``_ANCHOR_TOL``.
+_CHAIN_TRUTH = {
+    "h_AB": np.array(
+        [
+            0.96732762280898837899360109180522,
+            0.23086689230373387723744625441654,
+            0.10416414807156935624729313135820,
+            0.01129506287064498789186875888256,
+        ]
+    ),
+    "h_BA": np.array(
+        [
+            0.92503143833487241612154711250545,
+            0.37454306530169057931648786267052,
+            0.05593437791937427037005353223542,
+            0.03009444622024623806971961761028,
+        ]
+    ),
+}
+
+
+def _assert_reference_matches_the_external_truth(refs, truth, what):
+    """The tenax-derived reference must reproduce the ``decimal`` derivation.
+
+    Both chain anchors call this.  It is what converts "certified outside
+    tenax" from a docstring claim into a gate: without it the only live
+    comparison is BP against ``FiniteMPS.compute_singular_values``, which
+    shares ``tenax.linalg.svd``/``eigh`` and ``contract`` with the code under
+    test, so a charge-bookkeeping defect common to both sides passes.
+    """
+    for bond, ref in refs.items():
+        err = float(np.max(np.abs(ref - truth[bond])))
+        assert err < _ANCHOR_TOL, (
+            f"the {what} reference's {bond} is {err:.3e} away from the "
+            f"externally derived spectrum (Python ``decimal`` on the transfer "
+            f"matrix's fixed points, importing nothing from tenax).  This is "
+            f"the only comparison here that is not tenax-against-tenax, so a "
+            f"failure means either the draw/builder moved -- in which case "
+            f"re-derive the constant, do not widen this -- or tenax and the "
+            f"external derivation genuinely disagree: got "
+            f"{np.array2string(ref, precision=17)} want "
+            f"{np.array2string(truth[bond], precision=17)}"
+        )
 
 
 @pytest.mark.core
@@ -537,11 +787,14 @@ def test_bp_weights_are_the_chains_schmidt_values():
     bond; those two spectra have no reason to agree and the only ways to make
     that pass are to loosen the tolerance or to compare almost nothing.
 
-    Four claims, in order:
+    Five claims, in order:
 
     1. The reference has converged in ``L``.  "Far from the boundaries" is an
        approximation and this task's whole value is that its reference is
        exact, so it is measured rather than assumed.
+    1b. The reference reproduces the **externally derived** spectrum
+       (:data:`_CHAIN_TRUTH`, and see *Certified outside tenax* below).  This
+       is the only comparison in the file with a side that is not tenax.
     2. BP reproduces it on **both** inequivalent horizontal bonds.  ``h_AB``
        and ``h_BA`` carry genuinely different spectra here (they differ by
        1.44e-01), and checking only one -- as the plan did -- leaves the other
@@ -549,10 +802,14 @@ def test_bp_weights_are_the_chains_schmidt_values():
     3. The *crossed* pairing fails.  Comparing ``h_AB`` against the wrong-parity
        reference bond is a silent mistake, so the parity claim is asserted, not
        just reasoned about in a comment.
-    4. The vertical bonds, which sit on dimension-1 legs, come back as a single
-       exact 1.0.  Free, and it catches a ``gauge_fix`` that has transposed its
+    4. The vertical bonds, which sit on dimension-1 legs, come back with shape
+       ``(1,)``.  Free, and it catches a ``gauge_fix`` that has transposed its
        bond bookkeeping -- a defect class this project has hit twice (#834,
-       #602).
+       #602).  The companion "and the value is exactly 1.0" check this once
+       carried **cannot fail** and has been removed: ``lam / max(lam)`` is
+       ``x/x`` on a length-1 vector, and the non-finite and all-zero escapes
+       are already caught by ``assert info.converged`` above.  The symmetric
+       twin says the same thing in its own claim 4.
 
     Measured on this branch (seed 10, ``d=2``, ``chi=4``, ``L=100`` reference)::
 
@@ -565,26 +822,22 @@ def test_bp_weights_are_the_chains_schmidt_values():
     comparison to between 2.2e-07 and 1.0e-06, i.e. five to six orders above
     the gate, so the tolerance is not doing the work.
 
-    **Certified outside tenax.**  Everything above runs through tenax --
-    ``FiniteMPS.compute_singular_values`` for the reference, ``contract`` /
-    ``eigh`` / ``svd`` for the subject -- so agreement between them is not by
-    itself independent.  The infinite chain's spectra were therefore rebuilt
-    from the transfer matrix's left and right fixed points in Python
-    ``decimal``, importing nothing from tenax but the two site tensors.  Exact
-    for the ``float64`` tensors this seed draws, truncated to 32 digits::
+    **Certified outside tenax, and now asserted.**  Everything else here runs
+    through tenax -- ``FiniteMPS.compute_singular_values`` for the reference,
+    ``contract`` / ``eigh`` / ``svd`` for the subject -- so agreement between
+    them is not by itself independent: a charge-bookkeeping defect in the
+    shared machinery (#834's class) is common-mode and passes both sides.  The
+    infinite chain's spectra were therefore rebuilt from the transfer matrix's
+    left and right fixed points in Python ``decimal``, importing nothing from
+    tenax but the two site tensors.  Those 32-digit values are
+    :data:`_CHAIN_TRUTH`, and claim 1b asserts the tenax reference against
+    them, so the external certification lives in the required gate rather than
+    in a review transcript.  Measured agreement: **8.3e-17** (``h_AB``) and
+    **2.8e-17** (``h_BA``), against ``_ANCHOR_TOL`` = 1e-12.
 
-        h_AB  0.96732762280898837899360109180522
-              0.23086689230373387723744625441654
-              0.10416414807156935624729313135820
-              0.01129506287064498789186875888256
-        h_BA  0.92503143833487241612154711250545
-              0.37454306530169057931648786267052
-              0.05593437791937427037005353223542
-              0.03009444622024623806971961761028
-
-    If this test ever fails, those are what tell a regression from a
-    re-derivation: a changed seed or a changed builder moves them, a broken
-    ``gauge_fix`` does not.
+    If claim 1b ever fails, it is what tells a regression from a
+    re-derivation: a changed seed or a changed builder moves those numbers, a
+    broken ``gauge_fix`` does not (it is asserted before ``gauge_fix`` runs).
     """
     a, b, vl, vr = _chain_pair()
 
@@ -599,6 +852,13 @@ def test_bp_weights_are_the_chains_schmidt_values():
         f"this whole test exists to defend."
     )
 
+    ref_AB, ref_BA = (_as_spectrum(s) for s in hi)
+    # Claim 1b, and it runs before the solve so a moved reference is reported as
+    # a moved reference rather than as a BP defect.
+    _assert_reference_matches_the_external_truth(
+        {"h_AB": ref_AB, "h_BA": ref_BA}, _CHAIN_TRUTH, "dense chain"
+    )
+
     A, B = _chain_pair_as_peps(a, b)
     _, _, w, info = gauge_fix(A, B, **_ANCHOR_BP_KW)
     assert info.converged, (
@@ -606,7 +866,6 @@ def test_bp_weights_are_the_chains_schmidt_values():
         f"sweeps, residual {info.residual:.3e}"
     )
 
-    ref_AB, ref_BA = (_as_spectrum(s) for s in hi)
     got_AB, got_BA = _as_spectrum(w.h_AB), _as_spectrum(w.h_BA)
     for bond, got, want in (("h_AB", got_AB, ref_AB), ("h_BA", got_BA, ref_BA)):
         err = float(np.max(np.abs(got - want)))
@@ -629,16 +888,14 @@ def test_bp_weights_are_the_chains_schmidt_values():
         f"bonds have gone (nearly) degenerate -- redraw _CHAIN_SEED."
     )
 
+    # Shape only.  "and the value is exactly 1.0" cannot fail -- ``lam/max(lam)``
+    # is x/x on a length-1 vector -- and the symmetric twin already documents
+    # that in prose rather than asserting it.
     for bond in ("v_AB", "v_BA"):
         v = np.asarray(getattr(w, bond))
         assert v.shape == (1,), (
             f"{bond} sits on a dimension-1 leg but came back with shape "
             f"{v.shape}; gauge_fix has its bonds crossed"
-        )
-        assert abs(float(v[0]) - 1.0) < 1e-15, (
-            f"{bond} is a single number on a dimension-1 bond and BP "
-            f"max-normalises every weight vector, so it must be exactly 1.0; "
-            f"got {float(v[0]):.17g}"
         )
 
 
@@ -673,6 +930,40 @@ _SYM_BOND_SECTORS = {
 #: ``fermionic_ipeps._build_initial_fpeps_tensor``).  An MPS site is left IN /
 #: right OUT, so reaching this *is* the flow inversion.
 _SYM_PEPS_FLOWS = {"l": FlowDirection.OUT, "r": FlowDirection.IN}
+
+#: The block-sparse arm's external truth, the twin of :data:`_CHAIN_TRUTH` and
+#: carrying the same load: it is the only side of any comparison in this file
+#: that is not tenax.  Rebuilt from the 2-site transfer matrix's left and right
+#: fixed points in Python ``decimal`` for the seed-30 draw, truncated to 32
+#: digits.  Two independent derivations agree on every digit shown -- this one
+#: and the reviewer's, same method, separate implementations.
+#:
+#: It matters more here than on the dense arm.  The dense reference and the
+#: dense subject are both all-zero-charge, so a charge-bookkeeping defect could
+#: not reach either; here both sides are block-sparse and share the charge
+#: machinery that #834/#602/#865 all lived in, which is exactly the common mode
+#: a tenax-vs-tenax comparison cannot see.
+#:
+#: Measured on this branch: the tenax reference at ``L=60`` agrees with these to
+#: **1.1e-16** on both bonds, four orders under ``_ANCHOR_TOL``.
+_SYM_CHAIN_TRUTH = {
+    "h_AB": np.array(
+        [
+            0.99427402003591040195305550186645,
+            0.08453854492747805197392288081348,
+            0.06518798423820836634457954834226,
+            0.00478896796125356249540515639037,
+        ]
+    ),
+    "h_BA": np.array(
+        [
+            0.75797768426499114645172401877520,
+            0.64403699904936766172236098989718,
+            0.10331921524594954594674073374516,
+            0.00336359520860306414572422435044,
+        ]
+    ),
+}
 
 
 def _sectors_of(idx):
@@ -714,6 +1005,8 @@ def test_bp_weights_are_the_symmetric_chains_schmidt_values():
     Six claims:
 
     1. The reference has converged in ``L``, measured at two lengths.
+    1b. The reference reproduces the **externally derived** spectrum
+       (:data:`_SYM_CHAIN_TRUTH`, and see *Certified outside tenax* below).
     2. BP reproduces it on **both** inequivalent horizontal bonds.
     3. The *crossed* pairing fails, so the bond parity is pinned rather than
        assumed.
@@ -750,25 +1043,16 @@ def test_bp_weights_are_the_symmetric_chains_schmidt_values():
     comparison to between 8.4e-08 and 1.0e-06, four to six orders above the
     gate.
 
-    **Certified outside tenax**, the same way the dense anchor is and for the
-    same reason -- both sides of the comparison above are tenax code, so their
-    agreement is not independent of tenax.  Rebuilt from the transfer matrix's
-    left and right fixed points in Python ``decimal``; exact for the
-    ``float64`` tensors seed 30 draws, truncated to 32 digits::
-
-        h_AB  0.99427402003591040195305550186645
-              0.08453854492747805197392288081348
-              0.06518798423820836634457954834226
-              0.00478896796125356249540515639037
-        h_BA  0.75797768426499114645172401877520
-              0.64403699904936766172236098989718
-              0.10331921524594954594674073374516
-              0.00336359520860306414572422435044
-
-    Two independent derivations agree on every digit shown: this one and the
-    reviewer's, which used the same method but its own implementation.  BP
-    against that truth, rather than against the finite chain, is 7.85e-16
-    (``h_AB``) and 9.42e-16 (``h_BA``).
+    **Certified outside tenax, and now asserted**, the same way the dense
+    anchor is and for the same reason -- both sides of every other comparison
+    above are tenax code, so their agreement is not independent of tenax, and
+    on *this* arm the shared machinery is the charge bookkeeping that #834,
+    #602 and #865 all lived in.  The 32-digit values are
+    :data:`_SYM_CHAIN_TRUTH`; claim 1b asserts the tenax reference against
+    them, at a measured **1.1e-16** on both bonds.  Two independent derivations
+    agree on every digit: this one and the reviewer's, same method, separate
+    implementations.  BP against that truth, rather than against the finite
+    chain, is 7.85e-16 (``h_AB``) and 9.42e-16 (``h_BA``).
     """
     a, b, vl, vr = _sym_chain_pair()
 
@@ -783,6 +1067,11 @@ def test_bp_weights_are_the_symmetric_chains_schmidt_values():
         f"it is not yet the infinite chain's and cannot certify anything at "
         f"{_ANCHOR_TOL:.0e}.  Raise L -- do not loosen the tolerance below, "
         f"which is the number this whole test exists to defend."
+    )
+
+    # Claim 1b, before the solve, for the reason the dense twin gives.
+    _assert_reference_matches_the_external_truth(
+        {"h_AB": hi_s[0], "h_BA": hi_s[1]}, _SYM_CHAIN_TRUTH, "symmetric chain"
     )
 
     A, B = _sym_chain_pair_as_peps(a, b)

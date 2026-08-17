@@ -207,9 +207,11 @@ def gauge_fix(
     )
     # bp_gauge_checkerboard returns Vidal ``Gamma lambda Gamma``, which is its
     # documented and correct contract.  Converting here rather than there is
-    # deliberate: this is the boundary the spec draws, and other callers depend
-    # on the Vidal form.  Returning the raw pair moved the state by up to
-    # 1.25 (dense D=2) when read as the docstring above promises.
+    # deliberate: this is the boundary the spec draws.  (It is not that other
+    # callers need the Vidal form -- ``src/`` has none; this function is
+    # ``bp_gauge_checkerboard``'s only in-repo caller.  The spec is the whole
+    # reason.)  Returning the raw pair moved the state by up to 1.25 (dense
+    # D=2) when read as the docstring above promises.
     A_out, B_out = absorb_weights(A_v, B_v, weights)
     return A_out, B_out, weights, info
 
@@ -375,7 +377,13 @@ def ctm_rdm2x1_planar(
     answered: see #882 §5.2.  (Related, and also deferred: at D=3 the fermionic
     floor *does* fall, 2.24e-03 at ``chi=8`` to 6.25e-04 at ``chi=20``, per
     ``task-5-report.md`` §1 -- so the plateau may be specific to D=2, where
-    both parity sectors have size 1.)
+    both parity sectors have size 1.  Read those two rows side by side with
+    care: **they are different gauges**, not one gauge at two ``D``.  The D=2
+    plateau is a single-bond *diagonal* gauge, ``g = [1.7, 0.55]`` on ``A.r``
+    with ``1/g`` on ``B.l`` (``task-4-report.md``); the D=3 numbers are a
+    four-bond *non-diagonal* parity-block gauge at spread 1.5
+    (``task-5-report.md``'s ``nd15``).  So "falls at D=3, flat at D=2" is not
+    yet a statement about ``D``.)
 
     Args:
         A, B:      Checkerboard site tensors, labels ``(u,d,l,r,phys)``.

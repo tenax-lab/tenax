@@ -91,10 +91,15 @@ almost nothing is arithmetic: the identical arithmetic under ``jit`` is
 solves in 26 sweeps, 490.6 ms eager against 2.44 ms traced.)  The carrier is
 ~300 eager dispatches per sweep plus tenax-level Python -- label bookkeeping,
 ``TensorIndex`` construction, ``opt_einsum`` expression lookup.  The host-side
-``float()``/``bool()`` syncs are a *minority* contributor: there are exactly 18
-per sweep, and removing all of them without a traced loop is worth perhaps
-1.2-1.4x, not 200x.  So the fix is to trace the whole solve, which removes all
-three at once.
+``float()``/``bool()`` syncs are a *minority* contributor, and the count is
+**history, not a description of this file**: on ``main`` a sweep did 18 of them,
+and removing all 18 without a traced loop was worth perhaps 1.2-1.4x, not 200x.
+Tracing the solve took the count to **2** on the way past --
+``_is_representable`` and ``_residual`` return 0-d arrays now, so the eager
+driver syncs only on the health gate and the residual (see
+:func:`_bp_solve_eager`, which states the current number).  Do not read the 18
+as current; the point it carries is that the syncs were never the carrier, so
+the fix is to trace the whole solve.
 
 :func:`_bp_solve` is that: one ``lax.while_loop`` over a six-slot carry,
 compiled once per ``(D, dtype, carry treedef, max_iter, tol)`` and reused by
@@ -115,8 +120,9 @@ The remaining cost is **compile**, and it is the binding one: 84 ms to trace and
 lower plus 214 ms of XLA, on a 324-equation sweep body, *flat in D* (214/216/224
 ms at D=2/3/4 -- structure-bound, not array-size-bound, unlike #633's CTM
 finding).  Against the rewrite's 450 ms budget for a 100-step run that is 66%
-before a single solve runs; see ``tests/test_ipeps_gauge_perf.py``, which
-records the shortfall rather than hiding it.
+before a single solve runs; see ``tests/test_ipeps_gauge_perf.py``, whose gate
+*asserts* that budget (it recorded a shortfall while only the solve was traced,
+and stopped once ``gauge_fix``'s own boundary went inside the jit too).
 
 ``SymmetricTensor`` stays on the eager loop, because it cannot be traced today:
 ``_eigh_symmetric`` derives the output bond's charges from eigenvalue
