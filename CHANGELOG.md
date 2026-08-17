@@ -4,6 +4,62 @@
 
 ### Added
 
+- **`measure_gradient_error`: root-implicit gradient accuracy can be measured,
+  and cannot be predicted** (#785). The root-implicit engines report a root
+  residual, a covariant residual, an adjoint residual and a `usable_rank`, and
+  none of them is a gradient-quality signal. The residual is *anti-correlated*
+  with gradient error: on a rank-matched pair at χ=4 the physical simple-update
+  state carries the **larger** covariant residual (8.49e-06 against 6.85e-06)
+  and a gradient **13× more accurate** (2.9e-07 against 3.8e-06), so a gate
+  tightened onto it would reject the good state and admit the bad one.
+
+  Six candidate surrogates were measured against a directional finite
+  difference across nine states spanning ten orders of gradient error. All six
+  failed, and the negative results are recorded in the module docstring so they
+  are not re-derived: `usable_rank` ties states whose gradients differ 13×;
+  `s[usable_rank-1]/s[0]` is identically 1 when every direction collapses, so
+  the worst states score best; `retained_smin_rtol` inverts on the rank-matched
+  pair and moves five orders with χ (3.0e-08 → 2.1e-13) on a state whose
+  gradient error does not move at all; the adjoint amplification
+  `‖F̄‖/‖ȳ‖` is structurally ≈1 because `F = X'/⟨X,X'⟩ − X` makes `∂F/∂y` a
+  small perturbation of `−I`; and the site tensor's own conditioning, despite a
+  −0.80 log-log correlation, spans **170,000×** in gradient error across a 14%
+  change in conditioning (5.97e-06 against 1.01e+00).
+
+  So the honest position is measurement, not prediction. `measure_gradient_error`
+  takes any engine's `energy_and_grad` and finite-differences *that same
+  callable*, needing no reference implementation. It reports two numbers:
+  `relative_error`, and the `resolution` the step scan can actually resolve.
+  `is_resolved` says which regime you are in, and `False` has three causes: only
+  a *small* `fd_divergence` means the gradient is accurate to about
+  `unresolved_bound` — the good case, and deliberately not a failure; a large
+  one means the scan did not converge; and NaN means no two steps probed
+  commensurable directions, so the scan is indeterminate. In the latter two the
+  bound is not an accuracy claim at all. `unresolved_bound` is the larger of the
+  two thresholds the error is tested against, so `is_resolved` is exactly
+  `relative_error > unresolved_bound` and the published floor can never sit
+  below an error that was rejected. Nothing calls it automatically: it costs
+  several CTM convergences, which is why #785 rejected an FD probe inside the
+  optimizer loop. Run it once on a representative state before a long run.
+
+  On a complex state the probe direction is complex too, and a real-*valued*
+  one passed explicitly is refused — judged on the values, so a real array cast
+  to a complex dtype is refused as well: `Re(Σ g·v)` with real `v` pairs the gradient's
+  imaginary components to exactly zero, so an arbitrarily large error confined
+  to them would have been reported as below the resolution. The asymmetric
+  engine takes complex states (#721), so that was reachable.
+
+  Non-finite results fail **closed**. `nan > x` is False, so a NaN gradient
+  reaching the comparison would have set `is_resolved=False` — the branch that
+  means "better than the scan can resolve" — and reported an error below a NaN
+  floor. That is #787 and the #772 residual gate failing open, one level up,
+  and it is reachable: #772 *was* this engine returning NaN gradients on a
+  physical state. A non-finite gradient, directional derivative, perturbed
+  energy or difference now raises.
+
+  Measured on D=2, χ ∈ {4, 8}, dense asymmetric engine. The symmetric and
+  multisite engines are untested, as #785's "Not established" says.
+
 - **`bp_gauge_checkerboard`: the bond weights simple update stores are not the
   Schmidt spectra they are read as** (#869). Simple update takes each bond's
   spectrum straight from the SVD that produced it and never recomputes it, but
@@ -323,6 +379,63 @@
   site's fence is defensive. Separately, the all-zero matrix does produce a NaN
   gradient there, but from the SVD backward on a fully degenerate spectrum,
   which is the #406/#750 cluster and a different defect.
+
+- **`fpeps()` returned a state that was exactly `0.0`, and now returns a 2-site
+  checkerboard** (#878). ⚠️ **Breaking**: the return is
+  `(energy, (A, B), (env_A, env_B))` — the state and environment are pairs.
+  The 1-site fermionic ansatz could not be right: `A` was both ends of every
+  bond, so the update kept only `U` from each SVD and gave `A` the left/top half
+  of every gate and never the right/bottom half. That is #667 in a module #844
+  never touched; the state went to a product state regardless of `dt` (measured
+  at equal imaginary time, `dt` = 0.05 / 0.01 / 0.005 all gave `lam_h = [1, 0]`)
+  and then to exactly zero by step 10. The shipped test only asserted
+  `isfinite(energy)`, and `0.0` is finite. The guards now assert on the bond
+  **spectrum**: `_normalize_tensor` runs last, so `|A|` reads a healthy 1.0 right
+  up to the step where it is exactly 0.
+
+  A 1-site ansatz also cannot represent the t-V ground state at finite `V`,
+  which is a checkerboard charge-density wave. `sublattice_gap(A, B, env_A,
+  env_B)` measures that charge order: the trace distance between the two
+  sublattices' one-site RDMs, traced out of the two-site RDM the energy already
+  uses, which for spinless fermions is exactly `|<n_A> - <n_B>|`. Measured at
+  D=2, 8 steps, χ=4 it tracks `V` as it should — 0.037 at `V=0` (free fermions,
+  no charge order), 0.270 at `V=1`, 0.900 at `V=2`, 1.000 at `V=4`. It is a
+  **one-body** probe: a nonzero value is evidence of charge order, but a zero
+  does *not* prove a single tensor would suffice, because a columnar-dimer or
+  bond-ordered state has identical on-site densities and still needs two. Do
+  **not** use `||A - B||` or a `T T†` leg fingerprint for this: neither is
+  invariant under the bond gauge `T -> G T`, and on one gauged pair whose
+  physical state did not move at all, the Gram fingerprint went from 0.077 to
+  27.0 while the RDM distance moved by 4e-04.
+
+  The returned pair is in physical (CTM-contractable) form and `initial_tensor`
+  now accepts an `(A, B)` pair, so `fpeps()`'s output restarts `fpeps()` —
+  though a restart is not a continuation, since the sweep always begins from
+  `BondWeights.ones` while the tensors handed back already carry `sqrt(λ)`.
+  Returning the bare Vidal `Γ` would not round-trip at all — the bond weights live
+  outside it, and a restart resets them to ones.
+
+  All four checkerboard bond spectra are carried end to end as a `BondWeights`
+  (#851), with `independent_bonds` left at the #880 default: reflection through
+  a site maps `A.r<->B.l` onto `B.r<->A.l` and leaves the CDW invariant, so the
+  paired bonds share a spectrum in the state this sweep is reaching — the CDW
+  breaks the *site* symmetry, not the bond symmetry. **On the shipped default
+  this changes no numbers**: with the spectra shared, `lambdas.h_AB is
+  lambdas.h_BA`, so the output is identical to the two-lambda code it replaces.
+  What it fixes is the plumbing — the leg-to-bond map is now written once, in
+  `_to_physical_pair`, so the #851 mix-up can no longer be re-introduced at a
+  call site — and it is what makes the numerical fix available the moment the
+  four bonds are freed.
+
+  This does **not** fix #392: the absolute energy is still not certified. With
+  no chemical potential in `H`, both the empty state and the fully polarised
+  checkerboard are `E = 0` eigenstates, and at 200 steps, D=2, `V=0` the sweep
+  reports `E ≈ -6e-05` where the half-filled answer is ≈ `-1.6t`. Survival is
+  also seed-dependent at every bond dimension (4/5, 2/5, 4/5, 4/5 over seeds 0–4
+  at D=2, 3, 4, 6, 600 steps), which `test_fpeps_878_su_collapse.py` pins with a
+  strict `xfail` on a known-dying seed rather than papering over with a luckier
+  one.
+
 ### Added
 
 - **`TENAX_STRICT_CONTRACT=1` detects block-sparse contractions that disagree

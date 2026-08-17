@@ -73,6 +73,13 @@ _FILE_MARKERS = {
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
+    # #785: the only thing that says whether a root-implicit gradient is
+    # accurate.  The contract tests run on a closed-form quartic with no CTM
+    # anywhere (~0.2s), so the measurement semantics -- a wrong gradient
+    # reported wrong by the right amount, an unresolvable scan reported as
+    # unresolvable -- are cheap enough for the required gate.  The rank-matched
+    # pair that pins the residual's anti-correlation is @slow (~6 min).
+    "test_root_implicit_gradient_check.py": "core",
     # #667: simple update converged to the product state, and survived because
     # *no test asserted a simple-update energy* -- one test even documented the
     # bug ("small dt causes the bond lambdas to converge to a product-like fixed
@@ -96,6 +103,24 @@ _FILE_MARKERS = {
     # #851 default: with shared spectra the sweep must still reproduce the
     # pre-#851 loop element for element.
     "test_su_sweep_consolidation.py": "core",
+    # #878's collapse guards (fpeps() returned exactly 0.0 by step 10).  These
+    # assert on the bond SPECTRUM, never the norm -- `_normalize_tensor` runs
+    # last in the update, so |A| reads a healthy 1.0 right up to the step where
+    # it is exactly 0, and `isfinite` passes on the corpse.  They belong in
+    # `algorithm` rather than the merge gate purely on cost: a fermionic 4-bond
+    # cycle is ~1.2 s at D=2 (block-sparse eager dispatch, #566/#618), so the
+    # 10/20/40-step sweeps here run 280 s locally -- two orders of magnitude
+    # above anything else in `core`.
+    "test_fpeps_878_su_collapse.py": "algorithm",
+    # The fPEPS sublattice diagnostic (#881 review).  ``fpeps()`` returns two
+    # tensors only because the t-V ground state is a checkerboard CDW, and this
+    # is the probe that says whether a given run produced one -- a wrong answer
+    # from it is a wrong answer about the whole reason the return type changed.
+    # The first version compared leg Gram spectra, which are not gauge
+    # invariant, so it reported a difference between representations; these pin
+    # the replacement against an explicit non-unitary bond gauge.  Same cost
+    # bracket as its `algorithm` neighbours (short D=2 sweeps + chi=8 CTM).
+    "test_fpeps_881_sublattice_gap.py": "algorithm",
     # Root-implicit AD wiring (#715): dispatch + guard surface only, no
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).

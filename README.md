@@ -18,7 +18,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), iTEBD (numerically stable infinite TEBD, incl. inversion-free Hastings update), TRG, HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
 - **GPU/TPU-accelerated DMRG** — JIT-compiled sweeps via `jax.lax.scan` for dense tensors and per-operation JIT for block-sparse symmetric tensors; automatic warmup-to-JIT transition when bond dimensions are growing; multi-GPU sharding via GSPMD for large bond dimensions (`DMRGConfig(accelerator="jit"|"sharded")`)
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
-- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via iterative VJP (default) and optional GMRES route; explicit AD through unrolled CTM iterations for 1-site C4v path; **2-site shared-tensor C4v path** (`unit_cell="2site"` + `gs_c4v=True`) where a single C4v tensor is optimized and the second sublattice is derived by spin-π rotation, stable across χ=8–24 for spin-1/2 AFMs; opt-in reference-mode dense C4v Appendix C-F mode (`ctm_ad_mode="c4v_reference"`) with Krylov implicit backward (`bicgstab` + `gmres` fallback); **root implicit AD** (`ctm_ad_mode="root_implicit"`, dense 1x1 only; Burgelman et al. arXiv:2607.15030) driving the characteristic equations rather than back-propagating the CTM sweep, so no SVD/eigh backward appears in the gradient path — an accuracy/stability lever, not a speed one (~63x slower than explicit AD at D=2 χ=6, reproducing the paper's §VI.3), whose reason to exist is that explicit backprop NaNs on every entry at D=3 χ=4 where this path stays finite and FD-correct; sigma gauge fixing (`forward_gauge="sigma"`) for stable elementwise CTM convergence; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement
+- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via iterative VJP (default) and optional GMRES route; explicit AD through unrolled CTM iterations for 1-site C4v path; **2-site shared-tensor C4v path** (`unit_cell="2site"` + `gs_c4v=True`) where a single C4v tensor is optimized and the second sublattice is derived by spin-π rotation, stable across χ=8–24 for spin-1/2 AFMs; opt-in reference-mode dense C4v Appendix C-F mode (`ctm_ad_mode="c4v_reference"`) with Krylov implicit backward (`bicgstab` + `gmres` fallback); **root implicit AD** (`ctm_ad_mode="root_implicit"`, dense 1x1 only; Burgelman et al. arXiv:2607.15030) driving the characteristic equations rather than back-propagating the CTM sweep, so no SVD/eigh backward appears in the gradient path — an accuracy/stability lever, not a speed one (~63x slower than explicit AD at D=2 χ=6, reproducing the paper's §VI.3), whose reason to exist is that explicit backprop NaNs on every entry at D=3 χ=4 where this path stays finite and FD-correct. Its gradient accuracy is state-dependent and **no diagnostic predicts it** (#785) — measure it with `measure_gradient_error` rather than reading the root residual, which is anti-correlated with it; sigma gauge fixing (`forward_gauge="sigma"`) for stable elementwise CTM convergence; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement
 - **In-CTM χ-bump (variPEPS §2.8.2)** — recommended reactive growth of the CTM bond dimension *inside* CTM convergence (`CTMConfig.ctmrg_heuristic_increase_chi=True` with `chi_max` set); the env is always converged at the new χ before the optimizer sees it, avoiding the zero-padded-env cliff-edge artifact that the legacy end-of-outer-step `chi_auto_bump` and scheduled `chi_ramp` introduce between L-BFGS steps. Both legacy knobs still work but emit `DeprecationWarning` (see issue #512) and will be removed in a future release. References: Naumann et al., SciPost Phys. Lect. Notes 86, 2024
 - **SVD and QR CTMRG projectors** — SVD (Fishman) projectors (`projector_method="svd"`, default) and `eigh` projectors, plus a reduced-corner QR-CTMRG projector (`projector_method="qr"`, arXiv:2505.00494) on the dense single-site path, usable both forward-only and under AD ground-state optimization via `gs_recipe="1x1"` + `gs_projector_method="qr"` (Phase 2, dense; block-sparse is a later phase)
 - **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) *projector* cost instead of O(χ³D⁶); works with both `DenseTensor` and `SymmetricTensor` via the Tensor protocol (Naumann et al., arXiv:2502.10298). Note this is a projector **cost** bound, not a peak-memory one: the realized `value_and_grad` peak is 1.02–2.7× below the fused path depending on χ, and converges to ~1× at the memory ceiling (#825)
@@ -517,6 +517,33 @@ config_root = iPEPSConfig(
 )
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config_root)
 
+# Root-implicit gradient accuracy is state-dependent and NOT predicted by any
+# diagnostic the engine reports (#785) — the root residual is anti-correlated
+# with it, and `usable_rank`, the retained-spectrum ratios and the site tensor's
+# own conditioning all fail too.  Measured across seeds at one conditioning,
+# gradient error spans 3.4e-06 to 7.7e-03.  So measure it once on a
+# representative state before a long run; it costs a few CTM convergences.
+from functools import partial
+
+from tenax import measure_gradient_error
+from tenax.algorithms._ctm_root_implicit_asym import (
+    asym_root_implicit_energy_and_grad,
+)
+
+report = measure_gradient_error(
+    lambda t: asym_root_implicit_energy_and_grad(t, gate, chi=6)[:2], A_opt
+)
+print(report.summary())
+# `relative_error` is a measurement only when `is_resolved`. When it is not,
+# check `fd_divergence`: only a SMALL value means the gradient is accurate to
+# about `unresolved_bound` (the larger of the two thresholds it is tested
+# against, so `is_resolved` is exactly `relative_error > unresolved_bound`) —
+# the good case.
+# A large one means the differences are still moving — the bound then carries
+# that, so it is honest but wide. NaN means no two steps probed commensurable
+# directions: the scan is indeterminate, and `unresolved_bound` is NaN too,
+# because nothing established a floor to report.
+
 # Quasiparticle excitations (Ponsioen et al. 2022)
 momenta = make_momentum_path("brillouin", num_points=20)
 exc_config = ExcitationConfig(num_excitations=3)
@@ -560,6 +587,85 @@ if not bool(info.converged):
 
 `info.diff` is the convergence criterion — the change in the corner singular
 values, not in the energy. `ipeps()` performs this check itself and warns.
+
+## Fermionic iPEPS (fPEPS)
+
+Spinless fermions on the square lattice — `H = -t(c†c + h.c.) + V n n` — with
+`FermionParity` block-sparse tensors, so the exchange signs come from the graded
+tensor algebra (Koszul signs in transpose, contraction and SVD) rather than from
+hand-placed swap gates.
+
+```python
+import jax
+from tenax import FPEPSConfig, fpeps, spinless_fermion_gate, sublattice_gap
+
+config = FPEPSConfig(D=2, t=1.0, V=4.0, dt=0.05, num_imaginary_steps=200,
+                     ctm_chi=8, ctm_max_iter=60, ctm_conv_tol=1e-8)
+H = spinless_fermion_gate(config)
+
+energy, (A, B), (env_A, env_B) = fpeps(H, config, key=jax.random.PRNGKey(0))
+print(energy, sublattice_gap(A, B, env_A, env_B))
+```
+
+**`fpeps()` returns a pair of site tensors, not one** (#878). The t-V ground
+state at finite `V` is a checkerboard charge-density wave, which no single
+tensor can represent; the previous 1-site ansatz also made `A` both ends of
+every bond, so its update kept only `U` from each SVD and gave `A` the left/top
+half of every gate and never the right/bottom half — the state went to a product
+state regardless of `dt`, and then to exactly `0.0`.
+
+`sublattice_gap(A, B, env_A, env_B)` measures **charge order** between the two
+sublattices: the trace distance between their one-site reduced density matrices,
+traced out of the two-site RDM the energy already uses. For spinless fermions
+`FermionParity` forbids the off-diagonal entries, so each RDM is diagonal in the
+occupation basis and this is exactly `|<n_A> - <n_B>|`, the CDW order parameter
+— ~0 at `V=0` (free fermions, no charge order) up to 1 for the fully polarised
+occupied/empty checkerboard.
+
+**It is a one-body probe, and a zero does not mean one tensor would do.** A
+`0` says the two *one-site* RDMs coincide; it says nothing about two-site
+structure. A columnar-dimer or bond-ordered state has identical on-site
+densities on both sublattices, reads `0` here, and is still genuinely two-site.
+A nonzero value is positive evidence of charge order; the converse does not
+hold. To rule out two-site order in general, compare a two-site observable
+instead — e.g. the horizontal against the vertical bond energy of the pair.
+
+A value above 1 means the environment's RDM is not PSD (#854) — measured up to
+1.07 at χ=4 on a deliberately under-converged environment, against a few `1e-4`
+once the CTM has settled. It is not clipped: the excess tells you χ or the sweep
+count is too small, and clipping would hide that inside a plausible-looking 1.0.
+
+Do **not** compare the two sublattices with `||A - B||`, or with any fingerprint
+built from `T T†` on a virtual leg. A simple-update tensor is defined only up to
+a bond gauge `T -> G T`, under which that matrix goes to `G M G†` — its spectrum
+moves unless `G` is unitary, and simple update's gauge is not. Measured on a
+provably uniform pair, `||A - B||` sits at ~1.7. A reduced density matrix has no
+such freedom.
+
+The returned pair is in physical (CTM-contractable) form, which is also the form
+`initial_tensor` takes for a warm restart:
+
+```python
+energy, pair, envs = fpeps(H, config, initial_tensor=pair)   # continues
+energy, pair, envs = fpeps(H, config, initial_tensor=A)      # both sites from A
+```
+
+A restart is not a continuation. The sweep always begins from
+`BondWeights.ones`, so its first cycle treats the outer legs as unweighted while
+the tensors you hand back already carry `sqrt(λ)`. `fpeps(N)` is therefore not
+`fpeps(N/2)` fed back for another `N/2` — use a restart to continue annealing,
+not to reproduce a longer single run.
+
+Two standing caveats. Simple update on this path is **seed-dependent**: over
+seeds 0–4 at 600 steps, the fraction whose bond spectrum survives is 4/5 at D=2,
+2/5 at D=3, 4/5 at D=4 and 4/5 at D=6 — every bond dimension has both surviving
+and dying seeds, so check the result rather than assuming it (#869 is the same
+basin behaviour on the bosonic path). And the **absolute energy is not
+certified** (#392): with no chemical potential in `H`, both the empty state and
+the fully polarised checkerboard are `E = 0` eigenstates, and the sweep is
+observed to settle on them — measured at 200 steps, D=2, `E ≈ -6e-05` at `V=0`
+where the half-filled answer is ≈ `-1.6t`. `sublattice_gap` tells you *which*
+state you landed on; it does not tell you it is the ground state.
 
 ## Honeycomb iPEPS CTM (native rank-4)
 

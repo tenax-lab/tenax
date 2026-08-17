@@ -45,21 +45,66 @@ config = FPEPSConfig(
 ## Example — spinless fermion t-V model
 
 ```python
-from tenax import FPEPSConfig, fpeps, spinless_fermion_gate
+from tenax import FPEPSConfig, fpeps, spinless_fermion_gate, sublattice_gap
 import jax
 
-config = FPEPSConfig(D=2, t=1.0, V=0.5, dt=0.01, num_imaginary_steps=500,
-                     ctm_chi=16, ctm_max_iter=60)
-H = spinless_fermion_gate(t=1.0, V=0.5)
-energy, A_opt, env = fpeps(H, config, key=jax.random.PRNGKey(0))
+config = FPEPSConfig(D=2, t=1.0, V=4.0, dt=0.05, num_imaginary_steps=200,
+                     ctm_chi=8, ctm_max_iter=60)
+H = spinless_fermion_gate(config)
+energy, (A, B), (env_A, env_B) = fpeps(H, config, key=jax.random.PRNGKey(0))
 print(f"E/site = {energy:.8f}")
+print(f"CDW gap = {sublattice_gap(A, B, env_A, env_B):.4f}")
 ```
+
+**The state and environment are pairs** (#878). The t-V ground state at finite
+``V`` is a checkerboard charge-density wave, which no single tensor can
+represent, and the 1-site ansatz that preceded this made ``A`` both ends of
+every bond — its update kept only ``U`` from each SVD, so ``A`` received the
+left/top half of every gate and never the right/bottom half, and the state
+collapsed to a product state regardless of ``dt``.
+
+``sublattice_gap(A, B, env_A, env_B)`` measures **charge order** between the two
+sublattices: the trace distance between their one-site reduced density matrices,
+traced out of the two-site RDM the energy already uses. For spinless fermions
+``FermionParity`` forbids the off-diagonal entries, so this is exactly
+``|<n_A> - <n_B>|`` — the CDW order parameter, ~0 at ``V=0`` and 1 for the fully
+polarised occupied/empty checkerboard.
+
+```{warning}
+It is a **one-body** probe, and a zero does not mean one tensor would do. A
+``0`` says the two *one-site* RDMs coincide; it says nothing about two-site
+structure. A columnar-dimer or bond-ordered state has identical on-site
+densities on both sublattices, reads ``0``, and is still genuinely two-site. A
+nonzero value is positive evidence of charge order; the converse does not hold.
+To rule out two-site order in general, compare a two-site observable — e.g. the
+horizontal against the vertical bond energy of the pair.
+```
+
+Do **not** use ``||A - B||`` or a ``T T†`` leg fingerprint instead — neither is
+invariant under the bond gauge ``T -> G T``, so both measure the representation
+rather than the state.
+
+Two caveats. The sweep is **seed-dependent** (over seeds 0–4 at 600 steps, the
+surviving fraction is 4/5 at D=2, 2/5 at D=3, 4/5 at D=4, 4/5 at D=6), and the
+**absolute energy is not certified** (#392): ``H`` carries no chemical
+potential, so both the empty state and the fully polarised checkerboard are
+exact ``E = 0`` eigenstates and the sweep is observed to settle on them.
 
 ## API
 
 - ``fpeps(hamiltonian_gate, config, initial_tensor=None, key=None)`` — full
-  pipeline: simple update + CTM + energy.
-- ``spinless_fermion_gate(t, V, dt=None)`` — build the t-V model gate.
+  pipeline: simple update + CTM + energy. Returns
+  ``(energy, (A, B), (env_A, env_B))``. ``initial_tensor`` takes either an
+  ``(A, B)`` pair — the form this returns, so its own output restarts it — or a
+  single tensor, which starts both sublattices from the same place. A restart
+  is **not** a continuation: the sweep always begins from ``BondWeights.ones``,
+  so its first cycle treats the outer legs as unweighted while the tensors
+  handed in already carry ``sqrt(lambda)``. ``fpeps(N)`` is not ``fpeps(N/2)``
+  restarted for another ``N/2``.
+- ``sublattice_gap(A, B, env_A, env_B)`` — charge-order diagnostic, above; a
+  one-body probe, so a zero does not certify that one tensor would suffice.
+- ``spinless_fermion_gate(config)`` — build the t-V model gate from an
+  ``FPEPSConfig`` (it reads ``t`` and ``V``).
 - ``FPEPSConfig`` — configuration dataclass.
 - ``optimize_fpeps_ad(hamiltonian_gate, A_init, config, fpeps_config=None)`` —
   AD-based ground-state optimization (1-site). For a 2-site unit cell use

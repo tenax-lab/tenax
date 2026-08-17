@@ -8,8 +8,6 @@ import pytest
 from tenax.algorithms.fermionic_ipeps import (
     FPEPSConfig,
     _fpeps_simple_update,
-    _fpeps_simple_update_horizontal,
-    _fpeps_simple_update_vertical,
     _initialize_fpeps,
     _trotter_gate,
     fpeps,
@@ -188,96 +186,6 @@ class TestFPEPSInit:
 
 
 # ------------------------------------------------------------------ #
-# Task 4: _fpeps_simple_update_horizontal                              #
-# ------------------------------------------------------------------ #
-
-
-class TestFPEPSSimpleUpdateBond:
-    """Tests for horizontal simple update on the fPEPS bond."""
-
-    @pytest.fixture
-    def setup(self):
-        """Prepare A, gate, and lambdas for horizontal update."""
-        cfg = FPEPSConfig(D=2, t=1.0, V=0.0, dt=0.01)
-        key = jax.random.PRNGKey(7)
-        A = _initialize_fpeps(cfg, key)
-        H = spinless_fermion_gate(cfg)
-        gate = _trotter_gate(H, cfg.dt)
-        D = cfg.D
-        lam_h = jnp.ones(D)
-        lam_v = jnp.ones(D)
-        return A, gate, lam_h, lam_v, D
-
-    def test_returns_tensor_and_lambda(self, setup):
-        A, gate, lam_h, lam_v, D = setup
-        A_new, lam_new = _fpeps_simple_update_horizontal(A, gate, lam_h, lam_v, D)
-        assert isinstance(A_new, SymmetricTensor)
-        assert isinstance(lam_new, jax.Array)
-
-    def test_output_shape(self, setup):
-        A, gate, lam_h, lam_v, D = setup
-        A_new, lam_new = _fpeps_simple_update_horizontal(A, gate, lam_h, lam_v, D)
-        assert A_new.todense().shape == (D, D, D, D, 2)
-        assert lam_new.shape == (D,)
-
-    def test_output_labels(self, setup):
-        A, gate, lam_h, lam_v, D = setup
-        A_new, lam_new = _fpeps_simple_update_horizontal(A, gate, lam_h, lam_v, D)
-        assert A_new.labels() == ("u", "d", "l", "r", "phys")
-
-    def test_output_finite(self, setup):
-        A, gate, lam_h, lam_v, D = setup
-        A_new, lam_new = _fpeps_simple_update_horizontal(A, gate, lam_h, lam_v, D)
-        assert jnp.all(jnp.isfinite(A_new.todense()))
-        assert jnp.all(jnp.isfinite(lam_new))
-
-    def test_lambda_positive(self, setup):
-        A, gate, lam_h, lam_v, D = setup
-        A_new, lam_new = _fpeps_simple_update_horizontal(A, gate, lam_h, lam_v, D)
-        assert jnp.all(lam_new >= 0)
-
-
-# ------------------------------------------------------------------ #
-# Task 5: _fpeps_simple_update_vertical                                #
-# ------------------------------------------------------------------ #
-
-
-class TestFPEPSSimpleUpdateVertical:
-    """Tests for vertical simple update on the fPEPS bond."""
-
-    @pytest.fixture
-    def setup(self):
-        """Prepare A, gate, and lambdas for vertical update."""
-        cfg = FPEPSConfig(D=2, t=1.0, V=0.0, dt=0.01)
-        key = jax.random.PRNGKey(7)
-        A = _initialize_fpeps(cfg, key)
-        H = spinless_fermion_gate(cfg)
-        gate = _trotter_gate(H, cfg.dt)
-        D = cfg.D
-        lam_h = jnp.ones(D)
-        lam_v = jnp.ones(D)
-        return A, gate, lam_h, lam_v, D
-
-    def test_returns_tensor_and_lambda(self, setup):
-        A, gate, lam_h, lam_v, D = setup
-        A_new, lam_new = _fpeps_simple_update_vertical(A, gate, lam_h, lam_v, D)
-        assert isinstance(A_new, SymmetricTensor)
-        assert isinstance(lam_new, jax.Array)
-
-    def test_output_shape(self, setup):
-        A, gate, lam_h, lam_v, D = setup
-        A_new, lam_new = _fpeps_simple_update_vertical(A, gate, lam_h, lam_v, D)
-        assert A_new.todense().shape == (D, D, D, D, 2)
-        assert lam_new.shape == (D,)
-
-    def test_output_finite(self, setup):
-        A, gate, lam_h, lam_v, D = setup
-        A_new, lam_new = _fpeps_simple_update_vertical(A, gate, lam_h, lam_v, D)
-        assert jnp.all(jnp.isfinite(A_new.todense()))
-        assert jnp.all(jnp.isfinite(lam_new))
-
-
-# ------------------------------------------------------------------ #
 # Task 6: _fpeps_simple_update                                         #
 # ------------------------------------------------------------------ #
 
@@ -291,11 +199,15 @@ class TestFPEPSSimpleUpdate:
         key = jax.random.PRNGKey(0)
         A = _initialize_fpeps(cfg, key)
         H = spinless_fermion_gate(cfg)
-        A_opt, lam_h, lam_v = _fpeps_simple_update(
+        # #878: 2-site checkerboard, so both sublattices are returned, and
+        # #851: all four bond spectra, as a BondWeights.
+        A_opt, B_opt, lambdas = _fpeps_simple_update(
             A, H, max_D=cfg.D, dt=cfg.dt, steps=5
         )
         assert isinstance(A_opt, SymmetricTensor)
+        assert isinstance(B_opt, SymmetricTensor)
         assert jnp.all(jnp.isfinite(A_opt.todense()))
+        assert set(lambdas._fields) == {"h_AB", "h_BA", "v_AB", "v_BA"}
 
     def test_simple_update_changes_tensor(self):
         """20 steps of imaginary time evolution should change A."""
@@ -304,7 +216,8 @@ class TestFPEPSSimpleUpdate:
         A = _initialize_fpeps(cfg, key)
         A_before = A.todense()
         H = spinless_fermion_gate(cfg)
-        A_opt, lam_h, lam_v = _fpeps_simple_update(
+        # #878: 2-site checkerboard, so both sublattices are returned.
+        A_opt, B_opt, _lambdas = _fpeps_simple_update(
             A, H, max_D=cfg.D, dt=cfg.dt, steps=20
         )
         A_after = A_opt.todense()
@@ -324,17 +237,19 @@ class TestFPEPSSimpleUpdate:
         cfg = FPEPSConfig(D=D, t=1.0, V=0.0, dt=0.01)
         A = _initialize_fpeps(cfg, jax.random.PRNGKey(0))
         H = spinless_fermion_gate(cfg)
-        A_opt, _, _ = _fpeps_simple_update(A, H, max_D=cfg.D, dt=cfg.dt, steps=5)
-        for axis_label in ("u", "d", "l", "r"):
-            ax = A_opt.labels().index(axis_label)
-            idx = A_opt.indices[ax]
-            assert idx.dim == D, f"axis {axis_label!r} dim {idx.dim} != D={D}"
-            charges = sorted(int(c) for c in idx.charges)
-            expected = sorted([i % 2 for i in range(D)])
-            assert charges == expected, (
-                f"axis {axis_label!r} charges {charges} != canonical {expected}"
-            )
-        assert jnp.all(jnp.isfinite(A_opt.todense()))
+        A_opt, B_opt, _ = _fpeps_simple_update(A, H, max_D=cfg.D, dt=cfg.dt, steps=5)
+        # #558's contract holds for BOTH sublattices now, not just one.
+        for name, site in (("A", A_opt), ("B", B_opt)):
+            for axis_label in ("u", "d", "l", "r"):
+                ax = site.labels().index(axis_label)
+                idx = site.indices[ax]
+                assert idx.dim == D, f"{name}.{axis_label} dim {idx.dim} != D={D}"
+                charges = sorted(int(c) for c in idx.charges)
+                expected = sorted([i % 2 for i in range(D)])
+                assert charges == expected, (
+                    f"{name}.{axis_label} charges {charges} != canonical {expected}"
+                )
+            assert jnp.all(jnp.isfinite(site.todense()))
 
 
 class TestFPEPS2SiteSimpleUpdate:
@@ -439,7 +354,8 @@ class TestFPEPS:
         )
         H = spinless_fermion_gate(cfg)
         key = jax.random.PRNGKey(99)
-        energy, A_opt, env = fpeps(H, cfg, key=key)
+        # #878: 2-site checkerboard, so state and env are pairs.
+        energy, (A_opt, B_opt), (env_A, env_B) = fpeps(H, cfg, key=key)
         assert jnp.isfinite(energy)
 
     def test_fpeps_returns_symmetric_tensor(self):
@@ -456,8 +372,10 @@ class TestFPEPS:
         )
         H = spinless_fermion_gate(cfg)
         key = jax.random.PRNGKey(99)
-        energy, A_opt, env = fpeps(H, cfg, key=key)
+        # #878: 2-site checkerboard, so state and env are pairs.
+        energy, (A_opt, B_opt), (env_A, env_B) = fpeps(H, cfg, key=key)
         assert isinstance(A_opt, SymmetricTensor)
+        assert isinstance(B_opt, SymmetricTensor)
 
 
 # ------------------------------------------------------------------ #

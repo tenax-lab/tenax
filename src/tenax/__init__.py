@@ -201,6 +201,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "tenax.algorithms.fermionic_ipeps",
         "spinless_fermion_gate",
     ),
+    "sublattice_gap": ("tenax.algorithms.fermionic_ipeps", "sublattice_gap"),
     # hotrg
     "HOTRGConfig": ("tenax.algorithms.hotrg", "HOTRGConfig"),
     "hotrg": ("tenax.algorithms.hotrg", "hotrg"),
@@ -248,6 +249,15 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "bp_gauge_checkerboard": (
         "tenax.algorithms.ipeps_bp_gauge",
         "bp_gauge_checkerboard",
+    ),
+    # _root_implicit_gradient_check
+    "GradientErrorReport": (
+        "tenax.algorithms._root_implicit_gradient_check",
+        "GradientErrorReport",
+    ),
+    "measure_gradient_error": (
+        "tenax.algorithms._root_implicit_gradient_check",
+        "measure_gradient_error",
     ),
     # ipeps_config
     "CTMConfig": ("tenax.algorithms.ipeps_config", "CTMConfig"),
@@ -468,6 +478,8 @@ __all__ = [
     "heisenberg_u1sz_init_pair",
     "ipeps",
     "bp_gauge_checkerboard",
+    "GradientErrorReport",
+    "measure_gradient_error",
     "BondWeights",
     "BPGaugeInfo",
     "sublattice_rotate_gate",
@@ -528,6 +540,7 @@ __all__ = [
     "fpeps",
     "optimize_fpeps_ad",
     "spinless_fermion_gate",
+    "sublattice_gap",
     # iPEPS Excitations
     "ExcitationConfig",
     "ExcitationResult",
