@@ -16,7 +16,6 @@ on dense input.
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -25,10 +24,12 @@ from _ipeps_gauge_helpers import (  # tests/ is on sys.path
     _dense_pair,
     _symmetric_pair,
     _torus_2x2,
+    retraced,  # noqa: F401  -- a fixture; pytest reads it off this namespace
 )
 
 from tenax.algorithms.ipeps import (
     _make_trotter_gate_tensor,
+    _wrap_as_dense_tensor,
     heisenberg_gate,
     sublattice_rotate_gate,
 )
@@ -78,28 +79,6 @@ def _direction(t):
     """
     m = float(np.max(np.abs(t)))
     return t / m if m > 0.0 else t
-
-
-@pytest.fixture
-def retraced():
-    """Make a monkeypatch inside the traced solve actually take effect.
-
-    The dense driver is one jitted ``lax.while_loop``, and its cache key is
-    ``(shape, dtype, treedef, max_iter, tol)`` -- it does **not** include the
-    module globals the body reads.  So patching something the body calls is
-    honoured only if the entry is retraced, and the entry the patched run
-    leaves behind would poison any later test that happens to match the same
-    key.  Clearing on both sides is what makes such a test mean what it says.
-
-    ``clear_cache()`` on the one jitted function, not ``jax.clear_caches()``:
-    the global version also evicts every *eager* op the session has compiled,
-    which costs the next test ~170 ms of re-compilation for no benefit here.
-    """
-    import tenax.algorithms.ipeps_bp_gauge as bp
-
-    bp._bp_solve_traced.clear_cache()
-    yield
-    bp._bp_solve_traced.clear_cache()
 
 
 def _two_site(gam_L, gam_R, leg_L, leg_R, lam):
@@ -303,6 +282,96 @@ def test_an_su_evolved_symmetric_state_does_not_walk_out_of_f64(phases):
     assert rel < GAUGE_TOL, f"{phases} phase(s): state moved by {rel:.3e}"
 
 
+#: How far past its fixed point the #870 guard below has to run.  The state
+#: converges at sweep ~60 and the hoisted-rescale overflow does not arrive until
+#: sweep ~116, so anything that stops at the fixed point cannot see it.  150
+#: clears the blow-up with margin without doubling the test's cost.
+_HOIST_GUARD_SWEEPS = 150
+
+
+def test_rescaling_once_per_sweep_instead_of_once_per_bond_still_overflows():
+    """The #870 guard, run *past* the fixed point where the defect actually is.
+
+    ``_sweep`` rescales after every **bond**, 8x per sweep, and the comment
+    there says a cleanup that hoists it to once per sweep reintroduces the
+    overflow.  That claim was untested: hoisting the two ``_rescale`` calls out
+    of the ``for bond ...`` loop turns this whole file green, including
+    ``test_an_su_evolved_symmetric_state_does_not_walk_out_of_f64``, which is
+    the test nominally guarding it.
+
+    The mechanism is not stale, the *guard* was.  Instrumented on this fixture:
+    hoisted, ``peak ||Gamma||`` reaches ``inf`` and the first unhealthy sweep is
+    116; per-bond, ``||Gamma||`` sits at exactly 1.000 for the whole run.  The
+    existing test misses it because the solve **converges at sweep ~60** and
+    returns 56 sweeps before the blow-up: it asks for the fixed point, and the
+    defect lives past it.
+
+    So this one deliberately does not converge -- ``tol=0.0`` forces all
+    ``_HOIST_GUARD_SWEEPS`` sweeps -- and asserts every one of them was healthy.
+    ``iterations`` is the discriminator rather than the returned norm, because
+    the rollback hands back the *last good* iterate either way, so the state
+    alone looks fine in both arms; only the sweep count says whether the solve
+    walked out of f64 on the way.
+    """
+    A, B, stored = _simple_update(*_symmetric_pair(), phases=4, rotate=False)
+
+    _, _, _, info = bp_gauge_checkerboard(
+        A, B, stored, max_iter=_HOIST_GUARD_SWEEPS, tol=0.0
+    )
+
+    assert info.iterations == _HOIST_GUARD_SWEEPS, (
+        f"only {info.iterations} of {_HOIST_GUARD_SWEEPS} sweeps stayed inside "
+        f"f64 (residual {info.residual}).  The per-bond rescale in ``_sweep`` "
+        f"bounds the compounding of ``X_inv``; if it has been hoisted to once "
+        f"per sweep, this is #870 and the fix is to put it back, not to lower "
+        f"the sweep count until the test passes"
+    )
+    assert info.residual != float("inf"), "a sweep was rejected as unrepresentable"
+
+
+def test_a_state_whose_messages_underflow_is_rejected_by_the_real_predicate():
+    """The health guard, reached through the solve rather than injected.
+
+    Every other rollback test in this tree patches ``_sweep_is_healthy``, so
+    nothing pins that the solve consults :func:`_is_representable` at all -- a
+    driver that dropped the call entirely would keep them all green.
+
+    The reachable death is **underflow**, not overflow.  ``_PINV_CUTOFF`` is a
+    *relative* cutoff (``s > 1e-12 * max(s)``), so ``s_inv`` is capped at
+    ``1e12 / max(s)`` and cannot run away to ``inf`` however fast the message
+    spectrum decays.  What it does not stop is the whole message underflowing:
+    here ``Gamma``'s O(1) weight sits at virtual index 1 on all four legs and
+    ``lambda[1] = 1e-170``, so ``_message`` -- which multiplies three incoming
+    weights in and then squares -- lands below 1e-308 and rounds to exactly
+    zero.  The pseudo-inverse of a zero message is zero, ``Gamma`` becomes
+    exactly zero, and ``_rescale`` leaves it there.
+
+    Zero is the *absorbing fixed point*: ``norm(0 - 0) / max(0, 1e-300)`` is 0,
+    which passes any tolerance.  This is what the ``n > 0`` clause exists for,
+    and without it the solve would report a confident ``converged=True`` on a
+    corpse (#870).  The input is a legal one -- it passes ``_validate_weights``
+    -- so this is a state a caller could hand over, not a mutation of internals.
+    """
+    D_ = 2
+    arr = np.full((D_, D_, D_, D_, 2), 1e-300)
+    arr[1, 1, 1, 1, :] = 1.0  # the O(1) weight, on virtual index 1 of every leg
+    A = _wrap_as_dense_tensor(jnp.asarray(arr))
+    B = _wrap_as_dense_tensor(jnp.asarray(arr))
+    lam = jnp.array([1.0, 1e-170])
+    w = BondWeights(h_AB=lam, h_BA=lam, v_AB=lam, v_BA=lam)
+
+    A2, B2, _, info = bp_gauge_checkerboard(A, B, w, max_iter=50, tol=1e-12)
+
+    assert not info.converged, (
+        "a state whose messages underflow to zero was certified converged; "
+        "zero is an absorbing fixed point and reports residual 0"
+    )
+    assert info.iterations == 0, f"reported sweeps that were not healthy: {info}"
+    assert info.residual == float("inf")
+    # The rollback hands back a usable state -- here the rescaled input.
+    assert float(A2.norm()) > 0.0 and float(B2.norm()) > 0.0
+
+
 @pytest.mark.parametrize("kind", list(_PAIRS))
 @pytest.mark.parametrize("target", ["gamma", "lambda"])
 def test_an_overall_scale_on_the_input_changes_nothing(kind, target):
@@ -393,10 +462,12 @@ def test_the_health_predicate_rejects_every_way_an_iterate_dies():
     assert not ok({"A": A}, BondWeights.ones(D, D)._replace(v_BA=jnp.zeros(D)))
 
 
+# ``usefixtures`` rather than an argument: ``retraced`` is imported into this
+# module's namespace so pytest can find it, and naming it in the signature too
+# would shadow that import (ruff F811).  It is used for its side effect only.
+@pytest.mark.usefixtures("retraced")
 @pytest.mark.parametrize("kind", list(_PAIRS))
-def test_an_unrepresentable_sweep_rolls_back_and_is_not_certified(
-    monkeypatch, kind, retraced
-):
+def test_an_unrepresentable_sweep_rolls_back_and_is_not_certified(monkeypatch, kind):
     """The solve must honour the predicate: return the last good gauge, say so.
 
     Driven by a mocked health signal rather than by finding an input that still

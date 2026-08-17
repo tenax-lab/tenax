@@ -5,11 +5,12 @@ solve on the per-step budget rather than the per-run one.  Run eagerly that is
 18.9 ms per sweep and tens of sweeps per solve -- 490.6 ms for one D=2 solve,
 measured -- i.e. the cadence is unaffordable; run as one ``lax.while_loop`` it
 is 0.034 ms per sweep and 2.44 ms per solve, and the binding term becomes the
-one-off compile.  **The whole gate is still missed**: 533-535 ms for a
-100-step run against a 450 ms budget, of which 292 ms is the compile.  See
-``test_re_gauging_every_step_fits_the_simple_update_budget`` at the bottom of
-this file, which records that rather than hiding it.  So the two things worth
-guarding are not "is it fast" but:
+one-off compile.  **The whole gate is still missed** as this file stands:
+533-535 ms for a 100-step run against a 450 ms budget, of which 292 ms is the
+compile.  See ``test_re_gauging_every_step_fits_the_simple_update_budget`` at
+the bottom of this file, which records that rather than hiding it -- and #882
+Task 7b, which closes it by tracing ``gauge_fix`` end to end.  So the two
+things worth guarding here are not "is it fast" but:
 
 * **tracing did not move the answer** -- checked against the eager driver on the
   same input, through a *gauge-invariant* witness (see below);
@@ -39,7 +40,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from _ipeps_gauge_helpers import _dense_pair, _torus_2x2  # tests/ is on sys.path
+from _ipeps_gauge_helpers import (  # tests/ is on sys.path
+    _dense_pair,
+    _torus_2x2,
+    retraced,  # noqa: F401  -- a fixture; pytest reads it off this namespace
+)
 
 import tenax.algorithms.ipeps_bp_gauge as bp
 from tenax.algorithms.ipeps import (
@@ -65,26 +70,6 @@ def _unit(x) -> np.ndarray:
     return a / n if n > 0.0 else a
 
 
-@pytest.fixture
-def retraced():
-    """Make a monkeypatch inside the traced solve actually take effect.
-
-    ``_bp_solve_traced``'s cache key is ``(shape, dtype, treedef, max_iter,
-    tol)`` and does **not** include the module globals its body reads, so a
-    patched ``_sweep_is_healthy`` is honoured only if the entry is retraced --
-    and the entry the patched run leaves behind would poison any later test
-    matching the same key.  Clear on both sides.
-
-    ``clear_cache()`` on the one jitted function, not ``jax.clear_caches()``:
-    the global version also evicts every *eager* op the session has compiled,
-    which costs the next test ~170 ms of re-compilation and, in the timing
-    tests below, would be charged to the thing being measured.
-    """
-    bp._bp_solve_traced.clear_cache()
-    yield
-    bp._bp_solve_traced.clear_cache()
-
-
 def _solve_eager(A, B, w, **kw):
     """The same solve, forced down the Python-loop driver.
 
@@ -98,10 +83,21 @@ def _solve_eager(A, B, w, **kw):
         return bp.bp_gauge_checkerboard(A, B, w, **kw)
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
-@pytest.mark.parametrize("D", [2, 3, 4])
+#: The nine random draws, plus the one input where the two drivers genuinely
+#: differ.  ``_dense_pair``'s flows already match the convention ``_gauge_bond``
+#: stamps, so on all nine the structure restoration is a no-op and the arm of
+#: the code that #882's flow defect lives in is never compared across drivers.
+#: The simple-update-evolved pair -- the one Phase 2 actually hands over -- has
+#: four of its five flows inverted, so it is the only fixture here that
+#: exercises it.  ``"su"`` is spelled as a seed rather than a second test so the
+#: assertions below cover it verbatim.
+_PARITY_FIXTURES = [(D, seed) for D in (2, 3, 4) for seed in (0, 1, 2)]
+_PARITY_FIXTURES.append((2, "su"))
+
+
+@pytest.mark.parametrize("D,seed", _PARITY_FIXTURES)
 def test_the_traced_driver_reproduces_the_eager_one(D, seed):
-    """Same fixed point, same sweep count, same state -- on nine fixtures.
+    """Same fixed point, same sweep count, same state -- on ten fixtures.
 
     The sweep count is asserted **exactly**.  It is the sharpest available
     check on the carry: the health gate, the ``done`` counter and the
@@ -109,7 +105,7 @@ def test_the_traced_driver_reproduces_the_eager_one(D, seed):
     a residual reduced over the wrong axis would change it while leaving a
     perfectly plausible spectrum behind.
     """
-    A, B = _dense_pair(D=D, seed=seed)
+    A, B = _su_evolved_pair(D) if seed == "su" else _dense_pair(D=D, seed=seed)
     w0 = BondWeights.ones(D, D)
     kw = {"max_iter": 400, "tol": 1e-13}
 
@@ -121,13 +117,14 @@ def test_the_traced_driver_reproduces_the_eager_one(D, seed):
         f"D={D} seed={seed}: traced took {info_t.iterations} sweeps, eager "
         f"{info_e.iterations}; the two drivers must follow the same trajectory"
     )
-    # Both stop *below* the tolerance, and on the same order.  Not tighter than
-    # that on purpose: the reported residual is a converged fixed point's
-    # round-off, accumulated over ~40 sweeps down two different fusion paths,
-    # and it is the sweep count above that pins the trajectory.  Measured
-    # spread across these nine fixtures: 7e-3 to 1.3e-2 relative.
+    # Both stop *below* the tolerance, and agree to within a few percent.  Not
+    # tighter than that on purpose: the reported residual is a converged fixed
+    # point's round-off, accumulated over tens of sweeps down two different
+    # fusion paths.  Measured spread across these fixtures: 7e-3 to 1.3e-2
+    # relative, so 0.1 is ~8x headroom.  The sweep count above is what pins the
+    # trajectory; this only catches a residual reduced over the wrong axis.
     assert max(info_t.residual, info_e.residual) < kw["tol"]
-    assert info_t.residual == pytest.approx(info_e.residual, rel=0.5)
+    assert info_t.residual == pytest.approx(info_e.residual, rel=0.1)
 
     for name, a, b in zip(w_t._fields, w_t, w_e, strict=True):
         d = float(np.max(np.abs(np.asarray(a) - np.asarray(b))))
@@ -155,7 +152,9 @@ def test_the_traced_driver_reproduces_the_eager_one(D, seed):
     )
 
 
-def test_the_two_drivers_roll_back_identically(retraced):
+# ``usefixtures``, not an argument: see the note in ``test_ipeps_bp_gauge.py``.
+@pytest.mark.usefixtures("retraced")
+def test_the_two_drivers_roll_back_identically():
     """The rollback is the one path the two drivers implement *differently*.
 
     Eager keeps the previous iterate by never overwriting it; traced computes
@@ -268,25 +267,31 @@ def test_every_solve_in_a_run_hits_one_compiled_entry():
 
     Compile is the binding term in the budget below -- 292 ms against a 450 ms
     budget for all hundred solves -- so a second compilation is not a slowdown,
-    it is a doubling.  The inputs are deliberately *different states* of the
-    same shape, since what is being pinned is that the cache key is the
-    shape/dtype/treedef and not the values.
+    it is a doubling.
 
-    The ``D=3`` probe at the end is not decoration: without it an assertion
-    that the counter did not move would also pass if the counter were dead.
+    The inputs are **independently built pairs**, cycled, not one pair with a
+    scalar wobble on it: a rescaled copy of ``A`` is the same state once
+    ``_rescale`` has had it, and -- more to the point -- it reuses ``A``'s very
+    ``TensorIndex`` *objects*, so it could not distinguish "the cache key is the
+    shape/dtype/treedef" from "the cache key happens to hold those objects".
+    Freshly built pairs carry fresh ``TensorIndex`` instances, and
+    ``__hash__``/``__eq__`` are value-based (``core/index.py``), which is the
+    property being pinned.
+
+    The two probes at the end are not decoration: without them an assertion that
+    the counter did not move would also pass if the counter were dead.  They
+    also pin the two things that *do* split the key, and the second one is a
+    live constraint on Phase 2 rather than a curiosity.
     """
     n_solves, D, _ = _budget()
-    A, B = _su_evolved_pair(D)
+    pairs = [_dense_pair(D=D, seed=k) for k in range(5)]
 
     bp._bp_solve_traced.clear_cache()
     assert bp._bp_solve_traced._cache_size() == 0, "cache not cleared"
 
-    key = jax.random.PRNGKey(0)
     for i in range(n_solves):
-        # A different state each solve, as a real run would hand over.
-        key, sub = jax.random.split(key)
-        Ai = A + A * (1e-3 * jax.random.normal(sub, ()))
-        info = gauge_fix(Ai, B, **_GATE_KW)[3]
+        Ai, Bi = pairs[i % len(pairs)]
+        info = gauge_fix(Ai, Bi, **_GATE_KW)[3]
         assert info.iterations > 0, f"solve {i} did nothing: {info}"
 
     assert bp._bp_solve_traced._cache_size() == 1, (
@@ -295,11 +300,30 @@ def test_every_solve_in_a_run_hits_one_compiled_entry():
         f"compile is paid again and the re-gauging budget is gone"
     )
 
+    # A different bond dimension is a different key -- obvious, and it is what
+    # makes the assertion above non-vacuous.
     A3, B3 = _dense_pair(D=3)
     gauge_fix(A3, B3, **_GATE_KW)
     assert bp._bp_solve_traced._cache_size() == 2, (
         "a different bond dimension did not produce a second entry, so the "
         "assertion above cannot distinguish 'one compile' from 'no counter'"
+    )
+
+    # And so is a different *flow convention* at the same D, which is much less
+    # obvious and is a constraint on the caller.  ``TensorIndex`` is pytree aux
+    # data, so the pair's flows are part of the carry treedef; a
+    # simple-update-evolved pair has its four virtual flows inverted relative to
+    # ``_wrap_as_dense_tensor``, and mixing the two conventions in one run costs
+    # a second 292 ms compile.  A real run hands over one convention throughout
+    # -- which is exactly what ``_restore_caller_structure`` now guarantees, by
+    # handing each caller its own metadata back instead of stamping this
+    # module's onto it.  This assertion is what would notice if that stopped
+    # being true.
+    A_su, B_su = _su_evolved_pair(D)
+    gauge_fix(A_su, B_su, **_GATE_KW)
+    assert bp._bp_solve_traced._cache_size() == 3, (
+        "a pair with inverted virtual flows reused an existing entry; the flows "
+        "are aux data and must be part of the key"
     )
 
 
@@ -339,8 +363,22 @@ def _warm_solve_seconds(A, B, repeats: int = 20) -> float:
     return statistics.median(out)
 
 
+# NOTE: the ``timing`` marker is currently **decorative**.  It is registered in
+# ``pyproject.toml``, and that file's comment says these tests "can be deselected
+# with -m 'not timing'" -- but that string appears nowhere else in the repo.
+# ``.github/workflows/ci.yml`` runs the non-core bucket as
+# ``-m "not core and not slow"``, so both tests below execute on a 2-core GitHub
+# runner in a bucket this project already tracks as chronically red.  Wiring the
+# deselection into the workflow needs a token with the ``workflow`` scope, which
+# this branch does not have.  So the assertion below is written to be
+# *machine-independent* instead of merely generous: it compares the traced solve
+# against the eager one **measured in the same process**, so a runner that is 20x
+# slower slows both arms and the ratio survives.  If you later add
+# ``-m "not timing"`` to ci.yml, delete this note, not the ratio.
+
+
 @pytest.mark.timing
-def test_the_warm_re_gauging_cost_fits_the_budget():
+def test_the_warm_solve_is_orders_faster_than_the_eager_one(record_property):
     """Steady state is inside the budget.  The compile is not -- see below.
 
     Arithmetic, not a constant::
@@ -349,23 +387,38 @@ def test_the_warm_re_gauging_cost_fits_the_budget():
         D        = iPEPSConfig().max_bond_dim             # 2
         budget   = 0.75 s target - 0.30 s un-gauged baseline
 
-    Measured on a quiet 128-core machine (load1 ~7-11), three fresh processes:
+    Measured on a quiet 128-core machine (load1 ~6-11), three fresh processes:
     2.44 ms per warm solve at 26 sweeps, so 100 solves is 244 ms -- 54% of the
-    budget.  Eager, the same solve is 490.6 ms (18.9 ms/sweep), so this is the
-    ~200x that tracing bought and it is the part that is under control.
+    budget -- against 490.6 ms per eager solve (18.9 ms/sweep).  That is the
+    ~200x tracing bought, and it is the part that is under control.
 
-    A generous 2x on top of the measured number, because this asserts a
-    *wall-clock* on whatever machine runs it: what would fail here is a
-    regression that reintroduces per-sweep host work, not a busy afternoon.
+    Asserted as a **ratio against the eager driver in this same process**, not
+    as an absolute millisecond count.  The absolute number is what the budget is
+    written in, but it is also the one thing a CI runner cannot reproduce; the
+    ratio is a property of the code.  20x is a tenth of the measured 200x, so
+    what fails here is a regression that puts per-sweep host work back into the
+    loop, not a busy afternoon.  The absolute numbers are recorded either way.
     """
     n_solves, D, budget_s = _budget()
     A, B = _su_evolved_pair(D)
-    warm_s = _warm_solve_seconds(A, B)
+    w0 = BondWeights.ones(D, D)
 
-    assert n_solves * warm_s < 2.0 * budget_s, (
-        f"{n_solves} warm solves cost {n_solves * warm_s * 1e3:.0f} ms "
-        f"({warm_s * 1e3:.2f} ms each) against a {budget_s * 1e3:.0f} ms "
-        f"budget; the steady state used to be 248 ms"
+    warm_s = _warm_solve_seconds(A, B)
+    t0 = time.perf_counter()
+    r = _solve_eager(A, B, w0, **_GATE_KW)
+    jax.block_until_ready(jax.tree_util.tree_leaves(r))
+    eager_s = time.perf_counter() - t0
+
+    record_property("warm_solve_ms", round(warm_s * 1e3, 3))
+    record_property("eager_solve_ms", round(eager_s * 1e3, 1))
+    record_property("hundred_warm_solves_ms", round(n_solves * warm_s * 1e3))
+    record_property("budget_ms", round(budget_s * 1e3))
+
+    assert eager_s / warm_s > 20.0, (
+        f"the traced solve is only {eager_s / warm_s:.1f}x the eager one "
+        f"({warm_s * 1e3:.2f} ms vs {eager_s * 1e3:.0f} ms); it was ~200x, and "
+        f"{n_solves} warm solves are budgeted at {budget_s * 1e3:.0f} ms "
+        f"(measured 244 ms).  Something is dispatching per sweep again."
     )
 
 
@@ -384,7 +437,7 @@ def test_the_warm_re_gauging_cost_fits_the_budget():
         "design change and the user's call (#882 §2).  See task-7-report.md."
     ),
 )
-def test_re_gauging_every_step_fits_the_simple_update_budget():
+def test_re_gauging_every_step_fits_the_simple_update_budget(record_property):
     """The gate, whole: one compile plus ``num_imaginary_steps`` solves.
 
     Kept as a live measurement rather than deleted or re-pointed at a number
@@ -427,6 +480,21 @@ def test_re_gauging_every_step_fits_the_simple_update_budget():
 
     warm_s = _warm_solve_seconds(A, B)
     total = compile_s + (n_solves - 1) * warm_s
+
+    # Recorded and printed unconditionally.  On XFAIL the number is in the
+    # assertion message, but on XPASS pytest reports the bare word and the good
+    # news would arrive with no evidence for it -- and the whole point of
+    # keeping this test alive is to learn what the number became.
+    record_property("compile_ms", round(compile_s * 1e3, 1))
+    record_property("warm_solve_ms", round(warm_s * 1e3, 3))
+    record_property("total_ms", round(total * 1e3))
+    record_property("budget_ms", round(budget_s * 1e3))
+    print(
+        f"\n[#882 gate] {n_solves} solves at D={D}: {total * 1e3:.0f} ms "
+        f"(compile {compile_s * 1e3:.0f} + {n_solves - 1} x "
+        f"{warm_s * 1e3:.2f} ms) vs {budget_s * 1e3:.0f} ms budget"
+    )
+
     assert total < budget_s, (
         f"re-gauging {n_solves} steps at D={D} costs {total * 1e3:.0f} ms "
         f"(first solve incl. compile {compile_s * 1e3:.0f} ms + "

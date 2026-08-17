@@ -62,6 +62,33 @@
   a scaled `lambda` overflowed exactly as a scaled `Gamma` did; the incoming
   weights are now normalised as well.
 
+  **The dense solve is now a single traced `lax.while_loop`**, ~200× faster
+  warm: 490.6 ms → 2.44 ms for a D=2 simple-update-evolved pair (26 sweeps),
+  i.e. 18.9 ms → 0.034 ms per sweep. The eager loop was ~99.8% host overhead —
+  ~300 eager dispatches per sweep plus label bookkeeping, `TensorIndex`
+  construction and `opt_einsum` lookup — and the 18 host syncs per sweep were a
+  minority of it, so eliminating syncs alone would have been worth ~1.3×, not
+  200×. A `SymmetricTensor` pair still takes the eager loop, which is unchanged
+  and shares the sweep body verbatim; it cannot be traced until
+  `_eigh_symmetric` stops deriving its output charges from eigenvalue
+  magnitudes on the host.
+
+  Two behaviour changes come with it, both on the **dense** path only:
+
+  - **Leg flows are now preserved.** `_gauge_bond` stamps the flow its own SVD
+    produced onto each of the four *virtual* legs (`phys` was never touched),
+    so a pair whose convention was the opposite came back with all four
+    inverted — which is exactly what `_simple_update_checkerboard_sweep`
+    returns. Callers built against the inverted output will see different index
+    metadata. A `SymmetricTensor` pair is deliberately left as it was: there the
+    charges are load-bearing and rewriting them would be #834's silent
+    mis-pairing.
+  - **The dense path is no longer reverse-mode differentiable.**
+    `lax.while_loop` has no reverse rule, and the `where`-select used for the
+    health rollback would leak `NaN` under `grad` even where the primal is
+    clean. It fails loudly, and nothing in `src` differentiates through this;
+    a differentiable gauge would need `scan` with a fixed trip count.
+
 ### Fixed
 
 - **Each checkerboard bond can now carry its own Schmidt spectrum**

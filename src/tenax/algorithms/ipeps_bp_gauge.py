@@ -88,7 +88,7 @@ rather than the run budget.  Run eagerly one sweep costs **18.9 ms**, of which
 almost nothing is arithmetic: the identical arithmetic under ``jit`` is
 **0.034 ms**, so the eager sweep is ~99.8% host overhead.  (Measured on a quiet
 128-core machine at ``JAX_PLATFORMS=cpu``: a D=2 simple-update-evolved pair
-solves in 26 sweeps, 490.6 ms eager against 2.48 ms traced.)  The carrier is
+solves in 26 sweeps, 490.6 ms eager against 2.44 ms traced.)  The carrier is
 ~300 eager dispatches per sweep plus tenax-level Python -- label bookkeeping,
 ``TensorIndex`` construction, ``opt_einsum`` expression lookup.  The host-side
 ``float()``/``bool()`` syncs are a *minority* contributor: there are exactly 18
@@ -97,10 +97,11 @@ per sweep, and removing all of them without a traced loop is worth perhaps
 three at once.
 
 :func:`_bp_solve_traced` is that: one ``lax.while_loop`` over a six-slot carry,
-compiled once per ``(D, dtype, max_iter, tol)`` and reused by every subsequent
-solve.  ``lax.while_loop`` rather than a Python loop over a jitted body is not
-a preference -- 26 sweeps of a jitted *body* still costs 26 dispatches, which
-alone exceeds the per-solve budget.
+compiled once per ``(D, dtype, carry treedef, max_iter, tol)`` and reused by
+every subsequent solve.  ``lax.while_loop`` rather than a Python loop over a
+jitted body is not a preference: at 0.143 ms per dispatch a jitted *body* costs
+3.7 ms for a 26-sweep solve, which is 1.5x the whole traced solve and eats the
+entire warm allowance on its own.
 
 The remaining cost is **compile**, and it is the binding one: 84 ms to trace and
 lower plus 214 ms of XLA, on a 324-equation sweep body, *flat in D* (214/216/224
@@ -419,7 +420,10 @@ def _restore_caller_structure(t: Tensor, like: Tensor) -> Tensor:
     :func:`_gauge_bond` stamps the flow its own SVD produced on every virtual
     leg -- ``IN`` on the left/upper end, ``OUT`` on the right/lower one -- which
     nothing undid: handed a pair using the opposite convention, the solve
-    silently returned every virtual flow inverted.  That is not hypothetical.
+    silently returned all four *virtual* flows inverted.  ``phys`` is not among
+    them; ``_gauge_bond`` never touches it, so it always came back as handed
+    over, which is what made the other four easy to miss.  That is not
+    hypothetical.
     ``_simple_update_checkerboard_sweep``'s own output is such a pair, so the
     caller this module exists for was hitting it, and
     ``test_the_solve_converges_and_hands_back_the_same_tensor_structure``
@@ -666,13 +670,15 @@ def bp_gauge_checkerboard(
     the self-consistent BP messages rather than whatever the last SVD left
     behind.
 
-    A **dense** pair takes the traced driver: input validation, the initial
-    rescale and the weight normalisation stay on the host, the solve itself is
-    one compiled ``lax.while_loop``, and three casts rebuild
-    :class:`BPGaugeInfo` -- so three host syncs for the whole solve, down from
-    18 per sweep.  A ``SymmetricTensor`` pair takes the eager Python loop, which
-    is unchanged; see the module docstring for why it cannot be traced yet.
-    Both share the sweep body verbatim.
+    A **dense** pair takes the traced driver.  Only the input validation stays
+    on the host, because it raises the documented ``ValueError`` and a traced
+    solve cannot; the initial rescale and the weight normalisation run *inside*
+    the jit (:func:`_prepare`), and three casts rebuild :class:`BPGaugeInfo` on
+    the way out.  So **four** host syncs for the whole solve -- one in
+    :func:`_validate_weights` plus those three casts -- down from 18 per sweep.
+    A ``SymmetricTensor`` pair takes the eager Python loop, which is unchanged;
+    see the module docstring for why it cannot be traced yet.  Both share the
+    sweep body verbatim.
 
     .. warning::
         The dense path is **not reverse-mode differentiable** -- see

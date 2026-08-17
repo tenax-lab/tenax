@@ -12,6 +12,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from tenax.algorithms.ipeps import _wrap_as_dense_tensor, heisenberg_u1sz_init_pair
 from tenax.core.index import FlowDirection, TensorIndex
@@ -20,6 +21,33 @@ from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 D = 3
+
+
+@pytest.fixture
+def retraced():
+    """Make a monkeypatch inside the traced BP solve actually take effect.
+
+    ``ipeps_bp_gauge._bp_solve_traced`` is one jitted ``lax.while_loop``, and
+    its cache key is ``(shape, dtype, treedef, max_iter, tol)`` -- it does
+    **not** include the module globals its body reads.  So patching something
+    the body calls (``_sweep_is_healthy``, say) is honoured only if the entry is
+    retraced, and the entry the patched run leaves behind would poison any later
+    test that happens to match the same key.  Clearing on both sides is what
+    makes such a test mean what it says.
+
+    ``clear_cache()`` on the one jitted function, not ``jax.clear_caches()``:
+    the global version also evicts every *eager* op the session has compiled,
+    which costs the next test ~170 ms of re-compilation and, in the timing
+    tests, would be charged to the thing being measured.
+
+    Import it into a test module to use it -- pytest collects fixtures from the
+    module namespace, so ``from _ipeps_gauge_helpers import retraced`` is enough.
+    """
+    from tenax.algorithms.ipeps_bp_gauge import _bp_solve_traced
+
+    _bp_solve_traced.clear_cache()
+    yield
+    _bp_solve_traced.clear_cache()
 
 
 def _dense_pair(D: int = D, seed: int = 0):
