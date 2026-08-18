@@ -54,7 +54,8 @@ _logger = logging.getLogger(__name__)
 
 # ``ctm_ad_mode`` values handled here.  "root_implicit" auto-selects among the
 # *dense* variants from the unit cell; the symmetric variant must be asked for
-# by name so nobody lands on the 8.4 GB GMRES path (#731) by accident.  C4v
+# by name, because it is far and away the most expensive engine here -- 4.78 GB
+# and ~180 s for a single gradient at D=2, chi=4 (8.63 GB before #731).  C4v
 # (Phase 0) is deliberately not exposed -- it exists to validate the
 # characteristic equations, not to run production.
 ROOT_IMPLICIT_MODES = ("root_implicit", "root_implicit_symmetric")
@@ -255,11 +256,14 @@ def optimize_gs_ad_root_implicit(
         )
     if variant == "symmetric":
         raise NotImplementedError(
-            "ctm_ad_mode='root_implicit_symmetric' is not wired yet: the "
-            "symmetric adjoint peaks at 8.4 GB in the GMRES solve (#731), "
-            "which needs resolving before it can be driven from an optimizer "
-            "loop. The engine itself (sym_root_implicit_energy_and_grad) is "
-            "built and tested."
+            "ctm_ad_mode='root_implicit_symmetric' is not wired yet. The "
+            "engine itself (sym_root_implicit_energy_and_grad) is built and "
+            "tested, and #731 -- the 8.4 GB peak in the GMRES solve that used "
+            "to be the blocker -- is fixed: the adjoint now peaks at 4.78 GB "
+            "at D=2, chi=4. What is left is the entry-point contract (it "
+            "always returns three values, its gradient is a SymmetricTensor "
+            "rather than an array, and nothing in this module can build a "
+            "symmetric initial state)."
         )
 
     _warn_implicit_ad_variational_caveat(config, path="1-site dense root-implicit")
