@@ -532,6 +532,16 @@ def test_the_saturation_probe_leaves_the_shared_cache_as_it_found_it():
     (measured ``0``, against ``1`` apiece for ``jnp.ones`` and ``jnp.asarray``),
     so the net footprint is zero.  Asserted over repeat calls because a
     one-shot check would pass on a helper that inserts once and reuses.
+
+    **The invariant is "never grows", not "never changes".**  On an already-full
+    cache the probe is a guaranteed-fresh key, so inserting it *evicts* a live
+    entry, and collecting the probe's own wrapper afterwards leaves the cache
+    one below capacity -- measured ``2 -> 1`` at capacity 2, with the helper
+    correctly reporting ``True``.  An equality assertion fails there on correct
+    code, in precisely the regime this helper exists to detect, so equality is
+    asserted only where it holds: when the cache was not saturated to begin
+    with, which is the case where an insertion would be the thing that pushed
+    it over.
     """
     from jax._src import pjit as _pjit
 
@@ -543,15 +553,22 @@ def test_the_saturation_probe_leaves_the_shared_cache_as_it_found_it():
 
     for call in range(3):
         before = [c.size() for c in caches]
-        _shared_pjit_cache_is_full()
+        saturated = _shared_pjit_cache_is_full()
         gc.collect()
         after = [c.size() for c in caches]
-        assert after == before, (
-            f"call {call} left the shared pjit caches at {after}, not {before}: "
+
+        assert all(a <= b for a, b in zip(after, before)), (
+            f"call {call} grew the shared pjit caches from {before} to {after}: "
             f"the saturation probe is filling the cache it exists to measure, "
             f"which can push a nearly-full cache over and freeze the counter "
             f"the guards below read"
         )
+        if not saturated:
+            assert after == before, (
+                f"call {call} changed the shared pjit caches from {before} to "
+                f"{after} on a cache that was not saturated, so nothing forced "
+                f"an eviction: the helper is not leaving the cache as it found it"
+            )
 
 
 #: The two compiled boundaries around the one solve, each with the call that
