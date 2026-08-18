@@ -30,6 +30,19 @@ four ways and no one reading sees more than one of them:
   ``test_su_step_output_can_still_be_gauged`` for why its former state-equality
   half was removed rather than kept as decoration.
 
+**Every bond reading below is taken in the Vidal metric** -- the pair with one
+more ``sqrt(lambda)`` on the legs *outside* the bond, which is what
+:func:`_vidal_pair` builds and what ``_su_step`` truncates in.  That is Task
+10's reopening (``task-10-reopen-report.md``) and it is not a refactor: the
+split and truncation guards used to read in *absorbed* form, where the
+environment of the two-site tensor is not the identity, and in that metric they
+were true of a step that truncates the wrong tensor and false of one that does
+not.  They passed through four review rounds while ``_su_evolve`` scored 0 of 9
+on energy.  A guard whose reference is re-derived in the same wrong metric as
+the code cannot see a wrong metric; the one that could,
+``test_su_step_truncates_in_the_state_s_own_basis``, compares against
+Eckart-Young rather than against anything ``_su_step`` computed.
+
 The first three are mutually blind, and for the first two that is arithmetic
 rather than a gap in the probes.  A diagonal weight factors arbitrarily between
 the two legs it joins without changing the contracted value, so ``sqrt(s)`` at
@@ -45,6 +58,7 @@ from __future__ import annotations
 
 import dataclasses
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -69,6 +83,7 @@ from tenax.algorithms.ipeps_simple_update import (
 from tenax.algorithms.ipeps_su import (
     _BOND_ENDS,
     _align_gate_to_ket,
+    _sqrt_and_inv_sqrt,
     _su_evolve,
     _su_step,
     _SUState,
@@ -264,15 +279,93 @@ def _torus_rel(x, y):
     return float(np.linalg.norm(_unit(x) - _unit(y)))
 
 
+#: ``(site, leg) -> bond``, both ends of all four bonds, derived here from
+#: ``_BOND_ENDS`` rather than imported from ``ipeps_su._BOND_OF_LEG``.  The
+#: implementation derives its own copy the same way, and keeping this one
+#: separate is what makes a hand-edited map in the module visible from here.
+_BOND_OF_LEG = {
+    (site, leg): bond for bond, ends in _BOND_ENDS.items() for site, leg in ends
+}
+
+
+def _vidal_pair(state, bond, weights):
+    """``bond``'s two sites with one more ``sqrt(lambda)`` on their outer legs.
+
+    **Every bond reading in this file goes through here, and that is the
+    correction Task 10's reopening carries.**  ``gauge_fix`` returns the pair in
+    *absorbed* form -- each bond weight split ``sqrt(lambda)`` into both of its
+    ends -- so a two-site tensor built straight from it carries only
+    ``lambda**1`` across the ket-bra pair on each outer leg.  The Vidal
+    canonical condition wants ``lambda**2`` there, so in absorbed form the
+    environment of the two-site tensor is **not** the identity: its singular
+    values are not the state's Schmidt values, its singular vectors are not
+    Schmidt vectors, and a bond spectrum read in that metric is a spectrum of
+    the wrong operator.
+
+    ``_su_step`` truncates in this metric (its stages 2 and 5), so the guards
+    that check *what it kept* have to read in it too.  They did not, and the
+    absorbed-metric readings they used were true only of the pre-fix step,
+    which is the same thing as saying they were calibrated against the defect.
+    Measured on the ``dt=2.0`` truncation cells, correct step, both metrics:
+
+    ==============================  ===================  =================
+    reading                         absorbed metric      Vidal metric
+    ==============================  ===================  =================
+    end Gram off-diagonal *        2.1e-01 to 9.7e-01   <= 2.7e-15
+    ``|G_i - G_j|`` (the split)     4.1e-01 to 1.5e+00   <= 1.4e-14
+    ``diag(G)`` against ``sigma``   1.9e-01 to 6.4e-01   <= 7.1e-15
+    kept against top-``D``          3.8e-03 to 5.4e-02   <= 1.4e-15
+    ``cos`` against ``sqrt(1-d)``   5.8e-04 to 6.6e-03   <= 1.0e-15
+    ==============================  ===================  =================
+
+    (``*`` = the four **dense** cells; the symmetric one reads exactly 0 in both
+    metrics, structurally, and the split guard says why.)
+
+    Every one of those five sits at machine precision in the Vidal metric and
+    between 3.8e-03 and 1.5e+00 in the absorbed one -- twelve orders of
+    magnitude apart and more -- on a step whose truncation is independently
+    certified optimal by ``test_su_step_truncates_in_the_state_s_own_basis``.
+    So the metric was the error, not the step.
+
+    ``weights`` must be the ``BondWeights`` ``gauge_fix`` returns for the
+    **input** pair -- the same ones the step used.  They describe the *state*,
+    not the step, and a step cannot make them agree with it by being wrong:
+    the untouched outer legs are what they are.
+
+    Args:
+        state:   An ``_SUState``, or any ``{"A": ..., "B": ...}`` mapping.
+        bond:    Which bond's two sites to take.
+        weights: ``gauge_fix``'s spectrum for the pair these legs came from.
+
+    Returns:
+        ``{"A": ..., "B": ...}`` with the six outer legs weighted.  The bond's
+        own two legs are untouched -- weighting those would be #667.
+    """
+    (site_i, leg_i), (site_j, leg_j) = _BOND_ENDS[bond]
+    pair = dict(state) if isinstance(state, dict) else {"A": state.A, "B": state.B}
+    for site, on_bond in ((site_i, leg_i), (site_j, leg_j)):
+        for leg in ("u", "d", "l", "r"):
+            if leg == on_bond:
+                continue
+            lam = jnp.asarray(np.asarray(getattr(weights, _BOND_OF_LEG[(site, leg)])))
+            pair[site] = scale_bond_axis(pair[site], leg, jnp.sqrt(lam))
+    return pair
+
+
 def _gram(t, leg):
     """``<t|t>`` traced over every leg but ``leg``, as a dense ``(leg, leg)`` matrix.
 
-    This is the split guard's whole content.  Write the step's two outputs as
+    This is the split guard's whole content, and it is only a statement about
+    the split when ``t`` is an end **in the Vidal metric** -- i.e. what
+    :func:`_vidal_pair` returns.  There the step's two outputs are
     ``F_j = U sqrt(sigma)`` and ``F_i = sqrt(sigma) Vh`` with ``U`` and ``Vh``
-    the SVD's isometries; then ``F_j^dag F_j`` and ``F_i F_i^dag`` are both
+    the SVD's isometries, so ``F_j^dag F_j`` and ``F_i F_i^dag`` are both
     ``diag(sigma)`` -- the *same* matrix at both ends, diagonal, and equal to
     the bond's spectrum.  Put the whole weight on one end and they become
-    ``diag(sigma**2)`` and the identity.
+    ``diag(sigma**2)`` and the identity.  Read the same ends in absorbed form
+    and ``U^dag Lambda^-1 U`` sits between them, which is neither diagonal nor
+    equal at the two ends however the split was made; see :func:`_vidal_pair`
+    for that measurement.
 
     Unlike an element-wise comparison of the tensors, this is invariant under
     the sign and basis freedom the SVD and BP's ``eigh`` each carry, which is
@@ -314,8 +407,8 @@ def _theta_labels(bond):
     return (site_i, ren_i), (site_j, ren_j), left, right
 
 
-def _two_site_tensor(state, bond):
-    """The two sites sharing ``bond``, contracted across it.
+def _two_site_tensor(state, bond, weights):
+    """The two sites sharing ``bond``, contracted across it, in the Vidal metric.
 
     This is the ``theta`` an ``_su_step`` on ``bond`` produced: ``F_j F_i``,
     which is ``U sqrt(sigma) sqrt(sigma) Vh = U diag(sigma) Vh`` however the
@@ -323,20 +416,26 @@ def _two_site_tensor(state, bond):
     the *same* input at the same ``dt`` give tensors on identical outer legs --
     the internal ``gauge_fix`` is deterministic and the truncation touches only
     the bond -- so they are directly comparable, element for element.
+
+    ``weights`` is not optional and there is no absorbed-metric route to this:
+    see :func:`_vidal_pair`.  A reading of this tensor without them is a
+    reading of a different operator, and it is the one that let the truncation
+    defect through four review rounds.
     """
     (site_i, ren_i), (site_j, ren_j), _left, _right = _theta_labels(bond)
-    pair = {"A": state.A, "B": state.B}
+    pair = _vidal_pair(state, bond, weights)
     return contract(pair[site_j].relabels(ren_j), pair[site_i].relabels(ren_i))
 
 
-def _bond_spectrum(state, bond, max_D, base_charges=None):
+def _bond_spectrum(state, bond, max_D, weights, base_charges=None):
     """The Schmidt spectrum of ``state`` across ``bond``, independent of the split.
 
-    Reassembles the two-site tensor and takes its singular values.  Because
-    ``F_j F_i`` is the same object however the ``sqrt`` was shared out between
-    the two factors, this number is the same for a correct split, a one-sided
-    one, and anything in between -- which is exactly what makes it a valid
-    reference for the split check rather than a restatement of it.
+    Reassembles the two-site tensor in the Vidal metric (:func:`_vidal_pair`)
+    and takes its singular values.  Because ``F_j F_i`` is the same object
+    however the ``sqrt`` was shared out between the two factors, this number is
+    the same for a correct split, a one-sided one, and anything in between --
+    which is exactly what makes it a valid reference for the split check rather
+    than a restatement of it.
 
     ``base_charges`` is exposed so a test can build the **pinned** truncation of
     the same ``theta`` and show that this configuration can tell the two apart
@@ -344,7 +443,7 @@ def _bond_spectrum(state, bond, max_D, base_charges=None):
     """
     _ends_i, _ends_j, left, right = _theta_labels(bond)
     _U, sigma, _Vh, _full = truncated_svd(
-        _two_site_tensor(state, bond),
+        _two_site_tensor(state, bond, weights),
         left_labels=left,
         right_labels=right,
         new_bond_label="__reference_bond",
@@ -354,7 +453,7 @@ def _bond_spectrum(state, bond, max_D, base_charges=None):
     return np.asarray(sigma)
 
 
-def _theta_cosine(state_a, state_b, bond):
+def _theta_cosine(state_a, state_b, bond, weights):
     """``<theta_a, theta_b> / (||theta_a|| ||theta_b||)`` across ``bond``.
 
     The **subspace** reading, and the only one in this file that is not blind to
@@ -372,9 +471,15 @@ def _theta_cosine(state_a, state_b, bond):
 
     ``bar()`` supplies the conjugate with flows flipped, so every leg pairs; the
     contraction is closed and the result is a scalar.
+
+    In the **Vidal** metric, like every other bond reading here: the projector
+    ``P`` is orthogonal only there.  Measured on the same correct step, the
+    absorbed-metric reading of this quantity misses ``sqrt(1 - dropped)`` by
+    5.8e-04 to 6.6e-03 against a guard at 1e-11, so reading it in the wrong
+    metric does not merely blunt the check -- it fails on correct code.
     """
-    ta = _two_site_tensor(state_a, bond)
-    tb = _two_site_tensor(state_b, bond)
+    ta = _two_site_tensor(state_a, bond, weights)
+    tb = _two_site_tensor(state_b, bond, weights)
     num = float(
         np.asarray(contract(ta, tb.bar(), output_labels=[]).todense()).reshape(())
     )
@@ -441,12 +546,34 @@ def su():
     """
     pairs: dict[str, tuple] = {}
     steps: dict[tuple, object] = {}
+    gauges: dict[str, object] = {}
 
     class _Cache:
         def pair(self, kind):
             if kind not in pairs:
                 pairs[kind] = _PAIRS[kind](D=D)
             return pairs[kind]
+
+        def weights(self, kind):
+            """``gauge_fix``'s spectrum for this kind's **input** pair.
+
+            The metric every bond reading below is taken in
+            (:func:`_vidal_pair`).  Memoised because a symmetric solve is 38 s
+            and five cells want it; convergence is asserted here rather than in
+            each of them, since a spectrum from a failed solve is not the
+            state's and nothing downstream could tell.
+            """
+            if kind not in gauges:
+                A, B = self.pair(kind)
+                _A, _B, w, info = gauge_fix(A, B)
+                assert info.converged, (
+                    f"{kind}: BP did not converge on the input pair "
+                    f"({info.iterations} sweeps, residual {info.residual:.3e}), "
+                    f"so the metric every bond reading below is taken in is not "
+                    f"the state's"
+                )
+                gauges[kind] = w
+            return gauges[kind]
 
         def step(self, kind, bond, max_D=D, dt=0.05):
             key = (kind, bond, max_D, dt)
@@ -568,16 +695,29 @@ def test_su_step_splits_sqrt_sigma_into_both_ends(kind, bond, su):
     *reassembled* two-site tensor and therefore independently of how the split
     was made.
 
+    **Both readings are taken in the Vidal metric, and that is the correction
+    Task 10's reopening carries here.** ``_su_step``'s SVD is of the two-site
+    tensor with the other three bonds' weights on the six outer legs, so its
+    isometries are isometries *there*; in absorbed form ``U^dag Lambda^-1 U``
+    sits between the two ends and neither the diagonality nor the equality
+    holds however the split was made.  Measured on a correct step, this cell's
+    three assertions read 2.1e-01 to 9.7e-01, 4.1e-01 to 1.5e+00 and 1.9e-01 to
+    6.4e-01 in the absorbed metric against 1e-11 gates, and <= 1.4e-14 in the
+    Vidal one.  The absorbed reading was true only of the pre-fix step, which
+    truncated in that metric -- so it was a guard calibrated against the defect,
+    and it went on passing while ``_su_evolve`` scored 0 of 9 on energy.
+
     The spectrum is checked to be spread before it is used, because a flat
     ``sigma`` at 1 satisfies ``diag(sigma) == diag(sigma**2)`` and the guard
     would then have no teeth on the very mutation it exists for.
     """
     stepped = su.step(kind, bond)
     (site_i, leg_i), (site_j, leg_j) = _BOND_ENDS[bond]
-    pair = {"A": stepped.A, "B": stepped.B}
+    weights = su.weights(kind)
+    pair = _vidal_pair(stepped, bond, weights)
     G_i = _gram(pair[site_i], leg_i)
     G_j = _gram(pair[site_j], leg_j)
-    sigma = _bond_spectrum(stepped, bond, D)
+    sigma = _bond_spectrum(stepped, bond, D, weights)
 
     spread = float(np.max(sigma) / np.min(sigma))
     assert spread > 1.1, (
@@ -587,10 +727,19 @@ def test_su_step_splits_sqrt_sigma_into_both_ends(kind, bond, su):
 
     for name, G in (("i", G_i), ("j", G_j)):
         off = float(np.max(np.abs(G - np.diag(np.diag(G)))))
+        # This one has teeth on the **dense** cells only, and the asymmetry is
+        # structural rather than a sampling accident: at D=3 the symmetric
+        # pair's bond carries charges (0, 1, -1), one basis vector per sector,
+        # so a charge-conserving Gram is 1x1-block diagonal by construction and
+        # reads exactly 0.000e+00 whatever the step did.  On dense it reads
+        # 9.7e-01 in the wrong metric and 9.2e-16 in the right one.  Kept
+        # because the four dense cells are where it can fail, and named here so
+        # nobody reads the symmetric zeros as evidence.
         assert off < 1e-11, (
             f"{kind} {bond}: end {name}'s bond Gram matrix is not diagonal "
             f"(max off-diagonal {off:.3e}) -- the SVD factor is not an "
-            f"isometry, so what sits on the bond is not a spectrum"
+            f"isometry in the metric it was taken in, so what sits on the bond "
+            f"is not a spectrum"
         )
     gap = float(np.max(np.abs(G_i - G_j)))
     assert gap < 1e-11, (
@@ -711,33 +860,50 @@ def test_the_bond_guards_see_different_mutations(su):
       bond carries ``sigma**2``.  The two ends still agree, so the Gram reading
       is blind to it; only the state guard sees it.
 
+    **The two readings live in different metrics and that is not incidental.**
+    The torus is a closed contraction of the pair as it stands, so it must be
+    taken on the raw absorbed pair; the Gram is a statement about the SVD's
+    isometries, which are isometries in the *Vidal* metric only, so it is taken
+    on :func:`_vidal_pair`'s reweighting of the same pair.  Mixing them is not a
+    style question: the split reading of the unmutated step scores 5.3e-01 in
+    the absorbed metric, so the ``baseline_split`` premise below fails outright
+    and no contrast can be measured at all.  The mutants themselves are built on
+    the **raw** pair, so ``one_sided`` stays the gauge transformation it claims
+    to be under the torus.
+
     Measured here (``dense``, ``h_AB``, ``D=3``, ``dt=0.05``; both guards gate
     at 1e-11):
 
     ============  =================  ==================
     mutation      state (torus)      split (|Gi - Gj|)
     ============  =================  ==================
-    correct step  8.8e-15            4.9e-15
-    one_sided     2.6e-16  *blind*   1.1e+01  fires
-    squared       1.7e-01  fires     2.0e-14  *blind*
+    correct step  8.5e-15            2.2e-15
+    one_sided     3.6e-16  *blind*   3.4e+00  fires
+    squared       2.3e-01  fires     3.6e-15  *blind*
     ============  =================  ==================
+
+    (The ``correct step`` state figure is
+    ``test_su_step_applies_the_gate_across_the_bond``'s reading at full rank,
+    which is the only place a *state* has a reference to be right against; the
+    two mutant rows are distances from the unmutated step.)
     """
     bond = "h_AB"
     stepped = su.step("dense", bond)
     (site_i, leg_i), (site_j, leg_j) = _BOND_ENDS[bond]
-    pair = {"A": stepped.A, "B": stepped.B}
-    root = jnp.asarray(np.sqrt(_bond_spectrum(stepped, bond, D)))
+    weights = su.weights("dense")
+    raw = {"A": stepped.A, "B": stepped.B}
+    root = jnp.asarray(np.sqrt(_bond_spectrum(stepped, bond, D, weights)))
 
     mutants = {
         # all of sigma on end j and none on end i: a re-split, not a new state
         "one_sided": {
-            site_j: scale_bond_axis(pair[site_j], leg_j, root),
-            site_i: scale_bond_axis(pair[site_i], leg_i, 1.0 / root),
+            site_j: scale_bond_axis(raw[site_j], leg_j, root),
+            site_i: scale_bond_axis(raw[site_i], leg_i, 1.0 / root),
         },
         # sigma on each end instead of sqrt(sigma): the bond carries sigma**2
         "squared": {
-            site_j: scale_bond_axis(pair[site_j], leg_j, root),
-            site_i: scale_bond_axis(pair[site_i], leg_i, root),
+            site_j: scale_bond_axis(raw[site_j], leg_j, root),
+            site_i: scale_bond_axis(raw[site_i], leg_i, root),
         },
     }
 
@@ -745,14 +911,14 @@ def test_the_bond_guards_see_different_mutations(su):
     # so the test's premise is pinned rather than assumed.  ``assert_leg_split``
     # is the tool Phase 1 built for exactly this comparison: element-wise,
     # against a bond map written out independently.
-    site = pair[site_j]
+    site = raw[site_j]
     scale = {
         lg: np.ones(site.indices[site.labels().index(lg)].dim)
         for lg in ("u", "d", "l", "r")
     }
     scale[leg_j] = np.asarray(root)
     assert_leg_split(
-        site_j, pair[site_j], mutants["one_sided"][site_j], scale, 1e-12, msg="mutant "
+        site_j, raw[site_j], mutants["one_sided"][site_j], scale, 1e-12, msg="mutant "
     )
 
     ref = torus_2x2_sign_free(stepped.A, stepped.B, _ones_for(stepped.A))
@@ -760,8 +926,9 @@ def test_the_bond_guards_see_different_mutations(su):
     # restates the split guard's first assertion on purpose: the two mutants
     # are derived from *this* pair, so if it were already split-asymmetric the
     # "one_sided fires / squared is blind" contrast would mean nothing.
+    gauged = _vidal_pair(raw, bond, weights)
     baseline_split = float(
-        np.max(np.abs(_gram(pair[site_i], leg_i) - _gram(pair[site_j], leg_j)))
+        np.max(np.abs(_gram(gauged[site_i], leg_i) - _gram(gauged[site_j], leg_j)))
     )
     assert baseline_split < 1e-11, (
         f"the unmutated step this test mutates is already split-asymmetric "
@@ -771,9 +938,10 @@ def test_the_bond_guards_see_different_mutations(su):
     seen = {}
     for name, m in mutants.items():
         got = torus_2x2_sign_free(m["A"], m["B"], _ones_for(m["A"]))
+        mv = _vidal_pair(m, bond, weights)
         seen[name] = (
             _torus_rel(got, ref),
-            float(np.max(np.abs(_gram(m[site_i], leg_i) - _gram(m[site_j], leg_j)))),
+            float(np.max(np.abs(_gram(mv[site_i], leg_i) - _gram(mv[site_j], leg_j)))),
         )
 
     state_gap, split_gap = seen["one_sided"]
@@ -824,6 +992,15 @@ def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
     internal ``gauge_fix`` is deterministic).  Then "kept == top ``max_D``" is
     an assertion about the truncation and not a restatement of it.
 
+    **Both spectra are read in the Vidal metric** (:func:`_vidal_pair`), which
+    Task 10's reopening corrected.  "The largest ``max_D``" is only a
+    well-posed statement once the metric is named: measured on a correct step,
+    reading the same two spectra in absorbed form puts the kept set 3.8e-03 to
+    5.4e-02 from the top ``D`` against a 1e-11 gate, and the subspace cosine
+    5.8e-04 to 6.6e-03 from ``sqrt(1 - dropped)``.  The absorbed-metric reading
+    was true only of the pre-fix step, which truncated in that metric, and it
+    passed throughout the four review rounds that shipped the defect.
+
     This is also the only executable coverage of ``base_charges=None``, brief
     constraint #3 and one of the four bugs the rewrite exists to delete (#865).
     Pinning the new bond's per-sector keep counts to the old bond's layout
@@ -833,12 +1010,13 @@ def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
     **only** at a ``dt`` where truncation bites -- see ``_TRUNCATION_DT``.
     """
     A, B = su.pair(kind)
+    weights = su.weights(kind)
     full = su.step(kind, bond, max_D=_FULL_RANK, dt=_TRUNCATION_DT)
     kept = su.step(kind, bond, max_D=D, dt=_TRUNCATION_DT)
     (site_i, leg_i), (site_j, leg_j) = _BOND_ENDS[bond]
 
-    sigma_full = np.sort(_bond_spectrum(full, bond, _FULL_RANK))[::-1]
-    sigma_kept = np.sort(_bond_spectrum(kept, bond, D))[::-1]
+    sigma_full = np.sort(_bond_spectrum(full, bond, _FULL_RANK, weights))[::-1]
+    sigma_kept = np.sort(_bond_spectrum(kept, bond, D, weights))[::-1]
     dropped = 1.0 - float(np.sum(sigma_kept**2) / np.sum(sigma_full**2))
 
     # --- the two meta-assertions: this cell can see both failure modes -------
@@ -858,7 +1036,9 @@ def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
         # leg charges pin exactly as the gauged pair's permutation of them do.
         src = {"A": A, "B": B}[site_i]
         pin = np.asarray(src.indices[src.labels().index(leg_i)].charges)
-        sigma_pinned = np.sort(_bond_spectrum(full, bond, D, base_charges=pin))[::-1]
+        sigma_pinned = np.sort(
+            _bond_spectrum(full, bond, D, weights, base_charges=pin)
+        )[::-1]
         sep = float(np.max(np.abs(sigma_pinned - sigma_kept)) / sigma_full[0])
         assert sep > 1e-3, (
             f"{kind} {bond}: pinning base_charges to {list(pin)} keeps the "
@@ -910,7 +1090,7 @@ def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
     # The middle row passes every other test in this file (28 dense cells)
     # while returning a state ORTHOGONAL to the correct one: cos = -0.000000
     # where a projection onto the top-3 subspace must give 0.853179.
-    cos = _theta_cosine(kept, full, bond)
+    cos = _theta_cosine(kept, full, bond, weights)
     expected = float(np.sqrt(1.0 - dropped))
     gap = abs(cos - expected)
     assert gap < 1e-11, (
@@ -919,6 +1099,110 @@ def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
         f"sqrt(1 - dropped) = {expected:.6f} (gap {gap:.3e}).  The kept "
         f"singular values are attached to the wrong singular vectors: the "
         f"spectrum is right and the retained subspace is not."
+    )
+
+
+def test_su_step_survives_a_bond_direction_the_state_does_not_use():
+    """A zero bond weight round-trips through the outer-leg reweighting.
+
+    ``_su_step`` multiplies six outer legs by ``sqrt(lambda)`` and divides the
+    same six back out, and **the division is the dangerous half**: a true
+    ``1/sqrt(lambda)`` is ``+inf`` at ``lambda == 0`` and the dead slice it
+    multiplies is exactly ``0``, so the product is ``nan`` and the whole tensor
+    goes with it.  That is #789's shape and the reason
+    ``absorb_sqrt_singular_values`` carries a guard;
+    :func:`~tenax.algorithms.ipeps_su._sqrt_and_inv_sqrt` is the same guard for
+    the inverse.
+
+    **Reachable, not hypothetical.**  A pair whose third virtual direction is
+    scaled to exactly zero on all four legs of both sites gives a BP fixed point
+    with an exact zero in every one of the four spectra -- measured
+    ``h_AB = [1, 0.7766, 0]``, ``h_BA = [1, 0.4146, 0]``,
+    ``v_AB = [1, 0.6708, 0]``, ``v_BA = [1, 0.9177, 0]``, from a solve that
+    converged at residual 7.5e-07.  The meta-assertion below refuses to conclude
+    anything if that stops being true, because on a well-conditioned spectrum
+    this test cannot fail.
+
+    The naive route is computed here as the control, and it reads ``inf`` on the
+    same four vectors.  The output is then checked to be the *gated state* and
+    not merely finite: a guard that only asked for ``isfinite`` would pass on an
+    implementation that dropped the dead direction and returned zeros.
+    """
+    A, B = _PAIRS["dense"](D=D)
+    dead = jnp.asarray([1.0] * (D - 1) + [0.0])
+    for leg in ("u", "d", "l", "r"):
+        A, B = scale_bond_axis(A, leg, dead), scale_bond_axis(B, leg, dead)
+
+    _A_g, _B_g, w, info = gauge_fix(A, B)
+    assert info.converged, (
+        f"BP did not converge on the starved pair ({info.iterations} sweeps, "
+        f"residual {info.residual:.3e}), so the spectrum below is not a fixed "
+        f"point and the zero this test needs is not certified"
+    )
+    zeros = {f: int(np.sum(np.asarray(getattr(w, f)) == 0.0)) for f in w._fields}
+    assert all(n > 0 for n in zeros.values()), (
+        f"no bond spectrum has an exact zero ({zeros}); this pair does not "
+        f"reach the division guard at all and the assertions below are vacuous"
+    )
+    with np.errstate(divide="ignore"):  # the point of the control is the inf
+        naive = {
+            f: float(np.max(1.0 / np.sqrt(np.asarray(getattr(w, f))))) for f in zeros
+        }
+    assert all(not np.isfinite(v) for v in naive.values()), (
+        f"the unguarded 1/sqrt(lambda) is finite on this spectrum ({naive}), so "
+        f"there is nothing here for the guard to be protecting against"
+    )
+
+    # The *backward* half of the same claim.  Nothing differentiates through
+    # ``_su_step`` yet -- ``gauge_fix`` is a traced ``while_loop`` and reverse
+    # mode does not go through one -- so the unit that carries the guard is
+    # asserted directly rather than left as prose in its docstring.  The naive
+    # route is the control and reads ``nan`` on the same input.
+    lam = jnp.asarray([1.0, 0.5, 0.0])
+
+    def _both(x):
+        root, inv_root = _sqrt_and_inv_sqrt(x)
+        return jnp.sum(root) + jnp.sum(inv_root)
+
+    guarded = np.asarray(jax.grad(_both)(lam))
+    naive_grad = np.asarray(
+        jax.grad(lambda x: jnp.sum(jnp.sqrt(x) + 1 / jnp.sqrt(x)))(lam)
+    )
+    assert not np.all(np.isfinite(naive_grad)), (
+        f"the unguarded sqrt/inverse-sqrt has a finite VJP at lambda=0 "
+        f"({naive_grad}), so the guard below is not protecting against anything"
+    )
+    assert np.all(np.isfinite(guarded)), (
+        f"_sqrt_and_inv_sqrt's VJP at lambda=0 is {guarded} -- the double-where "
+        f"is not masking the adjoint, which is #789's inf-VJP shape"
+    )
+
+    gate = _gate(A)
+    stepped = _su_step(_SUState.from_pair(A, B), gate, max_D=_FULL_RANK, bond="h_AB")
+    for name, t in (("A", stepped.A), ("B", stepped.B)):
+        arr = np.asarray(t.todense())
+        assert np.all(np.isfinite(arr)), (
+            f"{name} came back with "
+            f"{int(np.sum(~np.isfinite(arr)))} non-finite entries -- the "
+            f"1/sqrt(lambda) on the outer legs hit a dead bond direction"
+        )
+
+    T_before = np.asarray(torus_2x2_sign_free(A, B, _ones_for(A)).todense())
+    T_expected = _apply_gate_to_torus(
+        T_before, np.asarray(gate.todense()), _TORUS_GATE_AXES["h_AB"]
+    )
+    control = _torus_rel(T_before, T_expected)
+    assert control > 1e-3, (
+        f"the gate moves the starved state by only {control:.3e}, so the "
+        f"assertion below could not tell a working step from a no-op"
+    )
+    rel = _torus_rel(
+        torus_2x2_sign_free(stepped.A, stepped.B, _ones_for(stepped.A)), T_expected
+    )
+    assert rel < 1e-11, (
+        f"the untruncated step on a starved pair is {rel:.3e} from the gated "
+        f"state (a no-op would score {control:.3e}) -- the dead direction was "
+        f"not returned to where it started by the divide-back-out"
     )
 
 
@@ -1469,28 +1753,47 @@ def test_su_evolve_names_the_step_that_broke_bond_uniformity(su, monkeypatch):
 # still converge to the wrong fixed point, which is what #667, #851, #865 and
 # #869 each were.
 #
-# **This section is red, and it is the finding rather than a defect in the
-# tests.**  Measured below and reported in ``task-12-report.md``: ``_su_evolve``
-# reaches the Heisenberg energy on **0 of 9** (seed, D) cells.  At D=2 it lands
-# on -0.5406 / exactly 0.0 / exactly -0.500000 for seeds 0, 1, 2 against a
-# reference of -0.6593; at D=3 and D=4 it lands on the product state outright.
-# The mechanism is localised by
+# **This section was red on 0 of 9 and is now green on 5 of 9, and the four
+# that stay red are the finding rather than a defect in the tests.**  Task 12
+# measured ``_su_evolve`` on the product state at every cell; Task 10's
+# reopening put the truncation into the state's own basis
+# (``ipeps_su._su_step`` stages 2 and 5) and re-ran the same grid.  Nothing else
+# changed and no threshold moved.  Measured, ``JAX_PLATFORMS=cpu``, dt=0.05,
+# energies at 400/800/1200/2000 steps:
+#
+#   D=2, all three seeds   -0.658880 at every step count       PASS  (was
+#                                                              -0.5406 / 0.0 /
+#                                                              -0.500000)
+#   D=3 seeds 1, 2         -0.662838 -> -0.662839, pinned      PASS
+#   D=3 seed 0             -0.651785 -> -0.607822, decaying    FAIL, and BP
+#                          fails on 1782 of 2000 steps
+#   D=4, all three seeds   -0.500000 from 800 steps on         FAIL, with BP
+#                          converging on every step
+#
+# **The two residues are out of scope and must stay visible.**  Neither is
+# explained, both are reproduced exactly from ``task-12-report.md``'s prototype
+# numbers, and a change that turned either green without an explanation would
+# be far likelier to be a new bug than a fix -- this project has shipped that
+# mistake before (#869: one step count reporting either verdict from the same
+# code).  Do not tune ``steps``, ``dt`` or ``chi`` to close them.
+#
+# The mechanism the fix addressed is localised by
 # ``test_su_step_truncates_in_the_state_s_own_basis`` below, which is the
-# cheapest of the four red cells: ``_su_step`` truncates the SVD of the
-# **absorbed** two-site tensor, whose environment is not the identity, rather
-# than the **Vidal** one, whose is.  Do not weaken these guards to make the
-# file green -- the fix is in ``_su_step``, and it is one insertion.
+# cheapest cell in the section and the only guard here whose reference is not
+# re-derived from ``_su_step``: as shipped, ``_su_step`` truncated the SVD of
+# the **absorbed** two-site tensor, whose environment is not the identity,
+# rather than the **Vidal** one, whose is.
 
 
 #: Seeds for every cell of the sweep.  Three, not one, and the reason is
 #: historical rather than statistical: every earlier attempt at these numbers
 #: measured one seed, and a single-seed D=3 run passes on a broken
 #: implementation while a single-seed D=4 run cannot tell "always broken" from
-#: "unlucky".  Measured here, the axis pays for itself twice over -- at D=2
-#: ``_su_evolve`` fails in three *different* ways across the three seeds
-#: (a drifting -0.54, a state that is exactly zero, and the product state), and
-#: the prototype fix in the report reaches the D=3 reference on seeds 1 and 2
-#: but not on seed 0.  One seed reports either verdict.
+#: "unlucky".  Measured here, the axis paid for itself twice over -- before the
+#: truncation-basis fix ``_su_evolve`` failed in three *different* ways across
+#: the three D=2 seeds (a drifting -0.54, a state that was exactly zero, and the
+#: product state), and after it the D=3 reference is reached on seeds 1 and 2 but
+#: not on seed 0.  One seed reports either verdict, in both directions.
 _SEEDS = (0, 1, 2)
 
 #: The sublattice-rotated Heisenberg Hamiltonian, which is what makes an energy
@@ -1633,18 +1936,20 @@ def _shipped_su_run(D, seed, steps):
 
 
 def _vidal_theta(pair, weights, bond, gate=None):
-    """The two-site tensor across ``bond`` in the basis the truncation belongs in.
+    """:func:`_vidal_pair`'s reweighting, contracted across ``bond`` and densified.
 
     **This is the whole of what Task 12 found, written as ten lines of test
-    code.**  ``gauge_fix`` returns the pair in *absorbed* form -- every bond
-    weight split ``sqrt(lambda)`` into both of its ends -- so the two-site
-    tensor ``A.B`` carries ``sqrt(lambda)`` on each of its six outer legs.  The
-    Vidal-gauge canonical condition is ``sum Gamma (prod lambda**2) Gamma* = I``
-    with the **square** on the outer legs, and an absorbed pair supplies only
-    ``lambda**1`` of that (``sqrt`` from the ket and ``sqrt`` from the bra).  So
-    the environment of the absorbed two-site tensor is *not* the identity, its
-    SVD is *not* a Schmidt decomposition, and truncating it does not keep the
-    largest Schmidt values of the state.
+    code**, and :func:`_vidal_pair` is now the shared statement of it -- the
+    reweighting used to live in both places.  ``gauge_fix`` returns the pair in
+    *absorbed* form -- every bond weight split ``sqrt(lambda)`` into both of its
+    ends -- so the two-site tensor ``A.B`` carries ``sqrt(lambda)`` on each of
+    its six outer legs.  The Vidal-gauge canonical condition is
+    ``sum Gamma (prod lambda**2) Gamma* = I`` with the **square** on the outer
+    legs, and an absorbed pair supplies only ``lambda**1`` of that (``sqrt``
+    from the ket and ``sqrt`` from the bra).  So the environment of the absorbed
+    two-site tensor is *not* the identity, its SVD is *not* a Schmidt
+    decomposition, and truncating it does not keep the largest Schmidt values of
+    the state.
 
     One extra ``sqrt(lambda)`` on each outer leg fixes it: the ket then carries
     ``lambda``, the bra carries ``lambda``, the condition is met, and the SVD
@@ -1657,15 +1962,14 @@ def _vidal_theta(pair, weights, bond, gate=None):
     measured, with no truncation the weighted and unweighted routes produce the
     same state to 1.1e-15 on all four bonds.  The two are different operations
     and the rewrite conflated them.
+
+    This one densifies and returns an axis order, because the guard below wants
+    a numpy SVD of a reshaped matrix; :func:`_two_site_tensor` is the same
+    contraction kept as a ``Tensor``.  Both are three lines around
+    :func:`_vidal_pair` and neither is worth folding into the other.
     """
     (site_i, leg_i), (site_j, leg_j) = _BOND_ENDS[bond]
-    weighted = dict(pair)
-    for site, on_bond in ((site_i, leg_i), (site_j, leg_j)):
-        for leg in ("u", "d", "l", "r"):
-            if leg == on_bond:
-                continue
-            lam = jnp.asarray(np.asarray(getattr(weights, _BOND_OF_LEG[(site, leg)])))
-            weighted[site] = scale_bond_axis(weighted[site], leg, jnp.sqrt(lam))
+    weighted = _vidal_pair(pair, bond, weights)
 
     def rename(leg, prefix, phys):
         out = {lg: prefix + lg for lg in ("u", "d", "l", "r") if lg != leg}
@@ -1684,13 +1988,6 @@ def _vidal_theta(pair, weights, bond, gate=None):
     order = sorted(theta.labels())
     arr = theta.transpose(tuple(theta.labels().index(lab) for lab in order))
     return order, np.asarray(arr.todense())
-
-
-#: ``(site, leg) -> bond``, both ends of all four bonds, derived from the
-#: module's own ``_BOND_ENDS`` so the two cannot drift apart.
-_BOND_OF_LEG = {
-    (site, leg): bond for bond, ends in _BOND_ENDS.items() for site, leg in ends
-}
 
 
 def _truncation_error_of(theta_full, theta_kept):
@@ -1729,18 +2026,30 @@ def test_su_step_truncates_in_the_state_s_own_basis(bond):
     seeds (this test runs seed 0's four bonds; the seed axis added nothing here
     and costs three gauge solves a bond, so it is not parametrised):
 
-    ==================================  ========================
-    ``_su_step`` (truncates absorbed)   ratio 1.0048 to 1.0234
-    the same step, truncating Vidal     ratio 1.000000, all 12
-    ==================================  ========================
+    ==================================  ==============================
+    ``_su_step`` truncating absorbed    ratio 1.004775 to 1.023395
+    ``_su_step`` truncating Vidal       ratio 1.000000 on all twelve
+    ==================================  ==============================
 
-    So the guard has been watched in **both** directions -- failing on all
-    twelve cells as shipped, and passing at exactly 1.000000 on all twelve with
-    the outer-leg weights inserted.  A guard whose passing state has never been
-    observed is a guard that might not have one.  1-2% a step does not sound
-    like much; compounded over 800 steps it is the difference between -0.6589
-    and the product state (see the energy guards below, and
-    ``task-12-report.md`` for the full grid).
+    Both rows were re-measured for Task 10's reopening and reproduce Task 12's
+    1.0048-1.0234 exactly; seed 0's four bonds, which is what this test runs,
+    read 1.009201, 1.009628, 1.010690 and 1.010944 before the fix.  So the guard
+    has been watched in **both** directions -- failing on all twelve cells as
+    shipped, and passing at exactly 1.000000 on all twelve with the outer-leg
+    weights inserted.  A guard whose passing state has never been observed is a
+    guard that might not have one.  1-2% a step does not sound like much;
+    compounded over 800 steps it was the difference between -0.6589 and the
+    product state (see the energy guards below, and
+    ``task-10-reopen-report.md`` for the re-run grid).
+
+    **This is the only guard in the file whose reference is not re-derived from
+    ``_su_step``, and that is why it is the one that caught this.** The twelve
+    guards above it compare the step against a spectrum, a subspace or a state
+    rebuilt from the step's own output, so a step that corrupts the tensor it is
+    truncating corrupts the reference in the same breath and they agree.  The
+    reference here is Eckart-Young -- a lower bound on the truncation error that
+    holds for *any* rank-``max_D`` truncation of the gated state, whoever
+    computed it -- so it cannot be moved by being wrong in the same way.
 
     The reference is built here rather than imported, and deliberately does not
     reuse ``_su_step``'s own SVD: it re-derives the two-site tensor from the
@@ -1934,23 +2243,27 @@ def test_d2_reaches_the_heisenberg_energy_not_the_product_state(seed):
     input by max-abs on the way in to the next step, so ``||A||`` reads a
     healthy 1.0 right up to the step where it is exactly 0.
 
-    **This currently fails on all three seeds, in three different ways**, which
-    is why the seed axis is here and not a formality:
+    **This passes on all three seeds now, and it failed on all three in three
+    different ways** before ``_su_step``'s truncation basis was corrected --
+    which is why the seed axis is here and not a formality:
 
     ======  ==========================================================
-    seed 0  -0.576225 here, and not settling: -0.512783 at 400 steps,
+    seed 0  was -0.576225, and not settling: -0.512783 at 400 steps,
             -0.576225 at 800, back **up** to -0.540608 at 1200
-    seed 1  the pair is exactly **zero** -- ``_energy_of`` reports it
+    seed 1  the pair was exactly **zero** -- ``_energy_of`` reported it
             rather than returning a number, and a norm check would not
             have (#878)
     seed 2  exactly -0.500000, the product state, to fifteen digits
     ======  ==========================================================
 
     A one-seed run would have reported any one of those three as *the* symptom.
-    The cause is one thing and it is not seed-dependent: see
+    The cause was one thing and it was not seed-dependent: see
     ``test_su_step_truncates_in_the_state_s_own_basis``.  With that step's
-    truncation basis corrected, the same nine (seed, D) runs give -0.658880 at
-    D=2 on every seed and at every step count from 400 to 2000.
+    truncation basis corrected the three seeds read **-0.658880 at 400, 800,
+    1200 and 2000 steps alike**, agreeing with each other to 1e-15 and with the
+    reference to 4.2e-04 -- which is a stronger statement than this test's
+    ``abs=0.02`` makes, and the tolerance is deliberately left where Task 12 set
+    it rather than tightened onto one measurement of one engine.
     """
     state = _random_state(2, seed)
     state = _su_evolve(state, _su_heisenberg_gate(state), 2, 800)
@@ -1983,12 +2296,21 @@ def test_su_evolve_reaches_the_simple_update_reference_energy(D, seed):
     warns about.  1600 is used at D=3 too so the two cells differ in one
     variable.
 
-    Currently failing on all six cells.  The 1600-step energies are not quoted
-    here, because a docstring number that was not taken at the step count the
-    test runs is exactly the kind of figure this task exists to stop being
-    repeated; ``task-12-report.md`` has the grid at 400, 800, 1200 and 2000
-    steps, where every D=3 cell sits between -0.5000 and -0.6045 and every D=4
-    cell is at -0.500000 from 800 steps onward.
+    **Two of the six pass now** -- D=3 seeds 1 and 2 -- and **four still fail,
+    on purpose**: D=3 seed 0 and all three D=4 seeds.  Both residues are named
+    in the section header, neither is explained, and neither is in scope for the
+    truncation-basis fix that made the other two pass.  ``task-10-reopen-report.md``
+    §"what did not close" is the standing record; do not tune ``steps``,
+    ``_SU_DT`` or ``_CHI`` to close them, because a cell that goes green without
+    a mechanism is more likely a new bug than a fix.
+
+    The 1600-step energies are not quoted here, because a docstring number that
+    was not taken at the step count the test runs is exactly the kind of figure
+    this task exists to stop being repeated; ``task-10-reopen-report.md`` has
+    the re-run grid at 400, 800, 1200 and 2000 steps, where D=3 seeds 1 and 2
+    sit at -0.662839, D=3 seed 0 decays -0.651785 -> -0.607822 with BP failing
+    on 1782 of 2000 steps, and every D=4 cell is at -0.500000 from 800 steps
+    onward with BP converging throughout.
     """
     state = _random_state(D, seed)
     state = _su_evolve(state, _su_heisenberg_gate(state), D, 1600)
@@ -2020,23 +2342,29 @@ def test_the_energy_does_not_drift_away_with_more_steps(D, seed):
     ``h_AB`` on every call, so a block that was not a multiple of 4 would
     silently change the Trotter ordering.)
 
-    Measured, this is the guard that separates the two engines most cleanly.  As
-    shipped, D=2 seed 0 runs -0.512783, -0.576225, -0.540608 -- it comes back
-    *up* by 3.6e-02 and the second assertion fires.  D=3 seed 1 runs -0.536106,
-    -0.514482, -0.604504 and fires on the first.  With ``_su_step``'s truncation
-    basis corrected the same three points read -0.658880, -0.658880, -0.658880 at
-    D=2 on every seed, flat to 1e-06, and D=3 seeds 1 and 2 read -0.662838,
-    -0.662839, -0.662839 against a -0.6632 reference.
+    Measured, this is the guard that separated the two engines most cleanly.
+    Before the truncation-basis fix, D=2 seed 0 ran -0.512783, -0.576225,
+    -0.540608 -- it came back *up* by 3.6e-02 and the second assertion fired --
+    and D=3 seed 1 ran -0.536106, -0.514482, -0.604504 and fired on the first.
+    With ``_su_step``'s truncation basis corrected the same three points read
+    -0.658880, -0.658880, -0.658880 at D=2 on every seed, flat to 1e-06, and D=3
+    seeds 1 and 2 read -0.662838, -0.662839, -0.662839 against a -0.6632
+    reference.  **Five of the six cells pass; D=3 seed 0 still fires**, on the
+    first assertion, running -0.651785, -0.643480, -0.622322 -- uphill, and the
+    only cell of the six where the internal BP stops converging.  That residue is
+    out of scope and is meant to stay visible.
 
     **This guard is necessary and it is not sufficient, which is measured rather
-    than argued.**  Both ``seed 2`` cells *pass* it: at D=2 and at D=3 that seed
-    settles on exactly -0.500000 and stays there, so the trend is flat, pinned,
+    than argued, and it is emphatically not an acceptance criterion.**  On the
+    pre-fix engine both ``seed 2`` cells *passed* it: at D=2 and at D=3 that seed
+    settled on exactly -0.500000 and stayed there, so the trend was flat, pinned,
     and completely wrong.  A state stuck at the product state is perfectly
-    settled.  That is why this sits beside
-    ``test_d2_reaches_the_heisenberg_energy_not_the_product_state`` and
+    settled, and this reading calls that convergence.  That is why it sits
+    beside ``test_d2_reaches_the_heisenberg_energy_not_the_product_state`` and
     ``test_su_evolve_reaches_the_simple_update_reference_energy`` rather than in
     place of them -- convergence and correctness are two questions and neither
-    reading answers the other.
+    reading answers the other.  Do not quote a pass here as evidence that the
+    engine is right.
     """
     state = _random_state(D, seed)
     gate = _su_heisenberg_gate(state)
@@ -2069,14 +2397,24 @@ def test_d3_actually_uses_its_third_bond_direction(seed):
     That trap is why pre-#667 D=3 results from ``ipeps()`` were meaningless --
     the third direction was there in the shape and absent from the state.
 
-    **This guard passes today, and saying only that would be misleading.** All
-    three seeds clear it comfortably (``lam_3/lam_1`` from 4.6e-03 to 7.5e-01),
-    and seed 2's state has an energy of exactly -0.500000: it is *the product
-    state* with a full-rank bond spectrum. So a passing rank check is not
-    evidence that the state is right, and this test is not an acceptance
-    criterion -- the energy guards above are. It is kept because it is cheap and
-    because it is the only reading that catches #667's specific symptom, which
-    the energy guards would report only as a number that is too high.
+    **A pass here is not evidence that the state is right, and that is measured
+    rather than hedged.** On the pre-fix engine all three seeds cleared the rank
+    reading comfortably (``lam_3/lam_1`` from 4.6e-03 to 7.5e-01) while seed 2's
+    state had an energy of exactly -0.500000: *the product state* with a
+    full-rank bond spectrum. A tensor ``|up> (x) M`` has a product physical state
+    and an arbitrarily entangled virtual structure, so this reading is blind to
+    it by construction. **This test is not an acceptance criterion** -- the
+    energy guards above are. It is kept because it is cheap and because it is the
+    only reading that catches #667's specific symptom, which the energy guards
+    would report only as a number that is too high.
+
+    **Seed 0 fails here now, on its precondition rather than on the rank**, and
+    it is the same D=3-seed-0 residue the energy guards report: after 1200 steps
+    BP no longer converges on that pair (100 sweeps, residual 7.2e-02 against
+    ``tol=1e-10``), so there is no fixed-point spectrum to read and the test says
+    so instead of reading one anyway. That is the assertion behaving as designed
+    -- #870 is the standing reason not to trust a spectrum from a failed solve --
+    and it is out of scope here; see the section header.
 
     The control below is what keeps it from being an assertion that cannot
     fail: a pair whose third virtual direction is scaled by 1e-06 is a genuinely
