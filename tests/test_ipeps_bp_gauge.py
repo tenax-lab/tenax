@@ -27,6 +27,7 @@ from _ipeps_gauge_helpers import (  # tests/ is on sys.path
     retraced,  # noqa: F401  -- a fixture; pytest reads it off this namespace
 )
 
+import tenax.algorithms.ipeps_bp_gauge as bp_mod
 from tenax.algorithms.ipeps import (
     _make_trotter_gate_tensor,
     _wrap_as_dense_tensor,
@@ -40,11 +41,13 @@ from tenax.algorithms.ipeps_bp_gauge import (
     _message,
     bp_gauge_checkerboard,
 )
+from tenax.algorithms.ipeps_gauge import gauge_fix
 from tenax.algorithms.ipeps_simple_update import (
     _simple_update_checkerboard_sweep,
 )
 from tenax.contraction.contractor import contract
 from tenax.core._tensor_utils import scale_bond_axis
+from tenax.core.index import FlowDirection
 
 D = 3
 GAUGE_TOL = 1e-13
@@ -567,3 +570,97 @@ def test_the_weights_simple_update_stores_are_not_bp_self_consistent():
         f"the stored spectrum and the BP-consistent one agree to {drift:.2e}; "
         f"simple update's weights were expected to have drifted (#869)"
     )
+
+
+def _square_pair_at(dtype, D: int = 2, seed: int = 0):
+    """A dense pair at an explicit precision, built without going through
+    ``_wrap_as_dense_tensor``, which fixes the dtype to the caller's array."""
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import DenseTensor, TensorIndex
+
+    sym = U1Symmetry()
+
+    def leg(n, label, flow):
+        return TensorIndex.from_charges(
+            sym, np.zeros(n, dtype=np.int32), flow, label=label
+        )
+
+    def site(key):
+        arr = jnp.asarray(
+            np.random.default_rng(key).normal(size=(D, D, D, D, 2)), dtype=dtype
+        )
+        return DenseTensor(
+            arr,
+            (
+                leg(D, "u", FlowDirection.OUT),
+                leg(D, "d", FlowDirection.IN),
+                leg(D, "l", FlowDirection.OUT),
+                leg(D, "r", FlowDirection.IN),
+                leg(2, "phys", FlowDirection.IN),
+            ),
+        )
+
+    return site(seed), site(seed + 1)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "real"),
+    [
+        (jnp.float32, jnp.float32),
+        (jnp.float64, jnp.float64),
+        (jnp.complex64, jnp.float32),
+        (jnp.complex128, jnp.float64),
+    ],
+    ids=["f32", "f64", "c64", "c128"],
+)
+def test_the_traced_loop_takes_the_precisions_the_eager_loop_takes(dtype, real):
+    """A carry may not mix precisions, and the pair's dtype decides which.
+
+    tenax enables x64 globally, so ``BondWeights.ones`` and ``gauge_fix``'s
+    identity weights are ``float64``.  Against a ``float32`` pair the first
+    sweep promoted the candidate tensors to ``float64`` while the carry's tensor
+    slot stayed ``float32``, and ``lax.while_loop`` rejected the body with
+    "carry input and carry output must have equal types" -- so **every** dense
+    ``float32`` pair failed.
+
+    The eager driver rebinds Python names each sweep and never noticed, which is
+    what makes this a regression introduced with the traced loop rather than a
+    standing limitation, and why both drivers are exercised here: the reference
+    must not accept a mix the traced path rejects.
+
+    Weights are singular values, so a complex pair wants the *real* dtype behind
+    it -- ``float32`` for ``complex64``.  Watched failing on ``f32``/``c64``
+    before the cast in ``_prepare``; ``f64``/``c128`` pass either way and are
+    the controls that keep this honest.
+    """
+    A, B = _square_pair_at(dtype)
+
+    A_g, B_g, w, info = gauge_fix(A, B)
+    assert info.converged, f"gauge_fix did not converge at {np.dtype(dtype).name}"
+    for name, t in (("A", A_g), ("B", B_g)):
+        assert t.todense().dtype == dtype, (
+            f"{name} came back as {t.todense().dtype}, not {np.dtype(dtype).name}; "
+            f"the gauge silently changed the caller's precision"
+        )
+    for bond in ("h_AB", "h_BA", "v_AB", "v_BA"):
+        got = getattr(w, bond).dtype
+        assert got == real, (
+            f"weight {bond} came back as {got}, expected {np.dtype(real).name} -- "
+            f"weights are singular values and belong at the pair's real precision"
+        )
+
+    # Both drivers, same input: the eager one is the reference the traced one is
+    # checked against, so a precision it accepts must not fail the other.
+    for traced in (True, False):
+        monkey = bp_mod._use_traced_loop
+        bp_mod._use_traced_loop = lambda *a, **k: traced
+        try:
+            out = bp_gauge_checkerboard(
+                A, B, BondWeights.ones(2, 2), max_iter=20, tol=1e-10
+            )
+        finally:
+            bp_mod._use_traced_loop = monkey
+        assert out[0].todense().dtype == dtype, (
+            f"the {'traced' if traced else 'eager'} driver returned "
+            f"{out[0].todense().dtype} for a {np.dtype(dtype).name} pair"
+        )

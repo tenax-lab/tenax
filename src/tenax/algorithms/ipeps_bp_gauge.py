@@ -515,10 +515,30 @@ def _prepare(
 
     The traced driver calls this *inside* its jit, so on the dense path it
     costs no eager dispatches at all.
+
+    **The weights come back at the pair's own real precision.**  Weights are
+    singular values, so the target is the real dtype behind a complex pair --
+    ``float32`` for ``complex64``, ``float64`` for ``complex128``.  Without the
+    cast the carry is heterogeneous: tenax enables x64 globally, so
+    ``BondWeights.ones`` and :func:`~tenax.algorithms.ipeps_gauge.gauge_fix`'s
+    identity weights are ``float64``, and against a ``float32`` pair the first
+    sweep promotes the candidate tensors to ``float64`` while the carry's tensor
+    slot is still ``float32``.  ``lax.while_loop`` then rejects the body outright
+    with *"carry input and carry output must have equal types"*, so **every**
+    dense ``float32`` pair failed -- and it failed only on the traced driver,
+    which the eager loop's Python rebinding tolerated, making it a regression
+    introduced with the tracing rather than a standing limitation.
+
+    Casting here rather than at the loop boundary keeps both drivers on one
+    convention, so the eager reference cannot silently accept a mix the traced
+    driver rejects.
     """
+    gam = {"A": _rescale(A), "B": _rescale(B)}
+    dtype = jnp.result_type(*(t.todense().dtype for t in gam.values()))
+    real = jnp.finfo(dtype).dtype if jnp.issubdtype(dtype, jnp.inexact) else dtype
     return (
-        {"A": _rescale(A), "B": _rescale(B)},
-        BondWeights(*(w / jnp.max(w) for w in weights)),
+        gam,
+        BondWeights(*((w / jnp.max(w)).astype(real) for w in weights)),
     )
 
 
