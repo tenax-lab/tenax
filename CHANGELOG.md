@@ -120,6 +120,37 @@
 
 ### Fixed
 
+- **The iPEPS AD guide documented a Path 2 configuration that cannot run, and
+  recommended against the default path** (#808). Two separate defects in
+  `docs/guide/algorithms/ipeps_ad_paths.md`:
+
+  - Path 2's configuration block specified `forward_gauge="sigma"`, "required
+    for stable element-wise convergence". `validate_ctm_for_implicit_ad`
+    accepts `"phase"` and nothing else — there is no `sigma` branch in the
+    check at all — so a user transcribing the guide verbatim got a `ValueError`
+    before the first CTM sweep. The same stale claim appeared in the Path 2
+    architecture diagram, the Forward Gauge Mode Matrix (where the `sigma` row
+    was qualified "at large chi (1-site only)", a narrowing the policy does not
+    make), Path 1's "sigma gauge as a fallback" note, `README.md` and
+    `docs/guide/capabilities.md`. Sigma gauge remains a first-class **explicit**-AD
+    mode; all six sites now say so.
+  - The guide marked Path 1 (explicit) *Recommended* and Path 2 (implicit)
+    *Experimental*, while `iPEPSConfig.gs_implicit_ad` defaults to `True` —
+    i.e. it recommended against its own default, and `ipeps_config.py`'s own
+    docstring called implicit "the recommended AD path" 170 lines above an
+    inline comment describing it as using sigma gauge. **Implicit AD is the
+    recommended path and the default**; Path 1 is opt-in via
+    `gs_implicit_ad=False`. The #292 stability gap is scoped to
+    `ad_backward_method="gmres"`, not to implicit differentiation as such —
+    the default `"vjp"` backward is regression-covered.
+
+  Both were prose, so both drifted silently. `tests/test_docs_ad_paths_808.py`
+  now reads the shipped markdown and checks it against the shipped code:
+  every `forward_gauge` the Path 2 block documents must pass the policy, must
+  be the `CTMConfig` default, and whichever heading claims to be recommended
+  must match `gs_implicit_ad`. Reverting the guide to its pre-fix wording fails
+  exactly those three.
+
 - **Each checkerboard bond can now carry its own Schmidt spectrum**
   (#851, opt-in via `su_independent_bond_lambdas`). The four-phase sweep
   evolves `A.r<->B.l`, `A.d<->B.u`, `B.r<->A.l` and `B.d<->A.u`, but stored one

@@ -205,6 +205,12 @@ _FILE_MARKERS = {
     # duplicate under-reported rho on complex input, so the guard passed a
     # divergent adjoint -- and a guard that runs in no required job is not one.
     "test_arnoldi.py": "core",
+    # The iPEPS AD guide against the code it documents (#808).  Pure markdown
+    # parsing plus config validation, microseconds.  ``core`` because both
+    # defects it pins were *silent*: the guide specified a Path 2 config that
+    # raises ValueError before the first CTM sweep, and recommended against the
+    # path the code runs by default.  Nothing else in the suite reads the docs.
+    "test_docs_ad_paths_808.py": "core",
     # The adjoint-convergence gate on the DEFAULT iPEPS AD gradient path
     # (#801, first raised on #341).  An unconverged adjoint yields a gradient
     # that is wrong, finite, and indistinguishable downstream -- the exact
