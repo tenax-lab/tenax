@@ -568,14 +568,39 @@ def measure_gradient_error(
 
     energy_dtypes: list = []
 
-    def _energy_eps() -> float:
-        """Machine epsilon of the precision the energies actually came back in."""
+    def _energy_finfo() -> np.finfo:
+        """``finfo`` of the precision the energies actually came back in."""
         if not energy_dtypes:
-            return float(np.finfo(base.dtype).eps)
+            return np.finfo(base.dtype)
         dt = np.result_type(*energy_dtypes)
         if not np.issubdtype(dt, np.inexact):
-            return float(np.finfo(np.float64).eps)
-        return float(np.finfo(dt).eps)
+            return np.finfo(np.float64)
+        return np.finfo(dt)
+
+    def _energy_eps() -> float:
+        """Machine epsilon of the precision the energies actually came back in."""
+        return float(_energy_finfo().eps)
+
+    def _energy_quantum() -> float:
+        """The smallest gap two energies of this dtype can have and still differ.
+
+        ``eps * |E|`` is the spacing of *normal* floats and it **underflows to
+        exactly 0.0** once ``|E|`` is small enough — measured, float64: for
+        ``|E| <= 2.781342323134e-309`` the product is zero (#885).  Below the
+        smallest normal the spacing stops shrinking and becomes the constant
+        ``smallest_subnormal``, so that is the right term to fall back on: it
+        keeps the guard an *absolute* quantum instead of letting it collapse to
+        nothing.
+
+        Getting this wrong is not a division by zero — ``floor`` is never a
+        denominator.  It is a **vacuous comparison**: ``span <= 0.0`` rejects
+        only an exactly-zero span, so a difference made of one or two units in
+        the last place is admitted as signal.  A subnormal-scale map with an
+        *exact* gradient then reports 12.8% error and publishes an
+        ``unresolved_bound`` of 1.0 manufactured out of quantization noise,
+        where the identical map at normal scale reports 1.08e-07.
+        """
+        return float(_energy_finfo().smallest_subnormal)
 
     def energy_at(t: float) -> float:
         # ``v`` already carries ``base``'s precision, so this inherits it.
@@ -661,7 +686,20 @@ def measure_gradient_error(
             # charging it the float32 floor rejects a scan whose span is seven
             # orders above its real rounding: |E| ~ 1e6 gives 4.8e-01 against
             # 8.9e-10.
-            floor = 4.0 * _energy_eps() * max(abs(e_plus), abs(e_minus))
+            # ``max`` with the dtype's absolute quantum, not the relative term
+            # alone: below the smallest normal the relative term underflows to
+            # exactly 0.0 and the guard stops guarding (#885).  See
+            # ``_energy_quantum``.  This is the same absolute-vs-relative
+            # tension as the denormal-*slope* fix one level down, approached
+            # from the other side: there an absolute floor was too *large* at
+            # small scale and destroyed scale invariance; here the relative one
+            # collapses to nothing.  Taking the larger of the two keeps scale
+            # invariance everywhere the relative term is representable and
+            # degrades to the absolute quantum only where it is not.
+            floor = 4.0 * max(
+                _energy_eps() * max(abs(e_plus), abs(e_minus)),
+                _energy_quantum(),
+            )
             if span <= floor:
                 raise _StepUnusable(
                     f"at h={h:.1e} the two perturbed energies differ by {span:.3e}, "

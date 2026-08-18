@@ -120,6 +120,37 @@
 
 ### Fixed
 
+- **`measure_gradient_error`'s rounding floor no longer underflows to zero**
+  (#885). The scan rejects a step whose two perturbed energies differ by less
+  than the energy's own rounding quantum, and that quantum was estimated
+  relatively, as `4 * eps * |E|`. Below the smallest normal that product is
+  exactly `0.0` — measured, float64: for `|E| ≤ 2.781342323134e-309` the floor
+  is zero, so `span <= floor` degenerates to `span <= 0.0` and admits a
+  difference made of one or two units in the last place.
+
+  It is not a division by zero; the floor is never a denominator. It is a
+  vacuous comparison, and what came out the other side was worse than a crash:
+  on a subnormal-scale objective with an **exact** gradient the scan reported
+  **12.8%** relative error and published an `unresolved_bound` of **1.0** —
+  the number a caller reads as "the gradient is good to this" — manufactured
+  out of quantization noise. The identical map at normal scale reports
+  1.08e-07. The same scan also stopped resolving real 0.1% and 5% gradient
+  errors that it catches at normal scale.
+
+  The floor is now the larger of the relative term and the dtype's
+  `smallest_subnormal`, so it keeps scale invariance everywhere the relative
+  term is representable and degrades to an absolute quantum only where it is
+  not. This is the mirror of the denormal-*slope* fix one level down: there an
+  absolute floor was too *large* at small scale and destroyed scale
+  invariance; here the relative one collapsed to nothing.
+
+  Reachable, though not through XLA: XLA-CPU flushes subnormals to zero, so a
+  `jnp`-evaluated energy cannot get there — but `measure_gradient_error` takes
+  any Python callable, and a host-side NumPy objective can. No existing test
+  came within an order of magnitude of the threshold, so the guard is pinned by
+  a new one plus a mutation check that restores the underflow and confirms the
+  mutant measures the noise instead of refusing it.
+
 - **Each checkerboard bond can now carry its own Schmidt spectrum**
   (#851, opt-in via `su_independent_bond_lambdas`). The four-phase sweep
   evolves `A.r<->B.l`, `A.d<->B.u`, `B.r<->A.l` and `B.d<->A.u`, but stored one
