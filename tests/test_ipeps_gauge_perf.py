@@ -49,6 +49,7 @@ from __future__ import annotations
 import statistics
 import sys
 import time
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -418,21 +419,39 @@ def _via_bp_gauge_checkerboard(A, B):
 
 
 def _shared_pjit_cache_is_full() -> bool:
-    """Is jax's process-wide ``PjitFunctionCache`` sitting at capacity?
+    """Is the process-wide ``PjitFunctionCache`` *these jits use* at capacity?
 
-    Every ``jit`` in the process shares one of two of these -- ``jax._src.pjit``
-    builds them at capacity 8192 apiece -- and while one is *at* capacity every
-    insertion also evicts.  That is the single regime in which ``_cache_size()``
-    *differences* stop being exact, so it is the only thing the guards below are
-    allowed to withdraw on.  See the comment in
+    ``jax._src.pjit`` builds two of these at capacity 8192 apiece and hands each
+    ``jit`` one of them, and while one is *at* capacity every insertion also
+    evicts.  That is the single regime in which ``_cache_size()`` *differences*
+    stop being exact, so it is the only thing the guards below are allowed to
+    withdraw on.  See the comment in
     :func:`test_every_solve_in_a_run_hits_one_compiled_entry` for the
     measurements.
 
-    Fails **closed**.  If a future jax stops exposing those two module globals,
-    or they stop answering ``size()``/``capacity()``, this reports ``False`` --
-    "saturation was not established" -- and the caller fails loudly instead of
-    skipping on an excuse it could not check.  A withdrawal that cannot verify
-    its own precondition is a dead guard.
+    **Which** of the two is not a detail: asking ``any()`` of both would let a
+    cache these jits never touch license a withdrawal, and a withdrawal granted
+    on an irrelevant precondition hides exactly the cache-key regression this
+    file exists to catch.  So the cache is *measured*, not assumed -- a
+    throwaway ``jit`` is traced and whichever cache grew is the one in use.
+
+    Two things make the measurement worth doing rather than reading off jax's
+    own rule.  ``_get_cpp_global_cache`` selects on ``contains_explicit
+    attributes``, and the module comment beside it says a bare ``jax.jit(f)``
+    goes to ``_cpp_pjit_cache_fun_only`` -- but on jax 0.10.2 it does not:
+    a plain ``jit`` and a ``static_argnums`` ``jit`` both land in
+    ``_cpp_pjit_cache_explicit_attributes``, measured at ``(1, 0)`` apiece over
+    three fresh functions each, with ``fun_only`` flat at 0 the whole time.  So
+    the documented rule and the shipped behaviour disagree, and a probe believes
+    the right one.  The probe must also hold a reference to its throwaway
+    ``jit``: drop it and the entry goes with it, and every delta reads ``(0, 0)``.
+
+    Fails **closed** in both halves.  If a future jax stops exposing the module
+    globals, or they stop answering ``size()``/``capacity()``, or the probe
+    cannot tell which cache grew, this reports ``False`` -- "saturation was not
+    established" -- and the caller fails loudly instead of skipping on an excuse
+    it could not check.  A withdrawal that cannot verify its own precondition is
+    a dead guard.
     """
     try:
         from jax._src import pjit as _pjit
@@ -441,7 +460,26 @@ def _shared_pjit_cache_is_full() -> bool:
             _pjit._cpp_pjit_cache_explicit_attributes,
             _pjit._cpp_pjit_cache_fun_only,
         )
-        return any(c.size() >= c.capacity() for c in caches)
+        before = [c.size() for c in caches]
+        # Same shape as the boundaries under test -- ``static_argnums`` and a
+        # never-before-seen function -- so it is routed the way they are.  The
+        # reference has to outlive the measurement; see the docstring.
+        probe = partial(jax.jit, static_argnums=(1,))(lambda a, k: a * k)
+        probe(jnp.ones((1,)), 2)
+        grew = [i for i, c in enumerate(caches) if c.size() > before[i]]
+        if len(grew) == 1:
+            used = caches[grew[0]]
+            return used.size() >= used.capacity()
+        if not grew:
+            # A guaranteed-fresh key that grows *neither* cache is the
+            # definition of an evicting insert, and the probe only ever touches
+            # the cache these jits use: if that one had room it would have
+            # grown.  So this is saturation of the relevant cache, which is the
+            # one thing a withdrawal is allowed to rest on.  (Reading it as
+            # "inconclusive" would invert the guard precisely in the regime it
+            # exists to detect.)
+            return True
+        return False  # both grew -- the probe is not isolating one cache
     except Exception:  # private jax layout moved -- do not guess
         return False
 
@@ -532,6 +570,15 @@ def test_every_solve_in_a_run_hits_one_compiled_entry(entry):
     # genuinely fresh keys measured ``0, 0, 0`` against a side-effect trace
     # counter's ``1, 2, 3``.  That regime is detected and refused below rather
     # than reported as a compile that never happened.
+    # Sampled **before** the workload, and it is the only saturation reading the
+    # withdrawal below is allowed to use.  Asking after the run would let the
+    # regression grant its own excuse: the failure this test exists to catch is
+    # "every solve compiles", which on a nearly-full shared cache inserts a
+    # hundred entries and saturates it, making an after-the-fact predicate true
+    # and skipping the very run that proved the defect.  A precondition a defect
+    # can create is not a precondition.
+    saturated_before = _shared_pjit_cache_is_full()
+
     cache_of().clear_cache()
     base = cache_of()._cache_size()
 
@@ -565,12 +612,15 @@ def test_every_solve_in_a_run_hits_one_compiled_entry(entry):
     # after the clear, so each must move the counter by exactly one; if either
     # fails to, the counter is not counting this function's traces and none of
     # the three numbers means anything.  Withdraw only on the one cause that can
-    # be *confirmed* -- a shared LRU sitting at capacity -- so a counter broken
-    # for any other reason still fails loudly below instead of skipping.
+    # be *confirmed* -- a shared LRU that was already at capacity when this test
+    # started -- so a counter broken for any other reason, including a cache
+    # this run's own compiles filled, still fails loudly below instead of
+    # skipping.
     calibrated = (after_dim - after_run, after_flows - after_dim) == (1, 1)
-    if not calibrated and _shared_pjit_cache_is_full():
+    if not calibrated and saturated_before:
         pytest.skip(
-            f"jax's process-wide PjitFunctionCache is at capacity, so "
+            f"the PjitFunctionCache these jits use was already at capacity "
+            f"when this test started, so "
             f"_cache_size() has stopped counting {entry}'s traces: two "
             f"guaranteed-fresh keys moved it by {after_dim - after_run} and "
             f"{after_flows - after_dim} instead of 1 and 1.  Once the shared "
@@ -589,8 +639,10 @@ def test_every_solve_in_a_run_hits_one_compiled_entry(entry):
             "it was tracking traces and this is a real miscount."
             if calibrated
             else "it was not tracking traces either -- and the shared cache "
-            "was not confirmed at capacity, so this is a dead counter or a jit "
-            "that is never entered, not the LRU."
+            "these jits use was not already at capacity when this test "
+            "started, so this is a dead counter, a jit that is never entered, "
+            "or a cache this run's own compiles filled -- not a pre-existing "
+            "LRU, which is the only thing that would excuse it."
         )
     )
     assert after_dim == 2, (
