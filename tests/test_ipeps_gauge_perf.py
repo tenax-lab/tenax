@@ -460,36 +460,38 @@ def _shared_pjit_cache_is_full() -> bool:
             _pjit._cpp_pjit_cache_explicit_attributes,
             _pjit._cpp_pjit_cache_fun_only,
         )
-        # Build the probe's argument *before* the snapshot.  ``jnp.ones`` is not
-        # free: on a first call in a fresh process it inserts two persistent
-        # entries of its own into the explicit-attributes cache -- measured
-        # ``0 -> 2`` on jax 0.10.2, and ``0`` on every call after.  Left inside
-        # the measured interval those two would be invisible to ``before`` while
-        # still filling the cache, so on a cache within two entries of capacity
-        # this function could saturate it and *then* report ``False``.  The
-        # calibration would go on to read a frozen counter and fail a correct
-        # one-compile implementation -- a false alarm rather than a missed
-        # regression, but a guard that cries wolf gets weakened, and weakening
-        # this one is how the negative-counter failure got here in the first
-        # place.
-        one = jnp.ones((1,))
-
+        # ``before`` is sampled ahead of *everything* this function does, and it
+        # is the only reading the verdict rests on.  Routing is read separately,
+        # from what grew across the whole helper.
+        #
+        # Both halves of that split were learned the hard way.  The probe is an
+        # insertion, so on a cache one entry below capacity a post-probe reading
+        # reports a saturation the probe itself caused.  Moving the reading
+        # earlier is not enough either, because ``jnp.ones`` is not free: on a
+        # first call in a fresh process it inserts **two** persistent entries of
+        # its own into the explicit-attributes cache (measured ``0 -> 2`` on jax
+        # 0.10.2, ``0`` on every call after), so building the argument before
+        # the snapshot merely moved the same fault to the other side -- the two
+        # entries fill the cache, ``before`` then reads it saturated, and the
+        # withdrawal is granted on a precondition this function manufactured.
+        #
+        # Every one of those is the same error: judging saturation on a number
+        # this function had already perturbed.  Sampling first and routing later
+        # removes the class rather than the instance.
         before = [c.size() for c in caches]
+
+        one = jnp.ones((1,))
         # Same shape as the boundaries under test -- ``static_argnums`` and a
         # never-before-seen function -- so it is routed the way they are.  The
         # reference has to outlive the measurement; see the docstring.
         probe = partial(jax.jit, static_argnums=(1,))(lambda a, k: a * k)
         probe(one, 2)
+
         grew = [i for i, c in enumerate(caches) if c.size() > before[i]]
         if len(grew) == 1:
-            # Judge on the size *before* the probe.  The probe is an insertion,
-            # so on a cache sitting one entry below capacity it fills it, and a
-            # post-insertion reading would report a saturation this function
-            # itself caused -- granting the withdrawal on its own side effect,
-            # one entry early.  A cache that had room for the probe was not
-            # saturated, which is what this comparison says.
-            used = caches[grew[0]]
-            return before[grew[0]] >= used.capacity()
+            # It grew, so it had room, so it was not saturated when this
+            # function was called -- whatever it reads now.
+            return False
         if not grew:
             # A guaranteed-fresh key that grows *neither* cache is the
             # definition of an evicting insert, and the probe only ever touches

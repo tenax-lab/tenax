@@ -89,18 +89,31 @@ def absorb_weights(A: Tensor, B: Tensor, weights: BondWeights) -> tuple[Tensor, 
 
 
 def _identity_weights(A: Tensor) -> BondWeights:
-    """``BondWeights.ones`` at this pair's two bond dimensions.
+    """Unweighted bonds at **each of this pair's four** bond dimensions.
 
     Correct as the *incoming* weights precisely because the pair is in absorbed
     form: it already carries its own ``lambda``, so the bonds between the
-    tensors handed to the solve really are unweighted.  Read off ``A``'s ``r``
-    and ``d`` legs rather than assuming a square ``D``: the chain anchor's PEPS
-    embedding has dimension-1 vertical legs.
+    tensors handed to the solve really are unweighted.
+
+    Every entry is sized from **its own** leg, via the same ``_BOND_OF`` table
+    :func:`absorb_weights` and the solve use, rather than from a single
+    horizontal and a single vertical dimension.  ``BondWeights.ones(D_h, D_v)``
+    gives ``h_AB`` and ``h_BA`` one length and ``v_AB`` and ``v_BA`` another, so
+    reading ``D_h`` off ``A.r`` silently sized ``h_BA`` -- which lives on
+    ``A.l`` -- to the wrong bond.  On a square pair the two agree and nothing
+    shows; on a pair whose four checkerboard bonds differ, ``gauge_fix`` died
+    inside ``scale_bond_axis`` on a pair ``bp_gauge_checkerboard`` handles
+    perfectly well, making this wrapper strictly less capable than the solve it
+    wraps.  Not hypothetical: ``A.r != A.l`` is what direction-dependent
+    U(1) simple update produces.
+
+    Reading the dimensions off the legs at all -- rather than assuming a square
+    ``D`` -- is still load-bearing for the chain anchor, whose PEPS embedding
+    has dimension-1 vertical legs.
     """
     labels = A.labels()
-    return BondWeights.ones(
-        A.indices[labels.index("r")].dim, A.indices[labels.index("d")].dim
-    )
+    dim_of = {leg: A.indices[labels.index(leg)].dim for leg in _LEGS}
+    return BondWeights(**{_BOND_OF[("A", leg)]: jnp.ones(dim_of[leg]) for leg in _LEGS})
 
 
 @partial(jax.jit, static_argnums=(2, 3))
