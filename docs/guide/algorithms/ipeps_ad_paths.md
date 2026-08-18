@@ -29,9 +29,11 @@ config = iPEPSConfig(
         projector_method="qr",  # fastest, best energy, scales to chi=64+
         # forward_gauge defaults to "phase" (AD-correct for 1-site and 2-site)
     ),
-    gs_implicit_ad=False,
-    gs_explicit_ad_steps=30,
-    gs_explicit_ad_warmup=10,
+    # Path 2, implicit AD -- the default, so this line only makes it explicit.
+    # Swap to False for Path 1 (explicit AD through the unrolled sweeps) and
+    # add gs_explicit_ad_steps=30, gs_explicit_ad_warmup=10; the benchmark
+    # table below was measured on that path.
+    gs_implicit_ad=True,
     gs_optimizer="lbfgs",
     gs_line_search_method="hager_zhang",
     gs_metric_precond=True,
@@ -65,12 +67,18 @@ scales well to chi=64 (2.5x slower than chi=8), and never NaNs.
 |------|--------|------|-------|
 | eigh + sigma (explicit AD) | -0.6601 | 1234s | Slower than phase |
 | svd + sigma (two-proj) | -0.6623 | 1124s | Slower than phase |
-| eigh + sigma (GMRES implicit) | -0.6601 | — | Implicit AD path |
+| eigh + sigma (GMRES implicit) | -0.6601 | — | **Config no longer accepted** — see below |
 | Literature (chi=8) | -0.6625 | — | — |
 | Exact (QMC, chi→∞) | -0.6694 | — | — |
 
 Phase gauge is **6-9x faster** than sigma gauge for explicit AD with equal
-or better energy. Sigma gauge is still needed for implicit AD (GMRES backward).
+or better energy.
+
+The `eigh + sigma (GMRES implicit)` row is a historical measurement and its
+configuration **no longer runs**: `validate_ctm_for_implicit_ad` accepts
+`forward_gauge="phase"` and nothing else, and rejects `projector_method="eigh"`
+outright. The number is kept because it was measured; do not copy the config.
+Sigma gauge remains a first-class **explicit**-AD mode (#808).
 
 ## Working AD Paths
 
@@ -471,13 +479,18 @@ Together they remove the dominant gauge ambiguity at negligible cost —
 no power iteration, no eigensolve, fully differentiable — and are the
 reason the qr+phase path scales to chi=64 without NaNs.
 
-### 2. Sigma Gauge Fixing (implicit-diff path)
+### 2. Sigma Gauge Fixing (explicit-AD path only)
 
 Sigma gauge aligns each iteration's environment to the previous one using
 transfer matrix eigenvectors, making element-wise convergence monotonic.
-This is required for the implicit-diff backward, where a well-conditioned
-fixed-point environment is needed for the ``(I - J^T) λ = g`` solve to
-behave well.
+
+**It is not available on the implicit-diff path.** This section used to say the
+opposite — "required for the implicit-diff backward" — and that was stale:
+`validate_ctm_for_implicit_ad` accepts `forward_gauge="phase"` and raises
+`ValueError` for every other value, `"sigma"` included (#808). What the implicit
+backward actually needs from the forward pass is element-wise convergence to a
+well-conditioned fixed point, and phase gauge delivers that at a fraction of the
+cost — no power iteration, no eigensolve.
 
 **Implementation**: Power iteration (30 iterations) computes the leading
 eigenvector of the double-layer transfer matrix. This is fully
@@ -558,9 +571,12 @@ optimization stability and speed.
    (not JIT-traceable). Both phase and sigma gauge work on this path, but
    with dense fallbacks for gauge fixing.
 
-5. **Sigma gauge cost**: ~40% overhead from power iteration per sweep.
-   Phase gauge is the recommended replacement for explicit AD; reserve
-   sigma gauge for the implicit-diff path.
+5. **Sigma gauge cost**: ~40% overhead from power iteration per sweep, and
+   6-9x slower end to end than phase gauge for equal or better energy. It is
+   an **explicit**-AD option only — the implicit path refuses it (#808) — so
+   there is no configuration in which it is the recommended choice today. It
+   is kept because it is still correct and because it gives the exact
+   transfer-matrix alignment when you want that specifically.
 
 6. **Root implicit AD has no gradient-quality signal**: the root residual
    it reports says whether `y*` solves the characteristic equations, and
