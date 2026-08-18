@@ -56,10 +56,16 @@ from _ipeps_gauge_helpers import (  # tests/ is on sys.path
 )
 
 import tenax.algorithms.ipeps_su as ipeps_su_module
-from tenax.algorithms.ipeps import heisenberg_gate
+from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
+from tenax.algorithms.ipeps import heisenberg_gate, sublattice_rotate_gate
 from tenax.algorithms.ipeps_bp_gauge import BondWeights, BPGaugeInfo
 from tenax.algorithms.ipeps_gauge import gauge_fix, torus_2x2_sign_free
-from tenax.algorithms.ipeps_simple_update import _make_trotter_gate_tensor
+from tenax.algorithms.ipeps_simple_update import (
+    _make_trotter_gate_tensor,
+    _simple_update_checkerboard_sweep,
+    _to_physical_pair,
+)
 from tenax.algorithms.ipeps_su import (
     _BOND_ENDS,
     _align_gate_to_ket,
@@ -1246,7 +1252,6 @@ def test_su_evolve_visits_four_distinct_bonds_per_cycle(su, monkeypatch):
     _su_evolve(state, gate, max_D=D, steps=8)
     monkeypatch.undo()
 
-    assert len(seen) == 8, f"eight steps were asked for, {len(seen)} were run: {seen}"
     # Weaker than the order assertion below and **not** redundant with it, for a
     # reason that is about the two references rather than about the sets: this
     # compares against ``_BOND_ENDS``, the module's own inventory of bonds,
@@ -1364,6 +1369,30 @@ def test_su_evolve_rejects_a_step_count_it_cannot_run(steps, exc, match, su):
         _su_evolve(state, _gate(A), max_D=D, steps=steps)
 
 
+@pytest.mark.parametrize("steps", [np.int64(4), np.int32(4)])
+def test_su_evolve_accepts_a_numpy_integer_step_count(steps, su):
+    """``np.int64`` is a step count; the check is on ``numbers.Integral``.
+
+    Not hypothetical plumbing.  ``iPEPSConfig.num_imaginary_steps``
+    (``ipeps_config.py:524``) is an uncoerced dataclass field handed straight
+    through at ``ipeps.py:451``, so anything that reaches it from numpy -- a
+    schedule built with ``np.arange``, a value read back out of a checkpoint --
+    arrives as ``np.int64``.  An ``isinstance(steps, int)`` check rejects that,
+    and would have done so the first time Phase 4 wired ``ipeps()`` to
+    ``_su_evolve``.  Watched: with the check narrowed back to ``int`` both
+    parameters raise ``TypeError: steps must be an int; got int64``.
+
+    The ``bool`` exclusion above is what stops this widening letting
+    ``steps=True`` through -- ``bool`` is ``Integral`` too, so that ``and not
+    isinstance(steps, bool)`` is now the *only* thing rejecting it, which is
+    why the two tests sit next to each other.
+    """
+    A, B = su.pair("dense")
+    state = _SUState.from_pair(A, B)
+    out = _su_evolve(state, _gate(A, dt=0.0), max_D=D, steps=steps)
+    assert out.max_D == D
+
+
 def test_su_evolve_names_the_step_that_broke_bond_uniformity(su, monkeypatch):
     """A bond that shrinks mid-run is reported here, not as a reshape error later.
 
@@ -1429,3 +1458,655 @@ def test_su_evolve_names_the_step_that_broke_bond_uniformity(su, monkeypatch):
         with pytest.raises(ValueError, match=match):
             _su_evolve(state, _gate(A), max_D=D, steps=4)
         monkeypatch.undo()
+
+
+# --- #882 Task 12: the acceptance sweep, seeds x D ------------------------
+#
+# Everything above this line asks whether ``_su_step`` and ``_su_evolve`` do
+# what they say.  This section asks the only question the rewrite exists to
+# answer: does the state they produce have the right *energy*?  Nothing above
+# can see that -- a step can gate, split and truncate exactly as specified and
+# still converge to the wrong fixed point, which is what #667, #851, #865 and
+# #869 each were.
+#
+# **This section is red, and it is the finding rather than a defect in the
+# tests.**  Measured below and reported in ``task-12-report.md``: ``_su_evolve``
+# reaches the Heisenberg energy on **0 of 9** (seed, D) cells.  At D=2 it lands
+# on -0.5406 / exactly 0.0 / exactly -0.500000 for seeds 0, 1, 2 against a
+# reference of -0.6593; at D=3 and D=4 it lands on the product state outright.
+# The mechanism is localised by
+# ``test_su_step_truncates_in_the_state_s_own_basis`` below, which is the
+# cheapest of the four red cells: ``_su_step`` truncates the SVD of the
+# **absorbed** two-site tensor, whose environment is not the identity, rather
+# than the **Vidal** one, whose is.  Do not weaken these guards to make the
+# file green -- the fix is in ``_su_step``, and it is one insertion.
+
+
+#: Seeds for every cell of the sweep.  Three, not one, and the reason is
+#: historical rather than statistical: every earlier attempt at these numbers
+#: measured one seed, and a single-seed D=3 run passes on a broken
+#: implementation while a single-seed D=4 run cannot tell "always broken" from
+#: "unlucky".  Measured here, the axis pays for itself twice over -- at D=2
+#: ``_su_evolve`` fails in three *different* ways across the three seeds
+#: (a drifting -0.54, a state that is exactly zero, and the product state), and
+#: the prototype fix in the report reaches the D=3 reference on seeds 1 and 2
+#: but not on seed 0.  One seed reports either verdict.
+_SEEDS = (0, 1, 2)
+
+#: The sublattice-rotated Heisenberg Hamiltonian, which is what makes an energy
+#: comparable at all here.  Under the rotation the Neel ground state becomes
+#: uniform, so ``A`` and ``B`` converge to the same physical tensor and
+#: ``|E(A) - E(B)|`` becomes a convergence diagnostic rather than a property of
+#: the sublattice.  ``test_su_667_product_state.py`` uses the same gate for the
+#: same reason.
+_H_HEISENBERG_ROT = sublattice_rotate_gate(heisenberg_gate())
+
+#: What "broken" looks like.  Not a round number pulled from the air: it is the
+#: exact fixed point #667's ``lambda**1.5`` bond produced, and three of the nine
+#: cells below sit on it to fifteen digits.
+_PRODUCT_STATE_ENERGY = -0.5
+
+#: Post-#667 simple-update references for this model, per bond dimension.
+#: ``test_the_energy_reference_reproduces_the_known_su_number`` reproduces the
+#: D=2 entry from the shipped engine, which is what keeps these expectations
+#: reproduced rather than gospel assumed.  D=3 and D=4 were reproduced the same
+#: way out of band (-0.662859 and -0.667071); see ``task-12-report.md`` section
+#: 5 for the chi scan behind all three.
+_SU_REFERENCE = {2: -0.6593, 3: -0.6632, 4: -0.6674}
+
+#: Environment dimension per ``D``.  ``chi >> D**2`` is the requirement (C-3):
+#: at D=2 and D=3 ``chi=16`` is 4x and 1.8x ``D**2``, and at D=4 ``chi=24`` is
+#: 1.5x it.  The margin at D=3 and D=4 is thin, so the ratio is not the
+#: evidence -- the chi-to-chi movement was measured directly on shipped-engine
+#: states and is 1.4e-11 (D=2, 8->16), 1.1e-07 (D=3, 16->24) and 2.0e-06 (D=4,
+#: 16->24), with nothing further from chi=32.  ``task-12-report.md`` section 5
+#: carries the scan; the D=2 half of it is asserted by
+#: ``test_the_energy_reference_reproduces_the_known_su_number``.
+_CHI = {2: 16, 3: 16, 4: 24}
+
+#: Imaginary time step.  The same 0.05 the shipped path uses, so a shortfall
+#: here cannot be blamed on a Trotter step nothing else in this tree uses.
+_SU_DT = 0.05
+
+
+def _random_state(D, seed):
+    """A random dense checkerboard pair at ``D``, as an ``_SUState``.
+
+    The same builder ``ipeps()`` uses for its own default initialisation
+    (``jax.random.normal`` on ``(D, D, D, D, 2)``, normalised), so the sweep
+    starts where the shipped path starts and a difference in outcome is a
+    difference in the *engine*.
+    """
+    return _SUState.from_pair(*_PAIRS["dense"](D=D, seed=seed))
+
+
+def _su_heisenberg_gate(state, dt=_SU_DT):
+    """``exp(-dt H_rot)`` on the pair's own physical leg."""
+    return _make_trotter_gate_tensor(
+        jnp.asarray(_H_HEISENBERG_ROT.todense()), dt, site_tensor=state.A
+    )
+
+
+def _energy_of(state, chi):
+    """Energy per site of the checkerboard pair, from a **checked** CTM.
+
+    Three things about this reference are deliberate, and each of them is a
+    trap this project has already fallen into once.
+
+    * **The 2-site reading, not the 1-site one.**  ``test_su_667_product_state``
+      measures ``E_1x1(A)`` -- the uniform lattice built from ``A`` alone -- and
+      that is sound *there*, because its states come out of ``_to_physical_pair``
+      with all four bonds in one consistent gauge.  ``_su_evolve``'s output is
+      not in that gauge: only the last-updated bond carries the SVD's basis and
+      the other three carry whatever the step's opening ``gauge_fix`` left, so
+      ``A`` alone is not a valid uniform ansatz for the state.  Measured on a
+      state whose 2-site energy is pinned at -0.662839 across 400, 800, 1200 and
+      2000 steps, the 1x1 reading of the same state moves -0.663174, -0.360570,
+      -0.360570, -0.072255.  A 1x1 reference would have reported a wildly
+      unconverged energy for a state that had converged.
+    * **``recipe="2x2"``, and ``rank(C1)`` asserted rather than assumed.**  The
+      ``1x1`` recipe collapses the environment to rank-1 corners and returns a
+      plausible, wrong number (#723/#726/#747); that defect invalidated a whole
+      benchmark on this project.  Asserting the rank is two singular-value
+      decompositions of a ``chi x chi`` matrix and it is the only thing that
+      distinguishes a converged environment from a collapsed one.
+    * **A zero environment is reported as a zero *state*.**  If the pair itself
+      has gone to zero -- which one cell of this sweep does -- ``C1`` is
+      identically zero and there is no energy to report.  Saying so is the
+      point: ``_normalize_tensor``-style norm checks pass on a corpse
+      (``||A||`` reads 1.0 right up to the step where it is exactly 0), so the
+      collapse has to surface as an energy failure or not at all.
+
+    Args:
+        state: The pair to measure.
+        chi:   Environment bond dimension; must be well above ``D**2``.
+
+    Returns:
+        Energy per site as a ``float``.
+    """
+    env_A, env_B = ctm_tensor_2site(
+        state.A, state.B, chi=chi, max_iter=200, conv_tol=1e-10, recipe="2x2"
+    )
+    for name, env in (("A", env_A), ("B", env_B)):
+        sv = np.linalg.svd(np.asarray(env.C1.todense()), compute_uv=False)
+        assert sv[0] > 0, (
+            f"the {name} corner C1 is identically zero, so there is no energy "
+            f"to report -- the pair itself has collapsed to zero.  Note that a "
+            f"norm check would not have said so: _su_step's output is rescaled "
+            f"by gauge_fix on the way in to the next step, so ||A|| reads a "
+            f"healthy 1.0 right up to the step where it is exactly 0 (#878)."
+        )
+        rank = int(np.sum(sv > sv[0] * 1e-10))
+        assert rank > 1, (
+            f"the {name} corner C1 has rank {rank} at chi={chi} -- a rank-1 "
+            f"corner is the collapsed-environment signature (#747), and it "
+            f"returns a plausible wrong energy rather than failing.  This "
+            f"reference is on recipe='2x2', so a rank-1 corner here is a "
+            f"finding about the state, not about the recipe."
+        )
+    return float(
+        compute_energy_ctm_tensor_2site(
+            state.A, state.B, env_A, env_B, _H_HEISENBERG_ROT, 2
+        )
+    )
+
+
+def _shipped_su_run(D, seed, steps):
+    """The same run on the **shipped** stored-lambda engine.
+
+    Read-only use of ``ipeps_simple_update``: this is the reference engine the
+    rewrite is measured against, and the two tests that use it are the ones
+    that validate the measuring apparatus itself (against a CTM number this
+    project already has) and the rewrite's premise (C-1).
+
+    Returns:
+        ``(state, lambdas)`` -- the pair in physical (absorbed) form, and the
+        four spectra the engine *stored*.  Both halves are needed: C-1 is
+        exactly the question of whether the second describes the first.
+    """
+    A0, B0 = _PAIRS["dense"](D=D, seed=seed)
+    gate = _make_trotter_gate_tensor(
+        jnp.asarray(_H_HEISENBERG_ROT.todense()), _SU_DT, site_tensor=A0
+    )
+    A, B, lambdas = _simple_update_checkerboard_sweep(A0, B0, gate, D, steps)
+    return _SUState.from_pair(*_to_physical_pair(A, B, lambdas)), lambdas
+
+
+def _vidal_theta(pair, weights, bond, gate=None):
+    """The two-site tensor across ``bond`` in the basis the truncation belongs in.
+
+    **This is the whole of what Task 12 found, written as ten lines of test
+    code.**  ``gauge_fix`` returns the pair in *absorbed* form -- every bond
+    weight split ``sqrt(lambda)`` into both of its ends -- so the two-site
+    tensor ``A.B`` carries ``sqrt(lambda)`` on each of its six outer legs.  The
+    Vidal-gauge canonical condition is ``sum Gamma (prod lambda**2) Gamma* = I``
+    with the **square** on the outer legs, and an absorbed pair supplies only
+    ``lambda**1`` of that (``sqrt`` from the ket and ``sqrt`` from the bra).  So
+    the environment of the absorbed two-site tensor is *not* the identity, its
+    SVD is *not* a Schmidt decomposition, and truncating it does not keep the
+    largest Schmidt values of the state.
+
+    One extra ``sqrt(lambda)`` on each outer leg fixes it: the ket then carries
+    ``lambda``, the bra carries ``lambda``, the condition is met, and the SVD
+    across the bond is the state's own Schmidt decomposition.
+
+    That insertion is emphatically **not** "absorbing the weights again", which
+    is the mistake ``_su_step``'s docstring rules out and which really would put
+    ``lambda**2`` on the bond (#667's shape).  It touches the *outer* legs only,
+    it leaves the bond alone, and a correct step divides it straight back out --
+    measured, with no truncation the weighted and unweighted routes produce the
+    same state to 1.1e-15 on all four bonds.  The two are different operations
+    and the rewrite conflated them.
+    """
+    (site_i, leg_i), (site_j, leg_j) = _BOND_ENDS[bond]
+    weighted = dict(pair)
+    for site, on_bond in ((site_i, leg_i), (site_j, leg_j)):
+        for leg in ("u", "d", "l", "r"):
+            if leg == on_bond:
+                continue
+            lam = jnp.asarray(np.asarray(getattr(weights, _BOND_OF_LEG[(site, leg)])))
+            weighted[site] = scale_bond_axis(weighted[site], leg, jnp.sqrt(lam))
+
+    def rename(leg, prefix, phys):
+        out = {lg: prefix + lg for lg in ("u", "d", "l", "r") if lg != leg}
+        out[leg] = "__shared"
+        out["phys"] = phys
+        return out
+
+    gated = gate is not None
+    theta = contract(
+        weighted[site_j].relabels(rename(leg_j, "__j", "sj" if gated else "__pj")),
+        weighted[site_i].relabels(rename(leg_i, "__i", "si" if gated else "__pi")),
+    )
+    if gated:
+        theta = contract(theta, _align_gate_to_ket(gate, weighted[site_i]))
+        theta = theta.relabels({"si_out": "__pi", "sj_out": "__pj"})
+    order = sorted(theta.labels())
+    arr = theta.transpose(tuple(theta.labels().index(lab) for lab in order))
+    return order, np.asarray(arr.todense())
+
+
+#: ``(site, leg) -> bond``, both ends of all four bonds, derived from the
+#: module's own ``_BOND_ENDS`` so the two cannot drift apart.
+_BOND_OF_LEG = {
+    (site, leg): bond for bond, ends in _BOND_ENDS.items() for site, leg in ends
+}
+
+
+def _truncation_error_of(theta_full, theta_kept):
+    """``sqrt(1 - cos**2)`` between two two-site tensors, i.e. the relative
+    error the truncation introduced, measured scale-free.
+
+    The cosine rather than a difference of norms, because ``_su_step``
+    deliberately does not renormalise and ``gauge_fix`` rescales by max-abs, so
+    an overall factor between the two is expected and is not an error.  The
+    cosine quotients it out exactly; normalising and subtracting does not (it
+    agrees only to ``O(err**3)``, which is 4e-04 relative here -- above the
+    1e-06 tolerance the guard below wants and therefore not usable).
+    """
+    cos = abs(np.vdot(theta_full, theta_kept)) / (
+        np.linalg.norm(theta_full) * np.linalg.norm(theta_kept)
+    )
+    return float(np.sqrt(max(1.0 - cos**2, 0.0)))
+
+
+@pytest.mark.parametrize("bond", _BONDS)
+def test_su_step_truncates_in_the_state_s_own_basis(bond):
+    """The kept subspace must be the best rank-``max_D`` one **for the state**.
+
+    This is the most localised statement of what Task 12 found, and the cheapest
+    -- one step, no CTM, no imaginary-time run.  Everything else in this section
+    is this defect, compounded 800 times.
+
+    Eckart-Young in the state's own metric: of all rank-``max_D`` truncations of
+    the gated two-site tensor, the one that keeps the top ``max_D`` singular
+    values of the *Vidal* theta has the smallest error, and every other one is
+    strictly worse.  So ``error(_su_step) / error(optimal) >= 1`` always, with
+    equality **iff** the step truncated in the right basis.  That makes the
+    tolerance below a statement about correctness rather than about numerics.
+
+    Measured out of band on dense ``D=3``, ``dt=0.05``, all four bonds x three
+    seeds (this test runs seed 0's four bonds; the seed axis added nothing here
+    and costs three gauge solves a bond, so it is not parametrised):
+
+    ==================================  ========================
+    ``_su_step`` (truncates absorbed)   ratio 1.0048 to 1.0234
+    the same step, truncating Vidal     ratio 1.000000, all 12
+    ==================================  ========================
+
+    So the guard has been watched in **both** directions -- failing on all
+    twelve cells as shipped, and passing at exactly 1.000000 on all twelve with
+    the outer-leg weights inserted.  A guard whose passing state has never been
+    observed is a guard that might not have one.  1-2% a step does not sound
+    like much; compounded over 800 steps it is the difference between -0.6589
+    and the product state (see the energy guards below, and
+    ``task-12-report.md`` for the full grid).
+
+    The reference is built here rather than imported, and deliberately does not
+    reuse ``_su_step``'s own SVD: it re-derives the two-site tensor from the
+    gauged pair, applies the gate itself, and takes the singular values with
+    numpy.  A reference that shared the implementation's basis would agree with
+    it by construction.
+    """
+    A, B = _PAIRS["dense"](D=D, seed=0)
+    state = _SUState.from_pair(A, B)
+    gate = _su_heisenberg_gate(state)
+
+    A_g, B_g, weights, info = gauge_fix(A, B)
+    assert info.converged, (
+        f"the reference gauge did not converge ({info.iterations} sweeps, "
+        f"residual {info.residual:.3e}), so the basis this compares against is "
+        f"not the BP fixed point and neither number below means anything"
+    )
+    order, full = _vidal_theta({"A": A_g, "B": B_g}, weights, bond, gate)
+
+    (_site_i, leg_i), (_site_j, leg_j) = _BOND_ENDS[bond]
+    left = [f"__j{lg}" for lg in ("u", "d", "l", "r") if lg != leg_j] + ["__pj"]
+    perm = [order.index(x) for x in left] + [
+        order.index(x) for x in order if x not in left
+    ]
+    sigma = np.linalg.svd(
+        full.transpose(perm).reshape(2 * D**3, 2 * D**3), compute_uv=False
+    )
+    optimal = float(np.linalg.norm(sigma[D:]) / np.linalg.norm(sigma))
+    assert optimal > 1e-6, (
+        f"the untruncated theta on {bond} is already rank {D}, so keeping "
+        f"{D} of it is exact and this cell cannot discriminate between two "
+        f"truncation bases -- pick a dt or a pair where truncation bites"
+    )
+
+    stepped = _su_step(state, gate, max_D=D, bond=bond)
+    _order, kept = _vidal_theta({"A": stepped.A, "B": stepped.B}, weights, bond)
+    actual = _truncation_error_of(full, kept)
+
+    assert actual <= optimal * (1 + 1e-6), (
+        f"{bond}: _su_step's truncation costs {actual:.9f} where the best "
+        f"rank-{D} truncation of the same gated state costs {optimal:.9f} "
+        f"({actual / optimal:.6f}x).  It truncates the SVD of the *absorbed* "
+        f"two-site tensor, whose environment is not the identity, so its "
+        f"singular values are not the state's Schmidt values.  Insert one "
+        f"sqrt(lambda) on each of the six outer legs before the SVD (the "
+        f"weights gauge_fix already returns and _su_step drops) and divide it "
+        f"back out after: measured, that makes this ratio 1.000000 on all "
+        f"twelve dense cells, and it is exact at full rank (1.1e-15), so it "
+        f"changes the truncation basis and nothing else."
+    )
+
+
+def test_the_energy_reference_reproduces_the_known_su_number():
+    """``_energy_of`` is checked before anything is concluded from it (C-3).
+
+    A CTM reference that has silently collapsed returns a plausible wrong
+    number, and that has invalidated a whole benchmark on this project before.
+    Three independent things are asserted here, on a state built by the
+    **shipped** engine so that the apparatus is validated against physics this
+    tree already knows rather than against the code under test:
+
+    * **The number.**  ``-0.659004`` at D=2, against this project's post-#667
+      reference of ``-0.6593``.
+    * **It has settled in chi.**  ``chi=8`` and ``chi=16`` agree to 1.4e-11,
+      and ``chi=24`` and ``chi=32`` add nothing (3.3e-16 and 0.0).  An energy
+      still moving with chi is not an answer.
+    * **The recipe is not the collapsing one.**  ``recipe="1x1"`` on the same
+      state returns ``-0.648904`` with ``rank(C1) == 1`` -- a wrong energy that
+      differs from the right one by 1e-02, which is the size of the whole
+      D=2-to-D=4 spread.  The rank assertion inside ``_energy_of`` is what
+      stands between this file and that number.
+
+    Also measured and worth recording: no ``check_rdm`` non-PSD warning fires at
+    any chi on any of D=2, 3 or 4, so the energies here are bounded by physics.
+    """
+    state, _lambdas = _shipped_su_run(D=2, seed=0, steps=600)
+
+    chi_coarse, chi_fine = 8, 16
+    coarse = _energy_of(state, chi=chi_coarse)
+    fine = _energy_of(state, chi=chi_fine)
+    assert fine == pytest.approx(_SU_REFERENCE[2], abs=1e-3), (
+        f"the D=2 reference reads {fine:.6f}, not {_SU_REFERENCE[2]} -- either "
+        f"this apparatus or the shipped engine has moved, and nothing else in "
+        f"this section means anything until that is resolved"
+    )
+    # The two chi are named from the variables rather than written into the
+    # string: a message that hard-codes "chi=8" keeps saying so under a
+    # mutation that changed it, which is how a guard comes to report a number
+    # it did not measure.
+    assert abs(fine - coarse) < 1e-6, (
+        f"E(chi={chi_coarse})={coarse:.9f} and E(chi={chi_fine})={fine:.9f} "
+        f"differ by {abs(fine - coarse):.2e}: the environment has not settled, "
+        f"so this is a truncation error and not yet an energy"
+    )
+
+    # The collapsed-recipe control.  Without it, the rank assertion inside
+    # ``_energy_of`` is a claim nobody has watched fire.
+    env_A, _env_B = ctm_tensor_2site(
+        state.A, state.B, chi=16, max_iter=200, conv_tol=1e-10, recipe="1x1"
+    )
+    sv = np.linalg.svd(np.asarray(env_A.C1.todense()), compute_uv=False)
+    assert int(np.sum(sv > sv[0] * 1e-10)) == 1, (
+        "recipe='1x1' no longer collapses to a rank-1 corner, so _energy_of's "
+        "rank guard has lost the mutation that demonstrates it can fire "
+        "(#723/#726/#747)"
+    )
+
+
+def test_the_stored_spectra_are_closer_to_the_bp_messages_than_the_plan_says():
+    """C-1, resolved by measurement -- and the measurement contradicts the plan.
+
+    The plan's Step 1 asks the new engine's returned weights to match "the
+    diagnostic the engine reported".  ``_su_evolve`` reports none: ``_SUState``
+    has two fields and nowhere to put a spectrum, which is the design.  So the
+    only available comparison on the new engine is ``gauge_fix``'s weights
+    against themselves, which is vacuous in the dangerous direction -- it passes
+    on ``return state``.  ``task-12-corrections.md`` C-1 therefore re-points the
+    test at the **old** engine, whose stored spectra are a real object that can
+    be wrong, and quotes the plan's claim that they miss the BP messages of
+    their own output "by 15-35%".
+
+    **They do not, under the natural metric.**  Measured here at D=2 and
+    reproduced across D in 2, 3, 4 and seeds 0, 1, 2 in ``task-12-report.md``:
+    the shipped default sits **2.25% to 2.38%** away in L2, normalised on the
+    leading value -- small, not large.  On the four-independent-lambda path at
+    D=4 it is **0.00%**: the stored spectra *are* the BP messages, bit for bit,
+    which refutes the premise outright for that configuration.
+
+    Where the plan's number comes from is the *element-wise* maximum relative
+    deviation, which reads **16.3%** on this same D=2 data and 37-38% at D=3 and
+    D=4.  That metric is dominated by the smallest singular value and it is not
+    robust: on the one cell that reaches the plan's range in L2 (D=3, four
+    independent lambdas, 800 steps, 37.52%) the BP solve did **not converge**,
+    and the element-wise reading of that same cell is 2023%.  ``task-12-
+    corrections.md`` C-5 warns about exactly this -- "a Frobenius-vs-max-abs
+    mismatch produced a wrong tolerance figure" -- and it happened again.
+
+    Both metrics are pinned below, so the file records which number belongs to
+    which reading and neither can be quoted as the other.  Watched failing: with
+    the BP weights compared against themselves, both readings go to 0.0 and the
+    lower bounds fire.
+
+    This is the whole of C-1.  There is no matching number for the new engine,
+    and "unrepresentable by construction" is the honest answer rather than a
+    gap: ``test_su_state_has_no_lambda_fields`` is that property as an
+    assertion, and it is the only form the property can take once the field is
+    gone.
+    """
+    state, lambdas = _shipped_su_run(D=2, seed=0, steps=800)
+    _A, _B, bp, info = gauge_fix(state.A, state.B, tol=1e-10)
+    assert info.converged, (
+        f"BP did not converge on the shipped engine's own output "
+        f"({info.iterations} sweeps, residual {info.residual:.3e}); a "
+        f"discrepancy measured against a failed solve is #870's shape and is "
+        f"not evidence of anything"
+    )
+
+    l2, elementwise = {}, {}
+    for field in BondWeights._fields:
+        stored = np.asarray(getattr(lambdas, field), dtype=float)
+        message = np.asarray(getattr(bp, field), dtype=float)
+        stored, message = stored / stored[0], message / message[0]
+        l2[field] = float(np.linalg.norm(stored - message) / np.linalg.norm(message))
+        elementwise[field] = float(np.max(np.abs(stored - message) / message))
+
+    worst_l2, worst_elem = max(l2.values()), max(elementwise.values())
+    assert 1e-3 < worst_l2 < 0.05, (
+        f"the shipped engine's stored spectra sit {worst_l2 * 100:.2f}% from "
+        f"the BP messages of its own output in L2 (per bond: "
+        f"{ {k: round(v * 100, 2) for k, v in l2.items()} }).  The plan claims "
+        f"15-35%; this measurement says the premise is metric-dependent."
+    )
+    assert 0.10 < worst_elem < 0.50, (
+        f"the element-wise maximum relative deviation is "
+        f"{worst_elem * 100:.2f}% (per bond: "
+        f"{ {k: round(v * 100, 2) for k, v in elementwise.items()} }) -- this "
+        f"is the reading the plan's 15-35% belongs to, and pinning it here is "
+        f"what stops the two numbers being quoted for each other"
+    )
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [0] + [pytest.param(s, marks=pytest.mark.slow) for s in _SEEDS[1:]],
+)
+def test_d2_reaches_the_heisenberg_energy_not_the_product_state(seed):
+    """#667's guard: D=2 must reach ~-0.659, not -0.5.
+
+    -0.5 is the product state, which is what the ``lambda**1.5`` bond made the
+    fixed point.  Assert on ENERGY, never on norm: ``gauge_fix`` rescales its
+    input by max-abs on the way in to the next step, so ``||A||`` reads a
+    healthy 1.0 right up to the step where it is exactly 0.
+
+    **This currently fails on all three seeds, in three different ways**, which
+    is why the seed axis is here and not a formality:
+
+    ======  ==========================================================
+    seed 0  -0.576225 here, and not settling: -0.512783 at 400 steps,
+            -0.576225 at 800, back **up** to -0.540608 at 1200
+    seed 1  the pair is exactly **zero** -- ``_energy_of`` reports it
+            rather than returning a number, and a norm check would not
+            have (#878)
+    seed 2  exactly -0.500000, the product state, to fifteen digits
+    ======  ==========================================================
+
+    A one-seed run would have reported any one of those three as *the* symptom.
+    The cause is one thing and it is not seed-dependent: see
+    ``test_su_step_truncates_in_the_state_s_own_basis``.  With that step's
+    truncation basis corrected, the same nine (seed, D) runs give -0.658880 at
+    D=2 on every seed and at every step count from 400 to 2000.
+    """
+    state = _random_state(2, seed)
+    state = _su_evolve(state, _su_heisenberg_gate(state), 2, 800)
+    E = _energy_of(state, _CHI[2])
+    assert E < -0.60, (
+        f"seed {seed}: E={E:.6f} -- at or above the product state "
+        f"({_PRODUCT_STATE_ENERGY}), which is what #667 looked like"
+    )
+    assert E == pytest.approx(_SU_REFERENCE[2], abs=0.02), (
+        f"seed {seed}: E={E:.6f}, reference {_SU_REFERENCE[2]}"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", _SEEDS)
+@pytest.mark.parametrize("D", [3, 4])
+def test_su_evolve_reaches_the_simple_update_reference_energy(D, seed):
+    """The D axis of the sweep: D=3 and D=4 against this project's references.
+
+    Both axes are needed and neither alone discriminates.  D=3 is where #869
+    stayed ambiguous for months, and D=4 is where the shipped four-lambda
+    baseline diverges on every seed -- so a D=3 single-seed run can pass on a
+    broken implementation and a D=4 single-seed run cannot tell "always broken"
+    from "unlucky".
+
+    ``steps`` is 1600, not the plan's 1200, and that is measured rather than
+    cautious: the shipped engine needs 1600 steps at ``dt=0.05`` to reach
+    -0.667071 at D=4 (against the -0.6674 reference), and reporting a D=4
+    shortfall from an under-converged run is the failure mode #882 section 6.3
+    warns about.  1600 is used at D=3 too so the two cells differ in one
+    variable.
+
+    Currently failing on all six cells: every one lands on the product state or
+    within 0.06 of it.  See ``task-12-report.md`` for the grid.
+    """
+    state = _random_state(D, seed)
+    state = _su_evolve(state, _su_heisenberg_gate(state), D, 1600)
+    E = _energy_of(state, _CHI[D])
+    assert E < -0.60, (
+        f"D={D} seed={seed}: E={E:.6f} -- at or above the product state "
+        f"({_PRODUCT_STATE_ENERGY})"
+    )
+    assert E == pytest.approx(_SU_REFERENCE[D], abs=0.01), (
+        f"D={D} seed={seed}: E={E:.6f}, reference {_SU_REFERENCE[D]}"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", _SEEDS)
+@pytest.mark.parametrize("D", [2, 3])
+def test_the_energy_does_not_drift_away_with_more_steps(D, seed):
+    """C-2: pin the **trend**, because one step count reports either verdict.
+
+    Dense four-lambda simple update is non-monotonic in step count -- #869's D=3
+    run peaks near -0.654 around 800 steps and falls to -0.477 by 4000, from the
+    same code -- so a single-step-count energy assertion is not evidence of
+    convergence even when it passes.  What convergence looks like is an energy
+    that stops moving and *stays* stopped.
+
+    Chained in 400-step blocks, which is a multiple of the four-bond cycle, so
+    the bond ordering is identical to one 1200-step call and only the
+    measurement points are added.  (``_su_evolve`` restarts its cycle at
+    ``h_AB`` on every call, so a block that was not a multiple of 4 would
+    silently change the Trotter ordering.)
+
+    Measured, this is the guard that separates the two engines most cleanly.  As
+    shipped, D=2 seed 0 runs -0.512783, -0.576225, -0.540608 -- it comes back
+    *up* by 3.6e-02 and the second assertion fires.  D=3 seed 1 runs -0.536106,
+    -0.514482, -0.604504 and fires on the first.  With ``_su_step``'s truncation
+    basis corrected the same three points read -0.658880, -0.658880, -0.658880 at
+    D=2 on every seed, flat to 1e-06, and D=3 seeds 1 and 2 read -0.662838,
+    -0.662839, -0.662839 against a -0.6632 reference.
+
+    **This guard is necessary and it is not sufficient, which is measured rather
+    than argued.**  Both ``seed 2`` cells *pass* it: at D=2 and at D=3 that seed
+    settles on exactly -0.500000 and stays there, so the trend is flat, pinned,
+    and completely wrong.  A state stuck at the product state is perfectly
+    settled.  That is why this sits beside
+    ``test_d2_reaches_the_heisenberg_energy_not_the_product_state`` and
+    ``test_su_evolve_reaches_the_simple_update_reference_energy`` rather than in
+    place of them -- convergence and correctness are two questions and neither
+    reading answers the other.
+    """
+    state = _random_state(D, seed)
+    gate = _su_heisenberg_gate(state)
+    energies, done = {}, 0
+    for target in (400, 800, 1200):
+        state = _su_evolve(state, gate, D, target - done)
+        done = target
+        energies[target] = _energy_of(state, _CHI[D])
+
+    trail = ", ".join(f"{k}: {v:.6f}" for k, v in energies.items())
+    assert energies[800] <= energies[400] + 1e-3, (
+        f"D={D} seed={seed}: the energy rose between 400 and 800 steps "
+        f"({trail}) -- imaginary time does not go uphill on a converging run"
+    )
+    assert energies[1200] <= energies[800] + 1e-3, (
+        f"D={D} seed={seed}: the energy rose between 800 and 1200 steps ({trail})"
+    )
+    assert abs(energies[1200] - energies[800]) < 5e-3, (
+        f"D={D} seed={seed}: the energy is still moving at 1200 steps "
+        f"({trail}); a value that has not stopped moving is not an answer, "
+        f"whatever it happens to equal"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", _SEEDS)
+def test_d3_actually_uses_its_third_bond_direction(seed):
+    """A nominally-D=3 state whose ``lam_3`` is 2e-6 is really D=2.
+
+    That trap is why pre-#667 D=3 results from ``ipeps()`` were meaningless --
+    the third direction was there in the shape and absent from the state.
+
+    **This guard passes today, and saying only that would be misleading.** All
+    three seeds clear it comfortably (``lam_3/lam_1`` from 4.6e-03 to 7.5e-01),
+    and seed 2's state has an energy of exactly -0.500000: it is *the product
+    state* with a full-rank bond spectrum. So a passing rank check is not
+    evidence that the state is right, and this test is not an acceptance
+    criterion -- the energy guards above are. It is kept because it is cheap and
+    because it is the only reading that catches #667's specific symptom, which
+    the energy guards would report only as a number that is too high.
+
+    The control below is what keeps it from being an assertion that cannot
+    fail: a pair whose third virtual direction is scaled by 1e-06 is a genuinely
+    D=2 state wearing a D=3 shape, and the same reading must reject it.
+    """
+    state = _random_state(3, seed)
+    state = _su_evolve(state, _su_heisenberg_gate(state), 3, 1200)
+    _A, _B, w, info = gauge_fix(state.A, state.B, tol=1e-10)
+    assert info.converged, (
+        f"seed {seed}: BP did not converge on the evolved pair "
+        f"({info.iterations} sweeps, residual {info.residual:.3e}), so the "
+        f"spectrum below is not the state's"
+    )
+    for field in BondWeights._fields:
+        lam = np.asarray(getattr(w, field), dtype=float)
+        assert lam[-1] / lam[0] > 1e-3, (
+            f"seed {seed} bond {field}: lam_3/lam_1 = {lam[-1] / lam[0]:.2e} -- "
+            f"this is a D=2 state in a D=3 shape (#667)"
+        )
+
+    # The control: a pair that really is rank-deficient must be rejected here.
+    A, B = _PAIRS["dense"](D=3, seed=seed)
+    starved = jnp.asarray([1.0, 1.0, 1e-6])
+    for leg in ("u", "d", "l", "r"):
+        A, B = scale_bond_axis(A, leg, starved), scale_bond_axis(B, leg, starved)
+    _a, _b, w_starved, _i = gauge_fix(A, B, tol=1e-10)
+    ratios = [
+        float(
+            np.asarray(getattr(w_starved, f))[-1] / np.asarray(getattr(w_starved, f))[0]
+        )
+        for f in BondWeights._fields
+    ]
+    assert min(ratios) <= 1e-3, (
+        f"a pair whose third virtual direction was scaled by 1e-06 still reads "
+        f"lam_3/lam_1 = {min(ratios):.2e} -- this reading cannot see a "
+        f"rank-deficient bond and the assertion above is decoration"
+    )

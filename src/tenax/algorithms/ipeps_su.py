@@ -25,6 +25,7 @@ entry point arrives in #882's Phase 4, once ``ipeps()`` is wired to it.
 
 from __future__ import annotations
 
+import numbers
 import warnings
 from dataclasses import dataclass
 
@@ -668,10 +669,20 @@ def _su_evolve(state: _SUState, gate: Tensor, max_D: int, steps: int) -> _SUStat
         gauge once.  ``steps=0`` returns the input object unchanged.
 
     Raises:
-        TypeError: if ``steps`` is not an ``int``.  ``range`` would raise this
+        TypeError: if ``steps`` is not an integer.  ``range`` would raise this
             anyway, three frames down and without naming the argument; ``bool``
             is rejected too, since ``steps=True`` meaning "one step" is not a
             call anybody intended to make.
+
+            The check is on ``numbers.Integral``, not on ``int``, and that is
+            load-bearing rather than tidiness: ``np.int64``/``np.int32`` are not
+            ``int``, and ``iPEPSConfig.num_imaginary_steps``
+            (``ipeps_config.py:524``) is an uncoerced dataclass field handed
+            straight through at ``ipeps.py:451``, so an ``int`` check here would
+            reject a perfectly ordinary numpy scalar the moment Phase 4 wires
+            ``ipeps()`` to this function.  ``bool`` is excluded explicitly
+            because it is ``Integral`` too -- that exclusion is the only reason
+            ``steps=True`` raises.
         ValueError: if ``steps`` is negative, or if any virtual leg of the pair
             is not at ``max_D``.
 
@@ -725,7 +736,7 @@ def _su_evolve(state: _SUState, gate: Tensor, max_D: int, steps: int) -> _SUStat
         runaway of #870, where ``||Gamma||`` grew 300x an iteration into an f64
         ``inf``.
     """
-    if not isinstance(steps, int) or isinstance(steps, bool):
+    if not isinstance(steps, numbers.Integral) or isinstance(steps, bool):
         raise TypeError(
             f"steps must be an int; got {type(steps).__name__} ({steps!r}).  "
             f"It counts bonds, so there is no meaning to give a fraction of one."
