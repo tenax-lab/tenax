@@ -989,11 +989,19 @@ def test_su_step_rejects_a_gate_that_does_not_match_the_site(broken, match, su):
 # is 76 s on its own, against a budget of 90 s for the whole of Task 11.  What
 # a symmetric cell would add is block-sparse *algebra*, and none of it happens
 # here: ``_su_evolve`` picks bond names off a tuple and calls ``_su_step``,
-# whose own symmetric cells already cover the charge bookkeeping.  The one
-# block-sparse-specific hazard the loop does own -- a bond coming back below
-# ``max_D`` because a charge block truncated away entirely -- is reachable
-# without paying for BP, and
-# ``test_su_evolve_names_the_step_that_broke_bond_uniformity`` reaches it.
+# whose own symmetric cells already cover the charge bookkeeping.
+#
+# An earlier version of this note claimed the loop owned one block-sparse
+# hazard of its own -- a bond coming back below ``max_D`` because a charge
+# block truncated away entirely.  **It does not, and the correction is
+# measured.**  With ``base_charges=None``, ``linalg.svd`` drops sectors but
+# keeps the total: on this file's own symmetric ``D=3`` ``theta`` the returned
+# bond dimension is exactly ``max_D`` for ``max_D`` in 1, 2, 3, 4, 5, 8, 12, 20
+# and 40, and falls short only past the structural capacity of 50
+# (``54 -> 50``, ``60 -> 50``).  ``max_D == D == 3`` is nowhere near that.  So
+# there is no symmetric-only behaviour here that the dense arm misses, and
+# ``test_su_evolve_names_the_step_that_broke_bond_uniformity`` is testing a
+# broken ``_su_step``, not a truncation outcome.
 
 #: The cycle order asserted below.  Written out here rather than imported from
 #: ``ipeps_su._SU_CYCLE`` so the assertion is a second, independent statement of
@@ -1009,8 +1017,38 @@ def _torus(state):
     return torus_2x2_sign_free(state.A, state.B, _ones_for(state.A))
 
 
+def _shrink_leg(t, leg, keep):
+    """``t`` with ``leg`` truncated to its first ``keep`` entries.
+
+    Used to build a pair that is uniform on every bond's ``IN`` end and *not* on
+    one ``OUT`` end -- the case a four-leg uniformity read cannot see.  Same
+    index-rebuilding idiom as
+    ``test_su_step_rejects_a_gate_that_does_not_match_the_site``.
+    """
+    axis = t.labels().index(leg)
+    idx = t.indices[axis]
+    indices = list(t.indices)
+    indices[axis] = TensorIndex.from_charges(
+        idx.symmetry, np.asarray(idx.charges)[:keep].copy(), idx.flow, label=idx.label
+    )
+    arr = np.take(np.asarray(t.todense()), np.arange(keep), axis=axis)
+    return DenseTensor(jnp.asarray(arr), tuple(indices))
+
+
 def _bond_dims(state):
-    """Each bond's dimension, read through ``_BOND_ENDS``' ``IN`` end."""
+    """Each bond's dimension, read through ``_BOND_ENDS``' ``IN`` end.
+
+    Deliberately **not** ``ipeps_su._bond_dims``, even though the implementation
+    has one -- same discipline as ``_EXPECTED_CYCLE`` above and
+    ``_TORUS_GATE_AXES`` further up.  The only assertion that uses this
+    (``test_su_evolve_rejects_a_max_D_the_pair_does_not_have``) is a statement
+    about what ``_su_step`` leaves behind, i.e. about the premise the
+    implementation's guard rests on; reading it through that guard's own helper
+    would make it agree by construction.  The two are also shaped differently on
+    purpose -- this returns four entries keyed by bond, the implementation's
+    returns eight keyed by ``bond@site.leg`` -- so they cannot be swapped for
+    each other by accident.
+    """
     pair = {"A": state.A, "B": state.B}
     return {
         bond: pair[site].indices[pair[site].labels().index(leg)].dim
@@ -1067,7 +1105,12 @@ def test_su_evolve_has_no_steps_mod_4_dependence(su):
     identity = _gate(A, dt=0.0)
 
     # The premise: dt=0 really is the identity, so "the state must not move" is
-    # a statement about the loop and not about the gate.  Measured 3.1e-16.
+    # a statement about the loop and not about the gate.  Measured **2.220e-16**
+    # -- max|G - I|, the expression below.  (An earlier comment said 3.1e-16,
+    # which is the Frobenius norm of the same matrix: a scratch probe used
+    # ``np.linalg.norm`` where the assertion uses ``np.max(np.abs(...))``.  Same
+    # class of mistake as quoting a coverage-on runtime against a --no-cov
+    # budget, and worth the correction for the same reason.)
     off = float(
         np.max(np.abs(np.asarray(identity.todense()).reshape(4, 4) - np.eye(4)))
     )
@@ -1123,6 +1166,13 @@ def test_su_evolve_actually_evolves(su):
 
     T = {n: _torus(_su_evolve(state, gate, max_D=D, steps=n)) for n in range(6)}
 
+    # Not implied by the consecutive-step assertion below, and it took a
+    # mutation to establish that rather than an argument: ``range(steps % 4)``
+    # -- a loop that drops whole cycles and runs only the remainder -- makes
+    # ``steps=4`` run zero steps, so this fires at 0.000e+00 while every
+    # consecutive pair (0,1,2,3,0,1 steps) still differs and the loop below
+    # stays green.  A cycle that returns to where it started is a real shape;
+    # this is the only reading that sees it.
     moved = _torus_rel(T[4], T[0])
     assert moved > 1e-3, (
         f"four steps of a dt=0.05 gate moved the state by only {moved:.3e} -- "
@@ -1197,6 +1247,18 @@ def test_su_evolve_visits_four_distinct_bonds_per_cycle(su, monkeypatch):
     monkeypatch.undo()
 
     assert len(seen) == 8, f"eight steps were asked for, {len(seen)} were run: {seen}"
+    # Weaker than the order assertion below and **not** redundant with it, for a
+    # reason that is about the two references rather than about the sets: this
+    # compares against ``_BOND_ENDS``, the module's own inventory of bonds,
+    # while the next line compares against a literal written out in this file.
+    # So this is the assertion that pins the ``_BOND_ENDS`` <-> ``_SU_CYCLE``
+    # coupling.  Watched: add a fifth entry to ``_BOND_ENDS`` and leave the
+    # cycle alone -- the recorded order is still a perfect
+    # ``h_AB, v_AB, h_BA, v_BA`` twice over, the order assertion passes, and
+    # only this one reports "the four bonds of a checkerboard cell are
+    # ['h_AB', 'h_BA', 'h_XX', 'v_AB', 'v_BA']".  It is also the *durable* half:
+    # any permutation covering all four is a valid Trotter split, so the order
+    # below may legitimately be re-pointed one day, and coverage may not.
     assert set(seen[:4]) == set(_BOND_ENDS), (
         f"the first cycle updated {seen[:4]} -- the four bonds of a checkerboard "
         f"cell are {sorted(_BOND_ENDS)}, and evolving a subset leaves the state "
@@ -1278,43 +1340,92 @@ def test_su_evolve_rejects_a_max_D_the_pair_does_not_have(max_D, su):
     # notices that the premise moved.
 
 
-def test_su_evolve_rejects_a_negative_step_count(su):
-    """``range(-1)`` is empty, so a negative count would silently do nothing."""
+@pytest.mark.parametrize(
+    "steps,exc,match",
+    [
+        (-1, ValueError, "steps must be non-negative"),
+        (4.0, TypeError, "steps must be an int"),
+        (True, TypeError, "steps must be an int"),
+    ],
+)
+def test_su_evolve_rejects_a_step_count_it_cannot_run(steps, exc, match, su):
+    """Each of the three is silent or misleading if it is not caught here.
+
+    ``-1`` is the dangerous one: ``range(-1)`` is empty, so a negative count
+    would run zero steps and return a plausible state rather than complain.
+    ``4.0`` raises out of ``range`` anyway, but three frames down and without
+    naming the argument.  ``True`` is an ``int`` to Python and would quietly
+    mean "one step"; ``steps`` counts bonds, and nobody writing ``steps=True``
+    meant one bond.
+    """
     A, B = su.pair("dense")
     state = _SUState.from_pair(A, B)
-    with pytest.raises(ValueError, match="steps must be non-negative"):
-        _su_evolve(state, _gate(A), max_D=D, steps=-1)
+    with pytest.raises(exc, match=match):
+        _su_evolve(state, _gate(A), max_D=D, steps=steps)
 
 
 def test_su_evolve_names_the_step_that_broke_bond_uniformity(su, monkeypatch):
     """A bond that shrinks mid-run is reported here, not as a reshape error later.
 
-    Real rather than defensive: on the block-sparse path a truncation can empty
-    a charge block, and ``linalg.svd`` then returns a bond below ``max_D``.
-    From that point the pair is non-uniform and the *next* step's ``gauge_fix``
-    fails inside ``absorb_weights``, several frames below the caller and naming
-    neither the step nor the bond -- which is how the same shape cost this
-    branch a debugging session already.  So ``_su_evolve`` re-checks its
-    invariant after every step and says which one broke it.
+    **This pins an internal invariant, not a guard against an expected event,
+    and the distinction is a correction.**  An earlier version of this docstring
+    called the post-step check "real rather than defensive" on the grounds that
+    a symmetric truncation which empties a charge block makes ``linalg.svd``
+    return a bond below ``max_D``.  Measured, it does not: with
+    ``base_charges=None`` the fallback allocation (``linalg.py:816-842``)
+    spreads the budget over the sectors and then drains the excess *to zero*, so
+    sectors are dropped and the total stays at exactly ``max_singular_values``.
+    On this file's own symmetric ``D=3`` ``theta``, ``max_D`` in 1, 2, 3, 4, 5,
+    8, 12, 20 and 40 all come back exact; only 54 and 60 under-deliver, at the
+    pair's structural capacity of 50.  ``max_D == D`` never goes near it.
 
-    Reproduced by monkeypatching ``_su_step`` rather than by finding a
-    symmetric truncation that empties a block: the thing under test is the
-    *reporting*, one symmetric step costs 38 s, and a pair engineered to lose a
-    sector would pin the SVD's block bookkeeping rather than this loop.  The
-    same trade ``test_su_step_warns_when_the_gauge_did_not_converge`` makes.
+    So with a well-formed input and a correct ``_su_step`` the check cannot
+    fire, and the only thing that reaches it is a broken step -- which is what
+    the monkeypatch below substitutes.  It is kept because eight metadata reads
+    are free, because the alternative report is a reshape ``TypeError`` several
+    frames below the caller naming neither the step nor the bond, and because an
+    invariant worth stating is worth stating where it is cheap.  What it is not
+    is a prediction about the block-sparse path.
+
+    Monkeypatching rather than engineering a real shrink is the same trade
+    ``test_su_step_warns_when_the_gauge_did_not_converge`` makes: the thing under
+    test is the *reporting*, and one symmetric step costs 38 s.
+
+    **The ``out_end_only`` case is why the check reads all eight virtual legs
+    rather than the four ``IN`` ends.** For a working ``_su_step`` one end per
+    bond is enough -- both come out of one SVD -- but the only thing this check
+    exists to catch is a step that did *not* work, and a step that misbehaved on
+    an ``OUT`` end alone is exactly what a four-leg read waves through. Watched:
+    with ``_bond_dims`` narrowed to ``ends[:1]``, this parameter stops raising
+    and every other test in the file still passes. That is the whole argument
+    for the extra four reads, and without this case it would have been an
+    unfalsifiable one.
     """
     A, B = su.pair("dense")
     state = _SUState.from_pair(A, B)
-    small = _SUState.from_pair(*_PAIRS["dense"](D=D - 1))
-    real_step = ipeps_su_module._su_step
-    calls = {"n": 0}
 
-    def _shrinks_on_the_second(st, g, max_D, bond):
-        calls["n"] += 1
-        if calls["n"] == 2:
-            return small
-        return real_step(st, g, max_D, bond)
+    # Every IN end (A.r, B.r, A.d, B.d) stays at D; only A.l -- h_BA's OUT end
+    # -- shrinks, so a four-leg read sees a perfectly uniform pair.
+    out_end_only = _SUState.from_pair(_shrink_leg(A, "l", D - 1), B)
+    both_ends = _SUState.from_pair(*_PAIRS["dense"](D=D - 1))
 
-    monkeypatch.setattr(ipeps_su_module, "_su_step", _shrinks_on_the_second)
-    with pytest.raises(ValueError, match=r"the pair after step 1 \(v_AB\)"):
-        _su_evolve(state, _gate(A), max_D=D, steps=4)
+    # Both patterns pin the step index as well as the symptom -- "step 1
+    # (v_AB)" is the step that returned the broken pair, so a check that fired
+    # late (say, only after the loop) would report step 3 and not match.
+    for broken, match in (
+        (both_ends, r"the pair after step 1 \(v_AB\) carries"),
+        (out_end_only, r"the pair after step 1 \(v_AB\).*off on \{'h_BA@A\.l': 2\}"),
+    ):
+        real_step = ipeps_su_module._su_step
+        calls = {"n": 0}
+
+        def _shrinks_on_the_second(st, g, max_D, bond, _broken=broken, _real=real_step):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                return _broken
+            return _real(st, g, max_D, bond)
+
+        monkeypatch.setattr(ipeps_su_module, "_su_step", _shrinks_on_the_second)
+        with pytest.raises(ValueError, match=match):
+            _su_evolve(state, _gate(A), max_D=D, steps=4)
+        monkeypatch.undo()

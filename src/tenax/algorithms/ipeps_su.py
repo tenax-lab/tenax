@@ -407,14 +407,22 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
             gone to zero.
 
     Note:
-        ``max_D`` should equal the pair's current bond dimension unless all
-        four bonds are being grown together.  ``gauge_fix`` reads **one**
-        ``D_h`` off ``A.r`` and one ``D_v`` off ``A.d`` and hands each to both
-        bonds of that orientation (``ipeps_gauge._identity_weights``), so a
-        pair whose two horizontal bonds have different dimensions is not
-        something it can gauge.  Growing ``D`` therefore has to happen a full
-        four-bond cycle at a time; the failure is loud (a shape error inside
-        the next ``gauge_fix``), not silent.
+        ``max_D`` must equal the pair's current bond dimension, full stop.  Not
+        "unless all four bonds are grown together" -- that was this docstring's
+        earlier claim and #882 Task 11 refuted it by measurement; see
+        :func:`_require_uniform_bonds`, which is the authority on this and
+        which :func:`_su_evolve` enforces.
+
+        The short form: ``gauge_fix`` reads **one** ``D_h`` off ``A.r`` and one
+        ``D_v`` off ``A.d`` and hands each to both bonds of that orientation
+        (``ipeps_gauge._identity_weights``), and it runs at the *start* of every
+        step.  One call here can only move one bond.  So the very first step at
+        any ``max_D != D`` leaves a pair that cannot be gauged, and the
+        **second** step raises inside ``absorb_weights`` -- at step index 1, in
+        the middle of the first cycle, whatever order the bonds are visited in.
+        There is no cycle to complete and no boundary to defer to, and
+        *shrinking* fails identically to growing.  Changing ``D`` means building
+        a new pair at the new ``D``, not passing a different ``max_D``.
 
     Performance:
         ``gauge_fix`` is called at its **default** ``tol=1e-6``.  That buys
@@ -506,17 +514,23 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
 
 
 def _bond_dims(state: _SUState) -> dict[str, int]:
-    """Each bond's dimension, read off the ``IN`` end named in :data:`_BOND_ENDS`.
+    """Every virtual leg's dimension, keyed ``"<bond>@<site>.<leg>"``.
 
-    One end is enough: an ``_su_step`` builds both ends of the bond it updates
-    from the same SVD, so they share a dimension by construction, and the three
-    it does not touch are returned untransformed.
+    **Both** ends of each bond, i.e. all eight virtual legs, not the four ``IN``
+    ends.  For a working :func:`_su_step` the two ends of a bond cannot disagree
+    -- they come out of one SVD -- so reading one end would be sound *for the
+    real step*.  But the only thing this feeds is a check on whether a step
+    misbehaved, and a step that misbehaved on an ``OUT`` end alone is precisely
+    the case a four-leg read would wave through.  Eight metadata reads cost
+    nothing; scoping the check to the failures one already believes cannot
+    happen is how a guard ends up unable to fail.
     """
     pair = {"A": state.A, "B": state.B}
     dims = {}
-    for bond, ((site, leg), _other) in _BOND_ENDS.items():
-        t = pair[site]
-        dims[bond] = t.indices[t.labels().index(leg)].dim
+    for bond, ends in _BOND_ENDS.items():
+        for site, leg in ends:
+            t = pair[site]
+            dims[f"{bond}@{site}.{leg}"] = t.indices[t.labels().index(leg)].dim
     return dims
 
 
@@ -539,7 +553,7 @@ def _require_uniform_bonds(state: _SUState, max_D: int, where: str) -> None:
         max_D=4 (grow)     step 0 -> A.r = 4, A.l = 3    step 1 RAISES
         max_D=3 (match)    step 0 -> A.r = 3             step 1, 2, 3 all fine
 
-    Two consequences, both of which contradict the obvious reading:
+    Three consequences, all of which contradict the obvious reading:
 
     * **Shrinking is no more available than growing.**  Both leave the same
       non-uniform pair.
@@ -547,12 +561,26 @@ def _require_uniform_bonds(state: _SUState, max_D: int, where: str) -> None:
       index 1, inside the first cycle, so there is no cycle boundary to defer
       growth to; a run of ``steps=4`` with ``max_D=4`` from ``D=3`` gets one
       step in, not four.
+    * **No bond ordering rescues it either.**  ``gauge_fix`` runs at the *start*
+      of every step and takes two dimensions for four bonds, and one
+      :func:`_su_step` can only move one bond, so the pair is ungaugeable after
+      the *first* step whichever bond that was.  Refusing is therefore not a
+      conservative choice; it is the only reachable contract while ``gauge_fix``
+      reads a ``D_h`` and a ``D_v`` rather than four dimensions.
 
     ``D`` therefore changes between runs, not within one -- which is how
     ``ipeps()`` already uses it, building the pair at ``config.max_bond_dim``
     and passing that same number as ``max_D`` (``ipeps.py:408``).  Growing a
     converged state is a re-initialisation (pad the pair, then evolve at the new
-    ``D``), and it is out of scope for this module.
+    ``D``), and it is out of scope for this module.  Note that this is not a
+    capability being taken away from the shipped path: measured,
+    ``_simple_update_checkerboard_sweep`` at its **default**
+    ``independent_bonds=False`` raises the identical ``TypeError`` at the
+    identical step index for ``max_D != D`` in either direction.  Re-dimensioning
+    over a full four-bond cycle works only under the non-default
+    ``su_independent_bond_lambdas=True``, where four independent stored spectra
+    mean no gauge is ever re-derived from a non-uniform pair -- which is exactly
+    the capability #882 trades away by deleting the storage.
 
     Args:
         state:  The pair to check.
@@ -560,14 +588,14 @@ def _require_uniform_bonds(state: _SUState, max_D: int, where: str) -> None:
         where:  Human-readable position, used in the message only.
 
     Raises:
-        ValueError: if any of the four bonds is not at ``max_D``.
+        ValueError: if any virtual leg is not at ``max_D``.
     """
     dims = _bond_dims(state)
-    off = {bond: d for bond, d in dims.items() if d != max_D}
+    off = {leg: d for leg, d in dims.items() if d != max_D}
     if off:
         raise ValueError(
             f"_su_evolve needs all four bonds at max_D={max_D}, but {where} "
-            f"carries {dims} -- off on {sorted(off)}.  Each step re-derives "
+            f"carries {dims} -- off on {off}.  Each step re-derives "
             f"the gauge with gauge_fix, "
             f"which reads a single D_h off A.r and a single D_v off A.d and "
             f"applies each to both bonds of that orientation, so a pair whose "
@@ -631,7 +659,8 @@ def _su_evolve(state: _SUState, gate: Tensor, max_D: int, steps: int) -> _SUStat
         max_D: Bond dimension.  Must be the dimension the pair already has; see
                :func:`_require_uniform_bonds` for why this is not a truncation
                knob.
-        steps: Number of **bonds** to update.  ``0`` returns ``state`` itself.
+        steps: Number of **bonds** to update, a non-negative ``int``.  ``0``
+               returns ``state`` itself.
 
     Returns:
         A new :class:`_SUState` in the same convention as the input -- same leg
@@ -639,11 +668,39 @@ def _su_evolve(state: _SUState, gate: Tensor, max_D: int, steps: int) -> _SUStat
         gauge once.  ``steps=0`` returns the input object unchanged.
 
     Raises:
-        ValueError: if ``steps`` is negative, or if the pair's bonds are not all
-            at ``max_D`` -- checked on the input *and* after every step, so a
-            symmetric run that loses a charge sector mid-cycle is reported with
-            the step index that lost it instead of as a reshape error inside the
-            next ``gauge_fix``.
+        TypeError: if ``steps`` is not an ``int``.  ``range`` would raise this
+            anyway, three frames down and without naming the argument; ``bool``
+            is rejected too, since ``steps=True`` meaning "one step" is not a
+            call anybody intended to make.
+        ValueError: if ``steps`` is negative, or if any virtual leg of the pair
+            is not at ``max_D``.
+
+            The bond check runs on the input **and** again after every step, and
+            the two halves are different kinds of statement.  The input half is
+            the precondition -- it is what a caller can get wrong, and it fires
+            on real input (see :func:`_require_uniform_bonds`).  The post-step
+            half is an **internal invariant**: given a well-formed input and a
+            correct :func:`_su_step`, it cannot fire, and no truncation outcome
+            makes it fire either.  That last part is measured rather than
+            assumed, and it corrects an earlier justification of this guard which
+            claimed an emptied charge sector would shrink the bond.  It does not:
+            with ``base_charges=None``, ``linalg.svd``'s fallback allocation
+            (``linalg.py:816-842``) spreads the budget across sectors and then
+            *drains the excess to zero*, dropping sectors while keeping the total
+            at exactly ``max_singular_values``.  On this module's own symmetric
+            ``D=3`` ``theta`` the returned bond dimension is exactly ``max_D``
+            for ``max_D`` in 1, 2, 3, 4, 5, 8, 12, 20 and 40, and under-delivers
+            only past the pair's structural capacity (50: ``54 -> 50``,
+            ``60 -> 50``) -- a regime ``max_D == D`` never reaches.
+
+            It is kept anyway, as an assertion and not as a guard against an
+            expected event: it is eight metadata reads, the message names the
+            step and the bond, and the failure it would report -- an ungaugeable
+            pair handed to the next step -- otherwise surfaces as a reshape
+            ``TypeError`` several frames below the caller.  The one thing that
+            reaches it is a broken ``_su_step``, which is exactly what
+            ``test_su_evolve_names_the_step_that_broke_bond_uniformity``
+            substitutes.
 
     Warns:
         RuntimeWarning: once per step whose internal ``gauge_fix`` did not
@@ -668,6 +725,11 @@ def _su_evolve(state: _SUState, gate: Tensor, max_D: int, steps: int) -> _SUStat
         runaway of #870, where ``||Gamma||`` grew 300x an iteration into an f64
         ``inf``.
     """
+    if not isinstance(steps, int) or isinstance(steps, bool):
+        raise TypeError(
+            f"steps must be an int; got {type(steps).__name__} ({steps!r}).  "
+            f"It counts bonds, so there is no meaning to give a fraction of one."
+        )
     if steps < 0:
         raise ValueError(f"steps must be non-negative; got {steps}.")
     _require_uniform_bonds(state, max_D, "the input pair")
