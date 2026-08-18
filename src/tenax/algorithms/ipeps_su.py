@@ -18,6 +18,17 @@ from the tensors themselves with
 transiently, inside one step, between the SVD and the ``sqrt(sigma)`` split
 that immediately consumes it.
 
+**"Absorbed form everywhere" is a statement about what is stored, not about
+what the SVD is taken of**, and conflating the two cost this module a review
+cycle.  The truncating SVD has to see the *Vidal* two-site tensor or it is not
+a Schmidt decomposition and the subspace it keeps is not the state's;
+:func:`_su_step` therefore reconstructs that tensor inside the step -- one more
+``sqrt(lambda)`` on the six legs outside the bond, divided straight back out --
+and its stage-2 note is the authority on why this is not the ``lambda**1.5``
+re-absorb of #667.  Without it :func:`_su_evolve` reached the Heisenberg energy
+on **0 of 9** (seed, D) cells and sat on the product state; with it, 5 of the
+same 9 (``task-12-report.md``, ``task-10-reopen-report.md``).
+
 Everything here is underscore-private for v1.  Nothing is exported from
 ``tenax/__init__.py`` and nothing is documented in ``README.md``: the public
 entry point arrives in #882's Phase 4, once ``ipeps()`` is wired to it.
@@ -29,11 +40,13 @@ import numbers
 import warnings
 from dataclasses import dataclass
 
+import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._tensor_utils import absorb_sqrt_singular_values
 from tenax.algorithms.ipeps_gauge import gauge_fix
 from tenax.contraction.contractor import contract, truncated_svd
+from tenax.core._tensor_utils import scale_bond_axis
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 #: Canonical leg order of a checkerboard site tensor, shared with
@@ -88,11 +101,63 @@ _BOND_ENDS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
 #: would leave it (#667's shape).
 _SU_CYCLE: tuple[str, ...] = ("h_AB", "v_AB", "h_BA", "v_BA")
 
+#: ``(site, leg) -> bond``, all eight virtual legs, **derived** from
+#: :data:`_BOND_ENDS` rather than written out a second time.
+#:
+#: This is the same map ``ipeps_bp_gauge._BOND_OF`` carries, and that is the
+#: point of deriving it: a hand-written copy would be a second table to keep in
+#: step with the first, which is the duplication #882 Task 11 was corrected for.
+#: :func:`_su_step` reads it to find which weight sits on each of the six
+#: **outer** legs of a bond's two sites.
+_BOND_OF_LEG: dict[tuple[str, str], str] = {
+    (site, leg): bond for bond, ends in _BOND_ENDS.items() for site, leg in ends
+}
+
+#: Relative floor below which a bond weight is treated as an unused direction.
+#: Matches ``_tensor_utils.safe_inv_lambda``'s default and
+#: ``absorb_sqrt_singular_values``' own guard in spirit: an entry this far below
+#: the leading weight carries no state, and inverting it would turn a zero into
+#: an ``inf`` rather than projecting it out.
+_WEIGHT_RTOL = 1e-12
+
 #: Working labels, ``__``-prefixed so they cannot collide with a site leg
 #: (``u``, ``d``, ``l``, ``r``, ``phys``) or a gate leg (``si``, ``sj``,
 #: ``si_out``, ``sj_out``).
 _SHARED = "__shared"
 _NEW_BOND = "__bond_new"
+
+
+def _sqrt_and_inv_sqrt(lam) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """``(sqrt(lam), 1/sqrt(lam))`` under one shared mask, backward-safe.
+
+    :func:`_su_step` multiplies six outer legs by the first and divides the
+    same six by the second, so the two have to agree about which entries are
+    "there" -- one mask computed once, used twice, rather than two thresholds
+    that could disagree by a rounding.
+
+    **At ``lam -> 0`` the pair is ``(0, 0)``, and the round trip is still
+    exact.**  That looks like it loses the direction and does not: the pair
+    handed to :func:`_su_step` is in *absorbed* form, so it already carries
+    ``sqrt(lam) == 0`` on that slice and the slice is identically zero before
+    this function is reached.  Multiplying it by 0 and then by the
+    pseudo-inverse 0 returns the same zero.  The alternative -- a true
+    ``1/sqrt(lam)`` -- turns that zero into ``0 * inf == nan``, which is the
+    ``1/(lam + eps)`` amplification ``safe_inv_lambda`` exists to avoid.
+
+    Backward-safe by the standard double-``where``: the inner ``where`` keeps
+    the ``sqrt`` argument at 1.0 on masked entries so the adjoint
+    ``0.5/sqrt(s)`` is finite there, and the outer ``where`` zeroes both the
+    value and the cotangent.  A bare ``jnp.sqrt`` has an ``inf`` VJP at zero,
+    which is #789's shape and the reason
+    :func:`~tenax.algorithms._tensor_utils.absorb_sqrt_singular_values` exists.
+    Nothing here is differentiated yet; the point is that it stays safe when
+    something is.
+    """
+    lam = jnp.asarray(lam)
+    keep = lam > _WEIGHT_RTOL * jnp.max(lam)
+    safe = jnp.where(keep, lam, 1.0)
+    root = jnp.sqrt(safe)
+    return jnp.where(keep, root, 0.0), jnp.where(keep, 1.0 / root, 0.0)
 
 
 @dataclass(frozen=True)
@@ -309,27 +374,77 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
     the start of every step because the previous step's gate invalidated it --
     that is the cadence, and it is not a tunable (#882 §2).
 
-    The four stages:
+    The five stages:
 
     1. :func:`~tenax.algorithms.ipeps_gauge.gauge_fix` on the pair.  It takes
        and returns **absorbed form**, and the ``BondWeights`` it also returns
        are the BP fixed-point spectrum *already absorbed into that pair*.  They
-       are dropped here.  Absorbing them again would put ``lambda**1.5`` on
-       every bond, which is #667's mechanism verbatim and has shipped on this
-       very function once already.  Measured *here*, re-absorbing them inside
-       this function moves the stepped state by 2.7e-01 (dense ``h_AB`` and
-       ``h_BA``) and 2.8e-01 (``v_AB``, ``v_BA``), independently reproduced at
-       2.663e-01.  (``gauge_fix``'s own docstring quotes 9.0e-02 to 8.4e-01 for
-       the same mistake; that is Phase 1's measurement of re-absorbing at
-       *its* boundary, on a range of pairs, and is not a number about this
-       function.)
-    2. Contract the two sites sharing ``bond`` across it, and apply ``gate`` to
+       are **not absorbed into it again**.  Doing that would put
+       ``lambda**1.5`` on every bond, which is #667's mechanism verbatim and
+       has shipped on this very function once already.  Measured *here*,
+       re-absorbing them inside this function moves the stepped state by
+       2.7e-01 (dense ``h_AB`` and ``h_BA``) and 2.8e-01 (``v_AB``, ``v_BA``),
+       independently reproduced at 2.663e-01.  (``gauge_fix``'s own docstring
+       quotes 9.0e-02 to 8.4e-01 for the same mistake; that is Phase 1's
+       measurement of re-absorbing at *its* boundary, on a range of pairs, and
+       is not a number about this function.)
+    2. Multiply each of the **six outer legs** by one more ``sqrt(lambda)``,
+       from stage 1's weights.  Read the next block before changing this.
+    3. Contract the two sites sharing ``bond`` across it, and apply ``gate`` to
        the two open physical legs (see :func:`_align_gate_to_ket` for why the
        gate's flows are checked first).
-    3. Truncated SVD of the result across the same bond, keeping at most
+    4. Truncated SVD of the result across the same bond, keeping at most
        ``max_D`` singular values, with ``base_charges=None``.
-    4. Split ``sqrt(sigma)`` into **both** factors, so the pair comes back in
-       absorbed form and the next step's gauge is exact on it.
+    5. Split ``sqrt(sigma)`` into **both** factors and divide stage 2's six
+       weights straight back out, so the pair comes back in absorbed form and
+       the next step's gauge is exact on it.
+
+    **Stage 2 is not stage 1's mistake, and the next reader will want to
+    "correct" it back, so here is the difference in full.**  What makes an SVD
+    of the two-site tensor a *Schmidt* decomposition is the Vidal canonical
+    condition, ``sum_{legs != k} Gamma (prod_{i != k} lambda_i**2) Gamma* =
+    I_k`` -- with the **square** on the outer legs.  An absorbed pair supplies
+    only ``lambda**1`` of that (``sqrt`` from the ket, ``sqrt`` from the bra),
+    so the environment of the absorbed two-site tensor is *not* the identity,
+    its singular vectors are *not* Schmidt vectors, and truncating it keeps the
+    wrong subspace.  The truncation itself is executed perfectly; it is optimal
+    for the wrong tensor.
+
+    The two operations differ in *which legs* they touch and in *whether they
+    are undone*:
+
+    ===================  =========================  ======================
+    ..                   #667's re-absorb           stage 2
+    ===================  =========================  ======================
+    legs touched         all eight, the bond        the six **outer** legs
+                         being updated included     only
+    net power on bond    ``lambda**1.5``            ``lambda**1``, i.e.
+                                                    unchanged
+    undone afterwards    no                         yes, exactly, stage 5
+    effect on the state  2.7e-01                    1.3e-15 to 2.4e-15
+    ===================  =========================  ======================
+
+    So this is a within-step change of basis, exactly reversed, and the last
+    row is the check that says so: at full rank the SVD keeps everything, only
+    the basis can differ, and the weighted and unweighted routes produce the
+    same state to **1.3e-15 to 2.4e-15** on the four bonds (dense ``D=3``,
+    ``dt=0.05``, torus reading).  Truncate the same two routes to ``D`` and they
+    part company by 3.8e-03 to 5.2e-03 in one step -- the basis is all that
+    changed, and the basis is what truncation is *for*.
+
+    Measured, dense ``D=3``, ``dt=0.05``, four bonds x three seeds: the
+    truncation error this step incurs against the best achievable for that bond
+    goes from **1.0048-1.0234x** without stage 2 to **1.000000x on all twelve**
+    with it.  1-2% a step compounds over 800 steps into the difference between
+    -0.6589 and the product state, which is what
+    ``task-12-report.md``'s 0-of-9 acceptance sweep was measuring.
+    ``test_su_step_truncates_in_the_state_s_own_basis`` is that ratio as a
+    guard, and it is the only guard in the file whose reference is not
+    re-derived from this function.
+
+    Each of the six outer legs belongs to one of the *other three* bonds, so
+    each of those three weights is used twice; :data:`_BOND_OF_LEG` derives the
+    map from :data:`_BOND_ENDS` rather than restating it.
 
     ``base_charges=None`` is not an omission.  It is what
     ``ipeps_simple_update._truncation_base_charges`` already returns for dense
@@ -352,6 +467,14 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
     ``0.5/sqrt(s)``, i.e. ``+inf`` at ``s == 0``, which is #789's NaN-VJP shape.
     Nothing here is differentiated yet; the point is that it stays safe when
     something is.
+
+    Stages 2 and 5 use :func:`_sqrt_and_inv_sqrt` for the same reason, and the
+    **division is the dangerous half**: ``1/sqrt(lambda)`` blows up on a small
+    weight where ``sqrt(lambda)`` merely shrinks.  Both roots come out of one
+    masked call, so multiply and divide agree about which entries exist, and at
+    ``lambda -> 0`` both are 0 -- which round-trips a zero slice back to itself
+    rather than to ``0 * inf == nan``.  See that function for why the slice is
+    already zero when it gets there.
 
     The output is deliberately **not** renormalised.  An overall scale is not
     observable, and it cannot compound across steps either: ``gauge_fix``
@@ -450,12 +573,14 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
             f"(#667)."
         )
 
-    # Absorbed form in, absorbed form out.  ``weights`` is a report, not state:
-    # see stage 1 above for what re-absorbing it costs.  ``info`` is not a
-    # report -- it is the only thing that can tell a caller the truncation
+    # Absorbed form in, absorbed form out.  ``weights`` is **not** re-absorbed
+    # into the pair -- see stage 1 above for what that costs -- but it is not
+    # dropped either: stage 2 borrows the *other three* bonds' entries onto the
+    # six outer legs for the duration of the SVD.  ``info`` is not a report
+    # either -- it is the only thing that can tell a caller the truncation
     # basis was derived from a solve that never converged, so it is checked
     # rather than dropped (see *Warns*).
-    A, B, _weights, info = gauge_fix(state.A, state.B)
+    A, B, weights, info = gauge_fix(state.A, state.B)
     if not info.converged:
         warnings.warn(
             f"gauge_fix did not converge before the {bond} update: "
@@ -468,6 +593,25 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
         )
     pair = {"A": A, "B": B}
     (site_i, leg_i), (site_j, leg_j) = _BOND_ENDS[bond]
+
+    # --- into the Vidal metric, on the SIX OUTER LEGS only -------------------
+    #
+    # The one insertion that makes the SVD below a Schmidt decomposition; see
+    # stage 2 of the docstring for why, and for why this is not #667.  ``outer``
+    # is built from ``_BOND_ENDS`` via :data:`_BOND_OF_LEG`, so the bond-to-leg
+    # map exists once in this module and the six legs cannot drift from the
+    # four bonds.  ``inv`` is kept rather than recomputed: the multiply and the
+    # divide must share one mask (see :func:`_sqrt_and_inv_sqrt`).
+    outer: list[tuple[str, str, jnp.ndarray]] = []
+    for site, on_bond in ((site_i, leg_i), (site_j, leg_j)):
+        for leg in _VIRTUAL_LEGS:
+            if leg == on_bond:
+                continue
+            root, inv_root = _sqrt_and_inv_sqrt(
+                getattr(weights, _BOND_OF_LEG[site, leg])
+            )
+            pair[site] = scale_bond_axis(pair[site], leg, root)
+            outer.append((site, leg, inv_root))
 
     def _rename(leg_on_bond: str, prefix: str, phys_label: str) -> dict[str, str]:
         renames = {lg: prefix + lg for lg in _VIRTUAL_LEGS if lg != leg_on_bond}
@@ -511,6 +655,18 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
         site_j: _rebuild(F_j, ren_j, leg_j, "sj_out"),
         site_i: _rebuild(F_i, ren_i, leg_i, "si_out"),
     }
+
+    # --- and straight back out again ----------------------------------------
+    #
+    # Exactly the six legs weighted above, by the inverse of exactly the vectors
+    # used there.  What survives the round trip is the *basis* the SVD chose;
+    # the state is returned to absorbed form, which is the convention
+    # ``_SUState`` and ``gauge_fix`` share.  Measured at full rank, where the
+    # SVD keeps everything and only the basis can differ: weighted and
+    # unweighted routes agree to 1.1e-15 on all four bonds.
+    for site, leg, inv_root in outer:
+        out[site] = scale_bond_axis(out[site], leg, inv_root)
+
     return _SUState(A=out["A"], B=out["B"])
 
 
@@ -721,9 +877,20 @@ def _su_evolve(state: _SUState, gate: Tensor, max_D: int, steps: int) -> _SUStat
             exactly the silent-degradation shape #870 is a standing reminder of.
 
     Performance:
-        Dense ``D=3``, warm: **0.018 s for 4 steps, 0.053 s for 12** -- linear,
-        ~4.4 ms a step, after a ~1.6 s first call that compiles the traced
-        gauge.  Symmetric ``D=3`` takes the eager BP route at **~38 s a step**
+        Dense ``D=3``, warm, best of three at load 7: **0.027 s for 4 steps,
+        0.082 s for 12, 0.596 s for 100** -- linear, ~6.0 ms a step, after a
+        ~1.75 s first call that compiles the traced gauge.
+
+        That is **+1.55 ms a step against the pre-fix engine**, measured back to
+        back in the same session on the same pair (4.41 ms a step over 100
+        steps), i.e. ~35%.  The cost is :func:`_su_step`'s stages 2 and 5: twelve
+        ``scale_bond_axis`` calls a step, six in and six out, and they are
+        *outside* the traced gauge, so each is a host dispatch.  It buys the
+        difference between the product state and the Heisenberg energy, so it is
+        not a trade anything would want reversed -- but if it ever needs paying
+        back, folding the reweighting into the traced region is where to look,
+        not dropping it.  Symmetric ``D=3`` takes the eager BP route at
+        **~38 s a step**
         (``ipeps_gauge``'s *Performance*), so a symmetric hundred-step evolve is
         an hour and does not belong in a test suite; the tests here evolve on
         the dense arm and cover the block-sparse algebra through
