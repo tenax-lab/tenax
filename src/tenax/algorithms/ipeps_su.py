@@ -159,9 +159,13 @@ def _sqrt_and_inv_sqrt(lam) -> tuple[jnp.ndarray, jnp.ndarray]:
           eps=1e-07  lam3/lam1=5.7e-15   step vs gated  2.142e-14
           eps=0      lam3/lam1=0         step vs gated  2.390e-15
 
-      The peak sits right at the threshold, three orders under the ``1e-11``
-      gates in this module's tests, and falls away again below it because the
-      direction being deleted is itself vanishing.
+      The peak sits right at the threshold and falls away again below it,
+      because the direction being deleted is itself vanishing.  **Its margin
+      against the ``1e-11`` gates in this module's tests is 7.0x -- 0.85 orders,
+      not three**, which an earlier version of this sentence claimed.  That is
+      thin enough to be worth knowing about the first time the cell goes flaky
+      on another platform, and it is the narrowest headroom any assertion in
+      this module runs on.
       ``test_su_step_survives_a_bond_direction_the_state_does_not_use``
       exercises the ``eps=1e-06`` row as well as the exact zero, so the lossy
       case is pinned rather than only described.
