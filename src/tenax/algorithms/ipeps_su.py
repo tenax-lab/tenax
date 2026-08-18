@@ -135,14 +135,40 @@ def _sqrt_and_inv_sqrt(lam) -> tuple[jnp.ndarray, jnp.ndarray]:
     "there" -- one mask computed once, used twice, rather than two thresholds
     that could disagree by a rounding.
 
-    **At ``lam -> 0`` the pair is ``(0, 0)``, and the round trip is still
-    exact.**  That looks like it loses the direction and does not: the pair
-    handed to :func:`_su_step` is in *absorbed* form, so it already carries
-    ``sqrt(lam) == 0`` on that slice and the slice is identically zero before
-    this function is reached.  Multiplying it by 0 and then by the
-    pseudo-inverse 0 returns the same zero.  The alternative -- a true
-    ``1/sqrt(lam)`` -- turns that zero into ``0 * inf == nan``, which is the
-    ``1/(lam + eps)`` amplification ``safe_inv_lambda`` exists to avoid.
+    **At ``lam == 0`` the pair is ``(0, 0)`` and the round trip is exact; below
+    the relative floor it is lossy, by an amount bounded by ``lam`` itself.**
+    The two halves of that sentence are different claims and an earlier version
+    of this docstring made only the first, which is the stronger one:
+
+    * *At exactly zero* the direction really is returned untouched.  The pair
+      handed to :func:`_su_step` is in *absorbed* form, so it already carries
+      ``sqrt(lam) == 0`` on that slice and the slice is identically zero before
+      this function is reached; multiplying it by 0 and then by the
+      pseudo-inverse 0 returns the same zero.
+    * *Between zero and the floor* -- ``0 < lam <= _WEIGHT_RTOL * max(lam)`` --
+      the slice is **not** zero (it carries ``sqrt(lam)``, around ``1e-6``
+      relative at the threshold) and the mask deletes it.  That is a real loss,
+      and it is bounded by the weight being dropped.  Measured on a pair whose
+      third virtual direction is starved by a factor ``eps`` on all four legs
+      of both sites, full-rank ``h_AB`` step against an independently gated
+      torus::
+
+          eps=1e-03  lam3/lam1=5.9e-07   step vs gated  9.774e-15
+          eps=1e-05  lam3/lam1=5.9e-11   step vs gated  1.482e-14
+          eps=1e-06  lam3/lam1=5.9e-13   step vs gated  1.426e-12  <- under the floor
+          eps=1e-07  lam3/lam1=5.7e-15   step vs gated  2.142e-14
+          eps=0      lam3/lam1=0         step vs gated  2.390e-15
+
+      The peak sits right at the threshold, three orders under the ``1e-11``
+      gates in this module's tests, and falls away again below it because the
+      direction being deleted is itself vanishing.
+      ``test_su_step_survives_a_bond_direction_the_state_does_not_use``
+      exercises the ``eps=1e-06`` row as well as the exact zero, so the lossy
+      case is pinned rather than only described.
+
+    The alternative -- a true ``1/sqrt(lam)`` -- turns the exact zero into
+    ``0 * inf == nan``, which is the ``1/(lam + eps)`` amplification
+    ``safe_inv_lambda`` exists to avoid.
 
     Backward-safe by the standard double-``where``: the inner ``where`` keeps
     the ``sqrt`` argument at 1.0 on masked entries so the adjoint
@@ -379,9 +405,18 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
     1. :func:`~tenax.algorithms.ipeps_gauge.gauge_fix` on the pair.  It takes
        and returns **absorbed form**, and the ``BondWeights`` it also returns
        are the BP fixed-point spectrum *already absorbed into that pair*.  They
-       are **not absorbed into it again**.  Doing that would put
-       ``lambda**1.5`` on every bond, which is #667's mechanism verbatim and
-       has shipped on this very function once already.  Measured *here*,
+       are **not absorbed into it again**.  Doing that puts ``lambda**2`` on
+       every bond -- ``absorb_weights`` splits ``sqrt(lambda)`` into each of a
+       bond's two ends, so a second pass over a pair that already carries
+       ``lambda`` doubles it -- and it has shipped on this very function once
+       already.  (**Not** ``lambda**1.5``, which is the power #667 itself wore
+       and is a different arithmetic: there ``Gamma`` kept a *single*
+       ``sqrt(sigma)`` from its own SVD while the same ``sigma`` was stored as
+       ``lambda`` and re-absorbed in full on the next sweep, so the bond carried
+       ``sqrt(sigma) * sigma``.  The two are the same *class* of mistake --
+       weighting a bond more than once -- at two different powers, and this
+       module's docstrings kept them straight only after a review caught them
+       being used interchangeably.)  Measured *here*,
        re-absorbing them inside this function moves the stepped state by
        2.7e-01 (dense ``h_AB`` and ``h_BA``) and 2.8e-01 (``v_AB``, ``v_BA``),
        independently reproduced at 2.663e-01.  (``gauge_fix``'s own docstring
@@ -414,15 +449,20 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
     are undone*:
 
     ===================  =========================  ======================
-    ..                   #667's re-absorb           stage 2
+    ..                   re-absorbing stage 1's     stage 2
+                         weights (#667's class)
     ===================  =========================  ======================
     legs touched         all eight, the bond        the six **outer** legs
                          being updated included     only
-    net power on bond    ``lambda**1.5``            ``lambda**1``, i.e.
+    net power on bond    ``lambda**2``              ``lambda**1``, i.e.
                                                     unchanged
     undone afterwards    no                         yes, exactly, stage 5
     effect on the state  2.7e-01                    1.3e-15 to 2.4e-15
     ===================  =========================  ======================
+
+    (``lambda**2`` for *this* operation; #667 as shipped wore ``lambda**1.5``,
+    for the reason stage 1 spells out.  Quoting either number for the other is
+    the mistake this parenthesis exists to stop.)
 
     So this is a within-step change of basis, exactly reversed, and the last
     row is the check that says so: at full rank the SVD keeps everything, only
@@ -439,8 +479,17 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
     -0.6589 and the product state, which is what
     ``task-12-report.md``'s 0-of-9 acceptance sweep was measuring.
     ``test_su_step_truncates_in_the_state_s_own_basis`` is that ratio as a
-    guard, and it is the only guard in the file whose reference is not
-    re-derived from this function.
+    guard.  Its reference is Eckart-Young rather than anything this function
+    computes -- but it shares the *metric* with stage 2, since the test builds
+    its ``theta`` by the same "one more ``sqrt(lambda)`` on the six outer legs"
+    prescription, so a wrong prescription would read 1.000000 on both sides.
+    What certifies the prescription itself is
+    ``test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax``, which
+    checks it on a **chain**, where BP is exact, against transfer-matrix fixed
+    points computed in Python ``decimal`` importing nothing from tenax: the
+    prescription lands 2.1e-08 - 1.9e-07 from those numbers and the two
+    neighbouring powers (``lambda**0``, ``lambda**2``) land 1.4e-02 - 2.2e-01
+    away.
 
     Each of the six outer legs belongs to one of the *other three* bonds, so
     each of those three weights is used twice; :data:`_BOND_OF_LEG` derives the
@@ -602,14 +651,23 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
     # map exists once in this module and the six legs cannot drift from the
     # four bonds.  ``inv`` is kept rather than recomputed: the multiply and the
     # divide must share one mask (see :func:`_sqrt_and_inv_sqrt`).
+    roots: dict[str, tuple[jnp.ndarray, jnp.ndarray]] = {}
     outer: list[tuple[str, str, jnp.ndarray]] = []
     for site, on_bond in ((site_i, leg_i), (site_j, leg_j)):
         for leg in _VIRTUAL_LEGS:
             if leg == on_bond:
                 continue
-            root, inv_root = _sqrt_and_inv_sqrt(
-                getattr(weights, _BOND_OF_LEG[site, leg])
-            )
+            # Six legs, but only *three* distinct weights: each of the other
+            # three bonds owns two of them (``A.u``/``B.d`` are both ``v_BA``,
+            # and so on).  Keyed by bond so the pair of roots is computed once,
+            # which is the same de-duplication ``_BOND_OF_LEG`` exists for --
+            # and it guarantees the two ends of a neighbouring bond are
+            # weighted by byte-identical vectors rather than by two vectors
+            # that agree.
+            other = _BOND_OF_LEG[site, leg]
+            if other not in roots:
+                roots[other] = _sqrt_and_inv_sqrt(getattr(weights, other))
+            root, inv_root = roots[other]
             pair[site] = scale_bond_axis(pair[site], leg, root)
             outer.append((site, leg, inv_root))
 
@@ -889,7 +947,12 @@ def _su_evolve(state: _SUState, gate: Tensor, max_D: int, steps: int) -> _SUStat
         difference between the product state and the Heisenberg energy, so it is
         not a trade anything would want reversed -- but if it ever needs paying
         back, folding the reweighting into the traced region is where to look,
-        not dropping it.  Symmetric ``D=3`` takes the eager BP route at
+        not dropping it.  Halving the ``_sqrt_and_inv_sqrt`` calls (six legs,
+        three distinct weights) is **not** that lever: measured interleaved,
+        three rounds each on the same box, three calls gives 5.56/6.45/6.84
+        ms a step against six at 6.97/6.71/6.75, so the within-arm spread is
+        wider than the difference.  It is kept for the de-duplication, not for
+        the time.  Symmetric ``D=3`` takes the eager BP route at
         **~38 s a step**
         (``ipeps_gauge``'s *Performance*), so a symmetric hundred-step evolve is
         an hour and does not belong in a test suite; the tests here evolve on
