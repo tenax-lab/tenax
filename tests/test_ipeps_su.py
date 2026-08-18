@@ -1983,8 +1983,12 @@ def test_su_evolve_reaches_the_simple_update_reference_energy(D, seed):
     warns about.  1600 is used at D=3 too so the two cells differ in one
     variable.
 
-    Currently failing on all six cells: every one lands on the product state or
-    within 0.06 of it.  See ``task-12-report.md`` for the grid.
+    Currently failing on all six cells.  The 1600-step energies are not quoted
+    here, because a docstring number that was not taken at the step count the
+    test runs is exactly the kind of figure this task exists to stop being
+    repeated; ``task-12-report.md`` has the grid at 400, 800, 1200 and 2000
+    steps, where every D=3 cell sits between -0.5000 and -0.6045 and every D=4
+    cell is at -0.500000 from 800 steps onward.
     """
     state = _random_state(D, seed)
     state = _su_evolve(state, _su_heisenberg_gate(state), D, 1600)
