@@ -197,6 +197,52 @@ def test_a_krylov_space_that_closes_early_does_not_divide_by_noise():
     assert bool(jnp.allclose(x, b / 3.0))
 
 
+@pytest.mark.parametrize("scale", [1.0, 1e-10, 1e-20, 1e40])
+def test_the_solve_is_invariant_under_rescaling_the_operator(scale):
+    """The breakdown test must measure orthogonality, not magnitude.
+
+    ``A x = b`` and ``(sA) x = (s b)`` have the same solution, so GMRES should
+    do the same work on both. It did not: the breakdown threshold was
+    ``1e-14 * max(|H[j,j]|, 1.0)``, and that floor of 1.0 makes it an
+    *absolute* test. Any operator smaller than the floor then reports a happy
+    breakdown on its first Krylov vector, collapsing every restart to a
+    one-dimensional update.
+
+    Measured at ``s = 1e-20`` on a moderately conditioned nonsymmetric ``M``
+    (``cond = 32``): **801 matvecs and a relative residual of 0.904**, against
+    32 matvecs and 2.1e-15 at ``s = 1``. Not a slow path -- a wrong answer,
+    returned after exhausting the whole 400-restart budget.
+    """
+    rng = np.random.default_rng(3)
+    n = 30
+    M = rng.standard_normal((n, n)) + 3.0 * np.eye(n)
+    assert 10.0 < float(np.linalg.cond(M)) < 1e3, "fixture must stay moderate"
+    b0 = rng.standard_normal(n)
+
+    calls = {"n": 0}
+
+    def op(v):
+        calls["n"] += 1
+        return jnp.asarray(scale * M) @ v
+
+    x, resid = gmres_eager(
+        op, jnp.asarray(scale * b0), tol=1e-12, maxiter=400, restart=30
+    )
+
+    assert resid <= 1e-12, (scale, resid)
+    # The solution itself is scale-invariant, so compare against the unscaled one.
+    exact = np.linalg.solve(M, b0)
+    rel = float(jnp.linalg.norm(x - jnp.asarray(exact)) / np.linalg.norm(exact))
+    assert rel < 1e-10, (scale, rel)
+    # And it did not spend the whole budget getting there. The bound is loose
+    # on purpose: the defect exhausted all 400 restarts at 801 matvecs, and a
+    # converged solve here costs 32 (or ~125 at ``s = 1e40``, where the
+    # convergence target itself starts feeling float64 rounding). 200
+    # separates those two regimes without pinning a restart count that a
+    # different BLAS could shift by one.
+    assert calls["n"] < 200, (scale, calls["n"])
+
+
 def test_a_zero_right_hand_side_returns_zero():
     b = jnp.zeros(9)
     x, resid = gmres_eager(lambda v: 2.0 * v, b, tol=1e-12, maxiter=5, restart=3)
