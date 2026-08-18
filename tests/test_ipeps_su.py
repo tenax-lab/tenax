@@ -426,7 +426,7 @@ def _theta_labels(bond):
     return (site_i, ren_i), (site_j, ren_j), left, right
 
 
-def _two_site_tensor(state, bond, weights, power=1.0):
+def _two_site_tensor(state, bond, weights, power=None):
     """The two sites sharing ``bond``, contracted across it, in the Vidal metric.
 
     This is the ``theta`` an ``_su_step`` on ``bond`` produced: ``F_j F_i``,
@@ -442,11 +442,20 @@ def _two_site_tensor(state, bond, weights, power=1.0):
     defect through four review rounds.
     """
     (site_i, ren_i), (site_j, ren_j), _left, _right = _theta_labels(bond)
-    pair = _vidal_pair(state, bond, weights, power)
+    # ``power=None`` forwards nothing, so :func:`_vidal_pair`'s signature is the
+    # **one** place the shipped metric is written down.  Repeating ``1.0`` here
+    # would mask a changed default from every caller -- measured: with the
+    # literal in place, mutating ``_vidal_pair``'s default passed the chain
+    # anchor.
+    pair = (
+        _vidal_pair(state, bond, weights)
+        if power is None
+        else _vidal_pair(state, bond, weights, power)
+    )
     return contract(pair[site_j].relabels(ren_j), pair[site_i].relabels(ren_i))
 
 
-def _bond_spectrum(state, bond, max_D, weights, base_charges=None, power=1.0):
+def _bond_spectrum(state, bond, max_D, weights, base_charges=None, power=None):
     """The Schmidt spectrum of ``state`` across ``bond``, independent of the split.
 
     Reassembles the two-site tensor in the Vidal metric (:func:`_vidal_pair`)
@@ -1851,10 +1860,12 @@ def test_su_evolve_names_the_step_that_broke_bond_uniformity(su, monkeypatch):
 #
 # The mechanism the fix addressed is localised by
 # ``test_su_step_truncates_in_the_state_s_own_basis`` below, which is the
-# cheapest cell in the section and the only guard here whose reference is not
-# re-derived from ``_su_step``: as shipped, ``_su_step`` truncated the SVD of
+# cheapest cell in the section: as shipped, ``_su_step`` truncated the SVD of
 # the **absorbed** two-site tensor, whose environment is not the identity,
-# rather than the **Vidal** one, whose is.
+# rather than the **Vidal** one, whose is.  Its reference is not re-derived from
+# ``_su_step`` -- and neither is
+# ``test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax``'s, which is
+# more independent still: that one is not computed by tenax at all.
 
 
 #: Seeds for every cell of the sweep.  Three, not one, and the reason is
@@ -2109,6 +2120,58 @@ _CHAIN_ARMS = {
     "symmetric": (_sym_chain_pair, _sym_chain_pair_as_peps, _SYM_CHAIN_TRUTH),
 }
 
+#: How the chain is laid on the lattice, and what that does to the *leg set*
+#: the anchor exercises.
+#:
+#: **This axis exists because the first version of the anchor was blind on half
+#: of it, and the blindness had the same shape as the defect the whole task is
+#: about.**  ``_chain_pair_as_peps`` gives the vertical bonds dimension 1, so
+#: ``gauge_fix`` returns ``v_AB = v_BA = [1.0]`` exactly -- and any power of 1.0
+#: is 1.0.  Four of the six outer legs of a horizontal bond are therefore
+#: *inert*: a metric error confined to ``u``/``d`` changes nothing the
+#: horizontal arm can see.  Measured, a shared error that never weights ``u`` or
+#: ``d`` passes the square-lattice optimality guard **and** the
+#: horizontal-only anchor, while costing **1.008741x** a step when it is not
+#: shared -- the same order as the 1.0048-1.0234x defect this task fixed.
+#:
+#: The chain embedding is a free parameter, and that is the whole remedy: laying
+#: the same two MPS tensors along ``u``/``d`` instead makes the *vertical* bonds
+#: carry the spectrum and the horizontal ones ``[1.0]``, so the live leg set is
+#: exactly complementary.  Same state, same ``_CHAIN_TRUTH`` constants, and
+#: nothing about the reference changes -- MPS bond ``i`` is ``a.right <-> b.left``
+#: for even ``i``, which the horizontal embedding sends to ``A.r <-> B.l``
+#: (``h_AB``) and the vertical one to ``A.d <-> B.u`` (``v_AB``).
+#:
+#: The relabel is an involution and it preserves every flow, which is why it is
+#: a relabel and not a second builder: ``u`` and ``l`` are both ``OUT`` and
+#: ``d`` and ``r`` are both ``IN`` in the shipped convention, so swapping the
+#: two pairs leaves each index object -- flow, charges, dimension -- exactly
+#: where it was and only renames the axis.  On the block-sparse arm that also
+#: leaves the conservation law untouched: ``-q_u + q_d - q_l + q_r + q_phys``
+#: is the same sum with ``u <-> l`` and ``d <-> r`` exchanged.
+#:
+#: ``(relabel, parity -> bond, the leg names that carry a live weight)``.
+_CHAIN_ORIENTATIONS = {
+    "horizontal": ({}, {"h_AB": "h_AB", "h_BA": "h_BA"}, {"l", "r"}),
+    "vertical": (
+        {"u": "l", "l": "u", "d": "r", "r": "d"},
+        {"h_AB": "v_AB", "h_BA": "v_BA"},
+        {"u", "d"},
+    ),
+}
+
+#: The union of the two orientations' live leg sets is all four virtual legs.
+#: Asserted at import rather than left to a reader: if a future edit makes one
+#: orientation inert again -- which is what happened to the vertical half the
+#: first time -- this is what says so, and the per-cell meta-assertion in the
+#: test says which one.
+assert set().union(*(live for _r, _m, live in _CHAIN_ORIENTATIONS.values())) == {
+    "u",
+    "d",
+    "l",
+    "r",
+}, "the chain orientations no longer cover all four virtual legs between them"
+
 #: How close the metric must land on the external truth.  Not the 1e-12 the
 #: Phase 1 anchor uses, and the difference is one thing: that test solves at
 #: ``tol=1e-14`` while this one must use ``gauge_fix``'s **default** ``tol=1e-6``
@@ -2136,46 +2199,67 @@ _METRIC_CONTROL = 1e-3
 #: tolerance, not the anchor's.
 _METRIC_RATIO_TOL = 1e-4
 
+#: How close the *square-lattice* BP gauge must sit to the Vidal canonical
+#: condition under the shipped metric.  Set off the measurement at
+#: ``gauge_fix``'s default ``tol=1e-6``, where the correct metric reads
+#: 1.9e-07 to 9.4e-07 and every wrong one reads 4.6e-02 to 3.6e-01; two orders
+#: of headroom above the former and five below the latter.  It tracks the solve
+#: tolerance (at ``tol=1e-10`` the same readings are ~3e-11), so tightening it
+#: without re-measuring would couple this guard to a knob it does not set.
+_CANONICAL_TOL = 1e-4
+
 
 @pytest.fixture(scope="module")
 def chain_anchor():
     """Memoised ``(pair, gauged pair, weights, identity gate, truth)`` per arm.
 
-    Module-scoped because the symmetric chain's ``gauge_fix`` is 6.1 s and four
-    cells want it.  The gate is ``exp(-0 * 0) == 1``: an identity, so the
-    two-site tensor the step forms is the *ungated* one, whose spectrum the
-    external truth is a statement about.  A real gate would move the state to
-    one nothing outside tenax has a number for.
-    """
-    cache: dict[str, tuple] = {}
+    Keyed by ``(arm, orientation)`` and module-scoped, because a symmetric
+    chain ``gauge_fix`` is ~6 s and two cells share each solve.  The gate is
+    ``exp(-0 * 0) == 1``: an identity, so the two-site tensor the step forms is
+    the *ungated* one, whose spectrum the external truth is a statement about.
+    A real gate would move the state to one nothing outside tenax has a number
+    for.
 
-    def get(arm):
-        if arm not in cache:
+    The ``vertical`` orientation is the same pair with ``u <-> l`` and
+    ``d <-> r`` relabelled -- see :data:`_CHAIN_ORIENTATIONS` for why that is a
+    relabel rather than a second builder, and for the blind region it exists to
+    close.
+    """
+    cache: dict[tuple[str, str], tuple] = {}
+
+    def get(arm, orientation):
+        key = (arm, orientation)
+        if key not in cache:
             build_pair, as_peps, truth = _CHAIN_ARMS[arm]
+            relabel, _parity_map, _live = _CHAIN_ORIENTATIONS[orientation]
             a, b, _vl, _vr = build_pair()
             A, B = as_peps(a, b)
+            if relabel:
+                A, B = A.relabels(relabel), B.relabels(relabel)
             # ``gauge_fix``'s DEFAULT tol -- the call ``_su_step`` makes.  See
             # ``_METRIC_TOL`` for why matching it is load-bearing.
             A_g, B_g, weights, info = gauge_fix(A, B)
             assert info.converged, (
-                f"{arm} chain: BP did not converge where it is exact "
-                f"({info.iterations} sweeps, residual {info.residual:.3e}); "
-                f"nothing below can be concluded from a failed solve"
+                f"{arm} {orientation} chain: BP did not converge where it is "
+                f"exact ({info.iterations} sweeps, residual "
+                f"{info.residual:.3e}); nothing below can be concluded from a "
+                f"failed solve"
             )
             d = A.indices[A.labels().index("phys")].dim
             gate = _make_trotter_gate_tensor(
                 jnp.zeros((d, d, d, d)), 0.0, site_tensor=A
             )
-            cache[arm] = (A, B, A_g, B_g, weights, gate, truth)
-        return cache[arm]
+            cache[key] = (A, B, A_g, B_g, weights, gate, truth)
+        return cache[key]
 
     return get
 
 
 @pytest.mark.parametrize("arm", ["dense", "symmetric"])
-@pytest.mark.parametrize("bond", ["h_AB", "h_BA"])
+@pytest.mark.parametrize("orientation", ["horizontal", "vertical"])
+@pytest.mark.parametrize("parity", ["h_AB", "h_BA"])
 def test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax(
-    arm, bond, chain_anchor
+    arm, orientation, parity, chain_anchor
 ):
     """The metric is right, checked against a number tenax did not compute.
 
@@ -2201,6 +2285,21 @@ def test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax(
     tensor** the metric builds have them as its singular values?  It does, and
     the two neighbouring powers do not.
 
+    **Why two orientations.**  A chain embedded horizontally gives the vertical
+    bonds dimension 1, so ``gauge_fix`` returns ``v_AB = v_BA = [1.0]`` and four
+    of the six outer legs are *inert* -- any power of 1.0 is 1.0.  The first
+    version of this guard had only that embedding, and a metric error confined
+    to ``u``/``d`` therefore passed it **and** the square-lattice optimality
+    guard, while costing 1.008741x a step: the same order as the 1.0048-1.0234x
+    defect this whole task exists to fix, and the same shape -- a reference
+    blind to part of the space it certifies.  The ``vertical`` orientation is
+    the identical state with ``u <-> l`` and ``d <-> r`` relabelled, so the
+    live leg set is exactly complementary and the union is all four.  Measured
+    on the widened guard: the shared ``u``/``d`` error dies at 2.212e-01 and the
+    shared ``l``/``r`` error at 2.212e-01, both on reading 1.  See
+    :data:`_CHAIN_ORIENTATIONS`, and the per-cell reading 0 below, which asserts
+    which legs this cell is actually exercising rather than trusting the table.
+
     Two readings, both against the external truth:
 
     * **the spectrum** -- ``svd(theta_vidal)`` must be the truth.  Measured,
@@ -2223,36 +2322,76 @@ def test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax(
     **What this still does not certify**, stated because the point of the guard
     is to be precise about its own reach: BP on the *square lattice* is
     approximate, so this says the prescription is the canonical-form
-    prescription, not that ``gauge_fix``'s square-lattice fixed point is
-    canonical.  Nothing can say that -- there is no exact reference on a loopy
-    lattice (#882 section 6.3).  What corroborates the square-lattice case is
-    the energy: 0 of 9 (seed, D) cells before the fix and 5 of 9 after, against
-    references this project reproduced independently.
+    prescription, not that ``gauge_fix``'s square-lattice fixed point reproduces
+    the *exact* environment.  Nothing can say that -- there is no exact
+    reference on a loopy lattice (#882 section 6.3).  Two things do reach the
+    square lattice: ``test_su_step_truncates_in_the_state_s_own_basis``'s
+    reading 0, which checks the metric against the canonical condition's own
+    absolute right-hand side there (five orders of separation, and it is what
+    catches a leg-set error on the real geometry); and the energy, 0 of 9
+    (seed, D) cells before the fix and 5 of 9 after, against references this
+    project reproduced independently.
     """
-    A, B, A_g, B_g, weights, gate, truth = chain_anchor(arm)
-    want = np.sort(np.asarray(truth[bond]))[::-1]
+    A, B, A_g, B_g, weights, gate, truth = chain_anchor(arm, orientation)
+    _relabel, parity_map, live_expected = _CHAIN_ORIENTATIONS[orientation]
+    bond = parity_map[parity]
+    want = np.sort(np.asarray(truth[parity]))[::-1]
     want = want / np.linalg.norm(want)
     gauged = {"A": A_g, "B": B_g}
     chi = len(want)
 
+    # --- reading 0: which of this cell's six outer legs are not inert --------
+    #
+    # The meta-assertion that keeps the two orientations honest.  A leg whose
+    # weight is a single number (or a flat vector) contributes a global factor
+    # that both the normalised spectrum and the cosine quotient out, so the
+    # readings below are blind to whatever the metric does to it.  On the
+    # horizontal embedding that is ``u`` and ``d``; on the vertical one ``l``
+    # and ``r``.  If a future edit made *this* cell's live set shrink, the two
+    # arms would stop covering the four legs between them and a metric error
+    # confined to the newly-inert pair would pass everything -- which is
+    # exactly what happened to the vertical half before this arm existed.
+    live = set()
+    for site, leg in _BOND_ENDS[bond]:
+        for other_leg in ("u", "d", "l", "r"):
+            if other_leg == leg:
+                continue
+            lam = np.asarray(getattr(weights, _BOND_OF_LEG[(site, other_leg)]))
+            if lam.size > 1 and not np.allclose(lam / lam[0], 1.0):
+                live.add(other_leg)
+    assert live == live_expected, (
+        f"{arm} {orientation} {bond}: the outer legs carrying a non-trivial "
+        f"weight are {sorted(live)}, expected {sorted(live_expected)}.  A leg "
+        f"whose weight is flat is inert -- every reading below quotients a "
+        f"global factor out -- so this cell certifies the metric only on the "
+        f"legs listed.  The two orientations are what make the union all four; "
+        f"if this set shrinks they no longer do."
+    )
+
     # --- reading 1: the spectrum of the metric's own theta -------------------
     got = {}
-    for power in (1.0, 0.0, 2.0):
-        sigma = _bond_spectrum(gauged, bond, chi, weights, power=power)
+    for power in (None, 0.0, 2.0):
+        # ``None`` = ``_vidal_pair``'s shipped default; see the same note in
+        # ``test_su_step_truncates_in_the_state_s_own_basis``.
+        sigma = (
+            _bond_spectrum(gauged, bond, chi, weights)
+            if power is None
+            else _bond_spectrum(gauged, bond, chi, weights, power=power)
+        )
         sigma = np.sort(np.asarray(sigma))[::-1]
         got[power] = float(np.max(np.abs(sigma / np.linalg.norm(sigma) - want)))
     for power in (0.0, 2.0):
         assert got[power] > _METRIC_CONTROL, (
-            f"{arm} {bond}: the metric with lambda**{power:.0f} on the outer "
+            f"{arm} {orientation} {bond}: the metric with lambda**{power:.0f} on the outer "
             f"legs is {got[power]:.3e} from the chain's exact Schmidt spectrum, "
             f"inside the {_METRIC_CONTROL:.0e} this cell needs it to miss by.  "
             f"Then the assertion below cannot tell the right power from a wrong "
             f"one and passes for the wrong reason -- the anchor has gone flat, "
             f"redraw the chain seed rather than loosening anything."
         )
-    assert got[1.0] < _METRIC_TOL, (
-        f"{arm} {bond}: the two-site tensor built in the Vidal metric has "
-        f"singular values {got[1.0]:.3e} away from the chain's exact Schmidt "
+    assert got[None] < _METRIC_TOL, (
+        f"{arm} {orientation} {bond}: the two-site tensor built in the Vidal metric has "
+        f"singular values {got[None]:.3e} away from the chain's exact Schmidt "
         f"spectrum, which was derived outside tenax.  BP is exact on a tree, so "
         f"this is not a tolerance to widen: the metric _vidal_pair applies -- "
         f"and _su_step's stage 2 with it -- is not the canonical-form metric.  "
@@ -2264,28 +2403,29 @@ def test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax(
     for max_D in (2, chi - 1):
         optimal = float(np.linalg.norm(want[max_D:]) / np.linalg.norm(want))
         assert optimal > _METRIC_CONTROL, (
-            f"{arm} {bond}: keeping {max_D} of {chi} costs only {optimal:.3e} "
+            f"{arm} {orientation} {bond}: keeping {max_D} of {chi} costs only {optimal:.3e} "
             f"on this draw, so the ratio below cannot discriminate"
         )
         stepped = _su_step(state, gate, max_D=max_D, bond=bond)
         ratios = {}
-        for power in (1.0, 0.0, 2.0):
-            full = _two_site_tensor(gauged, bond, weights, power)
-            kept = _two_site_tensor(stepped, bond, weights, power)
+        for power in (None, 0.0, 2.0):
+            args = () if power is None else (power,)
+            full = _two_site_tensor(gauged, bond, weights, *args)
+            kept = _two_site_tensor(stepped, bond, weights, *args)
             actual = _truncation_error_of(
                 np.asarray(full.todense()), np.asarray(kept.todense())
             )
             ratios[power] = actual / optimal
         for power in (0.0, 2.0):
             assert abs(ratios[power] - 1.0) > 1e-2, (
-                f"{arm} {bond} max_D={max_D}: scoring the step in the "
+                f"{arm} {orientation} {bond} max_D={max_D}: scoring the step in the "
                 f"lambda**{power:.0f} metric still gives ratio "
                 f"{ratios[power]:.6f}, so this cell cannot tell the metric it "
                 f"is supposed to be certifying from a wrong one"
             )
-        assert abs(ratios[1.0] - 1.0) < _METRIC_RATIO_TOL, (
-            f"{arm} {bond} max_D={max_D}: _su_step's truncation error is "
-            f"{ratios[1.0]:.6f}x the best achievable, where the best is "
+        assert abs(ratios[None] - 1.0) < _METRIC_RATIO_TOL, (
+            f"{arm} {orientation} {bond} max_D={max_D}: _su_step's truncation error is "
+            f"{ratios[None]:.6f}x the best achievable, where the best is "
             f"||truth[{max_D}:]||/||truth|| = {optimal:.9f} computed from a "
             f"spectrum derived outside tenax.  The gate is two-sided on "
             f"purpose: below 1 means the error is being measured in the wrong "
@@ -2384,6 +2524,83 @@ def test_su_step_truncates_in_the_state_s_own_basis(bond):
         f"residual {info.residual:.3e}), so the basis this compares against is "
         f"not the BP fixed point and neither number below means anything"
     )
+
+    # --- reading 0: the metric makes THIS gauge canonical -------------------
+    #
+    # **The prescription-free half of this test, and the one that survives a
+    # shared metric error.**  Everything below scores `_su_step` against a
+    # reference built with `_vidal_pair`, which is the same prescription stage 2
+    # applies -- so a metric error present in *both* files reads 1.000000 here
+    # and is invisible.  This reading is not: the Vidal canonical condition has
+    # an absolute right-hand side.  With the metric applied, each end's
+    # environment traced over every other leg must be **diagonal**, and its
+    # diagonal must be that bond's own weight.  Nothing in this tree computes a
+    # diagonal matrix to compare against, and `lambda` comes from `gauge_fix`'s
+    # weights table rather than from the prescription, so neither side can be
+    # moved by getting the prescription wrong.
+    #
+    # What it certifies is that the prescription is the one under which the BP
+    # *fixed point* is a canonical form -- BP's own fixed-point equation, on the
+    # real square lattice.  It does **not** certify that the BP environment is
+    # the exact one; on a loopy lattice it is not, and that is what the chain
+    # anchor covers, where the two coincide by theorem.
+    #
+    # Measured, dense D=3, three seeds, at `gauge_fix`'s default `tol=1e-6`:
+    #
+    #     metric       max off-diagonal      diag against lambda
+    #     lambda**1    1.9e-07 - 4.2e-07     4.5e-07 - 9.4e-07
+    #     lambda**0    8.4e-02 - 1.0e-01     8.8e-02 - 2.1e-01
+    #     lambda**2    7.3e-02 - 1.1e-01     8.3e-02 - 1.7e-01
+    #     skip u,d     5.0e-02 - 7.6e-02     1.0e-01 - 2.4e-01
+    #     skip l,r     4.6e-02 - 6.3e-02     6.1e-02 - 1.2e-01
+    #
+    # Five orders of separation, and the last two rows are the point: a *leg-set*
+    # error confined to one orientation is caught here, on the square lattice,
+    # where the chain anchor's two embeddings each see only half the legs.  The
+    # residual at `lambda**1` tracks the solve tolerance -- at `tol=1e-10` the
+    # same readings are 2.3e-11 and 3.7e-11 -- so the gate is set off the
+    # default-`tol` figure with two orders of headroom and is not a tolerance to
+    # tighten without re-measuring.
+    for power in (None, 0.0, 2.0):
+        # ``None`` means "whatever ``_vidal_pair`` ships as its default", not
+        # "1.0".  Passing the literal instead would make this reading survive a
+        # changed default -- measured: with the argument spelled out, the
+        # shared ``lambda**0`` mutation passes this guard.
+        vp = (
+            _vidal_pair({"A": A_g, "B": B_g}, bond, weights)
+            if power is None
+            else _vidal_pair({"A": A_g, "B": B_g}, bond, weights, power)
+        )
+        lam = np.asarray(getattr(weights, bond), dtype=float)
+        worst_off, worst_lam = 0.0, 0.0
+        for site, leg in _BOND_ENDS[bond]:
+            G = _gram(vp[site], leg)
+            worst_off = max(
+                worst_off,
+                float(np.max(np.abs(G - np.diag(np.diag(G)))) / np.max(np.abs(G))),
+            )
+            d = np.diag(G).real
+            worst_lam = max(worst_lam, float(np.max(np.abs(d / d[0] - lam / lam[0]))))
+        if power is None:
+            assert worst_off < _CANONICAL_TOL and worst_lam < _CANONICAL_TOL, (
+                f"{bond}: with the shipped metric the gauged pair's one-site "
+                f"environment is {worst_off:.3e} off diagonal and its diagonal "
+                f"is {worst_lam:.3e} from this bond's own weight.  The Vidal "
+                f"canonical condition is what makes an SVD across the bond a "
+                f"Schmidt decomposition, and its right-hand side is not "
+                f"computed by the prescription being checked -- so this is the "
+                f"one reading in this test that a metric error present in BOTH "
+                f"_vidal_pair and _su_step's stage 2 cannot hide from."
+            )
+        else:
+            assert worst_off > 1e-2 or worst_lam > 1e-2, (
+                f"{bond}: the lambda**{power:.0f} metric leaves the environment "
+                f"{worst_off:.3e} off diagonal and {worst_lam:.3e} from the "
+                f"bond weight, inside the 1e-2 this control needs it to miss "
+                f"by -- the reading above then cannot tell the canonical metric "
+                f"from a wrong one and passes for the wrong reason"
+            )
+
     order, full = _vidal_theta({"A": A_g, "B": B_g}, weights, bond, gate)
 
     (_site_i, leg_i), (_site_j, leg_j) = _BOND_ENDS[bond]
