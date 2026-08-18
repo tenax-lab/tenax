@@ -182,7 +182,20 @@
 
   One behaviour *is* improved: a non-finite residual now returns `inf` instead
   of `nan`, so a caller's `residual > tolerance` gate fails closed. That is the
-  #796 / #787 / #784 shape, one level below where it kept being fixed.
+  #796 / #787 / #784 shape, one level below where it kept being fixed. The
+  operator is also checked mid-Arnoldi rather than only between restarts, so a
+  NaN cannot ride the Givens recurrence into a poisoned step whose residual is
+  then measured against it.
+
+  The happy-breakdown test is measured against `||A v||` — the vector *before*
+  orthogonalisation — rather than against an absolute floor. A floor makes it a
+  test of the operator's *scale* instead of of orthogonality, so every operator
+  below the floor reports breakdown on its first Krylov vector and each restart
+  collapses to a one-dimensional update. Measured on `A = 1e-20 M` with
+  `cond(M) = 32`: **801 matvecs and a relative residual of 0.904**, against 32
+  matvecs and 2.1e-15 at unit scale — a wrong answer returned after exhausting
+  the full 400-restart budget, not merely a slow path. Pinned by a
+  rescaling-invariance test across `s ∈ {1, 1e-10, 1e-20, 1e40}`.
 
 - **Each checkerboard bond can now carry its own Schmidt spectrum**
   (#851, opt-in via `su_independent_bond_lambdas`). The four-phase sweep

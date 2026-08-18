@@ -46,9 +46,14 @@ import numpy as np
 
 __all__ = ["gmres_eager"]
 
-# A subdiagonal entry this far below the column it terminates means the Krylov
-# space is exhausted (a "happy breakdown"): the current subspace already
-# contains the solution, and normalising by it would divide by noise.
+# A new Arnoldi direction this far below ``||A v||`` -- the size of the vector
+# *before* orthogonalisation -- means the Krylov space is exhausted (a "happy
+# breakdown"): the current subspace already contains ``A v``, and normalising
+# what is left would divide by noise.
+#
+# Relative to ``||A v||``, never to an absolute floor.  A floor turns this into
+# a test of the operator's *scale* rather than of orthogonality, and then any
+# operator below the floor breaks down on its first Krylov vector.
 _BREAKDOWN_REL = 1e-14
 
 
@@ -156,6 +161,11 @@ def gmres_eager(
         k = 0  # Krylov dimension actually built this restart
         for j in range(m):
             w = matvec(V[j])
+            # The scale the breakdown test is measured against, taken BEFORE
+            # orthogonalisation.  ``V[j]`` is a unit vector, so this is the
+            # local size of the operator itself -- the only scale-free
+            # reference available here.
+            w0_norm = float(jnp.linalg.norm(w))
 
             basis = V[: j + 1]
             h1 = basis @ w
@@ -212,8 +222,17 @@ def gmres_eager(
             #
             # Happy breakdown is the one inner exit, and it is not optional:
             # the subspace is A-invariant, so extending it divides by noise.
-            scale = max(abs(H[j, j]), 1.0)
-            if h_next <= _BREAKDOWN_REL * scale:
+            #
+            # Measured against ``||A v||`` rather than against 1.0.  An
+            # absolute floor makes this a *scale* test instead of an
+            # orthogonality test, and every operator smaller than the floor
+            # then "breaks down" on its first Krylov vector: at ``A = 1e-20 M``
+            # with ``cond(M) = 32`` that turned a solve which converges in 32
+            # matvecs into 801 matvecs -- 400 restarts of a one-dimensional
+            # subspace -- leaving a relative residual of **0.904**.  The
+            # quantity that means something is how much of ``A v`` survived
+            # orthogonalisation, which is scale-free by construction.
+            if h_next <= _BREAKDOWN_REL * w0_norm:
                 break
             V = V.at[j + 1].set(w / h_next)
 
