@@ -38,39 +38,32 @@ from tenax.contraction.contractor import contract
 from tenax.core._tensor_utils import scale_bond_axis
 from tenax.core.tensor import Tensor
 
-#: Module scope, not library scope.  None of these is re-exported from
-#: ``tenax/__init__.py`` or documented in ``README.md``, and that is deliberate:
-#: ``gauge_fix`` becomes part of the supported top-level API in #882's Phase 4,
-#: once the simple-update engine that consumes it exists.  Until then this
-#: module is reachable only by its full path.
-#:
-#: An earlier version of this comment defended that with "39 of the 46 modules
-#: under ``src/tenax`` that define ``__all__`` name at least one symbol absent
-#: from ``tenax.__all__``".  The count is real but it does not support the
-#: claim, and it was used to rebut a review finding, so it is corrected here
-#: rather than quietly dropped.  37 of those 46 modules are ``_``-prefixed,
-#: where divergence is definitional, and a symbol also counts as reachable if
-#: ``tenax/__init__.py`` registers it in ``_LAZY_IMPORTS`` rather than listing
-#: it in ``__all__``.  Counting public-named symbols of public-named modules
-#: against ``tenax.__all__ | _LAZY_IMPORTS``, **exactly two** of the nine
-#: diverge: this module, and ``ipeps_optimize_root_implicit``.  Of the modules
-#: the old comment named, ``ipeps_ctm_init`` and ``ipeps_ctm_moves`` export no
-#: public-named symbol at all, and both of ``pess_optimize``'s are in
-#: ``_LAZY_IMPORTS``, so they do resolve as ``tenax.X``.
-#:
-#: So this is one genuine precedent, not thirty-nine, and the nearest sibling
-#: goes the other way: all three of ``ipeps_bp_gauge.__all__`` resolve as
-#: ``tenax.X``, none of the four here do.  ``__all__`` still says what the
-#: module exports to an importer while ``tenax.__all__`` says what the library
-#: supports, and AGENTS.md's export-and-document rule is about the latter --
-#: but the case for leaving these four out rests on Phase 4 landing them as
-#: top-level API, not on a repo-wide norm that does not exist.
-__all__ = [
-    "absorb_weights",
-    "ctm_rdm2x1_planar",
-    "gauge_fix",
-    "torus_2x2_sign_free",
-]
+# No ``__all__`` until Phase 4.
+#
+# This module deliberately declares no exports.  ``gauge_fix``,
+# ``absorb_weights``, ``ctm_rdm2x1_planar`` and ``torus_2x2_sign_free`` are
+# public-*named* because Phase 4 (#882) makes ``gauge_fix`` part of the
+# supported top-level API once the simple-update engine that consumes it
+# exists.  Until that lands, none of them is re-exported from
+# ``tenax/__init__.py`` or documented in ``README.md``, so an ``__all__``
+# listing them advertised a public surface that does not resolve as
+# ``tenax.X``.
+#
+# An earlier revision kept the list, defended by "39 of the 46 modules under
+# ``src/tenax`` that define ``__all__`` name at least one symbol absent from
+# ``tenax.__all__``".  That count is real but does not support the claim, and
+# it was used to rebut a review finding, so the record is corrected rather than
+# quietly dropped: 37 of those 46 modules are ``_``-prefixed, where divergence
+# is definitional, and a symbol is also reachable when ``tenax/__init__.py``
+# registers it in ``_LAZY_IMPORTS`` instead of listing it in ``__all__``.
+# Counting public-named symbols of public-named modules against
+# ``tenax.__all__ | _LAZY_IMPORTS``, exactly **two** diverge -- this module and
+# ``ipeps_optimize_root_implicit`` -- while the nearest sibling goes the other
+# way, all three of ``ipeps_bp_gauge.__all__`` resolving as ``tenax.X``.  One
+# precedent is not a norm, so the finding was right and the list is gone.
+#
+# Add ``__all__`` back in Phase 4, together with the ``tenax/__init__.py``
+# export and the ``README.md`` entry, as one change.
 
 
 def absorb_weights(A: Tensor, B: Tensor, weights: BondWeights) -> tuple[Tensor, Tensor]:
