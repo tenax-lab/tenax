@@ -2255,7 +2255,37 @@ def chain_anchor():
     return get
 
 
-@pytest.mark.parametrize("arm", ["dense", "symmetric"])
+# The ``dense`` half of this guard carries an explicit ``core`` mark, and that is
+# the one marker decision in this file that is not about cost.
+#
+# ``tests/conftest.py`` maps the whole file to ``"algorithm"`` and CI's required
+# checks run ``-m core``, so without this the **only externally-anchored fact in
+# #882 Phase 2** would live in the non-required bucket -- the one this project's
+# own memory records as chronically red on ``main``.  Phase 1 made the same call
+# explicitly for its twin (``test_ipeps_gauge.py``'s
+# ``test_bp_weights_are_the_chains_schmidt_values``, whose docstring argues that
+# "without this marker the one test in the whole rewrite with an externally known
+# answer would land only in the non-required fast-other bucket").
+#
+# **Dense only, and the split is measured rather than cautious.**  All eight
+# cells cost 44.24 s; the four ``dense`` ones cost **4.70 s**, and between them
+# they cover both orientations -- hence all four virtual legs (see
+# ``_CHAIN_ORIENTATIONS``) -- and both bond parities.  The symmetric arm is ~40 s
+# of the 44 and stays in ``algorithm``; what it adds is the charge bookkeeping,
+# which is not what a required gate needs at that price.
+#
+# **The composition was checked, not assumed**, because getting it backwards
+# drops the anchor from *every* bucket rather than adding it to one:
+# ``pytest_collection_modifyitems`` *adds* the file's bucket marker and withholds
+# it only for ``core``-mapped files carrying an explicit ``slow``, so these cells
+# end up ``core`` **and** ``algorithm``.  ``-m core`` selects them; the fast
+# buckets (``not core and not slow``) drop them, which is the intended trade --
+# they run in a required job instead.  Verified on
+# ``tests/test_ipeps_gauge.py``, an ``algorithm`` file that already does this:
+# ``-m core`` collects 2 of 27 and ``-m "not core and not slow"`` collects 22.
+@pytest.mark.parametrize(
+    "arm", [pytest.param("dense", marks=pytest.mark.core), "symmetric"]
+)
 @pytest.mark.parametrize("orientation", ["horizontal", "vertical"])
 @pytest.mark.parametrize("parity", ["h_AB", "h_BA"])
 def test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax(
