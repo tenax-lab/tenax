@@ -460,12 +460,26 @@ def _shared_pjit_cache_is_full() -> bool:
             _pjit._cpp_pjit_cache_explicit_attributes,
             _pjit._cpp_pjit_cache_fun_only,
         )
+        # Build the probe's argument *before* the snapshot.  ``jnp.ones`` is not
+        # free: on a first call in a fresh process it inserts two persistent
+        # entries of its own into the explicit-attributes cache -- measured
+        # ``0 -> 2`` on jax 0.10.2, and ``0`` on every call after.  Left inside
+        # the measured interval those two would be invisible to ``before`` while
+        # still filling the cache, so on a cache within two entries of capacity
+        # this function could saturate it and *then* report ``False``.  The
+        # calibration would go on to read a frozen counter and fail a correct
+        # one-compile implementation -- a false alarm rather than a missed
+        # regression, but a guard that cries wolf gets weakened, and weakening
+        # this one is how the negative-counter failure got here in the first
+        # place.
+        one = jnp.ones((1,))
+
         before = [c.size() for c in caches]
         # Same shape as the boundaries under test -- ``static_argnums`` and a
         # never-before-seen function -- so it is routed the way they are.  The
         # reference has to outlive the measurement; see the docstring.
         probe = partial(jax.jit, static_argnums=(1,))(lambda a, k: a * k)
-        probe(jnp.ones((1,)), 2)
+        probe(one, 2)
         grew = [i for i, c in enumerate(caches) if c.size() > before[i]]
         if len(grew) == 1:
             # Judge on the size *before* the probe.  The probe is an insertion,
