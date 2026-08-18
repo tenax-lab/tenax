@@ -120,6 +120,55 @@
 
 ### Fixed
 
+- **Review debt from #712/#717/#720/#729 drained** (#800). Four items, and only
+  one of them was a live defect — the other three are now pinned by tests or by
+  a comment so they are not re-filed.
+
+  - **The v0.8.2 CHANGELOG's χ²·D⁴ claim for the 2-site split path is wrong,
+    and wider than reported.** Measured peak intermediates, dense-equivalent:
+    the fermionic arm builds `contract(T4, a)` on the merged representation —
+    three D² legs against two χ legs — which is χ²·D⁶, exactly D² over, with
+    the ratio 4.00 / 9.00 / 16.00 at D = 2 / 3 / 4. That much was expected
+    (bounded Koszul-correct fermionic kernels are open work), but at D=2, χ=6
+    the **bosonic** 2-site kernels also peak at χ²·D⁶ via an 8-leg joint
+    ket⊗bra edge, so #800's suggested fix — scope the claim to "the
+    non-fermionic paths" — would still overstate it. The entry is corrected in
+    place; χ²·D⁴ remains the single-site figure.
+
+  - **The `_build_quadrant` endpoint-pairing allegation is false**, and the
+    disproof is now a test rather than an assertion. `_upper_left_quadrant`
+    agrees with `_build_enlarged_corner(..., position="top_left")` **bit for
+    bit** on a deliberately asymmetric environment, and `_lower_left_quadrant`
+    with `"bottom_left"` to 1.4e-14. The reading missed `swap_env_convention`:
+    the root-implicit module frames every tensor in its own direction — which
+    is what makes `rotate_env` a pure relabel — while `CTMTensorEnv` closes the
+    same ring with C4 transposed and T3, T4 reversed, and labels the
+    geometrically *down* end of T4 `t4_u`. The new test measures its own
+    sensitivity (the alternative pairing differs by 1.17 relative, dropping the
+    convention swap by the same) and asserts its fixture is asymmetric enough
+    to see a transpose at all — the trap that hid #718 for months.
+
+  - **The diagonal-only gauge test is a real limitation with real coverage.**
+    `test_each_directional_gauge_is_independently_licensed` has existed since
+    #720 and does exactly what #800 asks for. A comment now records why both
+    tests are kept, with the measurement that makes the point: re-introducing
+    #718 gives per-direction violations of (+5.8e-14, −4.2e-14, +2.121e-03,
+    −2.121e-03) while the summed value the weaker test measures reads +1.9e-14
+    and *passes* — bonds 2 and 3 are the two touching C4, and a global
+    generator is blind to a C4 transpose, so the errors are equal and opposite.
+
+  - **All three symmetric root-implicit gaps were already fixed** and were
+    re-verified by construction rather than by reading: `_same_block_structure`
+    rejects the `{q0:1, q1:2} → {q0:2, q1:1}` permutation that keeps both the
+    block keys and the packed length; the partner charge goes through
+    `sym.dual`, which a Z3/Z4/ProductSymmetry round trip confirms (Z2 is
+    self-dual and would have hidden it); and `layout_override` reaches the
+    polish sweep, with the instrumented alternation signature of the old bug
+    absent. One incidental: the layout test's docstring quoted a residual
+    ladder and two energies that no longer reproduce (`-0.10873` measures
+    `-0.13176`). The assertions are scale-free and never noticed, so the
+    numbers are replaced by what they actually constrain.
+
 - **Each checkerboard bond can now carry its own Schmidt spectrum**
   (#851, opt-in via `su_independent_bond_lambdas`). The four-phase sweep
   evolves `A.r<->B.l`, `A.d<->B.u`, `B.r<->A.l` and `B.d<->A.u`, but stored one
@@ -727,7 +776,21 @@ additive features (multi-GPU HOTRG, 2-site split-CTM, Potts helpers).
 
 - **2-site split-CTM, Phases 0–4** (#684, #685, #688, #690) — joint dense
   forward, dense AD, `SymmetricTensor` forward, and fermionic forward
-  (merge → fused → resplit), extending the χ²·D⁴ split path to 2-site cells.
+  (merge → fused → resplit), extending the split path to 2-site cells.
+
+  > **Corrected (#800).** This entry originally said "extending the **χ²·D⁴**
+  > split path to 2-site cells". That figure does not hold for the 2-site
+  > kernels and a reader sizing a run from it under-budgets memory by D².
+  > Measured peak intermediates, dense-equivalent, at D=2: the fermionic arm
+  > builds `contract(T4, a)` on the merged representation — legs
+  > `(t4_d, t4_u, u2, d2, r2)`, three D² legs against two χ legs — which is
+  > **χ²·D⁶**, exactly D² over, and the ratio is 4.00 / 9.00 / 16.00 at
+  > D = 2 / 3 / 4. That was expected (bounded Koszul-correct fermionic kernels
+  > are still open work), but at D=2, χ=6 the **bosonic** 2-site kernels also
+  > peak at χ²·D⁶, via an 8-leg joint ket⊗bra edge of shape
+  > (χ, D, D, D, χ, D, D, D) — so scoping the claim to "the non-fermionic
+  > paths" would still overstate it. χ²·D⁴ remains the single-site split
+  > figure.
 - **Multi-GPU HOTRG** (#681, #682) — `HOTRGConfig(device_mesh=...)` shards a
   surviving leg of the χ⁶ merge under GSPMD: ideal **2.00×/device** memory
   relief on 2×A100 with numerically identical results, and a real χ-ceiling

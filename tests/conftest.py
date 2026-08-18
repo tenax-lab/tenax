@@ -205,6 +205,12 @@ _FILE_MARKERS = {
     # duplicate under-reported rho on complex input, so the guard passed a
     # divergent adjoint -- and a guard that runs in no required job is not one.
     "test_arnoldi.py": "core",
+    # #800 item 2: the root-implicit quadrants against the production enlarged
+    # corner.  Milliseconds, no CTM convergence.  ``core`` because every
+    # endpoint here has dimension chi, so an endpoint swap is invisible to
+    # shape and to a fixed-point test -- the #700/#702 shape -- and because the
+    # file also pins that its own fixture is asymmetric enough to see one.
+    "test_quadrant_endpoint_pairing_800.py": "core",
     # The adjoint-convergence gate on the DEFAULT iPEPS AD gradient path
     # (#801, first raised on #341).  An unconverged adjoint yields a gradient
     # that is wrong, finite, and indistinguishable downstream -- the exact

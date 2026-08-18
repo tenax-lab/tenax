@@ -405,6 +405,24 @@ def test_freezing_the_isometries_is_gauge_licensed():
     assert worst < 1e-10 * scale, (worst, scale)
 
 
+# NOTE (#800 item 3).  The test above reuses the same ``X`` in all four
+# directions and asserts only on the *summed* cotangent, so on its own it
+# probes only the global diagonal subgroup, and contributions from different
+# directions can cancel inside it.  That is a real limitation and it is not an
+# oversight: ``test_each_directional_gauge_is_independently_licensed`` below is
+# the strict form, added on #720 for exactly this reason, and it activates one
+# direction at a time and asserts per direction.
+#
+# The concern is not academic.  Re-introducing the #718 defect -- dropping
+# ``swap_env_convention`` at the energy boundary -- gives per-direction
+# violations of (+5.8e-14, -4.2e-14, +2.121e-03, -2.121e-03) while the *summed*
+# value this test measures reads +1.9e-14 and passes.  Bonds 2 and 3 are the
+# two that touch ``C4``, and a global ``X`` is blind to a ``C4`` transpose, so
+# the two errors are exactly equal and opposite.  Keep both tests: this one
+# states the invariant in its simplest form, the next one is what would catch
+# the regression.
+
+
 def test_each_directional_gauge_is_independently_licensed():
     """Eq. 88 must hold for one gauge generator per bond, not just their sum.
 
