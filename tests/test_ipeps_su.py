@@ -66,8 +66,16 @@ from _ipeps_gauge_helpers import (  # tests/ is on sys.path
     _PAIRS,
     _chain_pair,
     _chain_pair_as_peps,
+    _sym_chain_pair,
+    _sym_chain_pair_as_peps,
     assert_leg_split,
 )
+
+# The two externally-derived chain spectra, and the Phase 1 anchor's normaliser.
+# Imported rather than copied: they are certified outside tenax (rebuilt from
+# the transfer matrix's fixed points in Python ``decimal``), and a second copy
+# of a certified constant is a second thing that can go stale.
+from test_ipeps_gauge import _CHAIN_TRUTH, _SYM_CHAIN_TRUTH
 
 import tenax.algorithms.ipeps_su as ipeps_su_module
 from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
@@ -288,7 +296,7 @@ _BOND_OF_LEG = {
 }
 
 
-def _vidal_pair(state, bond, weights):
+def _vidal_pair(state, bond, weights, power=1.0):
     """``bond``'s two sites with one more ``sqrt(lambda)`` on their outer legs.
 
     **Every bond reading in this file goes through here, and that is the
@@ -336,6 +344,15 @@ def _vidal_pair(state, bond, weights):
         state:   An ``_SUState``, or any ``{"A": ..., "B": ...}`` mapping.
         bond:    Which bond's two sites to take.
         weights: ``gauge_fix``'s spectrum for the pair these legs came from.
+        power:   Net power of ``lambda`` to leave on each outer leg **in the
+                 ket**, counting what absorbed form already carries.  ``1.0``
+                 is the Vidal metric and the only value any guard reads;
+                 the knob exists so that
+                 ``test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax``
+                 can score the two neighbouring powers against an external
+                 spectrum and show that only this one lands on it.  ``0.0``
+                 reproduces the absorbed reading this file used before Task
+                 10's reopening.
 
     Returns:
         ``{"A": ..., "B": ...}`` with the six outer legs weighted.  The bond's
@@ -347,8 +364,10 @@ def _vidal_pair(state, bond, weights):
         for leg in ("u", "d", "l", "r"):
             if leg == on_bond:
                 continue
-            lam = jnp.asarray(np.asarray(getattr(weights, _BOND_OF_LEG[(site, leg)])))
-            pair[site] = scale_bond_axis(pair[site], leg, jnp.sqrt(lam))
+            lam = np.asarray(getattr(weights, _BOND_OF_LEG[(site, leg)]), dtype=float)
+            pair[site] = scale_bond_axis(
+                pair[site], leg, jnp.asarray(lam ** (power / 2.0))
+            )
     return pair
 
 
@@ -407,7 +426,7 @@ def _theta_labels(bond):
     return (site_i, ren_i), (site_j, ren_j), left, right
 
 
-def _two_site_tensor(state, bond, weights):
+def _two_site_tensor(state, bond, weights, power=1.0):
     """The two sites sharing ``bond``, contracted across it, in the Vidal metric.
 
     This is the ``theta`` an ``_su_step`` on ``bond`` produced: ``F_j F_i``,
@@ -423,11 +442,11 @@ def _two_site_tensor(state, bond, weights):
     defect through four review rounds.
     """
     (site_i, ren_i), (site_j, ren_j), _left, _right = _theta_labels(bond)
-    pair = _vidal_pair(state, bond, weights)
+    pair = _vidal_pair(state, bond, weights, power)
     return contract(pair[site_j].relabels(ren_j), pair[site_i].relabels(ren_i))
 
 
-def _bond_spectrum(state, bond, max_D, weights, base_charges=None):
+def _bond_spectrum(state, bond, max_D, weights, base_charges=None, power=1.0):
     """The Schmidt spectrum of ``state`` across ``bond``, independent of the split.
 
     Reassembles the two-site tensor in the Vidal metric (:func:`_vidal_pair`)
@@ -443,7 +462,7 @@ def _bond_spectrum(state, bond, max_D, weights, base_charges=None):
     """
     _ends_i, _ends_j, left, right = _theta_labels(bond)
     _U, sigma, _Vh, _full = truncated_svd(
-        _two_site_tensor(state, bond, weights),
+        _two_site_tensor(state, bond, weights, power),
         left_labels=left,
         right_labels=right,
         new_bond_label="__reference_bond",
@@ -1144,14 +1163,11 @@ def test_su_step_survives_a_bond_direction_the_state_does_not_use():
         f"no bond spectrum has an exact zero ({zeros}); this pair does not "
         f"reach the division guard at all and the assertions below are vacuous"
     )
-    with np.errstate(divide="ignore"):  # the point of the control is the inf
-        naive = {
-            f: float(np.max(1.0 / np.sqrt(np.asarray(getattr(w, f))))) for f in zeros
-        }
-    assert all(not np.isfinite(v) for v in naive.values()), (
-        f"the unguarded 1/sqrt(lambda) is finite on this spectrum ({naive}), so "
-        f"there is nothing here for the guard to be protecting against"
-    )
+    # There was an ``assert all(not np.isfinite(1/sqrt(lam)))`` here.  It is
+    # deleted rather than kept as a control: given the exact zero the assertion
+    # above certifies, ``1/sqrt(0) == inf`` is IEEE arithmetic, so it could not
+    # fail for any state of this module.  That is the thirteenth-assertion
+    # pattern this branch keeps producing, and a review caught it.
 
     # The *backward* half of the same claim.  Nothing differentiates through
     # ``_su_step`` yet -- ``gauge_fix`` is a traced ``while_loop`` and reverse
@@ -1168,9 +1184,15 @@ def test_su_step_survives_a_bond_direction_the_state_does_not_use():
     naive_grad = np.asarray(
         jax.grad(lambda x: jnp.sum(jnp.sqrt(x) + 1 / jnp.sqrt(x)))(lam)
     )
+    # A canary on JAX, **not** a guard on this module: the input is a literal
+    # and nothing in ``ipeps_su`` can falsify it, so it cannot fail for any
+    # change to the code under test.  It is kept because the assertion below
+    # is worth nothing if ``jnp.sqrt``'s adjoint ever stops being ``inf`` at
+    # zero -- at which point the double-``where`` would be dead weight and this
+    # line is what would say so.
     assert not np.all(np.isfinite(naive_grad)), (
-        f"the unguarded sqrt/inverse-sqrt has a finite VJP at lambda=0 "
-        f"({naive_grad}), so the guard below is not protecting against anything"
+        f"jnp.sqrt's VJP at 0 is finite ({naive_grad}); JAX changed under this "
+        f"test and the double-where below is no longer guarding anything"
     )
     assert np.all(np.isfinite(guarded)), (
         f"_sqrt_and_inv_sqrt's VJP at lambda=0 is {guarded} -- the double-where "
@@ -1203,6 +1225,56 @@ def test_su_step_survives_a_bond_direction_the_state_does_not_use():
         f"the untruncated step on a starved pair is {rel:.3e} from the gated "
         f"state (a no-op would score {control:.3e}) -- the dead direction was "
         f"not returned to where it started by the divide-back-out"
+    )
+
+    # --- and the case the exact zero does NOT cover -------------------------
+    #
+    # ``_sqrt_and_inv_sqrt`` masks at ``lam <= 1e-12 * max(lam)``, and *between*
+    # zero and that floor the absorbed slice is not zero -- it carries
+    # ``sqrt(lam)`` -- so the mask deletes a direction the state is still
+    # (barely) using.  The round trip is exact only at exactly zero.  The worst
+    # case is right at the threshold and it is bounded by the weight being
+    # dropped; scanned out of band, ``eps`` 1e-3 / 1e-5 / 1e-6 / 1e-7 / 0 give
+    # 9.774e-15, 1.482e-14, **1.426e-12**, 2.142e-14, 2.390e-15.  ``eps=1e-06``
+    # is the peak (``lam_3/lam_1 = 5.9e-13``, just under the floor) and is the
+    # cell run here, so the bound is pinned rather than only described in
+    # ``_sqrt_and_inv_sqrt``'s docstring.
+    A2, B2 = _PAIRS["dense"](D=D)
+    nearly_dead = jnp.asarray([1.0] * (D - 1) + [1e-6])
+    for leg in ("u", "d", "l", "r"):
+        A2 = scale_bond_axis(A2, leg, nearly_dead)
+        B2 = scale_bond_axis(B2, leg, nearly_dead)
+    _a2, _b2, w2, info2 = gauge_fix(A2, B2)
+    assert info2.converged, (
+        f"BP did not converge on the nearly-starved pair ({info2.iterations} "
+        f"sweeps, residual {info2.residual:.3e})"
+    )
+    lam2 = np.asarray(w2.h_AB, dtype=float)
+    ratio = float(lam2[-1] / lam2[0])
+    assert 0.0 < ratio < 1e-12, (
+        f"the nearly-starved pair's lam_3/lam_1 is {ratio:.3e}, which is not "
+        f"strictly between zero and _sqrt_and_inv_sqrt's 1e-12 relative floor "
+        f"-- this cell is then either the exact-zero case already covered above "
+        f"or an ordinary well-conditioned one, and it certifies neither bound"
+    )
+    gate2 = _gate(A2)
+    stepped2 = _su_step(
+        _SUState.from_pair(A2, B2), gate2, max_D=_FULL_RANK, bond="h_AB"
+    )
+    T_before2 = np.asarray(torus_2x2_sign_free(A2, B2, _ones_for(A2)).todense())
+    T_expected2 = _apply_gate_to_torus(
+        T_before2, np.asarray(gate2.todense()), _TORUS_GATE_AXES["h_AB"]
+    )
+    rel2 = _torus_rel(
+        torus_2x2_sign_free(stepped2.A, stepped2.B, _ones_for(stepped2.A)),
+        T_expected2,
+    )
+    assert rel2 < 1e-11, (
+        f"a bond direction just under the relative floor (lam_3/lam_1 = "
+        f"{ratio:.3e}) costs {rel2:.3e} through the reweighting round trip, "
+        f"above the 1e-11 this file gates everything else at.  The mask deletes "
+        f"it, which is intended; the claim being pinned here is that the loss "
+        f"is bounded by the weight dropped."
     )
 
 
@@ -2007,6 +2079,221 @@ def _truncation_error_of(theta_full, theta_kept):
     return float(np.sqrt(max(1.0 - cos**2, 0.0)))
 
 
+# --- the metric itself, against numbers derived outside tenax --------------
+#
+# Everything above certifies ``_su_step`` *given* the Vidal metric.  Nothing
+# above certifies the metric, and that gap has the same shape as the defect
+# this task fixed: ``_vidal_pair`` (test) and ``_su_step``'s stage 2 (source)
+# are the same prescription written twice, so a wrong prescription would score
+# 1.000000 on both sides.  Two copies catch a mutation of either file -- they
+# do not catch a shared conceptual error, which is exactly what the absorbed
+# metric was.
+#
+# The anchor below has no copy of the prescription in it.  It runs on a
+# **chain**, where belief propagation is exact rather than approximate, and
+# compares against ``test_ipeps_gauge``'s ``_CHAIN_TRUTH`` /
+# ``_SYM_CHAIN_TRUTH`` -- the infinite chain's Schmidt spectra rebuilt from the
+# 2-site transfer matrix's fixed points in Python ``decimal``, importing
+# nothing from tenax but two float64 arrays.  Phase 1 Task 6/6b built those and
+# proved ``gauge_fix``'s weights equal them; this asks the next question, which
+# is whether the *two-site tensor* the metric builds has them as its singular
+# values.
+
+#: The external truths and the pair builders, per arm.  Imported from
+#: ``test_ipeps_gauge`` rather than copied: a second copy of an
+#: externally-certified constant is a second thing to keep right, and the
+#: import fails loudly if it moves.  (``tests/`` is on ``sys.path``, which is
+#: how ``_ipeps_gauge_helpers`` is already reached.)
+_CHAIN_ARMS = {
+    "dense": (_chain_pair, _chain_pair_as_peps, _CHAIN_TRUTH),
+    "symmetric": (_sym_chain_pair, _sym_chain_pair_as_peps, _SYM_CHAIN_TRUTH),
+}
+
+#: How close the metric must land on the external truth.  Not the 1e-12 the
+#: Phase 1 anchor uses, and the difference is one thing: that test solves at
+#: ``tol=1e-14`` while this one must use ``gauge_fix``'s **default** ``tol=1e-6``
+#: -- the call ``_su_step`` makes -- so that the reference pair and the stepped
+#: pair are in the *same* BP basis.  (Solving the reference at 1e-14 instead
+#: puts the two thetas in different gauges and the optimality ratio below reads
+#: 8.5 on correct code; that was measured, not guessed.)  At the default the
+#: weights sit ~2e-7 from the fixed point.  Measured here: the Vidal metric
+#: lands 2.1e-08 to 1.9e-07 from the truth, the two neighbouring powers land
+#: 1.4e-02 to 2.2e-01 away -- five orders apart, so this gate has no judgement
+#: in it.
+_METRIC_TOL = 1e-5
+
+#: Lower bound the two wrong powers must clear, so the cell cannot pass because
+#: the anchor has gone flat.
+_METRIC_CONTROL = 1e-3
+
+#: How close the externally-anchored optimality ratio must sit to 1.  Two-sided,
+#: unlike the square-lattice guard's one-sided Eckart-Young bound, and that is
+#: the point: with ``optimal`` computed from the external truth rather than from
+#: a tenax SVD of the same theta, a *wrong metric* makes the ratio land on the
+#: wrong side as easily as the right one.  Measured on this pair, the absorbed
+#: reading gives 2.9x to 10.0x and the doubled one 0.09x to 0.87x, against a
+#: correct 1.000000 to 1.000002.  The 2e-6 residual is ``gauge_fix``'s default
+#: tolerance, not the anchor's.
+_METRIC_RATIO_TOL = 1e-4
+
+
+@pytest.fixture(scope="module")
+def chain_anchor():
+    """Memoised ``(pair, gauged pair, weights, identity gate, truth)`` per arm.
+
+    Module-scoped because the symmetric chain's ``gauge_fix`` is 6.1 s and four
+    cells want it.  The gate is ``exp(-0 * 0) == 1``: an identity, so the
+    two-site tensor the step forms is the *ungated* one, whose spectrum the
+    external truth is a statement about.  A real gate would move the state to
+    one nothing outside tenax has a number for.
+    """
+    cache: dict[str, tuple] = {}
+
+    def get(arm):
+        if arm not in cache:
+            build_pair, as_peps, truth = _CHAIN_ARMS[arm]
+            a, b, _vl, _vr = build_pair()
+            A, B = as_peps(a, b)
+            # ``gauge_fix``'s DEFAULT tol -- the call ``_su_step`` makes.  See
+            # ``_METRIC_TOL`` for why matching it is load-bearing.
+            A_g, B_g, weights, info = gauge_fix(A, B)
+            assert info.converged, (
+                f"{arm} chain: BP did not converge where it is exact "
+                f"({info.iterations} sweeps, residual {info.residual:.3e}); "
+                f"nothing below can be concluded from a failed solve"
+            )
+            d = A.indices[A.labels().index("phys")].dim
+            gate = _make_trotter_gate_tensor(
+                jnp.zeros((d, d, d, d)), 0.0, site_tensor=A
+            )
+            cache[arm] = (A, B, A_g, B_g, weights, gate, truth)
+        return cache[arm]
+
+    return get
+
+
+@pytest.mark.parametrize("arm", ["dense", "symmetric"])
+@pytest.mark.parametrize("bond", ["h_AB", "h_BA"])
+def test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax(
+    arm, bond, chain_anchor
+):
+    """The metric is right, checked against a number tenax did not compute.
+
+    **This is the guard that closes the last self-reference in the file.**  The
+    optimality guard below certifies ``_su_step``'s truncation *given* a metric;
+    it builds its reference with ``_vidal_pair``, which is the same prescription
+    ``_su_step``'s stage 2 applies, so a shared conceptual error in the metric
+    reads 1.000000 on both sides.  That is the shape of the defect this task
+    fixed, one level up.
+
+    The reference here is ``_CHAIN_TRUTH`` / ``_SYM_CHAIN_TRUTH``: the infinite
+    chain's two horizontal-bond Schmidt spectra, rebuilt from the 2-site
+    transfer matrix's left and right fixed points in Python ``decimal``,
+    importing nothing from tenax but two ``float64`` site tensors.  No
+    prescription of any kind is involved in producing them.
+
+    **Why a chain.**  BP is exact on a tree and only approximate on the loopy
+    square lattice, so a chain is the one geometry where "the BP gauge is the
+    canonical form" is a theorem rather than an ansatz -- which makes it the one
+    geometry where the metric has a ground truth at all.  Phase 1 Task 6/6b
+    built this anchor and proved ``gauge_fix``'s *weights* equal those numbers;
+    this asks the next question, which no test asked: does the **two-site
+    tensor** the metric builds have them as its singular values?  It does, and
+    the two neighbouring powers do not.
+
+    Two readings, both against the external truth:
+
+    * **the spectrum** -- ``svd(theta_vidal)`` must be the truth.  Measured,
+      ``power=1`` (the shipped metric) lands 2.1e-08 to 1.9e-07 away;
+      ``power=0`` (the absorbed reading this file used before the reopening)
+      1.1e-01 to 2.2e-01; ``power=2`` 1.4e-02 to 7.6e-02.
+    * **the truncation** -- ``_su_step``'s own error at ``max_D`` in 2, 3
+      against ``||truth[max_D:]|| / ||truth||``, which is computed from the
+      external constant alone.  ``power=1`` gives 1.000000 to 1.000002;
+      ``power=0`` gives 2.9x to 10.0x and ``power=2`` gives 0.09x to 0.87x.
+
+    The second reading is the one that reaches ``_su_step``: the ``optimal``
+    half comes from outside tenax entirely, so a metric that is wrong *in both
+    files at once* still cannot produce a ratio of 1.  The ratio gate is
+    therefore **two-sided** here, unlike the square-lattice guard's one-sided
+    Eckart-Young bound -- a wrong metric measures the error of the wrong
+    operator and lands below 1 as readily as above it, which is exactly what
+    ``power=2`` does.
+
+    **What this still does not certify**, stated because the point of the guard
+    is to be precise about its own reach: BP on the *square lattice* is
+    approximate, so this says the prescription is the canonical-form
+    prescription, not that ``gauge_fix``'s square-lattice fixed point is
+    canonical.  Nothing can say that -- there is no exact reference on a loopy
+    lattice (#882 section 6.3).  What corroborates the square-lattice case is
+    the energy: 0 of 9 (seed, D) cells before the fix and 5 of 9 after, against
+    references this project reproduced independently.
+    """
+    A, B, A_g, B_g, weights, gate, truth = chain_anchor(arm)
+    want = np.sort(np.asarray(truth[bond]))[::-1]
+    want = want / np.linalg.norm(want)
+    gauged = {"A": A_g, "B": B_g}
+    chi = len(want)
+
+    # --- reading 1: the spectrum of the metric's own theta -------------------
+    got = {}
+    for power in (1.0, 0.0, 2.0):
+        sigma = _bond_spectrum(gauged, bond, chi, weights, power=power)
+        sigma = np.sort(np.asarray(sigma))[::-1]
+        got[power] = float(np.max(np.abs(sigma / np.linalg.norm(sigma) - want)))
+    for power in (0.0, 2.0):
+        assert got[power] > _METRIC_CONTROL, (
+            f"{arm} {bond}: the metric with lambda**{power:.0f} on the outer "
+            f"legs is {got[power]:.3e} from the chain's exact Schmidt spectrum, "
+            f"inside the {_METRIC_CONTROL:.0e} this cell needs it to miss by.  "
+            f"Then the assertion below cannot tell the right power from a wrong "
+            f"one and passes for the wrong reason -- the anchor has gone flat, "
+            f"redraw the chain seed rather than loosening anything."
+        )
+    assert got[1.0] < _METRIC_TOL, (
+        f"{arm} {bond}: the two-site tensor built in the Vidal metric has "
+        f"singular values {got[1.0]:.3e} away from the chain's exact Schmidt "
+        f"spectrum, which was derived outside tenax.  BP is exact on a tree, so "
+        f"this is not a tolerance to widen: the metric _vidal_pair applies -- "
+        f"and _su_step's stage 2 with it -- is not the canonical-form metric.  "
+        f"lambda**0 scores {got[0.0]:.3e} and lambda**2 scores {got[2.0]:.3e}."
+    )
+
+    # --- reading 2: _su_step's truncation, scored from outside tenax ---------
+    state = _SUState.from_pair(A, B)
+    for max_D in (2, chi - 1):
+        optimal = float(np.linalg.norm(want[max_D:]) / np.linalg.norm(want))
+        assert optimal > _METRIC_CONTROL, (
+            f"{arm} {bond}: keeping {max_D} of {chi} costs only {optimal:.3e} "
+            f"on this draw, so the ratio below cannot discriminate"
+        )
+        stepped = _su_step(state, gate, max_D=max_D, bond=bond)
+        ratios = {}
+        for power in (1.0, 0.0, 2.0):
+            full = _two_site_tensor(gauged, bond, weights, power)
+            kept = _two_site_tensor(stepped, bond, weights, power)
+            actual = _truncation_error_of(
+                np.asarray(full.todense()), np.asarray(kept.todense())
+            )
+            ratios[power] = actual / optimal
+        for power in (0.0, 2.0):
+            assert abs(ratios[power] - 1.0) > 1e-2, (
+                f"{arm} {bond} max_D={max_D}: scoring the step in the "
+                f"lambda**{power:.0f} metric still gives ratio "
+                f"{ratios[power]:.6f}, so this cell cannot tell the metric it "
+                f"is supposed to be certifying from a wrong one"
+            )
+        assert abs(ratios[1.0] - 1.0) < _METRIC_RATIO_TOL, (
+            f"{arm} {bond} max_D={max_D}: _su_step's truncation error is "
+            f"{ratios[1.0]:.6f}x the best achievable, where the best is "
+            f"||truth[{max_D}:]||/||truth|| = {optimal:.9f} computed from a "
+            f"spectrum derived outside tenax.  The gate is two-sided on "
+            f"purpose: below 1 means the error is being measured in the wrong "
+            f"metric, not that the step beat Eckart-Young.  lambda**0 gives "
+            f"{ratios[0.0]:.6f}x and lambda**2 gives {ratios[2.0]:.6f}x."
+        )
+
+
 @pytest.mark.parametrize("bond", _BONDS)
 def test_su_step_truncates_in_the_state_s_own_basis(bond):
     """The kept subspace must be the best rank-``max_D`` one **for the state**.
@@ -2042,14 +2329,44 @@ def test_su_step_truncates_in_the_state_s_own_basis(bond):
     product state (see the energy guards below, and
     ``task-10-reopen-report.md`` for the re-run grid).
 
-    **This is the only guard in the file whose reference is not re-derived from
-    ``_su_step``, and that is why it is the one that caught this.** The twelve
+    **The reference does not come from ``_su_step``'s SVD, truncation or split,
+    and that is why this is the guard that caught the defect.** The twelve
     guards above it compare the step against a spectrum, a subspace or a state
     rebuilt from the step's own output, so a step that corrupts the tensor it is
     truncating corrupts the reference in the same breath and they agree.  The
     reference here is Eckart-Young -- a lower bound on the truncation error that
     holds for *any* rank-``max_D`` truncation of the gated state, whoever
-    computed it -- so it cannot be moved by being wrong in the same way.
+    computed it.
+
+    **What it does share with the code it audits**, stated precisely because on
+    this task the scope of an independence claim is the thing that matters:
+
+    * ``gauge_fix`` -- unavoidable, and Phase 1 code rather than code under test.
+    * ``_align_gate_to_ket`` and ``_BOND_ENDS``, both imported from
+      ``ipeps_su``.  A gate-alignment error would move ``full`` and ``stepped``
+      together and this ratio would still read 1.000000.  Covered elsewhere:
+      ``test_su_step_applies_the_gate_across_the_bond`` derives its gate axes
+      from ``_TORUS_GATE_AXES``, written out independently from ``ipeps_gauge``'s
+      edge table, and ``test_su_evolve_visits_four_distinct_bonds_per_cycle``
+      pins the bond map against a literal written out in this file.
+    * **the metric** -- ``_vidal_pair`` here and stage 2 in the source are the
+      same prescription written twice, so a *shared* error in it would read
+      1.000000 on both sides.  Two copies in two files catch a mutation of
+      either (measured: mutating the module's ``_BOND_OF_LEG`` dies at
+      1.000551x, halving its leg set at 1.005972x); they do not catch a shared
+      conceptual error, which is exactly what the absorbed metric was.
+      ``test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax`` is the
+      guard that does, against transfer-matrix fixed points computed in Python
+      ``decimal``.
+
+    **Scope: dense, seed 0, four bonds.**  The seed axis was measured to add
+    nothing here (all twelve pre-fix cells sit in 1.004775-1.023395) and costs
+    three gauge solves a bond.  There is no symmetric cell *in this test*, and
+    the block-sparse path is where this project's charge-order and pairing bugs
+    live (#602, #834, #865) -- so the symmetric optimality reading lives in the
+    chain anchor above, which covers both arms in 25.8 s for four cells because
+    a chain's ``gauge_fix`` is 6.1 s where a symmetric ``D=3`` square-lattice
+    one is 38 s.
 
     The reference is built here rather than imported, and deliberately does not
     reuse ``_su_step``'s own SVD: it re-derives the two-site tensor from the
