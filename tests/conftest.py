@@ -43,6 +43,14 @@ _FILE_MARKERS = {
     # Every test runs at least one BP gauge solve (and the split guard runs
     # three), which puts it well past the `core` budget.
     "test_ipeps_su.py": "algorithm",
+    # #882 Task 13: every guard in test_ipeps_su.py killed by a faithful
+    # re-introduction of the defect it is named for.  Each cell runs its
+    # guard twice -- unmutated (which must pass) and mutated (which must
+    # fail, on the named assertion, at a number in range) -- so it costs
+    # about twice the guard.  The two cells whose guard is expensive (the
+    # D=2 imaginary-time run and the symmetric truncation cell) carry
+    # their own @pytest.mark.slow; the rest add ~35 s to -m "not slow".
+    "test_ipeps_su_mutations.py": "algorithm",
     "test_ipeps_core.py": "core",
     "test_auto_mpo.py": "algorithm",
     "test_ad_utils.py": "algorithm",
