@@ -16,16 +16,22 @@ on dense input.
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from _ipeps_gauge_helpers import (  # tests/ is on sys.path
+    _PAIRS,
+    _dense_pair,
+    _symmetric_pair,
+    _torus_2x2,
+    retraced,  # noqa: F401  -- a fixture; pytest reads it off this namespace
+)
 
+import tenax.algorithms.ipeps_bp_gauge as bp_mod
 from tenax.algorithms.ipeps import (
     _make_trotter_gate_tensor,
     _wrap_as_dense_tensor,
     heisenberg_gate,
-    heisenberg_u1sz_init_pair,
     sublattice_rotate_gate,
 )
 from tenax.algorithms.ipeps_bp_gauge import (
@@ -35,68 +41,16 @@ from tenax.algorithms.ipeps_bp_gauge import (
     _message,
     bp_gauge_checkerboard,
 )
+from tenax.algorithms.ipeps_gauge import gauge_fix
 from tenax.algorithms.ipeps_simple_update import (
     _simple_update_checkerboard_sweep,
 )
 from tenax.contraction.contractor import contract
 from tenax.core._tensor_utils import scale_bond_axis
+from tenax.core.index import FlowDirection
 
 D = 3
 GAUGE_TOL = 1e-13
-
-
-def _dense_pair(D: int = D, seed: int = 0):
-    kA, kB = jax.random.split(jax.random.PRNGKey(seed))
-    A = _wrap_as_dense_tensor(jax.random.normal(kA, (D, D, D, D, 2)))
-    B = _wrap_as_dense_tensor(jax.random.normal(kB, (D, D, D, D, 2)))
-    return A * (1.0 / float(A.norm())), B * (1.0 / float(B.norm()))
-
-
-def _symmetric_pair(D: int = D, seed: int = 0):
-    return heisenberg_u1sz_init_pair(D=D, key=jax.random.PRNGKey(seed))
-
-
-_PAIRS = {"dense": _dense_pair, "symmetric": _symmetric_pair}
-
-
-def _udlrp(t):
-    """``t`` as a plain array in ``(u, d, l, r, phys)`` order."""
-    labels = t.labels()
-    return np.asarray(t.todense()).transpose(
-        [labels.index(lab) for lab in ("u", "d", "l", "r", "phys")]
-    )
-
-
-def _torus_2x2(A, B, weights):
-    """The closed 2x2 checkerboard torus, physical legs open.
-
-    Exactly gauge invariant, and the only probe here that covers all four bonds
-    at once: every bond appears twice, each time with the gauge on one end and
-    its inverse on the other, so a gauge that fails to cancel shows up.
-    ``_two_site`` cannot do this -- it leaves three legs open per site, so a
-    gauge on any of them survives uncancelled and the comparison is meaningless.
-
-    Sites ``A(0,0) B(1,0) / B(0,1) A(1,1)``.  Each site carries the weight of
-    the bond leaving its ``r`` and ``d`` legs, which places each of the four
-    weights exactly twice and each edge's weight exactly once::
-
-        i = A00.r-B10.l  h_AB     m = A00.d-B01.u  v_AB
-        j = B10.r-A00.l  h_BA *   n = B01.d-A00.u  v_BA *
-        k = B01.r-A11.l  h_BA     o = B10.d-A11.u  v_BA
-        l = A11.r-B01.l  h_AB *   p = A11.d-B10.u  v_AB *
-
-    (``*`` = wraps around the torus.)
-    """
-    a = _udlrp(A) * np.asarray(weights.v_AB)[None, :, None, None, None]
-    a = a * np.asarray(weights.h_AB)[None, None, None, :, None]
-    b = _udlrp(B) * np.asarray(weights.v_BA)[None, :, None, None, None]
-    b = b * np.asarray(weights.h_BA)[None, None, None, :, None]
-    #      u  d  l  r  phys
-    # A00  n  m  j  i  w
-    # B10  p  o  i  j  x
-    # B01  m  n  l  k  y
-    # A11  o  p  k  l  z
-    return np.einsum("nmjiw,poijx,mnlky,opklz->wxyz", a, b, b, a, optimize=True)
 
 
 def _simple_update(A, B, *, phases, rotate):
@@ -241,6 +195,55 @@ def test_the_solve_converges_and_hands_back_the_same_tensor_structure(kind):
         assert w.max() > 0.0, f"{kind}: {name} came back all zero"
 
 
+def test_a_dense_pair_whose_flows_are_not_this_modules_keeps_its_own():
+    """The structure check above, on a pair that does *not* start canonical.
+
+    ``_gauge_bond`` stamps the flow its SVD produced on every virtual leg --
+    ``IN`` on the left/upper end of each bond, ``OUT`` on the right/lower one --
+    so the returned flows used to be that convention whatever the caller's were.
+    Every fixture the test above runs on already uses it, so nothing could see
+    the difference.
+
+    ``_simple_update_checkerboard_sweep``'s output does not: it comes back with
+    all five legs inverted relative to ``_wrap_as_dense_tensor`` (measured:
+    ``u`` OUT->IN, ``d`` IN->OUT, ``l`` OUT->IN, ``r`` IN->OUT, ``phys``
+    IN->OUT).  That is the pair this module exists to re-gauge, so "flows must
+    survive" was false for the only caller that matters.
+
+    Dense only.  On a ``SymmetricTensor`` the charges are load-bearing and
+    rewriting the metadata would be #834's silent mis-pairing, so that path
+    keeps the stamped flows it has always returned.
+    """
+    A, B, stored = _simple_update(*_dense_pair(), phases=40, rotate=True)
+    flows = [int(i.flow) for i in A.indices]
+    canonical = [int(i.flow) for i in _dense_pair()[0].indices]
+    assert flows != canonical, (
+        "the simple update's output now uses this module's flow convention, so "
+        "this test no longer probes anything -- find another non-canonical pair "
+        "or delete it, do not weaken it"
+    )
+
+    A2, B2, weights, info = bp_gauge_checkerboard(A, B, stored, max_iter=400, tol=1e-13)
+    assert info.converged, f"BP did not converge ({info.residual:.2e})"
+
+    for original, gauged, tag in ((A, A2, "A"), (B, B2, "B")):
+        assert gauged.labels() == original.labels(), f"{tag}: axis order changed"
+        assert [int(i.flow) for i in gauged.indices] == [
+            int(i.flow) for i in original.indices
+        ], f"{tag}: flows changed"
+
+    # And restoring the metadata did not buy that by moving the state.
+    rel = float(
+        np.max(
+            np.abs(
+                _direction(_torus_2x2(A2, B2, weights))
+                - _direction(_torus_2x2(A, B, stored))
+            )
+        )
+    )
+    assert rel < GAUGE_TOL, f"the solve moved the state by {rel:.3e}"
+
+
 @pytest.mark.parametrize("phases", [1, 4, 8])
 def test_an_su_evolved_symmetric_state_does_not_walk_out_of_f64(phases):
     """The iterate must stay representable, and a corpse must not be certified.
@@ -280,6 +283,96 @@ def test_an_su_evolved_symmetric_state_does_not_walk_out_of_f64(phases):
         np.max(np.abs(_direction(_torus_2x2(A2, B2, weights)) - _direction(before)))
     )
     assert rel < GAUGE_TOL, f"{phases} phase(s): state moved by {rel:.3e}"
+
+
+#: How far past its fixed point the #870 guard below has to run.  The state
+#: converges at sweep ~60 and the hoisted-rescale overflow does not arrive until
+#: sweep ~116, so anything that stops at the fixed point cannot see it.  150
+#: clears the blow-up with margin without doubling the test's cost.
+_HOIST_GUARD_SWEEPS = 150
+
+
+def test_rescaling_once_per_sweep_instead_of_once_per_bond_still_overflows():
+    """The #870 guard, run *past* the fixed point where the defect actually is.
+
+    ``_sweep`` rescales after every **bond**, 8x per sweep, and the comment
+    there says a cleanup that hoists it to once per sweep reintroduces the
+    overflow.  That claim was untested: hoisting the two ``_rescale`` calls out
+    of the ``for bond ...`` loop turns this whole file green, including
+    ``test_an_su_evolved_symmetric_state_does_not_walk_out_of_f64``, which is
+    the test nominally guarding it.
+
+    The mechanism is not stale, the *guard* was.  Instrumented on this fixture:
+    hoisted, ``peak ||Gamma||`` reaches ``inf`` and the first unhealthy sweep is
+    116; per-bond, ``||Gamma||`` sits at exactly 1.000 for the whole run.  The
+    existing test misses it because the solve **converges at sweep ~60** and
+    returns 56 sweeps before the blow-up: it asks for the fixed point, and the
+    defect lives past it.
+
+    So this one deliberately does not converge -- ``tol=0.0`` forces all
+    ``_HOIST_GUARD_SWEEPS`` sweeps -- and asserts every one of them was healthy.
+    ``iterations`` is the discriminator rather than the returned norm, because
+    the rollback hands back the *last good* iterate either way, so the state
+    alone looks fine in both arms; only the sweep count says whether the solve
+    walked out of f64 on the way.
+    """
+    A, B, stored = _simple_update(*_symmetric_pair(), phases=4, rotate=False)
+
+    _, _, _, info = bp_gauge_checkerboard(
+        A, B, stored, max_iter=_HOIST_GUARD_SWEEPS, tol=0.0
+    )
+
+    assert info.iterations == _HOIST_GUARD_SWEEPS, (
+        f"only {info.iterations} of {_HOIST_GUARD_SWEEPS} sweeps stayed inside "
+        f"f64 (residual {info.residual}).  The per-bond rescale in ``_sweep`` "
+        f"bounds the compounding of ``X_inv``; if it has been hoisted to once "
+        f"per sweep, this is #870 and the fix is to put it back, not to lower "
+        f"the sweep count until the test passes"
+    )
+    assert info.residual != float("inf"), "a sweep was rejected as unrepresentable"
+
+
+def test_a_state_whose_messages_underflow_is_rejected_by_the_real_predicate():
+    """The health guard, reached through the solve rather than injected.
+
+    Every other rollback test in this tree patches ``_sweep_is_healthy``, so
+    nothing pins that the solve consults :func:`_is_representable` at all -- a
+    driver that dropped the call entirely would keep them all green.
+
+    The reachable death is **underflow**, not overflow.  ``_PINV_CUTOFF`` is a
+    *relative* cutoff (``s > 1e-12 * max(s)``), so ``s_inv`` is capped at
+    ``1e12 / max(s)`` and cannot run away to ``inf`` however fast the message
+    spectrum decays.  What it does not stop is the whole message underflowing:
+    here ``Gamma``'s O(1) weight sits at virtual index 1 on all four legs and
+    ``lambda[1] = 1e-170``, so ``_message`` -- which multiplies three incoming
+    weights in and then squares -- lands below 1e-308 and rounds to exactly
+    zero.  The pseudo-inverse of a zero message is zero, ``Gamma`` becomes
+    exactly zero, and ``_rescale`` leaves it there.
+
+    Zero is the *absorbing fixed point*: ``norm(0 - 0) / max(0, 1e-300)`` is 0,
+    which passes any tolerance.  This is what the ``n > 0`` clause exists for,
+    and without it the solve would report a confident ``converged=True`` on a
+    corpse (#870).  The input is a legal one -- it passes ``_validate_weights``
+    -- so this is a state a caller could hand over, not a mutation of internals.
+    """
+    D_ = 2
+    arr = np.full((D_, D_, D_, D_, 2), 1e-300)
+    arr[1, 1, 1, 1, :] = 1.0  # the O(1) weight, on virtual index 1 of every leg
+    A = _wrap_as_dense_tensor(jnp.asarray(arr))
+    B = _wrap_as_dense_tensor(jnp.asarray(arr))
+    lam = jnp.array([1.0, 1e-170])
+    w = BondWeights(h_AB=lam, h_BA=lam, v_AB=lam, v_BA=lam)
+
+    A2, B2, _, info = bp_gauge_checkerboard(A, B, w, max_iter=50, tol=1e-12)
+
+    assert not info.converged, (
+        "a state whose messages underflow to zero was certified converged; "
+        "zero is an absorbing fixed point and reports residual 0"
+    )
+    assert info.iterations == 0, f"reported sweeps that were not healthy: {info}"
+    assert info.residual == float("inf")
+    # The rollback hands back a usable state -- here the rescaled input.
+    assert float(A2.norm()) > 0.0 and float(B2.norm()) > 0.0
 
 
 @pytest.mark.parametrize("kind", list(_PAIRS))
@@ -339,42 +432,67 @@ def test_the_health_predicate_rejects_every_way_an_iterate_dies():
     A, _ = _dense_pair()
     healthy = {"h_AB": jnp.ones(D)}
 
-    assert _is_representable({"A": A}, healthy)
+    def ok(gam, weights):
+        """The predicate as a Python ``bool``, and pinned to 0-d.
+
+        It returns a **0-d jnp array** now, because the traced driver calls it
+        inside a ``lax.while_loop``.  Truthiness of a 0-d array is well defined,
+        so the assertions below would still read correctly -- but only as long
+        as it stays 0-d, and a predicate that started returning one entry per
+        bond would make ``assert not ...`` raise rather than fail.  Pin the
+        shape here so that change is caught at its source.
+        """
+        got = _is_representable(gam, weights)
+        assert got.shape == (), f"health predicate returned shape {got.shape}"
+        return bool(got)
+
+    assert ok({"A": A}, healthy)
     # Representable, not unit-scaled: an unobservable prefactor is not a defect,
     # and a norm-based predicate would reject both of these -- ||Gamma|| is 0 at
     # 1e-200 and inf at 1e200 because it squares before it sums.
-    assert _is_representable({"A": A * 1e-200}, healthy), "small scale rejected"
-    assert _is_representable({"A": A * 1e200}, healthy), "large scale rejected"
-    assert not _is_representable({"A": A * 0.0}, healthy), "zero Gamma accepted"
-    assert not _is_representable({"A": A * jnp.inf}, healthy), "inf Gamma accepted"
-    assert not _is_representable({"A": A * jnp.nan}, healthy), "nan Gamma accepted"
-    assert not _is_representable({"A": A}, {"h_AB": jnp.zeros(D)}), "zero lambda"
-    assert not _is_representable({"A": A}, {"h_AB": jnp.array([1.0, jnp.nan, 0.1])}), (
+    assert ok({"A": A * 1e-200}, healthy), "small scale rejected"
+    assert ok({"A": A * 1e200}, healthy), "large scale rejected"
+    assert not ok({"A": A * 0.0}, healthy), "zero Gamma accepted"
+    assert not ok({"A": A * jnp.inf}, healthy), "inf Gamma accepted"
+    assert not ok({"A": A * jnp.nan}, healthy), "nan Gamma accepted"
+    assert not ok({"A": A}, {"h_AB": jnp.zeros(D)}), "zero lambda"
+    assert not ok({"A": A}, {"h_AB": jnp.array([1.0, jnp.nan, 0.1])}), (
         "nan lambda accepted"
     )
+    # The four bonds arrive as a ``BondWeights`` from ``_sweep`` and as a plain
+    # dict from here, so the predicate has to read both.
+    assert ok({"A": A}, BondWeights.ones(D, D))
+    assert not ok({"A": A}, BondWeights.ones(D, D)._replace(v_BA=jnp.zeros(D)))
 
 
-def test_an_unrepresentable_sweep_rolls_back_and_is_not_certified(monkeypatch):
+# ``usefixtures`` rather than an argument: ``retraced`` is imported into this
+# module's namespace so pytest can find it, and naming it in the signature too
+# would shadow that import (ruff F811).  It is used for its side effect only.
+@pytest.mark.usefixtures("retraced")
+@pytest.mark.parametrize("kind", list(_PAIRS))
+def test_an_unrepresentable_sweep_rolls_back_and_is_not_certified(monkeypatch, kind):
     """The solve must honour the predicate: return the last good gauge, say so.
 
     Driven by a mocked health signal rather than by finding an input that still
     overflows -- what is being tested is the loop's *reaction*, and a real
     overflow would only make the test hostage to whichever state still triggers
     it.
+
+    Injected at ``_sweep_is_healthy``, keyed on the **sweep index**, rather than
+    by counting calls.  The dense pair now runs inside a ``lax.while_loop``,
+    whose body is traced exactly once, so a host-side counter would fire once
+    and never reach the third sweep -- it would silently test nothing.  The
+    index is what both drivers have (the Python loop variable; the carry's
+    ``done`` slot), so one injection covers the traced and the eager path, and
+    running this on both pair kinds is what pins that they react identically.
     """
     import tenax.algorithms.ipeps_bp_gauge as bp
 
-    A, B = _dense_pair()
+    A, B = _PAIRS[kind]()
     w0 = BondWeights.ones(D, D)
     before = _torus_2x2(A, B, w0)
 
-    calls = {"n": 0}
-
-    def dies_on_the_third_sweep(gam, new_weights):
-        calls["n"] += 1
-        return calls["n"] < 3
-
-    monkeypatch.setattr(bp, "_is_representable", dies_on_the_third_sweep)
+    monkeypatch.setattr(bp, "_sweep_is_healthy", lambda gam, weights, sweep: sweep < 2)
     A2, B2, weights, info = bp.bp_gauge_checkerboard(A, B, w0, max_iter=50, tol=0.0)
 
     assert not info.converged, "an unrepresentable iterate was certified"
@@ -451,4 +569,169 @@ def test_the_weights_simple_update_stores_are_not_bp_self_consistent():
     assert drift > 1e-2, (
         f"the stored spectrum and the BP-consistent one agree to {drift:.2e}; "
         f"simple update's weights were expected to have drifted (#869)"
+    )
+
+
+def _square_pair_at(dtype, D: int = 2, seed: int = 0):
+    """A dense pair at an explicit precision, built without going through
+    ``_wrap_as_dense_tensor``, which fixes the dtype to the caller's array."""
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import DenseTensor, TensorIndex
+
+    sym = U1Symmetry()
+
+    def leg(n, label, flow):
+        return TensorIndex.from_charges(
+            sym, np.zeros(n, dtype=np.int32), flow, label=label
+        )
+
+    def site(key):
+        arr = jnp.asarray(
+            np.random.default_rng(key).normal(size=(D, D, D, D, 2)), dtype=dtype
+        )
+        return DenseTensor(
+            arr,
+            (
+                leg(D, "u", FlowDirection.OUT),
+                leg(D, "d", FlowDirection.IN),
+                leg(D, "l", FlowDirection.OUT),
+                leg(D, "r", FlowDirection.IN),
+                leg(2, "phys", FlowDirection.IN),
+            ),
+        )
+
+    return site(seed), site(seed + 1)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "real"),
+    [
+        (jnp.float32, jnp.float32),
+        (jnp.float64, jnp.float64),
+        (jnp.complex64, jnp.float32),
+        (jnp.complex128, jnp.float64),
+    ],
+    ids=["f32", "f64", "c64", "c128"],
+)
+def test_the_traced_loop_takes_the_precisions_the_eager_loop_takes(dtype, real):
+    """A carry may not mix precisions, and the pair's dtype decides which.
+
+    tenax enables x64 globally, so ``BondWeights.ones`` and ``gauge_fix``'s
+    identity weights are ``float64``.  Against a ``float32`` pair the first
+    sweep promoted the candidate tensors to ``float64`` while the carry's tensor
+    slot stayed ``float32``, and ``lax.while_loop`` rejected the body with
+    "carry input and carry output must have equal types" -- so **every** dense
+    ``float32`` pair failed.
+
+    The eager driver rebinds Python names each sweep and never noticed, which is
+    what makes this a regression introduced with the traced loop rather than a
+    standing limitation, and why both drivers are exercised here: the reference
+    must not accept a mix the traced path rejects.
+
+    Weights are singular values, so a complex pair wants the *real* dtype behind
+    it -- ``float32`` for ``complex64``.  Watched failing on ``f32``/``c64``
+    before the cast in ``_prepare``; ``f64``/``c128`` pass either way and are
+    the controls that keep this honest.
+    """
+    A, B = _square_pair_at(dtype)
+
+    A_g, B_g, w, info = gauge_fix(A, B)
+    assert info.converged, f"gauge_fix did not converge at {np.dtype(dtype).name}"
+    for name, t in (("A", A_g), ("B", B_g)):
+        assert t.todense().dtype == dtype, (
+            f"{name} came back as {t.todense().dtype}, not {np.dtype(dtype).name}; "
+            f"the gauge silently changed the caller's precision"
+        )
+    for bond in ("h_AB", "h_BA", "v_AB", "v_BA"):
+        got = getattr(w, bond).dtype
+        assert got == real, (
+            f"weight {bond} came back as {got}, expected {np.dtype(real).name} -- "
+            f"weights are singular values and belong at the pair's real precision"
+        )
+
+    # Both drivers, same input: the eager one is the reference the traced one is
+    # checked against, so a precision it accepts must not fail the other.
+    for traced in (True, False):
+        monkey = bp_mod._use_traced_loop
+        bp_mod._use_traced_loop = lambda *a, **k: traced
+        try:
+            out = bp_gauge_checkerboard(
+                A, B, BondWeights.ones(2, 2), max_iter=20, tol=1e-10
+            )
+        finally:
+            bp_mod._use_traced_loop = monkey
+        assert out[0].todense().dtype == dtype, (
+            f"the {'traced' if traced else 'eager'} driver returned "
+            f"{out[0].todense().dtype} for a {np.dtype(dtype).name} pair"
+        )
+
+
+@pytest.mark.parametrize(
+    ("dtype_A", "dtype_B", "common"),
+    [
+        (jnp.float32, jnp.float64, jnp.float64),
+        (jnp.float64, jnp.float32, jnp.float64),
+        (jnp.complex64, jnp.float32, jnp.complex64),
+    ],
+    ids=["f32+f64", "f64+f32", "c64+f32"],
+)
+def test_a_mixed_precision_pair_is_brought_to_one_dtype(dtype_A, dtype_B, common):
+    """Matching the weights to the pair is not enough when the pair disagrees.
+
+    ``A`` at ``float32`` beside ``B`` at ``float64`` promotes ``A``'s candidate
+    inside the sweep while its ``lax.while_loop`` carry slot stays ``float32``,
+    which is the same carry rejection as a uniformly-``float32`` pair, one level
+    in.  Fixing only the weights left this reachable, so it gets its own cells.
+
+    The common dtype is the promoted one, so the cast only ever widens and the
+    result is exact.
+    """
+    A, _ = _square_pair_at(dtype_A, seed=0)
+    _, B = _square_pair_at(dtype_B, seed=4)
+
+    A_g, B_g, w, info = gauge_fix(A, B)
+
+    assert info.converged, (
+        f"gauge_fix did not converge on a {np.dtype(dtype_A).name}/"
+        f"{np.dtype(dtype_B).name} pair: {info}"
+    )
+    for name, t in (("A", A_g), ("B", B_g)):
+        assert t.dtype == common, (
+            f"{name} came back as {t.dtype}, not the promoted {np.dtype(common).name}"
+        )
+    real = jnp.finfo(common).dtype
+    assert w.h_AB.dtype == real, (
+        f"weights came back as {w.h_AB.dtype}, expected {np.dtype(real).name}"
+    )
+
+
+def test_prepare_reads_dtypes_without_densifying():
+    """``_prepare`` must not call ``todense()`` to learn a dtype.
+
+    ``Tensor.dtype`` is right there, and densifying costs a full ``D**4 * d``
+    array per site -- on the ``SymmetricTensor`` path that discards block
+    sparsity before the solve has started, which is exactly what CLAUDE.md's
+    ``todense()`` rule exists to prevent.  An earlier revision of the
+    carry-dtype fix did precisely this, so the rule gets a test rather than a
+    comment.
+
+    Fails by raising out of the patched ``todense``, not by asserting after the
+    fact, so it cannot pass because a later line happened not to look.
+    """
+    A, B = _symmetric_pair(D=3)
+    calls: list[str] = []
+
+    real_todense = type(A).todense
+
+    def spy(self, *args, **kwargs):
+        calls.append(type(self).__name__)
+        return real_todense(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(type(A), "todense", spy)
+        bp_mod._prepare(A, B, BondWeights.ones(3, 3))
+
+    assert not calls, (
+        f"_prepare densified {len(calls)} tensor(s) ({calls}); Tensor.dtype "
+        f"gives the dtype without materialising D**4 * d entries per site"
     )

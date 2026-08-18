@@ -163,6 +163,47 @@
   a scaled `lambda` overflowed exactly as a scaled `Gamma` did; the incoming
   weights are now normalised as well.
 
+  **The dense solve is now a single traced `lax.while_loop`**, ~200× faster
+  warm: 490.6 ms → 2.44 ms for a D=2 simple-update-evolved pair (26 sweeps),
+  i.e. 18.9 ms → 0.034 ms per sweep. The eager loop was ~99.8% host overhead —
+  ~300 eager dispatches per sweep plus label bookkeeping, `TensorIndex`
+  construction and `opt_einsum` lookup — and the 18 host syncs per sweep were a
+  minority of it, so eliminating syncs alone would have been worth ~1.3×, not
+  200×. A `SymmetricTensor` pair still takes the eager loop, which is unchanged
+  and shares the sweep body verbatim; it cannot be traced until
+  `_eigh_symmetric` stops deriving its output charges from eigenvalue
+  magnitudes on the host.
+
+  Two behaviour changes come with it, both on the **dense** path only:
+
+  - **Leg flows are now preserved.** `_gauge_bond` stamps the flow its own SVD
+    produced onto each of the four *virtual* legs (`phys` was never touched),
+    so a pair whose convention was the opposite came back with all four
+    inverted — which is exactly what `_simple_update_checkerboard_sweep`
+    returns. Callers built against the inverted output will see different index
+    metadata. A `SymmetricTensor` pair is deliberately left as it was: there the
+    charges are load-bearing and rewriting them would be #834's silent
+    mis-pairing.
+  - **The dense path is no longer reverse-mode differentiable.**
+    `lax.while_loop` has no reverse rule, and the `where`-select used for the
+    health rollback would leak `NaN` under `grad` even where the primal is
+    clean. It fails loudly, and nothing in `src` differentiates through this;
+    a differentiable gauge would need `scan` with a fixed trip count.
+
+  **`gauge_fix` is traced end to end**, not just the solve inside it. Tracing
+  the solve alone left the boundary around it eager, and that boundary was the
+  *majority* of a warm call: of 2.47 ms at D=2, the `lax.while_loop` was
+  0.89 ms and the rest was `BondWeights.ones`, the entry point's validation and
+  `BPGaugeInfo` casts, and above all `absorb_weights`' eight `scale_bond_axis`
+  dispatches. Compiling the whole of `gauge_fix` as one jit — `absorb_weights`
+  included, so Vidal form never reaches the host — takes a warm call to
+  **~0.92 ms**. Re-gauging every simple-update step is on the *step* budget, so
+  a default 100-step D=2 run falls from 528 ms to **379–391 ms**; from a cold
+  interpreter, where the eager boundary also cost ~150 ms of first-touch
+  compilation for tiny ops, 702 ms to **402–422 ms**. The public signature and
+  return contract are unchanged, `BPGaugeInfo` is still `(int, float, bool)`,
+  and a `SymmetricTensor` pair still takes the eager route bit-identically.
+
 ### Fixed
 
 - **The root-implicit adjoint no longer compiles its operator into a loop

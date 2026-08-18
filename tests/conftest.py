@@ -28,6 +28,17 @@ _FILE_MARKERS = {
     "test_hotrg.py": "algorithm",
     "test_ipeps.py": "algorithm",
     "test_ipeps_bp_gauge.py": "algorithm",
+    "test_ipeps_gauge.py": "algorithm",
+    # #882 Tasks 7 and 7b: the dense ``gauge_fix`` is one traced call -- a
+    # ``lax.while_loop`` solve with ``absorb_weights`` compiled around it --
+    # which is what makes re-gauging every simple-update step affordable.
+    # Guards traced-vs-eager parity at both boundaries, flow preservation, the
+    # compile-cache key (a second compilation costs more than the whole
+    # re-gauging budget and is invisible to wall-clock), and the budget itself.
+    # The two wall-clock assertions carry ``@pytest.mark.timing``; one is a
+    # machine-independent ratio and the other withdraws under coverage or on a
+    # slow box rather than reporting a number it cannot measure.
+    "test_ipeps_gauge_perf.py": "algorithm",
     "test_ipeps_core.py": "core",
     "test_auto_mpo.py": "algorithm",
     "test_ad_utils.py": "algorithm",
