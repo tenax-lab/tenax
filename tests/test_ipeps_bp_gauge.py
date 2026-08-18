@@ -664,3 +664,74 @@ def test_the_traced_loop_takes_the_precisions_the_eager_loop_takes(dtype, real):
             f"the {'traced' if traced else 'eager'} driver returned "
             f"{out[0].todense().dtype} for a {np.dtype(dtype).name} pair"
         )
+
+
+@pytest.mark.parametrize(
+    ("dtype_A", "dtype_B", "common"),
+    [
+        (jnp.float32, jnp.float64, jnp.float64),
+        (jnp.float64, jnp.float32, jnp.float64),
+        (jnp.complex64, jnp.float32, jnp.complex64),
+    ],
+    ids=["f32+f64", "f64+f32", "c64+f32"],
+)
+def test_a_mixed_precision_pair_is_brought_to_one_dtype(dtype_A, dtype_B, common):
+    """Matching the weights to the pair is not enough when the pair disagrees.
+
+    ``A`` at ``float32`` beside ``B`` at ``float64`` promotes ``A``'s candidate
+    inside the sweep while its ``lax.while_loop`` carry slot stays ``float32``,
+    which is the same carry rejection as a uniformly-``float32`` pair, one level
+    in.  Fixing only the weights left this reachable, so it gets its own cells.
+
+    The common dtype is the promoted one, so the cast only ever widens and the
+    result is exact.
+    """
+    A, _ = _square_pair_at(dtype_A, seed=0)
+    _, B = _square_pair_at(dtype_B, seed=4)
+
+    A_g, B_g, w, info = gauge_fix(A, B)
+
+    assert info.converged, (
+        f"gauge_fix did not converge on a {np.dtype(dtype_A).name}/"
+        f"{np.dtype(dtype_B).name} pair: {info}"
+    )
+    for name, t in (("A", A_g), ("B", B_g)):
+        assert t.dtype == common, (
+            f"{name} came back as {t.dtype}, not the promoted {np.dtype(common).name}"
+        )
+    real = jnp.finfo(common).dtype
+    assert w.h_AB.dtype == real, (
+        f"weights came back as {w.h_AB.dtype}, expected {np.dtype(real).name}"
+    )
+
+
+def test_prepare_reads_dtypes_without_densifying():
+    """``_prepare`` must not call ``todense()`` to learn a dtype.
+
+    ``Tensor.dtype`` is right there, and densifying costs a full ``D**4 * d``
+    array per site -- on the ``SymmetricTensor`` path that discards block
+    sparsity before the solve has started, which is exactly what CLAUDE.md's
+    ``todense()`` rule exists to prevent.  An earlier revision of the
+    carry-dtype fix did precisely this, so the rule gets a test rather than a
+    comment.
+
+    Fails by raising out of the patched ``todense``, not by asserting after the
+    fact, so it cannot pass because a later line happened not to look.
+    """
+    A, B = _symmetric_pair(D=3)
+    calls: list[str] = []
+
+    real_todense = type(A).todense
+
+    def spy(self, *args, **kwargs):
+        calls.append(type(self).__name__)
+        return real_todense(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(type(A), "todense", spy)
+        bp_mod._prepare(A, B, BondWeights.ones(3, 3))
+
+    assert not calls, (
+        f"_prepare densified {len(calls)} tensor(s) ({calls}); Tensor.dtype "
+        f"gives the dtype without materialising D**4 * d entries per site"
+    )

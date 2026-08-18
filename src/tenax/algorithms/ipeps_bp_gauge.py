@@ -532,9 +532,25 @@ def _prepare(
     Casting here rather than at the loop boundary keeps both drivers on one
     convention, so the eager reference cannot silently accept a mix the traced
     driver rejects.
+
+    **The two sites are brought to one dtype as well**, not just the weights:
+    ``A`` at ``float32`` beside ``B`` at ``float64`` promotes ``A``'s candidate
+    inside the sweep while its carry slot stays ``float32``, which is the same
+    ``while_loop`` carry rejection one level in.  Weights alone are not enough.
+
+    The dtypes are read from ``Tensor.dtype`` and the cast is a scalar multiply,
+    so **nothing is densified**: ``todense()`` here would materialise a full
+    ``D**4 * d`` array per site purely to inspect a dtype, which on the
+    ``SymmetricTensor`` path defeats block sparsity before the solve even
+    starts.  The multiply is exact -- the common dtype is by construction the
+    *promoted* one, so this only ever widens, never rounds -- and it preserves
+    the tensor class.
     """
     gam = {"A": _rescale(A), "B": _rescale(B)}
-    dtype = jnp.result_type(*(t.todense().dtype for t in gam.values()))
+    dtype = jnp.result_type(*(t.dtype for t in gam.values()))
+    if any(t.dtype != dtype for t in gam.values()):
+        one = jnp.array(1, dtype)
+        gam = {s: (t if t.dtype == dtype else t * one) for s, t in gam.items()}
     real = jnp.finfo(dtype).dtype if jnp.issubdtype(dtype, jnp.inexact) else dtype
     return (
         gam,

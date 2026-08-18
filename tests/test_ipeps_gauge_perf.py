@@ -946,6 +946,15 @@ def test_re_gauging_every_step_fits_the_simple_update_budget(record_property):
     ig._gauge_fix_traced.clear_cache()
     cleared = ig._gauge_fix_traced._cache_size()
 
+    # Sampled before the timed call, for the same reason the entry-count guard
+    # samples before its workload: the failure this test would report is extra
+    # compiles, and on a nearly-full shared cache those extra entries saturate
+    # it, so an after-the-fact reading lets the regression license its own
+    # skip.  This path was missed when that one was fixed -- the same defect
+    # twice in one file, which is why it is spelled out at both sites rather
+    # than cross-referenced.
+    saturated_before = _shared_pjit_cache_is_full()
+
     t0 = time.perf_counter()
     first = gauge_fix(A, B, **_GATE_KW)
     jax.block_until_ready(jax.tree_util.tree_leaves(first))
@@ -960,9 +969,10 @@ def test_re_gauging_every_step_fits_the_simple_update_budget(record_property):
     # empty cache before says the next call *may* compile, whereas one added
     # entry says it *did*.
     compiled = ig._gauge_fix_traced._cache_size() - cleared
-    if compiled != 1 and _shared_pjit_cache_is_full():
+    if compiled != 1 and saturated_before:
         pytest.skip(
-            f"jax's process-wide PjitFunctionCache is at capacity, so "
+            f"the PjitFunctionCache these jits use was already at capacity when "
+            f"this test started, so "
             f"_cache_size() moved by {compiled} rather than 1 across a call "
             f"that had just had its cache cleared.  The counter cannot confirm "
             f"that {compile_s * 1e3:.0f} ms is a compile rather than a warm "
