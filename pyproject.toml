@@ -110,6 +110,17 @@ markers = [
     "core: fast API and infrastructure tests",
     "algorithm: full algorithm runs (DMRG, TRG, HOTRG, iPEPS)",
     "slow: expensive tests (excitations, large convergence)",
+    # Wall-clock measurements.  Correctness never depends on one.  Intended to
+    # be deselectable with -m "not timing" on a machine that is not quiet --
+    # but NOTHING IN THIS REPO PASSES THAT FLAG TODAY: .github/workflows/ci.yml
+    # runs the non-core bucket as -m "not core and not slow", so these do
+    # execute on GitHub runners.  Wiring it in needs a token with the `workflow`
+    # scope.  Until then a marked test must either assert something a slow
+    # runner can still satisfy, or establish that its number is measurable here
+    # and skip when it is not -- note the "--cov=tenax" in addopts above, which
+    # instruments the Python-bound half of any compile measurement.  See the
+    # note in tests/test_ipeps_gauge_perf.py.
+    "timing: reports a wall-clock measurement; needs a quiet machine",
 ]
 filterwarnings = [
     # optax 0.2.8 still imports `optax.contrib._complex_valued`, which on
