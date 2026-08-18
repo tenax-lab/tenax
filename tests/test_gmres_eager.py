@@ -238,6 +238,28 @@ def test_a_nan_arising_on_the_last_restart_also_fails_closed():
     assert resid == float("inf")
 
 
+def test_a_nan_arising_mid_arnoldi_returns_before_poisoning_the_step():
+    """Fail closed *and* early, from inside the Krylov loop.
+
+    Carrying a NaN through the Givens recurrence finishes the restart, takes a
+    NaN step, and then measures a residual against the poisoned ``x`` -- so the
+    number the caller's gate reads is about a solution that no longer exists.
+    """
+    M, b = _well_conditioned(n=8, seed=23)
+    calls = {"n": 0}
+
+    def op(v):
+        calls["n"] += 1
+        # Call 1 is the initial residual; call 2 is the first Arnoldi step.
+        return (M @ v) * (jnp.nan if calls["n"] == 2 else 1.0)
+
+    _x, resid = gmres_eager(op, b, tol=1e-12, maxiter=4, restart=6)
+
+    assert resid == float("inf")
+    # It stopped there rather than grinding out the rest of the budget.
+    assert calls["n"] == 2, calls
+
+
 def test_an_operator_that_returns_nan_fails_closed():
     b = jnp.asarray([1.0, 2.0, 3.0])
     _x, resid = gmres_eager(lambda v: v * jnp.nan, b, tol=1e-12, maxiter=5, restart=2)

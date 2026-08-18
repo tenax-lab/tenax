@@ -165,6 +165,13 @@ def gmres_eager(
             H[: j + 1, j] = np.asarray(h1 + h2, dtype=np.float64)
 
             h_next = float(jnp.linalg.norm(w))
+            if not math.isfinite(h_next):
+                # The operator went non-finite mid-restart.  Returning here
+                # rather than carrying NaN through the Givens recurrence is not
+                # only cheaper -- it is the only honest answer, because the
+                # alternative is to finish the restart, take a NaN step, and
+                # report a residual measured against a poisoned ``x``.
+                return x, float("inf")
             H[j + 1, j] = h_next
 
             # Apply the rotations built so far, then build the one that kills
