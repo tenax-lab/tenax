@@ -46,6 +46,7 @@ a gauge that fails to cancel shows up and a sign that does cancel does not.
 
 from __future__ import annotations
 
+import gc
 import statistics
 import sys
 import time
@@ -480,7 +481,16 @@ def _shared_pjit_cache_is_full() -> bool:
         # removes the class rather than the instance.
         before = [c.size() for c in caches]
 
-        one = jnp.ones((1,))
+        # ``device_put`` of a numpy array populates no pjit cache entry at all
+        # -- measured ``0`` against ``jnp.ones``' and ``jnp.asarray``' ``1``
+        # apiece, repeatably.  That matters beyond the verdict this function
+        # returns: with ``jnp.ones`` the *side effect* survived the call, so on
+        # a cache two entries below capacity this helper could hand back a
+        # correct ``False`` and still leave the cache full, and the caller's
+        # very next measurement would read a frozen counter and fail a correct
+        # one-compile implementation.  A guard is not allowed to break the
+        # measurement it precedes.
+        one = jax.device_put(np.ones(1))
         # Same shape as the boundaries under test -- ``static_argnums`` and a
         # never-before-seen function -- so it is routed the way they are.  The
         # reference has to outlive the measurement; see the docstring.
@@ -504,6 +514,44 @@ def _shared_pjit_cache_is_full() -> bool:
         return False  # both grew -- the probe is not isolating one cache
     except Exception:  # private jax layout moved -- do not guess
         return False
+
+
+def test_the_saturation_probe_leaves_the_shared_cache_as_it_found_it():
+    """The guard must not perturb the measurement it precedes.
+
+    ``_shared_pjit_cache_is_full`` inserts a throwaway ``jit`` to learn which
+    cache these boundaries use, and that entry is released with its wrapper.
+    Its *argument* is the part that bit: ``jnp.ones`` inserts two entries that
+    **survive the call**, so on a cache two below capacity the helper could
+    return a perfectly correct ``False`` and still hand the caller a full cache
+    -- and the caller's next measurement would then read a frozen counter and
+    fail a correct one-compile implementation.  Verdict right, side effect
+    fatal.
+
+    ``jax.device_put`` of a numpy array populates no pjit entry at all
+    (measured ``0``, against ``1`` apiece for ``jnp.ones`` and ``jnp.asarray``),
+    so the net footprint is zero.  Asserted over repeat calls because a
+    one-shot check would pass on a helper that inserts once and reuses.
+    """
+    from jax._src import pjit as _pjit
+
+    caches = (
+        _pjit._cpp_pjit_cache_explicit_attributes,
+        _pjit._cpp_pjit_cache_fun_only,
+    )
+    jnp.zeros((5,))  # warm the generic machinery, so this measures the helper
+
+    for call in range(3):
+        before = [c.size() for c in caches]
+        _shared_pjit_cache_is_full()
+        gc.collect()
+        after = [c.size() for c in caches]
+        assert after == before, (
+            f"call {call} left the shared pjit caches at {after}, not {before}: "
+            f"the saturation probe is filling the cache it exists to measure, "
+            f"which can push a nearly-full cache over and freeze the counter "
+            f"the guards below read"
+        )
 
 
 #: The two compiled boundaries around the one solve, each with the call that
