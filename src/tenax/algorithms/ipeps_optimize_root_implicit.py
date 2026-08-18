@@ -65,6 +65,14 @@ def root_implicit_variant(config: iPEPSConfig) -> str:
     """Return which root-implicit engine ``config`` selects.
 
     ``"asym"`` (dense 1x1), ``"cell"`` (dense multisite) or ``"symmetric"``.
+
+    **This does not validate the unit cell.**  ``"root_implicit_symmetric"``
+    selects the symmetric engine on the mode alone, so a non-1x1 unit cell
+    still returns ``"symmetric"`` here -- the engine is 1x1 only, and it is
+    :func:`validate_root_implicit_config` that refuses the combination rather
+    than this dispatcher.  Keeping the two apart is deliberate: a dispatcher
+    that silently reported ``"cell"`` for a mode the user spelled
+    ``symmetric`` would produce an error message about the wrong engine.
     """
     mode = getattr(config.ctm, "ctm_ad_mode", None)
     if mode == "root_implicit_symmetric":
@@ -146,6 +154,27 @@ def validate_root_implicit_config(config: iPEPSConfig) -> None:
                 "nothing on this path projects into the C4v basis or "
                 "optimises reduced coefficients, so the first update can "
                 "leave the requested symmetry sector",
+            )
+        )
+    # ``root_implicit_variant`` dispatches the symmetric mode on
+    # ``ctm_ad_mode`` ALONE, so ``root_implicit_symmetric`` + a non-1x1 unit
+    # cell returns "symmetric" and sails past the ``variant == "cell"``
+    # rejection.  While the symmetric arm was unwired that was harmless -- it
+    # hit a NotImplementedError either way -- but wiring it made the
+    # combination *run*: the 1-site engine on one A_init, with the configured
+    # multisite structure silently dropped and an energy returned for a
+    # different physical model.  Exactly the silent-inapplicability shape this
+    # validator exists for.
+    if config.ctm.ctm_ad_mode == "root_implicit_symmetric" and (
+        config.unit_cell != "1x1"
+    ):
+        unsupported.append(
+            (
+                f"unit_cell={config.unit_cell!r} with "
+                "ctm_ad_mode='root_implicit_symmetric'",
+                "the symmetric engine is 1x1 only; it would optimise a single "
+                "site tensor and drop the unit cell you asked for. There is no "
+                "multisite root-implicit energy yet -- see #894",
             )
         )
     # ``rel_floor``'s own docstring says it is "consulted by

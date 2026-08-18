@@ -242,6 +242,42 @@ def test_no_rank_clamp_override_is_forwarded_to_an_engine_that_lacks_it(wired):
         optimize(_gate(), _sym_site(), _cfg(rel_floor=1e-8))
 
 
+def test_a_multisite_unit_cell_is_refused_on_the_symmetric_mode():
+    """The combination that used to be harmless and stopped being so.
+
+    ``root_implicit_variant`` dispatches the symmetric mode on ``ctm_ad_mode``
+    alone, so ``root_implicit_symmetric`` + ``unit_cell="2site"`` returns
+    ``"symmetric"`` and sails past the ``variant == "cell"`` rejection. While
+    the symmetric arm was unwired that cost nothing -- both routes hit a
+    ``NotImplementedError``. Wiring it made the combination *run*: the 1-site
+    engine on one ``A_init``, the configured unit cell silently dropped, and an
+    energy returned for a different physical model.
+    """
+    import dataclasses
+
+    from tenax.algorithms.ipeps_optimize_root_implicit import (
+        root_implicit_variant,
+        validate_root_implicit_config,
+    )
+
+    cfg = dataclasses.replace(_cfg(), unit_cell="2site")
+    # The dispatcher still says "symmetric" -- that is its documented job, and
+    # pinning it here is what makes the guard below the thing being tested.
+    assert root_implicit_variant(cfg) == "symmetric"
+
+    with pytest.raises(NotImplementedError, match="symmetric engine is 1x1 only"):
+        validate_root_implicit_config(cfg)
+
+
+def test_the_symmetric_mode_still_accepts_a_1x1_cell():
+    """The guard must not over-reject the only cell that works."""
+    from tenax.algorithms.ipeps_optimize_root_implicit import (
+        validate_root_implicit_config,
+    )
+
+    validate_root_implicit_config(_cfg())
+
+
 def test_the_dense_variant_still_accepts_the_rank_clamp():
     """The guard must not over-reject: ``rel_floor`` is legitimate on 1x1 dense."""
     from tenax.algorithms.ipeps_optimize_root_implicit import (
