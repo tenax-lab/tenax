@@ -468,8 +468,14 @@ def _shared_pjit_cache_is_full() -> bool:
         probe(jnp.ones((1,)), 2)
         grew = [i for i, c in enumerate(caches) if c.size() > before[i]]
         if len(grew) == 1:
+            # Judge on the size *before* the probe.  The probe is an insertion,
+            # so on a cache sitting one entry below capacity it fills it, and a
+            # post-insertion reading would report a saturation this function
+            # itself caused -- granting the withdrawal on its own side effect,
+            # one entry early.  A cache that had room for the probe was not
+            # saturated, which is what this comparison says.
             used = caches[grew[0]]
-            return used.size() >= used.capacity()
+            return before[grew[0]] >= used.capacity()
         if not grew:
             # A guaranteed-fresh key that grows *neither* cache is the
             # definition of an evicting insert, and the probe only ever touches
