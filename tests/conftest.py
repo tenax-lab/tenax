@@ -205,6 +205,13 @@ _FILE_MARKERS = {
     # duplicate under-reported rho on complex input, so the guard passed a
     # divergent adjoint -- and a guard that runs in no required job is not one.
     "test_arnoldi.py": "core",
+    # The eager-loop GMRES every root-implicit adjoint runs through (#731).
+    # ~20s on dense matrices, no CTM.  ``core`` because the property it guards
+    # is *structural* and invisible to every numerical test: put the loop back
+    # under ``jit`` and the operator is compiled into a ``while_loop`` body
+    # again, which took the symmetric adjoint to 8.63 GB against ~7 GB runners.
+    # Every tolerance assertion in the suite stays green through that.
+    "test_gmres_eager.py": "core",
     # The adjoint-convergence gate on the DEFAULT iPEPS AD gradient path
     # (#801, first raised on #341).  An unconverged adjoint yields a gradient
     # that is wrong, finite, and indistinguishable downstream -- the exact
@@ -250,10 +257,13 @@ _FILE_MARKERS = {
     "test_ctm_root_implicit_sym_sectors.py": "core",
     # Symmetric root-implicit AD (#715 Phase 3): the structural half of this
     # file is cheap and belongs in the required gate, but the gradient tests
-    # peak at 8.4 GB RSS (XLA compiling the ~15k-equation block-sparse VJP
-    # inside GMRES's ``lax.while_loop``).  They carry their own explicit
-    # ``@pytest.mark.slow``, which the rule below honours by *withholding* this
-    # ``core``; see ``pytest_collection_modifyitems``.
+    # peak at 4.78 GB RSS and take ~180 s for the fixture alone.  That used to
+    # be 8.63 GB -- XLA compiling the ~15k-equation block-sparse VJP inside
+    # GMRES's ``lax.while_loop`` -- until #731 moved the loop out of the jit;
+    # it now fits a ~7 GB runner, but it is still the largest single fixture in
+    # the suite and the wall time alone keeps it out of a required gate.  They
+    # carry their own explicit ``@pytest.mark.slow``, which the rule below
+    # honours by *withholding* this ``core``; see ``pytest_collection_modifyitems``.
     "test_ctm_root_implicit_symmetric.py": "core",
     "test_ctm_truncation_error.py": "core",
     "test_ctm_paired.py": "algorithm",
@@ -455,8 +465,10 @@ def pytest_collection_modifyitems(items):
     test carrying both ``core`` and ``slow`` is selected by it.  So for a file
     mapped to ``core``, an explicit ``@pytest.mark.slow`` on a test has to
     *withhold* the file marker or it means nothing — the test would run in the
-    required gate anyway, which is how an 8.4 GB block-sparse AD test came to
-    be pointed at GitHub's ~7 GB Linux runners.
+    required gate anyway, which is how an 8.63 GB block-sparse AD test came to
+    be pointed at GitHub's ~7 GB Linux runners (#731; that fixture is 4.78 GB
+    since the adjoint loop came out of the jit, but it is still the largest
+    here and still marked).
 
     The ``algorithm`` files are deliberately left alone.  Their coexistence of
     ``algorithm`` + explicit ``slow`` is already correct and already relied on

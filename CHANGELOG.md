@@ -120,6 +120,70 @@
 
 ### Fixed
 
+- **The root-implicit adjoint no longer compiles its operator into a loop
+  body** (#731). The symmetric engine peaked at **8.63 GB** of host RAM for a
+  single gradient at `D=2, χ=4` — the smallest case there is — against
+  GitHub's ~7 GB Linux runners. The data was never the cause: the adjoint's
+  real embedding at that size is `n = 384`, so its entire 30-dimensional
+  Krylov basis is 91 KB, and `compiled.memory_analysis()` reports 0.505 MB of
+  runtime temporaries. It was **compile-time** memory: executing the compiled
+  program added nothing to the high-water mark, while lowering it added
+  +5.1 GB in 148 s with the program never run.
+
+  `jax.scipy.sparse.linalg.gmres` traces the operator into a `lax.while_loop`
+  body, and `custom_linear_solve` then needs it in several places at once. The
+  matvec's own jaxpr is 76,884 equations; the jitted solve is **700,013 — 9.1×
+  the operator**, because `solve` holds three copies (`A(x0)`, `A(v)` in the
+  Arnoldi body, `A(x)` for the restart residual), `transpose_solve` holds
+  another three, and the caller applied it once more to measure an honest
+  residual. Compiling *k* copies of the operator in one program costs about
+  +1.0 GB and +50 s each, measured.
+
+  `_solve_root_adjoint` now runs the *loop* in Python and keeps the *matvec*
+  jitted, so XLA compiles one program per matvec instead of one program for
+  the whole solve. Measured end to end on the symmetric `D=2, χ=4` fixture:
+
+  | | peak RSS | wall | `gmres_residual` | `‖dE/dA‖` |
+  |---|---|---|---|---|
+  | before | 8.63 GB | 303.3 s | 3.130e-15 | 0.6294482283 |
+  | after | **4.78 GB** | **179.6 s** | 9.682e-16 | 0.6294482283 |
+
+  and on the dense asymmetric engine at the same size, 2.94 GB / 90.0 s →
+  **1.74 GB / 39.0 s**. An independent replication under an isolated JAX
+  compilation cache — `tenax/__init__.py` enables a persistent one, which
+  hides the compile on a warm run — measured 7.79 → 4.40 GB on the symmetric
+  fixture; the absolute numbers move with cache state, the ~45% reduction does
+  not. The gradient is unchanged to ten digits and the solve comes out *more*
+  accurate. All four engines — C4v, dense asymmetric, multisite and symmetric
+  — share this solver and all four benefit.
+
+  **This moves the ceiling; it does not remove it.** About 3.0 GB of the
+  symmetric peak is committed *before* the solve is reached — 1.8 GB of it in
+  the single `jax.vjp` of the energy — so deleting the adjoint solve outright
+  would still leave ≈3.7 GB at `D=2, χ=4`. The issue's reading under "Bearing
+  on #566" therefore survives the fix: removing the SVD VJP moved the
+  compile-scale problem rather than removing it, and this moves it again, from
+  one 700k-equation program to a 77k-equation one plus a long tail of small
+  ones.
+
+  This is **not** the "run it all eagerly" the old docstring warned against.
+  There the matvec itself was un-jitted and Python dispatch dominated, badly
+  enough that a single measurement once failed to return. Here each iteration
+  is exactly one compiled call.
+
+  Two behaviours are deliberately preserved rather than improved. The new
+  solver builds the **full** Krylov space every restart and tests convergence
+  only between restarts, because that is what JAX's `"batched"` method does
+  (`_gmres_batched` opens with `del ptol  # unused`) and it is why a `tol` of
+  1e-8 lands at 1e-15; adding the textbook early exit inside a memory fix
+  would have loosened every caller's adjoint by six orders with nothing to
+  attribute it to, and #785 established that no cheap diagnostic predicts
+  root-implicit gradient quality. And `x0` still defaults to `b`, not to zero.
+
+  One behaviour *is* improved: a non-finite residual now returns `inf` instead
+  of `nan`, so a caller's `residual > tolerance` gate fails closed. That is the
+  #796 / #787 / #784 shape, one level below where it kept being fixed.
+
 - **Each checkerboard bond can now carry its own Schmidt spectrum**
   (#851, opt-in via `su_independent_bond_lambdas`). The four-phase sweep
   evolves `A.r<->B.l`, `A.d<->B.u`, `B.r<->A.l` and `B.d<->A.u`, but stored one
