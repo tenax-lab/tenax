@@ -1532,18 +1532,27 @@ def test_a_wrong_bond_layout_breaks_the_root(converged_root):
     * Give the wrong layout every chance instead — let it re-truncate the
       environment consistently, so that the bonds, ``S``, the isometries and
       the cut all agree with each other and nothing *can* raise — and it
-      **does** find a root: ``‖F(y)‖`` falls 8.8e-2 → 2.4e-6 → 9.3e-11 at 3,
-      10 and 40 polish sweeps from the natural fixed point, and reaches
-      2.2e-14 — as clean as the natural root's 2.7e-13 — when the forced
-      layout is converged from a fresh environment on its own terms, which is
-      what this test does.  Forcing a layout does not break the equations;
-      it poses a *different* truncation problem, and that problem has its own
-      fixed point.  What the moved dimension changes is the state you land on:
-      the forced fixed point reports ``E = -0.10873`` against ``-0.10502`` for
-      the layout the truncation actually chose, a 3.7e-3 gap next to the 1e-10
-      the natural layout reproduces against the dense module.  So the layout is
-      load-bearing — it selects which fixed point you get — but ``‖F‖`` is not
-      what detects it, and this test asserts the energy instead.
+      **does** find a root: ``‖F(y)‖`` falls by some nine orders over 3 → 40
+      polish sweeps from the natural fixed point, and when the forced layout is
+      converged from a fresh environment on its own terms, which is what this
+      test does, it reaches the same order as the natural root.  Forcing a
+      layout does not break the equations; it poses a *different* truncation
+      problem, and that problem has its own fixed point.  What the moved
+      dimension changes is the state you land on: the forced fixed point
+      reports an energy a few times 1e-2 away from the one the truncation
+      actually chose, next to the 1e-10 the natural layout reproduces against
+      the dense module.  So the layout is load-bearing — it selects which fixed
+      point you get — but ``‖F‖`` is not what detects it, and this test asserts
+      the energy instead.
+
+      The exact residual ladder and the two energies used to be quoted here and
+      **had drifted** — the recorded 8.8e-2 → 2.4e-6 at 3 and 10 sweeps
+      measures 2.8e-2 → 5.0e-5 today, and the forced energy recorded as
+      ``-0.10873`` is ``-0.13176``.  Nothing failed, because the assertions are
+      scale-free (``> 1e-3``, ``< 1e-8``) and deliberately so; but a docstring
+      full of numbers no run reproduces is worse than one with none, so what is
+      quoted now is only what the assertions actually constrain.  The test
+      prints the live values.
 
       This corrects an earlier reading of this fixture.  Before the polish
       sweep forwarded ``layout_override`` (it was passed to

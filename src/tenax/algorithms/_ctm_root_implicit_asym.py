@@ -179,6 +179,22 @@ def _upper_left_quadrant(env: AsymEnv, a: jax.Array) -> jax.Array:
 
     The ``(chi_d, a_d)`` pair is the vertical bond to be truncated; the
     ``(chi_r, a_r)`` pair is what remains open to the right.
+
+    **The leg names below are this module's geometry, not ``CTMTensorEnv``'s
+    labels, and the two disagree by exactly one convention.**  Here every
+    tensor sits in the frame of its own direction -- corner ``k`` is
+    ``(leg->k-1, leg->k)``, edge ``k`` is ``(prev, phys, next)`` -- which is
+    what makes :func:`rotate_env` a pure relabel.  ``CTMTensorEnv`` closes the
+    same ring with C4 transposed and T3, T4 reversed, and its label ``t4_u``
+    names the geometrically *down* end; :func:`swap_env_convention` bridges the
+    two at both boundaries (that mismatch was #718).  So "``T4.u``" below means
+    axis 2 of *this* module's T4, which is the endpoint
+    ``_build_enlarged_corner(..., position="top_left")`` pairs with ``C1.c1_d``
+    -- verified numerically on a deliberately asymmetric environment
+    (``||C - C^T|| ~ 4-8``, ``||T - rev(T)|| ~ 11-13``, chi != D^2): the two
+    agree **bit for bit**, while the alternative pairing differs by 1.17
+    relative and a transposed C4 by 0.53.  Reading these names against the
+    ``CTMTensorEnv`` labels instead is what makes them look reversed.
     """
     # C1[c,e] T1[e,f,g] T4[h,i,c] a[f,j,i,k]
     #   c = C1.d = T4.u   e = C1.r = T1.l   f = T1's a-leg = a.u
