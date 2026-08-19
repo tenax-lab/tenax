@@ -56,8 +56,10 @@ What is *not* done is #715 as a whole: none of this is wired into the
 production gradient path.  ``optimize_gs_ad`` still differentiates the CTM
 fixed point through :mod:`tenax.algorithms._ctm_energy_ad`, SVD backward and
 all.  Phase 3 (:mod:`tenax.algorithms._ctm_root_implicit_symmetric`) is the
-phase that would pay off #566/#687 and is blocked on #731 (8.4 GB peak in the
-GMRES solve at D=2, chi=4).
+phase that would pay off #566/#687.  Its adjoint used to peak at 8.63 GB at
+D=2, chi=4 (#731); the loop now runs outside the jit and it peaks at 4.78 GB,
+so what remains between it and the optimizer is the entry-point contract, not
+the memory.
 
 Complex states (#721)
 ---------------------

@@ -185,12 +185,22 @@ def test_multisite_variant_is_refused_with_a_reason():
 
 
 def test_symmetric_variant_is_refused_and_cites_its_blocker():
+    """And the blocker it cites has to be the one that is still true.
+
+    It used to say "#731, 8.4 GB in the GMRES solve".  That is fixed, so the
+    message now names the entry-point contract instead.  Asserting on the
+    *reason* rather than on ``NotImplementedError`` alone is the point: a
+    refusal that explains itself with a resolved blocker sends the next reader
+    to re-fix something that is already done.
+    """
     from tenax.algorithms.ipeps_optimize_root_implicit import (
         optimize_gs_ad_root_implicit,
     )
 
     cfg = _cfg(ctm_ad_mode="root_implicit_symmetric")
-    with pytest.raises(NotImplementedError, match="8.4 GB"):
+    with pytest.raises(NotImplementedError, match="entry-point contract"):
+        optimize_gs_ad_root_implicit(None, None, cfg)
+    with pytest.raises(NotImplementedError, match=r"#731.*is fixed"):
         optimize_gs_ad_root_implicit(None, None, cfg)
 
 
@@ -341,19 +351,24 @@ def test_the_root_implicit_gradient_descends_the_energy():
 
     **Marked slow, reluctantly.**  This was written to give the *required*
     gate (``-m core``) coverage of the claim that the gradient points
-    downhill, which it otherwise has none of.  Measured, one root-implicit
-    gradient at D=2 chi=4 peaks at **4.2 GB** against a 210 MB baseline for
-    the rest of this file -- almost entirely the adjoint solve's Krylov
-    basis.  ``-m core`` already peaks at 6.35 GB against ~7 GB runners
-    (#732), and JAX caches persist across tests within a session, so landing
-    4 GB on top of an accumulated cache risks an OOM that would present as a
-    confusing flake.  Shrinking ``solve_restart`` 30 -> 5 only reached 3.6 GB
-    while making the test 55% slower, which is not a trade worth making.
+    downhill, which it otherwise has none of.  It cost 4.2 GB in-suite when
+    that was written, against a 210 MB baseline for the rest of this file.
+    ``-m core`` already peaks at 6.35 GB against ~7 GB runners (#732), and JAX
+    caches persist across tests within a session, so landing 4 GB on top of an
+    accumulated cache risked an OOM presenting as a confusing flake.
 
-    So the required gate still has no convergence coverage for this path.
-    That is a real gap, recorded here rather than hidden by a marker: the
-    memory cost of a single gradient is the blocker, and it is the same
-    quantity #731 tracks at 8.4 GB on the symmetric path.
+    **Two things in the original note were wrong, and #731 fixed the second.**
+    The cost was never "the adjoint solve's Krylov basis": the real embedding
+    at D=2 chi=4 is n = 384, so a 30-dimensional basis is **91 KB**.  It was
+    XLA compiling the operator inside GMRES's ``lax.while_loop``.  Taking the
+    loop out of the jit and leaving the matvec in it drops one isolated
+    gradient here from **2.94 GB / 90.0 s to 1.74 GB / 39.0 s**, gradient
+    identical to ten digits (measured in a fresh process, which is why both
+    numbers sit below the 4.2 GB in-suite figure).
+
+    So the memory argument for this marker is gone and the wall time is what
+    is left.  Promoting it into ``-m core`` is a CI-budget decision rather
+    than a memory one now, and is deliberately not taken here.
     """
     import jax
     import jax.numpy as jnp
