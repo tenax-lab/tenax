@@ -66,6 +66,7 @@ from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
+from tenax.algorithms._gmres_eager import gmres_eager
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 __all__ = [
@@ -368,6 +369,21 @@ def _solve_root_adjoint(
     Returns ``(F̆, info)`` where ``info`` carries the achieved relative
     residual so callers can surface a diagnostic rather than silently
     returning a bad gradient.
+
+    The **matvec** is compiled; the **loop** is not, and the split is the whole
+    design (#731).  Each ``op`` is a VJP through the whole of ``F``, so running
+    that eagerly is out of the question — per-operation Python dispatch
+    dominated badly enough that adding the Eq. 73 cut-leg roots to ``F`` once
+    made a single measurement fail to return.  But compiling the *solve* is
+    equally out of the question, for the opposite reason: ``jax.scipy``'s GMRES
+    traces the operator into a ``lax.while_loop`` body, and
+    ``custom_linear_solve`` then needs it about nine times over, so one XLA
+    program had to hold nine copies of the block-sparse VJP.  At ``D=2,
+    chi=4`` — the smallest interesting case — the symmetric entry point peaked
+    at 8.6 GB against ~7 GB CI runners and took 303 s; eagerly it is 4.8 GB and
+    180 s, with a *better* residual.  The data was never the issue: the real
+    embedding there is ``n = 384`` and a 30-dimensional Krylov basis is 91 KB.
+    See :mod:`tenax.algorithms._gmres_eager` for the full attribution.
     """
     leaves, treedef = jax.tree.flatten(rhs)
     struct = _real_struct(rhs)
@@ -378,30 +394,21 @@ def _solve_root_adjoint(
         tree = _from_real_vec(vec, treedef, struct)
         return _to_real_vec(matvec(tree))
 
-    # The solve is the hot loop: GMRES evaluates ``op`` up to ``maxiter``
-    # times, and each evaluation is a VJP through the whole of ``F``.  Run
-    # eagerly, the per-operation Python dispatch dominates — enough that
-    # adding the Eq. 73 cut-leg roots to ``F`` made a single measurement
-    # fail to return.  Compiling the whole solve leaves one XLA program per
-    # call instead.
-    @jax.jit
-    def _solve(b):
-        sol, _info = jax.scipy.sparse.linalg.gmres(
-            op,
-            b,
-            x0=b,
-            tol=tol,
-            atol=0.0,
-            restart=restart,
-            maxiter=maxiter,
-            solve_method="batched",
-        )
-        resid = jnp.linalg.norm(op(sol) - b) / (jnp.linalg.norm(b) + 1e-30)
-        return sol, resid
-
-    sol, resid = _solve(b_vec)
+    # ``gmres_eager`` reports the residual it measured against ``op``, so there
+    # is no second application of the operator here — under the old jitted
+    # solve that check put a *second* copy of the whole VJP in the same
+    # program.
+    sol, resid = gmres_eager(
+        op,
+        b_vec,
+        x0=b_vec,
+        tol=tol,
+        atol=0.0,
+        maxiter=maxiter,
+        restart=restart,
+    )
     del leaves
-    return _from_real_vec(sol, treedef, struct), resid
+    return _from_real_vec(sol, treedef, struct), jnp.asarray(resid)
 
 
 # ---------------------------------------------------------------------------

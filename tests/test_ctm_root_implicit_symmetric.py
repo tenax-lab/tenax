@@ -1784,20 +1784,26 @@ def test_the_unboosted_z2_state_settles_element_wise():
 #
 # **Every test below that touches the ``sym_gradient`` fixture must carry
 # ``@pytest.mark.slow``, and that is a CI requirement rather than a
-# preference.**  Building the fixture peaks at 8.4 GB RSS — measured, staged:
-# 0.69 GB after the root extraction, 2.33 after the energy VJP, 2.50 after the
-# ``F`` VJP trace, 8.36 after the GMRES solve, flat thereafter.  The step that
-# costs it is XLA compiling the ~15k-equation block-sparse VJP inside GMRES's
-# ``lax.while_loop``; ``restart=10`` only reaches 7.19 GB and is both slower
-# (93 s vs 49 s) and far less accurate (2.5e-10 vs 6.4e-15), so there is no
-# cheap lever inside the solver.  GitHub's Linux runners have ~7 GB (see the
-# ``jax.clear_caches`` threshold note in ``tests/conftest.py``), and ``-m
-# core`` is the required gate, so an unmarked test here OOM-kills the runner
-# — which is what a marker on only *some* consumers of a module-scoped
-# fixture would still do, since the first consumer to run builds it.
+# preference.**  Building the fixture peaks at **4.78 GB** RSS and takes ~180 s.
+#
+# It used to peak at **8.63 GB** — measured end to end on this fixture, against
+# GitHub Linux runners of ~7 GB (see the ``jax.clear_caches`` threshold note in
+# ``tests/conftest.py``).  The cost was never the data: the adjoint's real
+# embedding here is ``n = 384``, so a 30-dimensional Krylov basis is 91 KB.  It
+# was XLA compiling the ~15k-equation block-sparse VJP *inside* GMRES's
+# ``lax.while_loop``, twice over — once for the solve and once for the residual
+# check.  ``restart=10`` was not a lever (7.19 GB, slower, five orders less
+# accurate); taking the *loop* out of the jit and leaving the *matvec* in it
+# was: #731, 8.63 → 4.78 GB and 303 → 180 s, with ``gmres_residual`` 3.1e-15 →
+# 9.7e-16 and the gradient norm unchanged to ten digits.
+#
+# So the marker is no longer about OOM-killing the runner.  It is the wall time
+# of the largest single fixture in the suite, and the margin that keeps it from
+# becoming an OOM again on a runner already carrying a JAX cache.
 # ``tests/conftest.py`` withholds this file's ``core`` marker from anything
 # explicitly marked ``slow``; without the marker here that mechanism has
-# nothing to act on.
+# nothing to act on — and a marker on only *some* consumers of a module-scoped
+# fixture would not help, since the first consumer to run builds it.
 # ---------------------------------------------------------------------------
 
 
@@ -1809,7 +1815,7 @@ def sym_gradient():
     convergence, the root extraction, three VJP traces and a GMRES solve
     through the block-sparse ``F``.  Every gradient test below reads the same
     result rather than recomputing it — and every one of them is ``slow``, for
-    the 8.4 GB reason in the section header above.
+    the 4.78 GB / 180 s reason in the section header above.
     """
     import tenax
 
