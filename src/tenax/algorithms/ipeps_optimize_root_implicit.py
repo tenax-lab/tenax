@@ -65,6 +65,14 @@ def root_implicit_variant(config: iPEPSConfig) -> str:
     """Return which root-implicit engine ``config`` selects.
 
     ``"asym"`` (dense 1x1), ``"cell"`` (dense multisite) or ``"symmetric"``.
+
+    **This does not validate the unit cell.**  ``"root_implicit_symmetric"``
+    selects the symmetric engine on the mode alone, so a non-1x1 unit cell
+    still returns ``"symmetric"`` here -- the engine is 1x1 only, and it is
+    :func:`validate_root_implicit_config` that refuses the combination rather
+    than this dispatcher.  Keeping the two apart is deliberate: a dispatcher
+    that silently reported ``"cell"`` for a mode the user spelled
+    ``symmetric`` would produce an error message about the wrong engine.
     """
     mode = getattr(config.ctm, "ctm_ad_mode", None)
     if mode == "root_implicit_symmetric":
@@ -148,6 +156,45 @@ def validate_root_implicit_config(config: iPEPSConfig) -> None:
                 "leave the requested symmetry sector",
             )
         )
+    # ``root_implicit_variant`` dispatches the symmetric mode on
+    # ``ctm_ad_mode`` ALONE, so ``root_implicit_symmetric`` + a non-1x1 unit
+    # cell returns "symmetric" and sails past the ``variant == "cell"``
+    # rejection.  While the symmetric arm was unwired that was harmless -- it
+    # hit a NotImplementedError either way -- but wiring it made the
+    # combination *run*: the 1-site engine on one A_init, with the configured
+    # multisite structure silently dropped and an energy returned for a
+    # different physical model.  Exactly the silent-inapplicability shape this
+    # validator exists for.
+    if config.ctm.ctm_ad_mode == "root_implicit_symmetric" and (
+        config.unit_cell != "1x1"
+    ):
+        unsupported.append(
+            (
+                f"unit_cell={config.unit_cell!r} with "
+                "ctm_ad_mode='root_implicit_symmetric'",
+                "the symmetric engine is 1x1 only; it would optimise a single "
+                "site tensor and drop the unit cell you asked for. There is no "
+                "multisite root-implicit energy yet -- see #894",
+            )
+        )
+    # ``rel_floor``'s own docstring says it is "consulted by
+    # ctm_ad_mode='root_implicit' only", and until now nothing enforced the
+    # narrower truth: only the *dense 1x1* engine takes it.  Neither
+    # sym_root_implicit_energy_and_grad nor cell_root_implicit_energy_and_grad
+    # has the parameter, so setting it alongside the symmetric mode was
+    # silently dropped -- the #723/#760/#762 shape this validator exists for.
+    if (
+        getattr(ctm, "rel_floor", None) is not None
+        and root_implicit_variant(config) != "asym"
+    ):
+        unsupported.append(
+            (
+                "rel_floor",
+                "only the dense 1x1 engine takes a rank-clamp override; the "
+                "symmetric and multisite engines derive the clamp from the "
+                "dtype and would ignore this",
+            )
+        )
     if unsupported:
         lines = "\n".join(f"  - {k}: {why}" for k, why in unsupported)
         raise NotImplementedError(
@@ -155,6 +202,36 @@ def validate_root_implicit_config(config: iPEPSConfig) -> None:
             f"settings, which would otherwise be silently ignored:\n{lines}\n"
             "Unset them, or use the default (fixed-point implicit) AD path."
         )
+
+
+def _initial_symmetric_tensor(A_init):
+    """Resolve the starting state for the symmetric variant.
+
+    There is exactly one source: an ``A_init`` the caller supplies.  Neither
+    ``su_init`` nor the random branch of :func:`_initial_tensor` can serve --
+    ``ipeps()`` builds dense states throughout, and a random
+    ``SymmetricTensor`` on the site indices is not a usable starting point
+    anyway, since the charge structure *is* the model here rather than a
+    representation detail.  Refusing loudly beats silently optimising a dense
+    lift of the state the caller meant.
+    """
+    from tenax.core.tensor import SymmetricTensor
+
+    if A_init is None:
+        raise ValueError(
+            "ctm_ad_mode='root_implicit_symmetric' needs an explicit "
+            "A_init: it optimises a SymmetricTensor, and nothing in this "
+            "library produces one for you -- su_init runs the dense simple "
+            "update, and the random fallback builds a dense array. Pass the "
+            "SymmetricTensor whose charge structure you want optimised."
+        )
+    if not isinstance(A_init, SymmetricTensor):
+        raise TypeError(
+            "ctm_ad_mode='root_implicit_symmetric' optimises a "
+            f"SymmetricTensor; got {type(A_init).__name__}. For a dense state "
+            "use ctm_ad_mode='root_implicit'."
+        )
+    return A_init
 
 
 def _initial_tensor(hamiltonian_gate, A_init, config: iPEPSConfig, gate, d_phys):
@@ -245,32 +322,34 @@ def optimize_gs_ad_root_implicit(
 
     if variant == "cell":
         raise NotImplementedError(
-            "ctm_ad_mode='root_implicit' currently wires the dense 1x1 "
-            "(asymmetric) engine only; got unit_cell="
-            f"{config.unit_cell!r}. The multisite engine "
-            "(cell_root_implicit_energy_and_grad, #715 Phase 2) is built and "
-            "tested but not yet wired here -- its shifted-cell index tables "
-            "are the whole risk of that phase and a wrong shift yields a "
-            "silently wrong gradient, so it gets its own increment. Use "
+            "ctm_ad_mode='root_implicit' wires the 1x1 engines only; got "
+            f"unit_cell={config.unit_cell!r}. This is not plumbing waiting to "
+            "be done: the multisite engine "
+            "(cell_root_implicit_energy_and_grad, #715 Phase 2) differentiates "
+            "a ONE-SITE observable tr(rho_1site . op), not an energy, and a "
+            "two-site Hamiltonian gate cannot be passed as that op. "
+            "_cell_energy exists but is documented valid only on a *uniform* "
+            "cell -- on a cell of different tensors the two RDM halves meet on "
+            "independently gauged chi bonds, so the number is gauge dependent "
+            "and not a differentiable function of A at all (measured: it moves "
+            "over [0.143, 0.171] under |t| <= 2e-5 while every fixed point "
+            "converges to 8.6e-13, and finite differences diverge as h -> 0). "
+            "A ground-state optimizer needs a two-site ring spanning adjacent "
+            "cells and its adjoint, which is separate work -- see #894. Use "
             "unit_cell='1x1'."
         )
-    if variant == "symmetric":
-        raise NotImplementedError(
-            "ctm_ad_mode='root_implicit_symmetric' is not wired yet. The "
-            "engine itself (sym_root_implicit_energy_and_grad) is built and "
-            "tested, and #731 -- the 8.4 GB peak in the GMRES solve that used "
-            "to be the blocker -- is fixed: the adjoint now peaks at 4.78 GB "
-            "at D=2, chi=4. What is left is the entry-point contract (it "
-            "always returns three values, its gradient is a SymmetricTensor "
-            "rather than an array, and nothing in this module can build a "
-            "symmetric initial state)."
-        )
-
-    _warn_implicit_ad_variational_caveat(config, path="1-site dense root-implicit")
-
-    from tenax.algorithms._ctm_root_implicit_asym import (
-        asym_root_implicit_energy_and_grad,
+    symmetric = variant == "symmetric"
+    _warn_implicit_ad_variational_caveat(
+        config,
+        path="1-site symmetric root-implicit"
+        if symmetric
+        else "1-site dense root-implicit",
     )
+
+    # Resolved before anything else touches its arguments: on the symmetric
+    # variant the caller *must* supply the state, so that is a precondition on
+    # the call rather than something to discover after converting a gate.
+    A_start = _initial_symmetric_tensor(A_init) if symmetric else None
 
     gate = (
         hamiltonian_gate.todense()
@@ -279,37 +358,92 @@ def optimize_gs_ad_root_implicit(
     )
     d_phys = gate.shape[0]
 
-    A = _initial_tensor(hamiltonian_gate, A_init, config, gate, d_phys)
-    if not isinstance(A, DenseTensor):
-        raise TypeError(
-            "ctm_ad_mode='root_implicit' is dense-only (#715 Phase 3 covers "
-            f"SymmetricTensor); got {type(A).__name__}."
-        )
-    A = A * (1.0 / (A.norm() + 1e-10))
-    indices = A.indices
     ctm_cfg = config.ctm
 
-    def _energy_and_grad(params):
-        A_t = DenseTensor(params, indices)
-        return asym_root_implicit_energy_and_grad(
-            A_t,
-            gate,
-            chi=ctm_cfg.chi,
-            max_iter=ctm_cfg.max_iter,
-            conv_tol=ctm_cfg.conv_tol,
-            min_iter=ctm_cfg.min_iter,
-            rel_floor=ctm_cfg.rel_floor,
+    if symmetric:
+        from tenax.algorithms._ctm_root_implicit_symmetric import (
+            sym_root_implicit_energy_and_grad,
         )
 
+        A = A_start
+        indices = A.indices
+
+        def _tensor_of(params):
+            # The parameter *is* the tensor here.  ``SymmetricTensor`` is a
+            # single-leaf pytree whose leaf is the packed block buffer, and its
+            # L2 norm is the Frobenius norm, so optax's ``clip_by_global_norm``
+            # and ``_normalize_params`` already mean the right thing on it.
+            # Flattening to a dense array instead -- what the dense branch does
+            # -- would discard the block structure, which is the entire point
+            # of Phase 3.
+            return params
+
+        def _energy_and_grad(params):
+            # Three values, always: this engine has no ``return_diagnostics``
+            # flag.  ``collect_backward_jaxpr=False`` skips six
+            # ``jax.make_jaxpr`` traces of ~40k-equation programs, which are
+            # what the tests assert on and pure overhead per optimizer step.
+            energy, grad, _diag = sym_root_implicit_energy_and_grad(
+                params,
+                gate,
+                chi=ctm_cfg.chi,
+                max_iter=ctm_cfg.max_iter,
+                conv_tol=ctm_cfg.conv_tol,
+                min_iter=ctm_cfg.min_iter,
+                collect_backward_jaxpr=False,
+            )
+            return energy, grad
+    else:
+        from tenax.algorithms._ctm_root_implicit_asym import (
+            asym_root_implicit_energy_and_grad,
+        )
+
+        A = _initial_tensor(hamiltonian_gate, A_init, config, gate, d_phys)
+        if not isinstance(A, DenseTensor):
+            raise TypeError(
+                "ctm_ad_mode='root_implicit' is dense-only; for a "
+                "SymmetricTensor state use ctm_ad_mode="
+                f"'root_implicit_symmetric' (#715 Phase 3). Got "
+                f"{type(A).__name__}."
+            )
+        indices = A.indices
+
+        def _tensor_of(params):
+            return DenseTensor(params, indices)
+
+        def _energy_and_grad(params):
+            return asym_root_implicit_energy_and_grad(
+                _tensor_of(params),
+                gate,
+                chi=ctm_cfg.chi,
+                max_iter=ctm_cfg.max_iter,
+                conv_tol=ctm_cfg.conv_tol,
+                min_iter=ctm_cfg.min_iter,
+                rel_floor=ctm_cfg.rel_floor,
+            )
+
+    A = A * (1.0 / (A.norm() + 1e-10))
+
     def _final_env(params):
-        """Converge the reported environment with the ordinary forward CTM."""
-        A_t = DenseTensor(params, indices)
+        """Converge the reported environment with the ordinary forward CTM.
+
+        On the symmetric variant this is not merely a re-convergence, it is a
+        *different truncation*: the engine takes per-sector SVDs and orders the
+        renormalised bond by charge, while the forward CTM takes one global SVD
+        and orders by singular value.  At finite chi those keep different
+        directions, so the energy reported here does not equal the last energy
+        the loop descended -- measured 4.7e-04 apart at D=2, chi=4.  Both are
+        legitimate variational energies of ``A_opt``; this one is the ordinary
+        machinery's, which is what a caller comparing against the rest of the
+        library needs.
+        """
+        A_t = _tensor_of(params)
         envs, _info = python_loop_ctm_converge(
             {(0, 0): A_t}, SINGLE_SITE_NEIGHBORS, **ctm_converge_kwargs(ctm_cfg)
         )
         return A_t, envs[(0, 0)]
 
-    params = A.todense()
+    params = A if symmetric else A.todense()
 
     # #792: return_history was accepted and dropped, so callers of the
     # documented 1x1 history API got a 3-tuple and lost the trajectory.  The
@@ -360,7 +494,13 @@ def optimize_gs_ad_root_implicit(
         steps_run = step + 1
         _step_t0 = _time.perf_counter()
         energy_val, grads = _energy_and_grad(params)
-        n_nonfinite = int(jnp.sum(~jnp.isfinite(grads)))
+        # Through the pytree, not through the array.  The dense gradient is a
+        # raw ``jax.Array``; the symmetric one is a ``SymmetricTensor``, and
+        # ``jnp.isfinite`` on that raises.  Both are single-leaf pytrees, so
+        # one traversal covers them and neither needs a special case below.
+        grad_leaves = jax.tree.leaves(grads)
+        n_nonfinite = sum(int(jnp.sum(~jnp.isfinite(leaf))) for leaf in grad_leaves)
+        n_entries = sum(int(leaf.size) for leaf in grad_leaves)
         if n_nonfinite:
             nonfinite_grad_steps += 1
             # Masking every entry really is a no-op; masking *some* of them is
@@ -369,7 +509,7 @@ def optimize_gs_ad_root_implicit(
             # same solve that produced the non-finite ones, so that step moves
             # the state along a direction already known to be contaminated.
             # That is a worse situation than a stalled step, not a milder one.
-            if n_nonfinite == grads.size:
+            if n_nonfinite == n_entries:
                 fully_masked_steps += 1
                 detail = (
                     "every entry was non-finite, so the step is a no-op and "
@@ -377,20 +517,20 @@ def optimize_gs_ad_root_implicit(
                 )
             else:
                 detail = (
-                    f"the remaining {grads.size - n_nonfinite} finite entries "
+                    f"the remaining {n_entries - n_nonfinite} finite entries "
                     "still drive a full update, so this step is NOT a no-op -- "
                     "it moves the state along a gradient already known to be "
                     "contaminated"
                 )
             warnings.warn(
                 f"ctm_ad_mode='root_implicit': step {step} produced "
-                f"{n_nonfinite} of {grads.size} non-finite gradient entries, "
+                f"{n_nonfinite} of {n_entries} non-finite gradient entries, "
                 f"masked to zero so the best-so-far state survives; {detail}. "
                 "Check usable_rank -- this is the #772 failure shape.",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        grads = jnp.where(jnp.isfinite(grads), grads, 0.0)
+        grads = jax.tree.map(lambda g: jnp.where(jnp.isfinite(g), g, 0.0), grads)
         E = float(jnp.real(energy_val))
         if config.return_history:
             _step_dt = float(_time.perf_counter() - _step_t0)

@@ -146,9 +146,12 @@ def test_metric_precond_warns_rather_than_rejecting():
     assert cfg.gs_metric_precond is True, "precondition: it defaults on"
     validate_root_implicit_config(cfg)  # must NOT raise
 
-    # It surfaces as a warning on the way to the (unwired) symmetric refusal.
+    # It surfaces as a warning before the run gets far enough to need a state.
+    # ``A_init=None`` then stops it: the symmetric variant has no way to build
+    # one (see ``test_root_implicit_symmetric_wiring.py``), which makes this a
+    # cheap place to observe the warning without running an optimization.
     with pytest.warns(UserWarning, match="gs_metric_precond"):
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(ValueError, match="needs an explicit A_init"):
             optimize_gs_ad_root_implicit(None, None, cfg)
 
 
@@ -174,34 +177,41 @@ def test_the_error_names_every_offending_knob_at_once():
 
 
 def test_multisite_variant_is_refused_with_a_reason():
-    """Phase 2's shifted-cell tables are the risk; it gets its own increment."""
+    """And the reason has to be the real one (#894).
+
+    It used to read "built and tested but not yet wired here", which describes
+    plumbing.  It is not plumbing: the multisite engine differentiates a
+    one-site observable rather than an energy, and there is no multisite energy
+    functional to differentiate -- ``_cell_energy`` is gauge-dependent on a
+    non-uniform cell.  A refusal that misdescribes its own blocker sends the
+    next reader to write the wrong patch.
+    """
     from tenax.algorithms.ipeps_optimize_root_implicit import (
         optimize_gs_ad_root_implicit,
     )
 
     cfg = dataclasses.replace(_cfg(), unit_cell="2site")
-    with pytest.raises(NotImplementedError, match="dense 1x1"):
+    with pytest.raises(NotImplementedError, match="ONE-SITE observable"):
         optimize_gs_ad_root_implicit(None, None, cfg)
 
 
-def test_symmetric_variant_is_refused_and_cites_its_blocker():
-    """And the blocker it cites has to be the one that is still true.
+def test_the_symmetric_variant_is_no_longer_refused():
+    """It was blocked on #731 (8.4 GB in the GMRES solve); that is fixed.
 
-    It used to say "#731, 8.4 GB in the GMRES solve".  That is fixed, so the
-    message now names the entry-point contract instead.  Asserting on the
-    *reason* rather than on ``NotImplementedError`` alone is the point: a
-    refusal that explains itself with a resolved blocker sends the next reader
-    to re-fix something that is already done.
+    The rest of its surface -- the initial state, the parameter type, the NaN
+    guard through the pytree -- lives in
+    ``tests/test_root_implicit_symmetric_wiring.py``.  What is pinned *here* is
+    only that dispatch no longer dead-ends, because a refusal is exactly the
+    kind of thing that gets reinstated by a merge.
     """
     from tenax.algorithms.ipeps_optimize_root_implicit import (
         optimize_gs_ad_root_implicit,
     )
 
     cfg = _cfg(ctm_ad_mode="root_implicit_symmetric")
-    with pytest.raises(NotImplementedError, match="entry-point contract"):
-        optimize_gs_ad_root_implicit(None, None, cfg)
-    with pytest.raises(NotImplementedError, match=r"#731.*is fixed"):
-        optimize_gs_ad_root_implicit(None, None, cfg)
+    with pytest.warns(UserWarning):
+        with pytest.raises(ValueError, match="needs an explicit A_init"):
+            optimize_gs_ad_root_implicit(None, None, cfg)
 
 
 # ------------------------------------------------------------------ #

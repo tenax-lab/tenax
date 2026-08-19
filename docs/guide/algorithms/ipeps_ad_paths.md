@@ -327,20 +327,43 @@ config = iPEPSConfig(
 )
 ```
 
-**Current scope:**
-- **dense 1×1 (asymmetric) only.** `unit_cell` other than `"1x1"` and
-  `ctm_ad_mode="root_implicit_symmetric"` both raise `NotImplementedError`
-  with the reason; a `SymmetricTensor` input raises `TypeError`. The
-  multisite and symmetric engines exist and are tested, but are not wired
-  to the optimizer. The symmetric one *was* blocked on #731 — 8.63 GB peak
-  in the adjoint at D=2, χ=4, against ~7 GB CI runners — which is fixed;
-  its adjoint now peaks at 4.78 GB and what is left is the entry-point
-  contract.
+**Current scope: 1×1 unit cells, dense or block-sparse.**
+
+- `ctm_ad_mode="root_implicit"` — the dense asymmetric engine. Takes a
+  `DenseTensor`; a `SymmetricTensor` is refused and points at the mode
+  below.
+- `ctm_ad_mode="root_implicit_symmetric"` — the `SymmetricTensor` engine
+  (#715 Phase 3), where this path's reason to exist actually pays off:
+  #566 and #687 are the block-sparse SVD/eigh VJPs, and there are none
+  here. **It needs an explicit `A_init`**, because nothing in the library
+  builds a symmetric initial state — `su_init` runs the dense simple update
+  and the random fallback builds a dense array — so the charge structure
+  you want optimised has to be the one you pass in. A single gradient costs
+  ~180 s and 4.8 GB at D=2, χ=4, so budget accordingly.
+
+  The environment returned at the end is converged by the *ordinary*
+  forward CTM, which truncates differently: the engine takes per-sector
+  SVDs and orders the renormalised bond by charge, the forward CTM takes
+  one global SVD and orders by singular value. At finite χ those retain
+  different directions, so the reported energy does not equal the last one
+  the loop descended — measured 4.7e-04 apart at D=2, χ=4. Both are
+  legitimate variational energies of the same `A_opt`.
+
+- **`unit_cell` other than `"1x1"` raises `NotImplementedError`,** and not
+  because the wiring is pending. The multisite engine differentiates a
+  *one-site observable* `tr(ρ₁ₛᵢₜₑ · op)`, not an energy, and a two-site
+  Hamiltonian gate cannot be passed as that `op`. A physical multisite
+  energy needs a two-site ring spanning adjacent cells — tracked as #894.
+
 - **Rejected rather than silently ignored:** `chi_auto_bump`, `chi_ramp`,
   `ctmrg_heuristic_increase_chi`, `fuse_virtual_legs=False`,
-  `gs_checkpoint_path`, `cg_gates`. These knobs depend on warm-start
-  behaviour this path does not have, so it refuses them instead of
-  quietly dropping them.
+  `gs_checkpoint_path`, `cg_gates`, `gs_optimizer="cg"`, `gs_c4v`, and
+  `rel_floor` on any variant but dense 1×1 (only that engine takes a
+  rank-clamp override). These depend on behaviour this path does not have,
+  so it refuses them instead of quietly dropping them.
+- **Warns and falls back:** `gs_metric_precond` and `gs_line_search`. Both
+  are effectively default-on, so refusing them would reject this path's own
+  default configuration.
 
 #### The rank clamp, and what the residual gate does and does not mean
 
