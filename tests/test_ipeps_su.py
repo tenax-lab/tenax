@@ -756,9 +756,9 @@ def test_su_step_output_can_still_be_gauged(kind, bond, su):
     reading it is one solve on a pair the ``su`` cache has already built.
 
     The *live* half of the same condition is elsewhere and is measured: one
-    ``-m slow`` pass of this file and its mutation sibling emits 1377
-    ``gauge_fix did not converge`` warnings from ``ipeps_su.py``, 19 of them
-    inside cells that report green, and
+    ``-m slow`` pass of this file and its mutation sibling emits 3339
+    ``gauge_fix did not converge`` warnings from ``ipeps_su.py``, 41 of them
+    inside five cells that report green, and
     ``test_su_step_warns_when_the_gauge_did_not_converge`` guards the reporting
     path with a fabricated ``BPGaugeInfo``.
 
@@ -1537,9 +1537,9 @@ def test_su_step_warns_when_the_gauge_did_not_converge(su, monkeypatch):
     could have moved it.  The citation is withdrawn.
 
     What *is* measured is that the condition fires in real runs: one
-    ``-m slow`` pass of this file and its mutation sibling emits **1377** of
-    these warnings from ``ipeps_su.py``, 19 of them inside cells that report
-    green.
+    ``-m slow`` pass of this file and its mutation sibling emits **3339** of
+    these warnings from ``ipeps_su.py``, 41 of them inside five cells that
+    report green.
 
     The ``BPGaugeInfo`` below is therefore **fabricated**, which is the right
     construction for this test either way: the thing under test is the
@@ -2124,17 +2124,25 @@ def test_su_evolve_names_the_step_that_broke_bond_uniformity(su, monkeypatch):
 #
 # **A gap this section does not close, recorded rather than left to be
 # rediscovered.**  ``_su_step`` warns when its internal ``gauge_fix`` fails, and
-# one ``-m slow`` pass of this file and its mutation sibling emits **1377** of
-# those warnings -- and they are not confined to the red cells.  Measured
-# (``-W always``, pytest's warnings summary grouped by node id), the 1377 split
-# four ways::
+# one ``-m slow`` pass of this file and its mutation sibling emits **3339** of
+# those warnings -- and they are not confined to the red cells.
 #
-#     970  test_d3_actually_uses_its_third_bond_direction[0]           RED
-#     388  test_su_evolve_reaches_the_simple_update_reference_...[3-0]  RED
-#      16  test_the_energy_does_not_drift_away_with_more_steps[2-1]     GREEN
-#       3  test_d3_actually_uses_its_third_bond_direction[1]            GREEN
+# **Count the emissions, not the summary lines.**  pytest's warnings summary
+# collapses byte-identical messages, and the twin cells here emit byte-identical
+# text, so that summary shows only **1377** entries and attributes each collapsed
+# group to a single node id.  Reading it as a per-cell census is what produced an
+# earlier version of this note claiming a 970/388/16/3 split over four cells --
+# every twin cell had silently vanished into its sibling.  Measured properly with
+# ``-rw`` (per node id, three batches), the green-cell emissions are::
 #
-# so 19 of them come from cells that report green.  No test here asserts on, counts
+#      16  test_d2_reaches_the_heisenberg_energy_not_the_product_state[1]
+#      16  test_the_energy_does_not_drift_away_with_more_steps[2-1]
+#       3  test_the_energy_does_not_drift_away_with_more_steps[3-1]
+#       3  test_su_evolve_reaches_the_simple_update_reference_energy[3-1]
+#       3  test_d3_actually_uses_its_third_bond_direction[1]
+#
+# so **41** of them come from **five** cells that report green.  The remainder
+# come from the red cells.  No test here asserts on, counts
 # or ``filterwarnings("error")``s the warning, so the degradation mode
 # ``ipeps_su.py``'s *Warns* documents -- "it quietly costs truncation quality on
 # **every** step" -- is unwatched inside cells reporting green.  Closing it is a
@@ -3237,18 +3245,24 @@ def test_the_shipped_engines_stored_spectra_are_closer_than_the_plan_says():
         f"is the reading the plan's 15-35% belongs to, and pinning it here is "
         f"what stops the two numbers being quoted for each other"
     )
-    # And the two really are different readings of the same data -- the whole
-    # of C-5, and the only assertion here that is not a band around a measured
-    # constant.  A single number quoted for both is the mistake C-5 names, and
-    # it is the one this cell can still catch: compute ``elementwise`` with the
-    # L2 formula and the ratio collapses to 1.  Measured on this cell's own
-    # data, the element-wise reading is ~7x the L2 one.
-    assert worst_elem > 3.0 * worst_l2, (
-        f"the element-wise reading ({worst_elem * 100:.2f}%) is not materially "
-        f"above the L2 one ({worst_l2 * 100:.2f}%), so the two bands above are "
-        f"pinning the same reading twice and either could be quoted as the "
-        f"other -- which is the Frobenius-vs-max-abs confusion C-5 names."
-    )
+    # There was an ``assert worst_elem > 3.0 * worst_l2`` here, added to give
+    # C-5 a reading that is not a band around a measured constant.  **It is
+    # deleted rather than kept, because it cannot fail on what it claims to
+    # watch**, and #882's re-review measured why: at ``D=2`` each spectrum has
+    # two entries, so the ratio reduces *exactly* to ``sqrt(1 + m**2) / m > 3``
+    # -- i.e. ``m < 0.354`` -- where ``m`` is the second value of the **BP
+    # message** spectrum.  The stored spectra this cell exists to measure drop
+    # out of it algebraically: the ratio stayed 6.212 under three different
+    # perturbations of ``lambdas``.  It was unreachable as well as inert, since
+    # ``0.10 < worst_elem`` two assertions above fires first in both scenarios
+    # the deleted text named.
+    #
+    # The observation it was trying to make is true and worth keeping as an
+    # observation: computing ``elementwise`` with the L2 formula collapses the
+    # ratio to 1, and on this cell's own data the element-wise reading is ~7x
+    # the L2 one.  What stops the two numbers being quoted for each other is
+    # the pair of bands above, which are disjoint (``< 0.05`` against
+    # ``> 0.10``) and each pinned to its own measured constant.
 
 
 @pytest.mark.parametrize(

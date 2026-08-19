@@ -590,8 +590,8 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
             quietly costs truncation quality on *every* step of a run.  That is
             live rather than hypothetical, and the evidence is a run rather than
             a probe: one ``-m slow`` pass of this module's two test files
-            emits **1377** of these warnings, and not only from the cells that
-            fail -- 19 of them come from two cells that report green.  (An earlier version of this
+            emits **3339** of these warnings, and not only from the cells that
+            fail -- 41 of them come from five cells that report green.  (An earlier version of this
             note cited "with the gate's flows left unaligned, BP hit
             ``max_iter=100`` at residual 1.399e-01 on a symmetric ``v_BA``
             step".  #882's final review measured that mutation on all six cells
