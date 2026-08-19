@@ -223,6 +223,12 @@ _FILE_MARKERS = {
     # again, which took the symmetric adjoint to 8.63 GB against ~7 GB runners.
     # Every tolerance assertion in the suite stays green through that.
     "test_gmres_eager.py": "core",
+    # The iPEPS AD guide against the code it documents (#808).  Pure markdown
+    # parsing plus config validation, microseconds.  ``core`` because both
+    # defects it pins were *silent*: the guide specified a Path 2 config that
+    # raises ValueError before the first CTM sweep, and recommended against the
+    # path the code runs by default.  Nothing else in the suite reads the docs.
+    "test_docs_ad_paths_808.py": "core",
     # #800 item 2: the root-implicit quadrants against the production enlarged
     # corner.  Milliseconds, no CTM convergence.  ``core`` because every
     # endpoint here has dimension chi, so an endpoint swap is invisible to

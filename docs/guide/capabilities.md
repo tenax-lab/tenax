@@ -85,8 +85,9 @@ research.
     clamp and degrades the gradient (measured 27x on one state), which is the
     opposite of the usual intuition. Multisite and `SymmetricTensor` inputs
     are refused with their reasons. See `ipeps_ad_paths.md` Path 5.
-  - Stability knobs: sigma gauge fixing (`forward_gauge="sigma"`) and a
-    chi-ramping schedule for progressive refinement.
+  - Stability knobs: sigma gauge fixing (`forward_gauge="sigma"`, on the
+    **explicit**-AD path only -- the implicit path accepts `"phase"` and
+    nothing else) and a chi-ramping schedule for progressive refinement.
 - **CTMRG projectors** -- SVD/Fishman (default), `eigh`, and a reduced-corner
   **QR-CTMRG** projector (`projector_method="qr"`, arXiv:2505.00494), usable
   both forward-only and under AD on the dense single-site path.

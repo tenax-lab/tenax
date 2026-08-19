@@ -312,6 +312,58 @@
   came within an order of magnitude of the threshold, so the guard is pinned by
   a new one plus a mutation check that restores the underflow and confirms the
   mutant measures the noise instead of refusing it.
+- **The iPEPS AD guide documented a Path 2 configuration that cannot run, and
+  recommended against the default path** (#808). Two separate defects in
+  `docs/guide/algorithms/ipeps_ad_paths.md`:
+
+  - Path 2's configuration block specified `forward_gauge="sigma"`, "required
+    for stable element-wise convergence". `validate_ctm_for_implicit_ad`
+    accepts `"phase"` and nothing else — there is no `sigma` branch in the
+    check at all — so a user transcribing the guide verbatim got a `ValueError`
+    before the first CTM sweep. The same stale claim appeared in the Path 2
+    architecture diagram, the Forward Gauge Mode Matrix (where the `sigma` row
+    was qualified "at large chi (1-site only)", a narrowing the policy does not
+    make), Path 1's "sigma gauge as a fallback" note, `README.md` and
+    `docs/guide/capabilities.md` — **and four more found in review**: the
+    benchmark table's `eigh + sigma (GMRES implicit)` row, the sentence under
+    it ("sigma gauge is still needed for implicit AD"), the section heading
+    `### 2. Sigma Gauge Fixing (implicit-diff path)` with its "required for the
+    implicit-diff backward", and Known Limitations' "reserve sigma gauge for
+    the implicit-diff path". Ten sites in all. Sigma gauge remains a
+    first-class **explicit**-AD mode; every one of them now says so. The
+    benchmark row is kept, since it was measured, and marked as a config that
+    no longer runs.
+  - The guide marked Path 1 (explicit) *Recommended* and Path 2 (implicit)
+    *Experimental*, while `iPEPSConfig.gs_implicit_ad` defaults to `True` —
+    i.e. it recommended against its own default, and `ipeps_config.py`'s own
+    docstring called implicit "the recommended AD path" 170 lines above an
+    inline comment describing it as using sigma gauge. **Implicit AD is the
+    recommended path and the default**; Path 1 is opt-in via
+    `gs_implicit_ad=False`. The #292 stability gap is scoped to
+    `ad_backward_method="gmres"`, not to implicit differentiation as such —
+    the default `"vjp"` backward is regression-covered.
+
+    The opening `## Recommended Configuration` — the block a reader copies
+    first — was itself setting `gs_implicit_ad=False`, so the guide's headline
+    example ran the path it no longer recommends. It now runs the recommended
+    one, with the explicit-AD variant spelled out beside it.
+
+  Both were prose, so both drifted silently. `tests/test_docs_ad_paths_808.py`
+  now reads the shipped markdown and checks it against the shipped code: every
+  `forward_gauge` the Path 2 block documents must pass the policy and be the
+  `CTMConfig` default; whichever heading claims to be recommended must match
+  `gs_implicit_ad`; the opening executable example must use that same path; the
+  sigma-gauge section heading must not claim the implicit path; and no passage
+  anywhere may direct a reader to sigma gauge on it. Against the pre-fix guide,
+  6 of the 10 tests fail.
+
+  The first version of that guard checked only the Path 2 configuration block
+  and would have passed on four of the ten stale sites — which is the lesson
+  worth keeping: a documentation guard scoped to the paragraph you happened to
+  edit is worth very little. It is deliberately a tripwire for the phrasing
+  that occurred rather than a natural-language linter, and says so, because a
+  co-occurrence scan over prose needs an ever-growing allow-list and gets
+  deleted the first time it fails on an unrelated edit.
 - **Review debt from #712/#717/#720/#729 drained** (#800). Four items, and only
   one of them was a live defect — the other three are now pinned by tests or by
   a comment so they are not re-filed.
