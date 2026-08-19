@@ -234,6 +234,14 @@ _FILE_MARKERS = {
     # no CTM, milliseconds.  They guard a defect class that has now recurred
     # on four engines, so they belong in the required gate.
     "test_root_implicit_nan_gates.py": "core",
+    # Wiring for ctm_ad_mode="root_implicit_symmetric" (#715 Phase 3).  Every
+    # gap it pins is a *type* gap -- a SymmetricTensor parameter, a
+    # SymmetricTensor gradient, a three-value return -- so the checks run
+    # against a stub engine in milliseconds.  ``core`` because the failure
+    # shape is a silent densification: the run would still converge to
+    # something, just not to the symmetric problem the caller posed.  The one
+    # end-to-end descent test carries its own ``slow``.
+    "test_root_implicit_symmetric_wiring.py": "core",
     # The multisite clamped-residual gate (#784).  The rank-report half is one
     # SVD per coordinate and runs in the gate; the two end-to-end cases each
     # converge a 300-sweep CTM plus an adjoint solve and carry their own

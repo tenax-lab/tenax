@@ -4,6 +4,51 @@
 
 ### Added
 
+- **`ctm_ad_mode="root_implicit_symmetric"` is wired to `optimize_gs_ad`**
+  (#715 Phase 3). The block-sparse engine has existed and been tested since
+  #729; what was missing was the optimizer contract, and it was blocked on
+  #731's 8.4 GB adjoint. With that fixed the remaining gaps were all *type*
+  gaps, and all four are now closed: the engine always returns three values
+  (there is no `return_diagnostics` flag), its gradient is a `SymmetricTensor`
+  rather than an array, the loop's NaN guard called `jnp.isfinite` on it —
+  which raises — and the loop flattened its parameter with `.todense()`, which
+  would have discarded the block structure that is the entire point of Phase 3.
+
+  The NaN guard now walks the pytree instead of the array, so one traversal
+  covers a raw `jax.Array` and a `SymmetricTensor` alike and neither needs a
+  special case. `SymmetricTensor` is a single-leaf pytree whose leaf's L2 norm
+  *is* the Frobenius norm, so `clip_by_global_norm`, `_grad_l2_norm` and
+  `_normalize_params` already meant the right thing on it — asserted rather
+  than assumed.
+
+  **This mode needs an explicit `A_init`.** Nothing in the library builds a
+  symmetric initial state: `su_init` runs the dense simple update and the
+  random fallback builds a dense array, so falling back to either would
+  silently optimise a dense lift of the problem the caller posed
+  symmetrically — and it would appear to work. It refuses instead, and says
+  which.
+
+  Two costs to budget for. A single symmetric gradient is ~180 s and 4.8 GB at
+  `D=2, χ=4` even after #731. And the environment returned at the end is
+  converged by the *ordinary* forward CTM, which truncates differently — the
+  engine takes per-sector SVDs and orders the renormalised bond by charge, the
+  forward CTM takes one global SVD and orders by singular value — so at finite
+  χ the reported energy does not equal the last one the loop descended;
+  measured 4.7e-04 apart at `D=2, χ=4`. Both are legitimate variational
+  energies of the same `A_opt`.
+
+  `sym_root_implicit_energy_and_grad` gains `collect_backward_jaxpr`
+  (default `True`, unchanged for existing callers). The six `jax.make_jaxpr`
+  traces of ~40k-equation programs are what the tests assert on and pure
+  overhead per optimizer step, so the loop passes `False`. The diagnostics key
+  is still present, holding `None`, so a caller testing `"backward_jaxpr" in
+  diag` cannot silently skip its own assertion.
+
+  `rel_floor` is now **refused** on any variant but dense 1×1 rather than
+  silently dropped. Its own docstring said "consulted by
+  `ctm_ad_mode='root_implicit'` only"; the narrower truth is that only the
+  dense engine has the parameter at all.
+
 - **`measure_gradient_error`: root-implicit gradient accuracy can be measured,
   and cannot be predicted** (#785). The root-implicit engines report a root
   residual, a covariant residual, an adjoint residual and a `usable_rank`, and
