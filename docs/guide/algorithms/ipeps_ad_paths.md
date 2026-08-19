@@ -305,8 +305,10 @@ config = iPEPSConfig(
   `ctm_ad_mode="root_implicit_symmetric"` both raise `NotImplementedError`
   with the reason; a `SymmetricTensor` input raises `TypeError`. The
   multisite and symmetric engines exist and are tested, but are not wired
-  to the optimizer — the symmetric one is blocked on #731 (8.4 GB peak in
-  the GMRES solve).
+  to the optimizer. The symmetric one *was* blocked on #731 — 8.63 GB peak
+  in the adjoint at D=2, χ=4, against ~7 GB CI runners — which is fixed;
+  its adjoint now peaks at 4.78 GB and what is left is the entry-point
+  contract.
 - **Rejected rather than silently ignored:** `chi_auto_bump`, `chi_ramp`,
   `ctmrg_heuristic_increase_chi`, `fuse_virtual_legs=False`,
   `gs_checkpoint_path`, `cg_gates`. These knobs depend on warm-start

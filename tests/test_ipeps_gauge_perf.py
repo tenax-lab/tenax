@@ -46,9 +46,11 @@ a gauge that fails to cancel shows up and a sign that does cancel does not.
 
 from __future__ import annotations
 
+import gc
 import statistics
 import sys
 import time
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -119,9 +121,12 @@ def _gauge_fix_eager(A, B, **kw):
 #: stamps, so on all nine the structure restoration is a no-op and the arm of
 #: the code that #882's flow defect lives in is never compared across drivers.
 #: The simple-update-evolved pair -- the one Phase 2 actually hands over -- has
-#: four of its five flows inverted, so it is the only fixture here that
-#: exercises it.  ``"su"`` is spelled as a seed rather than a second test so the
-#: assertions below cover it verbatim.
+#: **all five** of its flows inverted, ``phys`` included, so it is the only
+#: fixture here that exercises it.  Measured on both tensors at D=2, 3 and 4:
+#: ``[-1, 1, -1, 1, 1]`` for ``('u', 'd', 'l', 'r', 'phys')`` from
+#: ``_dense_pair`` against ``[1, -1, 1, -1, -1]`` after the sweep.  ``"su"`` is
+#: spelled as a seed rather than a second test so the assertions below cover it
+#: verbatim.
 _PARITY_FIXTURES = [(D, seed) for D in (2, 3, 4) for seed in (0, 1, 2)]
 _PARITY_FIXTURES.append((2, "su"))
 
@@ -414,6 +419,158 @@ def _via_bp_gauge_checkerboard(A, B):
     return bp.bp_gauge_checkerboard(A, B, w, **_GATE_KW)[3]
 
 
+def _shared_pjit_cache_is_full() -> bool:
+    """Is the process-wide ``PjitFunctionCache`` *these jits use* at capacity?
+
+    ``jax._src.pjit`` builds two of these at capacity 8192 apiece and hands each
+    ``jit`` one of them, and while one is *at* capacity every insertion also
+    evicts.  That is the single regime in which ``_cache_size()`` *differences*
+    stop being exact, so it is the only thing the guards below are allowed to
+    withdraw on.  See the comment in
+    :func:`test_every_solve_in_a_run_hits_one_compiled_entry` for the
+    measurements.
+
+    **Which** of the two is not a detail: asking ``any()`` of both would let a
+    cache these jits never touch license a withdrawal, and a withdrawal granted
+    on an irrelevant precondition hides exactly the cache-key regression this
+    file exists to catch.  So the cache is *measured*, not assumed -- a
+    throwaway ``jit`` is traced and whichever cache grew is the one in use.
+
+    Two things make the measurement worth doing rather than reading off jax's
+    own rule.  ``_get_cpp_global_cache`` selects on ``contains_explicit
+    attributes``, and the module comment beside it says a bare ``jax.jit(f)``
+    goes to ``_cpp_pjit_cache_fun_only`` -- but on jax 0.10.2 it does not:
+    a plain ``jit`` and a ``static_argnums`` ``jit`` both land in
+    ``_cpp_pjit_cache_explicit_attributes``, measured at ``(1, 0)`` apiece over
+    three fresh functions each, with ``fun_only`` flat at 0 the whole time.  So
+    the documented rule and the shipped behaviour disagree, and a probe believes
+    the right one.  The probe must also hold a reference to its throwaway
+    ``jit``: drop it and the entry goes with it, and every delta reads ``(0, 0)``.
+
+    Fails **closed** in both halves.  If a future jax stops exposing the module
+    globals, or they stop answering ``size()``/``capacity()``, or the probe
+    cannot tell which cache grew, this reports ``False`` -- "saturation was not
+    established" -- and the caller fails loudly instead of skipping on an excuse
+    it could not check.  A withdrawal that cannot verify its own precondition is
+    a dead guard.
+    """
+    try:
+        from jax._src import pjit as _pjit
+
+        caches = (
+            _pjit._cpp_pjit_cache_explicit_attributes,
+            _pjit._cpp_pjit_cache_fun_only,
+        )
+        # ``before`` is sampled ahead of *everything* this function does, and it
+        # is the only reading the verdict rests on.  Routing is read separately,
+        # from what grew across the whole helper.
+        #
+        # Both halves of that split were learned the hard way.  The probe is an
+        # insertion, so on a cache one entry below capacity a post-probe reading
+        # reports a saturation the probe itself caused.  Moving the reading
+        # earlier is not enough either, because ``jnp.ones`` is not free: on a
+        # first call in a fresh process it inserts **two** persistent entries of
+        # its own into the explicit-attributes cache (measured ``0 -> 2`` on jax
+        # 0.10.2, ``0`` on every call after), so building the argument before
+        # the snapshot merely moved the same fault to the other side -- the two
+        # entries fill the cache, ``before`` then reads it saturated, and the
+        # withdrawal is granted on a precondition this function manufactured.
+        #
+        # Every one of those is the same error: judging saturation on a number
+        # this function had already perturbed.  Sampling first and routing later
+        # removes the class rather than the instance.
+        before = [c.size() for c in caches]
+
+        # ``device_put`` of a numpy array populates no pjit cache entry at all
+        # -- measured ``0`` against ``jnp.ones``' and ``jnp.asarray``' ``1``
+        # apiece, repeatably.  That matters beyond the verdict this function
+        # returns: with ``jnp.ones`` the *side effect* survived the call, so on
+        # a cache two entries below capacity this helper could hand back a
+        # correct ``False`` and still leave the cache full, and the caller's
+        # very next measurement would read a frozen counter and fail a correct
+        # one-compile implementation.  A guard is not allowed to break the
+        # measurement it precedes.
+        one = jax.device_put(np.ones(1))
+        # Same shape as the boundaries under test -- ``static_argnums`` and a
+        # never-before-seen function -- so it is routed the way they are.  The
+        # reference has to outlive the measurement; see the docstring.
+        probe = partial(jax.jit, static_argnums=(1,))(lambda a, k: a * k)
+        probe(one, 2)
+
+        grew = [i for i, c in enumerate(caches) if c.size() > before[i]]
+        if len(grew) == 1:
+            # It grew, so it had room, so it was not saturated when this
+            # function was called -- whatever it reads now.
+            return False
+        if not grew:
+            # A guaranteed-fresh key that grows *neither* cache is the
+            # definition of an evicting insert, and the probe only ever touches
+            # the cache these jits use: if that one had room it would have
+            # grown.  So this is saturation of the relevant cache, which is the
+            # one thing a withdrawal is allowed to rest on.  (Reading it as
+            # "inconclusive" would invert the guard precisely in the regime it
+            # exists to detect.)
+            return True
+        return False  # both grew -- the probe is not isolating one cache
+    except Exception:  # private jax layout moved -- do not guess
+        return False
+
+
+def test_the_saturation_probe_leaves_the_shared_cache_as_it_found_it():
+    """The guard must not perturb the measurement it precedes.
+
+    ``_shared_pjit_cache_is_full`` inserts a throwaway ``jit`` to learn which
+    cache these boundaries use, and that entry is released with its wrapper.
+    Its *argument* is the part that bit: ``jnp.ones`` inserts two entries that
+    **survive the call**, so on a cache two below capacity the helper could
+    return a perfectly correct ``False`` and still hand the caller a full cache
+    -- and the caller's next measurement would then read a frozen counter and
+    fail a correct one-compile implementation.  Verdict right, side effect
+    fatal.
+
+    ``jax.device_put`` of a numpy array populates no pjit entry at all
+    (measured ``0``, against ``1`` apiece for ``jnp.ones`` and ``jnp.asarray``),
+    so the net footprint is zero.  Asserted over repeat calls because a
+    one-shot check would pass on a helper that inserts once and reuses.
+
+    **The invariant is "never grows", not "never changes".**  On an already-full
+    cache the probe is a guaranteed-fresh key, so inserting it *evicts* a live
+    entry, and collecting the probe's own wrapper afterwards leaves the cache
+    one below capacity -- measured ``2 -> 1`` at capacity 2, with the helper
+    correctly reporting ``True``.  An equality assertion fails there on correct
+    code, in precisely the regime this helper exists to detect, so equality is
+    asserted only where it holds: when the cache was not saturated to begin
+    with, which is the case where an insertion would be the thing that pushed
+    it over.
+    """
+    from jax._src import pjit as _pjit
+
+    caches = (
+        _pjit._cpp_pjit_cache_explicit_attributes,
+        _pjit._cpp_pjit_cache_fun_only,
+    )
+    jnp.zeros((5,))  # warm the generic machinery, so this measures the helper
+
+    for call in range(3):
+        before = [c.size() for c in caches]
+        saturated = _shared_pjit_cache_is_full()
+        gc.collect()
+        after = [c.size() for c in caches]
+
+        assert all(a <= b for a, b in zip(after, before)), (
+            f"call {call} grew the shared pjit caches from {before} to {after}: "
+            f"the saturation probe is filling the cache it exists to measure, "
+            f"which can push a nearly-full cache over and freeze the counter "
+            f"the guards below read"
+        )
+        if not saturated:
+            assert after == before, (
+                f"call {call} changed the shared pjit caches from {before} to "
+                f"{after} on a cache that was not saturated, so nothing forced "
+                f"an eviction: the helper is not leaving the cache as it found it"
+            )
+
+
 #: The two compiled boundaries around the one solve, each with the call that
 #: reaches it.  ``gauge_fix`` is what a simple-update step calls and what the
 #: budget is written against; ``bp_gauge_checkerboard`` is the narrower entry
@@ -450,50 +607,140 @@ def test_every_solve_in_a_run_hits_one_compiled_entry(entry):
     inheriting ``bp_gauge_checkerboard``'s coverage would prove nothing about
     it.  ``gauge_fix`` is also the one a simple-update step calls.
 
-    The two probes at the end are not decoration: without them an assertion that
-    the counter did not move would also pass if the counter were dead.  They
-    also pin the two things that *do* split the key, and the second one is a
-    live constraint on Phase 2 rather than a curiosity.
+    The two probes at the end pin the two things that *do* split the cache key
+    -- the bond dimension and the flow convention -- and the second is a live
+    constraint on Phase 2 rather than a curiosity.  They are **not** what rules
+    out a dead counter, which is what this docstring used to claim: measured, a
+    ``_cache_size()`` stubbed to a constant still fails the *first* assertion,
+    so the probes' own assertions never get to speak.  Nothing here can tell a
+    dead counter from a lost compile -- both read zero -- so the first message
+    names both readings instead of asserting one.  What the probes do buy is
+    the calibration below: all three deltas are measured before any is judged,
+    so a run whose counter has stopped tracking traces is distinguishable from
+    a run that lost a compile, and only the first is withdrawn.
     """
     solve, cache_of = _COMPILED_ENTRIES[entry]
     n_solves, D, _ = _budget()
     pairs = [_dense_pair(D=D, seed=k) for k in range(5)]
 
+    # Everything below counts entries **relative to this baseline**, never
+    # against zero.  ``_cache_size()`` is a private nanobind counter with no
+    # documented post-clear value, and it is not a live count of this function's
+    # entries: this file failed CI at ``assert -10 == 0`` on its very first line
+    # (``_bp_solve``; ``-7`` for ``_gauge_fix_traced``).
+    #
+    # **Reproduced on Linux at the same jax/jaxlib 0.10.2**, so it is not the
+    # macOS arm64 build, and the earlier claim here that it was is withdrawn.
+    # Every ``jit`` in the process shares one of two ``PjitFunctionCache``es
+    # (``jax._src.pjit``, capacity 8192 each).  Below capacity the counter is
+    # exact and ``clear_cache()`` removes only this function's entries and
+    # zeroes it.  Once the shared LRU has had to **evict**, ``clear_cache()``
+    # empties the whole shared cache and charges every removal to its caller, so
+    # it lands at minus the number of entries the other functions still hold:
+    # shrinking the capacity and overflowing it measured ``-3, -20, -3, -40,
+    # -3`` for co-tenants holding ``3, 20, 3, 40, 3`` at capacities ``64, 64,
+    # 128, 128, 256``.  The magnitude tracks the co-tenants, not the capacity,
+    # which is why CI read ``-10`` and not ``-8000``.
+    #
+    # ``conftest.py``'s RSS-gated global ``jax.clear_caches()`` is not the
+    # trigger the earlier version of this comment blamed.  It books the same
+    # deficit the eviction already created, and the ``clear_cache()`` below
+    # produces the identical value without it: with ten co-tenant entries both
+    # read ``-10``, in either order.  What creates the deficit is the eviction.
+    #
+    # From a constant negative baseline the **differences** are exact -- the
+    # counter still moves by one per new key -- and that is the regime CI was
+    # in, which is what makes the three claims below well-posed.  They do not,
+    # however, "survive an arbitrary constant offset", as this comment also used
+    # to say: while the shared LRU is held *at* capacity by other functions,
+    # every insert evicts too and the counter stops moving at all -- three
+    # genuinely fresh keys measured ``0, 0, 0`` against a side-effect trace
+    # counter's ``1, 2, 3``.  That regime is detected and refused below rather
+    # than reported as a compile that never happened.
+    # Sampled **before** the workload, and it is the only saturation reading the
+    # withdrawal below is allowed to use.  Asking after the run would let the
+    # regression grant its own excuse: the failure this test exists to catch is
+    # "every solve compiles", which on a nearly-full shared cache inserts a
+    # hundred entries and saturates it, making an after-the-fact predicate true
+    # and skipping the very run that proved the defect.  A precondition a defect
+    # can create is not a precondition.
+    saturated_before = _shared_pjit_cache_is_full()
+
     cache_of().clear_cache()
-    assert cache_of()._cache_size() == 0, "cache not cleared"
+    base = cache_of()._cache_size()
 
     for i in range(n_solves):
         info = solve(*pairs[i % len(pairs)])
         assert info.iterations > 0, f"solve {i} did nothing: {info}"
-
-    assert cache_of()._cache_size() == 1, (
-        f"{n_solves} solves through {entry} produced {cache_of()._cache_size()} "
-        f"compiled entries; every one of them must reuse the same trace or the "
-        f"XLA compile is paid again and the re-gauging budget is gone"
-    )
+    after_run = cache_of()._cache_size() - base
 
     # A different bond dimension is a different key -- obvious, and it is what
-    # makes the assertion above non-vacuous.
+    # makes the assertion below non-vacuous.
     solve(*_dense_pair(D=3))
-    assert cache_of()._cache_size() == 2, (
-        "a different bond dimension did not produce a second entry, so the "
-        "assertion above cannot distinguish 'one compile' from 'no counter'"
-    )
+    after_dim = cache_of()._cache_size() - base
 
     # And so is a different *flow convention* at the same D, which is much less
     # obvious and is a constraint on the caller.  ``TensorIndex`` is pytree aux
     # data, so the pair's flows are part of the key; a simple-update-evolved
-    # pair has its four virtual flows inverted relative to
-    # ``_wrap_as_dense_tensor``, and mixing the two conventions in one run costs
-    # a second ~285 ms compile.  A real run hands over one convention throughout
-    # -- which is exactly what ``_restore_caller_structure`` guarantees, by
-    # handing each caller its own metadata back instead of stamping the BP
-    # module's onto it (``test_gauge_fix_hands_back_the_callers_leg_flows``).
-    # This assertion is what would notice if that stopped being true.
+    # pair has **all five** of its flows inverted relative to ``_dense_pair``'s
+    # -- the four virtual legs and ``phys``, measured ``[-1, 1, -1, 1, 1]``
+    # against ``[1, -1, 1, -1, -1]`` for ``('u', 'd', 'l', 'r', 'phys')`` on
+    # both tensors at D=2, 3 and 4 -- and mixing the two conventions in one run
+    # costs a second ~285 ms compile.  A real run hands over one convention
+    # throughout -- which is exactly what ``_restore_caller_structure``
+    # guarantees, by handing each caller its own metadata back instead of
+    # stamping the BP module's onto it
+    # (``test_gauge_fix_hands_back_the_callers_leg_flows``).  This assertion is
+    # what would notice if that stopped being true.
     solve(*_su_evolved_pair(D))
-    assert cache_of()._cache_size() == 3, (
-        "a pair with inverted virtual flows reused an existing entry; the flows "
-        "are aux data and must be part of the key"
+    after_flows = cache_of()._cache_size() - base
+
+    # Measured first, judged second.  Each probe above is a guaranteed-fresh key
+    # after the clear, so each must move the counter by exactly one; if either
+    # fails to, the counter is not counting this function's traces and none of
+    # the three numbers means anything.  Withdraw only on the one cause that can
+    # be *confirmed* -- a shared LRU that was already at capacity when this test
+    # started -- so a counter broken for any other reason, including a cache
+    # this run's own compiles filled, still fails loudly below instead of
+    # skipping.
+    calibrated = (after_dim - after_run, after_flows - after_dim) == (1, 1)
+    if not calibrated and saturated_before:
+        pytest.skip(
+            f"the PjitFunctionCache these jits use was already at capacity "
+            f"when this test started, so "
+            f"_cache_size() has stopped counting {entry}'s traces: two "
+            f"guaranteed-fresh keys moved it by {after_dim - after_run} and "
+            f"{after_flows - after_dim} instead of 1 and 1.  Once the shared "
+            f"LRU evicts on every insert the counter is non-conservative and "
+            f"no baseline repairs it, so this run cannot measure the property.  "
+            f"Re-run this file in its own process to evaluate it."
+        )
+
+    assert after_run == 1, (
+        f"{n_solves} solves through {entry} produced {after_run} compiled "
+        f"entries, not 1; every one of them must reuse the same trace or the "
+        f"XLA compile is paid again and the re-gauging budget is gone.  The two "
+        f"probes after it moved the counter by {after_dim - after_run} and "
+        f"{after_flows - after_dim} against 1 and 1 expected, so "
+        + (
+            "it was tracking traces and this is a real miscount."
+            if calibrated
+            else "it was not tracking traces either -- and the shared cache "
+            "these jits use was not already at capacity when this test "
+            "started, so this is a dead counter, a jit that is never entered, "
+            "or a cache this run's own compiles filled -- not a pre-existing "
+            "LRU, which is the only thing that would excuse it."
+        )
+    )
+    assert after_dim == 2, (
+        f"a different bond dimension produced {after_dim - after_run} new "
+        f"entries, not 1, so the assertion above cannot distinguish 'one "
+        f"compile' from 'no counter'"
+    )
+    assert after_flows == 3, (
+        f"a pair with inverted flows produced {after_flows - after_dim} new "
+        f"entries, not 1; it reused an existing entry, and the flows are aux "
+        f"data that must be part of the key"
     )
 
 
@@ -703,7 +950,7 @@ def test_re_gauging_every_step_fits_the_simple_update_budget(record_property):
     in this file share the ``(D=2, max_iter=100, tol=1e-12)`` key, so the gate
     silently measured a warm solve and reported a passing ~250 ms.
 
-    **It withdraws rather than lying, on two conditions, and neither of them
+    **It withdraws rather than lying, on three conditions, and none of them
     widens the budget.**  Unlike every other assertion in this file this one is
     an absolute wall-clock number: the budget is 450 milliseconds and no ratio
     expresses it.  So it first establishes that the number is *measurable here*.
@@ -723,10 +970,19 @@ def test_re_gauging_every_step_fits_the_simple_update_budget(record_property):
        measures -- the same cross-check the task's own measurement discipline
        demanded before any number was believed.
 
-    Both are "the number cannot be measured here", never "the number is allowed
-    to be bigger here".  What still runs everywhere are the guards that do not
-    depend on the machine: one compiled entry, traced-vs-eager parity, flow
-    preservation, and the eager/warm ratio.
+    3. **And if the timed call cannot be shown to have compiled, it is not
+       either.**  The compile term is only a compile if the cleared cache
+       actually gained an entry across it, and the counter that answers that is
+       the same non-conservative ``_cache_size()`` the entry-count guard above
+       documents.  When it fails to move by one *and* jax's shared
+       ``PjitFunctionCache`` is confirmed at capacity, the claim is withdrawn;
+       when it fails to move by one and the cache is **not** saturated, that is
+       a real defect and the assertion fires.
+
+    All three are "the number cannot be measured here", never "the number is
+    allowed to be bigger here".  What still runs everywhere are the guards that
+    do not depend on the machine: one compiled entry, traced-vs-eager parity,
+    flow preservation, and the eager/warm ratio.
     """
     n_solves, D, budget_s = _budget()
     if _coverage_is_active():
@@ -753,15 +1009,48 @@ def test_re_gauging_every_step_fits_the_simple_update_budget(record_property):
 
     gauge_fix(A, B, **_GATE_KW)  # warm the eager remainder, as a real run has
     ig._gauge_fix_traced.clear_cache()
-    assert ig._gauge_fix_traced._cache_size() == 0, (
-        "the traced gauge is still cached, so the line below would time a warm "
-        "call and report a compile that never happened"
-    )
+    cleared = ig._gauge_fix_traced._cache_size()
+
+    # Sampled before the timed call, for the same reason the entry-count guard
+    # samples before its workload: the failure this test would report is extra
+    # compiles, and on a nearly-full shared cache those extra entries saturate
+    # it, so an after-the-fact reading lets the regression license its own
+    # skip.  This path was missed when that one was fixed -- the same defect
+    # twice in one file, which is why it is spelled out at both sites rather
+    # than cross-referenced.
+    saturated_before = _shared_pjit_cache_is_full()
 
     t0 = time.perf_counter()
     first = gauge_fix(A, B, **_GATE_KW)
     jax.block_until_ready(jax.tree_util.tree_leaves(first))
     compile_s = time.perf_counter() - t0
+
+    # Same counter, same treatment as the entry-count guard above: a difference,
+    # never an absolute.  This used to read ``_cache_size() == 0`` before the
+    # timed call, which is the assertion that failed CI at ``-7`` -- and it only
+    # escaped notice because condition 1 skips this test under ``--cov``, so the
+    # one invocation its own skip message recommends (``--no-cov``) was also the
+    # one that reached it.  Asked afterwards it is a stronger claim anyway: an
+    # empty cache before says the next call *may* compile, whereas one added
+    # entry says it *did*.
+    compiled = ig._gauge_fix_traced._cache_size() - cleared
+    if compiled != 1 and saturated_before:
+        pytest.skip(
+            f"the PjitFunctionCache these jits use was already at capacity when "
+            f"this test started, so "
+            f"_cache_size() moved by {compiled} rather than 1 across a call "
+            f"that had just had its cache cleared.  The counter cannot confirm "
+            f"that {compile_s * 1e3:.0f} ms is a compile rather than a warm "
+            f"call, so the budget is not evaluated here.  Re-run this file in "
+            f"its own process."
+        )
+    assert compiled == 1, (
+        f"the timed call added {compiled} entries to the traced gauge's cache "
+        f"instead of 1, so {compile_s * 1e3:.0f} ms is not one compile: the "
+        f"clear did not take and this timed a warm call, or the jit was never "
+        f"entered.  jax's shared cache is not at capacity, so the counter is "
+        f"not the excuse."
+    )
 
     warm_s = _warm_solve_seconds(A, B)
     total = compile_s + (n_solves - 1) * warm_s

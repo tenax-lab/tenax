@@ -1174,3 +1174,82 @@ def test_bp_weights_are_the_symmetric_chains_schmidt_values():
                 f"redistributed weight across charges (#865) or the legs were "
                 f"paired by position rather than by charge value (#834)."
             )
+
+
+def _pair_with_four_distinct_bond_dims(seed: int = 0):
+    """A checkerboard pair whose four bonds all have different dimensions.
+
+    Built by hand because ``_wrap_as_dense_tensor`` sizes all four virtual legs
+    from ``arr.shape[0]`` and so cannot express this.  The bonds are wired by
+    ``_BOND_OF``: ``h_AB`` is ``A.r``/``B.l``, ``h_BA`` is ``A.l``/``B.r``,
+    ``v_AB`` is ``A.d``/``B.u``, ``v_BA`` is ``A.u``/``B.d`` -- hence B's legs
+    are A's, crossed.
+    """
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import DenseTensor, TensorIndex
+
+    sym = U1Symmetry()
+
+    def leg(n, label, flow):
+        return TensorIndex.from_charges(
+            sym, np.zeros(n, dtype=np.int32), flow, label=label
+        )
+
+    def site(u, d, left, right, key):
+        arr = jnp.array(np.random.default_rng(key).normal(size=(u, d, left, right, 2)))
+        return DenseTensor(
+            arr,
+            (
+                leg(u, "u", FlowDirection.OUT),
+                leg(d, "d", FlowDirection.IN),
+                leg(left, "l", FlowDirection.OUT),
+                leg(right, "r", FlowDirection.IN),
+                leg(2, "phys", FlowDirection.IN),
+            ),
+        )
+
+    #      u  d  l  r          h_AB=2, h_BA=3, v_AB=4, v_BA=5
+    return site(5, 4, 3, 2, seed), site(4, 5, 2, 3, seed + 1)
+
+
+def test_gauge_fix_accepts_every_pair_the_solve_accepts():
+    """``gauge_fix`` must not be less capable than the solve it wraps.
+
+    Its incoming weights used to come from ``BondWeights.ones(D_h, D_v)``, which
+    gives ``h_AB`` and ``h_BA`` a single shared length -- so reading ``D_h`` off
+    ``A.r`` sized ``h_BA``, which lives on ``A.l``, to the wrong bond.  A square
+    pair hides it because the two agree.  Here they do not, and the shipped
+    wrapper died in ``scale_bond_axis`` with "cannot reshape array of shape (2,)
+    ... into shape [1, 1, 3, 1, 1]" on a pair ``bp_gauge_checkerboard`` gauges
+    without complaint -- which is what makes it a defect in the wrapper rather
+    than an unsupported input.
+
+    ``A.r != A.l`` is what direction-dependent U(1) simple update produces, so
+    this is a reachable state, not a constructed curiosity.
+    """
+    A, B = _pair_with_four_distinct_bond_dims()
+    expected = {"h_AB": 2, "h_BA": 3, "v_AB": 4, "v_BA": 5}
+
+    # The solve accepts it -- establish that first, or the test below cannot
+    # tell "gauge_fix is broken" from "this pair is not gaugeable".
+    w_in = BondWeights(**{k: jnp.ones(n) for k, n in expected.items()})
+    solved = bp_gauge_checkerboard(A, B, w_in, max_iter=30, tol=1e-10)
+    assert solved[3].converged, (
+        f"the reference solve did not converge on this pair ({solved[3]}), so "
+        f"it cannot witness anything about gauge_fix"
+    )
+
+    A_g, B_g, w, info = gauge_fix(A, B)
+
+    got = {k: int(np.asarray(getattr(w, k)).shape[0]) for k in expected}
+    assert got == expected, (
+        f"gauge_fix returned weights of lengths {got}, expected {expected}: an "
+        f"entry sized from the wrong leg means the four bonds are not being "
+        f"read independently"
+    )
+    for site_name, t, dims in (("A", A_g, (5, 4, 3, 2)), ("B", B_g, (4, 5, 2, 3))):
+        assert tuple(i.dim for i in t.indices[:4]) == dims, (
+            f"{site_name} came back with virtual dims "
+            f"{tuple(i.dim for i in t.indices[:4])}, not {dims}"
+        )
+    assert info.converged, f"gauge_fix did not converge on this pair: {info}"

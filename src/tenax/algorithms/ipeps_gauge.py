@@ -38,25 +38,32 @@ from tenax.contraction.contractor import contract
 from tenax.core._tensor_utils import scale_bond_axis
 from tenax.core.tensor import Tensor
 
-#: Module scope, not library scope.  None of these is re-exported from
-#: ``tenax/__init__.py`` or documented in ``README.md``, and that is deliberate:
-#: ``gauge_fix`` becomes part of the supported top-level API in #882's Phase 4,
-#: once the simple-update engine that consumes it exists.  Until then this
-#: module is reachable only by its full path.
-#:
-#: That split is the repo's norm rather than an exception -- 39 of the 46
-#: modules under ``src/tenax`` that define ``__all__`` name at least one symbol
-#: absent from ``tenax.__all__``, including public-named ones such as
-#: ``ipeps_ctm_init``, ``ipeps_ctm_moves`` and ``pess_optimize``.  ``__all__``
-#: here says what the module exports to an importer; ``tenax.__all__`` says
-#: what the library supports.  AGENTS.md's export-and-document rule is about
-#: the latter.
-__all__ = [
-    "absorb_weights",
-    "ctm_rdm2x1_planar",
-    "gauge_fix",
-    "torus_2x2_sign_free",
-]
+# No ``__all__`` until Phase 4.
+#
+# This module deliberately declares no exports.  ``gauge_fix``,
+# ``absorb_weights``, ``ctm_rdm2x1_planar`` and ``torus_2x2_sign_free`` are
+# public-*named* because Phase 4 (#882) makes ``gauge_fix`` part of the
+# supported top-level API once the simple-update engine that consumes it
+# exists.  Until that lands, none of them is re-exported from
+# ``tenax/__init__.py`` or documented in ``README.md``, so an ``__all__``
+# listing them advertised a public surface that does not resolve as
+# ``tenax.X``.
+#
+# An earlier revision kept the list, defended by "39 of the 46 modules under
+# ``src/tenax`` that define ``__all__`` name at least one symbol absent from
+# ``tenax.__all__``".  That count is real but does not support the claim, and
+# it was used to rebut a review finding, so the record is corrected rather than
+# quietly dropped: 37 of those 46 modules are ``_``-prefixed, where divergence
+# is definitional, and a symbol is also reachable when ``tenax/__init__.py``
+# registers it in ``_LAZY_IMPORTS`` instead of listing it in ``__all__``.
+# Counting public-named symbols of public-named modules against
+# ``tenax.__all__ | _LAZY_IMPORTS``, exactly **two** diverge -- this module and
+# ``ipeps_optimize_root_implicit`` -- while the nearest sibling goes the other
+# way, all three of ``ipeps_bp_gauge.__all__`` resolving as ``tenax.X``.  One
+# precedent is not a norm, so the finding was right and the list is gone.
+#
+# Add ``__all__`` back in Phase 4, together with the ``tenax/__init__.py``
+# export and the ``README.md`` entry, as one change.
 
 
 def absorb_weights(A: Tensor, B: Tensor, weights: BondWeights) -> tuple[Tensor, Tensor]:
@@ -82,18 +89,31 @@ def absorb_weights(A: Tensor, B: Tensor, weights: BondWeights) -> tuple[Tensor, 
 
 
 def _identity_weights(A: Tensor) -> BondWeights:
-    """``BondWeights.ones`` at this pair's two bond dimensions.
+    """Unweighted bonds at **each of this pair's four** bond dimensions.
 
     Correct as the *incoming* weights precisely because the pair is in absorbed
     form: it already carries its own ``lambda``, so the bonds between the
-    tensors handed to the solve really are unweighted.  Read off ``A``'s ``r``
-    and ``d`` legs rather than assuming a square ``D``: the chain anchor's PEPS
-    embedding has dimension-1 vertical legs.
+    tensors handed to the solve really are unweighted.
+
+    Every entry is sized from **its own** leg, via the same ``_BOND_OF`` table
+    :func:`absorb_weights` and the solve use, rather than from a single
+    horizontal and a single vertical dimension.  ``BondWeights.ones(D_h, D_v)``
+    gives ``h_AB`` and ``h_BA`` one length and ``v_AB`` and ``v_BA`` another, so
+    reading ``D_h`` off ``A.r`` silently sized ``h_BA`` -- which lives on
+    ``A.l`` -- to the wrong bond.  On a square pair the two agree and nothing
+    shows; on a pair whose four checkerboard bonds differ, ``gauge_fix`` died
+    inside ``scale_bond_axis`` on a pair ``bp_gauge_checkerboard`` handles
+    perfectly well, making this wrapper strictly less capable than the solve it
+    wraps.  Not hypothetical: ``A.r != A.l`` is what direction-dependent
+    U(1) simple update produces.
+
+    Reading the dimensions off the legs at all -- rather than assuming a square
+    ``D`` -- is still load-bearing for the chain anchor, whose PEPS embedding
+    has dimension-1 vertical legs.
     """
     labels = A.labels()
-    return BondWeights.ones(
-        A.indices[labels.index("r")].dim, A.indices[labels.index("d")].dim
-    )
+    dim_of = {leg: A.indices[labels.index(leg)].dim for leg in _LEGS}
+    return BondWeights(**{_BOND_OF[("A", leg)]: jnp.ones(dim_of[leg]) for leg in _LEGS})
 
 
 @partial(jax.jit, static_argnums=(2, 3))
