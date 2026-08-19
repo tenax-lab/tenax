@@ -742,7 +742,39 @@ _MUTANTS = [
             ),
             r"\(relative error ([0-9.e+-]+)\)\.  The truncation is not taking "
             r"the globally largest singular values",
-            (1e-3, 10.0),
+            # (0.1, 0.3), not the neighbours' looser (lo, 10x) shape -- fix
+            # round 2, F8.  The *upper* bound is a provable property of the
+            # reading, not a measurement: err = max|sigma_kept -
+            # sigma_full[:D]| / sigma_full[0], and both spectra lie in
+            # [0, sigma_full[0]] by construction, so err in [0, 1] for every
+            # possible input.  Any upper bound above 1.0 therefore has a half
+            # that cannot fire by construction -- this branch's own recurring
+            # defect (an assertion that cannot fire), which is why this row
+            # does not get to ship one.  The comparison below is
+            # ``lo <= reading <= hi`` (inclusive both ends), so this is not
+            # cosmetic: an inclusive 1.0 upper bound would still admit a
+            # reading of exactly 1.000, and on this cell's own measured
+            # spectrum "keep the smallest max_D" -- the dense arm's
+            # 1.000e+00 in the comment table above -- lands at err = 1.000
+            # exactly.  Separating that from #865's own reading is what the
+            # 0.3 upper bound buys and 1.0 would not.
+            #
+            # 0.1 and 0.3 bracket the reading with headroom on both sides,
+            # measured rather than assumed: killed at 1.787e-01 inside pytest
+            # (``{err:.3e}`` in the message) and at 1.786891e-01 to full
+            # precision outside it.  The nearest *other* value in this cell's
+            # own spectrum is sigma_4 / sigma_0 = 0.434414 -- 4.4% away from
+            # the reading -- and the largest known source of run-to-run drift
+            # is the BP gauge's own convergence tolerance
+            # (``ipeps_gauge.gauge_fix``, ``tol = 1e-6``), roughly five orders
+            # of magnitude below the ~40% of headroom this band leaves before
+            # either edge is threatened.  That is the whole basis for this row
+            # being tighter than its four siblings, and it is a bound from
+            # one box's numbers, not a proof: cross-platform stability of
+            # 1.787e-01 is unverified, and the headroom argument above rests
+            # on a single machine's BP-gauge tolerance, not a measurement on
+            # a second one.
+            (0.1, 0.3),
         ),
         marks=pytest.mark.slow,
         id="865-base-charges-pinned-on-the-truncation-guard",
@@ -862,9 +894,21 @@ def test_the_869_mutant_reproduces_the_pre_fix_engine_bond_for_bond():
     parametrised cell establishes an unmutated pass for ``h_AB`` alone; the
     other three had none, so on those the "it failed" half rested on nothing
     and would have read the same way against a red cell.  Each bond is
-    therefore run unmutated first here as well, with the same C-1 refusal.  The
-    guard is cheap (~0.15 s a bond), so this is a fifth of a second, not a
-    trade.
+    therefore run unmutated first here as well, with the same C-1 refusal.
+
+    This is not a trade: fix round 2 re-measured the whole function
+    (``JAX_PLATFORMS=cpu ... --no-cov -p no:randomly``, 3 runs each, one box)
+    on both sides of the change that added the per-bond C-1 checks, and it is
+    free within run-to-run noise -- 3.67 s (load 4.1 -> 8.5) at ``01cd473``
+    versus 3.75 s (load 8.1 -> 13.0) at the revision that added them, a
+    smaller gap than the run-to-run spread at either revision alone.  The
+    previous "~0.15 s a bond ... a fifth of a second" was wrong on both
+    halves -- neither number was measured, and they disagree with each other
+    (4 bonds x 0.15 s = 0.6 s, not 0.2 s) -- so it is corrected here rather
+    than tightened.  The eight guard calls this loop makes (four bonds, each
+    run unmutated then mutated) share the one JIT trace/compile the first
+    call pays; that is why adding four more calls does not show up in the
+    wall clock.
     """
     got = []
     for bond in guards._BONDS:
@@ -873,7 +917,8 @@ def test_the_869_mutant_reproduces_the_pre_fix_engine_bond_for_bond():
         # AssertionError" is satisfied by a mutation that does nothing -- the
         # same hole the parametrised cell's side 1 exists to close, and it does
         # not stop being a hole because the discriminator below is a 1e-6
-        # multiset rather than ``pytest.raises``.  ~0.15 s per bond.
+        # multiset rather than ``pytest.raises``.  Free within noise -- see
+        # the docstring above.
         try:
             guards.test_su_step_truncates_in_the_state_s_own_basis(bond)
         except BaseException as exc:  # noqa: BLE001 -- pytest.fail re-raises cleanly
