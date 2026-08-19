@@ -18,6 +18,8 @@ tests use a trivial closed-form map and cost nothing.
 
 from __future__ import annotations
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -577,6 +579,126 @@ def test_an_energy_offset_that_swallows_the_difference_is_reported():
 
     with pytest.raises(ValueError, match="rounding floor of the energy"):
         measure_gradient_error(offset_energy, _wrap(np.ones((2, 2, 2, 2, 2))))
+
+
+#: A subnormal-scale objective, in the regime where ``eps * |E|`` is zero.
+#:
+#: ``OFFSET`` is 2.02e+09 units in the last place and ``SLOPE`` is 2024, so the
+#: energy is pinned at ``|E| ~ 1e-314`` -- far below the measured
+#: ``2.781342323134e-309`` at which ``4 * eps * |E|`` stops rounding to exactly
+#: zero -- while the *difference* between two perturbed energies is a handful of
+#: ULP.  That is the whole shape of #885: a span that is pure quantization, sat
+#: on top of a floor that has collapsed to nothing.
+_SUBNORMAL_OFFSET = 1e-314
+_SUBNORMAL_SLOPE = 1e-320
+#: Chosen so both spans are non-zero (the *old* floor of 0.0 admits them) and at
+#: most 4 ULP (the absolute floor rejects them): 4 ULP at h=1e-3, 1 ULP at
+#: h=2.5e-4.  The factor-4 separation clears the step-spacing guard.
+_SUBNORMAL_STEPS = (1e-3, 2.5e-4)
+
+
+def _subnormal_energy(t):
+    """``E = OFFSET + SLOPE * sum(x)`` evaluated in NumPy, gradient exact.
+
+    NumPy on purpose: XLA-CPU flushes subnormals to zero, so an energy computed
+    through ``jnp`` cannot reach this regime.  ``measure_gradient_error`` takes
+    any Python callable, so a host-side objective can.
+    """
+    x = np.asarray(t.todense())
+    grad = np.full(x.shape, np.float64(_SUBNORMAL_SLOPE))
+    return np.float64(
+        _SUBNORMAL_OFFSET + np.float64(_SUBNORMAL_SLOPE) * np.sum(x)
+    ), grad
+
+
+def test_a_subnormal_energy_is_refused_rather_than_measured_on_quantization_noise():
+    """#885: the rounding floor must not underflow to zero.
+
+    ``floor = 4 * eps * |E|`` is a *relative* quantum, and below the smallest
+    normal it evaluates to exactly 0.0 -- so ``span <= floor`` degenerates to
+    ``span <= 0.0`` and admits any difference made of one or two units in the
+    last place.  It is not a division by zero; ``floor`` is never a denominator.
+    It is a vacuous comparison, and what comes out the other side is worse than
+    a crash: with an *exact* gradient the scan reports 12.8% relative error and
+    publishes an ``unresolved_bound`` of 1.0 built out of quantization noise,
+    where the identical map at normal scale reports 1.08e-07.
+    """
+    tiny = np.finfo(np.float64).smallest_subnormal
+    base = np.ones((2, 2, 2, 2, 2))
+    direction = np.zeros((2, 2, 2, 2, 2))
+    direction.flat[0] = 1.0
+
+    # Assert the regime, or this goes vacuous the moment the constants drift.
+    energies, spans = [], []
+    for h in _SUBNORMAL_STEPS:
+        e_plus, _ = _subnormal_energy(_wrap(base + h * direction))
+        e_minus, _ = _subnormal_energy(_wrap(base - h * direction))
+        energies.append(max(abs(e_plus), abs(e_minus)))
+        spans.append(abs(e_plus - e_minus))
+    assert all(e < np.finfo(np.float64).smallest_normal for e in energies), energies
+    assert all(4.0 * np.finfo(np.float64).eps * e == 0.0 for e in energies), (
+        "fixture no longer reaches the regime where the relative floor "
+        f"underflows: |E| = {energies}"
+    )
+    assert all(0.0 < s <= 4.0 * tiny for s in spans), (
+        "each span must be non-zero -- so the pre-fix floor of 0.0 admits it -- "
+        f"and at most 4 ULP, so the absolute floor rejects it: {spans}"
+    )
+
+    with pytest.raises(ValueError, match="rounding floor of the energy"):
+        measure_gradient_error(
+            _subnormal_energy,
+            _wrap(base),
+            direction=direction,
+            steps=_SUBNORMAL_STEPS,
+        )
+
+
+def test_the_subnormal_refusal_is_the_absolute_floor_and_not_some_other_guard():
+    """Mutation check: restore the underflow and the scan measures the noise.
+
+    Without this the test above proves only that *something* rejected the scan.
+    The mutant is the pre-#885 expression -- the relative term alone -- and
+    under it the same call must come back with a report rather than raising,
+    and that report must be badly wrong about an exactly-correct gradient.
+    """
+    import tenax.algorithms._root_implicit_gradient_check as mod
+
+    src = inspect.getsource(mod)
+    anchor = """            floor = 4.0 * max(
+                _energy_eps() * max(abs(e_plus), abs(e_minus)),
+                _energy_quantum(),
+            )"""
+    assert src.count(anchor) == 1, (
+        "the mutation anchor is not unique, so this test would mutate an "
+        f"unknown site: {src.count(anchor)} matches"
+    )
+    mutated = src.replace(
+        anchor,
+        "            floor = 4.0 * _energy_eps() * max(abs(e_plus), abs(e_minus))",
+    )
+    assert mutated != src
+
+    namespace: dict = {}
+    exec(compile(mutated, mod.__file__, "exec"), namespace)  # noqa: S102
+    mutant_measure = namespace["measure_gradient_error"]
+
+    base = np.ones((2, 2, 2, 2, 2))
+    direction = np.zeros((2, 2, 2, 2, 2))
+    direction.flat[0] = 1.0
+
+    report = mutant_measure(
+        _subnormal_energy,
+        _wrap(base),
+        direction=direction,
+        steps=_SUBNORMAL_STEPS,
+    )
+    # The gradient handed in is EXACT, so anything above roundoff here is the
+    # quantization noise being read as signal.
+    assert report.relative_error > 1e-3, (
+        "the mutant must measure something, and measure it wrongly, or the "
+        f"test above is not pinning this guard: {report.summary()}"
+    )
 
 
 def test_the_same_energy_without_the_offset_measures_fine():
