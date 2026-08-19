@@ -590,16 +590,22 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
         :func:`_require_uniform_bonds`, which is the authority on this and
         which :func:`_su_evolve` enforces.
 
-        The short form: ``gauge_fix`` reads **one** ``D_h`` off ``A.r`` and one
-        ``D_v`` off ``A.d`` and hands each to both bonds of that orientation
-        (``ipeps_gauge._identity_weights``), and it runs at the *start* of every
-        step.  One call here can only move one bond.  So the very first step at
-        any ``max_D != D`` leaves a pair that cannot be gauged, and the
-        **second** step raises inside ``absorb_weights`` -- at step index 1, in
-        the middle of the first cycle, whatever order the bonds are visited in.
-        There is no cycle to complete and no boundary to defer to, and
-        *shrinking* fails identically to growing.  Changing ``D`` means building
-        a new pair at the new ``D``, not passing a different ``max_D``.
+        The short form used to be mechanical: before #887, ``gauge_fix`` read
+        **one** ``D_h`` off ``A.r`` and one ``D_v`` off ``A.d`` and handed each
+        to both bonds of that orientation (``ipeps_gauge._identity_weights``),
+        so the very first step at any ``max_D != D`` left a pair that could not
+        be gauged, and the next call raised inside ``absorb_weights``.  #887
+        changed ``_identity_weights`` to size each of the four bonds from its
+        own leg, and that mechanism is gone: measured post-#887 (dense,
+        ``D=3``, calling this function directly so :func:`_require_uniform_bonds`
+        never runs), a full four-bond cycle now completes without raising for
+        both ``max_D=D-1`` (shrink) and ``max_D=D+1`` (grow), landing uniform
+        at the new ``D``.  :func:`_require_uniform_bonds` still refuses this on
+        every call it guards -- now as **policy**, because nothing has measured
+        that the resulting state agrees with a fresh run built at the new
+        ``D``, not because the gauge cannot be found.  #897 tracks that open
+        question.  Changing ``D`` means building a new pair at the new ``D``,
+        not passing a different ``max_D`` to this call.
 
     Performance:
         ``gauge_fix`` is called at its **default** ``tol=1e-6``.  That buys
@@ -756,50 +762,55 @@ def _bond_dims(state: _SUState) -> dict[str, int]:
 def _require_uniform_bonds(state: _SUState, max_D: int, where: str) -> None:
     """Refuse a pair whose four bonds are not all at ``max_D``.
 
-    **The precondition is much stronger than "do not grow ``D`` mid-cycle", and
-    the difference is measured rather than reasoned.**  ``gauge_fix`` reads one
-    ``D_h`` off ``A.r`` and one ``D_v`` off ``A.d`` and hands each to *both*
-    bonds of that orientation (``ipeps_gauge._identity_weights``), so a pair
-    whose two horizontal bonds differ cannot be gauged at all.  An
-    :func:`_su_step` sets the bond it updates to ``max_D`` whatever it was
-    before, so any ``max_D != D`` makes the pair non-uniform on the **first**
-    step and the **second** step then dies inside ``absorb_weights`` --
-    ``TypeError: cannot reshape array of shape (4,) into shape [1, 1, 3, 1, 1]``,
-    four frames below the caller.  Measured on ``D=3``, dense and symmetric,
-    stepping ``h_AB`` then ``v_AB``::
+    **This is policy, not a ``gauge_fix`` limitation -- it used to be the
+    latter, and the difference is measured rather than reasoned.**  Before
+    #887, ``gauge_fix`` read one ``D_h`` off ``A.r`` and one ``D_v`` off
+    ``A.d`` and handed each to *both* bonds of that orientation
+    (``ipeps_gauge._identity_weights``), so a pair whose two horizontal bonds
+    differed genuinely could not be gauged, and the state this guard refuses
+    was unreachable except by crashing.  #887 changed ``_identity_weights`` to
+    size each of the four bonds from its own leg, and that mechanism is gone.
+    Measured post-#887 (dense, ``D=3``, bypassing this guard by calling
+    :func:`_su_step` directly, cycling ``h_AB``, ``v_AB``, ``h_BA``,
+    ``v_BA``)::
 
-        max_D=2 (shrink)   step 0 -> A.r = 2, A.l = 3    step 1 RAISES
-        max_D=4 (grow)     step 0 -> A.r = 4, A.l = 3    step 1 RAISES
-        max_D=3 (match)    step 0 -> A.r = 3             step 1, 2, 3 all fine
+        _identity_weights on {h_AB: 4, rest: 3}  -> {h_AB: 4, h_BA: 3,
+                                                       v_AB: 3, v_BA: 3}
+        gauge_fix on that pair                   -> converged=True,
+                                                       15 iterations,
+                                                       residual 6.387e-07
+        max_D=2 (shrink) from D=3                -> all four steps complete,
+                                                       uniform at 2
+        max_D=4 (grow)   from D=3                -> all four steps complete,
+                                                       uniform at 4
 
-    Three consequences, all of which contradict the obvious reading:
+    **"Completes without raising" is not "correct."**  These are real
+    ``truncated_svd`` calls taken in whatever basis ``gauge_fix`` found for a
+    non-uniform pair, and nothing has measured that the resulting state is the
+    state a fresh run at the new ``D`` would produce.  Until something does,
+    ``D`` changes between runs, not within one -- which is how ``ipeps()``
+    already uses it, building the pair at ``config.max_bond_dim`` and passing
+    that same number as ``max_D`` (``ipeps.py:408``).  Growing a converged
+    state is a re-initialisation (pad the pair, then evolve at the new ``D``),
+    and it is out of scope for this module.
 
-    * **Shrinking is no more available than growing.**  Both leave the same
-      non-uniform pair.
-    * **"Complete whole cycles" does not rescue it.**  The failure is at step
-      index 1, inside the first cycle, so there is no cycle boundary to defer
-      growth to; a run of ``steps=4`` with ``max_D=4`` from ``D=3`` gets one
-      step in, not four.
-    * **No bond ordering rescues it either.**  ``gauge_fix`` runs at the *start*
-      of every step and takes two dimensions for four bonds, and one
-      :func:`_su_step` can only move one bond, so the pair is ungaugeable after
-      the *first* step whichever bond that was.  Refusing is therefore not a
-      conservative choice; it is the only reachable contract while ``gauge_fix``
-      reads a ``D_h`` and a ``D_v`` rather than four dimensions.
+    So this guard is now a choice kept because the correctness question is
+    open, not because the alternative crashes -- a future task could relax it
+    once something answers that question.  #897 tracks it, including partial
+    cycles and the interaction with the post-step check in
+    :func:`_su_evolve`, which this docstring does not repeat.
 
-    ``D`` therefore changes between runs, not within one -- which is how
-    ``ipeps()`` already uses it, building the pair at ``config.max_bond_dim``
-    and passing that same number as ``max_D`` (``ipeps.py:408``).  Growing a
-    converged state is a re-initialisation (pad the pair, then evolve at the new
-    ``D``), and it is out of scope for this module.  Note that this is not a
-    capability being taken away from the shipped path: measured,
-    ``_simple_update_checkerboard_sweep`` at its **default**
-    ``independent_bonds=False`` raises the identical ``TypeError`` at the
-    identical step index for ``max_D != D`` in either direction.  Re-dimensioning
-    over a full four-bond cycle works only under the non-default
-    ``su_independent_bond_lambdas=True``, where four independent stored spectra
-    mean no gauge is ever re-derived from a non-uniform pair -- which is exactly
-    the capability #882 trades away by deleting the storage.
+    Not a capability the shipped path loses either, and unaffected by #887
+    since ``ipeps_simple_update.py`` never calls ``ipeps_gauge``: measured this
+    session (dense, ``D=3``), ``_simple_update_checkerboard_sweep`` at its
+    **default** ``independent_bonds=False`` still raises a reshape
+    ``TypeError`` at step index 1 for ``max_D != D`` in either direction, and
+    completes all four steps under the non-default
+    ``su_independent_bond_lambdas=True`` -- where four independent stored
+    spectra mean no gauge is ever re-derived from a non-uniform pair -- which
+    is exactly the capability #882 trades away by deleting the storage, by
+    design, not because this module's own gauge can no longer complete the
+    cycle.
 
     Args:
         state:  The pair to check.
@@ -814,12 +825,12 @@ def _require_uniform_bonds(state: _SUState, max_D: int, where: str) -> None:
     if off:
         raise ValueError(
             f"_su_evolve needs all four bonds at max_D={max_D}, but {where} "
-            f"carries {dims} -- off on {off}.  Each step re-derives "
-            f"the gauge with gauge_fix, "
-            f"which reads a single D_h off A.r and a single D_v off A.d and "
-            f"applies each to both bonds of that orientation, so a pair whose "
-            f"bonds disagree cannot be gauged -- the next step would die inside "
-            f"absorb_weights with a reshape error rather than here.  max_D is "
+            f"carries {dims} -- off on {off}.  This is a policy choice, not a "
+            f"gauge_fix limitation (see #897): since #887, gauge_fix can size "
+            f"a non-uniform pair -- each bond from its own leg, not one D_h "
+            f"and one D_v handed to both bonds of an orientation -- but "
+            f"nothing has measured that the truncation this would drive "
+            f"agrees with a fresh run built at the new D.  max_D is "
             f"the dimension this pair already has; changing D means building a "
             f"new pair at the new D and evolving that, not passing a different "
             f"max_D to this call."
@@ -924,10 +935,14 @@ def _su_evolve(state: _SUState, gate: Tensor, max_D: int, steps: int) -> _SUStat
 
             It is kept anyway, as an assertion and not as a guard against an
             expected event: it is eight metadata reads, the message names the
-            step and the bond, and the failure it would report -- an ungaugeable
-            pair handed to the next step -- otherwise surfaces as a reshape
-            ``TypeError`` several frames below the caller.  The one thing that
-            reaches it is a broken ``_su_step``, which is exactly what
+            step and the bond, and -- since #887 -- the failure it would report
+            no longer reliably announces itself on its own.  Measured (see
+            :func:`_require_uniform_bonds`), a non-uniform pair can now be
+            gauged and evolved through further steps rather than crashing, so
+            without this check a drift here could propagate silently instead
+            of stopping at the step that caused it, rather than surfacing a
+            few frames below the caller the way it used to.  The one thing
+            that reaches it is a broken ``_su_step``, which is exactly what
             ``test_su_evolve_names_the_step_that_broke_bond_uniformity``
             substitutes.
 

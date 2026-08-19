@@ -256,9 +256,12 @@ def _ones_for(A):
     ``BondWeights.ones(D_h, D_v)`` gives both horizontal bonds one dimension
     and both vertical bonds another, which is right only while all four agree.
     A single ``_su_step`` truncates one bond and leaves the other three alone,
-    so mid-cycle they do not.  (``gauge_fix`` reads its dimensions the same way
-    and therefore cannot be run on such a pair at all -- see ``_su_step``'s
-    Note; that is why the untruncated cases below never re-gauge.)
+    so mid-cycle they do not -- and this helper, built from exactly two
+    dimensions, cannot represent that split even though ``gauge_fix`` itself
+    now can (since #887; see ``_su_step``'s Note).  That is why the
+    untruncated cases below never re-gauge: not because the pair is
+    ungaugeable, but because this helper's own two-dimension shape cannot
+    describe one that is not.
     """
     dim = {lab: A.indices[A.labels().index(lab)].dim for lab in ("u", "d", "l", "r")}
     return BondWeights(
@@ -1684,25 +1687,26 @@ def test_su_evolve_visits_four_distinct_bonds_per_cycle(su, monkeypatch):
 def test_su_evolve_rejects_a_max_D_the_pair_does_not_have(max_D, su):
     """``max_D`` is the pair's dimension, not a truncation knob -- and it is checked.
 
-    ``gauge_fix`` reads one ``D_h`` off ``A.r`` and one ``D_v`` off ``A.d`` and
-    hands each to *both* bonds of that orientation, so a pair whose two
-    horizontal bonds differ cannot be gauged.  A step sets the bond it updates
-    to ``max_D`` whatever it was, so any ``max_D != D`` makes the pair
-    non-uniform immediately and the *next* step dies four frames down inside
+    Before #887, ``gauge_fix`` read one ``D_h`` off ``A.r`` and one ``D_v`` off
+    ``A.d`` and handed each to *both* bonds of that orientation, so a pair
+    whose two horizontal bonds differed could not be gauged at all, and a step
+    at any ``max_D != D`` made the *next* step die four frames down inside
     ``absorb_weights`` with ``cannot reshape array of shape (4,) into shape
-    [1, 1, 3, 1, 1]``.
+    [1, 1, 3, 1, 1]``.  #887 changed ``ipeps_gauge._identity_weights`` to size
+    each of the four bonds from its own leg, and that mechanism is gone:
+    measured post-#887 (dense, ``D=3``, calling :func:`_su_step` directly so
+    this guard is bypassed), a full four-bond cycle now completes without
+    raising for both ``max_D=D-1`` (shrink) and ``max_D=D+1`` (grow).  The
+    guard below is therefore **policy**, kept because nothing has measured that
+    a state produced by truncating across a mixed-dimension pair agrees with a
+    fresh run built at the new ``D`` -- see
+    :func:`ipeps_su._require_uniform_bonds` for the measurements and #897 for
+    the open question.  "Completes without raising" is not "correct."
 
-    The last half measures that mechanism instead of quoting it, and it is what
-    makes this guard a statement about ``_su_evolve`` rather than about a
-    docstring.  It also corrects two things the plan assumed:
-
-    * **shrinking is no more available than growing** -- ``max_D=2`` from
-      ``D=3`` leaves exactly the same non-uniform pair as ``max_D=4`` does, and
-      dies at the same place (measured on both the dense and the symmetric
-      arm);
-    * **completing whole cycles does not rescue it** -- the failure is at step
-      index **1**, inside the first cycle, so there is no cycle boundary to
-      defer growth to.
+    The last half measures what one step actually leaves behind, rather than
+    assuming it: an unguarded ``_su_step`` still resizes only the bond it
+    touches, so the pair it returns is genuinely non-uniform -- the premise
+    the guard below refuses -- whichever direction ``max_D`` moves.
 
     **The message is matched on ``the input pair``, not on the shared prefix,
     and that is the whole difference between this test having teeth and not.**
@@ -1727,9 +1731,10 @@ def test_su_evolve_rejects_a_max_D_the_pair_does_not_have(max_D, su):
     stepped = _su_step(state, gate, max_D=max_D, bond="h_AB")
     dims = _bond_dims(stepped)
     assert dims == {"h_AB": max_D, "h_BA": D, "v_AB": D, "v_BA": D}, (
-        f"one step at max_D={max_D} left the bonds at {dims}; this guard exists "
-        f"because that pair is not gaugeable, so if the step no longer produces "
-        f"it the guard needs re-deriving, not deleting"
+        f"one step at max_D={max_D} left the bonds at {dims}; the guard this "
+        f"feeds is policy pending a correctness measurement (#897), not a "
+        f"response to that pair being ungaugeable, so if the step no longer "
+        f"produces this the guard's premise needs re-deriving, not deleting"
     )
     # Watched failing: an ``_su_step`` that drops ``max_singular_values``
     # reports ``{'h_AB': 54, 'h_BA': 3, 'v_AB': 3, 'v_BA': 3}`` here -- still
