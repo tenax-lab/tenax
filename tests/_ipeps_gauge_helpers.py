@@ -535,9 +535,15 @@ _SYM_PHYS_CHARGES = np.array([1, 0, -1], dtype=np.int32)
 #: The two virtual spaces, one per inequivalent horizontal bond: ``_SYM_VIRT_BA``
 #: is ``a.l <-> b.r`` (which the PEPS calls ``h_BA``) and ``_SYM_VIRT_AB`` is
 #: ``a.r <-> b.l`` (``h_AB``).  Deliberately **different multisets of the same
-#: dimension**: same dimension because ``gauge_fix`` reads one ``D_h`` off
-#: ``A.r`` and hands it to both horizontal bonds, different multisets because
-#: that is what makes the two bonds structurally distinguishable -- after the
+#: dimension**: same dimension is this fixture's own choice, **not** something
+#: ``gauge_fix`` forces.  (It used to be forced: before #887,
+#: ``ipeps_gauge._identity_weights`` read one ``D_h`` off ``A.r`` and handed it
+#: to both horizontal bonds.  #887 sizes each of the four bonds from its own
+#: leg, and ``test_ipeps_gauge.py``'s own
+#: ``_pair_with_four_distinct_bond_dims`` gauges ``{2, 3, 4, 5}`` to prove it.
+#: Holding the dimension fixed here keeps the *multiset* the only thing that
+#: varies, which is what the paragraph below relies on.)  Different multisets
+#: because that is what makes the two bonds structurally distinguishable -- after the
 #: flow inversion they carry multiplicities ``[1, 1, 2]`` and ``[2, 1, 1]`` over
 #: sectors ``[-1, 0, 1]``, so a transposed ``l``/``r`` is visible in the gauged
 #: pair's own index metadata and not only in the numbers.
