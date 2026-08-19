@@ -46,7 +46,9 @@ Three further disciplines, each of them a bug this project has already paid for:
   is a second thing to keep in step with the first, and it is the paraphrase
   that would be mutated into agreement.
 
-Measured kills (``JAX_PLATFORMS=cpu ... --no-cov -p no:randomly``, load ~1):
+Measured kills (``JAX_PLATFORMS=cpu ... --no-cov -p no:randomly``; the first
+five re-measured in fix round 1 at box load 3.9 -> 6.8 and unchanged to every
+digit, the sixth taken at load 6.4 -> 4.0):
 
 ======  ===========================  =====================================  =================
 mutant  re-introduces                killed by                              reading
@@ -57,6 +59,8 @@ mutant  re-introduces                killed by                              read
         the twin bond
 865     ``base_charges`` pinned to   ``..._the_vidal_metric_matches_a_...`` ratio = 15.266305x
         the old bond layout          ``spectrum_derived_outside_tenax``
+865     ``base_charges`` pinned to   ``..._su_step_keeps_the_largest_``    err = 1.787e-01
+        the old bond layout          ``singular_values`` (``slow``)
 869     the metric never re-derived  ``..._su_step_truncates_in_the_...``   ratio = 1.010944x
         (weights flat at one)
 6.2a    all of ``sigma`` on the      ``..._su_step_splits_sqrt_sigma_...``  |G_i-G_j| = 3.450e+00
@@ -65,6 +69,15 @@ mutant  re-introduces                killed by                              read
 
 Every one of those numbers is the guard's **own** formatting of its **own**
 reading, lifted out of the assertion message rather than recomputed here.
+
+**#865 appears twice on purpose.**  The guard the tree names for it --
+``test_su_step_keeps_the_largest_singular_values`` -- could not demonstrate a
+kill at ``01cd473``, because its symmetric meta-assertion builds its reference
+with the same pin the defect applies and so pre-empted the claim; fix round 1
+reordered the two in ``test_ipeps_su.py`` and the pinned negative finding became
+the second row, at 1.787e-01 (the number the meta-assertion held before the
+swap).  The cheap external-anchor kill stays: two independent kills on one
+defect, one of them at 23 s, is worth more than either alone.
 
 Two of them reproduce figures already recorded in the tree from probes that no
 longer exist, which is the point of committing this file rather than quoting a
@@ -101,8 +114,11 @@ Row 2 is C-1 in one line: against a cell that is already red, the plan's
 ``pytest.raises(AssertionError)`` would have reported a kill for a mutation that
 did nothing.
 
-**What this file does not do.**  It does not mutate ``ipeps_su.py`` on disk and
-it does not touch ``test_ipeps_su.py``.  Every mutation is a monkeypatch of a
+**What this file does not do.**  It does not mutate ``ipeps_su.py`` on disk, and
+it neither edits nor re-implements a guard: it imports each one and calls it.
+(The one edit fix round 1 *did* make to ``test_ipeps_su.py`` is the reorder
+described above -- two assertions moved earlier in a single guard, changing
+nothing that guard accepts.)  Every mutation is a monkeypatch of a
 module-level name that :func:`~tenax.algorithms.ipeps_su._su_step` looks up *at
 call time*, so it bites however the guard reached the step -- through
 ``test_ipeps_su``'s own ``from ... import _su_step`` binding, or through
@@ -582,34 +598,49 @@ def _mutant_62a():
 # Two rows depart from the brief on grounds of *what the mutant can reach*
 # rather than of naming, and both departures were forced by a measurement:
 #
-# * **865 -> the external chain anchor, not the D=3 rank guard and not the
-#   truncation guard either.**  The brief maps the ``base_charges`` pin onto
+# * **865 -> two guards, neither of them the D=3 rank guard.**  The brief maps
+#   the ``base_charges`` pin onto
 #   ``test_d3_actually_uses_its_third_bond_direction``, which runs on the
 #   **dense** arm -- where ``linalg.svd`` ignores ``base_charges`` outright, so
 #   the mutation is a no-op there and the cell could only ever report a
 #   survival.  ``test_the_865_mutant_is_invisible_on_the_dense_arm`` is that
 #   fact, measured.
 #
-#   The obvious replacement is
+#   The guard the brief's table should have named is
 #   ``test_su_step_keeps_the_largest_singular_values[symmetric-h_AB]``, whose own
 #   docstring calls it "the only executable coverage of ``base_charges=None`` ...
-#   (#865)".  **It cannot demonstrate the kill**, and the reason is this task's
-#   subject one level down: that cell builds its #865 reference by pinning the
-#   *same* charges the mutant pins, so under the mutation the reference and the
-#   code coincide, the "this cell can see #865" meta-assertion fires at a
-#   separation of 6.237e-16, and the claim -- ``kept == top-D`` -- is never
-#   reached.  It is a detector; it is not a demonstration that its claim is
-#   watched.  ``test_the_865_pin_disqualifies_its_own_guard_before_the_claim``
-#   pins that finding rather than leaving it in a report.
+#   (#865)".  **At 01cd473 it could not demonstrate the kill**, for a reason
+#   that is this task's own subject one level down: that cell built its #865
+#   reference by pinning the *same* charges the mutant pins, so under the
+#   mutation reference and code coincided, its "this cell can see #865"
+#   meta-assertion fired at a separation of 6.237e-16, and the claim --
+#   ``kept == top-D`` -- was never reached.  It was a detector, not a
+#   demonstration that its claim is watched, and this file's first round pinned
+#   that as a negative finding rather than closing it, because the task
+#   constraints forbade editing ``test_ipeps_su.py``.
 #
-#   What does kill it on the claim is
-#   ``test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax``, whose
-#   reading 2 scores ``_su_step``'s truncation against
-#   ``||truth[max_D:]|| / ||truth||`` -- computed from the infinite chain's
-#   Schmidt spectrum, rebuilt in Python ``decimal`` outside tenax.  A reference
-#   that no pin can move.  All four of its symmetric cells kill (15.266305x on
-#   both ``h_AB`` cells, 6.230252x on both ``h_BA`` ones); this file runs the
-#   first.
+#   **Fix round 1 closed it instead.**  With that constraint lifted for the one
+#   edit, the claim assertions were moved *above* the meta-assertion block in
+#   ``test_ipeps_su.py``; nothing was weakened, because the meta-assertion still
+#   runs on every green pass and still fails loudly on a cell that has gone
+#   blind.  The claim was never 16 orders from firing -- it was 16 orders *past*
+#   its own gate and simply not evaluated: under the pin the two readings swap
+#   exactly, ``sep`` 1.787e-01 -> 6.237e-16 and ``err`` 6.237e-16 -> 1.787e-01,
+#   both against gates of 1e-3 and 1e-11 respectively.  The pinned finding is
+#   therefore now a real kill -- the row below whose id is
+#   ``865-base-charges-pinned-on-the-truncation-guard`` -- at **1.787e-01**, for
+#   the same ~240 s the pin cost.  It is the one row here that carries ``slow``.
+#
+#   #865 keeps its second, cheap kill as well, and two independent kills on one
+#   defect is the point rather than an accident:
+#   ``test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax``
+#   (collected id ``[h_AB-horizontal-symmetric]``; stacked ``parametrize``
+#   renders bottom-decorator-first) scores ``_su_step``'s truncation in its
+#   reading 2 against ``||truth[max_D:]|| / ||truth||`` -- computed from the
+#   infinite chain's Schmidt spectrum, rebuilt in Python ``decimal`` outside
+#   tenax.  A reference that no pin can move, and 23 s rather than 240.  All
+#   four of its symmetric cells kill (15.266305x on both ``h_AB`` cells,
+#   6.230252x on both ``h_BA`` ones); this file runs the first.
 # * **869 -> the truncation-basis guard.**  There is no "returned weights"
 #   guard to kill, because there are no returned weights: ``_SUState`` has two
 #   fields and nowhere to put a spectrum, which is the design premise
@@ -625,13 +656,22 @@ def _mutant_62a():
 #: ``(id, mutant factory, guard runner, message pattern, [lo, hi])``.
 #:
 #: Cost per cell, **both sides**, measured
-#: ``JAX_PLATFORMS=cpu ... --no-cov -p no:randomly`` on this box: 667 17.86 s,
-#: 865 22.88 s, 851 2.49 s, 869 0.47 s, 6.2a 0.04 s.  None is above the ~60 s
-#: that C-5 puts in ``slow``, so the whole parametrised test stays in
-#: ``-m "not slow"``; with the two auxiliary cells the file adds **46.04 s**
-#: there, against a +120 s budget.  The one cell that does cost more is
-#: ``test_the_865_pin_disqualifies_its_own_guard_before_the_claim`` at 240.58 s,
-#: which carries its own ``slow`` mark and says why in its docstring.
+#: ``JAX_PLATFORMS=cpu ... --no-cov -p no:randomly`` on this box at load
+#: 3.9 -> 6.8: 865 22.56 s, 667 17.69 s, 851 2.35 s, 869 0.46 s, 6.2a 0.03 s.
+#: None is above the ~60 s C-5 puts in ``slow``, so those five stay in
+#: ``-m "not slow"``; with the two auxiliary cells the file adds **45.56 s**
+#: there, against a +120 s budget.
+#:
+#: The sixth row is the exception and carries ``slow`` for it:
+#: ``865-base-charges-pinned-on-the-truncation-guard`` runs the symmetric
+#: ``D=3`` truncation guard and costs **234.34 s** (load 6.4 -> 4.0),
+#: effectively all of it eager BP solves on that pair, twice over because C-1
+#: wants the unmutated side.  There is no cheaper symmetric arm for that guard,
+#: and it is the *same* wall-clock the negative finding it replaces used to
+#: cost -- bought back as a kill.  The mark sits on the ``pytest.param``, not on
+#: the function, because ``_MUTANTS`` is a single parametrised test; verified by
+#: collection that ``-m "not slow"`` deselects exactly this id and ``-m slow``
+#: selects exactly it.
 _MUTANTS = [
     pytest.param(
         (
@@ -692,6 +732,20 @@ _MUTANTS = [
             (1e-3, 100.0),
         ),
         id="6.2a-sigma-all-on-one-factor",
+    ),
+    pytest.param(
+        (
+            "865 (own guard)",
+            _mutant_865,
+            lambda: guards.test_su_step_keeps_the_largest_singular_values(
+                "symmetric", "h_AB", _fresh_su_cache()
+            ),
+            r"\(relative error ([0-9.e+-]+)\)\.  The truncation is not taking "
+            r"the globally largest singular values",
+            (1e-3, 10.0),
+        ),
+        marks=pytest.mark.slow,
+        id="865-base-charges-pinned-on-the-truncation-guard",
     ),
 ]
 
@@ -803,9 +857,38 @@ def test_the_869_mutant_reproduces_the_pre_fix_engine_bond_for_bond():
     four to 1e-6 is a far stronger statement than matching one to a range, and
     it also serves C-4: a harness that silently failed to mutate could not
     produce these numbers at all.
+
+    **Two-sided on every bond**, not just on the one ``_MUTANTS`` covers.  The
+    parametrised cell establishes an unmutated pass for ``h_AB`` alone; the
+    other three had none, so on those the "it failed" half rested on nothing
+    and would have read the same way against a red cell.  Each bond is
+    therefore run unmutated first here as well, with the same C-1 refusal.  The
+    guard is cheap (~0.15 s a bond), so this is a fifth of a second, not a
+    trade.
     """
     got = []
     for bond in guards._BONDS:
+        # C-1, once per bond.  ``_MUTANTS`` establishes an unmutated pass for
+        # ``h_AB`` only, and on a bond that is already red "the guard raised
+        # AssertionError" is satisfied by a mutation that does nothing -- the
+        # same hole the parametrised cell's side 1 exists to close, and it does
+        # not stop being a hole because the discriminator below is a 1e-6
+        # multiset rather than ``pytest.raises``.  ~0.15 s per bond.
+        try:
+            guards.test_su_step_truncates_in_the_state_s_own_basis(bond)
+        except BaseException as exc:  # noqa: BLE001 -- pytest.fail re-raises cleanly
+            pytest.fail(
+                f"mutant 869: the UNMUTATED guard did not pass on {bond} -- "
+                f"{type(exc).__name__}: {exc}\n\n"
+                f"Nothing can be concluded about the mutation from a bond whose "
+                f"unmutated half is already red: the kill asserted below is "
+                f"satisfied by a mutation that does nothing.  This cell is "
+                f"reporting that fact rather than a kill.  If this is one of "
+                f"the six cells that are red on purpose "
+                f"({', '.join(_RED_CELLS)}), the mapping is wrong and must be "
+                f"re-pointed, not skipped."
+            )
+
         with _installed(_mutant_869()):
             try:
                 guards.test_su_step_truncates_in_the_state_s_own_basis(bond)
@@ -850,66 +933,3 @@ def test_the_865_mutant_is_invisible_on_the_dense_arm():
         guards.test_su_step_keeps_the_largest_singular_values(
             "dense", "h_AB", _fresh_su_cache()
         )
-
-
-@pytest.mark.slow
-def test_the_865_pin_disqualifies_its_own_guard_before_the_claim():
-    """The #865 guard detects the pin -- and cannot reach the claim that it broke.
-
-    ``test_su_step_keeps_the_largest_singular_values`` calls itself "the only
-    executable coverage of ``base_charges=None`` ... (#865)", and it is the guard
-    the brief's table should have named.  It does not work as a kill target, and
-    the reason is the same shape as the defect Task 10 was reopened for, one
-    level down: **its #865 reference is built by applying the very pin the defect
-    applies.**
-
-    Its symmetric arm builds ``sigma_pinned`` by re-running the SVD with
-    ``base_charges`` set to the input bond's charges, and requires it to differ
-    from what the step kept -- a meta-assertion whose content is precisely "the
-    step is not pinning".  Under the pin, the step *is* pinning, the two
-    coincide, and the cell fails on that meta-assertion at a separation of
-    **6.237e-16** without ever evaluating ``kept == top-D``.
-
-    So the guard is a **detector** of this defect and not a demonstration that
-    its claim watches it.  Both halves are asserted below: that it fails, and
-    that it fails on the meta-assertion rather than on the claim.  (The claim has
-    been watched failing under a different mutation -- "keep the smallest
-    ``max_D``", recorded at 1.000e+00 in that guard's own comment table -- so
-    this is a statement about *this* defect's reach, not about the claim being
-    dead.)
-
-    **Cost: ~230 s**, effectively all of it three eager BP solves on the
-    symmetric ``D=3`` pair, at ~38 s each, twice over (C-1 wants the unmutated
-    side).  That is why it is ``slow`` and why it is the one cell here that is
-    not a kill.  It is committed rather than written down because a finding about
-    a guard that lives only in a report is a finding that goes stale silently --
-    which is the failure mode this whole task exists to close.
-    """
-    guards.test_su_step_keeps_the_largest_singular_values(
-        "symmetric", "h_AB", _fresh_su_cache()
-    )
-
-    with _installed(_mutant_865()):
-        with pytest.raises(AssertionError) as excinfo:
-            guards.test_su_step_keeps_the_largest_singular_values(
-                "symmetric", "h_AB", _fresh_su_cache()
-            )
-
-    message = str(excinfo.value)
-    match = re.search(r"separation ([0-9.e+-]+)\)", message)
-    assert match, (
-        f"the pinned step no longer trips this guard's #865 meta-assertion.  "
-        f"If it now fails on the claim instead ('not taking the globally "
-        f"largest singular values'), the guard has become a demonstration "
-        f"rather than a detector and this cell should be turned into a kill "
-        f"and moved into _MUTANTS.  Got:\n\n{message}"
-    )
-    separation = float(match.group(1))
-    assert separation < 1e-11, (
-        f"the guard's pinned reference and the pinned step differ by "
-        f"{separation:.3e}; they are supposed to coincide exactly under this "
-        f"mutation, since both apply the same pin to the same theta"
-    )
-    assert "not taking the globally largest singular values" not in message, (
-        "the guard reached its claim after all -- see above"
-    )

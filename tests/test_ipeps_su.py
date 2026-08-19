@@ -1031,11 +1031,29 @@ def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
 
     This is also the only executable coverage of ``base_charges=None``, brief
     constraint #3 and one of the four bugs the rewrite exists to delete (#865).
-    Pinning the new bond's per-sector keep counts to the old bond's layout
-    stops the SVD taking the globally largest values; here it keeps 0.43903
-    where the top three are 1, 0.9915, 0.46407, a relative error of 2.504e-02
-    against a guard at 1e-11.  It shows up **only** on the symmetric arm and
-    **only** at a ``dt`` where truncation bites -- see ``_TRUNCATION_DT``.
+    Pinning the new bond's per-sector keep counts to the old bond's layout stops
+    the SVD taking the globally largest values.  Re-measured under a faithful
+    re-introduction of that pin (``test_ipeps_su_mutations.py``'s ``_mutant_865``,
+    this cell, ``dt=_TRUNCATION_DT``): it keeps ``[1, 0.95831, 0.41614]`` where
+    the largest three of the untruncated spectrum are ``[1, 0.95831, 0.59483]``
+    -- the third one is traded for a smaller value in another sector -- a
+    relative error of **1.787e-01** against the 1e-11 gate below.  It shows up
+    **only** on the symmetric arm and **only** at a ``dt`` where truncation
+    bites -- see ``_TRUNCATION_DT``.
+
+    **The claim is asserted before the symmetric meta-assertion, deliberately.**
+    That block builds ``sigma_pinned`` by applying *the same pin the defect
+    applies*, so under the defect its reference and the step coincide and the
+    two readings swap exactly: separation 6.237e-16 where the claim reads
+    1.787e-01.  Ordered meta-first -- which is how this cell stood until #882
+    Task 13's fix round -- the meta-assertion fires and the claim is never
+    evaluated, so the one cell this file names for #865 could report that it had
+    *detected* the pin and never that its own assertion watches it.  Reordering
+    weakens nothing, because the meta-assertion still runs on every green pass:
+    a cell that has gone blind (a ``dt`` at which pinning stops separating) still
+    fails there, loudly.  The claim's own kill is pinned by the row named
+    ``865-base-charges-pinned-on-the-truncation-guard`` in
+    ``tests/test_ipeps_su_mutations.py``.
     """
     A, B = su.pair(kind)
     weights = su.weights(kind)
@@ -1047,40 +1065,12 @@ def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
     sigma_kept = np.sort(_bond_spectrum(kept, bond, D, weights))[::-1]
     dropped = 1.0 - float(np.sum(sigma_kept**2) / np.sum(sigma_full**2))
 
-    # --- the two meta-assertions: this cell can see both failure modes -------
+    # --- the precondition: this cell exercises a real truncation ------------
     assert dropped > 0.05, (
         f"{kind} {bond}: the truncation discards only {dropped:.4f} of the "
         f"weight at dt={_TRUNCATION_DT}, so this test is not exercising a real "
         f"truncation and cannot see a wrong keep set"
     )
-    if kind == "symmetric":
-        # ``dropped`` alone does NOT establish that #865 is visible here, and
-        # the gap is measured rather than imagined: at dt=0.05, max_D=2 this
-        # same cell drops 0.11580 of the weight -- 2.3x the gate above -- while
-        # the pinned and unpinned truncations are byte-identical (1.606e-16).
-        # So build the pin from the same ``theta`` and require it to separate.
-        # ``base_charges`` is a *multiset* through ``_derive_charges`` (which
-        # slices, and whose keep counts are a histogram), so the input pair's
-        # leg charges pin exactly as the gauged pair's permutation of them do.
-        src = {"A": A, "B": B}[site_i]
-        pin = np.asarray(src.indices[src.labels().index(leg_i)].charges)
-        sigma_pinned = np.sort(
-            _bond_spectrum(full, bond, D, weights, base_charges=pin)
-        )[::-1]
-        sep = float(np.max(np.abs(sigma_pinned - sigma_kept)) / sigma_full[0])
-        assert sep > 1e-3, (
-            f"{kind} {bond}: pinning base_charges to {list(pin)} keeps the "
-            f"same spectrum as not pinning it (separation {sep:.3e}), so this "
-            f"cell cannot see #865 and the assertion below is not covering it. "
-            f"dt={_TRUNCATION_DT} was chosen to make it visible; re-measure "
-            f"before changing it."
-        )
-    else:
-        # ``linalg.svd`` documents base_charges as "Ignored on the dense path",
-        # so there is no pin to separate from here and no meta-assertion to
-        # make.  Measured: separation 4.8e-16 (h_AB), i.e. exactly nothing.
-        # This is why _TRUNCATION_CASES carries a symmetric cell at all.
-        pass
 
     # --- what was kept: the right VALUES ... --------------------------------
     for name, site, leg in (
@@ -1128,6 +1118,43 @@ def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
         f"singular values are attached to the wrong singular vectors: the "
         f"spectrum is right and the retained subspace is not."
     )
+
+    # --- last: the meta-assertion that this cell can see #865 at all --------
+    # It runs *after* the claim, and the order is load-bearing: this block
+    # builds its reference with the same ``base_charges`` pin #865 applies, so
+    # under that defect reference and step coincide (separation 6.237e-16)
+    # while the claim above reads 1.787e-01 -- placed first, it fired and the
+    # claim was never reached.  See the docstring.  It still runs on every
+    # green pass, which is the whole of its job: a cell that has gone blind
+    # fails here rather than passing quietly.
+    if kind == "symmetric":
+        # ``dropped`` alone does NOT establish that #865 is visible here, and
+        # the gap is measured rather than imagined: at dt=0.05, max_D=2 this
+        # same cell drops 0.11580 of the weight -- 2.3x the gate above -- while
+        # the pinned and unpinned truncations are byte-identical (1.606e-16).
+        # So build the pin from the same ``theta`` and require it to separate.
+        # ``base_charges`` is a *multiset* through ``_derive_charges`` (which
+        # slices, and whose keep counts are a histogram), so the input pair's
+        # leg charges pin exactly as the gauged pair's permutation of them do.
+        src = {"A": A, "B": B}[site_i]
+        pin = np.asarray(src.indices[src.labels().index(leg_i)].charges)
+        sigma_pinned = np.sort(
+            _bond_spectrum(full, bond, D, weights, base_charges=pin)
+        )[::-1]
+        sep = float(np.max(np.abs(sigma_pinned - sigma_kept)) / sigma_full[0])
+        assert sep > 1e-3, (
+            f"{kind} {bond}: pinning base_charges to {list(pin)} keeps the "
+            f"same spectrum as not pinning it (separation {sep:.3e}), so this "
+            f"cell cannot see #865 and the claim above is not covering it. "
+            f"dt={_TRUNCATION_DT} was chosen to make it visible; re-measure "
+            f"before changing it."
+        )
+    else:
+        # ``linalg.svd`` documents base_charges as "Ignored on the dense path",
+        # so there is no pin to separate from here and no meta-assertion to
+        # make.  Measured: separation 4.8e-16 (h_AB), i.e. exactly nothing.
+        # This is why _TRUNCATION_CASES carries a symmetric cell at all.
+        pass
 
 
 def test_su_step_survives_a_bond_direction_the_state_does_not_use():

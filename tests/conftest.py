@@ -47,9 +47,13 @@ _FILE_MARKERS = {
     # re-introduction of the defect it is named for.  Each cell runs its
     # guard twice -- unmutated (which must pass) and mutated (which must
     # fail, on the named assertion, at a number in range) -- so it costs
-    # about twice the guard.  The two cells whose guard is expensive (the
-    # D=2 imaginary-time run and the symmetric truncation cell) carry
-    # their own @pytest.mark.slow; the rest add ~35 s to -m "not slow".
+    # about twice the guard.  Eight cells; exactly one carries `slow`, and
+    # it is a `pytest.param` mark rather than a function mark because the
+    # kills are one parametrised test.  Measured on CPU with --no-cov, box
+    # load 4-7: -m "not slow" is 45.6 s over seven cells (the two dearest
+    # being the D=2 imaginary-time run at 17.7 s -- which is NOT the slow
+    # one -- and the symmetric chain anchor at 22.6 s), and -m slow is
+    # 234 s in that single cell, the symmetric D=3 truncation guard.
     "test_ipeps_su_mutations.py": "algorithm",
     "test_ipeps_core.py": "core",
     "test_auto_mpo.py": "algorithm",
