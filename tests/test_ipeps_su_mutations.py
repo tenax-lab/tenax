@@ -149,6 +149,16 @@ from tenax.core._tensor_utils import scale_bond_axis
 #: The six cells of Task 12's acceptance sweep that are red at ``49b65b8``, and
 #: which no mutant may be mapped onto.
 #:
+#: **Documentation, not an assertion.**  This tuple is read only by the two
+#: failure messages below, which name it when a cell's unmutated half turns out
+#: to be red; nothing compares a run's actual red set against it, and nothing
+#: here notices a listed cell going *green*.  The refusal that works is side 1
+#: of every cell -- which is the better design, because it fires on the cell a
+#: mutant is actually pointed at rather than on a list that has to be kept in
+#: step by hand.  Read this list, and the module docstring's "``-m slow`` sits
+#: at 6 failed / 11 passed", as notes to the reader: both were correct when
+#: written and neither is asserted anywhere.
+#:
 #: They are red **on purpose** -- the user's explicit decision, with no
 #: ``xfail`` -- and they are why every cell below is two-sided.  ``-m slow`` sits
 #: at 6 failed / 11 passed (675.21 s); the D=4 residue and the D=3-seed-0 residue
@@ -645,7 +655,7 @@ def _mutant_62a():
 #   guard to kill, because there are no returned weights: ``_SUState`` has two
 #   fields and nowhere to put a spectrum, which is the design premise
 #   ``test_su_state_has_no_lambda_fields`` asserts.  The nearest existing guard,
-#   ``test_the_stored_spectra_are_closer_to_the_bp_messages_than_the_plan_says``,
+#   ``test_the_shipped_engines_stored_spectra_are_closer_than_the_plan_says``,
 #   measures the **shipped** engine (``_simple_update_checkerboard_sweep``), so
 #   no mutation of ``ipeps_su`` reaches it at all -- it would report a survival
 #   for a mutant that never ran.  What a never-re-derived metric actually breaks
@@ -661,6 +671,40 @@ def _mutant_62a():
 #: None is above the ~60 s C-5 puts in ``slow``, so those five stay in
 #: ``-m "not slow"``; with the two auxiliary cells the file adds **45.56 s**
 #: there, against a +120 s budget.
+#:
+#: **Three rows carry an explicit ``core`` mark**, and it is the same mechanism
+#: ``test_ipeps_su.py`` already uses on the chain anchor's ``dense`` arm
+#: (``test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax``).
+#: ``tests/conftest.py`` maps this file to ``"algorithm"`` and CI's required
+#: checks run ``uv run pytest tests/ -m "core"``
+#: (``.github/workflows/ci.yml:76``, ``:228``, ``:255``), so without them this
+#: file -- whose entire purpose is to certify that the guards in
+#: ``test_ipeps_su.py`` **can fail** -- contributes **zero** tests to any
+#: required job.  Measured:
+#: ``pytest tests/test_ipeps_su.py tests/test_ipeps_su_mutations.py -m core
+#: --collect-only`` collects **7 of 91** with the mark and **4** without, the
+#: four being the chain anchor's ``dense`` cells in ``test_ipeps_su.py``.  The
+#: bucket everything else here lands in is
+#: ``fast-other``, which is not required and which this project records as
+#: chronically red on ``main`` since 2026-06-14 -- i.e. the one place a new
+#: failure is invisible.
+#:
+#: The three chosen are the cheap ones (851 2.35 s, 869 0.46 s, 6.2a 0.03 s
+#: both sides, from the table above); 667 (17.69 s) and 865 (22.56 s) stay out,
+#: since three rows are enough to say "the guards can fail" and the required
+#: gate is measured in minutes.  ``tests/conftest.py`` states the principle
+#: this closes against itself, in its ``test_arnoldi.py`` note -- *"a guard
+#: that runs in no required job is not one"* -- and the gate already spends
+#: its time on four **old-engine** simple-update files
+#: (``test_su_667_product_state.py``,
+#: ``test_su_851_four_bond_lambdas.py``, ``test_su_865_symmetric_collapse.py``,
+#: ``test_su_sweep_consolidation.py``), i.e. on #667/#851/#865 guards for the
+#: engine being replaced, while the replacement's own guards sat outside it.
+#:
+#: The composition was checked rather than assumed, the same way the chain
+#: anchor's was: ``pytest_collection_modifyitems`` *adds* the file's bucket
+#: marker and withholds it only for ``core``-mapped files carrying an explicit
+#: ``slow``, so these three end up ``core`` **and** ``algorithm``.
 #:
 #: The sixth row is the exception and carries ``slow`` for it:
 #: ``865-base-charges-pinned-on-the-truncation-guard`` runs the symmetric
@@ -681,7 +725,27 @@ _MUTANTS = [
                 0
             ),
             r"E=(-?\d+\.\d+) -- at or above the product state",
-            (-0.60, 0.0),
+            # (-0.55, -0.40), not the shipped (-0.60, 0.0).  The old ``lo``
+            # could not fire **by construction**, which is this branch's own
+            # recurring defect and the standard this file sets for itself in
+            # the 865-own-guard row below: the pattern above matches only
+            # ``test_ipeps_su.py``'s "at or above the product state" message,
+            # which exists **only** when ``assert E < -0.60`` has already
+            # failed -- i.e. only when ``E >= -0.60``, which under
+            # ``f"{E:.6f}"`` formats to ``>= -0.600000``.  So ``-0.60 <=
+            # reading`` held for every reading the pattern can produce.
+            # Measured: driving the real cell body with a fabricated reading of
+            # -0.5999999 (formats as -0.600000) passes under (-0.60, 0.0) and
+            # fires once ``lo`` is raised to -0.55.
+            #
+            # The new band brackets the documented kill on **both** sides:
+            # measured at -0.509176 (re-measured for this change and unchanged
+            # to six decimals), 0.041 above ``lo`` and 0.109 below ``hi``.  It
+            # is deliberately not opened out to the product state's -0.5 on
+            # either side: #667 drives *to* the product state, so a reading
+            # that lands well away from it is a different defect and should be
+            # reported as one rather than accepted.
+            (-0.55, -0.40),
         ),
         id="667-lambda-1.5-on-the-bond",
     ),
@@ -695,6 +759,7 @@ _MUTANTS = [
             r"differs from steps=4 by ([0-9.e+-]+) under a dt=0 gate",
             (1e-3, 10.0),
         ),
+        marks=pytest.mark.core,
         id="851-one-spectrum-per-orientation",
     ),
     pytest.param(
@@ -719,6 +784,7 @@ _MUTANTS = [
             r"\(([0-9.]+)x\)\.  It truncates",
             (1.0001, 10.0),
         ),
+        marks=pytest.mark.core,
         id="869-metric-never-re-derived",
     ),
     pytest.param(
@@ -731,6 +797,7 @@ _MUTANTS = [
             r"max \|G_i - G_j\| = ([0-9.e+-]+)\)",
             (1e-3, 100.0),
         ),
+        marks=pytest.mark.core,
         id="6.2a-sigma-all-on-one-factor",
     ),
     pytest.param(

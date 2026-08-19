@@ -13,7 +13,7 @@ four ways and no one reading sees more than one of them:
 * **state** -- is it the *gated* state?  Checked exactly, by stepping with no
   truncation and comparing the 2x2 torus against the gate applied to the input
   torus.  This is also the no-op control: a step that returns its input scores
-  3.1e-02 to 4.1e-02 where a correct one scores 8.8e-15 to 9.5e-15.
+  3.1e-02 to 4.1e-02 where a correct one scores 8.0e-15 to 9.1e-15.
 * **split** -- is ``sqrt(sigma)`` on *both* ends of the bond, rather than all
   of it on one?
 * **truncation** -- of the singular values available, are these the largest
@@ -62,8 +62,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
+# The two externally-derived chain spectra come from here too.  They used to be
+# imported from ``test_ipeps_gauge`` -- one test module importing another, which
+# is the practice this helper exists to avoid (#882 final review, P3-15).
+# Imported rather than copied either way: they are certified outside tenax
+# (rebuilt from the transfer matrix's fixed points in Python ``decimal``), and a
+# second copy of a certified constant is a second thing that can go stale.
 from _ipeps_gauge_helpers import (  # tests/ is on sys.path
+    _CHAIN_TRUTH,
     _PAIRS,
+    _SYM_CHAIN_TRUTH,
     _chain_pair,
     _chain_pair_as_peps,
     _sym_chain_pair,
@@ -71,16 +80,14 @@ from _ipeps_gauge_helpers import (  # tests/ is on sys.path
     assert_leg_split,
 )
 
-# The two externally-derived chain spectra, and the Phase 1 anchor's normaliser.
-# Imported rather than copied: they are certified outside tenax (rebuilt from
-# the transfer matrix's fixed points in Python ``decimal``), and a second copy
-# of a certified constant is a second thing that can go stale.
-from test_ipeps_gauge import _CHAIN_TRUTH, _SYM_CHAIN_TRUTH
-
 import tenax.algorithms.ipeps_su as ipeps_su_module
 from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
-from tenax.algorithms.ipeps import heisenberg_gate, sublattice_rotate_gate
+from tenax.algorithms.ipeps import (
+    _wrap_as_dense_tensor,
+    heisenberg_gate,
+    sublattice_rotate_gate,
+)
 from tenax.algorithms.ipeps_bp_gauge import BondWeights, BPGaugeInfo
 from tenax.algorithms.ipeps_gauge import gauge_fix, torus_2x2_sign_free
 from tenax.algorithms.ipeps_simple_update import (
@@ -152,9 +159,28 @@ def test_su_state_max_D_reads_every_virtual_leg(kind):
       relabel, and flow-preserving, since ``u``/``l`` are both OUT and
       ``d``/``r`` both IN -- kills ``A.r.dim`` (1).
 
-    ``phys`` stays out of it on both: it is 2, so a reading that included it
-    would agree here, which is why the assertion is on the leg *set* rather
-    than only on the number.
+    Neither chain pair excludes ``phys``, and the previous version of this note
+    claimed otherwise -- it said the assertion was "on the leg *set*", which no
+    line here does; ``max_D`` is compared to a number and nothing else.  It was
+    measured false in #882's final review: the mutant
+    ``max(idx.dim for t in (A, B) for idx in t.indices)`` -- ``phys`` included,
+    contradicting :attr:`_SUState.max_D`'s own docstring -- **passes both
+    parametrisations**, because every pair above has ``phys.dim == 2`` and a
+    largest virtual dim of 3 or 4, so the two readings agree arithmetically.
+
+    The third row is what closes it, and it is the only fixture in the file
+    where ``phys`` is larger than every virtual leg: ``(2, 2, 2, 2, 4)``, so
+    ``max_D`` must be **2** and a ``phys``-including reading returns 4.
+    Measured against the same three variants: shipped 2, ``phys``-included 4,
+    ``min`` 2 -- the first two now disagree, which is what the earlier fixtures
+    could not make them do.  ``min`` is still killed by the chain rows (1
+    against 4), so the pair of controls between them pins both directions.
+
+    ``_SUState.max_D`` is not read anywhere in ``src/`` today, so this is a
+    forward-looking guard: a spin-1 or Hubbard site at small ``D`` in Phase 4 is
+    exactly the configuration where a ``phys``-including reading stops being
+    arithmetically indistinguishable and starts returning the wrong bond
+    dimension.
     """
     A, B = _PAIRS[kind](D=3)
     assert _SUState.from_pair(A, B).max_D == 3
@@ -164,17 +190,33 @@ def test_su_state_max_D_reads_every_virtual_leg(kind):
     swap = {"u": "l", "l": "u", "d": "r", "r": "d"}
     As, Bs = Ac.relabels(swap), Bc.relabels(swap)
 
-    for name, pair, expected in (
-        ("chain", (Ac, Bc), {"u": 1, "d": 1, "l": 4, "r": 4}),
-        ("swapped", (As, Bs), {"u": 4, "d": 4, "l": 1, "r": 1}),
+    # ``phys`` above every virtual leg -- the only pair here that separates
+    # "largest virtual dim" from "largest dim".  Dense on both parametrisations
+    # on purpose: the property is metadata arithmetic on ``.indices``, identical
+    # for both tensor types, and building a symmetric pair at ``d=4`` would add
+    # a charge layout this assertion says nothing about.
+    kA, kB = jax.random.split(jax.random.PRNGKey(7))
+    Ap = _wrap_as_dense_tensor(jax.random.normal(kA, (2, 2, 2, 2, 4)))
+    Bp = _wrap_as_dense_tensor(jax.random.normal(kB, (2, 2, 2, 2, 4)))
+
+    for name, pair, expected, phys_dim, want in (
+        ("chain", (Ac, Bc), {"u": 1, "d": 1, "l": 4, "r": 4}, 2, 4),
+        ("swapped", (As, Bs), {"u": 4, "d": 4, "l": 1, "r": 1}, 2, 4),
+        ("phys-dominant", (Ap, Bp), {"u": 2, "d": 2, "l": 2, "r": 2}, 4, 2),
     ):
         t = pair[0]
         dims = {
             lab: t.indices[t.labels().index(lab)].dim for lab in ("u", "d", "l", "r")
         }
         assert dims == expected, f"{name}: {dims}"
-        assert t.indices[t.labels().index("phys")].dim == 2
-        assert _SUState.from_pair(*pair).max_D == 4, name
+        got_phys = t.indices[t.labels().index("phys")].dim
+        assert got_phys == phys_dim, f"{name}: phys is {got_phys}, not {phys_dim}"
+        assert _SUState.from_pair(*pair).max_D == want, (
+            f"{name}: max_D read {_SUState.from_pair(*pair).max_D}, expected "
+            f"{want} -- the pair's virtual legs are {dims} and its phys leg is "
+            f"{got_phys}, so a reading that included phys returns "
+            f"{max(list(dims.values()) + [got_phys])}"
+        )
 
 
 # --- _su_step (#882 Task 10) ---------------------------------------------
@@ -220,7 +262,14 @@ _TRUNCATION_CASES = [("dense", b) for b in _BONDS] + [("symmetric", "h_AB")]
 #: 0.04% of the weight and pinning ``base_charges`` is *inert* -- measured, the
 #: kept spectrum is identical to the unpinned one at ``max_D=3`` and at
 #: ``max_D=2``.  At ``dt=2.0`` it drops 27% (dense) / 26% (symmetric) and the
-#: pin bites: it keeps 0.43903 where the top three are 1, 0.9915, 0.46407.
+#: pin bites: it keeps ``1, 0.95831, 0.41614`` where the largest three of the
+#: untruncated spectrum are ``1, 0.95831, 0.59483``, a relative error of
+#: 1.787e-01.  (Those are the figures
+#: ``test_su_step_keeps_the_largest_singular_values`` records and the
+#: ``865-base-charges-pinned-on-the-truncation-guard`` mutation row kills at.
+#: This constant used to carry a second, stale copy -- "keeps 0.43903 where the
+#: top three are 1, 0.9915, 0.46407" -- which disagreed with it; there is now
+#: one set of numbers and it is the measured one.)
 #: A guard for #865 has to run where #865 is visible.
 _TRUNCATION_DT = 2.0
 
@@ -253,15 +302,36 @@ _TORUS_GATE_AXES: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {
 def _ones_for(A):
     """``BondWeights.ones`` at *this* pair's four bond dimensions.
 
-    ``BondWeights.ones(D_h, D_v)`` gives both horizontal bonds one dimension
-    and both vertical bonds another, which is right only while all four agree.
-    A single ``_su_step`` truncates one bond and leaves the other three alone,
-    so mid-cycle they do not -- and this helper, built from exactly two
-    dimensions, cannot represent that split even though ``gauge_fix`` itself
-    now can (since #887; see ``_su_step``'s Note).  That is why the
-    untruncated cases below never re-gauge: not because the pair is
-    ungaugeable, but because this helper's own two-dimension shape cannot
-    describe one that is not.
+    Every weight is **1**, so this adds nothing to the network: it is the
+    identity weight :func:`torus_2x2_sign_free` requires for a pair that is
+    already in absorbed form.  Nothing here re-gauges, and nothing here is a
+    gauge -- the previous version of this note said otherwise and #882's final
+    review measured it false.
+
+    The four lengths are read off the pair's **own four virtual legs**, which
+    is the same per-leg sizing ``ipeps_gauge._identity_weights`` does since
+    #887.  ``BondWeights.ones(D_h, D_v)`` cannot: it gives both horizontal
+    bonds one dimension and both vertical bonds another, which is right only
+    while all four agree.  A single ``_su_step`` changes exactly one bond's
+    dimension and leaves the other three alone, so **every** stepped pair below
+    is mid-cycle -- truncating it (``max_D=2``) and growing it
+    (``max_D=_FULL_RANK``) break the two-dimension shape alike.
+
+    Measured, dense ``D=3``, one ``h_AB`` step at ``max_D=2`` (legs
+    ``{r: 2, u: 3, d: 3, l: 3}``): this helper returns lengths
+    ``{h_AB: 2, h_BA: 3, v_AB: 3, v_BA: 3}``, ``torus_2x2_sign_free`` accepts
+    them, and ``gauge_fix`` on that same pair converges in 20 sweeps at
+    residual 5.5e-07 -- so the pair is **not** ungaugeable, and this helper's
+    shape was never what stopped anything.  ``BondWeights.ones(A.r.dim,
+    A.d.dim)`` returns ``{2, 2, 3, 3}`` on it and the torus raises
+    ``TypeError: cannot reshape array of shape (2,) ... into shape
+    [1, 1, 1, 3, 1]``.
+
+    Watched failing rather than argued: with the two-dimension form installed
+    in place of this body, ``test_su_step_applies_the_gate_across_the_bond``
+    ``[dense-h_AB]`` dies at ``TypeError: cannot reshape array of shape (54,)
+    ... into shape [1, 1, 1, 3, 1]`` -- 54 being the ``_FULL_RANK`` bond that
+    step grows.
     """
     dim = {lab: A.indices[A.labels().index(lab)].dim for lab in ("u", "d", "l", "r")}
     return BondWeights(
@@ -390,15 +460,24 @@ def _gram(t, leg):
     for that measurement.
 
     Unlike an element-wise comparison of the tensors, this is invariant under
-    the sign and basis freedom the SVD and BP's ``eigh`` each carry, which is
-    what makes it usable at all.  Measured, ``gauge_fix`` applied to a stepped
-    pair comes back 1.7e-01 (dense) / 5.7e-03 (symmetric) away from it
-    element-wise -- in ``max ||x| - |y||``, so with the sign freedom already
-    quotiented out -- even for a ``dt=0`` gate on an already-gauged input,
-    because the two routines pick different bases on the bond.  Both are the
-    same state; only a basis-free reading can say so.  That is the measurement
-    behind not comparing the stepped pair to a re-derived ``gauge_fix``
-    spectrum leg by leg.
+    the sign and basis freedom the SVD and BP's ``eigh`` each carry, and under
+    the **scale** freedom as well -- which is what makes it usable at all.
+
+    The scale is the part the earlier version of this note got wrong.  It said
+    ``gauge_fix`` applied to a stepped pair comes back "1.7e-01 (dense) ...
+    away from it element-wise ... because the two routines pick different bases
+    on the bond".  Re-measured, ``dt=0`` gate on an already-gauged dense input,
+    ``max ||x| - |y||``: the raw reading is **2.68e-02** (``A``) / **2.92e-02**
+    (``B``), not 1.7e-01 -- and once each side is divided by its own max-abs it
+    falls to **6.2e-07** / **4.3e-07**, which is ``gauge_fix``'s own
+    ``tol=1e-6``.  So that reading is scale-dominated and the stated mechanism
+    is the opposite of what it measures: for a ``dt=0`` gate on a gauged input
+    the two routines pick the *same* basis to within the solve tolerance, and
+    what separates them element-wise is ``gauge_fix``'s max-abs rescale.  (Dense
+    only; the 5.7e-03 symmetric figure was not re-measured.)  A basis-free
+    reading is still what this returns and is still the right tool -- it is also
+    scale-free, which the raw element-wise one is not; the number that justified
+    it was the wrong number.
 
     ``todense()`` here is a ``(D, D)`` bond matrix -- always small.
     """
@@ -596,15 +675,28 @@ def su():
             """
             if kind not in gauges:
                 A, B = self.pair(kind)
-                _A, _B, w, info = gauge_fix(A, B)
+                A_g, B_g, w, info = gauge_fix(A, B)
                 assert info.converged, (
                     f"{kind}: BP did not converge on the input pair "
                     f"({info.iterations} sweeps, residual {info.residual:.3e}), "
                     f"so the metric every bond reading below is taken in is not "
                     f"the state's"
                 )
-                gauges[kind] = w
-            return gauges[kind]
+                gauges[kind] = (A_g, B_g, w)
+            return gauges[kind][2]
+
+        def gauged(self, kind):
+            """The gauged pair ``_su_step`` forms its ``theta`` from.
+
+            Off the *same* solve :meth:`weights` runs -- ``gauge_fix`` returns
+            the pair and the spectrum together and this used to throw the pair
+            away.  Keeping it is what lets a guard build the step's own input
+            ``theta`` without paying a second 38 s symmetric BP solve, and
+            ``gauge_fix`` is deterministic, so it is the same pair
+            ``_su_step``'s opening call produced.
+            """
+            self.weights(kind)
+            return gauges[kind][0], gauges[kind][1]
 
         def step(self, kind, bond, max_D=D, dt=0.05):
             key = (kind, bond, max_D, dt)
@@ -635,13 +727,40 @@ def test_su_step_output_can_still_be_gauged(kind, bond, su):
     is caught by ``test_su_step_returns_the_convention_it_accepts`` first.  An
     assertion nobody can make fail is decoration, so it is gone.
 
-    The convergence assertion left behind has teeth, and has been watched to
-    use them: with the gate's flows left unaligned, this fires on symmetric
-    ``v_BA`` at ``100 sweeps, residual 1.399e-01``.  What it guards is that the
-    step's output is still something BP can solve -- the property the *next*
-    step depends on, since the gauge sets the basis its truncation is taken in.
-    ``_su_step`` now warns on the same condition (see its *Warns*), so this
-    pins the warning's trigger as well.
+    **The convergence assertion has no demonstrated kill, and the trigger this
+    docstring used to name for it is refuted on the exact cell it named.**  It
+    claimed the assertion had "been watched to use them: with the gate's flows
+    left unaligned, this fires on symmetric ``v_BA`` at 100 sweeps, residual
+    1.399e-01".  Measured with ``_align_gate_to_ket`` neutered to the identity,
+    on all six cells this test parametrises::
+
+        dense     h_AB  converged=True  15 sweeps  residual 7.156e-07
+        dense     h_BA  converged=True  15 sweeps  residual 8.097e-07
+        dense     v_AB  converged=True  15 sweeps  residual 7.028e-07
+        dense     v_BA  converged=True  15 sweeps  residual 6.830e-07
+        symmetric h_AB  converged=True  53 sweeps  residual 8.486e-07
+        symmetric v_BA  converged=True  67 sweeps  residual 8.769e-07
+
+    -- the last being the named cell.  The mechanism could not have produced it
+    either: within one ``_su_step`` the internal ``gauge_fix`` runs *before* the
+    gate is used at all, so a change to the gate's flows cannot move that solve.
+
+    Four further production mutations were driven against it and **none** kills
+    it: stage 5 multiplying instead of dividing, ``sigma**2`` on the bond, all
+    of ``sigma`` on one factor (the plan's §6.2a hole), and stage 2/5 made inert
+    (#869's flat weights) each leave an output BP still solves, on all four
+    dense bonds.  So what stands here is a **precondition on the next step that
+    has never been observed failing**, and this docstring says that rather than
+    claiming a kill it does not have.  It is kept because the property is real
+    -- the gauge sets the basis the next truncation is taken in -- and because
+    reading it is one solve on a pair the ``su`` cache has already built.
+
+    The *live* half of the same condition is elsewhere and is measured: one
+    ``-m slow`` pass of this file and its mutation sibling emits 1377
+    ``gauge_fix did not converge`` warnings from ``ipeps_su.py``, 19 of them
+    inside cells that report green, and
+    ``test_su_step_warns_when_the_gauge_did_not_converge`` guards the reporting
+    path with a fabricated ``BPGaugeInfo``.
 
     The other two properties are pinned elsewhere and neither is claimed here:
     ``test_su_step_applies_the_gate_across_the_bond`` pins the state,
@@ -677,10 +796,12 @@ def test_su_step_applies_the_gate_across_the_bond(kind, bond, su):
 
     It is also this module's **no-op control**, and the one guard that catches
     a wrong bond.  Measured on ``dense`` at ``D=3``, ``dt=0.05``: a correct
-    step scores 8.8e-15 to 9.5e-15, an ``_su_step`` that returns ``state``
-    untouched scores 3.1e-02 to 4.1e-02, and a ``_BOND_ENDS`` with two of its
-    rows transposed -- or with the gate's ``si``/``sj`` legs crossed -- scores
-    1.9e-02.  Several of the plan's Phase 2 tests pass on a do-nothing
+    step scores 8.0e-15 to 9.1e-15 (8.500e-15, 8.011e-15, 8.949e-15, 9.125e-15
+    on ``h_AB``, ``h_BA``, ``v_AB``, ``v_BA``; the 8.8e-15 to 9.5e-15 this used
+    to quote reproduced neither endpoint), an ``_su_step`` that returns
+    ``state`` untouched scores 3.1e-02 to 4.1e-02, and a ``_BOND_ENDS`` with
+    two of its rows transposed -- or with the gate's ``si``/``sj`` legs
+    crossed -- scores 1.9e-02.  Several of the plan's Phase 2 tests pass on a do-nothing
     implementation; under a ``dt=0`` gate at ``max_D == D`` almost anything
     does, which is why the gate here is a real one and the control is asserted
     rather than assumed.
@@ -721,26 +842,61 @@ def test_su_step_splits_sqrt_sigma_into_both_ends(kind, bond, su):
     ``test_the_bond_guards_see_different_mutations`` measures that.
 
     The reading that does see it is each end's bond Gram matrix (see
-    :func:`_gram`): both must be diagonal, equal to each other, and equal to
-    the bond's Schmidt spectrum, which :func:`_bond_spectrum` derives from the
-    *reassembled* two-site tensor and therefore independently of how the split
-    was made.
+    :func:`_gram`): both must be diagonal and equal to each other, and the
+    weight they carry must be the *right power* of the bond's own spectrum.
+
+    **The third assertion's reference is the gated INPUT theta, not the stepped
+    pair, and that is #882's final review being right about this cell.**  It
+    used to compare ``diag(G_i)`` against :func:`_bond_spectrum` of the same
+    stepped state, and that comparison cannot fail: given ``off < 1e-11`` at
+    each end and ``gap < 1e-11`` between them, write ``G_i = G_j = diag(d)``;
+    then ``F_j = W sqrt(d)`` and ``F_i = sqrt(d) V^dag``, so ``theta = F_j F_i``
+    has singular values exactly ``d`` -- and ``_bond_spectrum`` is the SVD of
+    that same ``theta``, rebuilt by :func:`_two_site_tensor` from the very
+    tensors the Gram was taken of.  The reference was re-derived from the code
+    under test, one level down.  Measured: under
+    ``absorb_sqrt_singular_values`` handed ``sigma**2`` -- literally the wrong
+    power the message names -- the three readings are 9.99e-16, 3.55e-15 and
+    3.55e-15 and **all four dense cells pass**, while
+    ``test_su_step_applies_the_gate_across_the_bond`` fails at 2.298e-01.
+
+    ``_su_step`` did not compute the gated input ``theta``'s spectrum, so it is
+    a reference the split cannot move.  Both spectra are normalised on their
+    leading value, because ``_su_step`` does not renormalise and ``gauge_fix``
+    rescales by max-abs -- an overall factor is expected and is not a power
+    error.  Measured on all four dense bonds, as the number *this* assertion
+    takes: a correct step reads 2.2e-16 to 1.8e-15; ``sigma**2`` reads
+    2.211e-01, 2.500e-01, 2.465e-01, 2.385e-01 and is killed **here**, having
+    passed every assertion in this cell before; dropping ``sigma`` altogether
+    (``F_j, F_i = U, Vh``) reads 3.301e-01 to 4.959e-01 and is also killed
+    here.  All of ``sigma`` on one factor (the §6.2a hole) reads the same
+    3.301e-01 to 4.959e-01, but ``gap`` fires on it first, at 3.45 -- which is
+    the row ``tests/test_ipeps_su_mutations.py`` pins, and it is unchanged.
 
     **Both readings are taken in the Vidal metric, and that is the correction
     Task 10's reopening carries here.** ``_su_step``'s SVD is of the two-site
     tensor with the other three bonds' weights on the six outer legs, so its
     isometries are isometries *there*; in absorbed form ``U^dag Lambda^-1 U``
     sits between the two ends and neither the diagonality nor the equality
-    holds however the split was made.  Measured on a correct step, this cell's
-    three assertions read 2.1e-01 to 9.7e-01, 4.1e-01 to 1.5e+00 and 1.9e-01 to
-    6.4e-01 in the absorbed metric against 1e-11 gates, and <= 1.4e-14 in the
-    Vidal one.  The absorbed reading was true only of the pre-fix step, which
-    truncated in that metric -- so it was a guard calibrated against the defect,
+    holds however the split was made.  The absorbed-vs-Vidal numbers are in
+    :func:`_vidal_pair`'s table and are the ``dt=2.0`` truncation cells', not
+    this ``dt=0.05`` cell's -- this docstring used to quote them as though they
+    were, which is the mis-attribution #882's final review found.  The
+    absorbed reading was true only of the pre-fix step, which truncated in that
+    metric -- so it was a guard calibrated against the defect,
     and it went on passing while ``_su_evolve`` scored 0 of 9 on energy.
 
-    The spectrum is checked to be spread before it is used, because a flat
-    ``sigma`` at 1 satisfies ``diag(sigma) == diag(sigma**2)`` and the guard
-    would then have no teeth on the very mutation it exists for.
+    **The three claims are asserted before the meta-assertion**, which is the
+    ordering Task 13's fix round established on the #865 guard for the same
+    reason.  ``spread`` says the cell *can* discriminate -- a ``sigma`` flat at
+    1 satisfies ``diag(sigma) == diag(sigma**2)`` -- but it is not one of the
+    claims, and ordered first it pre-empts them: measured, under
+    ``F_j, F_i = U, Vh`` (no ``sigma`` on the bond at all) ``spread`` reads
+    1.000 on all four dense cells and reports that this cell cannot tell the
+    two apart, where the power assertion reports the actual defect at 3.301e-01
+    to 4.959e-01.  Detection was never in doubt; attribution was.  Reordering
+    weakens nothing, because ``spread`` still runs on every green pass and
+    still fails loudly on a cell that has gone blind.
     """
     stepped = su.step(kind, bond)
     (site_i, leg_i), (site_j, leg_j) = _BOND_ENDS[bond]
@@ -748,13 +904,6 @@ def test_su_step_splits_sqrt_sigma_into_both_ends(kind, bond, su):
     pair = _vidal_pair(stepped, bond, weights)
     G_i = _gram(pair[site_i], leg_i)
     G_j = _gram(pair[site_j], leg_j)
-    sigma = _bond_spectrum(stepped, bond, D, weights)
-
-    spread = float(np.max(sigma) / np.min(sigma))
-    assert spread > 1.1, (
-        f"{kind} {bond}: sigma is flat ({spread:.3f}), so this test cannot "
-        f"distinguish sqrt(sigma) at both ends from sigma at one"
-    )
 
     for name, G in (("i", G_i), ("j", G_j)):
         off = float(np.max(np.abs(G - np.diag(np.diag(G)))))
@@ -779,11 +928,42 @@ def test_su_step_splits_sqrt_sigma_into_both_ends(kind, bond, su):
         f"factors; putting it on one end leaves the same physical state, so no "
         f"closed-loop probe in this tree would notice."
     )
-    err = float(np.max(np.abs(np.sort(np.diag(G_i)) - np.sort(sigma))))
+    # The bond's spectrum as the *input* had it: the SVD of the gated two-site
+    # tensor ``_su_step`` formed, built here from ``gauge_fix``'s own output
+    # rather than from anything the step returned.  Truncation is why only the
+    # top ``D`` are compared; normalisation is why an overall factor is not
+    # read as a power error.
+    A_in, _B_in = su.pair(kind)
+    A_g, B_g = su.gauged(kind)
+    order, theta_in = _vidal_theta({"A": A_g, "B": B_g}, weights, bond, _gate(A_in))
+    left = [f"__j{lg}" for lg in ("u", "d", "l", "r") if lg != leg_j] + ["__pj"]
+    perm = [order.index(x) for x in left] + [
+        order.index(x) for x in order if x not in left
+    ]
+    arr = theta_in.transpose(perm)
+    sigma_in = np.linalg.svd(
+        arr.reshape(int(np.prod(arr.shape[: len(left)])), -1), compute_uv=False
+    )
+    ref = np.sort(sigma_in)[::-1][:D]
+    ref = ref / ref[0]
+    got = np.sort(np.diag(G_i).real)[::-1]
+    got = got / got[0]
+    err = float(np.max(np.abs(got - ref)))
     assert err < 1e-11, (
-        f"{kind} {bond}: each end carries {np.sort(np.diag(G_i))} where the "
-        f"bond's own spectrum is {np.sort(sigma)} (max diff {err:.3e}) -- the "
-        f"weight is on the bond at the wrong power"
+        f"{kind} {bond}: each end carries {got} where the top {D} of the "
+        f"gated input theta's own spectrum are {ref} (max diff {err:.3e}) -- "
+        f"the weight is on the bond at the wrong power.  Both are normalised "
+        f"on their leading value, so this is not an overall-scale reading; the "
+        f"reference is the SVD of the theta _su_step formed, taken from "
+        f"gauge_fix's output and not from the step's."
+    )
+
+    # --- the meta-assertion, after the claims (see the docstring) -----------
+    sigma = _bond_spectrum(stepped, bond, D, weights)
+    spread = float(np.max(sigma) / np.min(sigma))
+    assert spread > 1.1, (
+        f"{kind} {bond}: sigma is flat ({spread:.3f}), so this test cannot "
+        f"distinguish sqrt(sigma) at both ends from sigma at one"
     )
 
 
@@ -846,6 +1026,9 @@ def test_su_step_returns_the_convention_it_accepts(kind, bond, su):
             f"{kind} {bond} {name}: leg order {after.labels()} != {before.labels()}"
         )
         for i_before, i_after in zip(before.indices, after.indices):
+            # Implied by the ``labels()`` equality four lines up -- kept because
+            # it is what localises a mismatch to a leg if that ever stops being
+            # true, not because it can fail on its own.
             assert i_after.label == i_before.label
             assert i_after.flow == i_before.flow, (
                 f"{kind} {bond} {name}: leg {i_after.label} came back "
@@ -975,6 +1158,14 @@ def test_the_bond_guards_see_different_mutations(su):
             float(np.max(np.abs(_gram(mv[site_i], leg_i) - _gram(mv[site_j], leg_j)))),
         )
 
+    # The four assertions below are about mutations **this test builds**, from
+    # the ``root`` map written out above -- so they are statements of torus and
+    # Gram algebra, not readings of ``_su_step``.  What ties them to real code
+    # is the ``baseline_split`` assertion above, which is taken on the actual
+    # step's output; without it the contrast would hold on any pair at all.
+    # Labelled rather than removed, on the model of the ``jnp.sqrt`` VJP canary:
+    # they are what would report a ``dt`` or draw at which the two guards stop
+    # being complementary.
     state_gap, split_gap = seen["one_sided"]
     assert state_gap < 1e-11, (
         f"one_sided moved the state by {state_gap:.3e}; it is a gauge and must "
@@ -1069,6 +1260,16 @@ def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
     dropped = 1.0 - float(np.sum(sigma_kept**2) / np.sum(sigma_full**2))
 
     # --- the precondition: this cell exercises a real truncation ------------
+    #
+    # Ordered *before* the two claims, unlike the #865 meta-assertion at the
+    # bottom, and that is measured rather than an oversight.  Under ``sigma**2``
+    # on the bond this fires on dense ``v_AB`` at ``dropped = 0.0458`` -- but
+    # the two claims genuinely pass under that mutation (spectrum err 3.4e-16,
+    # subspace gap 2.2e-16, all four bonds at machine precision), because both
+    # are *relative* comparisons between two steps taken under the same
+    # mutation.  So moving this later would change which line reports and not
+    # what is reported.  It also has to be computed here: the subspace claim's
+    # own reference is ``sqrt(1 - dropped)``.
     assert dropped > 0.05, (
         f"{kind} {bond}: the truncation discards only {dropped:.4f} of the "
         f"weight at dt={_TRUNCATION_DT}, so this test is not exercising a real "
@@ -1327,17 +1528,32 @@ def test_su_step_warns_when_the_gauge_did_not_converge(su, monkeypatch):
     had gone to zero -- so a silent degradation on every step of a 100-step
     run is not acceptable either.
 
-    The trigger is real: with the gate's flows unaligned, BP hits
-    ``max_iter=100`` at residual 1.399e-01 on a symmetric ``v_BA`` step.  It is
-    reproduced here by monkeypatching ``gauge_fix`` rather than by constructing
-    such a pair, because the cheapest genuine one costs 38 s and the thing
-    under test is the *reporting*, not BP.
+    **The condition is real; the provenance this docstring used to give for it
+    was not.**  It said BP hits ``max_iter=100`` at residual 1.399e-01 "with the
+    gate's flows unaligned, on a symmetric ``v_BA`` step".  Measured, all six of
+    ``test_su_step_output_can_still_be_gauged``'s cells converge under exactly
+    that mutation (the readings are in its docstring), and within one step the
+    internal ``gauge_fix`` runs before the gate is touched, so no gate change
+    could have moved it.  The citation is withdrawn.
+
+    What *is* measured is that the condition fires in real runs: one
+    ``-m slow`` pass of this file and its mutation sibling emits **1377** of
+    these warnings from ``ipeps_su.py``, 19 of them inside cells that report
+    green.
+
+    The ``BPGaugeInfo`` below is therefore **fabricated**, which is the right
+    construction for this test either way: the thing under test is the
+    *reporting*, not BP, and the cheapest genuinely non-converging pair costs
+    38 s.
     """
     A, B = su.pair("dense")
     real = ipeps_su_module.gauge_fix
 
     def _unconverged(*args, **kwargs):
         A2, B2, w2, _info = real(*args, **kwargs)
+        # Fabricated, not measured -- see the docstring.  Only ``converged``
+        # is load-bearing; the two numbers are there so the message has
+        # something to format.
         return A2, B2, w2, BPGaugeInfo(100, 1.399e-01, False)
 
     monkeypatch.setattr(ipeps_su_module, "gauge_fix", _unconverged)
@@ -1426,6 +1642,17 @@ def _shrink_leg(t, leg, keep):
     index-rebuilding idiom as
     ``test_su_step_rejects_a_gate_that_does_not_match_the_site``.
     """
+    if not isinstance(t, DenseTensor):
+        # It would otherwise densify and hand back a ``DenseTensor`` still
+        # carrying the input's non-trivial charges on its indices: a silent type
+        # change, and one whose ``charges[:keep]`` is a *positional* truncation
+        # of a block-sparse leg rather than a choice of which sector loses a
+        # basis vector.  One caller today, dense; refuse the rest.
+        raise TypeError(
+            f"_shrink_leg is dense-only; got {type(t).__name__}.  Truncating a "
+            f"SymmetricTensor's leg means choosing which sector loses a basis "
+            f"vector, which this helper does not do."
+        )
     axis = t.labels().index(leg)
     idx = t.indices[axis]
     indices = list(t.indices)
@@ -1472,7 +1699,12 @@ def test_su_evolve_has_no_steps_mod_4_dependence(su):
     **This test is necessary and it is not sufficient, and the second half is
     not a caveat but the reason the next two tests exist.**  An ``_su_evolve``
     that ignores ``steps`` and returns its input passes it *exactly*, at
-    ``d = 0`` -- better than the correct implementation does.  The last
+    ``d = 0`` -- better than the correct implementation does.  And what it
+    cannot see is wider than that: measured, ``for i in range(steps % 4)`` --
+    the closest analogue of #851 in this architecture, and a loop that really
+    does drop steps -- **also passes**, because under a ``dt=0`` gate every
+    ``steps`` gives the same state.  ``test_su_evolve_actually_evolves``
+    catches that one at 0.000e+00.  The last
     assertion below says so out loud by pinning the ``dt=0`` invariance it
     depends on; the guards that can tell a working loop from ``return state``
     are ``test_su_evolve_actually_evolves`` and
@@ -1515,6 +1747,10 @@ def test_su_evolve_has_no_steps_mod_4_dependence(su):
     off = float(
         np.max(np.abs(np.asarray(identity.todense()).reshape(4, 4) - np.eye(4)))
     )
+    # Nothing in ``ipeps_su`` can make this fire either: ``identity`` is built
+    # by ``ipeps_simple_update._make_trotter_gate_tensor`` at ``dt=0`` from a
+    # zero Hamiltonian, so this is IEEE arithmetic about *that* function.  It is
+    # the premise of the loop assertion below rather than a reading of the loop.
     assert off < 1e-12, f"the dt=0 gate is not the identity (max |G - I| = {off:.3e})"
 
     ref = _torus(_su_evolve(state, identity, max_D=D, steps=4))
@@ -1610,14 +1846,17 @@ def test_su_evolve_visits_four_distinct_bonds_per_cycle(su, monkeypatch):
     * **What that buys** -- the recorder is a claim about calls, not about
       physics, so the second half evolves one bond four times by hand and
       requires the result to differ.  Measured against a four-bond cycle at
-      ``dt=0.05``, dense ``D=3``: 5.7e-02 (4x ``h_AB``), 4.5e-02 (``v_AB``),
-      5.3e-02 (``h_BA``), 6.2e-02 (``v_BA``), all against a guard at 1e-3.
+      ``dt=0.05``, dense ``D=3``: 6.44e-02 (4x ``h_AB``), 4.35e-02 (``v_AB``),
+      5.34e-02 (``h_BA``), 5.97e-02 (``v_BA``), all against a guard at 1e-3.
+      (Re-measured for #882's final review: the previous 5.7e-02 / 4.5e-02 /
+      5.3e-02 / 6.2e-02 did not reproduce, ``h_AB`` least of all.)
 
     The **order** is deliberately not asserted through the state, and that is
     measured too: a cycle re-ordered to ``(h_AB, h_BA, v_AB, v_BA)`` lands
-    4.4e-04 away, a hundredth of the single-bond contrast and merely a different
-    Trotter ordering.  Coverage is physics; order is a convention, so the
-    recorder pins it and the state reading does not pretend to.
+    4.93e-04 away (re-measured; 4.4e-04 was the earlier figure), a hundredth
+    of the single-bond contrast and merely a different Trotter ordering.
+    Coverage is physics; order is a convention, so the recorder pins it and the
+    state reading does not pretend to.
 
     **The second half is not belt-and-braces, and it took a mutation to prove
     it.**  Every loop-level defect trips the recorder first, so the obvious
@@ -1883,6 +2122,26 @@ def test_su_evolve_names_the_step_that_broke_bond_uniformity(su, monkeypatch):
 #   D=4, all three seeds   -0.500000 from 800 steps on         FAIL, with BP
 #                          converging on every step
 #
+# **A gap this section does not close, recorded rather than left to be
+# rediscovered.**  ``_su_step`` warns when its internal ``gauge_fix`` fails, and
+# one ``-m slow`` pass of this file and its mutation sibling emits **1377** of
+# those warnings -- and they are not confined to the red cells.  Measured
+# (``-W always``, pytest's warnings summary grouped by node id), the 1377 split
+# four ways::
+#
+#     970  test_d3_actually_uses_its_third_bond_direction[0]           RED
+#     388  test_su_evolve_reaches_the_simple_update_reference_...[3-0]  RED
+#      16  test_the_energy_does_not_drift_away_with_more_steps[2-1]     GREEN
+#       3  test_d3_actually_uses_its_third_bond_direction[1]            GREEN
+#
+# so 19 of them come from cells that report green.  No test here asserts on, counts
+# or ``filterwarnings("error")``s the warning, so the degradation mode
+# ``ipeps_su.py``'s *Warns* documents -- "it quietly costs truncation quality on
+# **every** step" -- is unwatched inside cells reporting green.  Closing it is a
+# design decision (does a warning fail an otherwise-green acceptance cell?) and
+# is deliberately not taken here; the counts are recorded so that whoever takes
+# it starts from a measurement.
+#
 # **The two residues are out of scope and must stay visible.**  Neither is
 # explained, both are reproduced exactly from ``task-12-report.md``'s prototype
 # numbers, and a change that turned either green without an explanation would
@@ -1965,7 +2224,7 @@ def _su_heisenberg_gate(state, dt=_SU_DT):
     )
 
 
-def _energy_of(state, chi):
+def _energy_of(state, chi, recipe="2x2"):
     """Energy per site of the checkerboard pair, from a **checked** CTM.
 
     Three things about this reference are deliberate, and each of them is a
@@ -1988,6 +2247,15 @@ def _energy_of(state, chi):
       benchmark on this project.  Asserting the rank is two singular-value
       decompositions of a ``chi x chi`` matrix and it is the only thing that
       distinguishes a converged environment from a collapsed one.
+
+      ``recipe`` is a parameter **only** so that
+      ``test_the_energy_reference_reproduces_the_known_su_number`` can watch
+      that assertion fire, by driving this function at ``"1x1"`` inside a
+      ``pytest.raises``.  Until #882's final review, that control called
+      ``ctm_tensor_2site`` directly and checked the corner rank itself, so the
+      assertion below was never watched failing anywhere in either test file --
+      an unwatched refusal is the same defect class as an unfalsifiable
+      assertion.  Every measurement caller uses the default.
     * **A zero environment is reported as a zero *state*.**  If the pair itself
       has gone to zero -- which one cell of this sweep does -- ``C1`` is
       identically zero and there is no energy to report.  Saying so is the
@@ -1996,14 +2264,18 @@ def _energy_of(state, chi):
       collapse has to surface as an energy failure or not at all.
 
     Args:
-        state: The pair to measure.
-        chi:   Environment bond dimension; must be well above ``D**2``.
+        state:  The pair to measure.
+        chi:    Environment bond dimension; must be well above ``D**2``.
+        recipe: CTM recipe.  Leave it at ``"2x2"``; see above.
 
     Returns:
         Energy per site as a ``float``.
+
+    Raises:
+        AssertionError: if either ``C1`` is zero or rank 1.
     """
     env_A, env_B = ctm_tensor_2site(
-        state.A, state.B, chi=chi, max_iter=200, conv_tol=1e-10, recipe="2x2"
+        state.A, state.B, chi=chi, max_iter=200, conv_tol=1e-10, recipe=recipe
     )
     for name, env in (("A", env_A), ("B", env_B)):
         sv = np.linalg.svd(np.asarray(env.C1.todense()), compute_uv=False)
@@ -2016,11 +2288,13 @@ def _energy_of(state, chi):
         )
         rank = int(np.sum(sv > sv[0] * 1e-10))
         assert rank > 1, (
-            f"the {name} corner C1 has rank {rank} at chi={chi} -- a rank-1 "
-            f"corner is the collapsed-environment signature (#747), and it "
-            f"returns a plausible wrong energy rather than failing.  This "
-            f"reference is on recipe='2x2', so a rank-1 corner here is a "
-            f"finding about the state, not about the recipe."
+            f"the {name} corner C1 has rank {rank} at chi={chi} on "
+            f"recipe={recipe!r} -- a rank-1 corner is the collapsed-environment "
+            f"signature (#747), and it returns a plausible wrong energy rather "
+            f"than failing.  On the default recipe='2x2' that is a finding "
+            f"about the state; on '1x1' it is the recipe and is what "
+            f"test_the_energy_reference_reproduces_the_known_su_number's "
+            f"control provokes on purpose."
         )
     return float(
         compute_energy_ctm_tensor_2site(
@@ -2075,7 +2349,9 @@ def _vidal_theta(pair, weights, bond, gate=None):
     ``lambda**2`` on the bond (#667's shape).  It touches the *outer* legs only,
     it leaves the bond alone, and a correct step divides it straight back out --
     measured, with no truncation the weighted and unweighted routes produce the
-    same state to 1.1e-15 on all four bonds.  The two are different operations
+    same state to 1.3e-15 - 2.4e-15 on the four bonds (re-measured; the
+    1.1e-15 this used to quote is below the minimum).  The two are
+    different operations
     and the rewrite conflated them.
 
     This one densifies and returns an axis order, because the guard below wants
@@ -2161,10 +2437,39 @@ _CHAIN_ARMS = {
 #: ``gauge_fix`` returns ``v_AB = v_BA = [1.0]`` exactly -- and any power of 1.0
 #: is 1.0.  Four of the six outer legs of a horizontal bond are therefore
 #: *inert*: a metric error confined to ``u``/``d`` changes nothing the
-#: horizontal arm can see.  Measured, a shared error that never weights ``u`` or
-#: ``d`` passes the square-lattice optimality guard **and** the
-#: horizontal-only anchor, while costing **1.008741x** a step when it is not
-#: shared -- the same order as the 1.0048-1.0234x defect this task fixed.
+#: horizontal arm can see.
+#:
+#: **What that error actually does, re-measured, because the first version of
+#: this note got half of it wrong.**  Build it as a *shared* error -- stage 2/5
+#: in ``_su_step`` and :func:`_vidal_pair` both skipping ``u`` and ``d``, so
+#: reference and code move together -- and:
+#:
+#: * it does **not** pass the square-lattice guard.  This note used to say it
+#:   did.  ``test_su_step_truncates_in_the_state_s_own_basis`` kills it on all
+#:   four bonds at its reading 0, whose right-hand side is the bond's own
+#:   ``gauge_fix`` weight rather than the prescription under test: off-diagonal
+#:   6.971e-02 (``h_AB``), 7.623e-02 (``h_BA``), 3.160e-02 (``v_AB``) and
+#:   4.980e-02 (``v_BA``) against ``_CANONICAL_TOL`` = 1e-4;
+#: * it **does** pass the horizontal-only anchor, on both parities -- that half
+#:   of the old claim reproduces exactly;
+#: * it dies on the ``vertical`` anchor, at 2.212e-01 (``v_AB``) and 1.921e-01
+#:   (``v_BA``) on reading 1.
+#:
+#: The *production-only* variant -- the test metric left correct, so the error
+#: is not shared -- costs 1.008741x (``h_AB``), 1.006569x (``h_BA``), 1.002311x
+#: (``v_AB``) and 1.002605x (``v_BA``) a step.  Three of those four sit
+#: **below** the 1.0048 floor of the 1.0048-1.0234x range this note used to
+#: compare them to, so "the same order as the defect this task fixed" was
+#: generous; 1.008741x, the reading it quoted, is the largest of the four.
+#:
+#: **So the ``vertical`` axis is kept on a narrower justification than it was
+#: written on: it is the only place ``u``/``d`` are certified against a
+#: non-tenax number.**  The square lattice catches a leg-set error too, but
+#: against tenax's own ``gauge_fix`` weights; only the chain has a spectrum
+#: nothing in this tree computed.  Measured cost of the axis in the *required*
+#: gate: **1.31 s** for its two ``core``-marked dense cells, against 2.26 s for
+#: the two horizontal ones (which pay the chain's first gauge solve), box load
+#: ~6.  Its symmetric half is ~40 s and stays in ``algorithm``.
 #:
 #: The chain embedding is a free parameter, and that is the whole remedy: laying
 #: the same two MPS tensors along ``u``/``d`` instead makes the *vertical* bonds
@@ -2203,6 +2508,11 @@ assert set().union(*(live for _r, _m, live in _CHAIN_ORIENTATIONS.values())) == 
     "l",
     "r",
 }, "the chain orientations no longer cover all four virtual legs between them"
+#
+# That one is table self-consistency and nothing in ``ipeps_su`` can falsify
+# it -- it is an assertion about the two literals four lines above.  It is the
+# per-cell reading 0 inside the test that checks the table against the weights
+# ``gauge_fix`` actually returns, and that one can fire.
 
 #: How close the metric must land on the external truth.  Not the 1e-12 the
 #: Phase 1 anchor uses, and the difference is one thing: that test solves at
@@ -2234,8 +2544,11 @@ _METRIC_RATIO_TOL = 1e-4
 #: How close the *square-lattice* BP gauge must sit to the Vidal canonical
 #: condition under the shipped metric.  Set off the measurement at
 #: ``gauge_fix``'s default ``tol=1e-6``, where the correct metric reads
-#: 1.9e-07 to 9.4e-07 and every wrong one reads 4.6e-02 to 3.6e-01; two orders
-#: of headroom above the former and five below the latter.  It tracks the solve
+#: 1.2e-07 to 6.2e-07 (dense ``D=3``, three seeds, four bonds, both readings)
+#: and the wrong ones floor at 1.9e-02; two orders of headroom above the former
+#: and **2.3** below the latter.  (The previous note said "five below", which
+#: was wrong arithmetic on its own figures -- 4.6e-02 / 1e-4 is 2.7 orders --
+#: and quoted a correct-metric band that did not reproduce.)  It tracks the solve
 #: tolerance (at ``tol=1e-10`` the same readings are ~3e-11), so tightening it
 #: without re-measuring would couple this guard to a knob it does not set.
 _CANONICAL_TOL = 1e-4
@@ -2351,16 +2664,23 @@ def test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax(
     bonds dimension 1, so ``gauge_fix`` returns ``v_AB = v_BA = [1.0]`` and four
     of the six outer legs are *inert* -- any power of 1.0 is 1.0.  The first
     version of this guard had only that embedding, and a metric error confined
-    to ``u``/``d`` therefore passed it **and** the square-lattice optimality
-    guard, while costing 1.008741x a step: the same order as the 1.0048-1.0234x
-    defect this whole task exists to fix, and the same shape -- a reference
-    blind to part of the space it certifies.  The ``vertical`` orientation is
-    the identical state with ``u <-> l`` and ``d <-> r`` relabelled, so the
-    live leg set is exactly complementary and the union is all four.  Measured
-    on the widened guard: the shared ``u``/``d`` error dies at 2.212e-01 and the
-    shared ``l``/``r`` error at 2.212e-01, both on reading 1.  See
-    :data:`_CHAIN_ORIENTATIONS`, and the per-cell reading 0 below, which asserts
-    which legs this cell is actually exercising rather than trusting the table.
+    to ``u``/``d`` passed it on both parities.  The ``vertical`` orientation is
+    the identical state with ``u <-> l`` and ``d <-> r`` relabelled, so the live
+    leg set is exactly complementary and the union is all four; measured on the
+    widened guard, the shared ``u``/``d`` error dies at **2.212e-01**
+    (``v_AB``) and **1.921e-01** (``v_BA``) on reading 1.
+
+    **What the axis is not.**  It is not the only thing that catches that
+    error, and this docstring used to say it was -- that the shared ``u``/``d``
+    error "passed the square-lattice optimality guard" as well.  It does not:
+    ``test_su_step_truncates_in_the_state_s_own_basis``' reading 0 kills it on
+    all four bonds at 3.160e-02 to 7.623e-02 against a 1e-4 gate.  What is left,
+    and what keeps the axis, is narrower and worth stating exactly: this is the
+    only place ``u``/``d`` are certified against a number **tenax did not
+    compute**.  See :data:`_CHAIN_ORIENTATIONS` for both measurements and for
+    the axis's 1.31 s cost in the required gate, and the per-cell reading 0
+    below, which asserts which legs this cell is actually exercising rather
+    than trusting the table.
 
     Two readings, both against the external truth:
 
@@ -2388,11 +2708,12 @@ def test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax(
     the *exact* environment.  Nothing can say that -- there is no exact
     reference on a loopy lattice (#882 section 6.3).  Two things do reach the
     square lattice: ``test_su_step_truncates_in_the_state_s_own_basis``'s
-    reading 0, which checks the metric against the canonical condition's own
+    reading 0, which checks the *metric* against the canonical condition's own
     absolute right-hand side there (five orders of separation, and it is what
-    catches a leg-set error on the real geometry); and the energy, 0 of 9
-    (seed, D) cells before the fix and 5 of 9 after, against references this
-    project reproduced independently.
+    catches a leg-set error on the real geometry -- it calls no ``_su_step``,
+    so it reaches the square-lattice **geometry**, not the step); and the
+    energy, 0 of 9 (seed, D) cells before the fix and 5 of 9 after, against
+    references this project reproduced independently.
     """
     A, B, A_g, B_g, weights, gate, truth = chain_anchor(arm, orientation)
     _relabel, parity_map, live_expected = _CHAIN_ORIENTATIONS[orientation]
@@ -2455,15 +2776,25 @@ def test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax(
         f"{arm} {orientation} {bond}: the two-site tensor built in the Vidal metric has "
         f"singular values {got[None]:.3e} away from the chain's exact Schmidt "
         f"spectrum, which was derived outside tenax.  BP is exact on a tree, so "
-        f"this is not a tolerance to widen: the metric _vidal_pair applies -- "
-        f"and _su_step's stage 2 with it -- is not the canonical-form metric.  "
-        f"lambda**0 scores {got[0.0]:.3e} and lambda**2 scores {got[2.0]:.3e}."
+        f"this is not a tolerance to widen: the metric _vidal_pair applies is "
+        f"not the canonical-form metric.  (Reading 1 calls no _su_step at all "
+        f"-- it is a reading of _vidal_pair on the gauged pair -- so it cannot "
+        f"say anything directly about the source's stage 2, whatever this "
+        f"message used to claim.  Reading 2 below is the half that steps; a "
+        f"metric error present in BOTH files does reach here, which is the "
+        f"whole point of the external truth.)  lambda**0 scores {got[0.0]:.3e} "
+        f"and lambda**2 scores {got[2.0]:.3e}."
     )
 
     # --- reading 2: _su_step's truncation, scored from outside tenax ---------
     state = _SUState.from_pair(A, B)
     for max_D in (2, chi - 1):
         optimal = float(np.linalg.norm(want[max_D:]) / np.linalg.norm(want))
+        # A statement about ``_CHAIN_TRUTH``, **not** about this module: both
+        # sides are derived from the frozen external literal, so no change to
+        # ``ipeps_su`` can make it fire.  Labelled rather than deleted, on the
+        # model of the ``jnp.sqrt`` VJP canary above: it is what would say so if
+        # a future re-draw of the chain seed made the truncation free.
         assert optimal > _METRIC_CONTROL, (
             f"{arm} {orientation} {bond}: keeping {max_D} of {chi} costs only {optimal:.3e} "
             f"on this draw, so the ratio below cannot discriminate"
@@ -2610,19 +2941,33 @@ def test_su_step_truncates_in_the_state_s_own_basis(bond):
     # Measured, dense D=3, three seeds, at `gauge_fix`'s default `tol=1e-6`:
     #
     #     metric       max off-diagonal      diag against lambda
-    #     lambda**1    1.9e-07 - 4.2e-07     4.5e-07 - 9.4e-07
-    #     lambda**0    8.4e-02 - 1.0e-01     8.8e-02 - 2.1e-01
-    #     lambda**2    7.3e-02 - 1.1e-01     8.3e-02 - 1.7e-01
-    #     skip u,d     5.0e-02 - 7.6e-02     1.0e-01 - 2.4e-01
-    #     skip l,r     4.6e-02 - 6.3e-02     6.1e-02 - 1.2e-01
+    #     lambda**1    1.2e-07 - 4.2e-07     1.4e-07 - 6.2e-07
+    #     lambda**0    2.1e-02 - 1.0e-01     5.3e-02 - 2.1e-01
+    #     lambda**2    1.9e-02 - 1.1e-01     5.2e-02 - 1.7e-01
+    #     skip u,d     2.0e-02 - 7.6e-02     3.8e-02 - 2.4e-01
+    #     skip l,r     1.1e-02 - 6.3e-02     2.1e-02 - 1.2e-01
     #
-    # Five orders of separation, and the last two rows are the point: a *leg-set*
-    # error confined to one orientation is caught here, on the square lattice,
-    # where the chain anchor's two embeddings each see only half the legs.  The
-    # residual at `lambda**1` tracks the solve tolerance -- at `tol=1e-10` the
-    # same readings are 2.3e-11 and 3.7e-11 -- so the gate is set off the
-    # default-`tol` figure with two orders of headroom and is not a tolerance to
-    # tighten without re-measuring.
+    # **Every floor in that table was quoted too high before #882's final
+    # review; the ceilings were right.**  It matters for one row: `skip l,r`
+    # reaches 1.1e-02 off-diagonal on some (seed, bond) against the 1e-2 the
+    # control below gates at -- a 1.1x margin where the old figures implied
+    # 4.6x.  Two things keep that from being a flake.  The control is an `or`,
+    # and the same cell's `diag against lambda` reading floors at 2.1e-02, so
+    # the pair together clears 1e-2 by 2.1x; and `skip l,r` is not one of the
+    # rows this test asserts on at all -- it runs `lambda**0` and `lambda**2`,
+    # whose worst floor over three seeds is 1.9e-02 / 5.2e-02, i.e. 5.2x on the
+    # `or`.  On seed 0, which is the seed this cell actually runs, those two
+    # rows floor at 6.4e-02 and 5.2e-02.  The table is documentation of the
+    # neighbourhood; the assertion's own margin is the second pair of numbers.
+    #
+    # Five orders of separation between `lambda**1` and the wrong metrics, and
+    # the last two rows are the point: a *leg-set* error confined to one
+    # orientation is caught here, on the square lattice, where the chain
+    # anchor's two embeddings each see only half the legs.  The residual at
+    # `lambda**1` tracks the solve tolerance -- at `tol=1e-10` the same readings
+    # are 2.3e-11 and 3.7e-11 -- so the gate is set off the default-`tol` figure
+    # with two orders of headroom and is not a tolerance to tighten without
+    # re-measuring.
     for power in (None, 0.0, 2.0):
         # ``None`` means "whatever ``_vidal_pair`` ships as its default", not
         # "1.0".  Passing the literal instead would make this reading survive a
@@ -2673,6 +3018,11 @@ def test_su_step_truncates_in_the_state_s_own_basis(bond):
     sigma = np.linalg.svd(
         full.transpose(perm).reshape(2 * D**3, 2 * D**3), compute_uv=False
     )
+    # Like the anchor's twin, this cannot fire on anything in ``ipeps_su``: it
+    # is a property of the *fixture's* theta, measured at ~2.0e-02 on all four
+    # bonds, and would need ``theta`` to collapse to rank <= 3 for a D=3 pair.
+    # Kept and labelled rather than deleted -- it is what would report a dt or
+    # a draw at which truncation stopped biting.
     optimal = float(np.linalg.norm(sigma[D:]) / np.linalg.norm(sigma))
     assert optimal > 1e-6, (
         f"the untruncated theta on {bond} is already rank {D}, so keeping "
@@ -2684,6 +3034,16 @@ def test_su_step_truncates_in_the_state_s_own_basis(bond):
     _order, kept = _vidal_theta({"A": stepped.A, "B": stepped.B}, weights, bond)
     actual = _truncation_error_of(full, kept)
 
+    # One-sided, unlike the chain anchor's twin, and the asymmetry is worth
+    # naming: ``_truncation_error_of`` contracts the bond away, so an
+    # ``_su_step`` that ignored ``max_D`` entirely would read ``actual ~ 0`` and
+    # pass here.  Eckart-Young only bounds it from below.  The anchor gates two
+    # -sided because its ``optimal`` comes from outside tenax, where "below 1"
+    # means the error is being measured in the wrong metric; here ``optimal``
+    # is a numpy SVD of the same theta, so below-1 is unreachable rather than
+    # meaningful.  A step that ignores ``max_D`` is caught by
+    # ``test_su_step_keeps_the_largest_singular_values``' dimension assertion
+    # and by ``_su_evolve``'s post-step bond-uniformity invariant.
     assert actual <= optimal * (1 + 1e-6), (
         f"{bond}: _su_step's truncation costs {actual:.9f} where the best "
         f"rank-{D} truncation of the same gated state costs {optimal:.9f} "
@@ -2693,7 +3053,8 @@ def test_su_step_truncates_in_the_state_s_own_basis(bond):
         f"sqrt(lambda) on each of the six outer legs before the SVD (the "
         f"weights gauge_fix already returns and _su_step drops) and divide it "
         f"back out after: measured, that makes this ratio 1.000000 on all "
-        f"twelve dense cells, and it is exact at full rank (1.1e-15), so it "
+        f"twelve dense cells, and it is exact at full rank (1.3e-15 to "
+        f"2.4e-15), so it "
         f"changes the truncation basis and nothing else."
     )
 
@@ -2713,13 +3074,30 @@ def test_the_energy_reference_reproduces_the_known_su_number():
       and ``chi=24`` and ``chi=32`` add nothing (3.3e-16 and 0.0).  An energy
       still moving with chi is not an answer.
     * **The recipe is not the collapsing one.**  ``recipe="1x1"`` on the same
-      state returns ``-0.648904`` with ``rank(C1) == 1`` -- a wrong energy that
-      differs from the right one by 1e-02, which is the size of the whole
-      D=2-to-D=4 spread.  The rank assertion inside ``_energy_of`` is what
-      stands between this file and that number.
+      state collapses to ``rank(C1) == 1``, and ``_energy_of`` is driven at that
+      recipe here inside a ``pytest.raises`` so its rank assertion is watched
+      firing.  (Out of band, the number it would have returned is ``-0.648904``
+      -- wrong by 1e-02, the size of the whole D=2-to-D=4 spread.  This test
+      does not compute it and does not assert it: ``_energy_of`` refuses before
+      returning, which is the point.)
 
-    Also measured and worth recording: no ``check_rdm`` non-PSD warning fires at
-    any chi on any of D=2, 3 or 4, so the energies here are bounded by physics.
+    **This cell validates the apparatus, not the engine, and that is why it
+    survives sabotage of the module under test.**  Measured: with ``_su_step``,
+    ``_su_evolve``, ``_align_gate_to_ket``, ``_sqrt_and_inv_sqrt``,
+    ``_require_uniform_bonds``, ``_bond_dims`` and ``_reorder`` all replaced by
+    functions that raise, in both ``ipeps_su``'s namespace and this file's, this
+    cell **passes** (19.4 s).  It should: the state comes from
+    ``ipeps_simple_update`` via :func:`_shipped_su_run` and the reading from
+    ``_ctm_tensor_*``; the only ``ipeps_su`` code it touches is
+    ``_SUState.from_pair``'s label check.  So **do not count it as coverage of
+    ``ipeps_su``** -- no mutation of that module can fail it, by design.  What
+    it covers is :func:`_energy_of`, which every energy guard below is scored
+    with, against a CTM number this project already had.
+
+    Also measured out of band and asserted nowhere here, so it is a record
+    rather than a guard: ``chi=24`` and ``chi=32`` add 3.3e-16 and 0.0 to the
+    ``chi=16`` reading, and no ``check_rdm`` non-PSD warning fires at any chi on
+    any of D=2, 3 or 4.
     """
     state, _lambdas = _shipped_su_run(D=2, seed=0, steps=600)
 
@@ -2741,10 +3119,20 @@ def test_the_energy_reference_reproduces_the_known_su_number():
         f"so this is a truncation error and not yet an energy"
     )
 
-    # The collapsed-recipe control.  Without it, the rank assertion inside
-    # ``_energy_of`` is a claim nobody has watched fire.
+    # The collapsed-recipe control, driven **through** ``_energy_of``.  Until
+    # #882's final review this called ``ctm_tensor_2site(recipe="1x1")``
+    # directly and asserted ``rank(C1) == 1`` on its own -- which watched the
+    # recipe, not the guard: ``_energy_of`` hard-coded ``recipe="2x2"``, so its
+    # ``assert rank > 1`` had never been seen firing anywhere in either file.
+    # What actually stood between this file and -0.648904 was a string literal.
+    # ``_energy_of`` now takes ``recipe`` for exactly this call.
+    with pytest.raises(AssertionError, match=r"corner C1 has rank 1 at chi="):
+        _energy_of(state, chi=chi_fine, recipe="1x1")
+
+    # And the corner really is rank 1 -- i.e. the refusal above is provoked by
+    # the collapse and not by something else the '1x1' recipe does.
     env_A, _env_B = ctm_tensor_2site(
-        state.A, state.B, chi=16, max_iter=200, conv_tol=1e-10, recipe="1x1"
+        state.A, state.B, chi=chi_fine, max_iter=200, conv_tol=1e-10, recipe="1x1"
     )
     sv = np.linalg.svd(np.asarray(env_A.C1.todense()), compute_uv=False)
     assert int(np.sum(sv > sv[0] * 1e-10)) == 1, (
@@ -2754,8 +3142,32 @@ def test_the_energy_reference_reproduces_the_known_su_number():
     )
 
 
-def test_the_stored_spectra_are_closer_to_the_bp_messages_than_the_plan_says():
+def test_the_shipped_engines_stored_spectra_are_closer_than_the_plan_says():
     """C-1, resolved by measurement -- and the measurement contradicts the plan.
+
+    **This cell measures ``ipeps_simple_update._simple_update_checkerboard_sweep``
+    -- the engine being *replaced* -- and nothing in ``ipeps_su``.**  Measured
+    rather than reasoned: with ``_su_step``, ``_su_evolve``,
+    ``_align_gate_to_ket``, ``_sqrt_and_inv_sqrt``, ``_require_uniform_bonds``,
+    ``_bond_dims`` and ``_reorder`` all replaced by functions that raise, in
+    both namespaces, this cell **passes** in 2.8 s.  The only ``ipeps_su`` code
+    it reaches is ``_SUState.from_pair``'s label check.  So no mutation of the
+    module under test can kill it, and it must not be counted as coverage of
+    that module; the name says which engine it is about for the same reason.
+    It is here because C-1 is a question about the *old* engine's stored
+    spectra, and that is where they exist.
+
+    **The two lower bounds are properties of the shipped engine as it stands
+    today, so they are anti-correlated with a future fix to it.**  ``1e-3 <
+    worst_l2`` and ``0.10 < worst_elem`` fire if the shipped engine's stored
+    spectra ever *become* the BP messages -- which is exactly what the
+    four-independent-lambda D=4 path already does, at 0.00%.  They are kept,
+    unmoved, because without them the comparison passes on a re-point of
+    ``lambdas`` to ``bp`` and the cell goes silently vacuous.  If they fire, the
+    claim they record has been settled: retire the cell, do not lower the bound.
+    (Latent rather than live at this cell's own configuration: flipping
+    ``independent_bonds=True`` here moves neither reading -- 2.2500% / 16.3057%
+    both ways.)
 
     The plan's Step 1 asks the new engine's returned weights to match "the
     diagnostic the engine reported".  ``_su_evolve`` reports none: ``_SUState``
@@ -2824,6 +3236,18 @@ def test_the_stored_spectra_are_closer_to_the_bp_messages_than_the_plan_says():
         f"{ {k: round(v * 100, 2) for k, v in elementwise.items()} }) -- this "
         f"is the reading the plan's 15-35% belongs to, and pinning it here is "
         f"what stops the two numbers being quoted for each other"
+    )
+    # And the two really are different readings of the same data -- the whole
+    # of C-5, and the only assertion here that is not a band around a measured
+    # constant.  A single number quoted for both is the mistake C-5 names, and
+    # it is the one this cell can still catch: compute ``elementwise`` with the
+    # L2 formula and the ratio collapses to 1.  Measured on this cell's own
+    # data, the element-wise reading is ~7x the L2 one.
+    assert worst_elem > 3.0 * worst_l2, (
+        f"the element-wise reading ({worst_elem * 100:.2f}%) is not materially "
+        f"above the L2 one ({worst_l2 * 100:.2f}%), so the two bands above are "
+        f"pinning the same reading twice and either could be quoted as the "
+        f"other -- which is the Frobenius-vs-max-abs confusion C-5 names."
     )
 
 
@@ -3036,7 +3460,18 @@ def test_d3_actually_uses_its_third_bond_direction(seed):
     starved = jnp.asarray([1.0, 1.0, 1e-6])
     for leg in ("u", "d", "l", "r"):
         A, B = scale_bond_axis(A, leg, starved), scale_bond_axis(B, leg, starved)
-    _a, _b, w_starved, _i = gauge_fix(A, B, tol=1e-10)
+    _a, _b, w_starved, info_starved = gauge_fix(A, B, tol=1e-10)
+    # Checked, four lines after the main path asserts the same thing "because
+    # #870 is the standing reason not to trust a spectrum from a failed solve".
+    # It was unpacked and discarded before #882's final review.  Latent, not
+    # live: the starved solve converges on all three seeds (40/34/69 sweeps,
+    # residual 6.2e-11 / 5.7e-11 / 9.9e-11 against tol=1e-10).
+    assert info_starved.converged, (
+        f"seed {seed}: BP did not converge on the starved control pair "
+        f"({info_starved.iterations} sweeps, residual {info_starved.residual:.3e}), "
+        f"so the spectrum this control rejects is not a fixed point and the "
+        f"rejection is not evidence that the reading above has teeth"
+    )
     ratios = [
         float(
             np.asarray(getattr(w_starved, f))[-1] / np.asarray(getattr(w_starved, f))[0]

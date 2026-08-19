@@ -54,6 +54,16 @@ _FILE_MARKERS = {
     # being the D=2 imaginary-time run at 17.7 s -- which is NOT the slow
     # one -- and the symmetric chain anchor at 22.6 s), and -m slow is
     # 234 s in that single cell, the symmetric D=3 truncation guard.
+    #
+    # **Three of its rows carry an explicit `core` mark** (851, 869, 6.2a --
+    # 2.35 s, 0.46 s and 0.03 s both sides), so the file contributes to the
+    # required gate.  It has to: this is the file that certifies the guards in
+    # `test_ipeps_su.py` can fail, and with the whole file in `algorithm` it
+    # collected zero tests under `-m core` -- every mutation cell ran only in
+    # `fast-other`, which is not required and is chronically red on `main`.
+    # That is the state the `test_arnoldi.py` note below calls "a guard that
+    # runs in no required job is not one", and it was the state of the one
+    # file whose subject is exactly that.  See `_MUTANTS` for the measurement.
     "test_ipeps_su_mutations.py": "algorithm",
     "test_ipeps_core.py": "core",
     "test_auto_mpo.py": "algorithm",

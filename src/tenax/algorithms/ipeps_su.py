@@ -88,11 +88,15 @@ _BOND_ENDS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
 #: ``ipeps()`` at :func:`_su_evolve` without also re-timing the Trotter
 #: ordering underneath it.  Any permutation covering all four is as valid a
 #: second-order-free Trotter split, and the difference is small but real:
-#: measured, ``(h_AB, h_BA, v_AB, v_BA)`` lands 4.4e-04 from this order after
-#: four dense ``D=3`` steps at ``dt=0.05``, against 4.5e-02 to 6.2e-02 for
-#: evolving any *single* bond four times.  So the order is worth pinning by
-#: assertion (``test_su_evolve_visits_four_distinct_bonds_per_cycle`` writes it
-#: out independently) and is not worth trying to detect from the state.
+#: measured, ``(h_AB, h_BA, v_AB, v_BA)`` lands 4.93e-04 from this order after
+#: four dense ``D=3`` steps at ``dt=0.05`` (with the asymmetric gate
+#: ``tests/test_ipeps_su.py``'s ``_asymmetric_hamiltonian`` builds), against
+#: 4.35e-02 to 6.44e-02 for evolving any *single* bond four times.  Both figures
+#: were re-measured for #882's final review; the previous 4.4e-04 and
+#: "4.5e-02 to 6.2e-02" were close but neither reproduced.  So the order is
+#: worth pinning by assertion
+#: (``test_su_evolve_visits_four_distinct_bonds_per_cycle`` writes it out
+#: independently) and is not worth trying to detect from the state.
 #:
 #: Alternating the two orientations rather than doing both horizontals first is
 #: not arbitrary either: it is what makes the *partial* cycles interesting.
@@ -363,11 +367,19 @@ def _align_gate_to_ket(gate: Tensor, site: Tensor) -> Tensor:
 
     Raises:
         ValueError: if the gate's two input legs disagree on flow, or if either
-            carries a different charge array from the site's ``phys`` leg.
+            carries a different charge array from **the one site it is handed**.
             Neither is repairable by flipping flows, and both mis-pair
             *silently*: block matching is by charge **value**, so a gate whose
             ``si`` charges are a permutation of the site's would contract the
             wrong physical basis states together and return a plausible number.
+
+            ``site`` is one tensor and both gate legs are checked against
+            *its* ``phys``.  :func:`_su_step` -- the only caller in ``src`` --
+            passes ``pair[site_i]``, so the gate's ``sj``, which acts on
+            ``site_j``, is never checked against ``site_j``'s own ``phys``
+            charges.  Harmless for every pair this module is used with, since
+            A and B share a physical index there; it is stated because the
+            sentence above reads like a two-site validation and it is not.
     """
     phys = site.indices[site.labels().index("phys")]
     labels = gate.labels()
@@ -576,9 +588,16 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
             gauge sets the basis the truncation is taken in, so a failed solve
             does not raise anything and does not corrupt the state -- it
             quietly costs truncation quality on *every* step of a run.  That is
-            live rather than hypothetical: with the gate's flows left
-            unaligned, BP hit ``max_iter=100`` at residual 1.399e-01 on a
-            symmetric ``v_BA`` step and this function returned normally.  #870
+            live rather than hypothetical, and the evidence is a run rather than
+            a probe: one ``-m slow`` pass of this module's two test files
+            emits **1377** of these warnings, and not only from the cells that
+            fail -- 19 of them come from two cells that report green.  (An earlier version of this
+            note cited "with the gate's flows left unaligned, BP hit
+            ``max_iter=100`` at residual 1.399e-01 on a symmetric ``v_BA``
+            step".  #882's final review measured that mutation on all six cells
+            of ``test_su_step_output_can_still_be_gauged`` and every one
+            converges, so the citation is withdrawn: the internal ``gauge_fix``
+            runs before the gate is used and no gate change can move it.)  #870
             is the standing reason to distrust a silent BP: there, a residual
             falling monotonically to 9.8e-12 certified a state that had already
             gone to zero.
@@ -731,7 +750,11 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
     # the state is returned to absorbed form, which is the convention
     # ``_SUState`` and ``gauge_fix`` share.  Measured at full rank, where the
     # SVD keeps everything and only the basis can differ: weighted and
-    # unweighted routes agree to 1.1e-15 on all four bonds.
+    # unweighted routes agree to 1.3e-15 to 2.4e-15 on the four bonds
+    # (1.294e-15, 2.420e-15, 1.778e-15, 1.908e-15 for h_AB, h_BA, v_AB,
+    # v_BA; dense D=3, dt=0.05).  The `1.1e-15` this comment used to
+    # carry was below the measured minimum -- the stage-2 table above has
+    # always had the range right.
     for site, leg, inv_root in outer:
         out[site] = scale_bond_axis(out[site], leg, inv_root)
 
@@ -870,7 +893,7 @@ def _su_evolve(state: _SUState, gate: Tensor, max_D: int, steps: int) -> _SUStat
     teeth are the real-gate ones -- ``test_su_evolve_actually_evolves``
     (a no-op scores 5.0e-02 at ``steps=4``) and
     ``test_su_evolve_visits_four_distinct_bonds_per_cycle`` (evolving one bond
-    four times scores 4.5e-02 to 6.2e-02).
+    four times scores 4.35e-02 to 6.44e-02).
 
     No ``phase0``.  The signature is fixed by #882 §11 and every call starts the
     cycle at ``h_AB``, so a caller that resumes by calling this a second time
@@ -971,11 +994,15 @@ def _su_evolve(state: _SUState, gate: Tensor, max_D: int, steps: int) -> _SUStat
         three rounds each on the same box, three calls gives 5.56/6.45/6.84
         ms a step against six at 6.97/6.71/6.75, so the within-arm spread is
         wider than the difference.  It is kept for the de-duplication, not for
-        the time.  Symmetric ``D=3`` takes the eager BP route at
-        **~38 s a step**
-        (``ipeps_gauge``'s *Performance*), so a symmetric hundred-step evolve is
-        an hour and does not belong in a test suite; the tests here evolve on
-        the dense arm and cover the block-sparse algebra through
+        the time.  Symmetric ``D=3`` takes the **eager** BP route -- that half
+        is what ``ipeps_gauge``'s *Performance* says, and it carries no figure
+        for this pair (its 0.92 ms and 2.47 ms are the dense/traced route).  The
+        eager cost is measured here instead: **~38 s a step**, effectively all
+        of it the BP solve -- 52 sweeps at ``gauge_fix``'s default ``tol`` at
+        ~0.7 s a sweep, against 1.06 s for the whole traced dense step
+        (``tests/test_ipeps_su.py``'s ``_CASES``).  So a symmetric hundred-step
+        evolve is an hour and does not belong in a test suite; the tests here
+        evolve on the dense arm and cover the block-sparse algebra through
         :func:`_su_step`'s own symmetric cells.
 
         Nothing is renormalised, and nothing needs to be: ``gauge_fix`` rescales
