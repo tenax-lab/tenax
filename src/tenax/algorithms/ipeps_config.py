@@ -628,7 +628,12 @@ class iPEPSConfig:
     # candidate energy strictly below this value is rejected as a non-
     # variational CTM artifact (see issue #298).  None disables the check.
     gs_energy_floor: float | None = None
-    gs_implicit_ad: bool = True  # implicit diff (VJP + sigma gauge)
+    # Implicit differentiation through the CTM fixed point (iterative VJP
+    # backward).  The gauge is ``ctm.forward_gauge``, which defaults to
+    # ``"phase"`` -- and for this path "defaults to" understates it:
+    # ``validate_ctm_for_implicit_ad`` accepts no other value.  This comment
+    # said "sigma gauge" until #808; sigma is an *explicit*-AD option.
+    gs_implicit_ad: bool = True
     # When True, optimize_gs_ad appends a trajectory dict
     # ``{energies, step_times, jit_compile_time, num_steps, converged}``
     # to its return tuple.  Default is False so existing callers see the
