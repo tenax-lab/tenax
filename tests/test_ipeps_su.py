@@ -765,12 +765,13 @@ def test_su_step_output_can_still_be_gauged(kind, bond, su):
     -- the gauge sets the basis the next truncation is taken in -- and because
     reading it is one solve on a pair the ``su`` cache has already built.
 
-    The *live* half of the same condition is elsewhere and is measured: one
-    ``-m slow`` pass of this file and its mutation sibling emits 3339
-    ``gauge_fix did not converge`` warnings from ``ipeps_su.py``, 41 of them
-    inside five cells that report green, and
-    ``test_su_step_warns_when_the_gauge_did_not_converge`` guards the reporting
-    path with a fabricated ``BPGaugeInfo``.
+    The other half of the same condition is the reporting path, and
+    ``test_su_step_warns_when_the_gauge_did_not_converge`` guards it with a
+    fabricated ``BPGaugeInfo``.  That construction is deliberate: the measured
+    census of these warnings is now **zero** (it was 3339 per ``-m slow`` pass,
+    41 of them inside cells reporting green, before the acceptance runs started
+    from a near-product pair), so there is no longer a naturally occurring
+    non-convergence for a test to catch a ride on.
 
     The other two properties are pinned elsewhere and neither is claimed here:
     ``test_su_step_applies_the_gate_across_the_bond`` pins the state,
@@ -1546,10 +1547,12 @@ def test_su_step_warns_when_the_gauge_did_not_converge(su, monkeypatch):
     internal ``gauge_fix`` runs before the gate is touched, so no gate change
     could have moved it.  The citation is withdrawn.
 
-    What *is* measured is that the condition fires in real runs: one
-    ``-m slow`` pass of this file and its mutation sibling emits **3339** of
-    these warnings from ``ipeps_su.py``, 41 of them inside five cells that
-    report green.
+    What is measured is that the condition **used** to fire in real runs: one
+    ``-m slow`` pass of this file and its mutation sibling emitted **3339** of
+    these warnings, 41 of them inside cells reporting green.  It is **zero**
+    now -- those were an artefact of starting inside the product state's basin
+    -- so the condition is reachable in principle and unobserved in practice,
+    which is exactly why the ``BPGaugeInfo`` below has to be fabricated.
 
     The ``BPGaugeInfo`` below is therefore **fabricated**, which is the right
     construction for this test either way: the thing under test is the

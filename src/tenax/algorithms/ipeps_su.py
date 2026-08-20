@@ -603,11 +603,19 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
         RuntimeWarning: if the internal ``gauge_fix`` did not converge.  The
             gauge sets the basis the truncation is taken in, so a failed solve
             does not raise anything and does not corrupt the state -- it
-            quietly costs truncation quality on *every* step of a run.  That is
-            live rather than hypothetical, and the evidence is a run rather than
-            a probe: one ``-m slow`` pass of this module's two test files
-            emits **3339** of these warnings, and not only from the cells that
-            fail -- 41 of them come from five cells that report green.  (An earlier version of this
+            quietly costs truncation quality on *every* step of a run.
+
+            **The current census is zero**, measured: one ``-m slow`` pass of
+            this module's two test files emits none of these warnings
+            (``-W always -rw``; pytest prints a warnings count in its summary
+            line whenever there is one, and there is none).  *Historically* the
+            same pass emitted **3339**, 41 of them from cells reporting green,
+            and that was cited here as a live property -- it was an artefact of
+            the acceptance runs starting from a maximally entangled pair, and
+            it went to zero when they switched to a near-product start.  The
+            hazard is still real and still unwatched: nothing counts these
+            warnings, so if the census ever leaves zero no test will say so.
+            (An earlier version of this
             note cited "with the gate's flows left unaligned, BP hit
             ``max_iter=100`` at residual 1.399e-01 on a symmetric ``v_BA``
             step".  #882's final review measured that mutation on all six cells
