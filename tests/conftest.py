@@ -216,6 +216,15 @@ _FILE_MARKERS = {
     # duplicate under-reported rho on complex input, so the guard passed a
     # divergent adjoint -- and a guard that runs in no required job is not one.
     "test_arnoldi.py": "core",
+    # #898: the CTM convergence criterion reads identically zero on a rank-1
+    # corner, so a collapsed environment was certified as converged at ANY
+    # max_iter, conv_tol and chi.  The unit half is pure array algebra --
+    # milliseconds -- and belongs in the required gate because the defect is
+    # *silence*: nothing failed, the loop just exited early and returned a
+    # mean-field number.  The three end-to-end cases converge 2-site CTMs and
+    # carry their own explicit ``@pytest.mark.slow``, which the rule below
+    # honours by *withholding* this ``core``.
+    "test_ctm_criterion_rank_blind_898.py": "core",
     # The eager-loop GMRES every root-implicit adjoint runs through (#731).
     # ~20s on dense matrices, no CTM.  ``core`` because the property it guards
     # is *structural* and invisible to every numerical test: put the loop back

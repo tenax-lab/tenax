@@ -22,6 +22,8 @@ __all__ = [
     "ctm_tensor_2site",
 ]
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 
@@ -552,13 +554,73 @@ def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
     which correctly reports the env as *not yet converged* while it is still
     changing shape.  Once the block structure stabilises the lengths match
     and the diff reduces to the usual element-wise comparison.
+
+    **Returns ``inf`` when the comparison cannot mean anything (#898).**
+    Normalising by the sum is what makes this comparable across sweeps under
+    ``renormalize`` -- the absolute corner scale is meaningless by design --
+    but it also means a **rank-1** spectrum normalises to ``[1, 0, ..., 0]``
+    *whatever* the environment is doing.  Two completely different
+    environments then compare equal to within an ulp, so every loop that tests
+    this against ``conv_tol`` certifies a collapsed environment as converged:
+    measured, the returned energy was bit-identical at ``max_iter``
+    60/120/300/400/800, ``conv_tol`` 1e-9/1e-12/1e-14 and ``chi`` 8/12/24/48,
+    while sitting 8.8e-3 above the fixed point the same loop reaches by sweep
+    41.
+
+    ``inf`` is the honest value rather than a sentinel: on a rank-1 corner the
+    true difference between the two environments is *unbounded*, because the
+    spectrum carries no information about them.  Reporting it here rather than
+    at the nine separate call sites is deliberate -- every one of them already
+    compares against ``conv_tol``, so they all fail closed with no change, and
+    a future tenth loop inherits the guard instead of re-acquiring the bug.
     """
+    # ``jnp.where``, not a Python ``if``: one of the nine loops runs inside
+    # ``jax.lax.while_loop`` (``ipeps_ctm_convergence``), where the predicate
+    # is a tracer and branching on it raises TracerBoolConversionError.  Both
+    # arms are cheap, so evaluating them unconditionally costs nothing.
+    blind = _spectrum_is_uninformative(sv_new) | _spectrum_is_uninformative(sv_old)
     n = max(sv_new.shape[0], sv_old.shape[0])
     sv_new = jnp.pad(sv_new, (0, n - sv_new.shape[0]))
     sv_old = jnp.pad(sv_old, (0, n - sv_old.shape[0]))
     sv1 = sv_new / (jnp.sum(sv_new) + 1e-15)
     sv2 = sv_old / (jnp.sum(sv_old) + 1e-15)
-    return jnp.max(jnp.abs(sv1 - sv2))
+    diff = jnp.max(jnp.abs(sv1 - sv2))
+    return jnp.where(blind, jnp.inf, diff)
+
+
+#: Relative singular-value cutoff for the rank test, matching
+#: ``_ctm_diagnostics.ctm_corner_rank`` so the convergence detector and the
+#: collapse detector cannot disagree about the same corner.
+_RANK_TOL = 1e-10
+
+
+def _spectrum_is_uninformative(sv: jax.Array, tol: float = _RANK_TOL) -> jax.Array:
+    """Whether a sum-normalised comparison of ``sv`` is forced (#898).
+
+    True exactly when the corner has numerical rank <= 1 -- one non-zero
+    singular value normalises to ``1.0`` and the rest to ``0.0`` regardless of
+    the environment -- or when the spectrum is empty or non-finite.  This is
+    deliberately ``env_is_collapsed``'s predicate: a corner the collapse
+    detector calls dead is exactly one the convergence detector cannot see.
+
+    Written in ``jnp`` and returning an array so it survives tracing; one of
+    the nine convergence loops runs inside ``jax.lax.while_loop``.
+    """
+    if sv.shape[0] == 0:
+        return jnp.asarray(True)
+    top = sv[0]
+    healthy = jnp.isfinite(top) & (top > 0.0)
+    rank = jnp.sum(sv > tol * top)
+    return jnp.logical_not(healthy & (rank > 1))
+
+
+def _spectrum_can_show_change(sv: jax.Array, tol: float = _RANK_TOL) -> bool:
+    """Eager ``bool`` form of :func:`_spectrum_is_uninformative`, negated.
+
+    For the loops that want to *report* the blindness rather than merely fail
+    closed on it.
+    """
+    return not bool(_spectrum_is_uninformative(sv, tol))
 
 
 def _tensor_leaf_data(leaf):
@@ -810,6 +872,7 @@ def _ctm_tensor_multisite(
         max_iter = max_iter - warmup
 
     prev_svs: dict[Coord, jax.Array] = {}
+    blind_coords: set[Coord] = set()
     for _ in range(max_iter):
         envs, _, _ = _ctm_tensor_sweep_multisite(
             envs,
@@ -824,6 +887,14 @@ def _ctm_tensor_multisite(
         converged = True
         for c in sorted(envs):
             sv = _corner_singular_values(envs[c].C1)
+            # ``_ctm_sv_diff`` returns ``inf`` on a rank-1 corner (#898), so
+            # the comparison below already fails closed and no special case is
+            # needed for *correctness*.  What is recorded here is only which
+            # coordinate went blind, so the warning after the loop can name it
+            # -- the loop is the only place that knows the budget ran out
+            # rather than the criterion being satisfied.
+            if not _spectrum_can_show_change(sv):
+                blind_coords.add(c)
             if c in prev_svs:
                 if float(_ctm_sv_diff(sv, prev_svs[c])) >= conv_tol:
                     converged = False
@@ -832,6 +903,26 @@ def _ctm_tensor_multisite(
             prev_svs[c] = sv
         if converged:
             break
+
+    if blind_coords:
+        # Not silent, and not fatal.  The sweeps still ran -- and on the
+        # measured case they keep *improving* the energy -- so the environment
+        # returned here is the best this budget reached.  What the caller must
+        # not do is read it as converged.
+        where = ", ".join(str(c) for c in sorted(blind_coords))
+        warnings.warn(
+            f"CTM convergence could not be certified: the corner at {where} "
+            "collapsed to rank <= 1 during the sweep, and the corner-spectrum "
+            "criterion is structurally blind there (it compares the spectrum "
+            "normalised by its sum, which a rank-1 corner forces to "
+            "[1, 0, ..., 0]). The full max_iter budget was run instead of "
+            "exiting early, so this environment is the best the budget "
+            "reached -- but it is NOT a converged fixed point, and its energy "
+            "is a mean-field number that will not respond to chi (#898, "
+            "#723/#726/#747).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     return envs
 

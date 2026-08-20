@@ -206,6 +206,56 @@
 
 ### Fixed
 
+- **The CTM convergence criterion no longer certifies a collapsed
+  environment** (#898). `_ctm_sv_diff` compares the corner spectrum
+  *normalised by its sum*. That normalisation is deliberate — under
+  `renormalize=True` the absolute corner scale is meaningless — but it also
+  means a **rank-1** spectrum normalises to `[1, 0, ..., 0]` whatever the
+  environment is doing. Two completely different environments then compared
+  equal, so every loop testing it against `conv_tol` exited on sweep 2 or 3 and
+  reported success.
+
+  Measured on a collapsing 2-site fixture: the returned energy was
+  bit-identical at `max_iter` 60/120/300/400/800, `conv_tol` 1e-9/1e-12/1e-14
+  **and** `chi` 8/12/24/48 — sitting **8.8e-3 above** the fixed point the same
+  loop reaches by sweep 41. There was no knob a caller could turn to notice,
+  and nothing warned.
+
+  The criterion now returns **`inf`** when either spectrum has numerical rank
+  ≤ 1. That is the honest value rather than a sentinel: on a rank-1 corner the
+  true difference between the two environments is genuinely *unbounded*,
+  because the normalised spectrum carries no information about them.
+
+  **The guard went into the criterion rather than the call sites, because there
+  are nine of them** — `_ctm_tensor_convergence` (×2),
+  `_split_ctm_tensor_convergence` (×2), `_ctm_tensor_c4v`,
+  `_ctm_tensor_c4v_reference_ad`, `ipeps_ctm_convergence` (×3), `ad_utils` and
+  `_ctm_loop_core` all share the identical `compare against conv_tol → certify`
+  pattern. Every one now fails closed with no change at the call site,
+  including the one inside `jax.lax.while_loop` (which is why the predicate is
+  written in `jnp` and returns an array). A tenth loop inherits the guard
+  instead of re-acquiring the bug — the #828/#829 duplicate-implementation
+  lesson applied up front.
+
+  After the fix the budget means something again: 4 / 12 / 30 sweeps give
+  −0.428341 / −0.433246 / −0.433290, i.e. 30 sweeps lands within 1e-9 of the
+  true fixed point. `_ctm_tensor_multisite` also warns, naming the collapsed
+  coordinate, since it is the only place that knows the budget ran out rather
+  than the criterion being satisfied.
+
+  **Inert on healthy states**, which is the constraint that shaped it: a
+  physical state has full-rank corners (measured 6/6 at χ=8), still exits early,
+  still emits nothing, and `_ctm_sv_diff` returns bit-identically what it did
+  before. Two regimes are pinned by test so they cannot be "tidied" away: the
+  `+1e-15` denominator guard leaves a scale-dependent residue of about
+  `1e-15/min(scale)` rather than an exact zero, and below that guard the
+  criterion already failed *closed* (~1.0), which is the safe direction.
+
+  Does **not** fix the two red tests that surfaced it
+  (`test_ctm_670_symmetric_2x2`, `test_ctm_direction_dependent_bonds`): their
+  fixtures build a state whose corner collapses in the first place, which is a
+  separate defect.
+
 - **The root-implicit adjoint no longer compiles its operator into a loop
   body** (#731). The symmetric engine peaked at **8.63 GB** of host RAM for a
   single gradient at `D=2, χ=4` — the smallest case there is — against
