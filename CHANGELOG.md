@@ -237,6 +237,20 @@
   instead of re-acquiring the bug — the #828/#829 duplicate-implementation
   lesson applied up front.
 
+  **That lesson had to be applied once more before the claim above was true.**
+  `ipeps_ctm_convergence` did not share the criterion — it defined its own
+  copy of `_ctm_sv_diff`, without the rank test — and that copy is the one the
+  **public** path ran: `ipeps()` imports `ctm_2site` from there
+  (`ipeps.py:30`, called at `:462`). So the first version of this fix guarded
+  the tensor loops while every `ipeps()` call kept comparing `[1, 0, ..., 0]`
+  against `[1, 0, ..., 0]` and exiting early — a fix that leaves the production
+  path broken, which is worse than no fix because the closed issue stops anyone
+  looking. The duplicate now imports the guarded implementation, and two tests
+  pin it: one asserts object identity (a fresh unguarded copy returns the same
+  number as the guarded one on every input *except* the collapsed ones, so a
+  value assertion would not catch the regression), the other pins the routing
+  that makes the first one load-bearing.
+
   After the fix the budget means something again: 4 / 12 / 30 sweeps give
   −0.428341 / −0.433246 / −0.433290, i.e. 30 sweeps lands within 1e-9 of the
   true fixed point. `_ctm_tensor_multisite` also warns, naming the collapsed

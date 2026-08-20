@@ -20,6 +20,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from tenax.algorithms._ctm_tensor_convergence import _ctm_sv_diff
 from tenax.algorithms.ipeps_config import (
     CTMConfig,
     CTMEnvironment,
@@ -62,11 +63,24 @@ def _ctm_sweep(
     return env
 
 
-def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
-    """Compute max absolute difference between normalized singular value vectors."""
-    sv1 = sv_new / (jnp.sum(sv_new) + 1e-15)
-    sv2 = sv_old / (jnp.sum(sv_old) + 1e-15)
-    return jnp.max(jnp.abs(sv1 - sv2))
+# ``_ctm_sv_diff`` is imported, not defined here.
+#
+# This module used to carry its own copy, and the copy is what the **public**
+# path ran: ``ipeps()`` imports ``ctm_2site`` from here (``ipeps.py:30``, called
+# at ``:462``), so #898's guard in ``_ctm_tensor_convergence`` protected the
+# tensor loops while every ``ipeps()`` call kept the unguarded comparison --
+# the rank-1 corner still normalised to ``[1, 0, ..., 0]``, still compared
+# equal to an unrelated environment, and still reported convergence early.
+# A fix that leaves the production path broken is worse than no fix, because
+# the closed issue stops anyone looking.
+#
+# The guarded implementation is written to be shared: it uses ``jnp.where``
+# rather than a Python ``if`` precisely so it can run inside the
+# ``jax.lax.while_loop`` in this module, and its own docstring says the guard
+# belongs in one place so "a future tenth loop inherits the guard instead of
+# re-acquiring the bug".  This is that inheritance, and it also picks up the
+# #670 zero-padding, which is a no-op on the dense path where the spectrum
+# length is fixed by ``chi``.
 
 
 class CTMConvergenceInfo(NamedTuple):

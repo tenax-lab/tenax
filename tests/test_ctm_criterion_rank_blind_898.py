@@ -278,3 +278,68 @@ def test_a_healthy_state_still_converges_early_and_silently():
     print(f"#898 healthy-state corner ranks: {rank_a}, {rank_b} (chi=8)")
     assert rank_a > 1, rank_a
     assert rank_b > 1, rank_b
+
+
+# --------------------------------------------------------------------- #
+# The path a user actually reaches                                       #
+# --------------------------------------------------------------------- #
+
+
+def test_the_public_ipeps_loop_uses_the_guarded_criterion():
+    """The guard is worth nothing if ``ipeps()`` runs a different comparison.
+
+    It did.  ``ipeps_ctm_convergence`` carried its **own** ``_ctm_sv_diff`` --
+    the same sum-normalised comparison without the rank test -- and that is the
+    copy the public path ran: ``ipeps.py`` imports ``ctm_2site`` from there and
+    calls it, so every ``ipeps()`` call kept comparing ``[1, 0, ..., 0]``
+    against ``[1, 0, ..., 0]`` and exiting early, while the tests above passed
+    against the guarded module.  A fix that leaves the production path broken
+    is worse than no fix, because the closed issue stops anyone looking.
+
+    Asserted as **object identity**, not by re-testing the behaviour: the
+    behaviour is already covered above, and what regresses is someone
+    re-introducing a local definition -- which identity catches and a
+    value assertion would not, since a fresh unguarded copy returns the same
+    number as the guarded one on every input except the collapsed ones.
+
+    The three loops in that module (``ctm``, ``ctm_2site``, ``ctm_split``) all
+    call the name bound at module scope, so binding it once is what routes all
+    three.  ``ctm_2site`` is the one ``ipeps()`` reaches.
+    """
+    from tenax.algorithms import ipeps_ctm_convergence
+
+    assert ipeps_ctm_convergence._ctm_sv_diff is _ctm_sv_diff, (
+        "ipeps_ctm_convergence._ctm_sv_diff is not the guarded implementation "
+        "from _ctm_tensor_convergence -- the public ipeps() path compares "
+        "corner spectra with an unguarded copy again (#898), so a rank-1 "
+        "corner will certify as converged there no matter what this file's "
+        "other tests say"
+    )
+
+
+def test_the_public_loop_is_the_one_ipeps_calls():
+    """Pin the routing the test above depends on.
+
+    ``test_the_public_ipeps_loop_uses_the_guarded_criterion`` is only
+    load-bearing while ``ipeps()`` actually reaches this module.  If the import
+    moves, that test keeps passing and stops meaning anything -- so the routing
+    is asserted rather than assumed.
+    """
+    import inspect
+
+    # The MODULE, not the re-exported ``ipeps`` function of the same name --
+    # ``from tenax.algorithms import ipeps`` binds the callable, and asking it
+    # for ``ctm_2site`` raises AttributeError rather than failing the claim.
+    import tenax.algorithms.ipeps as ipeps_module
+    from tenax.algorithms import ipeps_ctm_convergence
+
+    assert ipeps_module.ctm_2site is ipeps_ctm_convergence.ctm_2site, (
+        "ipeps no longer calls ipeps_ctm_convergence.ctm_2site, so the guard "
+        "assertion in the test above is no longer about the public path -- "
+        "re-point it at whatever ipeps() reaches now"
+    )
+    source = inspect.getsource(ipeps_ctm_convergence)
+    assert "def _ctm_sv_diff" not in source, (
+        "ipeps_ctm_convergence defines _ctm_sv_diff again; it must import the "
+        "guarded one from _ctm_tensor_convergence (#898)"
+    )
