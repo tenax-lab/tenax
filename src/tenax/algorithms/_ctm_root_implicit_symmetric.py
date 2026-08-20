@@ -1868,6 +1868,7 @@ def sym_root_implicit_energy_and_grad(
     solve_restart: int = 30,
     root_residual_warn: float = 1e-6,
     on_root_residual: str = "raise",
+    collect_backward_jaxpr: bool = True,
 ):
     """Energy and ``dE/dA`` for a 1x1 unit cell, block sparse throughout.
 
@@ -2059,20 +2060,28 @@ def sym_root_implicit_energy_and_grad(
     # that applies no such primitive.  The dense module's version of this test
     # is safe only because its jaxpr is small enough.  Listing primitives says
     # exactly what is meant, and is 300 bytes instead of 4 MB.
-    primitives: set[str] = set()
-    for fn, args in (
-        (energy_of, (A, tilde, S_star)),
-        (F_of_y, (y_star,)),
-        (F_of_p, (A,)),
-    ):
-        primitives |= _primitive_names(jax.make_jaxpr(fn)(*args))
-    for pullback, cotangent in (
-        (vjp_energy, jnp.ones((), dtype=energy.dtype)),
-        (vjp_y, y_bar),
-        (vjp_p, F_bar),
-    ):
-        primitives |= _primitive_names(jax.make_jaxpr(pullback)(cotangent))
-    backward_jaxpr = "\n".join(sorted(primitives))
+    #
+    # Six traces of ~40k-equation programs, which is affordable once and pure
+    # overhead per optimizer step -- so an optimizer loop passes
+    # ``collect_backward_jaxpr=False`` and gets ``None`` here.  The key stays
+    # in the dict either way: a caller that tests ``"backward_jaxpr" in diag``
+    # would otherwise silently skip its own assertion.
+    backward_jaxpr = None
+    if collect_backward_jaxpr:
+        primitives: set[str] = set()
+        for fn, args in (
+            (energy_of, (A, tilde, S_star)),
+            (F_of_y, (y_star,)),
+            (F_of_p, (A,)),
+        ):
+            primitives |= _primitive_names(jax.make_jaxpr(fn)(*args))
+        for pullback, cotangent in (
+            (vjp_energy, jnp.ones((), dtype=energy.dtype)),
+            (vjp_y, y_bar),
+            (vjp_p, F_bar),
+        ):
+            primitives |= _primitive_names(jax.make_jaxpr(pullback)(cotangent))
+        backward_jaxpr = "\n".join(sorted(primitives))
 
     return (
         energy,

@@ -29,9 +29,11 @@ config = iPEPSConfig(
         projector_method="qr",  # fastest, best energy, scales to chi=64+
         # forward_gauge defaults to "phase" (AD-correct for 1-site and 2-site)
     ),
-    gs_implicit_ad=False,
-    gs_explicit_ad_steps=30,
-    gs_explicit_ad_warmup=10,
+    # Path 2, implicit AD -- the default, so this line only makes it explicit.
+    # Swap to False for Path 1 (explicit AD through the unrolled sweeps) and
+    # add gs_explicit_ad_steps=30, gs_explicit_ad_warmup=10; the benchmark
+    # table below was measured on that path.
+    gs_implicit_ad=True,
     gs_optimizer="lbfgs",
     gs_line_search_method="hager_zhang",
     gs_metric_precond=True,
@@ -65,21 +67,34 @@ scales well to chi=64 (2.5x slower than chi=8), and never NaNs.
 |------|--------|------|-------|
 | eigh + sigma (explicit AD) | -0.6601 | 1234s | Slower than phase |
 | svd + sigma (two-proj) | -0.6623 | 1124s | Slower than phase |
-| eigh + sigma (GMRES implicit) | -0.6601 | — | Implicit AD path |
+| eigh + sigma (GMRES implicit) | -0.6601 | — | **Config no longer accepted** — see below |
 | Literature (chi=8) | -0.6625 | — | — |
 | Exact (QMC, chi→∞) | -0.6694 | — | — |
 
 Phase gauge is **6-9x faster** than sigma gauge for explicit AD with equal
-or better energy. Sigma gauge is still needed for implicit AD (GMRES backward).
+or better energy.
+
+The `eigh + sigma (GMRES implicit)` row is a historical measurement and its
+configuration **no longer runs**: `validate_ctm_for_implicit_ad` accepts
+`forward_gauge="phase"` and nothing else, and rejects `projector_method="eigh"`
+outright. The number is kept because it was measured; do not copy the config.
+Sigma gauge remains a first-class **explicit**-AD mode (#808).
 
 ## Working AD Paths
 
-After PR #291 the explicit-AD path is the recommended workflow and the
-implicit/GMRES path is explicitly labeled experimental until its stability
-gap is closed (tracked by issue #292). Both paths share the same forward
-CTM stack; they differ only in how gradients are computed.
+**Implicit AD (Path 2) is the recommended path and the one you get by
+default** — `gs_implicit_ad` is `True` in `iPEPSConfig`. Explicit AD (Path 1)
+is opt-in via `gs_implicit_ad=False`. Both paths share the same forward CTM
+stack; they differ only in how gradients are computed.
 
-### Path 1: Explicit AD (Recommended)
+The stability gap tracked by issue #292 is **specific to
+`ad_backward_method="gmres"`**, not to implicit differentiation as such. The
+default backward is `"vjp"` — the iterative Neumann-series solve — which is
+regression-covered and is what the default configuration runs. These headings
+previously read "Path 1 (Recommended)" / "Path 2 (Experimental)" while the code
+defaulted to Path 2, so the guide recommended against its own default (#808).
+
+### Path 1: Explicit AD (opt-in)
 
 **Architecture**: Warmup CTM sweeps (no gradient) → N backprop sweeps with
 phase-gauge fixing and `jax.checkpoint` → gradients accumulate through the
@@ -122,20 +137,21 @@ drift without introducing the power-iteration cost of sigma gauge. The
 Frobenius + phase fix is what variPEPS uses in `_post_process_CTM_tensors`.
 
 **Sigma gauge as a fallback**: ``forward_gauge="sigma"`` is still a
-first-class mode. It is slower (~40% per sweep from power iteration) but
-remains the right choice when you need the exact transfer-matrix
-alignment — most importantly on the implicit-diff path below. For the
-explicit-AD path, leave the config at its default and let the optimizer
-promote to ``"phase"``.
+first-class mode **on this path**. It is slower (~40% per sweep from power
+iteration) but remains available when you want the exact transfer-matrix
+alignment. It is *not* available on the implicit path below, which refuses
+every value but ``"phase"`` — this paragraph used to say the opposite (#808).
+There is no silent promotion either way: ``optimize_gs_ad`` passes
+``ctm.forward_gauge`` through unchanged.
 
-### Path 2: Implicit AD (Experimental)
+### Path 2: Implicit AD (Recommended — the default)
 
 **Architecture**: CTM converges to fixed point → backward solves the
 implicit-differentiation linear system at the fixed point → gradients flow
 back to the tensor without unrolling.
 
 ```
-Forward:  A → CTM sweeps (sigma gauge) → converged env → energy
+Forward:  A → CTM sweeps (phase gauge) → converged env → energy
 Backward: dE/dA via (I - J^T) λ = g  (VJP iteration or GMRES)
 ```
 
@@ -152,9 +168,19 @@ graph in memory).
   a tighter CTM fixed point. Tracked by issue #292.
 
 **Configuration (for the VJP path only)**:
-- `forward_gauge="sigma"` — required for stable element-wise convergence.
+- `forward_gauge="phase"` — the only value this path accepts, and the
+  `CTMConfig` default. `validate_ctm_for_implicit_ad`
+  (`ipeps_ad_policy.py:30`) raises `ValueError` for anything else, `"sigma"`
+  included; there is no `sigma` branch in the check at all.
 - `ad_backward_method="vjp"` — the supported implicit backward.
-- `gs_implicit_ad=True` — use implicit differentiation.
+- `gs_implicit_ad=True` — use implicit differentiation. This is the
+  `iPEPSConfig` default, so Path 2 is what you get without asking.
+
+> This block used to read `forward_gauge="sigma"` — "required for stable
+> element-wise convergence". That was stale rather than a second supported
+> mode: transcribed verbatim it raises `ValueError` before the first CTM
+> sweep (#808). Sigma gauge remains reachable on the **explicit** AD path
+> (Path 1).
 
 **Arnoldi spectral-radius precheck** (enabled by default):
 
@@ -169,9 +195,10 @@ Arnoldi precheck → GMRES fallback pattern.  Set
 `adjoint_arnoldi_precheck=False` to disable (e.g. for benchmarking the raw
 solver).
 
-This is the YASTN approach (arXiv:2311.11894), adapted for JAX. For new
-code prefer Path 1 — the explicit-AD path does not exercise the implicit
-backward at all.
+This is the YASTN approach (arXiv:2311.11894), adapted for JAX. It is what
+runs unless you set `gs_implicit_ad=False`. Reach for Path 1 when you want
+backprop through the unrolled sweeps — for a gauge other than `"phase"`, or
+to avoid the implicit backward entirely — not as a general default.
 
 ### Path 3: 2-site Shared-Tensor C4v (Checkerboard AFM)
 
@@ -300,20 +327,43 @@ config = iPEPSConfig(
 )
 ```
 
-**Current scope:**
-- **dense 1×1 (asymmetric) only.** `unit_cell` other than `"1x1"` and
-  `ctm_ad_mode="root_implicit_symmetric"` both raise `NotImplementedError`
-  with the reason; a `SymmetricTensor` input raises `TypeError`. The
-  multisite and symmetric engines exist and are tested, but are not wired
-  to the optimizer. The symmetric one *was* blocked on #731 — 8.63 GB peak
-  in the adjoint at D=2, χ=4, against ~7 GB CI runners — which is fixed;
-  its adjoint now peaks at 4.78 GB and what is left is the entry-point
-  contract.
+**Current scope: 1×1 unit cells, dense or block-sparse.**
+
+- `ctm_ad_mode="root_implicit"` — the dense asymmetric engine. Takes a
+  `DenseTensor`; a `SymmetricTensor` is refused and points at the mode
+  below.
+- `ctm_ad_mode="root_implicit_symmetric"` — the `SymmetricTensor` engine
+  (#715 Phase 3), where this path's reason to exist actually pays off:
+  #566 and #687 are the block-sparse SVD/eigh VJPs, and there are none
+  here. **It needs an explicit `A_init`**, because nothing in the library
+  builds a symmetric initial state — `su_init` runs the dense simple update
+  and the random fallback builds a dense array — so the charge structure
+  you want optimised has to be the one you pass in. A single gradient costs
+  ~180 s and 4.8 GB at D=2, χ=4, so budget accordingly.
+
+  The environment returned at the end is converged by the *ordinary*
+  forward CTM, which truncates differently: the engine takes per-sector
+  SVDs and orders the renormalised bond by charge, the forward CTM takes
+  one global SVD and orders by singular value. At finite χ those retain
+  different directions, so the reported energy does not equal the last one
+  the loop descended — measured 4.7e-04 apart at D=2, χ=4. Both are
+  legitimate variational energies of the same `A_opt`.
+
+- **`unit_cell` other than `"1x1"` raises `NotImplementedError`,** and not
+  because the wiring is pending. The multisite engine differentiates a
+  *one-site observable* `tr(ρ₁ₛᵢₜₑ · op)`, not an energy, and a two-site
+  Hamiltonian gate cannot be passed as that `op`. A physical multisite
+  energy needs a two-site ring spanning adjacent cells — tracked as #894.
+
 - **Rejected rather than silently ignored:** `chi_auto_bump`, `chi_ramp`,
   `ctmrg_heuristic_increase_chi`, `fuse_virtual_legs=False`,
-  `gs_checkpoint_path`, `cg_gates`. These knobs depend on warm-start
-  behaviour this path does not have, so it refuses them instead of
-  quietly dropping them.
+  `gs_checkpoint_path`, `cg_gates`, `gs_optimizer="cg"`, `gs_c4v`, and
+  `rel_floor` on any variant but dense 1×1 (only that engine takes a
+  rank-clamp override). These depend on behaviour this path does not have,
+  so it refuses them instead of quietly dropping them.
+- **Warns and falls back:** `gs_metric_precond` and `gs_line_search`. Both
+  are effectively default-on, so refusing them would reject this path's own
+  default configuration.
 
 #### The rank clamp, and what the residual gate does and does not mean
 
@@ -415,10 +465,15 @@ summarized below:
 
 | Mode | Explicit AD (Path 1) | Implicit AD (Path 2, VJP) | Notes |
 |------|----------------------|----------------------------|-------|
-| ``"phase"`` (default) | **Recommended** | **Recommended** | Cheapest gauge fix; Frobenius + differentiable phase fix. Works for 1-site and 2-site. |
-| ``"qr"`` | Legacy QR gauge | Works for simple cases but not preferred | Forward-only CTM, notebooks, diagnostics. |
-| ``"sigma"`` | Historical — still correct but ~6–9× slower than phase | Required for element-wise convergence at large chi (1-site only) | Power iteration (30 steps) per sweep. |
-| ``"none"`` | Benchmark / diagnostic only | Unstable | Isolates gauge-fix cost from projector cost. |
+| ``"phase"`` (default) | **Recommended** | **The only accepted value** | Cheapest gauge fix; Frobenius + differentiable phase fix. Works for 1-site and 2-site. |
+| ``"qr"`` | Legacy QR gauge | Refused (`ValueError`) | Forward-only CTM, notebooks, diagnostics. |
+| ``"sigma"`` | Historical — still correct but ~6–9× slower than phase | Refused (`ValueError`) | Power iteration (30 steps) per sweep. |
+| ``"none"`` | Benchmark / diagnostic only | Refused (`ValueError`) | Isolates gauge-fix cost from projector cost. |
+
+The Path 2 column is a hard gate, not a preference: `validate_ctm_for_implicit_ad`
+accepts `forward_gauge="phase"` and nothing else, and it narrows by neither
+`chi` nor unit cell — so the older "at large chi (1-site only)" qualifier on
+the `sigma` row described a configuration that never ran (#808).
 
 **No silent gauge promotion**: ``optimize_gs_ad`` passes
 ``ctm.forward_gauge`` through unchanged.  An explicit user choice
@@ -449,13 +504,18 @@ Together they remove the dominant gauge ambiguity at negligible cost —
 no power iteration, no eigensolve, fully differentiable — and are the
 reason the qr+phase path scales to chi=64 without NaNs.
 
-### 2. Sigma Gauge Fixing (implicit-diff path)
+### 2. Sigma Gauge Fixing (explicit-AD path only)
 
 Sigma gauge aligns each iteration's environment to the previous one using
 transfer matrix eigenvectors, making element-wise convergence monotonic.
-This is required for the implicit-diff backward, where a well-conditioned
-fixed-point environment is needed for the ``(I - J^T) λ = g`` solve to
-behave well.
+
+**It is not available on the implicit-diff path.** This section used to say the
+opposite — "required for the implicit-diff backward" — and that was stale:
+`validate_ctm_for_implicit_ad` accepts `forward_gauge="phase"` and raises
+`ValueError` for every other value, `"sigma"` included (#808). What the implicit
+backward actually needs from the forward pass is element-wise convergence to a
+well-conditioned fixed point, and phase gauge delivers that at a fraction of the
+cost — no power iteration, no eigensolve.
 
 **Implementation**: Power iteration (30 iterations) computes the leading
 eigenvector of the double-layer transfer matrix. This is fully
@@ -536,9 +596,12 @@ optimization stability and speed.
    (not JIT-traceable). Both phase and sigma gauge work on this path, but
    with dense fallbacks for gauge fixing.
 
-5. **Sigma gauge cost**: ~40% overhead from power iteration per sweep.
-   Phase gauge is the recommended replacement for explicit AD; reserve
-   sigma gauge for the implicit-diff path.
+5. **Sigma gauge cost**: ~40% overhead from power iteration per sweep, and
+   6-9x slower end to end than phase gauge for equal or better energy. It is
+   an **explicit**-AD option only — the implicit path refuses it (#808) — so
+   there is no configuration in which it is the recommended choice today. It
+   is kept because it is still correct and because it gives the exact
+   transfer-matrix alignment when you want that specifically.
 
 6. **Root implicit AD has no gradient-quality signal**: the root residual
    it reports says whether `y*` solves the characteristic equations, and

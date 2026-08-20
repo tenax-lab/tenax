@@ -4,6 +4,51 @@
 
 ### Added
 
+- **`ctm_ad_mode="root_implicit_symmetric"` is wired to `optimize_gs_ad`**
+  (#715 Phase 3). The block-sparse engine has existed and been tested since
+  #729; what was missing was the optimizer contract, and it was blocked on
+  #731's 8.4 GB adjoint. With that fixed the remaining gaps were all *type*
+  gaps, and all four are now closed: the engine always returns three values
+  (there is no `return_diagnostics` flag), its gradient is a `SymmetricTensor`
+  rather than an array, the loop's NaN guard called `jnp.isfinite` on it —
+  which raises — and the loop flattened its parameter with `.todense()`, which
+  would have discarded the block structure that is the entire point of Phase 3.
+
+  The NaN guard now walks the pytree instead of the array, so one traversal
+  covers a raw `jax.Array` and a `SymmetricTensor` alike and neither needs a
+  special case. `SymmetricTensor` is a single-leaf pytree whose leaf's L2 norm
+  *is* the Frobenius norm, so `clip_by_global_norm`, `_grad_l2_norm` and
+  `_normalize_params` already meant the right thing on it — asserted rather
+  than assumed.
+
+  **This mode needs an explicit `A_init`.** Nothing in the library builds a
+  symmetric initial state: `su_init` runs the dense simple update and the
+  random fallback builds a dense array, so falling back to either would
+  silently optimise a dense lift of the problem the caller posed
+  symmetrically — and it would appear to work. It refuses instead, and says
+  which.
+
+  Two costs to budget for. A single symmetric gradient is ~180 s and 4.8 GB at
+  `D=2, χ=4` even after #731. And the environment returned at the end is
+  converged by the *ordinary* forward CTM, which truncates differently — the
+  engine takes per-sector SVDs and orders the renormalised bond by charge, the
+  forward CTM takes one global SVD and orders by singular value — so at finite
+  χ the reported energy does not equal the last one the loop descended;
+  measured 4.7e-04 apart at `D=2, χ=4`. Both are legitimate variational
+  energies of the same `A_opt`.
+
+  `sym_root_implicit_energy_and_grad` gains `collect_backward_jaxpr`
+  (default `True`, unchanged for existing callers). The six `jax.make_jaxpr`
+  traces of ~40k-equation programs are what the tests assert on and pure
+  overhead per optimizer step, so the loop passes `False`. The diagnostics key
+  is still present, holding `None`, so a caller testing `"backward_jaxpr" in
+  diag` cannot silently skip its own assertion.
+
+  `rel_floor` is now **refused** on any variant but dense 1×1 rather than
+  silently dropped. Its own docstring said "consulted by
+  `ctm_ad_mode='root_implicit'` only"; the narrower truth is that only the
+  dense engine has the parameter at all.
+
 - **`measure_gradient_error`: root-implicit gradient accuracy can be measured,
   and cannot be predicted** (#785). The root-implicit engines report a root
   residual, a covariant residual, an adjoint residual and a `usable_rank`, and
@@ -237,6 +282,136 @@
   matvecs and 2.1e-15 at unit scale — a wrong answer returned after exhausting
   the full 400-restart budget, not merely a slow path. Pinned by a
   rescaling-invariance test across `s ∈ {1, 1e-10, 1e-20, 1e40}`.
+- **`measure_gradient_error`'s rounding floor no longer underflows to zero**
+  (#885). The scan rejects a step whose two perturbed energies differ by less
+  than the energy's own rounding quantum, and that quantum was estimated
+  relatively, as `4 * eps * |E|`. Below the smallest normal that product is
+  exactly `0.0` — measured, float64: for `|E| ≤ 2.781342323134e-309` the floor
+  is zero, so `span <= floor` degenerates to `span <= 0.0` and admits a
+  difference made of one or two units in the last place.
+
+  It is not a division by zero; the floor is never a denominator. It is a
+  vacuous comparison, and what came out the other side was worse than a crash:
+  on a subnormal-scale objective with an **exact** gradient the scan reported
+  **12.8%** relative error and published an `unresolved_bound` of **1.0** —
+  the number a caller reads as "the gradient is good to this" — manufactured
+  out of quantization noise. The identical map at normal scale reports
+  1.08e-07. The same scan also stopped resolving real 0.1% and 5% gradient
+  errors that it catches at normal scale.
+
+  The floor is now the larger of the relative term and the dtype's
+  `smallest_subnormal`, so it keeps scale invariance everywhere the relative
+  term is representable and degrades to an absolute quantum only where it is
+  not. This is the mirror of the denormal-*slope* fix one level down: there an
+  absolute floor was too *large* at small scale and destroyed scale
+  invariance; here the relative one collapsed to nothing.
+
+  Reachable, though not through XLA: XLA-CPU flushes subnormals to zero, so a
+  `jnp`-evaluated energy cannot get there — but `measure_gradient_error` takes
+  any Python callable, and a host-side NumPy objective can. No existing test
+  came within an order of magnitude of the threshold, so the guard is pinned by
+  a new one plus a mutation check that restores the underflow and confirms the
+  mutant measures the noise instead of refusing it.
+- **The iPEPS AD guide documented a Path 2 configuration that cannot run, and
+  recommended against the default path** (#808). Two separate defects in
+  `docs/guide/algorithms/ipeps_ad_paths.md`:
+
+  - Path 2's configuration block specified `forward_gauge="sigma"`, "required
+    for stable element-wise convergence". `validate_ctm_for_implicit_ad`
+    accepts `"phase"` and nothing else — there is no `sigma` branch in the
+    check at all — so a user transcribing the guide verbatim got a `ValueError`
+    before the first CTM sweep. The same stale claim appeared in the Path 2
+    architecture diagram, the Forward Gauge Mode Matrix (where the `sigma` row
+    was qualified "at large chi (1-site only)", a narrowing the policy does not
+    make), Path 1's "sigma gauge as a fallback" note, `README.md` and
+    `docs/guide/capabilities.md` — **and four more found in review**: the
+    benchmark table's `eigh + sigma (GMRES implicit)` row, the sentence under
+    it ("sigma gauge is still needed for implicit AD"), the section heading
+    `### 2. Sigma Gauge Fixing (implicit-diff path)` with its "required for the
+    implicit-diff backward", and Known Limitations' "reserve sigma gauge for
+    the implicit-diff path". Ten sites in all. Sigma gauge remains a
+    first-class **explicit**-AD mode; every one of them now says so. The
+    benchmark row is kept, since it was measured, and marked as a config that
+    no longer runs.
+  - The guide marked Path 1 (explicit) *Recommended* and Path 2 (implicit)
+    *Experimental*, while `iPEPSConfig.gs_implicit_ad` defaults to `True` —
+    i.e. it recommended against its own default, and `ipeps_config.py`'s own
+    docstring called implicit "the recommended AD path" 170 lines above an
+    inline comment describing it as using sigma gauge. **Implicit AD is the
+    recommended path and the default**; Path 1 is opt-in via
+    `gs_implicit_ad=False`. The #292 stability gap is scoped to
+    `ad_backward_method="gmres"`, not to implicit differentiation as such —
+    the default `"vjp"` backward is regression-covered.
+
+    The opening `## Recommended Configuration` — the block a reader copies
+    first — was itself setting `gs_implicit_ad=False`, so the guide's headline
+    example ran the path it no longer recommends. It now runs the recommended
+    one, with the explicit-AD variant spelled out beside it.
+
+  Both were prose, so both drifted silently. `tests/test_docs_ad_paths_808.py`
+  now reads the shipped markdown and checks it against the shipped code: every
+  `forward_gauge` the Path 2 block documents must pass the policy and be the
+  `CTMConfig` default; whichever heading claims to be recommended must match
+  `gs_implicit_ad`; the opening executable example must use that same path; the
+  sigma-gauge section heading must not claim the implicit path; and no passage
+  anywhere may direct a reader to sigma gauge on it. Against the pre-fix guide,
+  6 of the 10 tests fail.
+
+  The first version of that guard checked only the Path 2 configuration block
+  and would have passed on four of the ten stale sites — which is the lesson
+  worth keeping: a documentation guard scoped to the paragraph you happened to
+  edit is worth very little. It is deliberately a tripwire for the phrasing
+  that occurred rather than a natural-language linter, and says so, because a
+  co-occurrence scan over prose needs an ever-growing allow-list and gets
+  deleted the first time it fails on an unrelated edit.
+- **Review debt from #712/#717/#720/#729 drained** (#800). Four items, and only
+  one of them was a live defect — the other three are now pinned by tests or by
+  a comment so they are not re-filed.
+
+  - **The v0.8.2 CHANGELOG's χ²·D⁴ claim for the 2-site split path is wrong,
+    and wider than reported.** Measured peak intermediates, dense-equivalent:
+    the fermionic arm builds `contract(T4, a)` on the merged representation —
+    three D² legs against two χ legs — which is χ²·D⁶, exactly D² over, with
+    the ratio 4.00 / 9.00 / 16.00 at D = 2 / 3 / 4. That much was expected
+    (bounded Koszul-correct fermionic kernels are open work), but at D=2, χ=6
+    the **bosonic** 2-site kernels also peak at χ²·D⁶ via an 8-leg joint
+    ket⊗bra edge, so #800's suggested fix — scope the claim to "the
+    non-fermionic paths" — would still overstate it. The entry is corrected in
+    place; χ²·D⁴ remains the single-site figure.
+
+  - **The `_build_quadrant` endpoint-pairing allegation is false**, and the
+    disproof is now a test rather than an assertion. `_upper_left_quadrant`
+    agrees with `_build_enlarged_corner(..., position="top_left")` **bit for
+    bit** on a deliberately asymmetric environment, and `_lower_left_quadrant`
+    with `"bottom_left"` to 1.4e-14. The reading missed `swap_env_convention`:
+    the root-implicit module frames every tensor in its own direction — which
+    is what makes `rotate_env` a pure relabel — while `CTMTensorEnv` closes the
+    same ring with C4 transposed and T3, T4 reversed, and labels the
+    geometrically *down* end of T4 `t4_u`. The new test measures its own
+    sensitivity (the alternative pairing differs by 1.17 relative, dropping the
+    convention swap by the same) and asserts its fixture is asymmetric enough
+    to see a transpose at all — the trap that hid #718 for months.
+
+  - **The diagonal-only gauge test is a real limitation with real coverage.**
+    `test_each_directional_gauge_is_independently_licensed` has existed since
+    #720 and does exactly what #800 asks for. A comment now records why both
+    tests are kept, with the measurement that makes the point: re-introducing
+    #718 gives per-direction violations of (+5.8e-14, −4.2e-14, +2.121e-03,
+    −2.121e-03) while the summed value the weaker test measures reads +1.9e-14
+    and *passes* — bonds 2 and 3 are the two touching C4, and a global
+    generator is blind to a C4 transpose, so the errors are equal and opposite.
+
+  - **All three symmetric root-implicit gaps were already fixed** and were
+    re-verified by construction rather than by reading: `_same_block_structure`
+    rejects the `{q0:1, q1:2} → {q0:2, q1:1}` permutation that keeps both the
+    block keys and the packed length; the partner charge goes through
+    `sym.dual`, which a Z3/Z4/ProductSymmetry round trip confirms (Z2 is
+    self-dual and would have hidden it); and `layout_override` reaches the
+    polish sweep, with the instrumented alternation signature of the old bug
+    absent. One incidental: the layout test's docstring quoted a residual
+    ladder and two energies that no longer reproduce (`-0.10873` measures
+    `-0.13176`). The assertions are scale-free and never noticed, so the
+    numbers are replaced by what they actually constrain.
 
 - **Each checkerboard bond can now carry its own Schmidt spectrum**
   (#851, opt-in via `su_independent_bond_lambdas`). The four-phase sweep
@@ -845,7 +1020,21 @@ additive features (multi-GPU HOTRG, 2-site split-CTM, Potts helpers).
 
 - **2-site split-CTM, Phases 0–4** (#684, #685, #688, #690) — joint dense
   forward, dense AD, `SymmetricTensor` forward, and fermionic forward
-  (merge → fused → resplit), extending the χ²·D⁴ split path to 2-site cells.
+  (merge → fused → resplit), extending the split path to 2-site cells.
+
+  > **Corrected (#800).** This entry originally said "extending the **χ²·D⁴**
+  > split path to 2-site cells". That figure does not hold for the 2-site
+  > kernels and a reader sizing a run from it under-budgets memory by D².
+  > Measured peak intermediates, dense-equivalent, at D=2: the fermionic arm
+  > builds `contract(T4, a)` on the merged representation — legs
+  > `(t4_d, t4_u, u2, d2, r2)`, three D² legs against two χ legs — which is
+  > **χ²·D⁶**, exactly D² over, and the ratio is 4.00 / 9.00 / 16.00 at
+  > D = 2 / 3 / 4. That was expected (bounded Koszul-correct fermionic kernels
+  > are still open work), but at D=2, χ=6 the **bosonic** 2-site kernels also
+  > peak at χ²·D⁶, via an 8-leg joint ket⊗bra edge of shape
+  > (χ, D, D, D, χ, D, D, D) — so scoping the claim to "the non-fermionic
+  > paths" would still overstate it. χ²·D⁴ remains the single-site split
+  > figure.
 - **Multi-GPU HOTRG** (#681, #682) — `HOTRGConfig(device_mesh=...)` shards a
   surviving leg of the χ⁶ merge under GSPMD: ideal **2.00×/device** memory
   relief on 2×A100 with numerically identical results, and a real χ-ceiling

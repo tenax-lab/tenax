@@ -249,6 +249,18 @@ _FILE_MARKERS = {
     # again, which took the symmetric adjoint to 8.63 GB against ~7 GB runners.
     # Every tolerance assertion in the suite stays green through that.
     "test_gmres_eager.py": "core",
+    # The iPEPS AD guide against the code it documents (#808).  Pure markdown
+    # parsing plus config validation, microseconds.  ``core`` because both
+    # defects it pins were *silent*: the guide specified a Path 2 config that
+    # raises ValueError before the first CTM sweep, and recommended against the
+    # path the code runs by default.  Nothing else in the suite reads the docs.
+    "test_docs_ad_paths_808.py": "core",
+    # #800 item 2: the root-implicit quadrants against the production enlarged
+    # corner.  Milliseconds, no CTM convergence.  ``core`` because every
+    # endpoint here has dimension chi, so an endpoint swap is invisible to
+    # shape and to a fixed-point test -- the #700/#702 shape -- and because the
+    # file also pins that its own fixture is asymmetric enough to see one.
+    "test_quadrant_endpoint_pairing_800.py": "core",
     # The adjoint-convergence gate on the DEFAULT iPEPS AD gradient path
     # (#801, first raised on #341).  An unconverged adjoint yields a gradient
     # that is wrong, finite, and indistinguishable downstream -- the exact
@@ -260,6 +272,14 @@ _FILE_MARKERS = {
     # no CTM, milliseconds.  They guard a defect class that has now recurred
     # on four engines, so they belong in the required gate.
     "test_root_implicit_nan_gates.py": "core",
+    # Wiring for ctm_ad_mode="root_implicit_symmetric" (#715 Phase 3).  Every
+    # gap it pins is a *type* gap -- a SymmetricTensor parameter, a
+    # SymmetricTensor gradient, a three-value return -- so the checks run
+    # against a stub engine in milliseconds.  ``core`` because the failure
+    # shape is a silent densification: the run would still converge to
+    # something, just not to the symmetric problem the caller posed.  The one
+    # end-to-end descent test carries its own ``slow``.
+    "test_root_implicit_symmetric_wiring.py": "core",
     # The multisite clamped-residual gate (#784).  The rank-report half is one
     # SVD per coordinate and runs in the gate; the two end-to-end cases each
     # converge a 300-sweep CTM plus an adjoint solve and carry their own
