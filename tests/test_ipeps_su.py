@@ -2136,33 +2136,34 @@ def test_su_evolve_names_the_step_that_broke_bond_uniformity(su, monkeypatch):
 # ``lambda`` sharpen through accumulation and break the flat degeneracy, i.e.
 # the defect #882 deletes was doing regularisation work.
 #
-# **A gap this section does not close, recorded rather than left to be
-# rediscovered.**  ``_su_step`` warns when its internal ``gauge_fix`` fails, and
-# one ``-m slow`` pass of this file and its mutation sibling emits **3339** of
-# those warnings -- and they are not confined to the red cells.
+# **A gap this section used to have, and the same fix closed it.**  ``_su_step``
+# warns when its internal ``gauge_fix`` fails.  From the old starting point a
+# single ``-m slow`` pass of this file and its mutation sibling emitted **3339**
+# of those warnings, 41 of them from cells that reported *green* -- so the
+# degradation ``ipeps_su.py``'s *Warns* section documents ("it quietly costs
+# truncation quality on **every** step") was happening inside passing tests.
 #
-# **Count the emissions, not the summary lines.**  pytest's warnings summary
+# Re-measured after the initialisation fix, same command, ``-W always -rw``:
+# **zero**.  Not "fewer" -- pytest prints a warnings count in its summary line
+# whenever there is one, and that line now reads ``19 passed, 73 deselected in
+# 672.99s`` with no warnings clause at all, where it previously read
+# ``... 66 deselected, 3339 warnings``.  BP converges on every step of every
+# cell.  The warnings were an artefact of starting inside the product state's
+# basin, not an independent shortcoming.
+#
+# **Two things are deliberately kept from that episode.**  First the method: the
+# emissions are what matter, not the summary lines.  pytest's warnings summary
 # collapses byte-identical messages, and the twin cells here emit byte-identical
-# text, so that summary shows only **1377** entries and attributes each collapsed
-# group to a single node id.  Reading it as a per-cell census is what produced an
-# earlier version of this note claiming a 970/388/16/3 split over four cells --
-# every twin cell had silently vanished into its sibling.  Measured properly with
-# ``-rw`` (per node id, three batches), the green-cell emissions are::
-#
-#      16  test_d2_reaches_the_heisenberg_energy_not_the_product_state[1]
-#      16  test_the_energy_does_not_drift_away_with_more_steps[2-1]
-#       3  test_the_energy_does_not_drift_away_with_more_steps[3-1]
-#       3  test_su_evolve_reaches_the_simple_update_reference_energy[3-1]
-#       3  test_d3_actually_uses_its_third_bond_direction[1]
-#
-# so **41** of them come from **five** cells that report green.  The remainder
-# come from the red cells.  No test here asserts on, counts
-# or ``filterwarnings("error")``s the warning, so the degradation mode
-# ``ipeps_su.py``'s *Warns* documents -- "it quietly costs truncation quality on
-# **every** step" -- is unwatched inside cells reporting green.  Closing it is a
-# design decision (does a warning fail an otherwise-green acceptance cell?) and
-# is deliberately not taken here; the counts are recorded so that whoever takes
-# it starts from a measurement.
+# text, so it showed only **1377** entries and attributed each collapsed group
+# to a single node id; reading that as a per-cell census produced an earlier
+# note here claiming a 970/388/16/3 split over four cells, with every twin cell
+# silently absorbed into its sibling.  Use ``-rw``.  Second the guard: nothing
+# in this file asserts on, counts, or ``filterwarnings("error")``s the warning,
+# so if the count ever leaves zero no test here will say so.  The reporting path
+# itself is covered by
+# ``test_su_step_warns_when_the_gauge_did_not_converge`` (fabricated
+# ``BPGaugeInfo``), which is a statement about the warning, not about how often
+# it fires.
 #
 # **The two residues are out of scope and must stay visible.**  Neither is
 # explained, both are reproduced exactly from ``task-12-report.md``'s prototype
