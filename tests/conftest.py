@@ -39,6 +39,32 @@ _FILE_MARKERS = {
     # machine-independent ratio and the other withdraws under coverage or on a
     # slow box rather than reporting a number it cannot measure.
     "test_ipeps_gauge_perf.py": "algorithm",
+    # #882 Phase 2: the simple-update engine with no stored bond spectrum.
+    # Every test runs at least one BP gauge solve (and the split guard runs
+    # three), which puts it well past the `core` budget.
+    "test_ipeps_su.py": "algorithm",
+    # #882 Task 13: every guard in test_ipeps_su.py killed by a faithful
+    # re-introduction of the defect it is named for.  Each cell runs its
+    # guard twice -- unmutated (which must pass) and mutated (which must
+    # fail, on the named assertion, at a number in range) -- so it costs
+    # about twice the guard.  Eight cells; exactly one carries `slow`, and
+    # it is a `pytest.param` mark rather than a function mark because the
+    # kills are one parametrised test.  Measured on CPU with --no-cov, box
+    # load 4-7: -m "not slow" is 45.6 s over seven cells (the two dearest
+    # being the D=2 imaginary-time run at 17.7 s -- which is NOT the slow
+    # one -- and the symmetric chain anchor at 22.6 s), and -m slow is
+    # 234 s in that single cell, the symmetric D=3 truncation guard.
+    #
+    # **Three of its rows carry an explicit `core` mark** (851, 869, 6.2a --
+    # 2.35 s, 0.46 s and 0.03 s both sides), so the file contributes to the
+    # required gate.  It has to: this is the file that certifies the guards in
+    # `test_ipeps_su.py` can fail, and with the whole file in `algorithm` it
+    # collected zero tests under `-m core` -- every mutation cell ran only in
+    # `fast-other`, which is not required and is chronically red on `main`.
+    # That is the state the `test_arnoldi.py` note below calls "a guard that
+    # runs in no required job is not one", and it was the state of the one
+    # file whose subject is exactly that.  See `_MUTANTS` for the measurement.
+    "test_ipeps_su_mutations.py": "algorithm",
     "test_ipeps_core.py": "core",
     "test_auto_mpo.py": "algorithm",
     "test_ad_utils.py": "algorithm",
