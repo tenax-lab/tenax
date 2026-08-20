@@ -159,30 +159,28 @@ from tenax.core._tensor_utils import scale_bond_axis
 #: at 6 failed / 11 passed", as notes to the reader: both were correct when
 #: written and neither is asserted anywhere.
 #:
-#: They are red **on purpose** -- the user's explicit decision, with no
-#: ``xfail`` -- and they are why every cell below is two-sided.  ``-m slow`` sits
-#: at 6 failed / 11 passed (675.21 s); the D=4 residue and the D=3-seed-0 residue
-#: are unexplained and out of scope for #882 Phase 2
-#: (``task-10-reopen-report.md`` §"what did not close").  Mapping a mutant onto
-#: any of these would give a cell that passes with the mutation removed.
+#: **They are all green now, and this tuple is deliberately kept empty rather
+#: than deleted.**  Six cells used to be red on purpose -- three ``D=4`` seeds,
+#: ``D=3`` seed 0 twice, and the ``D=3`` third-direction cell -- and the whole
+#: two-sided design below was built so that a mutant mapped onto one of them
+#: could not report a kill it had not earned.
 #:
-#: Two of them matter for the mapping the brief hands over:
+#: What closed them was **not** a change to the engine.  ``_su_evolve`` was being
+#: started from a maximally entangled random pair, which at ``D >= 3`` sits
+#: inside the product state's basin for this engine; every acceptance cell now
+#: starts from ``_low_entanglement_state`` instead.  Measured after the change,
+#: ``tests/test_ipeps_su.py -m slow`` is **18 passed / 0 failed** (1097.92 s,
+#: box load 7.6), with ``D=2 -0.658880``, ``D=3 -0.662839`` and
+#: ``D=4 -0.667012`` on every seed, against references ``-0.6593``/``-0.6632``/
+#: ``-0.6674``.  ``test_su_evolve_collapses_from_a_maximally_random_init`` pins
+#: the old behaviour from the old starting point, so the limitation is still on
+#: the record.
 #:
-#: * ``test_d3_actually_uses_its_third_bond_direction`` is red **only at seed
-#:   0**, so the guard is usable at seeds 1 and 2 -- it is not used here, for the
-#:   separate reason given in :data:`_MUTANTS`' 865 row;
-#: * ``test_d2_reaches_the_heisenberg_energy_not_the_product_state`` is absent
-#:   from this list, i.e. green at every seed, so the 667 row's target is sound
-#:   as the brief has it.  This cell uses seed 0, which is also the only seed of
-#:   that test outside the ``slow`` bucket.
-_RED_CELLS = (
-    "test_su_evolve_reaches_the_simple_update_reference_energy[3-0]",
-    "test_su_evolve_reaches_the_simple_update_reference_energy[4-0]",
-    "test_su_evolve_reaches_the_simple_update_reference_energy[4-1]",
-    "test_su_evolve_reaches_the_simple_update_reference_energy[4-2]",
-    "test_the_energy_does_not_drift_away_with_more_steps[3-0]",
-    "test_d3_actually_uses_its_third_bond_direction[0]",
-)
+#: The tuple stays because the machinery that consumes it is the point: a red
+#: cell makes ``pytest.raises(AssertionError)`` succeed for free, so if a future
+#: residue appears, list it here and every mapping check below keeps working.
+#: An empty tuple means "no cell is currently exempt", not "this check is dead".
+_RED_CELLS: tuple[str, ...] = ()
 
 #: Every module attribute any mutant replaces, with the object it holds now.
 #:

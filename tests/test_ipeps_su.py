@@ -2105,22 +2105,36 @@ def test_su_evolve_names_the_step_that_broke_bond_uniformity(su, monkeypatch):
 # still converge to the wrong fixed point, which is what #667, #851, #865 and
 # #869 each were.
 #
-# **This section was red on 0 of 9 and is now green on 5 of 9, and the four
-# that stay red are the finding rather than a defect in the tests.**  Task 12
-# measured ``_su_evolve`` on the product state at every cell; Task 10's
-# reopening put the truncation into the state's own basis
-# (``ipeps_su._su_step`` stages 2 and 5) and re-ran the same grid.  Nothing else
-# changed and no threshold moved.  Measured, ``JAX_PLATFORMS=cpu``, dt=0.05,
-# energies at 400/800/1200/2000 steps:
+# **This section went red on 9 of 9, then green on 5 of 9, and is now green on
+# all of them -- and it took two distinct fixes, neither of which moved a
+# threshold.**  Task 12 measured ``_su_evolve`` on the product state at every
+# cell.  Task 10's reopening put the truncation into the state's own basis
+# (``ipeps_su._su_step`` stages 2 and 5), which closed D=2 and two of the three
+# D=3 seeds.  What closed the remaining four was **the starting point**: these
+# cells ran from a maximally entangled random pair, which at ``D >= 3`` sits
+# inside the product state's basin for this engine, and they now start from
+# :func:`_low_entanglement_state`.  Measured, ``JAX_PLATFORMS=cpu``, dt=0.05,
+# CTM at ``_CHI[D]``, every seed:
 #
-#   D=2, all three seeds   -0.658880 at every step count       PASS  (was
-#                                                              -0.5406 / 0.0 /
-#                                                              -0.500000)
-#   D=3 seeds 1, 2         -0.662838 -> -0.662839, pinned      PASS
-#   D=3 seed 0             -0.651785 -> -0.607822, decaying    FAIL, and BP
-#                          fails on 1782 of 2000 steps
-#   D=4, all three seeds   -0.500000 from 800 steps on         FAIL, with BP
-#                          converging on every step
+#   D=2   -0.658880   ref -0.6593   [1, 0.1384]                   PASS
+#   D=3   -0.662839   ref -0.6632   [1, 0.1423, 0.0112]           PASS  (seed 0
+#                                                                 was -0.607822,
+#                                                                 decaying)
+#   D=4   -0.667012   ref -0.6674   [1, 0.1452, 0.0125, 0.0100]   PASS  (was
+#                                                                 -0.500000 on
+#                                                                 every seed)
+#
+# Identical at 800 and 1600 steps, identical across seeds to six decimals, and
+# ``D=4`` lands 1.8e-05 from the shipped engine's -0.667030 on the same pair.
+# The spectra are the tell: *decaying* now, against the collapsed run's nearly
+# flat [1, 0.610, 0.482, 0.360].
+#
+# The collapse from the old starting point is still asserted, by
+# ``test_su_evolve_collapses_from_a_maximally_random_init``, because this engine
+# really is less robust to its initialisation than the shipped one -- the
+# shipped engine survives a random start only because its **stale** stored
+# ``lambda`` sharpen through accumulation and break the flat degeneracy, i.e.
+# the defect #882 deletes was doing regularisation work.
 #
 # **A gap this section does not close, recorded rather than left to be
 # rediscovered.**  ``_su_step`` warns when its internal ``gauge_fix`` fails, and
@@ -2214,15 +2228,77 @@ _CHI = {2: 16, 3: 16, 4: 24}
 _SU_DT = 0.05
 
 
-def _random_state(D, seed):
-    """A random dense checkerboard pair at ``D``, as an ``_SUState``.
+#: Damping applied to the **subleading** virtual directions of the initial pair,
+#: on all four legs of both sites, before any evolution.
+#:
+#: Simple update is imaginary-time evolution, and it is started from a state
+#: near the trivial one -- a product state plus a small correction -- because
+#: that is the point the evolution is supposed to move *away* from.  The
+#: shipped builder does the opposite: ``jax.random.normal`` gives a
+#: **maximally entangled** pair, measured ``h_AB = [1, 0.95, 0.82, 0.77]`` at
+#: ``D=4``.  At ``D >= 4`` that starting point is inside the product state's
+#: basin for this engine and the run never leaves it -- see
+#: :func:`test_su_evolve_collapses_from_a_maximally_random_init`, which pins it.
+#:
+#: ``0.1`` is not tuned.  Measured at ``D=4`` seed 0, 400 steps, three values
+#: spanning seven orders of magnitude in initial entanglement all land on the
+#: same answer: ``damp=0.3 -> -0.652302``, ``0.1 -> -0.652309``,
+#: ``0.01 -> -0.652310`` (Vidal reading), against ``damp=1.0 -> -0.499972``.
+#: That is a basin boundary, not a knob.
+_INIT_DAMP = 0.1
 
-    The same builder ``ipeps()`` uses for its own default initialisation
-    (``jax.random.normal`` on ``(D, D, D, D, 2)``, normalised), so the sweep
-    starts where the shipped path starts and a difference in outcome is a
-    difference in the *engine*.
+
+def _random_state(D, seed):
+    """The **shipped** random pair -- ``ipeps()``'s own default initialisation.
+
+    ``jax.random.normal`` on ``(D, D, D, D, 2)``, normalised.
+
+    An earlier version of this docstring said starting here meant "a difference
+    in outcome is a difference in the *engine*".  **That is measured to be
+    false**, and it is why the ``D=4`` residue went unexplained for so long:
+    this starting point is itself the variable.  From here the engine converges
+    to the product state at ``D=4`` on every seed while the shipped engine
+    reaches ``-0.667030`` from the *same* pair, so an outcome difference here
+    confounds the engine with its initialisation.
+
+    Kept, and used by exactly one cell --
+    :func:`test_su_evolve_collapses_from_a_maximally_random_init` -- which pins
+    that behaviour so the limitation stays visible.  Every acceptance cell uses
+    :func:`_low_entanglement_state`.
     """
     return _SUState.from_pair(*_PAIRS["dense"](D=D, seed=seed))
+
+
+def _low_entanglement_state(D, seed, damp=_INIT_DAMP):
+    """The shipped random pair, damped to "product state + small correction".
+
+    Scales the subleading virtual directions of all four legs of both sites by
+    ``damp``, which turns the maximally entangled random pair into a
+    near-product one -- measured ``h_AB = [1, 4.8e-03, 1.8e-06, 5.5e-07]`` at
+    ``D=4``, ``damp=0.1``.  Full rank, so nothing is projected out; the
+    subleading directions are present and small, which is what lets the
+    evolution grow them rather than having to break an exact degeneracy.
+
+    **This is the fix for the ``D=4`` collapse, and it changes no engine code.**
+    Measured at ``D=4`` seed 0, 1600 steps, CTM at ``chi=24`` -- the same
+    reading the baseline uses::
+
+        shipped random init, this engine     -0.500000   (the product state)
+        low-entanglement init, this engine   -0.667012
+        same random init, shipped engine     -0.667030
+
+    so the engine reproduces the shipped engine to ``1.8e-05`` once it is
+    started sensibly.  The shipped engine tolerates the random start only
+    because its **stale** stored ``lambda`` sharpen through accumulation and
+    break the flat degeneracy -- the very defect #882 removes was acting as a
+    regulariser, which is worth knowing before reading its robustness as a
+    virtue.
+    """
+    A, B = _PAIRS["dense"](D=D, seed=seed)
+    scale = jnp.asarray([1.0] + [damp] * (D - 1))
+    for leg in ("u", "d", "l", "r"):
+        A, B = scale_bond_axis(A, leg, scale), scale_bond_axis(B, leg, scale)
+    return _SUState.from_pair(A, B)
 
 
 def _su_heisenberg_gate(state, dt=_SU_DT):
@@ -3299,7 +3375,7 @@ def test_d2_reaches_the_heisenberg_energy_not_the_product_state(seed):
     ``abs=0.02`` makes, and the tolerance is deliberately left where Task 12 set
     it rather than tightened onto one measurement of one engine.
     """
-    state = _random_state(2, seed)
+    state = _low_entanglement_state(2, seed)
     state = _su_evolve(state, _su_heisenberg_gate(state), 2, 800)
     E = _energy_of(state, _CHI[2])
     assert E < -0.60, (
@@ -3330,23 +3406,33 @@ def test_su_evolve_reaches_the_simple_update_reference_energy(D, seed):
     warns about.  1600 is used at D=3 too so the two cells differ in one
     variable.
 
-    **Two of the six pass now** -- D=3 seeds 1 and 2 -- and **four still fail,
-    on purpose**: D=3 seed 0 and all three D=4 seeds.  Both residues are named
-    in the section header, neither is explained, and neither is in scope for the
-    truncation-basis fix that made the other two pass.  ``task-10-reopen-report.md``
-    §"what did not close" is the standing record; do not tune ``steps``,
-    ``_SU_DT`` or ``_CHI`` to close them, because a cell that goes green without
-    a mechanism is more likely a new bug than a fix.
+    **All six pass**, and what closed the four that used to fail was the
+    *starting point*, not a change to the engine.  These cells used to run from
+    ``_random_state`` -- the maximally entangled pair ``ipeps()`` builds by
+    default -- which at ``D >= 3`` sits inside the product state's basin for
+    this engine.  They now start from :func:`_low_entanglement_state`.  Measured
+    at 1600 steps, CTM at ``_CHI[D]``, every seed::
 
-    The 1600-step energies are not quoted here, because a docstring number that
-    was not taken at the step count the test runs is exactly the kind of figure
-    this task exists to stop being repeated; ``task-10-reopen-report.md`` has
-    the re-run grid at 400, 800, 1200 and 2000 steps, where D=3 seeds 1 and 2
-    sit at -0.662839, D=3 seed 0 decays -0.651785 -> -0.607822 with BP failing
-    on 1782 of 2000 steps, and every D=4 cell is at -0.500000 from 800 steps
-    onward with BP converging throughout.
+        D=2   -0.658880   reference -0.6593    h_AB [1, 0.1384]
+        D=3   -0.662839   reference -0.6632    h_AB [1, 0.1423, 0.0112]
+        D=4   -0.667012   reference -0.6674    h_AB [1, 0.1452, 0.0125, 0.0100]
+
+    Three things make that a fix rather than a lucky landing: every seed agrees
+    to six decimals, the values are identical at 800 and 1600 steps, and the
+    spectra are *decaying* -- against the collapsed run's nearly flat
+    ``[1, 0.610, 0.482, 0.360]``, which is what a state spending its bond
+    dimension on inert virtual structure looks like.  ``D=4`` also lands
+    ``1.8e-05`` from the shipped engine's ``-0.667030`` on the same pair.
+
+    **Nothing here was tuned to make it pass.**  ``steps``, ``_SU_DT`` and
+    ``_CHI`` are untouched; ``_INIT_DAMP`` is a basin boundary and not a knob,
+    with three values spanning seven orders of magnitude landing within
+    ``1e-05`` of each other (see :data:`_INIT_DAMP`).  The behaviour from the
+    old starting point is still asserted, by
+    :func:`test_su_evolve_collapses_from_a_maximally_random_init`, so the fix
+    did not retire the difference between the two engines -- it explained it.
     """
-    state = _random_state(D, seed)
+    state = _low_entanglement_state(D, seed)
     state = _su_evolve(state, _su_heisenberg_gate(state), D, 1600)
     E = _energy_of(state, _CHI[D])
     assert E < -0.60, (
@@ -3383,10 +3469,14 @@ def test_the_energy_does_not_drift_away_with_more_steps(D, seed):
     With ``_su_step``'s truncation basis corrected the same three points read
     -0.658880, -0.658880, -0.658880 at D=2 on every seed, flat to 1e-06, and D=3
     seeds 1 and 2 read -0.662838, -0.662839, -0.662839 against a -0.6632
-    reference.  **Five of the six cells pass; D=3 seed 0 still fires**, on the
-    first assertion, running -0.651785, -0.643480, -0.622322 -- uphill, and the
-    only cell of the six where the internal BP stops converging.  That residue is
-    out of scope and is meant to stay visible.
+    reference.  **All six cells pass.**  ``D=3`` seed 0 used to fire here on the
+    first assertion, running -0.651785, -0.643480, -0.622322 -- uphill, and it
+    was the only cell of the six where the internal BP stopped converging.  That
+    made it look like a second, separate defect; it was not.  Starting from
+    :func:`_low_entanglement_state` closes it along with the ``D=4`` cells, and
+    BP converges throughout: measured -0.662839 at 400, 800 and 1600 steps, flat
+    to 1e-06, the same as seeds 1 and 2.  The non-convergence was a *symptom* of
+    the starting point, not an independent bug.
 
     **This guard is necessary and it is not sufficient, which is measured rather
     than argued, and it is emphatically not an acceptance criterion.**  On the
@@ -3400,7 +3490,7 @@ def test_the_energy_does_not_drift_away_with_more_steps(D, seed):
     reading answers the other.  Do not quote a pass here as evidence that the
     engine is right.
     """
-    state = _random_state(D, seed)
+    state = _low_entanglement_state(D, seed)
     gate = _su_heisenberg_gate(state)
     energies, done = {}, 0
     for target in (400, 800, 1200):
@@ -3454,7 +3544,7 @@ def test_d3_actually_uses_its_third_bond_direction(seed):
     fail: a pair whose third virtual direction is scaled by 1e-06 is a genuinely
     D=2 state wearing a D=3 shape, and the same reading must reject it.
     """
-    state = _random_state(3, seed)
+    state = _low_entanglement_state(3, seed)
     state = _su_evolve(state, _su_heisenberg_gate(state), 3, 1200)
     _A, _B, w, info = gauge_fix(state.A, state.B, tol=1e-10)
     assert info.converged, (
@@ -3496,4 +3586,73 @@ def test_d3_actually_uses_its_third_bond_direction(seed):
         f"a pair whose third virtual direction was scaled by 1e-06 still reads "
         f"lam_3/lam_1 = {min(ratios):.2e} -- this reading cannot see a "
         f"rank-deficient bond and the assertion above is decoration"
+    )
+
+
+@pytest.mark.slow
+def test_su_evolve_collapses_from_a_maximally_random_init():
+    """**A limitation, pinned rather than hidden.**  ``D=4`` from the shipped init.
+
+    ``_low_entanglement_state`` is the fix for the ``D=4`` residue and it works
+    -- ``-0.667012`` against the shipped engine's ``-0.667030`` on the same pair
+    -- but it works by *changing where the run starts*, so on its own it would
+    quietly retire a real difference between the two engines.  This cell keeps
+    that difference on the record: from ``_random_state``, the pair ``ipeps()``
+    actually builds today, this engine converges to the product state at ``D=4``
+    while the shipped one reaches the reference.
+
+    **The surprising half is that nothing is rank-collapsed.**  A product state
+    has a rank-1 bond; this one does not.  Measured at 800 steps, seed 0::
+
+        bond spectrum   [1, 0.610, 0.482, 0.360]   rank 4, frozen to 4 dp
+                                                   between 400 and 800 steps
+        per-bond energy  h_AB = h_BA = v_AB = v_BA = -0.2500   (exactly)
+        BP               converged, 24 sweeps, every step
+
+    The site tensor has factorised into physical (x) virtual: the entanglement
+    is real and lives in a sector the Hamiltonian cannot see.  That is why every
+    internal health check passes, and it is why this needs its own assertion --
+    a rank or a BP-convergence guard reads clean here.
+
+    **Not a reading artefact**, established three independent ways: a CTM-free
+    Vidal energy agrees at ``-0.500000`` (validated on ``D=2``/``D=3``, where it
+    reproduces ``-0.650050``/``-0.651522`` against CTM's ``-0.6593``/
+    ``-0.6632``); ``_energy_of``'s ``rank(C1) > 1`` assertion never fires; and
+    the reading is **flat in chi** -- ``-0.500000`` at ``chi = 16, 24, 32, 40``
+    -- where a truncation artefact would shrink.
+
+    **If this test starts failing, the engine has become more robust.  Promote
+    it to an acceptance cell; do not delete it and do not loosen it.**  That is
+    the whole reason the assertion is written as "still collapses" rather than
+    as a tolerance around ``-0.5``.
+    """
+    state = _random_state(4, 0)
+    state = _su_evolve(state, _su_heisenberg_gate(state), 4, 400)
+    E = _energy_of(state, _CHI[4])
+
+    _A, _B, weights, info = gauge_fix(state.A, state.B)
+    spectrum = np.sort(np.asarray(weights.h_AB))[::-1]
+    spectrum = spectrum / spectrum[0]
+    rank = int(np.sum(spectrum > 1e-8))
+
+    # The meta-assertion first: this is a *physical* collapse on a bond that is
+    # not rank-deficient.  If the bond has collapsed too, the cell is pinning an
+    # ordinary rank collapse and its docstring is describing something else.
+    assert rank == 4 and spectrum[-1] > 1e-2, (
+        f"the h_AB spectrum came back {spectrum} (rank {rank}) -- this cell "
+        f"pins a collapse that leaves the bond FULL RANK, and a rank-deficient "
+        f"bond here means the failure mode changed and the docstring above no "
+        f"longer describes it"
+    )
+    assert info.converged, (
+        f"BP did not converge ({info.iterations} sweeps, residual "
+        f"{info.residual:.3e}); this cell pins the case where BP is HEALTHY "
+        f"and the physics is still wrong, which is what makes it worth pinning"
+    )
+    assert E > -0.60, (
+        f"D=4 from the maximally random init now reaches E={E:.6f}, below the "
+        f"product state -- the engine has become robust to its initialisation. "
+        f"That is a FIX, not a failure: promote this cell to an acceptance "
+        f"case (reference {_SU_REFERENCE[4]}), re-derive _INIT_DAMP's "
+        f"justification, and do not simply loosen this gate."
     )

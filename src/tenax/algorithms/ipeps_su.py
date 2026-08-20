@@ -873,6 +873,37 @@ def _su_evolve(state: _SUState, gate: Tensor, max_D: int, steps: int) -> _SUStat
     there is no cached spectrum for a non-unitary gate on another bond to
     invalidate (#667, #851, #865, #869).
 
+    **The caller owns the starting point, and at ``max_D >= 4`` it matters more
+    than anything in this function.**  Simple update is imaginary-time
+    evolution: it must start near the trivial state and move away from it.
+    Handed a **maximally entangled** pair -- which is what
+    ``jax.random.normal`` on ``(D, D, D, D, 2)`` gives, and what ``ipeps()``
+    builds by default -- this engine converges to the **product state** at
+    ``D=4`` on every seed and stays there.  Measured, ``D=4`` seed 0, 1600
+    steps, CTM at ``chi=24``::
+
+        maximally random init, this engine     -0.500000   (the product state)
+        near-product init, this engine         -0.667012
+        maximally random init, shipped engine  -0.667030
+
+    So the engine is right and the starting point is wrong: damping the
+    subleading virtual directions of the initial pair reproduces the shipped
+    engine to ``1.8e-05``.  It is not a truncation artefact (the reading is
+    flat in ``chi`` from 16 to 40) and not a rank collapse (the bond stays full
+    rank at ``[1, 0.610, 0.482, 0.360]`` while every bond energy sits at exactly
+    ``-0.2500``) -- the site tensor factorises into physical (x) virtual, and
+    the entanglement that survives is in a sector the Hamiltonian cannot see.
+    The shipped engine tolerates the random start only because its **stale**
+    stored ``lambda`` sharpen through accumulation and break the flat
+    degeneracy; the defect #882 removes was doing regularisation work.
+
+    ``tests/test_ipeps_su.py`` carries both halves: ``_low_entanglement_state``
+    for every acceptance cell, and
+    ``test_su_evolve_collapses_from_a_maximally_random_init`` pinning what
+    happens from the shipped one.  **Anything wiring this engine to a public
+    entry point has to supply the starting point too** -- ``ipeps()``'s current
+    default would collapse at ``D >= 4``.
+
     ``steps`` counts **bonds**, not cycles, matching the shipped convention
     (``ipeps_simple_update.py:276``, "Number of phases to run (not cycles)"), so
     Phase 4 can pass ``config.num_imaginary_steps`` through unchanged.  The
