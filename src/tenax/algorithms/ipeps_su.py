@@ -233,12 +233,24 @@ class _SUState:
         ``phys_B``, or a 4-leg tensor, i.e. the mistakes that would otherwise
         surface several frames deep inside a ``contract``.
 
+        **The pair is canonicalised to** ``_SITE_LABELS`` **here**, so every
+        state in this module carries one axis order and ``_su_step`` has one
+        order to return.  Accepting any order and then silently returning a
+        different one was the earlier behaviour, and it made ``_su_step``'s
+        "same leg order" promise true only for callers who happened to pass the
+        canonical order already -- measured, a pair handed in as
+        ``('phys', 'r', 'u', 'l', 'd')`` came back ``('u', 'd', 'l', 'r',
+        'phys')``.  Canonicalising at construction is the cheaper of the two
+        repairs: axis order is part of a pytree's structure, so one order for
+        every state is also what keeps the traced ``gauge_fix`` from
+        recompiling (see :func:`_reorder`).
+
         Args:
             A, B: Absorbed-form site tensors, labels ``(u, d, l, r, phys)`` in
-                  any order.
+                  any order.  The order is not preserved: see above.
 
         Returns:
-            The state.
+            The state, with both tensors in ``_SITE_LABELS`` order.
 
         Raises:
             ValueError: if either tensor's label set is not
@@ -254,7 +266,7 @@ class _SUState:
                     f"alone, with every bond weight already split into both "
                     f"of its ends."
                 )
-        return cls(A=A, B=B)
+        return cls(A=_reorder(A, _SITE_LABELS), B=_reorder(B, _SITE_LABELS))
 
     @property
     def max_D(self) -> int:
@@ -555,8 +567,12 @@ def _su_step(state: _SUState, gate: Tensor, max_D: int, bond: str) -> _SUState:
         bond:  One of ``"h_AB"``, ``"h_BA"``, ``"v_AB"``, ``"v_BA"``.
 
     Returns:
-        A new :class:`_SUState`, in absorbed form, with the same leg order,
-        leg labels, flows and dimensions as the input.
+        A new :class:`_SUState`, in absorbed form, with the same leg labels,
+        flows and dimensions as the input, and its axis order -- which is
+        ``_SITE_LABELS`` for both, because :meth:`_SUState.from_pair`
+        canonicalises on construction and every state reaching here has been
+        through it.  This used to be phrased as "the same leg order as the
+        input", which was false for a caller who passed a permuted pair.
 
         **Not the same per-leg charge layout**, and the way it moves is the
         opposite of what one would guess.  The *updated* bond keeps its layout;

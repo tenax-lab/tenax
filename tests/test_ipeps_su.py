@@ -97,7 +97,9 @@ from tenax.algorithms.ipeps_simple_update import (
 )
 from tenax.algorithms.ipeps_su import (
     _BOND_ENDS,
+    _SITE_LABELS,
     _align_gate_to_ket,
+    _reorder,
     _sqrt_and_inv_sqrt,
     _su_evolve,
     _su_step,
@@ -111,7 +113,15 @@ from tenax.core.tensor import DenseTensor
 
 @pytest.mark.parametrize("kind", ["dense", "symmetric"])
 def test_su_state_from_pair_round_trips_the_tensors(kind):
-    """``from_pair`` stores exactly what it is handed, and validates labels."""
+    """``from_pair`` stores what it is handed, unchanged, and validates labels.
+
+    ``is`` rather than ``==`` on purpose: ``from_pair`` canonicalises the axis
+    order (see its docstring), and ``_reorder`` returns its argument untouched
+    when the order already matches -- so for a canonical pair, which every
+    fixture here builds, no copy is made and identity holds.  A permuted pair
+    *is* rebuilt; that path is
+    :func:`test_from_pair_canonicalises_the_leg_order`.
+    """
     A, B = _PAIRS[kind](D=3)
     state = _SUState.from_pair(A, B)
 
@@ -3657,3 +3667,66 @@ def test_su_evolve_collapses_from_a_maximally_random_init():
         f"case (reference {_SU_REFERENCE[4]}), re-derive _INIT_DAMP's "
         f"justification, and do not simply loosen this gate."
     )
+
+
+@pytest.mark.parametrize(
+    "perm",
+    [
+        ("phys", "r", "u", "l", "d"),
+        ("d", "u", "r", "l", "phys"),
+        ("u", "d", "l", "r", "phys"),
+    ],
+    ids=["shuffled", "reversed-pairs", "already-canonical"],
+)
+def test_from_pair_canonicalises_the_leg_order(perm):
+    """``from_pair`` accepts any leg order and stores exactly one.
+
+    ``from_pair``'s label check accepts ``(u, d, l, r, phys)`` *in any order*,
+    and ``_su_step`` returns ``_SITE_LABELS`` whatever it was given.  Those two
+    facts used to combine into a false promise: ``_su_step``'s *Returns*
+    section said "the same leg order as the input", which held only for callers
+    who happened to pass the canonical order already.  Measured before the fix,
+    a pair handed in as ``('phys', 'r', 'u', 'l', 'd')`` came back as
+    ``('u', 'd', 'l', 'r', 'phys')``.
+
+    **The existing structure guard could not catch it.**
+    ``test_su_step_preserves_the_pair_s_structure`` asserts
+    ``after.labels() == before.labels()``, which is the right assertion -- but
+    every fixture in this file builds canonical pairs, so it compares
+    ``_SITE_LABELS`` with ``_SITE_LABELS`` and passes for any implementation.
+    That is this branch's recurring shape: a fixture that constrains the input
+    space bounds what the whole suite can discover, and it is exactly how two
+    source defects survived Phase 1 behind ``_wrap_as_dense_tensor``.
+
+    So this cell varies the one thing that guard holds fixed.  The
+    ``already-canonical`` case is the control: it must pass both before and
+    after the fix, so a failure there means the harness is wrong rather than
+    the code.
+
+    **Watched failing:** with the ``_reorder`` calls removed from ``from_pair``,
+    the two permuted cases fail here at the first assertion while the control
+    passes.
+    """
+    A, B = _PAIRS["dense"](D=2, seed=0)
+    A_in, B_in = _reorder(A, perm), _reorder(B, perm)
+    assert A_in.labels() == perm, "the fixture did not build the permutation"
+
+    state = _SUState.from_pair(A_in, B_in)
+
+    for name, tensor in (("A", state.A), ("B", state.B)):
+        assert tensor.labels() == _SITE_LABELS, (
+            f"from_pair stored {name} as {tensor.labels()} from an input in "
+            f"{perm}; it is supposed to canonicalise to {_SITE_LABELS} so that "
+            f"every state in this module carries one axis order -- which is "
+            f"what makes _su_step's documented return order true"
+        )
+
+    # ... and the step keeps it, which is the half _su_step's Returns promises.
+    stepped = _su_step(state, _su_heisenberg_gate(state), 2, "h_AB")
+    for name, tensor in (("A", stepped.A), ("B", stepped.B)):
+        assert tensor.labels() == _SITE_LABELS, (
+            f"after one step, {name} is {tensor.labels()} rather than "
+            f"{_SITE_LABELS}; axis order is part of the pytree structure, so a "
+            f"step that returned a different one each call would recompile the "
+            f"traced gauge every time (see ipeps_su._reorder)"
+        )
