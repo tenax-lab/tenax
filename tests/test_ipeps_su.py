@@ -1,4 +1,16 @@
-"""The simple-update engine that cannot hold a stale bond spectrum (#882 Phase 2).
+"""The simple-update engine that cannot hold a stale bond spectrum (#882 Phase 2/3).
+
+**The sweep has two arms and they do not reach equally far** (#882 Task 14).
+``dense`` runs every cell.  ``symmetric`` -- U(1)-Sz, ``_PAIRS["symmetric"]`` --
+runs the ``D=2`` acceptance cell and nothing above it, for two measured reasons
+rather than for want of parametrising: the rotated Heisenberg gate the dense
+cells evolve does not conserve ``Sz`` and cannot be built on a symmetric pair at
+all, and at ``D >= 3`` ``_su_evolve`` dies inside ``ipeps_bp_gauge`` after a
+handful of steps.  At ``D=2`` the engine is right and the *reading* is not: the
+symmetric and dense states are the same state to 2.8e-17 on the closed torus,
+and the same state reads -0.658880 through the dense CTM and -0.650094 through
+the symmetric one, flat in chi on both sides.  All three are pinned by cells in
+the "#882 Task 14" section below; none of them is worked around here.
 
 ``_SUState`` has two fields and no third.  That is the whole premise of the
 rewrite -- the defect class behind #667, #851, #865 and #869 is a stored
@@ -108,7 +120,7 @@ from tenax.algorithms.ipeps_su import (
 from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core._tensor_utils import scale_bond_axis
 from tenax.core.index import TensorIndex
-from tenax.core.tensor import DenseTensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 
 @pytest.mark.parametrize("kind", ["dense", "symmetric"])
@@ -2214,6 +2226,56 @@ _SEEDS = (0, 1, 2)
 #: same reason.
 _H_HEISENBERG_ROT = sublattice_rotate_gate(heisenberg_gate())
 
+#: The **unrotated** Heisenberg Hamiltonian -- the only one of the two the
+#: symmetric arm can use, and not a preference (#882 Task 14).
+#:
+#: ``sublattice_rotate_gate`` sends ``S.S`` to ``-(SxSx - SySy + SzSz)``, and
+#: ``SxSx - SySy`` is ``(S+S+ + S-S-)/2``, which changes total ``Sz`` by
+#: ``+/-2``.  So the rotated gate is not ``Sz``-conserving and cannot be cast
+#: to a U(1)-Sz ``SymmetricTensor`` at all: ``_make_trotter_gate_tensor``
+#: refuses it with ``data has 2 non-zero elements outside symmetry-allowed
+#: sectors (max abs value: 2.532e-02)``.  That refusal is *asserted*, by
+#: :func:`test_the_sublattice_rotation_cannot_be_cast_to_u1_sz`, so the
+#: substitution rests on a watched failure rather than on this note.
+#: ``test_su_865_symmetric_collapse.py`` made the same substitution for the
+#: same reason and says so in one line; this is that line with the measurement
+#: attached.
+#:
+#: The rotation is a *local unitary on one sublattice*, so it cannot move the
+#: energy -- and that is measured rather than argued, by
+#: :func:`test_the_unrotated_gate_reaches_the_same_dense_energy`, which runs
+#: the whole dense ``D=2`` cell on each and gets ``-0.658880204036`` against
+#: ``-0.658880204034``, 1.6e-12 apart, with all four bond spectra equal to six
+#: decimals.  What the rotation *does* buy on the dense arm is that ``A`` and
+#: ``B`` converge to the same physical tensor, which is a diagnostic and not a
+#: term in the energy.
+_H_HEISENBERG = heisenberg_gate()
+
+#: Which Hamiltonian each arm evolves under and is scored against.
+#:
+#: One map, read by both :func:`_su_heisenberg_gate` and :func:`_energy_of`,
+#: because a gate built from one Hamiltonian and an energy taken with the other
+#: is a *silent* wrong answer: the two differ by ``1.414214`` in Frobenius norm
+#: and both readings stay finite, plausible and stable.  Deriving both from the
+#: pair itself is what makes that unrepresentable here.
+_H_FOR_KIND = {"dense": _H_HEISENBERG_ROT, "symmetric": _H_HEISENBERG}
+
+
+def _kind_of(state):
+    """``"symmetric"`` or ``"dense"``, read off the pair rather than passed in.
+
+    Every helper below that needs a Hamiltonian gets it through
+    :func:`_hamiltonian_for`, so a caller cannot pair a symmetric state with
+    the rotated gate by forgetting an argument.
+    """
+    return "symmetric" if isinstance(state.A, SymmetricTensor) else "dense"
+
+
+def _hamiltonian_for(state):
+    """The Hamiltonian this pair's arm is evolved under and scored against."""
+    return _H_FOR_KIND[_kind_of(state)]
+
+
 #: What "broken" looks like.  Not a round number pulled from the air: it is the
 #: exact fixed point #667's ``lambda**1.5`` bond produced, and three of the nine
 #: cells below sit on it to fifteen digits.
@@ -2262,7 +2324,7 @@ _SU_DT = 0.05
 _INIT_DAMP = 0.1
 
 
-def _random_state(D, seed):
+def _random_state(D, seed, kind="dense"):
     """The **shipped** random pair -- ``ipeps()``'s own default initialisation.
 
     ``jax.random.normal`` on ``(D, D, D, D, 2)``, normalised.
@@ -2280,10 +2342,10 @@ def _random_state(D, seed):
     that behaviour so the limitation stays visible.  Every acceptance cell uses
     :func:`_low_entanglement_state`.
     """
-    return _SUState.from_pair(*_PAIRS["dense"](D=D, seed=seed))
+    return _SUState.from_pair(*_PAIRS[kind](D=D, seed=seed))
 
 
-def _low_entanglement_state(D, seed, damp=_INIT_DAMP):
+def _low_entanglement_state(D, seed, damp=_INIT_DAMP, kind="dense"):
     """The shipped random pair, damped to "product state + small correction".
 
     Scales the subleading virtual directions of all four legs of both sites by
@@ -2307,22 +2369,40 @@ def _low_entanglement_state(D, seed, damp=_INIT_DAMP):
     break the flat degeneracy -- the very defect #882 removes was acting as a
     regulariser, which is worth knowing before reading its robustness as a
     virtue.
+
+    **The symmetric arm starts here too** (#882 Task 14).  ``scale_bond_axis``
+    dispatches block-wise on a ``SymmetricTensor`` and indexes ``scale`` by the
+    leg's own positions, so ``[1, damp, ...]`` damps the same *slots* on either
+    arm; it is a diagonal map in the charge basis and therefore a
+    symmetry-preserving one.  Whether the symmetric arm *needs* it is a
+    separate question and it is measured, not assumed: at ``D=2`` the symmetric
+    run survives 60 steps and lands on the same energy from ``damp=1.0`` as
+    from ``damp=0.1``, so unlike the dense ``D>=3`` cells this is not what
+    stands between it and the reference.  It is kept so the two arms differ in
+    one variable.
     """
-    A, B = _PAIRS["dense"](D=D, seed=seed)
+    A, B = _PAIRS[kind](D=D, seed=seed)
     scale = jnp.asarray([1.0] + [damp] * (D - 1))
     for leg in ("u", "d", "l", "r"):
         A, B = scale_bond_axis(A, leg, scale), scale_bond_axis(B, leg, scale)
     return _SUState.from_pair(A, B)
 
 
-def _su_heisenberg_gate(state, dt=_SU_DT):
-    """``exp(-dt H_rot)`` on the pair's own physical leg."""
-    return _make_trotter_gate_tensor(
-        jnp.asarray(_H_HEISENBERG_ROT.todense()), dt, site_tensor=state.A
-    )
+def _su_heisenberg_gate(state, dt=_SU_DT, hamiltonian=None):
+    """``exp(-dt H)`` on the pair's own physical leg, ``H`` from the pair's arm.
+
+    ``H`` is :data:`_H_HEISENBERG_ROT` on a dense pair and :data:`_H_HEISENBERG`
+    on a symmetric one -- see :data:`_H_FOR_KIND` for why that is forced rather
+    than chosen.  ``hamiltonian`` overrides it and exists for exactly one
+    caller, :func:`test_the_unrotated_gate_reaches_the_same_dense_energy`,
+    which drives the *dense* arm on both so the substitution the symmetric arm
+    depends on is measured instead of assumed.
+    """
+    H = _hamiltonian_for(state) if hamiltonian is None else hamiltonian
+    return _make_trotter_gate_tensor(jnp.asarray(H.todense()), dt, site_tensor=state.A)
 
 
-def _energy_of(state, chi, recipe="2x2"):
+def _energy_of(state, chi, recipe="2x2", hamiltonian=None):
     """Energy per site of the checkerboard pair, from a **checked** CTM.
 
     Three things about this reference are deliberate, and each of them is a
@@ -2365,6 +2445,10 @@ def _energy_of(state, chi, recipe="2x2"):
         state:  The pair to measure.
         chi:    Environment bond dimension; must be well above ``D**2``.
         recipe: CTM recipe.  Leave it at ``"2x2"``; see above.
+        hamiltonian: Override for the arm's Hamiltonian.  Defaults to
+                :func:`_hamiltonian_for`, which is the only correct choice for
+                a state this suite evolved; the override has one caller, for
+                the same reason ``recipe`` does.
 
     Returns:
         Energy per site as a ``float``.
@@ -2394,11 +2478,8 @@ def _energy_of(state, chi, recipe="2x2"):
             f"test_the_energy_reference_reproduces_the_known_su_number's "
             f"control provokes on purpose."
         )
-    return float(
-        compute_energy_ctm_tensor_2site(
-            state.A, state.B, env_A, env_B, _H_HEISENBERG_ROT, 2
-        )
-    )
+    H = _hamiltonian_for(state) if hamiltonian is None else hamiltonian
+    return float(compute_energy_ctm_tensor_2site(state.A, state.B, env_A, env_B, H, 2))
 
 
 def _shipped_su_run(D, seed, steps):
@@ -3355,12 +3436,72 @@ def test_the_shipped_engines_stored_spectra_are_closer_than_the_plan_says():
     # ``> 0.10``) and each pinned to its own measured constant.
 
 
+#: The two arms of the acceptance sweep, and what each costs (#882 Task 14).
+#:
+#: ``symmetric`` carries ``slow`` unconditionally -- **not** as a judgement
+#: about how central it is, but because one cell of it is ~600x the dense one.
+#: Measured, ``JAX_PLATFORMS=cpu``, ``D=2``, 800 steps: dense evolves in 1.5 s
+#: and symmetric in 490 s.  The ratio is not the SU arithmetic, it is
+#: ``ipeps_bp_gauge``'s driver split -- a ``SymmetricTensor`` pair takes
+#: ``_bp_solve_eager``, the Python-loop driver, at "18.9 ms/sweep -- 555x the
+#: traced path's 0.034 ms" (that module's own docstring), and ``_su_step``
+#: re-derives the gauge on **every** step by design.
+_ARMS = [
+    pytest.param("dense", id="dense"),
+    pytest.param("symmetric", marks=pytest.mark.slow, id="symmetric"),
+]
+
+
+@pytest.mark.parametrize("kind", _ARMS)
 @pytest.mark.parametrize(
     "seed",
     [0] + [pytest.param(s, marks=pytest.mark.slow) for s in _SEEDS[1:]],
 )
-def test_d2_reaches_the_heisenberg_energy_not_the_product_state(seed):
+def test_d2_reaches_the_heisenberg_energy_not_the_product_state(seed, kind):
     """#667's guard: D=2 must reach ~-0.659, not -0.5.
+
+    **``kind`` has no default, deliberately.**  ``test_ipeps_su_mutations.py``
+    calls this guard directly and its recorded 667 kill (``E = -0.509176``) is
+    a *dense* reading, so that call now names its arm --
+    ``guards.test_d2_reaches_..._product_state(0, "dense")``.  A default would
+    have been quieter and pytest rejects it outright ("function already takes an
+    argument 'kind' with a default value"), which is the better outcome: an arm
+    a caller did not choose is exactly how a recorded number comes to be quoted
+    for a run that did not produce it.
+
+    **The symmetric arm reads -0.650094, and it passes this cell for a reason
+    that is not the one it looks like.**  ``abs=0.02`` is Task 12's tolerance
+    and it is deliberately left alone, so -0.650094 clears it -- but the dense
+    arm reads -0.658880 on a state that is, to 2.8e-17 on the closed-torus
+    witness, *the same state*.  The 8.8e-03 between them is the symmetric CTM,
+    not the symmetric simple update, and it is
+    :func:`test_the_symmetric_d2_state_reads_the_dense_reference_through_a_dense_ctm`
+    that says so with the measurement.  Do not read a pass here as agreement
+    between the arms.
+
+    **The symmetric arm reintroduces exactly one ``gauge_fix`` warning, and the
+    section header's "zero" is now a statement about the dense arm.**  Task 12
+    drove the ``gauge_fix did not converge`` count from 3339 to zero and the
+    method it recorded was "the emissions are what matter, use ``-rw``".
+    Re-measured that way on this arm --
+    ``pytest '...[2-symmetric]' -W always -rw`` -- the run reads ``1 passed, 1
+    warning in 1184.24s``, and the one is ``did not converge before the h_AB
+    update: 100 sweeps, residual 2.242e-03`` on **seed 2 only**; seeds 0 and 1
+    emit none.  One step of 800.  It does not move the answer: seed 2's energy,
+    both CTM readings and all four spectra are identical to seeds 0 and 1 to six
+    decimals.  Recorded rather than asserted, exactly as on the dense arm --
+    nothing here counts warnings, so if that one becomes many no cell will say
+    so.
+
+    **Measured, 800 steps, ``dt=0.05``, CTM at ``_CHI[2]``, every seed**::
+
+        arm         E           reference    h_AB              rank(C1)
+        dense       -0.658880   -0.6593      [1, 0.138424]     16
+        symmetric   -0.650094   -0.6593      [1, 0.138424]     3
+
+    -- the spectra are the *same* spectra, which is what makes the energy gap a
+    statement about the reading.  Seed-to-seed spread on the symmetric arm is
+    zero at six decimals, on both CTM readings and all four bonds.
 
     -0.5 is the product state, which is what the ``lambda**1.5`` bond made the
     fixed point.  Assert on ENERGY, never on norm: ``gauge_fix`` rescales its
@@ -3389,15 +3530,15 @@ def test_d2_reaches_the_heisenberg_energy_not_the_product_state(seed):
     ``abs=0.02`` makes, and the tolerance is deliberately left where Task 12 set
     it rather than tightened onto one measurement of one engine.
     """
-    state = _low_entanglement_state(2, seed)
+    state = _low_entanglement_state(2, seed, kind=kind)
     state = _su_evolve(state, _su_heisenberg_gate(state), 2, 800)
     E = _energy_of(state, _CHI[2])
     assert E < -0.60, (
-        f"seed {seed}: E={E:.6f} -- at or above the product state "
+        f"{kind} seed {seed}: E={E:.6f} -- at or above the product state "
         f"({_PRODUCT_STATE_ENERGY}), which is what #667 looked like"
     )
     assert E == pytest.approx(_SU_REFERENCE[2], abs=0.02), (
-        f"seed {seed}: E={E:.6f}, reference {_SU_REFERENCE[2]}"
+        f"{kind} seed {seed}: E={E:.6f}, reference {_SU_REFERENCE[2]}"
     )
 
 
@@ -3670,6 +3811,459 @@ def test_su_evolve_collapses_from_a_maximally_random_init():
         f"case (reference {_SU_REFERENCE[4]}), re-derive _INIT_DAMP's "
         f"justification, and do not simply loosen this gate."
     )
+
+
+# --- #882 Task 14: the symmetric U(1)-Sz arm ------------------------------
+#
+# Task 14's brief is "parametrise the Phase 2 tests over ``_PAIRS`` so
+# ``symmetric`` runs the same acceptance sweep".  One cell of that sweep does
+# run -- ``test_d2_reaches_the_heisenberg_energy_not_the_product_state`` above,
+# now parametrised over :data:`_ARMS` -- and the rest of this section is the
+# three things that stop the other cells, each measured and each pinned rather
+# than worked around.
+#
+# **1. The gate.**  The rotated Heisenberg Hamiltonian every dense cell evolves
+# does not conserve ``Sz`` and cannot be cast to a U(1)-Sz ``SymmetricTensor``
+# at all.  The symmetric arm evolves the unrotated one; the substitution costs
+# 1.6e-12 on the dense arm, measured.  See :data:`_H_HEISENBERG`.
+#
+# **2. ``D >= 3`` does not run.**  ``_su_evolve`` raises ``TypeError`` out of
+# ``ipeps_bp_gauge._residual`` after a handful of steps -- measured, step 3 at
+# seed 0 and step 15 at seed 1, both at ``D=3``, and step 3 at ``D=4``.  That is
+# a defect in ``src/``, it is not in ``ipeps_su.py``, and Task 14 does not fix
+# it: see
+# :func:`test_symmetric_simple_update_still_breaks_the_bp_gauge_at_D3`.
+#
+# **3. At ``D=2`` the engine is right and the *reading* is 8.8e-03 short.**
+# This is the finding worth carrying forward.  The symmetric SU state and the
+# dense one are the same state -- 2.8e-17 on the closed-torus witness, all four
+# bond spectra equal to six decimals -- and that state reads ``-0.658880``
+# through the dense CTM and ``-0.650094`` through the symmetric one, **flat in
+# chi on both sides** (16, 24, 32 and 8), with the symmetric environment's
+# ``C1`` stuck at rank 3 whatever chi it is given.  Flat in chi is this
+# project's own discriminator for "defect" against "truncation".  See
+# :func:`test_the_symmetric_d2_state_reads_the_dense_reference_through_a_dense_ctm`.
+#
+# Cost, so the ``slow`` marks below are not mysterious: at ``D=2``, 800 steps,
+# ``JAX_PLATFORMS=cpu``, the dense evolve is 1.5 s and the symmetric one 490 s.
+# ``ipeps_bp_gauge`` dispatches ``SymmetricTensor`` pairs to its Python-loop
+# driver at "18.9 ms/sweep -- 555x the traced path's 0.034 ms" (its own
+# docstring), and ``_su_step`` re-derives the gauge every step by design.
+
+
+def _dead_charge_slots(t):
+    """Charge values a leg's *index* carries that no *block* of ``t`` uses.
+
+    A ``SymmetricTensor`` leg is a list of charge values, one per slot, and the
+    tensor's blocks are keyed by the charge value each axis takes.  A value that
+    appears in the index and in no block key is a slot with no state in it: the
+    leg still reports ``dim`` counting it, while every block-sparse
+    decomposition across that leg returns one factor per *occupied* sector and
+    so comes back short.  That mismatch is the whole of the ``D >= 3`` blocker
+    below, and it is a property of the pair rather than of anything that
+    happens to it, which is why it is read here and not inferred from a
+    traceback.
+
+    Returns:
+        ``{leg_label: [dead charge values]}``, empty legs omitted.
+    """
+    out = {}
+    for axis, (label, index) in enumerate(zip(t.labels(), t.indices, strict=True)):
+        used = {int(key[axis]) for key in t.blocks}
+        dead = [int(c) for c in index.charges if int(c) not in used]
+        if dead:
+            out[label] = dead
+    return out
+
+
+def test_the_sublattice_rotation_cannot_be_cast_to_u1_sz():
+    """Why the symmetric arm evolves the **unrotated** Heisenberg gate.
+
+    The first thing that stops when the sweep is parametrised over ``_PAIRS``
+    is the *gate*.  ``sublattice_rotate_gate`` sends ``S.S`` to
+    ``-(SxSx - SySy + SzSz)``, and ``SxSx - SySy`` is ``(S+S+ + S-S-)/2``,
+    which moves total ``Sz`` by ``+/-2``.  In the 4x4 that is weight in the
+    ``|up up> <-> |down down|`` corner -- ``-0.5`` on the rotated gate, exactly
+    ``0`` on the unrotated one.
+
+    So this is not a tolerance and not a slowdown: on a U(1)-Sz pair the
+    rotated gate cannot be built.  It refuses **loudly**, which is the good
+    case; a silent projection onto the allowed sectors would have handed the
+    sweep an Ising gate and a plausible wrong energy, and that failure mode is
+    exactly #865's shape.
+
+    **Four cells, because one of them is not a claim.**  rotated/symmetric is
+    the refusal.  rotated/dense and plain/symmetric are the controls that make
+    it a statement about the *pair* and about the *gate* rather than about
+    ``_make_trotter_gate_tensor`` refusing things in general.  plain/dense is
+    the combination nothing here needs but which must keep working.
+
+    **Watched failing**, both directions:
+
+    * with ``SymmetricTensor.from_dense``'s out-of-sector check replaced by a
+      silent drop of the offending entries, ``pytest.raises`` reports
+      ``DID NOT RAISE`` -- i.e. this cell is what stands between the sweep and
+      an Ising gate;
+    * with ``sublattice_rotate_gate``'s ``U`` replaced by the identity, the
+      rotated gate stops differing from the plain one and the first assertion
+      fires at ``rot[0, 3] = 0.0``.
+    """
+    rot = np.asarray(_H_HEISENBERG_ROT.todense()).reshape(4, 4)
+    plain = np.asarray(_H_HEISENBERG.todense()).reshape(4, 4)
+
+    assert abs(rot[0, 3]) == pytest.approx(0.5) and abs(rot[3, 0]) == pytest.approx(
+        0.5
+    ), (
+        f"the rotated Heisenberg gate has {rot[0, 3]:.3f} in the |up up> <-> "
+        f"|down down| corner, not +/-0.5 -- that corner is the dSz = +/-2 term "
+        f"the rotation introduces and it is the entire reason the symmetric arm "
+        f"cannot use this gate"
+    )
+    assert plain[0, 3] == 0.0 and plain[3, 0] == 0.0, (
+        f"the unrotated Heisenberg gate has {plain[0, 3]:.3f} in the dSz = +/-2 "
+        f"corner; it is supposed to conserve Sz exactly, and the symmetric arm "
+        f"rests on that"
+    )
+    assert float(np.linalg.norm(rot - plain)) == pytest.approx(1.414214, abs=1e-5), (
+        f"the two Hamiltonians differ by {float(np.linalg.norm(rot - plain)):.6f}, "
+        f"not the measured 1.414214 -- one of them has moved and every number "
+        f"in this section was taken on the pair as it stood"
+    )
+
+    A_sym, _B_sym = _PAIRS["symmetric"](D=3, seed=0)
+    A_dense, _B_dense = _PAIRS["dense"](D=3, seed=0)
+    rot4 = jnp.asarray(rot.reshape(2, 2, 2, 2))
+    plain4 = jnp.asarray(plain.reshape(2, 2, 2, 2))
+
+    with pytest.raises(ValueError, match="outside symmetry-allowed sectors"):
+        _make_trotter_gate_tensor(rot4, _SU_DT, site_tensor=A_sym)
+
+    assert isinstance(
+        _make_trotter_gate_tensor(rot4, _SU_DT, site_tensor=A_dense), DenseTensor
+    ), "the rotated gate must still build on a dense pair -- 23 cells above use it"
+    assert isinstance(
+        _make_trotter_gate_tensor(plain4, _SU_DT, site_tensor=A_sym), SymmetricTensor
+    ), (
+        "the unrotated gate does not build on a U(1)-Sz pair either, so the "
+        "refusal above is not about the rotation and the symmetric arm has no "
+        "gate at all"
+    )
+
+
+def test_the_unrotated_gate_reaches_the_same_dense_energy():
+    """The control that licenses the symmetric arm's gate substitution.
+
+    The symmetric arm evolves a different Hamiltonian from every other cell in
+    this file.  That is forced (see
+    :func:`test_the_sublattice_rotation_cannot_be_cast_to_u1_sz`), but "forced"
+    is not "free": if the two runs did not agree, a symmetric shortfall would
+    confound the symmetry code with the gate, which is the same class of
+    mistake as Task 12's confounded initialisation.
+
+    The rotation is a local unitary on one sublattice, so it cannot move the
+    energy.  Measured here rather than argued -- dense ``D=2`` seed 0, 800
+    steps, CTM at ``_CHI[2]``::
+
+        rotated     -0.658880204036
+        unrotated   -0.658880204034
+
+    1.6e-12 apart, with all four bond spectra equal to six decimals.
+
+    **The first assertion is the one that keeps the rest honest.**  An equality
+    between two runs is satisfied for free if the two Hamiltonians are the same
+    object, so this cell first requires them to differ -- by 1.414214 in
+    Frobenius norm, measured.  Without that line, replacing
+    ``sublattice_rotate_gate`` with the identity would turn this cell green
+    while deleting its subject.
+
+    **Watched failing:** with ``_energy_of`` ignoring its ``hamiltonian``
+    argument and always scoring against :data:`_H_HEISENBERG_ROT` -- i.e. a gate
+    and an energy taken from different Hamiltonians, the hazard
+    :data:`_H_FOR_KIND` exists to make unrepresentable -- the unrotated run is
+    scored at **+0.373503** against the rotated run's -0.658880 and the equality
+    fires at 1.03e+00.  Note the sign: a Hamiltonian mismatch does not read as a
+    slightly-too-high energy, it reads as a positive one, which is the only
+    reason it is not the kind of mistake that ships.
+    """
+    rot = np.asarray(_H_HEISENBERG_ROT.todense())
+    plain = np.asarray(_H_HEISENBERG.todense())
+    assert float(np.linalg.norm(rot - plain)) == pytest.approx(1.414214, abs=1e-5), (
+        "the two Hamiltonians are the same to 1e-5, so the comparison below is "
+        "a run against itself and cannot fail"
+    )
+
+    energies, spectra = {}, {}
+    for name, H in (("rotated", _H_HEISENBERG_ROT), ("unrotated", _H_HEISENBERG)):
+        state = _low_entanglement_state(2, 0)
+        gate = _su_heisenberg_gate(state, hamiltonian=H)
+        state = _su_evolve(state, gate, 2, 800)
+        energies[name] = _energy_of(state, _CHI[2], hamiltonian=H)
+        _A, _B, weights, info = gauge_fix(state.A, state.B, tol=1e-10)
+        assert info.converged, (
+            f"{name}: BP did not converge on the evolved pair ({info.iterations} "
+            f"sweeps, residual {info.residual:.3e}), so its spectrum below is "
+            f"not the state's"
+        )
+        spectra[name] = {
+            f: np.sort(np.asarray(getattr(weights, f), dtype=float))[::-1]
+            for f in BondWeights._fields
+        }
+        spectra[name] = {f: v / v[0] for f, v in spectra[name].items()}
+
+    assert energies["unrotated"] == pytest.approx(energies["rotated"], abs=1e-8), (
+        f"the same engine on the same pair reads {energies['rotated']:.12f} under "
+        f"the rotated Heisenberg gate and {energies['unrotated']:.12f} under the "
+        f"unrotated one.  The rotation is a local unitary on one sublattice, so "
+        f"it cannot move the energy -- a difference here means the sublattice "
+        f"assignment is wrong somewhere (#881's shape), and it would show up on "
+        f"the symmetric arm as a symmetry bug"
+    )
+    assert energies["rotated"] == pytest.approx(_SU_REFERENCE[2], abs=0.02), (
+        f"the rotated dense run reads {energies['rotated']:.6f} against reference "
+        f"{_SU_REFERENCE[2]}; the agreement above means nothing if neither arm "
+        f"is right"
+    )
+    for f in BondWeights._fields:
+        assert spectra["unrotated"][f] == pytest.approx(
+            spectra["rotated"][f], abs=1e-5
+        ), (
+            f"bond {f}: the rotated run's spectrum is {spectra['rotated'][f]} and "
+            f"the unrotated run's is {spectra['unrotated'][f]} -- equal energies "
+            f"from different states would be a coincidence, not agreement"
+        )
+
+
+@pytest.mark.slow
+def test_the_symmetric_d2_state_reads_the_dense_reference_through_a_dense_ctm():
+    """**The symmetric arm's 8.8e-03 shortfall is the CTM, not the simple update.**
+
+    ``test_d2_reaches_the_heisenberg_energy_not_the_product_state[symmetric-*]``
+    passes at -0.650094 where the dense arm reads -0.658880, and Task 12's
+    ``abs=0.02`` absorbs the difference.  Absorbing it is not explaining it, and
+    on this branch an unexplained 1e-02 has twice turned out to be a defect.
+    So this cell takes the *same state* to both CTM implementations and reports
+    which one moves.
+
+    Measured, ``D=2`` seed 0, 800 steps, ``JAX_PLATFORMS=cpu``.  Seeds 1 and 2
+    and ``damp=1.0`` all give the same four numbers to six decimals, so nothing
+    below is a property of this draw::
+
+        chi              8          16          24          32     rank(C1)
+        symmetric   -0.650094  -0.650094  -0.650094  -0.650094      3
+        densified   -0.658880  -0.658880  -0.658880  -0.658880    8/16/24/25
+
+    The state is one state: the closed 2x2 torus -- an exact state-equality
+    witness on a bosonic pair, all four bonds at once -- puts the symmetric pair
+    and its densification between 0.0 and 2.8e-17 apart, and all four bond
+    spectra agree to six decimals.  So the engine reaches the dense reference on the
+    U(1)-Sz path; what does not is ``ctm_tensor_2site`` on a
+    ``SymmetricTensor``, whose ``C1`` corner is stuck at **rank 3** however much
+    chi it is given.
+
+    **Flat in chi is the discriminator, and it is asserted rather than
+    quoted.**  A truncation error shrinks as chi grows; a defect does not.  Both
+    readings are flat to 1e-09 from chi=16 to chi=32, so the 8.8e-03 is not the
+    environment being too small.  (This is #602's "sym != dense exactly is
+    EXPECTED" taken past its useful range: #602 is about *which basis* the chi
+    bonds come out in, and a rank-3 environment at chi=32 is not a basis
+    disagreement.)
+
+    **``todense()`` on a symmetric pair, and the guarantee is executable.**
+    CLAUDE.md allows it when the result is guaranteed small; at ``D=2`` a site
+    tensor is ``2*2*2*2*2 = 32`` doubles, and the assertion below reads that
+    size off the indices rather than trusting this sentence.  A ``D=3`` version
+    of this cell would be 486 doubles and still small -- what stops it is the
+    blocker in :func:`test_symmetric_simple_update_still_breaks_the_bp_gauge_at_D3`,
+    not the densification.
+
+    **The faithfulness check comes first and it cannot pre-empt the claim.**
+    This branch's standing defect is a meta-assertion that fires before the
+    thing it is supposed to be enabling.  This one cannot: it compares the
+    symmetric pair against *its own densification*, so a broken ``_su_step``
+    moves both sides identically and the witness still reads ~1e-17.  What a
+    broken ``_su_step`` does move is the densified energy, which is the
+    load-bearing assertion.
+
+    **Watched failing:** with #865's ``base_charges`` pin re-imposed on
+    ``_su_step``'s truncation -- the defect that made the symmetric SVD discard
+    the largest singular value -- the densified reading fails at the reference
+    while the torus witness stays at 1e-17, which is the split this cell is
+    built to report.
+
+    **If the symmetric CTM is fixed this cell fails, and that is the point.**
+    The gap assertion is written as a band around a measured number, not as a
+    tolerance around the reference: promote the symmetric arm out of
+    ``test_the_symmetric_d2_state_reads_...`` and into the ordinary sweep, and
+    do not simply widen it.
+    """
+    state = _low_entanglement_state(2, 0, kind="symmetric")
+    state = _su_evolve(state, _su_heisenberg_gate(state), 2, 800)
+
+    for name, t in (("A", state.A), ("B", state.B)):
+        size = int(np.prod([idx.dim for idx in t.indices]))
+        assert size == 32, (
+            f"{name} densifies to {size} entries, not 32 -- this cell calls "
+            f"todense() on a SymmetricTensor and the licence for that is that "
+            f"the result is guaranteed small (CLAUDE.md).  The guarantee is "
+            f"this assertion, not the D=2 in the name"
+        )
+
+    A_d = _wrap_as_dense_tensor(jnp.asarray(state.A.todense()))
+    B_d = _wrap_as_dense_tensor(jnp.asarray(state.B.todense()))
+    densified = _SUState.from_pair(A_d, B_d)
+
+    witness = _torus_rel(
+        torus_2x2_sign_free(state.A, state.B, _ones_for(state.A)),
+        torus_2x2_sign_free(A_d, B_d, _ones_for(A_d)),
+    )
+    assert witness < 1e-12, (
+        f"the densified pair is {witness:.3e} from the symmetric one on the "
+        f"closed 2x2 torus, so the two CTM readings below are of two different "
+        f"states and the comparison says nothing.  Block-sparse contract() "
+        f"pairs legs by charge VALUE and dense contract() by POSITION (#834), "
+        f"so this is the check that says the two agree on this pair"
+    )
+
+    # ``hamiltonian=`` is not optional here: ``densified`` is a DenseTensor
+    # pair, so ``_hamiltonian_for`` would hand it the *rotated* gate, while the
+    # state was evolved under the unrotated one.  Densifying a symmetric state
+    # changes which arm it looks like; it does not change what it was evolved
+    # under.
+    E_dense_ctm = _energy_of(densified, _CHI[2], hamiltonian=_H_HEISENBERG)
+    E_sym_ctm = _energy_of(state, _CHI[2])
+
+    assert E_dense_ctm == pytest.approx(_SU_REFERENCE[2], abs=1e-3), (
+        f"the U(1)-Sz simple-update state reads {E_dense_ctm:.6f} through the "
+        f"DENSE CTM, against reference {_SU_REFERENCE[2]} -- so the shortfall is "
+        f"in the engine after all and not in the reading.  Everything else this "
+        f"cell asserts is about the apparatus and is moot until this passes"
+    )
+
+    gap = E_sym_ctm - E_dense_ctm
+    assert 5e-3 < gap < 2e-2, (
+        f"the symmetric CTM reads {E_sym_ctm:.6f} on the same state the dense "
+        f"CTM reads {E_dense_ctm:.6f}, a gap of {gap:.3e}, outside the measured "
+        f"band [5e-03, 2e-02].  If the gap has CLOSED, the symmetric CTM has "
+        f"been fixed: that is a FIX, not a failure -- promote the symmetric arm "
+        f"into the ordinary acceptance sweep and delete this cell's second half "
+        f"rather than widening the band"
+    )
+
+    ranks, energies = {}, {}
+    for label, pair in (("symmetric", state), ("densified", densified)):
+        H = _H_HEISENBERG
+        for chi in (_CHI[2], 32):
+            env_A, _env_B = ctm_tensor_2site(
+                pair.A, pair.B, chi=chi, max_iter=200, conv_tol=1e-10, recipe="2x2"
+            )
+            sv = np.linalg.svd(np.asarray(env_A.C1.todense()), compute_uv=False)
+            ranks[label, chi] = int(np.sum(sv > sv[0] * 1e-10))
+            energies[label, chi] = _energy_of(pair, chi, hamiltonian=H)
+
+    assert ranks["symmetric", _CHI[2]] == 3 and ranks["symmetric", 32] == 3, (
+        f"the symmetric environment's C1 has rank "
+        f"{ranks['symmetric', _CHI[2]]} at chi={_CHI[2]} and "
+        f"{ranks['symmetric', 32]} at chi=32.  Measured it is 3 at both, and 3 "
+        f"at chi=8 and chi=24 as well -- an environment that does not grow with "
+        f"chi is what the gap above is made of"
+    )
+    assert ranks["densified", _CHI[2]] >= _CHI[2] - 1, (
+        f"the dense environment's C1 has rank {ranks['densified', _CHI[2]]} at "
+        f"chi={_CHI[2]}; measured it is full.  If it is not, the control arm has "
+        f"collapsed too and the rank reading above is not a difference between "
+        f"the two paths"
+    )
+    for label in ("symmetric", "densified"):
+        moved = abs(energies[label, 32] - energies[label, _CHI[2]])
+        assert moved < 1e-9, (
+            f"the {label} reading moves {moved:.3e} between chi={_CHI[2]} and "
+            f"chi=32, so it is still truncation-limited and the gap above is "
+            f"not yet a statement about either implementation"
+        )
+
+
+@pytest.mark.slow
+def test_symmetric_simple_update_still_breaks_the_bp_gauge_at_D3():
+    """**A blocker, pinned rather than worked around.**  Why ``D >= 3`` has no
+    symmetric arm.
+
+    ``_su_evolve`` on a U(1)-Sz pair at ``D >= 3`` raises ``TypeError: sub got
+    incompatible shapes for broadcasting: (2,), (3,)``.  Measured, unrotated
+    gate, ``_low_entanglement_state``: ``D=3`` seed 0 dies at step **3**, seed 1
+    at step **15**, seed 2 survives 60; ``D=4`` seed 0 dies at step 3.  ``D=2``
+    survives 60 steps on all three seeds and at ``damp=1.0`` as well, which is
+    why there is a ``D=2`` arm and no other.
+
+    **It is not in ``ipeps_su.py``.**  The raise comes out of
+    ``ipeps_bp_gauge._residual``, and this cell shows that by calling
+    ``gauge_fix`` on the stepped pair directly -- no ``_su_step`` on the stack.
+    Task 14 does not change ``src/``; this records the measurement instead.
+
+    **The mechanism, and it is a property of the pair.**  A block-sparse SVD
+    across a leg returns one singular value per *occupied* charge sector.  After
+    three steps the pair carries a leg whose index still counts three slots
+    while only two of them hold any block -- measured, ``A.u`` and ``B.d`` both
+    read ``charges=[-1, 1, 0]`` with charge ``0`` dead.  Those two legs are
+    exactly ``_BOND_ENDS["v_BA"]``, the fourth bond of the cycle and the next
+    one due.  ``_gauge_bond``'s ``svd`` then hands back a length-2 ``lam_new``
+    where the previous iterate held length 3, and ``_residual`` subtracts them.
+
+    **The control is the same solve on the same builder's pair one step
+    earlier.**  ``gauge_fix`` converges on the pair as built (35 sweeps), and
+    that pair has no dead slot, so the refusal is about what the evolution did
+    to the charge layout and not about symmetric pairs in general.
+
+    **If this test starts failing, the blocker is gone.**  Promote ``D=3`` and
+    ``D=4`` into the symmetric arm of the acceptance sweep -- the references are
+    already there in :data:`_SU_REFERENCE` -- and re-take the ``D=2`` CTM
+    attribution at the larger bond dimension.  Do not delete the cell and do not
+    replace it with an ``xfail``: an ``xfail`` reports "still broken" and
+    "silently fixed" with the same green tick.
+    """
+    D, seed = 3, 0
+    state = _low_entanglement_state(D, seed, kind="symmetric")
+
+    assert _dead_charge_slots(state.A) == {} and _dead_charge_slots(state.B) == {}, (
+        f"the pair as built already has a dead charge slot "
+        f"(A: {_dead_charge_slots(state.A)}, B: {_dead_charge_slots(state.B)}), "
+        f"so the mechanism below is present before any step and this cell is "
+        f"pinning the builder rather than the evolution"
+    )
+    _A, _B, _w, info = gauge_fix(state.A, state.B)
+    assert info.converged, (
+        f"gauge_fix does not converge on the pair as built ({info.iterations} "
+        f"sweeps, residual {info.residual:.3e}), so its refusal after three "
+        f"steps is not evidence that the steps did anything"
+    )
+
+    gate = _su_heisenberg_gate(state)
+    for bond in _EXPECTED_CYCLE[:3]:
+        state = _su_step(state, gate, D, bond)
+
+    dead = {"A": _dead_charge_slots(state.A), "B": _dead_charge_slots(state.B)}
+    assert dead == {"A": {"u": [0]}, "B": {"d": [0]}}, (
+        f"after three steps the dead charge slots are {dead}, not the measured "
+        f"{{'A': {{'u': [0]}}, 'B': {{'d': [0]}}}} -- the failure mode has moved "
+        f"and this cell's docstring no longer describes it"
+    )
+    assert _BOND_ENDS["v_BA"] == (("B", "d"), ("A", "u")), (
+        "the two legs carrying a dead slot are supposed to be the two ends of "
+        "v_BA, the next bond in the cycle; _BOND_ENDS says otherwise, so the "
+        "coincidence this cell rests on is not one"
+    )
+
+    with pytest.raises(
+        TypeError, match=r"incompatible shapes for broadcasting: \(2,\), \(3,\)"
+    ):
+        gauge_fix(state.A, state.B)
+
+    # ... and that is what a caller sees: the same raise, through _su_evolve,
+    # from the builder rather than from a hand-stepped pair.
+    fresh = _low_entanglement_state(D, seed, kind="symmetric")
+    with pytest.raises(
+        TypeError, match=r"incompatible shapes for broadcasting: \(2,\), \(3,\)"
+    ):
+        _su_evolve(fresh, _su_heisenberg_gate(fresh), D, 4)
 
 
 @pytest.mark.parametrize(

@@ -9,9 +9,10 @@ in the same wrong metric as the code.  So each mutation below is a **faithful
 re-introduction of an original defect**, and each is required to kill a named
 guard, at a named number.
 
-**Every cell is two-sided, and that is not decoration.**  Task 12's acceptance
-suite on this branch is deliberately red -- six cells fail on purpose, listed in
-:data:`_RED_CELLS` -- so the plan's own
+**Every cell is two-sided, and that is not decoration.**  When this file was
+written, Task 12's acceptance suite was **red on six cells** -- three ``D=4``
+seeds, ``D=3`` seed 0 twice, and the ``D=3`` third-direction cell -- so the
+plan's own
 
 .. code-block:: python
 
@@ -19,12 +20,21 @@ suite on this branch is deliberately red -- six cells fail on purpose, listed in
         with pytest.raises(AssertionError):
             guard()
 
-passes *without the mutation doing anything at all* for any guard mapped onto a
-red cell.  That is an assertion that cannot fail, written into the plan for a
+passed *without the mutation doing anything at all* for any guard mapped onto
+one of them.  That is an assertion that cannot fail, written into the plan for a
 task whose entire subject is assertions that cannot fail.  Each cell here
 therefore runs the guard **unmutated first** and requires it to pass, on exactly
 the parametrisation the mutant will use; if it does not, the cell fails loudly
 naming that fact rather than reporting a kill or skipping.
+
+**Those six are green now and :data:`_RED_CELLS` is empty**, which does not
+retire the design.  What closed them was the *starting point*, not a change to
+the engine: every acceptance cell now begins at
+``test_ipeps_su._low_entanglement_state`` rather than at the maximally entangled
+pair ``ipeps()`` builds, which at ``D >= 3`` sits inside the product state's
+basin for this engine.  See :data:`_RED_CELLS` for the measurement and for why
+the empty tuple is kept rather than deleted.  Read every "red cell" below as a
+statement about the machinery, not about today's suite.
 
 Three further disciplines, each of them a bug this project has already paid for:
 
@@ -99,7 +109,7 @@ made to happen                             reported
 a mutation that wraps but changes nothing  ``mutant noop SURVIVED``
 the guard pointed at a red cell            ``the UNMUTATED guard did not pass``
    (``..._d3_actually_uses_..._direction``     -- BP did not converge, 7.174e-02
-   at seed 0, one of :data:`_RED_CELLS`)
+   at seed 0, then one of :data:`_RED_CELLS`)
 the kill landing on another assertion      ``killed the guard, but on the wrong
                                            assertion``
 the kill landing at the wrong size         ``killed the guard at 3.45, outside
@@ -110,9 +120,10 @@ a mutation leaked past the context         ``ipeps_su.gauge_fix is <lambda>, not
                                            object it held at import``
 =========================================  ==========================================
 
-Row 2 is C-1 in one line: against a cell that is already red, the plan's
+Row 2 is C-1 in one line: against a cell that was red at the time, the plan's
 ``pytest.raises(AssertionError)`` would have reported a kill for a mutation that
-did nothing.
+did nothing.  It is reproducible today only by making a cell red on purpose,
+which is what that experiment did.
 
 **What this file does not do.**  It does not mutate ``ipeps_su.py`` on disk, and
 it neither edits nor re-implements a guard: it imports each one and calls it.
@@ -155,9 +166,12 @@ from tenax.core._tensor_utils import scale_bond_axis
 #: here notices a listed cell going *green*.  The refusal that works is side 1
 #: of every cell -- which is the better design, because it fires on the cell a
 #: mutant is actually pointed at rather than on a list that has to be kept in
-#: step by hand.  Read this list, and the module docstring's "``-m slow`` sits
-#: at 6 failed / 11 passed", as notes to the reader: both were correct when
-#: written and neither is asserted anywhere.
+#: step by hand.  Read this list as a note to the reader: it was correct when
+#: written and it is not asserted anywhere.  (An earlier version of this comment
+#: also pointed at a module-docstring line reading "``-m slow`` sits at 6 failed
+#: / 11 passed".  That line no longer exists -- the docstring was corrected in
+#: #882 Task 14 along with its "deliberately red" opening -- so the pointer is
+#: dropped rather than left dangling.)
 #:
 #: **They are all green now, and this tuple is deliberately kept empty rather
 #: than deleted.**  Six cells used to be red on purpose -- three ``D=4`` seeds,
@@ -719,8 +733,10 @@ _MUTANTS = [
         (
             "667",
             _mutant_667,
+            # ``"dense"`` is named rather than defaulted: #882 Task 14 gave the
+            # guard a second arm and the -0.509176 below is a dense reading.
             lambda: guards.test_d2_reaches_the_heisenberg_energy_not_the_product_state(
-                0
+                0, "dense"
             ),
             r"E=(-?\d+\.\d+) -- at or above the product state",
             # (-0.55, -0.40), not the shipped (-0.60, 0.0).  The old ``lo``
