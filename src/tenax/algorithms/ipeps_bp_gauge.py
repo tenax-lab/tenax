@@ -352,15 +352,31 @@ def _residual(new: BondWeights, old: BondWeights) -> jax.Array:
     (measured 7.0562e-13 vs 7.0430e-13 on the same state), and NaN now
     *propagates* instead of depending on Python's comparison order.
     """
-    return jnp.max(
-        jnp.stack(
-            [
-                jnp.linalg.norm(n - o)
-                / jnp.maximum(jnp.linalg.norm(o), _RESIDUAL_FLOOR)
-                for n, o in zip(new, old, strict=True)
-            ]
-        )
-    )
+
+    def _one(n: jax.Array, o: jax.Array) -> jax.Array:
+        # Zero-pad to the common length before subtracting (#904).  A bond's
+        # weight vector carries one entry per *non-empty* block, not per slot of
+        # the leg, so it changes length whenever a charge sector dies or
+        # revives: ``_gauge_bond`` takes ``lam_new`` from a block-sparse ``svd``
+        # and hands back tensors whose bond leg is that same new bond, so the
+        # leg and the weights shrink *together* and the state stays
+        # self-consistent -- measured on a U(1)-Sz D=3 pair, sweep 56, where
+        # ``v_BA`` went 3 -> 2 and ``Gamma_A.u``/``Gamma_B.d`` both came back at
+        # dim 2 on charges ``[-1, 1]``.  What does not survive is the comparison
+        # *across* sweeps, which is the only place the two lengths meet.
+        #
+        # Padding is right here for the same reason it is right in
+        # ``_ctm_tensor_convergence._ctm_sv_diff`` (#670): this is a convergence
+        # *indicator*, not a per-sector difference, and a vector that changed
+        # shape must register as "still moving" rather than raise.  It is not
+        # the #834 hazard -- nothing downstream indexes ``new`` against ``old``;
+        # each is used only with the leg it came back with.
+        k = max(n.shape[0], o.shape[0])  # Python max: jnp.pad needs a STATIC width
+        n = jnp.pad(n, (0, k - n.shape[0]))
+        o = jnp.pad(o, (0, k - o.shape[0]))
+        return jnp.linalg.norm(n - o) / jnp.maximum(jnp.linalg.norm(o), _RESIDUAL_FLOOR)
+
+    return jnp.max(jnp.stack([_one(n, o) for n, o in zip(new, old, strict=True)]))
 
 
 def _sweep(

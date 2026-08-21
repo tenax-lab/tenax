@@ -735,3 +735,66 @@ def test_prepare_reads_dtypes_without_densifying():
         f"_prepare densified {len(calls)} tensor(s) ({calls}); Tensor.dtype "
         f"gives the dtype without materialising D**4 * d entries per site"
     )
+
+
+# --------------------------------------------------------------------- #
+# A bond weight vector that changes length mid-solve (#904)              #
+# --------------------------------------------------------------------- #
+
+
+def test_the_residual_survives_a_bond_whose_sector_count_changes():
+    """A weight vector carries one entry per **non-empty block**, not per slot.
+
+    So it changes length whenever a charge sector dies or revives, and
+    ``_residual`` is the one place two sweeps' vectors meet.  Before #904 it
+    subtracted them directly and died four frames down::
+
+        TypeError: sub got incompatible shapes for broadcasting: (2,), (3,)
+
+    **The state is not broken when this happens**, which is what makes padding
+    the right answer rather than a papering-over.  ``_gauge_bond`` takes
+    ``lam_new`` from a block-sparse ``svd`` and hands back tensors whose bond
+    leg *is* that same new bond, so the leg and the weights shrink together.
+    Measured on a U(1)-Sz ``D=3`` pair, sweep 56: ``v_BA`` went 3 -> 2 and
+    ``Gamma_A.u``/``Gamma_B.d`` both came back at dim 2 on charges
+    ``[-1, 1]`` -- and ``v_BA`` is exactly ``A.u <-> B.d``.
+
+    It is also **transient**: the sector revived before the solve finished, and
+    all four bonds ended at length 3.  The old code raised on a shape change it
+    would have recovered from, which is the same behaviour
+    ``_ctm_tensor_convergence._ctm_sv_diff`` already pads for (#670).
+
+    This is **not** the #834 hazard.  Nothing indexes ``new`` against ``old``;
+    each weight vector is only ever used with the leg it came back with, and
+    this comparison is a convergence *indicator* -- a vector that changed shape
+    must read as "still moving", which zero-padding gives it.
+    """
+    short = BondWeights(
+        h_AB=jnp.asarray([1.0, 0.5]),
+        h_BA=jnp.asarray([1.0, 0.5, 0.25]),
+        v_AB=jnp.asarray([1.0, 0.5, 0.25]),
+        v_BA=jnp.asarray([1.0, 0.5, 0.25]),
+    )
+    long = BondWeights(
+        h_AB=jnp.asarray([1.0, 0.5, 0.25]),
+        h_BA=jnp.asarray([1.0, 0.5, 0.25]),
+        v_AB=jnp.asarray([1.0, 0.5, 0.25]),
+        v_BA=jnp.asarray([1.0, 0.5, 0.25]),
+    )
+
+    # Both directions: a sector dying (long -> short) and reviving (short -> long).
+    for tag, (new, old) in (("died", (short, long)), ("revived", (long, short))):
+        r = float(bp_mod._residual(new, old))
+        assert np.isfinite(r), f"{tag}: residual is {r}, not finite"
+        assert r > 0.0, (
+            f"{tag}: residual is exactly {r}, so a bond that changed shape "
+            f"reads as converged -- the padding must make the dropped entry "
+            f"register as a difference, not cancel it"
+        )
+
+    # And the unchanged case is untouched: identical weights read exactly zero,
+    # so the padding cannot be manufacturing a difference where there is none.
+    assert float(bp_mod._residual(long, long)) == 0.0, (
+        "identical weights no longer read as a zero residual; the padding is "
+        "perturbing the comparison it is supposed to leave alone"
+    )
