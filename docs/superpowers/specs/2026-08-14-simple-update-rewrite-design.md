@@ -618,7 +618,18 @@ What remains is the seed-dependent basin failure in §5.3.
 baseline this document said was missing, so Phase 3 no longer waits on a fix
 that does not exist. It does *not* supply a trustworthy fermionic **energy** —
 see §5.5 — so acceptance for the fermionic path must be stated on bond spectra
-and the variational bound, not on an energy value.
+and on the checks §5.5 finds applicable, not on an energy value.
+
+**Not on "the variational bound".** An earlier version of this sentence said
+that, and §5.5 then proved it wrong: the tier-7 bound is stated for the
+four-site 2x2 PBC torus, while the CTM energies are infinite-lattice
+quantities, a valid infinite-lattice energy may lie *below* a finite-cluster
+ground state, and a finite-χ CTM contraction is not a strict variational bound
+in the first place. Applying it would reject correct implementations. The bound
+stays where it is valid — guarding `reference_energy_2x2_pbc`. What acceptance
+uses instead, from §5.5: same-arity cross-path agreement (2-site against
+2-site, 1-site against 1-site, never across arities), χ-convergence, and a
+magnitude anchor on a product state whose energy is hand-computable.
 
 Note also `|A|` reads a healthy 1.0 the whole way down, because
 `_normalize_tensor` runs last. Any guard for this must assert a *spectrum*
@@ -681,9 +692,25 @@ The bar is set by how this subsystem has failed before, not by coverage
 percentage.
 
 1. **Gauge invariance (exactness).** `gauge_fix` must not change the physical
-   state: re-contract and compare, expect ~1e-15. Per tensor type, including
-   fermionic (§5.2). This is the foundation — if the gauge is not exact,
-   nothing above it means anything.
+   state: re-contract and compare. This is the foundation — if the gauge is not
+   exact, nothing above it means anything.
+
+   **The tolerance is per witness, not one number.** ~1e-15 belongs only to
+   contractions that can be evaluated *exactly*: the bosonic torus, and the
+   one-bond elementwise round trip of §5.2 (gauge one bond, contract the two
+   sites over exactly that bond, compare elementwise — exact for any
+   statistics, verified to ~1e-16 with no environment at all).
+
+   On the fermionic path §5.2 rejects the exact torus contraction and
+   prescribes a finite-χ planar CTM/RDM witness, and that witness has a
+   **measured floor of 6.25e-04** at D=3, χ=20 — under a gauge that is exact
+   *by construction*. Requiring ~1e-15 there would reject a corrected
+   fermionic gauge on the strength of the witness's own resolution. State the
+   fermionic tolerance relative to that floor, and pair it with a mutation
+   requirement: the check must be shown to kill a gauge that is wrong by more
+   than the floor. BP's own displacement is 7.28e-02, **116×** the floor and
+   flat in χ, so the separation being asked for is two orders wide — the
+   tolerance does not need to be tight to be decisive.
 2. **Tree exactness.** On a 1D/tree topology, the BP gauge must reproduce the
    MPS canonical form and the lambdas must equal the Schmidt values to machine
    precision. This is the one place we have ground truth, and tenax already has
@@ -693,10 +720,23 @@ percentage.
    both cheap and both guarding a way the state can silently become half a
    state: gauging an absorbed pair from `ones()` reproduces the Vidal call's
    physical state *and* fixed point (the table in §3, as a test); and a full
-   `_su_step` — gate, SVD, truncate — returns tensors whose next `gauge_fix`
-   is exact, which fails if the truncation leaves `sigma` on one side. Run on
-   the symmetric path too: a flow mistake there collapses charge sectors rather
-   than raising, and dense cannot see it.
+   `_su_step` — gate, SVD, truncate — splits `sqrt(sigma)` into **both** ends.
+
+   **The second one must not be phrased as "its next `gauge_fix` is exact".**
+   An earlier version was, and that assertion cannot fail: `gauge_fix` takes
+   the tensors it is handed as the complete state, so a pair with all of
+   `sigma` on one side is simply a *different gauge* of a different state, and
+   it is preserved exactly. Invariance is silent on the thing being guarded.
+
+   What does catch it is a comparison between the two ends rather than a
+   round trip through the gauge. Implemented as
+   `test_su_step_splits_sqrt_sigma_into_both_ends`, which reads each end's Gram
+   matrix in the Vidal metric and requires them to agree; measured, the
+   all-`sigma`-on-one-factor mutation of §6.2a is killed at
+   `|G_i - G_j| = 3.450e+00` against a gate at 1e-11, and the same mutation
+   survives a gauge-invariance assertion untouched. Run on the symmetric path
+   too: a flow mistake there collapses charge sectors rather than raising, and
+   dense cannot see it.
 3. **Acceptance is on energy and self-consistency, NOT on a reference spectrum.**
 
    An earlier draft of this section asked the rewrite to reproduce
