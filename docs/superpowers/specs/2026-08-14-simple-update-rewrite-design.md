@@ -847,7 +847,24 @@ while the new one is unproven.
 Resolved 2026-08-15; the reasoning is folded into the sections named.
 
 1. **Fermionic drops to v2 if its gates fail** — authorised in advance, so it is
-   not a question reopened under schedule pressure. There are now **two**
+   not a question reopened under schedule pressure.
+
+   > **TAKEN, 2026-08-20: fermionic drops to v2.** Both gates below failed on
+   > measurement. `fermionic_ipeps.py` stays on the code #881 repaired,
+   > `fpeps()` is not migrated, and Phase 3 covers the bosonic symmetric path
+   > only. Full reasoning, including the part that is a *deferral* rather than a
+   > refutation, in
+   > [`docs/superpowers/notes/2026-08-16-fermionic-su-gate.md`](../notes/2026-08-16-fermionic-su-gate.md).
+   >
+   > The gauge-exactness problem is **diagnosed and probably correctable** —
+   > §5.2a localises it to a single Koszul sign whose suppression drops the
+   > displacement from 7.28e-02 to 8.93e-04, 1.43× the floor. It is deferred
+   > anyway, because correcting it does not touch the **cost** gate, which is
+   > the one failing by ~40×. Do not read this decision as "the fermionic gauge
+   > is wrong and unfixable"; read it as "fixing it would not make the path
+   > usable".
+
+   There are now **two**
    independent gates, and the second has already been measured:
    - the *2-site* layout question of §5.1, still unexplained and still needing
      an experiment (the 1-site constraint is superseded by #881);
