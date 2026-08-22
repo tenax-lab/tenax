@@ -324,8 +324,7 @@ def test_energy_is_chi_converged_and_the_environment_is_not_collapsed(su_d2):
     assert min(ranks) > 1, f"corner collapsed to rank {ranks} (#747)"
 
 
-@pytest.mark.slow
-def test_the_uniform_reading_is_a_different_lattice():
+def test_the_uniform_reading_is_a_different_lattice(su_d2):
     """Pin the trap itself, so the 1x1 reading cannot quietly come back (#900).
 
     Three claims, each of which had to be true for #900 to be a measurement
@@ -341,17 +340,25 @@ def test_the_uniform_reading_is_a_different_lattice():
        network, not a transient -- which is why more steps never rescued the
        1x1 number and why #900 read the flatness as convergence.
 
-    Measured at D=2: the checkerboard sits at -0.659003527529 and the uniform
-    lattice at -0.659334299578 (600 steps), and at 400/600/800 steps the gap is
-    3.31e-4, 3.31e-4, 3.31e-4.  Deliberately D=2: the effect is not a
+    Measured at D=2, chi=24: the checkerboard sits at -0.659003527529 and the
+    uniform lattice at -0.659334299578 (600 steps), and at 400/600/800 steps the
+    gap is 3.31e-4, 3.31e-4, 3.31e-4.  Deliberately D=2: the effect is not a
     large-``D`` pathology, it is there at the smallest size and merely too small
     to notice until D=4 makes it 1.0e-2.
-    """
-    gate, A, B = _run_su(2, steps=600)
 
-    e_checker = _energy_checkerboard(A, B, gate, chi=24)
-    e_uniform_1x1 = _energy_1x1(A, gate, chi=24)
-    e_uniform_2site = _energy_checkerboard(A, A, gate, chi=24)
+    **In the required gate, not the ``slow`` bucket.**  #900 reached CI in the
+    first place because ``@pytest.mark.slow`` withheld this file's ``core``
+    marker from ``test_d4_beats_d2``, so no required job ran it on any platform
+    for fifteen days (#740/#805 -- *"a guard that runs in no required job is not
+    one"*).  The D=4 arm genuinely costs too much to gate; this one does not,
+    because it reuses ``su_d2`` rather than repeating the 600-step run it had
+    already paid for, and reads at the fixture's own chi.
+    """
+    gate, A, B = su_d2
+
+    e_checker = _energy_checkerboard(A, B, gate)
+    e_uniform_1x1 = _energy_1x1(A, gate)
+    e_uniform_2site = _energy_checkerboard(A, A, gate)
 
     assert e_uniform_1x1 == pytest.approx(e_uniform_2site, abs=1e-10), (
         f"E_1x1(A)={e_uniform_1x1:.12f} should be the same lattice as "
