@@ -336,15 +336,19 @@ def test_the_uniform_reading_is_a_different_lattice(su_d2):
        real bug and the rest of this reasoning is void.
     2. ``E_2site(A, B)`` differs from both.  That gap is the finding: the pair
        ``_to_physical_pair`` returns does not tile as ``A-A``.
-    3. The gap is not shrinking with the sweep.  It is a property of the
-       network, not a transient -- which is why more steps never rescued the
-       1x1 number and why #900 read the flatness as convergence.
+    3. The gap is not shrinking with the sweep -- measured at **two** step
+       counts, not asserted in prose.  It is a property of the network, not a
+       transient, which is why more steps never rescued the 1x1 number and why
+       #900 read that flatness as convergence.  A test that checked one step
+       count could not tell those apart, and would endorse the very reasoning
+       this file exists to correct.
 
     Measured at D=2, chi=24: the checkerboard sits at -0.659003527529 and the
-    uniform lattice at -0.659334299578 (600 steps), and at 400/600/800 steps the
-    gap is 3.31e-4, 3.31e-4, 3.31e-4.  Deliberately D=2: the effect is not a
-    large-``D`` pathology, it is there at the smallest size and merely too small
-    to notice until D=4 makes it 1.0e-2.
+    uniform lattice at -0.659334299578 (600 steps).  The gap is 3.3102e-04,
+    3.3077e-04, 3.3077e-04, 3.3077e-04 at 400/600/800/1600 steps -- flat to
+    2.5e-08 from 400 onward, against a 1e-2 separation at D=4.  Deliberately
+    D=2: the effect is not a large-``D`` pathology, it is there at the smallest
+    size and merely too small to notice until D=4 makes it 30x bigger.
 
     **In the required gate, not the ``slow`` bucket.**  #900 reached CI in the
     first place because ``@pytest.mark.slow`` withheld this file's ``core``
@@ -356,17 +360,34 @@ def test_the_uniform_reading_is_a_different_lattice(su_d2):
     """
     gate, A, B = su_d2
 
-    e_checker = _energy_checkerboard(A, B, gate)
+    # (1) the two paths agree about the uniform lattice.  su_d2's state only;
+    # this is a statement about the code, not about the sweep length.
     e_uniform_1x1 = _energy_1x1(A, gate)
     e_uniform_2site = _energy_checkerboard(A, A, gate)
-
     assert e_uniform_1x1 == pytest.approx(e_uniform_2site, abs=1e-10), (
         f"E_1x1(A)={e_uniform_1x1:.12f} should be the same lattice as "
         f"E_2site(A,A)={e_uniform_2site:.12f}; if these disagree, one of the "
         f"two energy paths is wrong and #900's diagnosis needs re-checking"
     )
-    assert abs(e_checker - e_uniform_1x1) > 1e-4, (
-        f"the checkerboard ({e_checker:.12f}) and uniform ({e_uniform_1x1:.12f}) "
-        f"readings have converged to each other; if that is real, #900's "
-        f"premise is gone and _energy_1x1 would be a valid reading again"
+
+    # (2) and (3): the gap is real and it is not a transient.  600 comes from
+    # the fixture; 400 is the extra run, and it is the cheap end of the scan
+    # deliberately -- if the gap were closing, the *earlier* state is where it
+    # would be widest, so this pair brackets the claim rather than repeating it.
+    gaps = {}
+    for steps, pair in ((400, _run_su(2, steps=400)), (600, (gate, A, B))):
+        g, X, Y = pair
+        gaps[steps] = abs(_energy_checkerboard(X, Y, g) - _energy_1x1(X, g))
+
+    for steps, gap in gaps.items():
+        assert gap > 1e-4, (
+            f"at {steps} steps the checkerboard and uniform readings have "
+            f"converged to each other (gap {gap:.3e}); if that is real, #900's "
+            f"premise is gone and _energy_1x1 would be a valid reading again"
+        )
+    assert gaps[400] == pytest.approx(gaps[600], abs=1e-6), (
+        f"the gap moved with the sweep ({gaps[400]:.6e} at 400 steps vs "
+        f"{gaps[600]:.6e} at 600) -- it is measured flat to 2.5e-08 from 400 "
+        f"onward, and a gap that decays would make it a transient rather than "
+        f"a property of the network, which is the whole of #900's diagnosis"
     )
