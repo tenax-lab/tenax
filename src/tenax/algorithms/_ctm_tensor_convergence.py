@@ -885,6 +885,17 @@ def _ctm_tensor_multisite(
             recipe=recipe,
         )
         converged = True
+        # Rebuilt each sweep rather than accumulated.  A corner can be blind
+        # while the environment is still warming up and informative by the
+        # time the loop exits; an append-only set would keep naming it, and
+        # the warning below would then assert -- in its own text -- that the
+        # budget ran out when the loop had in fact exited early.
+        #
+        # Reading only the final sweep is not a weaker check.  A blind corner
+        # forces ``_ctm_sv_diff`` to ``inf``, so ``converged`` cannot be true
+        # while any corner is blind: this set is non-empty at the loop's exit
+        # exactly when the budget ran out *because* of blindness.
+        blind_coords = set()
         for c in sorted(envs):
             sv = _corner_singular_values(envs[c].C1)
             # ``_ctm_sv_diff`` returns ``inf`` on a rank-1 corner (#898), so

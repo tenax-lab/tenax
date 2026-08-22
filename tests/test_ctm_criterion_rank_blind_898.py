@@ -343,3 +343,59 @@ def test_the_public_loop_is_the_one_ipeps_calls():
         "ipeps_ctm_convergence defines _ctm_sv_diff again; it must import the "
         "guarded one from _ctm_tensor_convergence (#898)"
     )
+
+
+# --------------------------------------------------------------------- #
+# The warning must describe the sweep the loop exited on                 #
+# --------------------------------------------------------------------- #
+
+
+@pytest.mark.core
+def test_a_corner_that_recovers_is_not_reported_as_blind(monkeypatch):
+    """A corner blind early and healthy later must not warn (#903 review, P2).
+
+    ``blind_coords`` was accumulated with ``.add`` and never cleared, so one
+    transiently rank-deficient sweep marked a coordinate for the rest of the
+    run.  The loop could then converge and exit early while the post-loop
+    warning still fired -- asserting *in its own text* that "the full max_iter
+    budget was run instead of exiting early", which had not happened.  That is
+    a false statement to the caller, and under ``-W error::RuntimeWarning`` it
+    turns a successful run into a failure.
+
+    The blindness is injected rather than fished out of a physical fixture on
+    purpose.  What is under test is the bookkeeping -- *does the reported set
+    describe the sweep the loop exited on* -- and a fixture that happened to
+    recover would be testing the fixture's luck as much as the code.  One
+    sweep reports blind, every later sweep reports the truth.
+
+    Note the two are not independent: a genuinely blind corner forces
+    ``_ctm_sv_diff`` to ``inf``, so ``converged`` cannot be true while any
+    corner is blind.  The last sweep's set is therefore non-empty exactly when
+    the budget ran out because of blindness -- which is what the warning says.
+    """
+    from tenax.algorithms import _ctm_tensor_convergence as conv
+    from tests._su_fixtures import physical_su_d2
+
+    A = physical_su_d2()
+    real = conv._spectrum_can_show_change
+    sweeps = {"n": 0}
+
+    def blind_on_the_first_sweep_only(sv, *args, **kwargs):
+        sweeps["n"] += 1
+        if sweeps["n"] <= 1:
+            return False
+        return real(sv, *args, **kwargs)
+
+    monkeypatch.setattr(
+        conv, "_spectrum_can_show_change", blind_on_the_first_sweep_only
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        conv.ctm_tensor_2site(A, A, chi=8, max_iter=60, conv_tol=1e-8, recipe="2x2")
+
+    assert sweeps["n"] > 1, (
+        f"the patch was consulted {sweeps['n']} time(s), so the loop never got "
+        f"past the sweep this test marks blind -- it would pass with the bug "
+        f"present.  This test is only meaningful if a later, healthy sweep ran."
+    )
