@@ -675,3 +675,33 @@ def test_the_rank_ceiling_comes_from_the_state_not_from_chi(bond_dim, expected, 
     for chi in (1, 2, 8, 64):
         got = _forced_corner_rank(bond_dim)
         assert got == expected, f"chi={chi}, {why}: expected {expected}, got {got}"
+
+
+@pytest.mark.core
+def test_every_wrapper_of_the_criterion_forwards_the_rank_bound():
+    """No re-export or wrapper may swallow ``max_rank`` (#903 review).
+
+    ``ad_utils`` imports the criterion **aliased** -- ``_ctm_sv_diff as
+    _ctm_sv_diff_tensor`` -- and wraps it again as ``_ctm_sv_diff_local``.  A
+    grep for ``_ctm_sv_diff(`` matches neither, which is exactly how that
+    production caller was missed twice while the surrounding commits claimed
+    "all eleven call sites".  A wrapper that drops the argument silently
+    reinstates the bug on the path it covers.
+
+    This asserts the behaviour rather than the spelling: a bound that makes the
+    bare criterion informative must do the same through the wrapper.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import _ctm_sv_diff
+    from tenax.algorithms.ad_utils import _ctm_sv_diff_local
+
+    sv = jnp.asarray([1.0, 0.0, 0.0, 0.0])
+
+    # D=1: the ceiling is 1, so an identical comparison is a fixed point.
+    assert jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=1)), "bare criterion"
+    assert jnp.isfinite(_ctm_sv_diff_local(sv, sv, max_rank=1)), (
+        "the ad_utils wrapper dropped max_rank; a D=1 product state would burn "
+        "the whole budget on every AD forward evaluation"
+    )
+    # D>=2: still fail-closed through both, which is the property to keep.
+    assert not jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=4)), "bare criterion"
+    assert not jnp.isfinite(_ctm_sv_diff_local(sv, sv, max_rank=4)), "wrapper"
