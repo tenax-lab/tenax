@@ -199,6 +199,10 @@ def ctm_split_tensor(
     prev_sv = None
     converged = False
     iterations = 0
+    # #903 P1: rank 1 is a collapse only if more was reachable.  Hoisted above
+    # the loop and outside the recipe branch -- it depends on neither, and
+    # defining it in one arm left the other raising UnboundLocalError.
+    _mr = _forced_corner_rank(chi, _double_layer_bond_dim(A) ** 2)
     for iteration in range(max_iter):
         iterations = iteration + 1
         if recipe == "2x2":
@@ -214,8 +218,6 @@ def ctm_split_tensor(
             )[(0, 0)]
         else:
             env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
-            # #903 P1: rank 1 is a collapse only if more was reachable.
-            _mr = _forced_corner_rank(chi, _double_layer_bond_dim(A) ** 2)
 
         current_sv = _corner_singular_values(env.C1)
         if prev_sv is not None and iteration + 1 >= min_iter:
