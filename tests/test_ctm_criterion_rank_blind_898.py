@@ -399,3 +399,59 @@ def test_a_corner_that_recovers_is_not_reported_as_blind(monkeypatch):
         f"past the sweep this test marks blind -- it would pass with the bug "
         f"present.  This test is only meaningful if a later, healthy sweep ran."
     )
+
+
+@pytest.mark.core
+def test_a_corner_blind_on_the_penultimate_sweep_still_warns(monkeypatch):
+    """Budget exhausted *because* of blindness must warn, even when the final
+    sweep's own spectrum is healthy (#903 review, P2 round 2).
+
+    ``_ctm_sv_diff`` reads **both** spectra.  A corner that is blind on sweep
+    ``N-1`` and healthy on sweep ``N`` still forces ``inf`` on sweep ``N``'s
+    comparison, so the loop spends its whole budget without certifying -- and a
+    ``blind_coords`` built from the *current* spectrum alone is empty in exactly
+    that case.  The warning is suppressed precisely where it is load-bearing.
+
+    This is the mirror image of
+    ``test_a_corner_that_recovers_is_not_reported_as_blind``: that one pins
+    "recovered, converged, stay silent", this one pins "recovered, still ran
+    out, say so".  A set keyed on the current spectrum passes the first and
+    fails this one; a set keyed on the whole comparison passes both.
+
+    **Both predicates are faked together because production couples them.**
+    ``_spectrum_can_show_change`` is the eager per-spectrum form of the test
+    ``_ctm_sv_diff`` applies to each of its two arguments, so a fake that blinds
+    one without the other builds a state the real code cannot reach -- and the
+    test would then be measuring the fake.  Here one spectrum object is marked,
+    and every question either function is asked about *that object* answers
+    "uninformative", exactly as it would if the corner really were rank-1.
+    """
+    from tenax.algorithms import _ctm_tensor_convergence as conv
+    from tests._su_fixtures import physical_su_d2
+
+    A = physical_su_d2()
+    real_can_show = conv._spectrum_can_show_change
+    real_diff = conv._ctm_sv_diff
+    marked: dict[str, object] = {}
+
+    def _is_marked(sv):
+        return "sv" in marked and sv is marked["sv"]
+
+    def fake_can_show(sv, *args, **kwargs):
+        if "sv" not in marked:  # the first spectrum the loop ever sees
+            marked["sv"] = sv
+            return False
+        return False if _is_marked(sv) else real_can_show(sv, *args, **kwargs)
+
+    def fake_diff(a, b, *args, **kwargs):
+        if _is_marked(a) or _is_marked(b):
+            return jnp.asarray(jnp.inf)
+        return real_diff(a, b, *args, **kwargs)
+
+    monkeypatch.setattr(conv, "_spectrum_can_show_change", fake_can_show)
+    monkeypatch.setattr(conv, "_ctm_sv_diff", fake_diff)
+
+    # Exactly two sweeps: sweep 1's spectrum is the marked (blind) one, sweep 2
+    # is healthy but must still compare against it.
+    with pytest.warns(RuntimeWarning, match="could not be certified"):
+        conv.ctm_tensor_2site(A, A, chi=8, max_iter=2, conv_tol=1e-8, recipe="2x2")

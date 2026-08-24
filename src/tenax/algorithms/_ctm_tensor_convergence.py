@@ -885,29 +885,41 @@ def _ctm_tensor_multisite(
             recipe=recipe,
         )
         converged = True
-        # Rebuilt each sweep rather than accumulated.  A corner can be blind
-        # while the environment is still warming up and informative by the
-        # time the loop exits; an append-only set would keep naming it, and
-        # the warning below would then assert -- in its own text -- that the
-        # budget ran out when the loop had in fact exited early.
+        # Rebuilt each sweep rather than accumulated, and keyed on the whole
+        # comparison rather than on the current spectrum alone.
         #
-        # Reading only the final sweep is not a weaker check.  A blind corner
-        # forces ``_ctm_sv_diff`` to ``inf``, so ``converged`` cannot be true
-        # while any corner is blind: this set is non-empty at the loop's exit
-        # exactly when the budget ran out *because* of blindness.
+        # Accumulating was wrong because a corner can be blind while the
+        # environment is warming up and informative by the time the loop exits;
+        # an append-only set keeps naming it, and the warning below would then
+        # assert -- in its own text -- that the budget ran out when the loop had
+        # in fact exited early.
+        #
+        # But rebuilding from ``sv`` alone is wrong in the mirror case, and it
+        # fails in the direction that matters.  ``_ctm_sv_diff`` reads **both**
+        # spectra: a corner blind on sweep ``N-1`` and healthy on sweep ``N``
+        # still forces ``inf`` on sweep ``N``, so the loop spends its whole
+        # budget uncertified -- while a set built from the current spectrum is
+        # empty exactly then, and the caller is told nothing. What must be
+        # recorded is whether the comparison the loop actually made was blind,
+        # which is a property of the pair.
         blind_coords = set()
         for c in sorted(envs):
             sv = _corner_singular_values(envs[c].C1)
-            # ``_ctm_sv_diff`` returns ``inf`` on a rank-1 corner (#898), so
-            # the comparison below already fails closed and no special case is
-            # needed for *correctness*.  What is recorded here is only which
-            # coordinate went blind, so the warning after the loop can name it
-            # -- the loop is the only place that knows the budget ran out
-            # rather than the criterion being satisfied.
-            if not _spectrum_can_show_change(sv):
+            prev = prev_svs.get(c)
+            # ``_ctm_sv_diff`` returns ``inf`` when *either* spectrum has rank
+            # <= 1 (#898), so the comparison below already fails closed and no
+            # special case is needed for *correctness*.  What is recorded here
+            # is only which coordinate's comparison went blind, so the warning
+            # after the loop can name it -- the loop is the only place that
+            # knows the budget ran out rather than the criterion being
+            # satisfied.  Mirror the ``or`` in the criterion exactly: reading
+            # one side would leave the other silently uncertified.
+            if not _spectrum_can_show_change(sv) or (
+                prev is not None and not _spectrum_can_show_change(prev)
+            ):
                 blind_coords.add(c)
-            if c in prev_svs:
-                if float(_ctm_sv_diff(sv, prev_svs[c])) >= conv_tol:
+            if prev is not None:
+                if float(_ctm_sv_diff(sv, prev)) >= conv_tol:
                     converged = False
             else:
                 converged = False
