@@ -46,8 +46,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from _ipeps_gauge_helpers import (  # tests/ is on sys.path
+    _CHAIN_TRUTH,
     _INDEPENDENT_BOND_OF,
     _PAIRS,
+    _SYM_CHAIN_TRUTH,
     _WITNESS_PAIRS,
     _chain_middle_spectra,
     _chain_pair,
@@ -699,41 +701,6 @@ def _as_spectrum(x):
     return v / np.linalg.norm(v)
 
 
-#: The infinite chain's two horizontal-bond spectra for the ``_chain_pair``
-#: draw, **derived outside tenax**: rebuilt from the 2-site transfer matrix's
-#: left and right fixed points in Python ``decimal``, importing nothing from
-#: tenax but the two ``float64`` site tensors.  Truncated to 32 digits.
-#:
-#: This is the half of the anchor that makes it an anchor.  Everything else in
-#: the test compares tenax against tenax -- ``FiniteMPS.compute_singular_values``
-#: for the reference, ``contract``/``eigh``/``svd`` for the subject -- and a
-#: common-mode defect in the shared machinery (#834's class) passes both sides.
-#: Asserting the *reference* against these numbers puts the external
-#: certification inside the required gate instead of in a review transcript.
-#:
-#: Measured on this branch: the tenax reference at ``L=100`` agrees with these
-#: to **8.3e-17** (``h_AB``) and **2.8e-17** (``h_BA``), four orders under
-#: ``_ANCHOR_TOL``.
-_CHAIN_TRUTH = {
-    "h_AB": np.array(
-        [
-            0.96732762280898837899360109180522,
-            0.23086689230373387723744625441654,
-            0.10416414807156935624729313135820,
-            0.01129506287064498789186875888256,
-        ]
-    ),
-    "h_BA": np.array(
-        [
-            0.92503143833487241612154711250545,
-            0.37454306530169057931648786267052,
-            0.05593437791937427037005353223542,
-            0.03009444622024623806971961761028,
-        ]
-    ),
-}
-
-
 def _assert_reference_matches_the_external_truth(refs, truth, what):
     """The tenax-derived reference must reproduce the ``decimal`` derivation.
 
@@ -930,40 +897,6 @@ _SYM_BOND_SECTORS = {
 #: ``fermionic_ipeps._build_initial_fpeps_tensor``).  An MPS site is left IN /
 #: right OUT, so reaching this *is* the flow inversion.
 _SYM_PEPS_FLOWS = {"l": FlowDirection.OUT, "r": FlowDirection.IN}
-
-#: The block-sparse arm's external truth, the twin of :data:`_CHAIN_TRUTH` and
-#: carrying the same load: it is the only side of any comparison in this file
-#: that is not tenax.  Rebuilt from the 2-site transfer matrix's left and right
-#: fixed points in Python ``decimal`` for the seed-30 draw, truncated to 32
-#: digits.  Two independent derivations agree on every digit shown -- this one
-#: and the reviewer's, same method, separate implementations.
-#:
-#: It matters more here than on the dense arm.  The dense reference and the
-#: dense subject are both all-zero-charge, so a charge-bookkeeping defect could
-#: not reach either; here both sides are block-sparse and share the charge
-#: machinery that #834/#602/#865 all lived in, which is exactly the common mode
-#: a tenax-vs-tenax comparison cannot see.
-#:
-#: Measured on this branch: the tenax reference at ``L=60`` agrees with these to
-#: **1.1e-16** on both bonds, four orders under ``_ANCHOR_TOL``.
-_SYM_CHAIN_TRUTH = {
-    "h_AB": np.array(
-        [
-            0.99427402003591040195305550186645,
-            0.08453854492747805197392288081348,
-            0.06518798423820836634457954834226,
-            0.00478896796125356249540515639037,
-        ]
-    ),
-    "h_BA": np.array(
-        [
-            0.75797768426499114645172401877520,
-            0.64403699904936766172236098989718,
-            0.10331921524594954594674073374516,
-            0.00336359520860306414572422435044,
-        ]
-    ),
-}
 
 
 def _sectors_of(idx):
