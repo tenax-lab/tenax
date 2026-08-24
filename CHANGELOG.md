@@ -868,6 +868,15 @@
   = χ. The state is now dt-stable (−0.6570 / −0.6593 / −0.6591 at dt =
   0.3 / 0.05 / 0.01).
 
+  > **Corrected by #900.** Every energy in the paragraph above is a reading of
+  > the *uniform A–A* lattice, not of the A–B checkerboard `_to_physical_pair`
+  > actually returns. On the checkerboard the same runs give **−0.659004 /
+  > −0.662859 / −0.667071** at D = 2/3/4. D=2 and D=3 move by only 3.3e-4, but
+  > the D=4 figure was additionally a *transient of the wrong lattice*: past
+  > ~500 steps the uniform reading falls to −0.65684, i.e. **above** D=2, which
+  > is what macOS CI had been reporting. The ordering D=2 > D=3 > D=4 does hold
+  > — on the checkerboard, where it is flat to 5e-7 between 800 and 1600 steps.
+
   **Two consequences for existing results.** Any nominally-D=3 state from
   `ipeps()` was really D=2 — its third Schmidt value was ~2e-6. And
   `sublattice_rotate_gate` now does what it promises: the rotated-frame state is
