@@ -265,10 +265,17 @@
   `1e-15/min(scale)` rather than an exact zero, and below that guard the
   criterion already failed *closed* (~1.0), which is the safe direction.
 
-  Does **not** fix the two red tests that surfaced it
-  (`test_ctm_670_symmetric_2x2`, `test_ctm_direction_dependent_bonds`): their
-  fixtures build a state whose corner collapses in the first place, which is a
-  separate defect.
+  **What happens to the two red tests that surfaced it** — measured on CI, not
+  predicted. `test_ctm_direction_dependent_bonds` now **passes** on
+  ubuntu-3.12 and macOS-3.12: once the criterion stops certifying the collapsed
+  corner, the loop reaches the real fixed point and the symmetric and dense
+  paths agree. `test_ctm_670_symmetric_2x2` still fails, and the reason is worth
+  stating precisely — it now computes **−0.4332902680573903**, which is the true
+  fixed point recorded above (30 sweeps → −0.433290), against a frozen
+  expectation of `−0.5421160718`, which is the *pre-fix collapsed* value. That
+  test is therefore failing because it froze the bug, not because the bug
+  survives; re-freezing it needs the sweep-count scan #836 requires and is left
+  to its own change.
 
 - **The root-implicit adjoint no longer compiles its operator into a loop
   body** (#731). The symmetric engine peaked at **8.63 GB** of host RAM for a
