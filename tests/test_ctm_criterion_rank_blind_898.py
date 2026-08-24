@@ -640,3 +640,38 @@ def test_a_d1_product_state_converges_and_does_not_warn():
     assert int(info.n_iter) < 20, (
         f"it should exit early, not burn the budget: {info.n_iter} sweeps"
     )
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "bond_dim,expected,why",
+    [
+        (1, 1, "D=1: the state itself cannot carry more, so rank 1 is exact"),
+        (4, 4, "D=2: rank 1 is a collapse whatever chi is"),
+        (9, 9, "D=3: likewise"),
+    ],
+)
+def test_the_rank_ceiling_comes_from_the_state_not_from_chi(bond_dim, expected, why):
+    """``chi`` must not enter the ceiling (#903 review, P1 round 2).
+
+    The first version took ``min(chi, D_doublelayer)``, on the reasoning that
+    rank 1 says nothing about collapse whenever rank 1 is all that was on
+    offer.  The first half of that is true for ``chi == 1`` as well as
+    ``D == 1``; the second half is not.
+
+    At ``chi = 1`` with ``D > 1`` the corner is 1x1, so its sum-normalised
+    spectrum is ``[1]`` **however the environment moves** -- which is #898's
+    blindness precisely, not an exact fixed point.  Certifying there would
+    report success on the first eligible comparison of an environment that has
+    not converged.  Only ``D == 1`` makes the environment exact by
+    construction, because then the *state* has nothing more to express.
+
+    So the ceiling is a property of the state alone.  A small ``chi`` makes the
+    comparison less able to see, which is a reason to stay fail-closed, never a
+    licence to certify.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import _forced_corner_rank
+
+    for chi in (1, 2, 8, 64):
+        got = _forced_corner_rank(bond_dim)
+        assert got == expected, f"chi={chi}, {why}: expected {expected}, got {got}"

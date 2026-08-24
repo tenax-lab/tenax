@@ -202,7 +202,7 @@ def ctm_split_tensor(
     # #903 P1: rank 1 is a collapse only if more was reachable.  Hoisted above
     # the loop and outside the recipe branch -- it depends on neither, and
     # defining it in one arm left the other raising UnboundLocalError.
-    _mr = _forced_corner_rank(chi, _double_layer_bond_dim(A) ** 2)
+    _mr = _forced_corner_rank(_double_layer_bond_dim(A) ** 2)
     for iteration in range(max_iter):
         iterations = iteration + 1
         if recipe == "2x2":
@@ -671,7 +671,7 @@ def _split_ctm_multisite(
     prev_svs: dict[Coord, jax.Array] = {}
     # #903 P1: rank 1 is a collapse only if more was reachable.
     _mr2 = _forced_corner_rank(
-        chi, min(_double_layer_bond_dim(A) ** 2 for A in site_tensors.values())
+        min(_double_layer_bond_dim(A) ** 2 for A in site_tensors.values())
     )
     for _ in range(max_iter):
         envs = _split_ctm_sweep_multisite(

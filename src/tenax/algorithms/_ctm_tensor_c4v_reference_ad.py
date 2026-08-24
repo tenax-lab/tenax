@@ -112,7 +112,7 @@ def _ctm_tensor_c4v_reference_fixed_point_reduced(
                 _ctm_sv_diff(
                     current_sv,
                     prev_sv,
-                    max_rank=_forced_corner_rank(config.chi, _double_layer_bond_dim(a)),
+                    max_rank=_forced_corner_rank(_double_layer_bond_dim(a)),
                 )
             )
             if iters >= min_iter and residual < float(config.conv_tol):

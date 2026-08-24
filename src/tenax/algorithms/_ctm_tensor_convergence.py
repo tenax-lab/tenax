@@ -606,29 +606,40 @@ def _double_layer_bond_dim(a) -> int:
     return int(a.shape[0])
 
 
-def _forced_corner_rank(chi: int, bond_dim: int) -> int:
-    """The rank a corner is held to by the problem size rather than by collapse.
+def _forced_corner_rank(bond_dim: int) -> int:
+    """The rank the *state* holds a corner to, as opposed to a collapse.
 
-    **This is not a tight bound on the corner rank, and does not claim to be.**
-    A healthy ``D=2`` corner at ``chi=12`` reaches rank 12, far above
-    ``D**2 = 4``.  It only has to be tight in the one regime that matters: it
-    equals ``1`` exactly when ``chi == 1`` or ``D == 1``, and those are the
-    cases where rank 1 is the *only* rank on offer and therefore says nothing
-    about collapse (#903 review, P1).
+    **``chi`` is deliberately not an argument.**  The first version of this took
+    ``min(chi, bond_dim)``, reasoning that rank 1 says nothing about collapse
+    whenever rank 1 was all that was on offer.  The first half of that is true
+    for ``chi == 1`` as well as ``D == 1``; the second half is not, and the
+    difference is the whole point (#903 review, P1 round 2).
 
-    For ``D >= 2`` it is at least 4, so a rank-1 corner there is still read as
-    collapsed and #898's guard is untouched -- which is the property to
-    preserve, since that guard is the point of the change.
+    At ``chi = 1`` with ``D > 1`` the corner is 1x1, so its sum-normalised
+    spectrum is ``[1]`` *however the environment moves* -- which is #898's
+    blindness exactly, not a fixed point.  Certifying there would report
+    success on the first eligible comparison of an environment still in
+    motion.  Only ``D == 1`` makes the environment exact by construction,
+    because only then has the state nothing further to express.
+
+    A small ``chi`` makes the comparison *less* able to see, which is a reason
+    to stay fail-closed and never a licence to certify.  Do not reintroduce it
+    here; ``test_the_rank_ceiling_comes_from_the_state_not_from_chi`` pins that.
+
+    **This is not a tight bound on corner rank and does not claim to be.**  A
+    healthy ``D=2`` corner at ``chi=12`` reaches rank 12, far above
+    ``D**2 = 4``.  It only has to be tight at ``D == 1``.  For ``D >= 2`` it is
+    at least 4, so a rank-1 corner is still read as collapsed and #898's guard
+    is untouched -- the property this whole change puts at risk.
 
     Args:
-        chi:      Environment bond dimension.
         bond_dim: Double-layer bond dimension (``D**2`` for a PEPS of bond
                   dimension ``D``).
 
     Returns:
-        ``max(1, min(chi, bond_dim))``.
+        ``max(1, bond_dim)``.
     """
-    return max(1, min(int(chi), int(bond_dim)))
+    return max(1, int(bond_dim))
 
 
 def _spectrum_is_uninformative(
@@ -926,7 +937,7 @@ def ctm_tensor(
 
     last_max_eps: float = 0.0
     prev_sv = None
-    max_rank = _forced_corner_rank(chi, _double_layer_bond_dim(a))
+    max_rank = _forced_corner_rank(_double_layer_bond_dim(a))
     for _ in range(max_iter):
         env, last_max_eps = sweep_fn(
             env,
@@ -999,7 +1010,7 @@ def _ctm_tensor_multisite(
     prev_svs: dict[Coord, jax.Array] = {}
     blind_coords: set[Coord] = set()
     max_rank = _forced_corner_rank(
-        chi, min(_double_layer_bond_dim(dl) for dl in double_layers.values())
+        min(_double_layer_bond_dim(dl) for dl in double_layers.values())
     )
     for _ in range(max_iter):
         envs, _, _ = _ctm_tensor_sweep_multisite(
