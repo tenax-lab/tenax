@@ -478,3 +478,88 @@ def test_a_corner_blind_on_the_penultimate_sweep_still_warns(monkeypatch):
         f"the corner returned here has rank > 1: {text}"
     )
     assert "recovered" in text, text
+
+
+# --------------------------------------------------------------------- #
+# Which diagnosis each coordinate licenses                              #
+# --------------------------------------------------------------------- #
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "blind,collapsed,strong_for,weak_for",
+    [
+        # all collapsed: the strong diagnosis, no weak clause at all
+        ({(0, 0), (1, 0)}, {(0, 0), (1, 0)}, [(0, 0), (1, 0)], []),
+        # all recovered: the weak diagnosis, and "mean-field" must not appear
+        ({(0, 0), (1, 0)}, set(), [], [(0, 0), (1, 0)]),
+        # MIXED -- the case #903's round-3 fix got wrong (P2 round 4)
+        ({(0, 0), (1, 0)}, {(0, 0)}, [(0, 0)], [(1, 0)]),
+        ({(0, 0), (1, 0)}, {(1, 0)}, [(1, 0)], [(0, 0)]),
+        # single coordinate, each way
+        ({(0, 0)}, {(0, 0)}, [(0, 0)], []),
+        ({(0, 0)}, set(), [], [(0, 0)]),
+    ],
+)
+def test_each_coordinate_gets_only_the_diagnosis_it_licenses(
+    blind, collapsed, strong_for, weak_for
+):
+    """A mixed sweep must name each group separately (#903 review, P2 round 4).
+
+    Round 3 split the message by ``if collapsed_coords:`` and then listed *all*
+    of ``blind_coords`` in it, so one still-collapsed coordinate pulled every
+    recovered coordinate into the "mean-field number that will not respond to
+    chi" claim.  That claim is licensed per coordinate, not per sweep: a
+    recovered corner is full rank and its environment is merely uncertified.
+
+    The message is a pure function precisely so this can be checked
+    exhaustively.  Driving a real multisite CTM into "one coordinate collapsed,
+    another recovered, on the same sweep" is far harder than the branch
+    deserves, and the two end-to-end tests above cover only the uniform cases
+    -- which is exactly why the mixed one survived three review rounds.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import _blind_corner_message
+
+    text = _blind_corner_message(blind, collapsed)
+
+    # Each clause opens with "The corner at <coords>", so splitting on that
+    # lead-in puts every coordinate in the same segment as its own diagnosis.
+    segments = text.split("The corner at ")
+    strong = next((seg for seg in segments if "STILL rank" in seg), "")
+    weak = next((seg for seg in segments if "earlier sweep" in seg), "")
+
+    if strong_for:
+        assert "mean-field" in text, text
+        assert strong, f"expected a still-collapsed clause: {text}"
+        for c in strong_for:
+            assert str(c) in strong, (
+                f"{c} is still rank-1 and must be named in the strong clause, "
+                f"not merely somewhere in the message: {text}"
+            )
+        for c in weak_for:
+            assert str(c) not in strong, (
+                f"{c} recovered, so it must not be swept into the mean-field "
+                f"claim: {text}"
+            )
+    else:
+        assert "mean-field" not in text, (
+            f"no coordinate is still rank-1, so nothing licenses the "
+            f"mean-field claim: {text}"
+        )
+
+    if weak_for:
+        assert "NOT known to be bad" in text, text
+        assert weak, f"expected a recovered clause: {text}"
+        for c in weak_for:
+            assert str(c) in weak, (
+                f"{c} recovered and must be named in the uncertified clause: {text}"
+            )
+        for c in strong_for:
+            assert str(c) not in weak, (
+                f"{c} is still rank-1 and must not be described as recovered: {text}"
+            )
+    else:
+        assert "recovered" not in text, (
+            f"every coordinate is still rank-1, so there is no recovered "
+            f"group to describe: {text}"
+        )

@@ -614,6 +614,64 @@ def _spectrum_is_uninformative(sv: jax.Array, tol: float = _RANK_TOL) -> jax.Arr
     return jnp.logical_not(healthy & (rank > 1))
 
 
+def _blind_corner_message(blind: set[Coord], collapsed: set[Coord]) -> str:
+    """Text for the uncertified-environment warning (#898).
+
+    Pure, and separate from the loop, because the interesting cases are
+    combinations of two coordinate sets and driving a real CTM into each of
+    them is far harder than the message logic deserves.  Every combination is
+    unit-tested directly.
+
+    Two claims of very different strength are on offer here, and which one is
+    licensed is **per coordinate**:
+
+    * A corner that is *still* rank <= 1 licenses the strong statement -- that
+      environment is not a converged fixed point and its energy is a mean-field
+      number that will not respond to ``chi``.
+    * A corner that was rank <= 1 on an earlier sweep and has since recovered
+      licenses only the weak one: the comparison could not be certified, but
+      the environment returned has a full-rank corner and is **not** known to
+      be bad.
+
+    Applying the strong text to a recovered coordinate invites the caller to
+    discard a healthy environment, which is the opposite of this warning's
+    purpose -- so a mixed sweep must name each group separately rather than
+    picking one diagnosis for all of them.
+
+    Args:
+        blind:     Coordinates whose comparison had a rank <= 1 spectrum on
+                   either side.  Non-empty whenever this is called.
+        collapsed: The subset of ``blind`` still rank <= 1 on the final sweep.
+
+    Returns:
+        The warning text.
+    """
+    parts = [
+        "CTM convergence could not be certified: the corner-spectrum "
+        "criterion compares spectra normalised by their sum, which a rank-1 "
+        "corner forces to [1, 0, ..., 0], so it is structurally blind there. "
+        "The full max_iter budget was run instead of exiting early."
+    ]
+    if collapsed:
+        where = ", ".join(str(c) for c in sorted(collapsed))
+        parts.append(
+            f" The corner at {where} is STILL rank <= 1: that environment is "
+            "NOT a converged fixed point, and its energy is a mean-field "
+            "number that will not respond to chi."
+        )
+    recovered = blind - collapsed
+    if recovered:
+        where = ", ".join(str(c) for c in sorted(recovered))
+        parts.append(
+            f" The corner at {where} was rank <= 1 on an earlier sweep and has "
+            "since recovered to rank > 1: that environment is NOT known to be "
+            "bad, only uncertified. Re-run with a larger max_iter to get a "
+            "comparison the criterion can read."
+        )
+    parts.append(" (#898, #723/#726/#747)")
+    return "".join(parts)
+
+
 def _spectrum_can_show_change(sv: jax.Array, tol: float = _RANK_TOL) -> bool:
     """Eager ``bool`` form of :func:`_spectrum_is_uninformative`, negated.
 
@@ -935,40 +993,8 @@ def _ctm_tensor_multisite(
         # Not silent, and not fatal.  The sweeps still ran, so the environment
         # returned here is the best this budget reached.  What the caller must
         # not do is read it as converged.
-        #
-        # Two different things can put a coordinate in ``blind_coords``, and
-        # they warrant different diagnoses.  Saying "mean-field, will not
-        # respond to chi" is a strong claim: it is true of a corner that is
-        # *still* rank-1, and false of one that recovered on the final sweep,
-        # whose corner is full rank and whose energy may be perfectly good --
-        # merely uncertified, because the comparison it was judged by had a
-        # rank-1 spectrum on the other side.  Emitting the strong text for the
-        # recovered case would invite callers to discard a healthy environment,
-        # which is the opposite of this warning's purpose.
-        where = ", ".join(str(c) for c in sorted(blind_coords))
-        common = (
-            f"CTM convergence could not be certified: the corner at {where} "
-            "had rank <= 1 in at least one of the two spectra the criterion "
-            "compared, and the corner-spectrum criterion is structurally blind "
-            "there (it compares the spectrum normalised by its sum, which a "
-            "rank-1 corner forces to [1, 0, ..., 0]). The full max_iter budget "
-            "was run instead of exiting early"
-        )
-        if collapsed_coords:
-            detail = (
-                ", so this environment is the best the budget reached -- but "
-                "it is NOT a converged fixed point, and its energy is a "
-                "mean-field number that will not respond to chi"
-            )
-        else:
-            detail = (
-                ", and the corner has since recovered to rank > 1: the "
-                "environment returned is NOT known to be bad, only "
-                "uncertified. Re-run with a larger max_iter to get a "
-                "comparison the criterion can actually read"
-            )
         warnings.warn(
-            f"{common}{detail} (#898, #723/#726/#747).",
+            _blind_corner_message(blind_coords, collapsed_coords),
             RuntimeWarning,
             stacklevel=2,
         )
