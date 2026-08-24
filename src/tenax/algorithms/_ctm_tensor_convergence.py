@@ -903,6 +903,7 @@ def _ctm_tensor_multisite(
         # recorded is whether the comparison the loop actually made was blind,
         # which is a property of the pair.
         blind_coords = set()
+        collapsed_coords = set()
         for c in sorted(envs):
             sv = _corner_singular_values(envs[c].C1)
             prev = prev_svs.get(c)
@@ -914,9 +915,12 @@ def _ctm_tensor_multisite(
             # knows the budget ran out rather than the criterion being
             # satisfied.  Mirror the ``or`` in the criterion exactly: reading
             # one side would leave the other silently uncertified.
-            if not _spectrum_can_show_change(sv) or (
-                prev is not None and not _spectrum_can_show_change(prev)
-            ):
+            sv_blind = not _spectrum_can_show_change(sv)
+            if sv_blind:
+                # Still blind *now*: the environment being returned is the
+                # collapsed one, so the strong diagnosis below applies.
+                collapsed_coords.add(c)
+            if sv_blind or (prev is not None and not _spectrum_can_show_change(prev)):
                 blind_coords.add(c)
             if prev is not None:
                 if float(_ctm_sv_diff(sv, prev)) >= conv_tol:
@@ -928,21 +932,43 @@ def _ctm_tensor_multisite(
             break
 
     if blind_coords:
-        # Not silent, and not fatal.  The sweeps still ran -- and on the
-        # measured case they keep *improving* the energy -- so the environment
+        # Not silent, and not fatal.  The sweeps still ran, so the environment
         # returned here is the best this budget reached.  What the caller must
         # not do is read it as converged.
+        #
+        # Two different things can put a coordinate in ``blind_coords``, and
+        # they warrant different diagnoses.  Saying "mean-field, will not
+        # respond to chi" is a strong claim: it is true of a corner that is
+        # *still* rank-1, and false of one that recovered on the final sweep,
+        # whose corner is full rank and whose energy may be perfectly good --
+        # merely uncertified, because the comparison it was judged by had a
+        # rank-1 spectrum on the other side.  Emitting the strong text for the
+        # recovered case would invite callers to discard a healthy environment,
+        # which is the opposite of this warning's purpose.
         where = ", ".join(str(c) for c in sorted(blind_coords))
-        warnings.warn(
+        common = (
             f"CTM convergence could not be certified: the corner at {where} "
-            "collapsed to rank <= 1 during the sweep, and the corner-spectrum "
-            "criterion is structurally blind there (it compares the spectrum "
-            "normalised by its sum, which a rank-1 corner forces to "
-            "[1, 0, ..., 0]). The full max_iter budget was run instead of "
-            "exiting early, so this environment is the best the budget "
-            "reached -- but it is NOT a converged fixed point, and its energy "
-            "is a mean-field number that will not respond to chi (#898, "
-            "#723/#726/#747).",
+            "had rank <= 1 in at least one of the two spectra the criterion "
+            "compared, and the corner-spectrum criterion is structurally blind "
+            "there (it compares the spectrum normalised by its sum, which a "
+            "rank-1 corner forces to [1, 0, ..., 0]). The full max_iter budget "
+            "was run instead of exiting early"
+        )
+        if collapsed_coords:
+            detail = (
+                ", so this environment is the best the budget reached -- but "
+                "it is NOT a converged fixed point, and its energy is a "
+                "mean-field number that will not respond to chi"
+            )
+        else:
+            detail = (
+                ", and the corner has since recovered to rank > 1: the "
+                "environment returned is NOT known to be bad, only "
+                "uncertified. Re-run with a larger max_iter to get a "
+                "comparison the criterion can actually read"
+            )
+        warnings.warn(
+            f"{common}{detail} (#898, #723/#726/#747).",
             RuntimeWarning,
             stacklevel=2,
         )

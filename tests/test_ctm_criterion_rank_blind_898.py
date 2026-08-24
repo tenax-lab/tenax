@@ -250,8 +250,19 @@ def test_a_collapsed_corner_says_so_out_loud():
 
     A, B = _collapsing_pair()
 
-    with pytest.warns(RuntimeWarning, match="could not be certified"):
+    with pytest.warns(RuntimeWarning, match="could not be certified") as rec:
         ctm_tensor_2site(A, B, chi=12, max_iter=6, conv_tol=1e-9, recipe="2x2")
+
+    # The strong diagnosis, and it must be reserved for this case: the corner
+    # is *still* rank-1, so "mean-field, will not respond to chi" is a claim
+    # about the environment being returned rather than about the comparison.
+    # Its twin
+    # (``test_a_corner_blind_on_the_penultimate_sweep_still_warns``) asserts
+    # the same phrase is absent when the corner recovered -- together they pin
+    # that the message says only what that run established (#903 review, P2
+    # round 3).
+    text = str(rec[0].message)
+    assert "mean-field" in text, text
 
 
 @pytest.mark.slow
@@ -453,5 +464,17 @@ def test_a_corner_blind_on_the_penultimate_sweep_still_warns(monkeypatch):
 
     # Exactly two sweeps: sweep 1's spectrum is the marked (blind) one, sweep 2
     # is healthy but must still compare against it.
-    with pytest.warns(RuntimeWarning, match="could not be certified"):
+    with pytest.warns(RuntimeWarning, match="could not be certified") as rec:
         conv.ctm_tensor_2site(A, A, chi=8, max_iter=2, conv_tol=1e-8, recipe="2x2")
+
+    # It must warn -- and it must not overclaim.  The returned corner is rank
+    # > 1, so this environment is *uncertified*, not established to be bad.
+    # Calling it a mean-field number that will not respond to chi would invite
+    # callers to discard a healthy environment, which is the opposite of what
+    # the warning is for (#903 review, P2 round 3).
+    text = str(rec[0].message)
+    assert "mean-field" not in text, (
+        f"the recovered case must not borrow the collapsed case's diagnosis; "
+        f"the corner returned here has rank > 1: {text}"
+    )
+    assert "recovered" in text, text
