@@ -24,6 +24,8 @@ from tenax.algorithms._ctm_tensor_convergence import (
     Coord,
     _corner_singular_values,
     _ctm_sv_diff,
+    _double_layer_bond_dim,
+    _forced_corner_rank,
     _sort_coords_for_direction,
 )
 from tenax.algorithms._split_ctm_tensor_init import (
@@ -212,10 +214,12 @@ def ctm_split_tensor(
             )[(0, 0)]
         else:
             env = _split_ctm_tensor_sweep(env, A, chi, chi_I, renormalize)
+            # #903 P1: rank 1 is a collapse only if more was reachable.
+            _mr = _forced_corner_rank(chi, _double_layer_bond_dim(A) ** 2)
 
         current_sv = _corner_singular_values(env.C1)
         if prev_sv is not None and iteration + 1 >= min_iter:
-            diff = _ctm_sv_diff(current_sv, prev_sv)
+            diff = _ctm_sv_diff(current_sv, prev_sv, max_rank=_mr)
             if float(diff) < conv_tol:
                 converged = True
                 break
@@ -663,6 +667,10 @@ def _split_ctm_multisite(
     bars = {c: A.bar() for c, A in site_tensors.items()}
     envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
     prev_svs: dict[Coord, jax.Array] = {}
+    # #903 P1: rank 1 is a collapse only if more was reachable.
+    _mr2 = _forced_corner_rank(
+        chi, min(_double_layer_bond_dim(A) ** 2 for A in site_tensors.values())
+    )
     for _ in range(max_iter):
         envs = _split_ctm_sweep_multisite(
             envs, site_tensors, bars, neighbors, chi, chi_I, renormalize, recipe
@@ -671,7 +679,7 @@ def _split_ctm_multisite(
         for c in sorted(envs):
             sv = _corner_singular_values(envs[c].C1)
             if c in prev_svs:
-                if float(_ctm_sv_diff(sv, prev_svs[c])) >= conv_tol:
+                if float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr2)) >= conv_tol:
                     converged = False
             else:
                 converged = False

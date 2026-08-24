@@ -543,7 +543,9 @@ def _ctm_tensor_sweep_multisite(
 # ------------------------------------------------------------------ #
 
 
-def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
+def _ctm_sv_diff(
+    sv_new: jax.Array, sv_old: jax.Array, max_rank: int | None = None
+) -> jax.Array:
     """Compute max absolute difference between normalized singular value vectors.
 
     On direction-dependent (asymmetric-bond) states the corner block
@@ -578,7 +580,9 @@ def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
     # ``jax.lax.while_loop`` (``ipeps_ctm_convergence``), where the predicate
     # is a tracer and branching on it raises TracerBoolConversionError.  Both
     # arms are cheap, so evaluating them unconditionally costs nothing.
-    blind = _spectrum_is_uninformative(sv_new) | _spectrum_is_uninformative(sv_old)
+    blind = _spectrum_is_uninformative(
+        sv_new, max_rank=max_rank
+    ) | _spectrum_is_uninformative(sv_old, max_rank=max_rank)
     n = max(sv_new.shape[0], sv_old.shape[0])
     sv_new = jnp.pad(sv_new, (0, n - sv_new.shape[0]))
     sv_old = jnp.pad(sv_old, (0, n - sv_old.shape[0]))
@@ -594,24 +598,82 @@ def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
 _RANK_TOL = 1e-10
 
 
-def _spectrum_is_uninformative(sv: jax.Array, tol: float = _RANK_TOL) -> jax.Array:
+def _double_layer_bond_dim(a) -> int:
+    """Bond dimension of a double-layer object, dense array or ``Tensor``."""
+    idx = getattr(a, "indices", None)
+    if idx is not None:
+        return int(idx[0].dim)
+    return int(a.shape[0])
+
+
+def _forced_corner_rank(chi: int, bond_dim: int) -> int:
+    """The rank a corner is held to by the problem size rather than by collapse.
+
+    **This is not a tight bound on the corner rank, and does not claim to be.**
+    A healthy ``D=2`` corner at ``chi=12`` reaches rank 12, far above
+    ``D**2 = 4``.  It only has to be tight in the one regime that matters: it
+    equals ``1`` exactly when ``chi == 1`` or ``D == 1``, and those are the
+    cases where rank 1 is the *only* rank on offer and therefore says nothing
+    about collapse (#903 review, P1).
+
+    For ``D >= 2`` it is at least 4, so a rank-1 corner there is still read as
+    collapsed and #898's guard is untouched -- which is the property to
+    preserve, since that guard is the point of the change.
+
+    Args:
+        chi:      Environment bond dimension.
+        bond_dim: Double-layer bond dimension (``D**2`` for a PEPS of bond
+                  dimension ``D``).
+
+    Returns:
+        ``max(1, min(chi, bond_dim))``.
+    """
+    return max(1, min(int(chi), int(bond_dim)))
+
+
+def _spectrum_is_uninformative(
+    sv: jax.Array, tol: float = _RANK_TOL, max_rank: int | None = None
+) -> jax.Array:
     """Whether a sum-normalised comparison of ``sv`` is forced (#898).
 
-    True exactly when the corner has numerical rank <= 1 -- one non-zero
-    singular value normalises to ``1.0`` and the rest to ``0.0`` regardless of
-    the environment -- or when the spectrum is empty or non-finite.  This is
-    deliberately ``env_is_collapsed``'s predicate: a corner the collapse
-    detector calls dead is exactly one the convergence detector cannot see.
+    True when the corner has numerical rank <= 1 -- one non-zero singular value
+    normalises to ``1.0`` and the rest to ``0.0`` regardless of the environment
+    -- or when the spectrum is empty or non-finite.  This is deliberately
+    ``env_is_collapsed``'s predicate: a corner the collapse detector calls dead
+    is exactly one the convergence detector cannot see.
+
+    **Unless rank 1 was all the corner could carry** (#903 review, P1).  A
+    ``D=1`` PEPS is an exact product state, and this project supports and tests
+    one (``TestProductStateEnergy``); a ``chi=1`` environment is legitimate
+    too.  Every corner there is rank 1 *at the exact fixed point*, so equating
+    rank 1 with collapse made those states unable to converge at all: measured,
+    ``ctm(D=1, chi=4, max_iter=20)`` returned ``converged=False`` with
+    ``diff=inf`` after burning the whole budget, ``ipeps()`` warned that a
+    state which had converged exactly had not, and ``_ctm_sv_diff(sv, sv)`` --
+    a spectrum against *itself* -- returned ``inf``.
+
+    Rank is therefore not the discriminator; **reachable** rank is.  Pass
+    ``max_rank = min(chi, D_doublelayer)`` and a corner sitting at its ceiling
+    is read as informative, because there is nothing further for it to show.
+    Omitting ``max_rank`` keeps the conservative reading -- a caller that has
+    not said what was reachable gets the fail-closed answer.
 
     Written in ``jnp`` and returning an array so it survives tracing; one of
-    the nine convergence loops runs inside ``jax.lax.while_loop``.
+    the nine convergence loops runs inside ``jax.lax.while_loop``.  ``max_rank``
+    comes from tensor shapes, so it is static and safe to branch on in Python.
     """
     if sv.shape[0] == 0:
         return jnp.asarray(True)
     top = sv[0]
     healthy = jnp.isfinite(top) & (top > 0.0)
     rank = jnp.sum(sv > tol * top)
-    return jnp.logical_not(healthy & (rank > 1))
+    informative = healthy & (rank > 1)
+    if max_rank is not None:
+        # At the ceiling: no higher rank was available, so a low rank is not
+        # evidence of collapse.  ``healthy`` still gates it -- a zero or
+        # non-finite corner is not a fixed point at any ceiling.
+        informative = informative | (healthy & (rank >= max_rank))
+    return jnp.logical_not(informative)
 
 
 def _blind_corner_message(blind: set[Coord], collapsed: set[Coord]) -> str:
@@ -672,13 +734,17 @@ def _blind_corner_message(blind: set[Coord], collapsed: set[Coord]) -> str:
     return "".join(parts)
 
 
-def _spectrum_can_show_change(sv: jax.Array, tol: float = _RANK_TOL) -> bool:
+def _spectrum_can_show_change(
+    sv: jax.Array, tol: float = _RANK_TOL, max_rank: int | None = None
+) -> bool:
     """Eager ``bool`` form of :func:`_spectrum_is_uninformative`, negated.
 
     For the loops that want to *report* the blindness rather than merely fail
-    closed on it.
+    closed on it.  ``max_rank`` must match whatever the loop passes to
+    :func:`_ctm_sv_diff`, or the warning will name coordinates the criterion
+    did not actually refuse.
     """
-    return not bool(_spectrum_is_uninformative(sv, tol))
+    return not bool(_spectrum_is_uninformative(sv, tol, max_rank))
 
 
 def _tensor_leaf_data(leaf):
@@ -860,6 +926,7 @@ def ctm_tensor(
 
     last_max_eps: float = 0.0
     prev_sv = None
+    max_rank = _forced_corner_rank(chi, _double_layer_bond_dim(a))
     for _ in range(max_iter):
         env, last_max_eps = sweep_fn(
             env,
@@ -872,7 +939,7 @@ def ctm_tensor(
 
         current_sv = _corner_singular_values(env.C1)
         if prev_sv is not None:
-            diff = _ctm_sv_diff(current_sv, prev_sv)
+            diff = _ctm_sv_diff(current_sv, prev_sv, max_rank=max_rank)
             if float(diff) < conv_tol:
                 break
         prev_sv = current_sv
@@ -931,6 +998,9 @@ def _ctm_tensor_multisite(
 
     prev_svs: dict[Coord, jax.Array] = {}
     blind_coords: set[Coord] = set()
+    max_rank = _forced_corner_rank(
+        chi, min(_double_layer_bond_dim(dl) for dl in double_layers.values())
+    )
     for _ in range(max_iter):
         envs, _, _ = _ctm_tensor_sweep_multisite(
             envs,
@@ -973,15 +1043,18 @@ def _ctm_tensor_multisite(
             # knows the budget ran out rather than the criterion being
             # satisfied.  Mirror the ``or`` in the criterion exactly: reading
             # one side would leave the other silently uncertified.
-            sv_blind = not _spectrum_can_show_change(sv)
+            sv_blind = not _spectrum_can_show_change(sv, max_rank=max_rank)
             if sv_blind:
                 # Still blind *now*: the environment being returned is the
                 # collapsed one, so the strong diagnosis below applies.
                 collapsed_coords.add(c)
-            if sv_blind or (prev is not None and not _spectrum_can_show_change(prev)):
+            if sv_blind or (
+                prev is not None
+                and not _spectrum_can_show_change(prev, max_rank=max_rank)
+            ):
                 blind_coords.add(c)
             if prev is not None:
-                if float(_ctm_sv_diff(sv, prev)) >= conv_tol:
+                if float(_ctm_sv_diff(sv, prev, max_rank=max_rank)) >= conv_tol:
                     converged = False
             else:
                 converged = False

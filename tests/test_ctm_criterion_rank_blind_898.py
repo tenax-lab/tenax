@@ -563,3 +563,80 @@ def test_each_coordinate_gets_only_the_diagnosis_it_licenses(
             f"every coordinate is still rank-1, so there is no recovered "
             f"group to describe: {text}"
         )
+
+
+# --------------------------------------------------------------------- #
+# A genuinely rank-1 fixed point is not a collapse                      #
+# --------------------------------------------------------------------- #
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "sv,max_rank,uninformative,why",
+    [
+        # D=1: chi may be 4, but the corner cannot carry more than one
+        # singular value, so rank 1 IS full rank -- there is nothing the
+        # criterion is failing to see.
+        ([1.0, 0.0, 0.0, 0.0], 1, False, "D=1 padded to chi=4: full rank"),
+        ([1.0], 1, False, "chi=1: full rank"),
+        # The defect #898 targets: the corner COULD have carried 4, and does
+        # not.  That is a collapse and must still fail closed.
+        ([1.0, 0.0, 0.0, 0.0], 4, True, "rank 1 of an attainable 4: collapsed"),
+        ([1.0, 0.5, 0.0, 0.0], 4, False, "rank 2: informative either way"),
+        # Without a bound the caller has told us nothing, so keep the
+        # conservative reading -- rank 1 is treated as blind.
+        ([1.0, 0.0, 0.0, 0.0], None, True, "no bound: fail closed"),
+        # A dead corner stays uninformative whatever the bound says.
+        ([0.0, 0.0], 1, True, "zero corner is not a fixed point"),
+    ],
+)
+def test_full_attainable_rank_is_not_a_collapse(sv, max_rank, uninformative, why):
+    """rank <= 1 means "collapsed" only if a higher rank was reachable (#903 P1).
+
+    The guard equated rank-1 with collapse.  For ``D=1`` -- an exact product
+    state, which this project supports and tests -- every corner is
+    legitimately rank 1 *at the exact fixed point*, and so is any ``chi=1``
+    environment.  Those states could therefore never converge: measured before
+    this fix, ``ctm(D=1, chi=4, max_iter=20)`` returned ``converged=False``
+    with ``diff=inf`` after burning the full budget, and ``_ctm_sv_diff(sv, sv)``
+    -- a spectrum against *itself* -- returned ``inf``.
+
+    What distinguishes the two is not the rank but whether a higher rank was
+    available: ``min(chi, D_doublelayer)``.  The comparison is blind only when
+    the corner could have carried more and does not.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import _spectrum_is_uninformative
+
+    got = bool(_spectrum_is_uninformative(jnp.asarray(sv), max_rank=max_rank))
+    assert got is uninformative, f"{why}: expected {uninformative}, got {got}"
+
+
+@pytest.mark.core
+def test_a_d1_product_state_converges_and_does_not_warn():
+    """The end-to-end case: `TestProductStateEnergy`'s state (#903 P1).
+
+    Its energy was always right -- the environment is exact -- so no test
+    failed.  What broke was the *convergence report*: `converged=False`,
+    `diff=inf`, the full budget burned, and `ipeps()` emitting "CTM did not
+    converge" for a state that had converged exactly. That is the same
+    silent-wrongness #898 exists to remove, pointing the other way.
+    """
+    import warnings as _w
+
+    from tenax.algorithms.ipeps_config import CTMConfig
+    from tenax.algorithms.ipeps_ctm_convergence import ctm
+
+    A = jnp.zeros((1, 1, 1, 1, 2)).at[0, 0, 0, 0, 0].set(1.0)
+
+    with _w.catch_warnings():
+        _w.simplefilter("error", RuntimeWarning)
+        _, info = ctm(A, CTMConfig(chi=4, max_iter=20, conv_tol=1e-8), return_meta=True)
+
+    assert bool(info.converged), (
+        f"a D=1 product state is an exact CTM fixed point; it reported "
+        f"converged={info.converged} after {info.n_iter} sweeps with "
+        f"diff={float(info.diff)}"
+    )
+    assert int(info.n_iter) < 20, (
+        f"it should exit early, not burn the budget: {info.n_iter} sweeps"
+    )

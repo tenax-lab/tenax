@@ -20,7 +20,11 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from tenax.algorithms._ctm_tensor_convergence import _ctm_sv_diff
+from tenax.algorithms._ctm_tensor_convergence import (
+    _ctm_sv_diff,
+    _double_layer_bond_dim,
+    _forced_corner_rank,
+)
 from tenax.algorithms.ipeps_config import (
     CTMConfig,
     CTMEnvironment,
@@ -199,6 +203,10 @@ def ctm(
     # care.
     _sv_dtype = jnp.zeros((), dtype=env.C1.dtype).real.dtype
     prev_sv = jnp.zeros(min(chi, env.C1.shape[0]), dtype=_sv_dtype)
+    # A rank-1 corner is a collapse only if a higher rank was on offer; at
+    # D=1 or chi=1 it is the exact fixed point (#903 review, P1).  Static, so
+    # it is fine to close over inside the traced body below.
+    max_rank = _forced_corner_rank(chi, _double_layer_bond_dim(a))
 
     # Carry: (env, prev_sv, iteration, converged, diff)
     # ``diff`` rides along purely so it can be reported (#839); ``converged``
@@ -221,7 +229,7 @@ def ctm(
         env_i, prev_sv_i, iteration, _, _ = carry
         env_i = _ctm_sweep(env_i, a, chi, renormalize, projector_method)
         current_sv = _dense_svd(env_i.C1, compute_uv=False)
-        diff = _ctm_sv_diff(current_sv, prev_sv_i)
+        diff = _ctm_sv_diff(current_sv, prev_sv_i, max_rank=max_rank)
         converged = diff < conv_tol
         return (env_i, current_sv, iteration + 1, converged, diff)
 
@@ -350,6 +358,11 @@ def ctm_2site(
     _sv_dtype_B = jnp.zeros((), dtype=env_B.C1.dtype).real.dtype
     prev_sv_A = jnp.zeros(min(chi, env_A.C1.shape[0]), dtype=_sv_dtype_A)
     prev_sv_B = jnp.zeros(min(chi, env_B.C1.shape[0]), dtype=_sv_dtype_B)
+    # See ``ctm`` above (#903 review, P1).  Both sublattices share one bound:
+    # the smaller, so neither is certified on the other's headroom.
+    max_rank = _forced_corner_rank(
+        chi, min(_double_layer_bond_dim(a_A), _double_layer_bond_dim(a_B))
+    )
 
     # Carry: (env_A, env_B, prev_sv_A, prev_sv_B, iteration, converged, diff)
     # ``diff`` rides along only so it can be reported (#839); ``converged`` is
@@ -378,8 +391,8 @@ def ctm_2site(
         eA, eB = _ctm_2site_sweep(eA, eB, a_A, a_B, chi, renormalize)
         sv_A = _dense_svd(eA.C1, compute_uv=False)
         sv_B = _dense_svd(eB.C1, compute_uv=False)
-        diff_A = _ctm_sv_diff(sv_A, psA)
-        diff_B = _ctm_sv_diff(sv_B, psB)
+        diff_A = _ctm_sv_diff(sv_A, psA, max_rank=max_rank)
+        diff_B = _ctm_sv_diff(sv_B, psB, max_rank=max_rank)
         diff = jnp.maximum(diff_A, diff_B)
         converged = diff < conv_tol
         return (eA, eB, sv_A, sv_B, iteration + 1, converged, diff)
@@ -523,7 +536,13 @@ def ctm_split(
 
         current_sv = _dense_svd(env.C1, compute_uv=False)
         if prev_sv is not None:
-            diff_val = float(_ctm_sv_diff(current_sv, prev_sv))
+            diff_val = float(
+                _ctm_sv_diff(
+                    current_sv,
+                    prev_sv,
+                    max_rank=_forced_corner_rank(chi, _double_layer_bond_dim(A) ** 2),
+                )
+            )
             if diff_val < config.conv_tol:
                 converged = True
                 break

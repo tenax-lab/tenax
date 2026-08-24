@@ -21,6 +21,8 @@ from tenax.algorithms._ctm_tensor_convergence import (
     Coord,
     _corner_singular_values,
     _ctm_sv_diff,
+    _double_layer_bond_dim,
+    _forced_corner_rank,
     _get_base_charges,
     _max_env_leaf_diff,
 )
@@ -256,12 +258,17 @@ def _run_ctm_loop_with_bump(
             plateau_metric_valid = True
         else:
             have_prev_svs = bool(prev_svs)
+            # #903 P1: rank 1 is a collapse only if more was reachable.
+            _mr = _forced_corner_rank(
+                chi_current,
+                min(_double_layer_bond_dim(A) ** 2 for A in site_tensors.values()),
+            )
             converged = True
             max_diff = 0.0
             for c in sorted(envs):
                 sv = _corner_singular_values(envs[c].C1)
                 if c in prev_svs:
-                    diff = float(_ctm_sv_diff(sv, prev_svs[c]))
+                    diff = float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr))
                     max_diff = max(max_diff, diff)
                     if diff >= conv_tol:
                         converged = False
