@@ -598,12 +598,37 @@ def _ctm_sv_diff(
 _RANK_TOL = 1e-10
 
 
-def _double_layer_bond_dim(a) -> int:
-    """Bond dimension of a double-layer object, dense array or ``Tensor``."""
-    idx = getattr(a, "indices", None)
-    if idx is not None:
-        return int(idx[0].dim)
-    return int(a.shape[0])
+def _max_virtual_bond_dim(t) -> int:
+    """Largest virtual bond dimension, over **all** virtual legs.
+
+    Reading ``indices[0]`` alone -- which this did until #903's review caught it
+    -- is wrong for anisotropic states.  A chain embedding with
+    ``(u, d, l, r) = (1, 1, 4, 4)`` reports ``1`` purely because the first leg
+    is trivial, the call sites then pass ``max_rank=1``, and every positive
+    rank-one corner is accepted as informative while the horizontal bonds still
+    carry correlations.  That silently restores the premature-convergence defect
+    this whole change exists to remove -- a *wrong* bound is worse than a
+    missing one, because a missing one fails closed.
+
+    The rank-one exemption belongs only to states whose virtual dimensions are
+    **all** one, so the maximum is the quantity to take: it is 1 exactly when
+    every virtual leg is 1.
+
+    Physical legs are excluded by label, so this is correct for a site tensor
+    ``(u, d, l, r, phys)`` and for a double layer, which has no physical leg.
+    """
+    idx = getattr(t, "indices", None)
+    if idx is None:
+        shape = tuple(t.shape)
+        dims = list(shape[:4]) if len(shape) >= 4 else list(shape)
+        return max(int(d) for d in dims) if dims else 1
+    labels = tuple(t.labels()) if hasattr(t, "labels") else ()
+    dims = [
+        int(ix.dim)
+        for k, ix in enumerate(idx)
+        if not (k < len(labels) and str(labels[k]).startswith("phys"))
+    ]
+    return max(dims) if dims else 1
 
 
 def _forced_corner_rank(bond_dim: int) -> int:
@@ -937,7 +962,7 @@ def ctm_tensor(
 
     last_max_eps: float = 0.0
     prev_sv = None
-    max_rank = _forced_corner_rank(_double_layer_bond_dim(a))
+    max_rank = _forced_corner_rank(_max_virtual_bond_dim(a))
     for _ in range(max_iter):
         env, last_max_eps = sweep_fn(
             env,
@@ -1010,7 +1035,7 @@ def _ctm_tensor_multisite(
     prev_svs: dict[Coord, jax.Array] = {}
     blind_coords: set[Coord] = set()
     max_rank = _forced_corner_rank(
-        min(_double_layer_bond_dim(dl) for dl in double_layers.values())
+        min(_max_virtual_bond_dim(dl) for dl in double_layers.values())
     )
     for _ in range(max_iter):
         envs, _, _ = _ctm_tensor_sweep_multisite(

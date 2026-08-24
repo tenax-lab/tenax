@@ -705,3 +705,68 @@ def test_every_wrapper_of_the_criterion_forwards_the_rank_bound():
     # D>=2: still fail-closed through both, which is the property to keep.
     assert not jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=4)), "bare criterion"
     assert not jnp.isfinite(_ctm_sv_diff_local(sv, sv, max_rank=4)), "wrapper"
+
+
+class _FakeIndex:
+    def __init__(self, dim):
+        self.dim = dim
+
+
+class _FakeTensor:
+    """Minimal stand-in: the accessor only reads ``indices`` and ``labels``."""
+
+    def __init__(self, dims, labels):
+        self.indices = tuple(_FakeIndex(d) for d in dims)
+        self._labels = labels
+
+    def labels(self):
+        return self._labels
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "dims,expected,why",
+    [
+        ((1, 1, 1, 1, 2), 1, "every virtual leg is 1: a true product state"),
+        ((1, 1, 4, 4, 2), 4, "chain embedding -- l,r carry correlations"),
+        ((4, 4, 1, 1, 2), 4, "the same, transposed: order must not matter"),
+        ((1, 2, 1, 1, 2), 2, "a single nontrivial leg is enough"),
+        ((2, 2, 2, 2, 2), 2, "isotropic D=2"),
+    ],
+)
+def test_the_exemption_needs_every_virtual_leg_to_be_trivial(dims, expected, why):
+    """Rank-one is exempt only if *all* virtual dims are 1 (#903 review, P1).
+
+    The accessor read ``indices[0]`` alone.  For a supported anisotropic state
+    such as a chain embedding with ``(u, d, l, r) = (1, 1, 4, 4)`` that reports
+    ``1`` purely because the *first* leg is trivial; the call sites then pass
+    ``max_rank=1`` and every positive rank-one corner is accepted as
+    informative, while the horizontal bonds still carry correlations and the
+    edges may still be moving.  That silently reinstates the premature
+    convergence #898 exists to remove.
+
+    **A wrong bound is worse than a missing one.**  Omitting ``max_rank``
+    fails closed; computing it wrongly fails *open*, and nothing downstream can
+    tell the difference.  The transposed case is included because reading one
+    fixed position passes any test that happens to put the large leg first.
+
+    Physical legs are excluded by label, so the same accessor serves a site
+    tensor and a double layer (which has none).
+    """
+    from tenax.algorithms._ctm_tensor_convergence import (
+        _forced_corner_rank,
+        _max_virtual_bond_dim,
+    )
+
+    t = _FakeTensor(dims, ("u", "d", "l", "r", "phys")[: len(dims)])
+    got = _max_virtual_bond_dim(t)
+    assert got == expected, f"{why}: expected {expected}, got {got}"
+
+    # And the consequence that matters: only the all-trivial state is exempt.
+    bound = _forced_corner_rank(got**2)
+    sv = jnp.asarray([1.0, 0.0, 0.0, 0.0])
+    exempt = bool(jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=bound)))
+    assert exempt is (expected == 1), (
+        f"{why}: rank-1 exemption should be {expected == 1} but bound={bound} "
+        f"gave {exempt}"
+    )

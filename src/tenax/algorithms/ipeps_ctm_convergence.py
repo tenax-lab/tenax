@@ -22,8 +22,8 @@ import jax.numpy as jnp
 
 from tenax.algorithms._ctm_tensor_convergence import (
     _ctm_sv_diff,
-    _double_layer_bond_dim,
     _forced_corner_rank,
+    _max_virtual_bond_dim,
 )
 from tenax.algorithms.ipeps_config import (
     CTMConfig,
@@ -206,7 +206,7 @@ def ctm(
     # A rank-1 corner is a collapse only if a higher rank was on offer; at
     # D=1 or chi=1 it is the exact fixed point (#903 review, P1).  Static, so
     # it is fine to close over inside the traced body below.
-    max_rank = _forced_corner_rank(_double_layer_bond_dim(a))
+    max_rank = _forced_corner_rank(_max_virtual_bond_dim(a))
 
     # Carry: (env, prev_sv, iteration, converged, diff)
     # ``diff`` rides along purely so it can be reported (#839); ``converged``
@@ -361,7 +361,7 @@ def ctm_2site(
     # See ``ctm`` above (#903 review, P1).  Both sublattices share one bound:
     # the smaller, so neither is certified on the other's headroom.
     max_rank = _forced_corner_rank(
-        min(_double_layer_bond_dim(a_A), _double_layer_bond_dim(a_B))
+        min(_max_virtual_bond_dim(a_A), _max_virtual_bond_dim(a_B))
     )
 
     # Carry: (env_A, env_B, prev_sv_A, prev_sv_B, iteration, converged, diff)
@@ -540,7 +540,7 @@ def ctm_split(
                 _ctm_sv_diff(
                     current_sv,
                     prev_sv,
-                    max_rank=_forced_corner_rank(_double_layer_bond_dim(A) ** 2),
+                    max_rank=_forced_corner_rank(_max_virtual_bond_dim(A) ** 2),
                 )
             )
             if diff_val < config.conv_tol:

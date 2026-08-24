@@ -57,10 +57,10 @@ from tenax.algorithms._ctm_tensor import (
     _ctm_sv_diff as _ctm_sv_diff_tensor,
 )
 from tenax.algorithms._ctm_tensor import (
-    _double_layer_bond_dim as _double_layer_bond_dim,
+    _forced_corner_rank as _forced_corner_rank,
 )
 from tenax.algorithms._ctm_tensor import (
-    _forced_corner_rank as _forced_corner_rank,
+    _max_virtual_bond_dim as _max_virtual_bond_dim,
 )
 from tenax.algorithms._split_ctm_tensor import (
     _split_ctm_tensor_sweep,
@@ -1042,7 +1042,7 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
     # assigned an equivalent inside one arm of a conditional and every call
     # through the other arm raised UnboundLocalError.
     _mr = _forced_corner_rank(
-        min(_double_layer_bond_dim(A) ** 2 for A in site_tensors.values())
+        min(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
     )
 
     for i in range(config.max_iter):

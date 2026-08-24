@@ -19,8 +19,8 @@ __all__ = [
 from tenax.algorithms._ctm_projector import _compute_projector_tensor
 from tenax.algorithms._ctm_tensor_convergence import (
     _ctm_sv_diff,
-    _double_layer_bond_dim,
     _forced_corner_rank,
+    _max_virtual_bond_dim,
 )
 from tenax.algorithms._ctm_tensor_init import (
     IN,
@@ -237,7 +237,7 @@ def ctm_tensor_c4v(
     for _ in range(max_iter):
         C, T = _c4v_sweep(C, T, a, chi, projector_method)
         # #903 P1: rank 1 is a collapse only if more was reachable.
-        _mr = _forced_corner_rank(_double_layer_bond_dim(a))
+        _mr = _forced_corner_rank(_max_virtual_bond_dim(a))
 
         current_sv = _dense_svd(C.todense(), compute_uv=False)
         if prev_sv is not None:

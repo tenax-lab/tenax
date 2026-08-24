@@ -34,8 +34,8 @@ from jax.scipy.sparse.linalg import gmres as _krylov_gmres
 from tenax.algorithms._ctm_tensor_c4v import _c4v_sweep, _c4v_to_full_env
 from tenax.algorithms._ctm_tensor_convergence import (
     _ctm_sv_diff,
-    _double_layer_bond_dim,
     _forced_corner_rank,
+    _max_virtual_bond_dim,
 )
 from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
@@ -112,7 +112,7 @@ def _ctm_tensor_c4v_reference_fixed_point_reduced(
                 _ctm_sv_diff(
                     current_sv,
                     prev_sv,
-                    max_rank=_forced_corner_rank(_double_layer_bond_dim(a)),
+                    max_rank=_forced_corner_rank(_max_virtual_bond_dim(a)),
                 )
             )
             if iters >= min_iter and residual < float(config.conv_tol):
