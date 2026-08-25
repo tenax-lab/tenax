@@ -360,9 +360,10 @@ def ctm_2site(
     prev_sv_B = jnp.zeros(min(chi, env_B.C1.shape[0]), dtype=_sv_dtype_B)
     # See ``ctm`` above (#903 review, P1).  Both sublattices share one bound:
     # the smaller, so neither is certified on the other's headroom.
-    max_rank = _forced_corner_rank(
-        max(_max_virtual_bond_dim(a_A), _max_virtual_bond_dim(a_B))
-    )
+    # Per sublattice, not aggregated (#903 review): each corner is judged by
+    # the reachable rank of the site sitting under it.
+    max_rank_A = _forced_corner_rank(_max_virtual_bond_dim(a_A))
+    max_rank_B = _forced_corner_rank(_max_virtual_bond_dim(a_B))
 
     # Carry: (env_A, env_B, prev_sv_A, prev_sv_B, iteration, converged, diff)
     # ``diff`` rides along only so it can be reported (#839); ``converged`` is
@@ -391,8 +392,8 @@ def ctm_2site(
         eA, eB = _ctm_2site_sweep(eA, eB, a_A, a_B, chi, renormalize)
         sv_A = _dense_svd(eA.C1, compute_uv=False)
         sv_B = _dense_svd(eB.C1, compute_uv=False)
-        diff_A = _ctm_sv_diff(sv_A, psA, max_rank=max_rank)
-        diff_B = _ctm_sv_diff(sv_B, psB, max_rank=max_rank)
+        diff_A = _ctm_sv_diff(sv_A, psA, max_rank=max_rank_A)
+        diff_B = _ctm_sv_diff(sv_B, psB, max_rank=max_rank_B)
         diff = jnp.maximum(diff_A, diff_B)
         converged = diff < conv_tol
         return (eA, eB, sv_A, sv_B, iteration + 1, converged, diff)

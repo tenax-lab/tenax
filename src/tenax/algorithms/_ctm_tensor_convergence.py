@@ -1034,9 +1034,17 @@ def _ctm_tensor_multisite(
 
     prev_svs: dict[Coord, jax.Array] = {}
     blind_coords: set[Coord] = set()
-    max_rank = _forced_corner_rank(
-        max(_max_virtual_bond_dim(dl) for dl in double_layers.values())
-    )
+    # Per coordinate, not per cell (#903 review).  A cell-wide aggregate is
+    # wrong in both directions: `min` lets one trivial site exempt every
+    # corner (fails open), and `max` makes a legitimate D=1 coordinate blind
+    # on every sweep so the loop can never certify it (fails closed, but
+    # wrongly).  The reachable rank is a property of the site sitting at that
+    # coordinate, so it is computed there.  Built before the loop and outside
+    # every branch.
+    max_ranks = {
+        c: _forced_corner_rank(_max_virtual_bond_dim(dl))
+        for c, dl in double_layers.items()
+    }
     for _ in range(max_iter):
         envs, _, _ = _ctm_tensor_sweep_multisite(
             envs,
@@ -1079,18 +1087,18 @@ def _ctm_tensor_multisite(
             # knows the budget ran out rather than the criterion being
             # satisfied.  Mirror the ``or`` in the criterion exactly: reading
             # one side would leave the other silently uncertified.
-            sv_blind = not _spectrum_can_show_change(sv, max_rank=max_rank)
+            _mr_c = max_ranks[c]
+            sv_blind = not _spectrum_can_show_change(sv, max_rank=_mr_c)
             if sv_blind:
                 # Still blind *now*: the environment being returned is the
                 # collapsed one, so the strong diagnosis below applies.
                 collapsed_coords.add(c)
             if sv_blind or (
-                prev is not None
-                and not _spectrum_can_show_change(prev, max_rank=max_rank)
+                prev is not None and not _spectrum_can_show_change(prev, max_rank=_mr_c)
             ):
                 blind_coords.add(c)
             if prev is not None:
-                if float(_ctm_sv_diff(sv, prev, max_rank=max_rank)) >= conv_tol:
+                if float(_ctm_sv_diff(sv, prev, max_rank=_mr_c)) >= conv_tol:
                     converged = False
             else:
                 converged = False

@@ -259,15 +259,18 @@ def _run_ctm_loop_with_bump(
         else:
             have_prev_svs = bool(prev_svs)
             # #903 P1: rank 1 is a collapse only if more was reachable.
-            _mr = _forced_corner_rank(
-                max(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
-            )
+            # Per coordinate, not per cell (#903 review): a cell-wide
+            # aggregate fails open with `min` and wrongly closed with `max`.
+            _mr = {
+                c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2)
+                for c, A in site_tensors.items()
+            }
             converged = True
             max_diff = 0.0
             for c in sorted(envs):
                 sv = _corner_singular_values(envs[c].C1)
                 if c in prev_svs:
-                    diff = float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr))
+                    diff = float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr[c]))
                     max_diff = max(max_diff, diff)
                     if diff >= conv_tol:
                         converged = False

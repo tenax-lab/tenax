@@ -774,28 +774,34 @@ def test_the_exemption_needs_every_virtual_leg_to_be_trivial(dims, expected, why
 
 @pytest.mark.core
 @pytest.mark.parametrize(
-    "cell,exempt,why",
+    "cell",
     [
-        ({"a": (1, 1, 1, 1, 2), "b": (1, 1, 1, 1, 2)}, True, "every site trivial"),
-        ({"a": (1, 1, 1, 1, 2), "b": (4, 4, 4, 4, 2)}, False, "mixed cell: D=1 + D=4"),
-        ({"a": (4, 4, 4, 4, 2), "b": (1, 1, 1, 1, 2)}, False, "same, order swapped"),
-        ({"a": (1, 1, 1, 1, 2), "b": (1, 1, 4, 4, 2)}, False, "mixed + anisotropic"),
+        {"trivial": (1, 1, 1, 1, 2), "rich": (4, 4, 4, 4, 2)},
+        {"rich": (4, 4, 4, 4, 2), "trivial": (1, 1, 1, 1, 2)},
+        {"trivial": (1, 1, 1, 1, 2), "rich": (1, 1, 4, 4, 2)},
     ],
 )
-def test_a_multisite_cell_is_exempt_only_if_every_site_is_trivial(cell, exempt, why):
-    """Aggregate with ``max`` across sites, never ``min`` (#903 review, P1).
+def test_each_coordinate_of_a_mixed_cell_is_judged_on_its_own_site(cell):
+    """The bound is per coordinate, never per cell (#903 review).
 
-    The multisite loops took ``min`` over the cell.  ``ctm_multisite`` does not
-    require uniform bond dimensions, so one ``D=1`` site in a cell drove
-    ``max_rank`` to 1 for **every** coordinate, and a positive rank-one corner
-    at the nontrivial site was then read as informative -- the collapsed
-    environment this guard exists to reject, exiting early.
+    A cell-wide aggregate is wrong in **both** directions, and this PR shipped
+    each in turn:
 
-    This is the same error as the per-tensor one, one level up: there I read
-    ``indices[0]`` instead of the max over legs; here I took the min instead of
-    the max over sites.  Both make the bound describe the *most* trivial part
-    of the problem, when the exemption is only licensed by the *least*.  Order
-    is varied below because an aggregate that reads one position passes any
+    * ``min`` lets one trivial site exempt every corner, so a rank-one
+      spectrum at the *rich* coordinate is read as informative and the loop
+      exits on the collapsed environment -- **fails open**.
+    * ``max`` gives the rich site's bound to every corner, so the *trivial*
+      coordinate is blind on every sweep, the loop can never certify it, and
+      it exhausts ``max_iter`` while emitting the strong collapsed-environment
+      warning -- fails closed, but wrongly.
+
+    ``ctm_multisite`` does not require uniform bond dimensions, so both are
+    reachable on supported input.  Reachable rank is a property of the site
+    sitting at a coordinate, so both halves are asserted **in the same cell**:
+    the earlier aggregate-only test could not have caught either failure,
+    because it never looked at an individual coordinate.
+
+    Cell order is varied because a bound that reads one position passes any
     fixture that happens to order the cell favourably.
     """
     from tenax.algorithms._ctm_tensor_convergence import (
@@ -804,11 +810,20 @@ def test_a_multisite_cell_is_exempt_only_if_every_site_is_trivial(cell, exempt, 
     )
 
     sites = {k: _FakeTensor(d, ("u", "d", "l", "r", "phys")) for k, d in cell.items()}
-    bound = _forced_corner_rank(
-        max(_max_virtual_bond_dim(A) ** 2 for A in sites.values())
-    )
+    bounds = {
+        c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2) for c, A in sites.items()
+    }
     sv = jnp.asarray([1.0, 0.0, 0.0, 0.0])
-    got = bool(jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=bound)))
-    assert got is exempt, (
-        f"{why}: exemption should be {exempt} but bound={bound} gave {got}"
+
+    exempt = {
+        c: bool(jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=b)))
+        for c, b in bounds.items()
+    }
+    assert exempt["trivial"] is True, (
+        f"the D=1 coordinate is an exact fixed point and must certify; "
+        f"bounds={bounds} -- a cell-wide max would make it blind forever"
+    )
+    assert exempt["rich"] is False, (
+        f"the nontrivial coordinate must stay fail-closed; bounds={bounds} -- "
+        f"a cell-wide min would let the trivial site exempt it"
     )

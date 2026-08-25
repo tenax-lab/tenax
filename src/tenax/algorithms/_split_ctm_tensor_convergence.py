@@ -670,9 +670,17 @@ def _split_ctm_multisite(
     envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
     prev_svs: dict[Coord, jax.Array] = {}
     # #903 P1: rank 1 is a collapse only if more was reachable.
-    _mr2 = _forced_corner_rank(
-        max(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
-    )
+    # Per coordinate, not per cell (#903 review).  A cell-wide aggregate is
+    # wrong in both directions: `min` lets one trivial site exempt every
+    # corner (fails open), and `max` makes a legitimate D=1 coordinate blind
+    # on every sweep so the loop can never certify it (fails closed, but
+    # wrongly).  The reachable rank is a property of the site sitting at that
+    # coordinate, so it is computed there.  Built before the loop and outside
+    # every branch.
+    _mr2 = {
+        c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2)
+        for c, A in site_tensors.items()
+    }
     for _ in range(max_iter):
         envs = _split_ctm_sweep_multisite(
             envs, site_tensors, bars, neighbors, chi, chi_I, renormalize, recipe
@@ -681,7 +689,7 @@ def _split_ctm_multisite(
         for c in sorted(envs):
             sv = _corner_singular_values(envs[c].C1)
             if c in prev_svs:
-                if float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr2)) >= conv_tol:
+                if float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr2[c])) >= conv_tol:
                     converged = False
             else:
                 converged = False

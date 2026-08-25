@@ -1041,9 +1041,17 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
     # here, above the loop and outside every branch -- the previous round
     # assigned an equivalent inside one arm of a conditional and every call
     # through the other arm raised UnboundLocalError.
-    _mr = _forced_corner_rank(
-        max(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
-    )
+    # Per coordinate, not per cell (#903 review).  A cell-wide aggregate is
+    # wrong in both directions: `min` lets one trivial site exempt every
+    # corner (fails open), and `max` makes a legitimate D=1 coordinate blind
+    # on every sweep so the loop can never certify it (fails closed, but
+    # wrongly).  The reachable rank is a property of the site sitting at that
+    # coordinate, so it is computed there.  Built before the loop and outside
+    # every branch.
+    _mr = {
+        c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2)
+        for c, A in site_tensors.items()
+    }
 
     for i in range(config.max_iter):
         envs_old = envs if use_sigma else None
@@ -1100,7 +1108,7 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
                 sv = _dense_svd(envs[c].C1.todense(), compute_uv=False)
                 if c in prev_svs:
                     if (
-                        float(_ctm_sv_diff_local(sv, prev_svs[c], max_rank=_mr))
+                        float(_ctm_sv_diff_local(sv, prev_svs[c], max_rank=_mr[c]))
                         >= config.conv_tol
                     ):
                         converged = False
