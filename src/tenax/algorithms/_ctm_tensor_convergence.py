@@ -584,6 +584,13 @@ def _ctm_sv_diff(
         sv_new, max_rank=max_rank
     ) | _spectrum_is_uninformative(sv_old, max_rank=max_rank)
     n = max(sv_new.shape[0], sv_old.shape[0])
+    if n == 0:
+        # Both empty: a ``SymmetricTensor`` corner with no populated blocks
+        # returns an empty spectrum, and if that persists across sweeps the
+        # reduction below raises on an empty array *before* the ``jnp.where``
+        # can return the fail-closed value (#903 review).  Shapes are static,
+        # so this branch is safe under tracing.
+        return jnp.asarray(jnp.inf)
     sv_new = jnp.pad(sv_new, (0, n - sv_new.shape[0]))
     sv_old = jnp.pad(sv_old, (0, n - sv_old.shape[0]))
     sv1 = sv_new / (jnp.sum(sv_new) + 1e-15)
@@ -701,7 +708,14 @@ def _spectrum_is_uninformative(
     if sv.shape[0] == 0:
         return jnp.asarray(True)
     top = sv[0]
-    healthy = jnp.isfinite(top) & (top > 0.0)
+    # EVERY element, not just the leading one (#903 review, P1).  A block-sparse
+    # corner can go non-finite in one block while others stay healthy, giving
+    # e.g. ``[1, 0.5, nan]``.  Checking ``sv[0]`` alone calls that informative,
+    # ``_ctm_sv_diff`` then returns NaN, and the Python loops compare
+    # ``diff >= conv_tol`` -- which is **False** for NaN -- so the corrupted
+    # environment is silently certified.  Failing closed requires the whole
+    # spectrum to be finite.
+    healthy = jnp.all(jnp.isfinite(sv)) & (top > 0.0)
     rank = jnp.sum(sv > tol * top)
     informative = healthy & (rank > 1)
     if max_rank is not None:

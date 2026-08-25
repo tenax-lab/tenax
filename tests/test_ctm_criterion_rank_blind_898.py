@@ -827,3 +827,60 @@ def test_each_coordinate_of_a_mixed_cell_is_judged_on_its_own_site(cell):
         f"the nontrivial coordinate must stay fail-closed; bounds={bounds} -- "
         f"a cell-wide min would let the trivial site exempt it"
     )
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "sv,uninformative,why",
+    [
+        ([1.0, 0.5, float("nan")], True, "NaN in the tail, healthy leading value"),
+        ([1.0, 0.5, float("inf")], True, "inf in the tail"),
+        ([1.0, float("nan"), 0.25], True, "NaN in the middle"),
+        ([1.0, 0.5, 0.25], False, "wholly finite: unchanged"),
+    ],
+)
+def test_a_non_finite_value_anywhere_fails_closed(sv, uninformative, why):
+    """Every element must be finite, not just ``sv[0]`` (#903 review, P1).
+
+    A block-sparse corner can go non-finite in one block while the others stay
+    healthy, so ``[1, 0.5, nan]`` reaches the criterion with a perfectly good
+    leading value.  Checking ``sv[0]`` alone called that informative;
+    ``_ctm_sv_diff`` then returned **NaN**, and the Python loops compare
+    ``diff >= conv_tol``, which is ``False`` for NaN.  The corrupted
+    environment was therefore certified as converged -- silently, and by the
+    guard whose entire purpose is to refuse exactly that.
+
+    NaN is the dangerous case precisely because it is not "large": every
+    ordering comparison against it is false, so it passes any threshold test
+    written the natural way.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import _spectrum_is_uninformative
+
+    got = bool(_spectrum_is_uninformative(jnp.asarray(sv)))
+    assert got is uninformative, f"{why}: expected {uninformative}, got {got}"
+
+    if uninformative:
+        healthy = jnp.asarray([1.0, 0.5, 0.25])
+        diff = _ctm_sv_diff(jnp.asarray(sv), healthy)
+        assert jnp.isinf(diff), (
+            f"{why}: the comparison must fail closed with inf, not NaN -- "
+            f"`diff >= conv_tol` is False for NaN, which certifies: got {diff}"
+        )
+
+
+@pytest.mark.core
+def test_two_empty_spectra_fail_closed_instead_of_raising():
+    """An empty block-sparse corner must exhaust the budget, not crash (#903).
+
+    ``_corner_singular_values`` returns an empty array when a
+    ``SymmetricTensor`` corner has no populated blocks.  If that persists
+    across consecutive sweeps both arguments are empty, and the reduction
+    inside ``_ctm_sv_diff`` raised on the empty array *before* the guard could
+    return its fail-closed value -- turning a diagnosable non-convergence into
+    a `ValueError` from inside the criterion.
+    """
+    empty = jnp.asarray([])
+    diff = _ctm_sv_diff(empty, empty)
+    assert jnp.isinf(diff), f"expected inf, got {diff}"
+    # And the mixed case still fails closed rather than comparing lengths.
+    assert jnp.isinf(_ctm_sv_diff(empty, jnp.asarray([1.0, 0.5])))
