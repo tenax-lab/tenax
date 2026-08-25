@@ -1035,7 +1035,7 @@ def _ctm_tensor_multisite(
     prev_svs: dict[Coord, jax.Array] = {}
     blind_coords: set[Coord] = set()
     max_rank = _forced_corner_rank(
-        min(_max_virtual_bond_dim(dl) for dl in double_layers.values())
+        max(_max_virtual_bond_dim(dl) for dl in double_layers.values())
     )
     for _ in range(max_iter):
         envs, _, _ = _ctm_tensor_sweep_multisite(

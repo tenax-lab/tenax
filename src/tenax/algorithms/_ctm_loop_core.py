@@ -260,7 +260,7 @@ def _run_ctm_loop_with_bump(
             have_prev_svs = bool(prev_svs)
             # #903 P1: rank 1 is a collapse only if more was reachable.
             _mr = _forced_corner_rank(
-                min(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
+                max(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
             )
             converged = True
             max_diff = 0.0

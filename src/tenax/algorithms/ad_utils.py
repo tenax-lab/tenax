@@ -1042,7 +1042,7 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
     # assigned an equivalent inside one arm of a conditional and every call
     # through the other arm raised UnboundLocalError.
     _mr = _forced_corner_rank(
-        min(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
+        max(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
     )
 
     for i in range(config.max_iter):

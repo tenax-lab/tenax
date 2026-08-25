@@ -770,3 +770,45 @@ def test_the_exemption_needs_every_virtual_leg_to_be_trivial(dims, expected, why
         f"{why}: rank-1 exemption should be {expected == 1} but bound={bound} "
         f"gave {exempt}"
     )
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "cell,exempt,why",
+    [
+        ({"a": (1, 1, 1, 1, 2), "b": (1, 1, 1, 1, 2)}, True, "every site trivial"),
+        ({"a": (1, 1, 1, 1, 2), "b": (4, 4, 4, 4, 2)}, False, "mixed cell: D=1 + D=4"),
+        ({"a": (4, 4, 4, 4, 2), "b": (1, 1, 1, 1, 2)}, False, "same, order swapped"),
+        ({"a": (1, 1, 1, 1, 2), "b": (1, 1, 4, 4, 2)}, False, "mixed + anisotropic"),
+    ],
+)
+def test_a_multisite_cell_is_exempt_only_if_every_site_is_trivial(cell, exempt, why):
+    """Aggregate with ``max`` across sites, never ``min`` (#903 review, P1).
+
+    The multisite loops took ``min`` over the cell.  ``ctm_multisite`` does not
+    require uniform bond dimensions, so one ``D=1`` site in a cell drove
+    ``max_rank`` to 1 for **every** coordinate, and a positive rank-one corner
+    at the nontrivial site was then read as informative -- the collapsed
+    environment this guard exists to reject, exiting early.
+
+    This is the same error as the per-tensor one, one level up: there I read
+    ``indices[0]`` instead of the max over legs; here I took the min instead of
+    the max over sites.  Both make the bound describe the *most* trivial part
+    of the problem, when the exemption is only licensed by the *least*.  Order
+    is varied below because an aggregate that reads one position passes any
+    fixture that happens to order the cell favourably.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import (
+        _forced_corner_rank,
+        _max_virtual_bond_dim,
+    )
+
+    sites = {k: _FakeTensor(d, ("u", "d", "l", "r", "phys")) for k, d in cell.items()}
+    bound = _forced_corner_rank(
+        max(_max_virtual_bond_dim(A) ** 2 for A in sites.values())
+    )
+    sv = jnp.asarray([1.0, 0.0, 0.0, 0.0])
+    got = bool(jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=bound)))
+    assert got is exempt, (
+        f"{why}: exemption should be {exempt} but bound={bound} gave {got}"
+    )

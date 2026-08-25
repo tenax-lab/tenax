@@ -671,7 +671,7 @@ def _split_ctm_multisite(
     prev_svs: dict[Coord, jax.Array] = {}
     # #903 P1: rank 1 is a collapse only if more was reachable.
     _mr2 = _forced_corner_rank(
-        min(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
+        max(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
     )
     for _ in range(max_iter):
         envs = _split_ctm_sweep_multisite(

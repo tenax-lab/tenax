@@ -361,7 +361,7 @@ def ctm_2site(
     # See ``ctm`` above (#903 review, P1).  Both sublattices share one bound:
     # the smaller, so neither is certified on the other's headroom.
     max_rank = _forced_corner_rank(
-        min(_max_virtual_bond_dim(a_A), _max_virtual_bond_dim(a_B))
+        max(_max_virtual_bond_dim(a_A), _max_virtual_bond_dim(a_B))
     )
 
     # Carry: (env_A, env_B, prev_sv_A, prev_sv_B, iteration, converged, diff)
