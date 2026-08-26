@@ -8,6 +8,8 @@ all three forward CTM paths (#514).
 
 from __future__ import annotations
 
+import math
+
 __all__ = [
     "CTMLoopResult",
     "_run_ctm_loop_with_bump",
@@ -255,7 +257,11 @@ def _run_ctm_loop_with_bump(
             converged = max_diff < conv_tol
             final_diff = max_diff
             prev_envs = {c: envs[c] for c in envs}
-            plateau_metric_valid = True
+            # Same rule on the elementwise metric: a NaN leaf makes ``max_diff``
+            # non-finite, and ``inf < best_diff`` is False just as
+            # ``nan < best_diff`` is, so both would silently count as
+            # "no improvement" and burn the patience budget.
+            plateau_metric_valid = math.isfinite(max_diff)
         else:
             have_prev_svs = bool(prev_svs)
             # #903 P1: rank 1 is a collapse only if more was reachable.
@@ -279,7 +285,19 @@ def _run_ctm_loop_with_bump(
                 prev_svs[c] = sv
             if have_prev_svs:
                 final_diff = max_diff
-                plateau_metric_valid = True
+                # #903 review P1: a blind corner makes ``_ctm_sv_diff`` return
+                # ``inf``, which is the criterion refusing to certify -- NOT a
+                # measurement that the environment stopped improving.  Feeding
+                # it to the plateau counter reads "no improvement" every sweep,
+                # so ``iters_since_best`` reaches ``plateau_patience`` and the
+                # loop bails with the collapsed environment it was supposed to
+                # keep sweeping past.  #898's own fixture recovers at sweep 41
+                # and the default patience is 20, so the bail fires first and
+                # the fix defeats itself.
+                #
+                # An unmeasurable sweep is ineligible, not unimproved: the
+                # budget runs on and ``max_iter`` decides.
+                plateau_metric_valid = math.isfinite(max_diff)
 
         if converged:
             return CTMLoopResult(

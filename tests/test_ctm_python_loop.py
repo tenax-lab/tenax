@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -320,6 +322,44 @@ class TestPlateauPatience:
         assert info_none.iterations == info_huge.iterations == max_iter
         assert not info_none.converged
         assert not info_huge.converged
+
+    def test_a_blind_comparison_does_not_burn_the_patience_budget(self):
+        """An unmeasurable sweep is ineligible, not unimproved (#903 review P1).
+
+        A blind corner makes ``_ctm_sv_diff`` return ``inf`` — the criterion
+        refusing to certify, which is #898's whole point. But ``inf <
+        best_diff`` is False exactly as a genuine non-improvement is, so
+        feeding it to the plateau counter reads "stuck" on every sweep and
+        bails after ``plateau_patience``. That defeats the fix it belongs to:
+        #898's own fixture reaches its fixed point at sweep 41 and the default
+        patience is 20, so the bail fires first and hands back the collapsed
+        environment the guard exists to keep sweeping past.
+
+        ``chi=1`` with ``D>1`` is the cheap way to hold a corner blind on every
+        sweep — a 1x1 corner sum-normalises to ``[1]`` however the environment
+        moves — and ``_forced_corner_rank`` deliberately ignores ``chi``, so
+        this is blindness rather than a licensed rank-one fixed point.
+        """
+        A = _make_random_A(D=2, key=jax.random.PRNGKey(3))
+        max_iter, patience = 24, 4
+        _, info = python_loop_ctm_converge(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            chi=1,
+            max_iter=max_iter,
+            min_iter=2,
+            conv_tol=1e-12,
+            conv_method="sv",
+            renormalize=True,
+            projector_method="svd",
+            plateau_patience=patience,
+        )
+        # The budget decides, not the patience counter.
+        assert info.iterations == max_iter, info
+        assert not info.converged, info
+        # And the criterion really was blind throughout -- otherwise this
+        # passes for the unrelated reason that the metric kept improving.
+        assert not math.isfinite(info.sv_diff), info.sv_diff
 
     def test_iterations_counts_sweeps_actually_run(self, monkeypatch):
         """``iterations`` is the sweep count performed, not the best-metric index.
