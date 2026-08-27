@@ -375,30 +375,93 @@ def _heisenberg_D2_2site_energy(chi, projector_method, max_iter=200):
     return float(compute_energy_ctm_tensor_2site(A, B, env_A, env_B, gate_dense, d=2))
 
 
+#: The converged energy of ``_build_physical_state_heisenberg_D2_2site``'s cell,
+#: from ``recipe="2x2"``, which reaches an actual fixed point on it: identical to
+#: 1e-13 across chi=6/8/10/16/24 and across max_iter=100/200/400.  This is the
+#: number the 1x1 limit cycle orbits *around* -- it is not reachable by 1x1 at
+#: any budget, which is the whole of #901.
+_E_2SITE_TRUE = -0.6590003658935
+
+#: How far the ``recipe="1x1"`` limit cycle wanders from ``_E_2SITE_TRUE``.
+#: Measured 4e-3 to 1.1e-2 over chi=4..24 for BOTH projectors (#901).  The guard
+#: below uses 2e-2 -- above the cycle, far below a real QR failure (O(1e-1)).
+_1X1_CYCLE_BAND = 2e-2
+
+
 @pytest.mark.algorithm
 @pytest.mark.parametrize("chi", [6, 10])
-def test_reduced_qr_energy_matches_eigh_2site_heisenberg_D2(chi):
-    e_eigh = _heisenberg_D2_2site_energy(chi=chi, projector_method="eigh")
-    e_qr = _heisenberg_D2_2site_energy(chi=chi, projector_method="qr")
-    assert abs(e_qr - e_eigh) < 1e-3  # different scheme, same physics
+def test_2site_1x1_still_limit_cycles_so_qr_vs_eigh_stays_unanswerable(chi):
+    """#901: the QR-vs-eigh comparison this file wants cannot be made here yet.
+
+    The original assertion was ``|E_qr - E_eigh| < 1e-3``.  It compared two
+    numbers that are **both** points on a limit cycle: ``recipe="1x1"`` on a
+    non-C4v 2-site cell has inequivalent directional moves and never reaches a
+    fixed point, for *either* projector.  The disagreement it measured was the
+    cycle amplitude (~6e-3, no chi trend), not a difference between the schemes.
+    The 1e-3 threshold was inherited from the single-site test, where the
+    measured agreement is ~1e-13; it was never re-measured here.
+
+    It cannot be repaired by switching to ``recipe="2x2"`` -- the obvious move,
+    and the one this issue originally recommended.  ``projector_method`` is
+    *not consulted* on the 2x2 path (``_ctm_tensor_convergence.py:298``; the 2x2
+    path always uses Fishman SVD), so all three methods return bit-identical
+    energies there.  That would make the test green and permanently vacuous,
+    which is the defect it exists to prevent.
+
+    So this asserts the **regime** instead, which is a real property and the
+    thing that has to change before the comparison becomes possible:
+
+    * the 1x1 path does not converge on this cell -- and now says so;
+    * both projectors nonetheless stay in the cycle band around the true
+      energy, which is what a gross QR regression would break.
+
+    **When this test fails, that is the good news**: it means ``recipe="1x1"``
+    has started converging on an asymmetric cell (#425/#426), and the real
+    comparison -- ``|E_qr - E_eigh|``, with a tolerance measured at that point,
+    not inherited -- should be restored in its place.
+    """
+    for method in ("eigh", "qr"):
+        with pytest.warns(UserWarning, match="did not converge"):
+            e = _heisenberg_D2_2site_energy(chi=chi, projector_method=method)
+        # Not a fixed point, but not diverging either: it orbits the true value.
+        assert abs(e - _E_2SITE_TRUE) < _1X1_CYCLE_BAND, (
+            f"{method} at chi={chi}: E={e} is {abs(e - _E_2SITE_TRUE):.3e} from "
+            f"the 2x2 fixed point {_E_2SITE_TRUE}, outside the known 1x1 cycle "
+            f"band {_1X1_CYCLE_BAND}. Either the cycle got worse or the "
+            f"projector regressed -- both are real and neither is #901."
+        )
 
 
 @pytest.mark.algorithm
-def test_reduced_qr_2site_energy_gap_shrinks_with_chi():
-    g6 = abs(
-        _heisenberg_D2_2site_energy(6, "qr") - _heisenberg_D2_2site_energy(6, "eigh")
+def test_2x2_ignores_projector_method_so_it_cannot_host_this_comparison():
+    """Pins the constraint that makes the test above the only option (#901).
+
+    If ``projector_method`` ever *is* honoured on the 2x2 path, this fails --
+    and at that point the QR-vs-eigh comparison should move there, where the
+    energy is a fixed point to 1e-13 and a tight measured tolerance means
+    something.  Without this, the next person to look at #901 re-derives the
+    withdrawn recommendation from scratch, as I did.
+    """
+    A, B, gate_dense = _build_physical_state_heisenberg_D2_2site()
+    energies = {}
+    for method in ("svd", "eigh", "qr"):
+        env_A, env_B = ctm_tensor_2site(
+            A,
+            B,
+            chi=6,
+            max_iter=100,
+            conv_tol=1e-10,
+            projector_method=method,
+            qr_warmup_steps=6,
+            recipe="2x2",
+        )
+        energies[method] = float(
+            compute_energy_ctm_tensor_2site(A, B, env_A, env_B, gate_dense, d=2)
+        )
+    assert energies["svd"] == energies["eigh"] == energies["qr"], (
+        "2x2 now distinguishes projector_method: "
+        f"{energies}. Move the QR-vs-eigh comparison here (see #901)."
     )
-    g10 = abs(
-        _heisenberg_D2_2site_energy(10, "qr") - _heisenberg_D2_2site_energy(10, "eigh")
-    )
-    # g6/g10 sit at the QR-vs-eigh noise floor (~1e-6..1e-4, set by SVD/QR gauge
-    # plus platform BLAS reassociation) — three orders below the 1e-3 agreement
-    # asserted in test_reduced_qr_energy_matches_eigh_2site_*. At that floor the
-    # gap is NOT strictly monotonic in chi: Linux gives g6 > g10, macOS Accelerate
-    # gives g10 > g6 (≈3e-5), so the old ``g10 <= g6 + 1e-9`` was red on macOS CI.
-    # Assert the gap stays at the noise floor at the larger chi rather than
-    # demanding bit-strict shrinkage; a genuine QR divergence would be O(1e-2+).
-    assert g10 <= max(g6, 5e-4)
 
 
 def _build_single_site_dense(D: int = 2, d: int = 2, seed: int = 0) -> DenseTensor:
@@ -885,6 +948,27 @@ def _short_optimize(gs_recipe, gs_projector_method, steps=5):
 
 
 @pytest.mark.algorithm
+@pytest.mark.xfail(
+    reason=(
+        "#858, surfaced here by #844 -- a REAL optimizer failure, not a "
+        "harness artifact, and deliberately left failing rather than retuned. "
+        "The run now STARTS at e0=-0.65943 (essentially the converged answer; "
+        "cf. the 2x2 reference -0.65900) and 5 Adam steps drive it UP to "
+        "ef=-0.52262, an ascent of +0.1368. Before #844 changed the fixture "
+        "state it started at -0.51363 and ended at -0.65949, so the same "
+        "ascent read as a descent purely because the starting point was "
+        "garbage; the assertion passed for the wrong reason for months. The "
+        "cause is visible in the run: 'adjoint solve did not converge "
+        "(relative residual 4.496e-01)' plus non-PSD RDMs at -0.0316 and "
+        "-0.113 -- the C4v D=2 adjoint divergence of #858. The gradient is "
+        "wrong by roughly the residual, so the optimizer is walking uphill on "
+        "a direction that is not the gradient. Fixing this means fixing #858, "
+        "not touching this file. strict=True on purpose: the ascent is 0.1368, "
+        "far outside any BLAS variation, so if this ever passes the adjoint "
+        "has genuinely been repaired and the xfail must come off."
+    ),
+    strict=True,
+)
 def test_optimize_gs_ad_qr_1x1_converges():
     """A short optimize_gs_ad run with gs_recipe='1x1' + gs_projector_method='qr'
     decreases the energy, stays finite, and reaches the physical Heisenberg
