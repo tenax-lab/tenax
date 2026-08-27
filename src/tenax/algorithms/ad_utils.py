@@ -56,6 +56,12 @@ from tenax.algorithms._ctm_tensor import (
 from tenax.algorithms._ctm_tensor import (
     _ctm_sv_diff as _ctm_sv_diff_tensor,
 )
+from tenax.algorithms._ctm_tensor import (
+    _forced_corner_rank as _forced_corner_rank,
+)
+from tenax.algorithms._ctm_tensor import (
+    _max_virtual_bond_dim as _max_virtual_bond_dim,
+)
 from tenax.algorithms._split_ctm_tensor import (
     _split_ctm_tensor_sweep,
     ctm_split_tensor,
@@ -511,9 +517,19 @@ def _needs_paired_sweep(A) -> bool:
     return has_nontrivial and all_same
 
 
-def _ctm_sv_diff_local(sv_new, sv_old):
-    """Compute max abs diff between normalized SVs."""
-    return _ctm_sv_diff_tensor(sv_new, sv_old)
+def _ctm_sv_diff_local(sv_new, sv_old, max_rank=None):
+    """Compute max abs diff between normalized SVs.
+
+    ``max_rank`` is forwarded rather than dropped: this wrapper is a production
+    caller of the guarded criterion, and swallowing the argument would leave
+    the AD path returning ``inf`` on every identical rank-one comparison, so a
+    ``D=1`` product state would burn ``config.max_iter`` on each forward
+    evaluation instead of recognising an exact fixed point (#903 review).
+
+    The alias on the import above is why this site was missed twice: a grep for
+    ``_ctm_sv_diff(`` does not match ``_ctm_sv_diff_tensor(``.
+    """
+    return _ctm_sv_diff_tensor(sv_new, sv_old, max_rank=max_rank)
 
 
 def _flatten_envs(envs):
@@ -1020,6 +1036,22 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
     use_phase = gauge_mode == "phase"
     prev_svs = {}
     prev_env_arrays = {}
+    # #903 P1: rank 1 is a collapse only when the *state* could carry more, so
+    # a D=1 product state certifies instead of burning the budget.  Defined
+    # here, above the loop and outside every branch -- the previous round
+    # assigned an equivalent inside one arm of a conditional and every call
+    # through the other arm raised UnboundLocalError.
+    # Per coordinate, not per cell (#903 review).  A cell-wide aggregate is
+    # wrong in both directions: `min` lets one trivial site exempt every
+    # corner (fails open), and `max` makes a legitimate D=1 coordinate blind
+    # on every sweep so the loop can never certify it (fails closed, but
+    # wrongly).  The reachable rank is a property of the site sitting at that
+    # coordinate, so it is computed there.  Built before the loop and outside
+    # every branch.
+    _mr = {
+        c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2)
+        for c, A in site_tensors.items()
+    }
 
     for i in range(config.max_iter):
         envs_old = envs if use_sigma else None
@@ -1075,7 +1107,10 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
             for c in sorted(envs):
                 sv = _dense_svd(envs[c].C1.todense(), compute_uv=False)
                 if c in prev_svs:
-                    if float(_ctm_sv_diff_local(sv, prev_svs[c])) >= config.conv_tol:
+                    if (
+                        float(_ctm_sv_diff_local(sv, prev_svs[c], max_rank=_mr[c]))
+                        >= config.conv_tol
+                    ):
                         converged = False
                 else:
                     converged = False

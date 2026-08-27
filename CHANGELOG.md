@@ -206,6 +206,77 @@
 
 ### Fixed
 
+- **The CTM convergence criterion no longer certifies a collapsed
+  environment** (#898). `_ctm_sv_diff` compares the corner spectrum
+  *normalised by its sum*. That normalisation is deliberate — under
+  `renormalize=True` the absolute corner scale is meaningless — but it also
+  means a **rank-1** spectrum normalises to `[1, 0, ..., 0]` whatever the
+  environment is doing. Two completely different environments then compared
+  equal, so every loop testing it against `conv_tol` exited on sweep 2 or 3 and
+  reported success.
+
+  Measured on a collapsing 2-site fixture: the returned energy was
+  bit-identical at `max_iter` 60/120/300/400/800, `conv_tol` 1e-9/1e-12/1e-14
+  **and** `chi` 8/12/24/48 — sitting **8.8e-3 above** the fixed point the same
+  loop reaches by sweep 41. There was no knob a caller could turn to notice,
+  and nothing warned.
+
+  The criterion now returns **`inf`** when either spectrum has numerical rank
+  ≤ 1. That is the honest value rather than a sentinel: on a rank-1 corner the
+  true difference between the two environments is genuinely *unbounded*,
+  because the normalised spectrum carries no information about them.
+
+  **The guard went into the criterion rather than the call sites, because there
+  are nine of them** — `_ctm_tensor_convergence` (×2),
+  `_split_ctm_tensor_convergence` (×2), `_ctm_tensor_c4v`,
+  `_ctm_tensor_c4v_reference_ad`, `ipeps_ctm_convergence` (×3), `ad_utils` and
+  `_ctm_loop_core` all share the identical `compare against conv_tol → certify`
+  pattern. Every one now fails closed with no change at the call site,
+  including the one inside `jax.lax.while_loop` (which is why the predicate is
+  written in `jnp` and returns an array). A tenth loop inherits the guard
+  instead of re-acquiring the bug — the #828/#829 duplicate-implementation
+  lesson applied up front.
+
+  **That lesson had to be applied once more before the claim above was true.**
+  `ipeps_ctm_convergence` did not share the criterion — it defined its own
+  copy of `_ctm_sv_diff`, without the rank test — and that copy is the one the
+  **public** path ran: `ipeps()` imports `ctm_2site` from there
+  (`ipeps.py:30`, called at `:462`). So the first version of this fix guarded
+  the tensor loops while every `ipeps()` call kept comparing `[1, 0, ..., 0]`
+  against `[1, 0, ..., 0]` and exiting early — a fix that leaves the production
+  path broken, which is worse than no fix because the closed issue stops anyone
+  looking. The duplicate now imports the guarded implementation, and two tests
+  pin it: one asserts object identity (a fresh unguarded copy returns the same
+  number as the guarded one on every input *except* the collapsed ones, so a
+  value assertion would not catch the regression), the other pins the routing
+  that makes the first one load-bearing.
+
+  After the fix the budget means something again: 4 / 12 / 30 sweeps give
+  −0.428341 / −0.433246 / −0.433290, i.e. 30 sweeps lands within 1e-9 of the
+  true fixed point. `_ctm_tensor_multisite` also warns, naming the collapsed
+  coordinate, since it is the only place that knows the budget ran out rather
+  than the criterion being satisfied.
+
+  **Inert on healthy states**, which is the constraint that shaped it: a
+  physical state has full-rank corners (measured 6/6 at χ=8), still exits early,
+  still emits nothing, and `_ctm_sv_diff` returns bit-identically what it did
+  before. Two regimes are pinned by test so they cannot be "tidied" away: the
+  `+1e-15` denominator guard leaves a scale-dependent residue of about
+  `1e-15/min(scale)` rather than an exact zero, and below that guard the
+  criterion already failed *closed* (~1.0), which is the safe direction.
+
+  **What happens to the two red tests that surfaced it** — measured on CI, not
+  predicted. `test_ctm_direction_dependent_bonds` now **passes** on
+  ubuntu-3.12 and macOS-3.12: once the criterion stops certifying the collapsed
+  corner, the loop reaches the real fixed point and the symmetric and dense
+  paths agree. `test_ctm_670_symmetric_2x2` still fails, and the reason is worth
+  stating precisely — it now computes **−0.4332902680573903**, which is the true
+  fixed point recorded above (30 sweeps → −0.433290), against a frozen
+  expectation of `−0.5421160718`, which is the *pre-fix collapsed* value. That
+  test is therefore failing because it froze the bug, not because the bug
+  survives; re-freezing it needs the sweep-count scan #836 requires and is left
+  to its own change.
+
 - **The root-implicit adjoint no longer compiles its operator into a loop
   body** (#731). The symmetric engine peaked at **8.63 GB** of host RAM for a
   single gradient at `D=2, χ=4` — the smallest case there is — against
