@@ -1030,6 +1030,16 @@ def _ctm_tensor_multisite(
     double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
     envs = {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
 
+    # #910 review: capture the caller's budget *here*, above the QR warm-up.
+    # The warm-up rewrites ``max_iter`` to the remainder
+    # (``max_iter = max_iter - warmup``), so reading it after the loop quoted a
+    # number the caller never passed -- with ``qr_warmup_steps=6``, a caller
+    # passing ``max_iter=40`` was told it "ran the full max_iter=34 sweeps".
+    # That matters because the message's own advice is "Raise max_iter", which
+    # is unactionable against a value that is not the parameter.  The warm-up
+    # sweeps do run, so the caller's total is also the honest sweep count.
+    budget = max_iter
+
     # QR warm-up: run a few eigh iterations before switching to QR
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
@@ -1059,6 +1069,20 @@ def _ctm_tensor_multisite(
         c: _forced_corner_rank(_max_virtual_bond_dim(dl))
         for c, dl in double_layers.items()
     }
+    # #901: assigned before the loop, not inside it.  Everything below the
+    # loop reads them, and a zero-iteration budget would otherwise raise
+    # ``UnboundLocalError`` from the reporting path rather than return.
+    converged = False
+    final_diff = float("inf")
+    # #910 review P2: the criterion is a property of a *pair* of spectra, so it
+    # does not exist until two sweeps have been compared.  ``sweep_diff`` starts
+    # at 0.0 and is only raised by an actual comparison, so on a budget with one
+    # measured sweep every ``prev`` is None, nothing is computed, and assigning
+    # it anyway made the warning report "final criterion 0" -- a perfectly
+    # converged number -- in the same breath as saying conv_tol was not reached.
+    # Reachable two ways: ``max_iter=1``, and any QR warm-up that leaves exactly
+    # one measured sweep (``max_iter=7, qr_warmup_steps=6``).
+    ever_measured = False
     for _ in range(max_iter):
         envs, _, _ = _ctm_tensor_sweep_multisite(
             envs,
@@ -1071,6 +1095,7 @@ def _ctm_tensor_multisite(
             recipe=recipe,
         )
         converged = True
+        sweep_diff = 0.0
         # Rebuilt each sweep rather than accumulated, and keyed on the whole
         # comparison rather than on the current spectrum alone.
         #
@@ -1112,11 +1137,19 @@ def _ctm_tensor_multisite(
             ):
                 blind_coords.add(c)
             if prev is not None:
-                if float(_ctm_sv_diff(sv, prev, max_rank=_mr_c)) >= conv_tol:
+                d = float(_ctm_sv_diff(sv, prev, max_rank=_mr_c))
+                sweep_diff = max(sweep_diff, d)
+                ever_measured = True
+                if d >= conv_tol:
                     converged = False
             else:
                 converged = False
             prev_svs[c] = sv
+        # Only overwrite the reported criterion once a comparison has actually
+        # produced one; otherwise ``final_diff`` keeps its ``inf``, which is what
+        # the zero-measured-sweep case already reports.
+        if ever_measured:
+            final_diff = sweep_diff
         if converged:
             break
 
@@ -1127,6 +1160,36 @@ def _ctm_tensor_multisite(
         warnings.warn(
             _blind_corner_message(blind_coords, collapsed_coords),
             RuntimeWarning,
+            stacklevel=2,
+        )
+    elif not converged:
+        # #901.  The blind branch above covers a criterion that could not
+        # *see*; this covers one that saw fine and never settled -- full-rank
+        # corners on a genuine limit cycle.  That case returned **silently**,
+        # which is how a 2-site ``recipe="1x1"`` cycle of ~6e-3 amplitude sat
+        # underneath a passing ``|E_qr - E_eigh| < 1e-3`` assertion for weeks:
+        # nothing in the call chain said the number was not a fixed point.
+        # ``ipeps()`` already warns in exactly this situation, and the wording
+        # deliberately mirrors it -- same category, so a caller filtering one
+        # filters both.
+        criterion = (
+            f"final criterion {final_diff:.3g}"
+            if ever_measured
+            else (
+                "the criterion was never evaluated -- fewer than two corner "
+                "spectra were compared, so no measurement of it exists"
+            )
+        )
+        warnings.warn(
+            f"CTM did not converge in ctm_tensor_multisite(): ran the full "
+            f"max_iter={budget} sweeps at chi={chi} without reaching "
+            f"conv_tol={conv_tol:g} ({criterion}). The "
+            f"returned environment is not a fixed point and any observable "
+            f"read from it can move with max_iter -- on a limit cycle it will "
+            f"move without ever settling, so raising max_iter is not always a "
+            f"fix. Raise max_iter, or switch recipe: the 1x1 recipe does not "
+            f"converge on a non-C4v multisite cell (#425/#426/#901).",
+            UserWarning,
             stacklevel=2,
         )
 
