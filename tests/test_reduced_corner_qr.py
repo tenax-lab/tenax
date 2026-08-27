@@ -472,6 +472,56 @@ def test_nonconvergence_warning_quotes_the_budget_the_caller_actually_passed():
 
 
 @pytest.mark.algorithm
+@pytest.mark.parametrize(
+    ("kwargs", "label"),
+    [
+        ({"max_iter": 1, "projector_method": "svd"}, "one sweep, no warm-up"),
+        (
+            {"max_iter": 7, "projector_method": "qr", "qr_warmup_steps": 6},
+            "warm-up leaves exactly one measured sweep",
+        ),
+        (
+            {"max_iter": 6, "projector_method": "qr", "qr_warmup_steps": 6},
+            "warm-up consumes the whole budget",
+        ),
+    ],
+)
+def test_warning_never_reports_a_criterion_it_did_not_measure(kwargs, label):
+    """A criterion needs two spectra; with fewer, say so instead of printing 0.
+
+    ``sweep_diff`` starts at ``0.0`` and is only raised by an actual comparison,
+    so when every ``prev`` is ``None`` nothing is computed and it stays ``0.0``.
+    Assigning that to ``final_diff`` anyway made the warning read::
+
+        without reaching conv_tol=1e-10 (final criterion 0)
+
+    which claims a perfectly converged criterion in the same sentence as
+    reporting non-convergence -- and ``0`` is the *most* reassuring value it
+    could have printed, so the failure is in the direction that misleads.
+
+    The third case is the control: with zero measured sweeps the loop body never
+    runs, ``final_diff`` keeps its pre-loop ``inf``, and this was already
+    reported correctly.  The fix makes the one-measured-sweep cases agree with
+    it rather than making the zero case agree with them.
+    """
+    A, B, _gate = _build_physical_state_heisenberg_D2_2site()
+    with pytest.warns(UserWarning, match="did not converge") as caught:
+        ctm_tensor_2site(A, B, chi=6, conv_tol=1e-10, recipe="2x2", **kwargs)
+
+    msgs = [str(w.message) for w in caught if "ctm_tensor_multisite" in str(w.message)]
+    assert msgs, f"{label}: no ctm_tensor_multisite warning was emitted"
+    for m in msgs:
+        assert "criterion 0)" not in m, (
+            f"{label}: the warning reports 'criterion 0' -- a converged value -- "
+            f"while saying conv_tol was not reached: {m}"
+        )
+        assert "never evaluated" in m, (
+            f"{label}: fewer than two spectra were compared, so the warning must "
+            f"say the criterion was never evaluated rather than print one: {m}"
+        )
+
+
+@pytest.mark.algorithm
 def test_2x2_ignores_projector_method_so_it_cannot_host_this_comparison():
     """Pins the constraint that makes the test above the only option (#901).
 

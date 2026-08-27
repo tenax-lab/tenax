@@ -1074,6 +1074,15 @@ def _ctm_tensor_multisite(
     # ``UnboundLocalError`` from the reporting path rather than return.
     converged = False
     final_diff = float("inf")
+    # #910 review P2: the criterion is a property of a *pair* of spectra, so it
+    # does not exist until two sweeps have been compared.  ``sweep_diff`` starts
+    # at 0.0 and is only raised by an actual comparison, so on a budget with one
+    # measured sweep every ``prev`` is None, nothing is computed, and assigning
+    # it anyway made the warning report "final criterion 0" -- a perfectly
+    # converged number -- in the same breath as saying conv_tol was not reached.
+    # Reachable two ways: ``max_iter=1``, and any QR warm-up that leaves exactly
+    # one measured sweep (``max_iter=7, qr_warmup_steps=6``).
+    ever_measured = False
     for _ in range(max_iter):
         envs, _, _ = _ctm_tensor_sweep_multisite(
             envs,
@@ -1130,12 +1139,17 @@ def _ctm_tensor_multisite(
             if prev is not None:
                 d = float(_ctm_sv_diff(sv, prev, max_rank=_mr_c))
                 sweep_diff = max(sweep_diff, d)
+                ever_measured = True
                 if d >= conv_tol:
                     converged = False
             else:
                 converged = False
             prev_svs[c] = sv
-        final_diff = sweep_diff
+        # Only overwrite the reported criterion once a comparison has actually
+        # produced one; otherwise ``final_diff`` keeps its ``inf``, which is what
+        # the zero-measured-sweep case already reports.
+        if ever_measured:
+            final_diff = sweep_diff
         if converged:
             break
 
@@ -1158,10 +1172,18 @@ def _ctm_tensor_multisite(
         # ``ipeps()`` already warns in exactly this situation, and the wording
         # deliberately mirrors it -- same category, so a caller filtering one
         # filters both.
+        criterion = (
+            f"final criterion {final_diff:.3g}"
+            if ever_measured
+            else (
+                "the criterion was never evaluated -- fewer than two corner "
+                "spectra were compared, so no measurement of it exists"
+            )
+        )
         warnings.warn(
             f"CTM did not converge in ctm_tensor_multisite(): ran the full "
             f"max_iter={budget} sweeps at chi={chi} without reaching "
-            f"conv_tol={conv_tol:g} (final criterion {final_diff:.3g}). The "
+            f"conv_tol={conv_tol:g} ({criterion}). The "
             f"returned environment is not a fixed point and any observable "
             f"read from it can move with max_iter -- on a limit cycle it will "
             f"move without ever settling, so raising max_iter is not always a "
