@@ -1030,6 +1030,16 @@ def _ctm_tensor_multisite(
     double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
     envs = {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
 
+    # #910 review: capture the caller's budget *here*, above the QR warm-up.
+    # The warm-up rewrites ``max_iter`` to the remainder
+    # (``max_iter = max_iter - warmup``), so reading it after the loop quoted a
+    # number the caller never passed -- with ``qr_warmup_steps=6``, a caller
+    # passing ``max_iter=40`` was told it "ran the full max_iter=34 sweeps".
+    # That matters because the message's own advice is "Raise max_iter", which
+    # is unactionable against a value that is not the parameter.  The warm-up
+    # sweeps do run, so the caller's total is also the honest sweep count.
+    budget = max_iter
+
     # QR warm-up: run a few eigh iterations before switching to QR
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
@@ -1064,7 +1074,6 @@ def _ctm_tensor_multisite(
     # ``UnboundLocalError`` from the reporting path rather than return.
     converged = False
     final_diff = float("inf")
-    budget = max_iter
     for _ in range(max_iter):
         envs, _, _ = _ctm_tensor_sweep_multisite(
             envs,

@@ -433,6 +433,45 @@ def test_2site_1x1_still_limit_cycles_so_qr_vs_eigh_stays_unanswerable(chi):
 
 
 @pytest.mark.algorithm
+def test_nonconvergence_warning_quotes_the_budget_the_caller_actually_passed():
+    """The #901 warning must report the caller's ``max_iter``, not the remainder.
+
+    ``_ctm_tensor_multisite`` shortens ``max_iter`` by ``qr_warmup_steps``
+    *before* the convergence loop::
+
+        max_iter = max_iter - warmup      # QR warm-up
+        ...
+        budget = max_iter                 # <- pre-fix: the remainder
+
+    so ``budget`` named a number the caller never passed.  That matters because
+    the message's own advice is "Raise max_iter", which is unactionable against
+    a value that is not the parameter: with ``qr_warmup_steps=6`` (what
+    ``_heisenberg_D2_2site_energy`` uses) a caller passing ``max_iter=40`` was
+    told it "ran the full max_iter=34 sweeps".
+
+    The warm-up sweeps do run, so the caller's total is also the honest count
+    of sweeps performed -- there is no reading on which 34 was right.
+
+    ``projector_method="qr"`` is load-bearing here: the warm-up is the only
+    thing that rewrites ``max_iter``, so ``eigh``/``svd`` cannot see this bug.
+    """
+    max_iter, warmup = 40, 6
+    with pytest.warns(UserWarning, match="did not converge") as caught:
+        _heisenberg_D2_2site_energy(chi=6, projector_method="qr", max_iter=max_iter)
+
+    msgs = [str(w.message) for w in caught]
+    assert any(f"max_iter={max_iter}" in m for m in msgs), (
+        f"the warning does not quote the caller's budget max_iter={max_iter}: {msgs}"
+    )
+    assert not any(f"max_iter={max_iter - warmup}" in m for m in msgs), (
+        f"the warning quotes the post-warm-up remainder "
+        f"max_iter={max_iter - warmup} instead of the caller's "
+        f"max_iter={max_iter}, so 'Raise max_iter' points at the wrong "
+        f"number: {msgs}"
+    )
+
+
+@pytest.mark.algorithm
 def test_2x2_ignores_projector_method_so_it_cannot_host_this_comparison():
     """Pins the constraint that makes the test above the only option (#901).
 
