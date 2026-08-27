@@ -1036,6 +1036,7 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
     use_phase = gauge_mode == "phase"
     prev_svs = {}
     prev_env_arrays = {}
+
     # #903 P1: rank 1 is a collapse only when the *state* could carry more, so
     # a D=1 product state certifies instead of burning the budget.  Defined
     # here, above the loop and outside every branch -- the previous round
@@ -1048,9 +1049,28 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
     # wrongly).  The reachable rank is a property of the site sitting at that
     # coordinate, so it is computed there.  Built before the loop and outside
     # every branch.
+    # Keyed to every site that can CONTRIBUTE to a corner, not to the
+    # coordinate the corner is stored under (#903 review, P1).  In the 2x2
+    # recipe `_ctm_tensor_sweep_multisite` builds a destination's C1 from a
+    # *neighbour's* double layer (`s_src = neighbors[s_dst]["top"]`), so
+    # `envs[c].C1` is not necessarily produced by the site at `c`.  Keying on
+    # `c` alone gives a D=1 destination fed by a rich source `max_rank=1` --
+    # accepting a collapsed corner -- and the reverse mismatch leaves a
+    # legitimate comparison blind forever.
+    #
+    # Taking the max over the contributing set is the conservative reading:
+    # a larger bound can only make the exemption harder to obtain, so a
+    # mis-attribution fails closed rather than certifying.
+    def _contributors_ad(c):
+        return {c} | {s for s in neighbors.get(c, {}).values() if s in site_tensors}
+
     _mr = {
-        c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2)
-        for c, A in site_tensors.items()
+        c: _forced_corner_rank(
+            max(
+                _max_virtual_bond_dim(site_tensors[s]) ** 2 for s in _contributors_ad(c)
+            )
+        )
+        for c in site_tensors
     }
 
     for i in range(config.max_iter):

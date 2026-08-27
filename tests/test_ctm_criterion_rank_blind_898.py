@@ -884,3 +884,51 @@ def test_two_empty_spectra_fail_closed_instead_of_raising():
     assert jnp.isinf(diff), f"expected inf, got {diff}"
     # And the mixed case still fails closed rather than comparing lengths.
     assert jnp.isinf(_ctm_sv_diff(empty, jnp.asarray([1.0, 0.5])))
+
+
+@pytest.mark.core
+def test_the_bound_covers_every_site_that_can_build_the_corner():
+    """A corner may be built from a NEIGHBOUR's tensor (#903 review, P1).
+
+    `_ctm_tensor_sweep_multisite`'s 2x2 top phase sets the destination's ``C1``
+    from ``s_src = neighbors[s_dst]["top"]`` and ``double_layers[s_src]``, so
+    ``envs[c].C1`` is not necessarily produced by the site stored at ``c``.
+    Keying the bound on ``c`` alone -- which the per-coordinate fix did -- gives
+    a ``D=1`` destination fed by a rich source ``max_rank=1``, and a collapsed
+    rank-one corner there is accepted as informative.  The reverse mismatch
+    leaves a legitimate comparison blind for the whole budget.
+
+    Per-coordinate was the right *shape* and the wrong *index*: the fifth
+    variation on one theme in this PR, a reachable-rank bound derived from the
+    wrong thing.  Taking the max over the contributing set is deliberately the
+    conservative reading -- a larger bound only makes the exemption harder to
+    obtain, so a mis-attribution fails closed rather than certifying.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import (
+        _forced_corner_rank,
+        _max_virtual_bond_dim,
+    )
+
+    dl = {
+        (0, 0): _FakeTensor((1, 1, 1, 1), ("u", "d", "l", "r")),  # D=1 destination
+        (1, 0): _FakeTensor((4, 4, 4, 4), ("u", "d", "l", "r")),  # rich source
+    }
+    neighbors = {(0, 0): {"top": (1, 0)}, (1, 0): {"top": (0, 0)}}
+
+    def contributors(c):
+        return {c} | {s for s in neighbors.get(c, {}).values() if s in dl}
+
+    bounds = {
+        c: _forced_corner_rank(
+            max(_max_virtual_bond_dim(dl[s]) for s in contributors(c))
+        )
+        for c in dl
+    }
+    sv = jnp.asarray([1.0, 0.0, 0.0, 0.0])
+
+    assert not jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=bounds[(0, 0)])), (
+        f"the D=1 coordinate is fed by a rich source, so its rank-one corner "
+        f"must stay blind; bounds={bounds} -- keying on the coordinate alone "
+        f"gives 1 here and certifies a collapsed corner"
+    )
+    assert bounds[(0, 0)] == bounds[(1, 0)] == 4, bounds

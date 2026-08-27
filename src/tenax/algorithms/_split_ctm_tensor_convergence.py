@@ -669,6 +669,7 @@ def _split_ctm_multisite(
     bars = {c: A.bar() for c, A in site_tensors.items()}
     envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
     prev_svs: dict[Coord, jax.Array] = {}
+
     # #903 P1: rank 1 is a collapse only if more was reachable.
     # Per coordinate, not per cell (#903 review).  A cell-wide aggregate is
     # wrong in both directions: `min` lets one trivial site exempt every
@@ -677,9 +678,26 @@ def _split_ctm_multisite(
     # wrongly).  The reachable rank is a property of the site sitting at that
     # coordinate, so it is computed there.  Built before the loop and outside
     # every branch.
+    # Keyed to every site that can CONTRIBUTE to a corner, not to the
+    # coordinate the corner is stored under (#903 review, P1).  In the 2x2
+    # recipe `_ctm_tensor_sweep_multisite` builds a destination's C1 from a
+    # *neighbour's* double layer (`s_src = neighbors[s_dst]["top"]`), so
+    # `envs[c].C1` is not necessarily produced by the site at `c`.  Keying on
+    # `c` alone gives a D=1 destination fed by a rich source `max_rank=1` --
+    # accepting a collapsed corner -- and the reverse mismatch leaves a
+    # legitimate comparison blind forever.
+    #
+    # Taking the max over the contributing set is the conservative reading:
+    # a larger bound can only make the exemption harder to obtain, so a
+    # mis-attribution fails closed rather than certifying.
+    def _contributors2(c):
+        return {c} | {s for s in neighbors.get(c, {}).values() if s in site_tensors}
+
     _mr2 = {
-        c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2)
-        for c, A in site_tensors.items()
+        c: _forced_corner_rank(
+            max(_max_virtual_bond_dim(site_tensors[s]) ** 2 for s in _contributors2(c))
+        )
+        for c in site_tensors
     }
     for _ in range(max_iter):
         envs = _split_ctm_sweep_multisite(
