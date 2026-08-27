@@ -592,11 +592,11 @@ def _regularized_qr_fwd(M):
     return (Q, R), (Q, R)
 
 
-def _regularized_qr_bwd(residuals, g):
-    # Reverse-mode VJP of the thin QR M = Q R (m >= n), obtained by transposing
-    # JAX's own thin-QR JVP rule (real branch). Verified to machine precision
-    # (5e-16) against jax.vjp(jnp.linalg.qr, .) for square AND tall real
-    # matrices in the Task 1 spike (#570).
+def _regularized_qr_bwd_square(Q, R, dQ, dR):
+    # Reverse-mode VJP of the thin QR M = Q R for **m >= n** (square or tall),
+    # obtained by transposing JAX's own thin-QR JVP rule (real branch).
+    # Verified to machine precision (5e-16) against jax.vjp(jnp.linalg.qr, .)
+    # for square AND tall real matrices in the Task 1 spike (#570).
     #
     #   P     = R̄ Rᴴ
     #   S     = Qᴴ Q̄
@@ -608,8 +608,9 @@ def _regularized_qr_bwd(residuals, g):
     # The R⁻ᴴ solve is the only place diag(R)→0 bites; flooring diag(R) there
     # keeps M̄ finite near rank-deficiency without changing the well-conditioned
     # answer (floor only activates when |diag(R)| < _R_FLOOR).
-    Q, R = residuals
-    dQ, dR = g
+    #
+    # ``R`` here must be **square** (n x n).  The wide case is split by the
+    # caller before reaching this point -- see ``_regularized_qr_bwd``.
     P = dR @ _qr_H(R)
     S = _qr_H(Q) @ dQ
     under = S - P
@@ -619,8 +620,53 @@ def _regularized_qr_bwd(residuals, g):
     safe = jnp.where(jnp.abs(d) > _R_FLOOR, d, _R_FLOOR)
     R_reg = R - jnp.diag(d) + jnp.diag(safe)
     # M̄ = Ā R⁻ᴴ  ⟺  M̄ Rᴴ = Ā  ⟺  R M̄ᴴ = Āᴴ  (upper-tri solve in R).
-    dM = _qr_H(jax.scipy.linalg.solve_triangular(R_reg, _qr_H(Abar), lower=False))
-    return (dM,)
+    return _qr_H(jax.scipy.linalg.solve_triangular(R_reg, _qr_H(Abar), lower=False))
+
+
+def _regularized_qr_bwd(residuals, g):
+    """VJP of the thin QR, valid for wide ``M`` as well as square/tall (#912).
+
+    The rule above is only defined for ``m >= n``: for a **wide** ``M`` the thin
+    QR gives ``Q`` of shape ``(m, m)`` and ``R`` of shape ``(m, n)``, so
+    ``jnp.diag(jnp.diag(R))`` is ``(m, m)`` and the ``R - jnp.diag(d)`` step
+    raised ``TypeError: sub got incompatible shapes for broadcasting``.
+
+    Wide is not an exotic case here: the QR projector concatenates the two
+    enlarged corners side by side (``_ctm_projector.py``,
+    ``M = jnp.concatenate([C1g_dense, C4g_dense], axis=1)``), and on the C4v
+    path both blocks are the same square ``(chi*D^2, chi*D^2)`` corner, so ``M``
+    is wide by exactly 2x at every chi.  That made ``projector_method="qr"``
+    non-differentiable in the whole C4v reference-AD path (#912), which in turn
+    is why #858's "is the QR adjoint itself unstable" question was unanswerable.
+
+    Split ``M = [M1 | M2]`` with ``M1`` square ``(m, m)``.  Then ``M1 = Q R1``
+    is an ordinary square QR and ``R2 = Qᴴ M2`` (equivalently ``M2 = Q R2``,
+    since ``Q`` is square unitary here).  Differentiating that pair:
+
+        M̄2      = Q R̄2
+        Q̄_eff   = Q̄ + M2 R̄2ᴴ  =  Q̄ + Q R2 R̄2ᴴ
+        M̄1      = square_rule(Q, R1, Q̄_eff, R̄1)
+        M̄       = [M̄1 | M̄2]
+
+    The ``Q̄`` correction is the part that is easy to drop: ``Q`` feeds ``R2``
+    as well as ``R1``, so a wide rule that only forwarded ``R̄2`` into ``M̄2``
+    would silently return a wrong gradient rather than crash.  That is the
+    failure mode this is written to avoid, and it is what the parity test
+    against ``jax.vjp(jnp.linalg.qr, .)`` pins.
+    """
+    Q, R = residuals
+    dQ, dR = g
+    m, n = R.shape[-2], R.shape[-1]
+    if n <= m:
+        return (_regularized_qr_bwd_square(Q, R, dQ, dR),)
+
+    R1, R2 = R[:, :m], R[:, m:]
+    dR1, dR2 = dR[:, :m], dR[:, m:]
+    # M2 = Q R2 (Q square unitary), so Q picks up a cotangent through R2 too.
+    dQ_eff = dQ + Q @ (R2 @ _qr_H(dR2))
+    dM1 = _regularized_qr_bwd_square(Q, R1, dQ_eff, dR1)
+    dM2 = Q @ dR2
+    return (jnp.concatenate([dM1, dM2], axis=1),)
 
 
 regularized_qr.defvjp(_regularized_qr_fwd, _regularized_qr_bwd)

@@ -71,3 +71,125 @@ def test_regularized_qr_backward_finite_at_rank_deficiency():
     M = (U * s) @ Vh
     g = jax.grad(_scalar)(M)
     assert jnp.all(jnp.isfinite(g))
+
+
+# --------------------------------------------------------------------------- #
+# Wide matrices (m < n) -- #912.                                               #
+#                                                                              #
+# The VJP above was written for thin QR with ``m >= n`` and its comment said   #
+# so ("verified ... for square AND tall real matrices", #570).  Nothing        #
+# enforced that, and the QR projector feeds it a wide matrix: it concatenates  #
+# the two enlarged corners side by side, and on the C4v path both blocks are   #
+# the same square ``(chi*D^2, chi*D^2)`` corner, so ``M`` is wide by exactly   #
+# 2x at every chi.  ``R`` is then ``(m, n)`` while ``jnp.diag(jnp.diag(R))``   #
+# is ``(m, m)`` and the backward died with a broadcasting ``TypeError``.       #
+# --------------------------------------------------------------------------- #
+
+
+def _ref_qr_tuple(A):
+    q, r = jnp.linalg.qr(A)
+    return (q, r)
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    ("m", "n"),
+    [
+        (4, 8),
+        (4, 12),
+        (6, 18),
+        # The shapes the C4v projector actually produces, at chi=4/8/12 with
+        # D=2: m = chi*D^2, n = 2*chi*D^2.  Pinned concretely so a future
+        # change to the projector's concat layout shows up here.
+        (16, 32),
+        (32, 64),
+        (48, 96),
+    ],
+)
+def test_regularized_qr_backward_matches_jax_on_wide_matrices(m, n):
+    """Wide-``M`` VJP parity against JAX's own QR VJP.
+
+    JAX's ``jnp.linalg.qr`` differentiates wide matrices perfectly well, so it
+    is a valid oracle here -- the gap was ours alone.
+    """
+    rng = np.random.default_rng(m * 1000 + n)
+    M = jnp.asarray(rng.standard_normal((m, n)))
+    cot = (
+        jnp.asarray(rng.standard_normal((m, min(m, n)))),
+        jnp.asarray(rng.standard_normal((min(m, n), n))),
+    )
+    _, vjp_reg = jax.vjp(regularized_qr, M)
+    _, vjp_raw = jax.vjp(_ref_qr_tuple, M)
+    got, want = vjp_reg(cot)[0], vjp_raw(cot)[0]
+    scale = float(jnp.max(jnp.abs(want))) + 1e-300
+    assert float(jnp.max(jnp.abs(got - want))) / scale < 1e-10, (
+        f"wide {m}x{n}: relative deviation "
+        f"{float(jnp.max(jnp.abs(got - want))) / scale:.3e}"
+    )
+
+
+@pytest.mark.core
+def test_regularized_qr_wide_backward_needs_the_R2_cotangent_path():
+    """The ``Q``-bar correction is load-bearing, and its absence is *silent*.
+
+    For wide ``M = [M1 | M2]``, ``Q`` feeds ``R2 = Q^H M2`` as well as ``R1``,
+    so ``Q``-bar must pick up ``M2 R2-bar^H``.  A wide rule that only routed
+    ``R2``-bar into ``M2``-bar returns finite, plausible numbers that are
+    ~75% wrong -- no crash, no NaN, nothing downstream can tell.  This test
+    fails (relative deviation 0.66-1.23) if that term is dropped, which is
+    what makes the parity test above worth having rather than decorative.
+    """
+    rng = np.random.default_rng(912)
+    m, n = 16, 32
+    M = jnp.asarray(rng.standard_normal((m, n)))
+    cot = (
+        jnp.asarray(rng.standard_normal((m, m))),
+        jnp.asarray(rng.standard_normal((m, n))),
+    )
+    _, vjp_reg = jax.vjp(regularized_qr, M)
+    got = vjp_reg(cot)[0]
+
+    # Independent reconstruction of the wide rule, spelled out rather than
+    # imported, so this does not merely restate the implementation.
+    Q, R = jnp.linalg.qr(M)
+    R1, R2 = R[:, :m], R[:, m:]
+    dR1, dR2 = cot[1][:, :m], cot[1][:, m:]
+    dQ_eff = cot[0] + Q @ (R2 @ dR2.conj().T)
+    P = dR1 @ R1.conj().T
+    S = Q.conj().T @ dQ_eff
+    under = S - P
+    Bbar = (P - S) + jnp.tril(under - under.conj().T, -1)
+    Abar = dQ_eff + Q @ Bbar
+    dM1 = jax.scipy.linalg.solve_triangular(R1, Abar.conj().T, lower=False).conj().T
+    want = jnp.concatenate([dM1, Q @ dR2], axis=1)
+
+    scale = float(jnp.max(jnp.abs(want))) + 1e-300
+    assert float(jnp.max(jnp.abs(got - want))) / scale < 1e-10
+
+
+@pytest.mark.core
+def test_regularized_qr_wide_stays_finite_at_rank_deficiency():
+    """The regularization must survive into the wide branch, not just square.
+
+    This is ``regularized_qr``'s entire reason to exist over ``jnp.linalg.qr``,
+    so a wide branch that quietly lost the ``diag(R)`` floor would be a
+    regression the parity tests above cannot see (they use well-conditioned
+    inputs, where the floor never activates).
+    """
+    rng = np.random.default_rng(5)
+    M = np.asarray(rng.standard_normal((16, 32)))
+    M[8:, :] = 0.0  # kill half the row space -> exactly singular R1
+    M = jnp.asarray(M)
+    cot = (
+        jnp.asarray(rng.standard_normal((16, 16))),
+        jnp.asarray(rng.standard_normal((16, 32))),
+    )
+    _, vjp_reg = jax.vjp(regularized_qr, M)
+    assert jnp.all(jnp.isfinite(vjp_reg(cot)[0])), "wide backward went non-finite"
+
+    # And confirm the guard is not vacuous: raw JAX really does NaN here.
+    _, vjp_raw = jax.vjp(_ref_qr_tuple, M)
+    assert not jnp.all(jnp.isfinite(vjp_raw(cot)[0])), (
+        "raw jnp.linalg.qr is finite on this input, so it does not exercise "
+        "the floor and this test proves nothing -- pick a more singular M"
+    )
