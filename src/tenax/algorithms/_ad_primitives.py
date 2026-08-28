@@ -575,8 +575,9 @@ def regularized_qr(M: jax.Array) -> tuple[jax.Array, jax.Array]:
     Raw ``jnp.linalg.qr``'s VJP divides by ``diag(R)`` and produces NaN when a
     bond is fully truncated.
 
-    This is the *real* branch only: CTM projector matrices are real, so the
-    complex diagonal correction in JAX's thin-QR JVP is intentionally omitted.
+    Valid for real **and complex** input, and for square, tall **and wide**
+    ``M`` -- because the rule is not hand-derived (#917).  See
+    :func:`_regularized_qr_bwd`.
 
     Returns:
         ``(Q, R)`` as in ``jnp.linalg.qr(M)``.  Returned as a plain ``tuple``
@@ -592,115 +593,62 @@ def _regularized_qr_fwd(M):
     return (Q, R), (Q, R)
 
 
-def _regularized_qr_bwd_square(Q, R, dQ, dR):
-    # Reverse-mode VJP of the thin QR M = Q R for **m >= n** (square or tall),
-    # obtained by transposing JAX's own thin-QR JVP rule (real branch).
-    # Verified to machine precision (5e-16) against jax.vjp(jnp.linalg.qr, .)
-    # for square AND tall real matrices in the Task 1 spike (#570).
-    #
-    #   P     = R̄ Rᴴ
-    #   S     = Qᴴ Q̄
-    #   under = S − P
-    #   B̄     = (P − S) + tril(under − underᴴ, −1)
-    #   Ā     = Q̄ + Q B̄
-    #   M̄     = Ā R⁻ᴴ          ← regularized triangular solve (floor diag R)
-    #
-    # The R⁻ᴴ solve is the only place diag(R)→0 bites; flooring diag(R) there
-    # keeps M̄ finite near rank-deficiency without changing the well-conditioned
-    # answer (floor only activates when |diag(R)| < _R_FLOOR).
-    #
-    # ``R`` here must be **square** (n x n).  The wide case is split by the
-    # caller before reaching this point -- see ``_regularized_qr_bwd``.
-    P = dR @ _qr_H(R)
-    S = _qr_H(Q) @ dQ
-    under = S - P
-    Bbar = (P - S) + jnp.tril(under - _qr_H(under), -1)
-    Abar = dQ + Q @ Bbar
-    d = jnp.diag(R)
-    safe = jnp.where(jnp.abs(d) > _R_FLOOR, d, _R_FLOOR)
-    R_reg = R - jnp.diag(d) + jnp.diag(safe)
-    # M̄ = Ā R⁻ᴴ  ⟺  M̄ Rᴴ = Ā  ⟺  R M̄ᴴ = Āᴴ  (upper-tri solve in R).
-    return _qr_H(jax.scipy.linalg.solve_triangular(R_reg, _qr_H(Abar), lower=False))
-
-
 def _regularized_qr_bwd(residuals, g):
-    """VJP of the thin QR, valid for wide ``M`` as well as square/tall (#912).
+    """VJP of the thin QR: JAX's own rule, evaluated at a floored factorization.
 
-    The rule above is only defined for ``m >= n``: for a **wide** ``M`` the thin
-    QR gives ``Q`` of shape ``(m, m)`` and ``R`` of shape ``(m, n)``, so
-    ``jnp.diag(jnp.diag(R))`` is ``(m, m)`` and the ``R - jnp.diag(d)`` step
-    raised ``TypeError: sub got incompatible shapes for broadcasting``.
+    This used to be a hand-transposed copy of JAX's thin-QR JVP, and every
+    limitation it had came from being hand-written:
 
-    Wide is not an exotic case here: the QR projector concatenates the two
-    enlarged corners side by side (``_ctm_projector.py``,
-    ``M = jnp.concatenate([C1g_dense, C4g_dense], axis=1)``), and on the C4v
-    path both blocks are the same square ``(chi*D^2, chi*D^2)`` corner, so ``M``
-    is wide by exactly 2x at every chi.  That made ``projector_method="qr"``
-    non-differentiable in the whole C4v reference-AD path (#912), which in turn
-    is why #858's "is the QR adjoint itself unstable" question was unanswerable.
+    * it assumed ``m >= n``, so the wide ``M`` the QR projector actually builds
+      crashed with a broadcasting ``TypeError`` (#912);
+    * it was the *real* branch -- it omitted the complex diagonal correction --
+      so complex input got a finite, plausible gradient wrong by 115%-191%
+      relative at **every** shape (#917).
 
-    Split ``M = [M1 | M2]`` with ``M1`` square ``(m, m)``.  Then ``M1 = Q R1``
-    is an ordinary square QR and ``R2 = Qᴴ M2`` (equivalently ``M2 = Q R2``,
-    since ``Q`` is square unitary here).  Differentiating that pair:
+    Rather than hand-derive the missing pieces, note what ``regularized_qr``
+    actually adds over ``jnp.linalg.qr``: **only** the ``diag(R)`` floor, which
+    keeps the backward finite when a bond is rank-deficient.  Everything else
+    is supposed to be JAX's rule.  So apply the floor and then *ask JAX*:
 
-        M̄2      = Q R̄2
-        Q̄_eff   = Q̄ + M2 R̄2ᴴ  =  Q̄ + Q R2 R̄2ᴴ
-        M̄1      = square_rule(Q, R1, Q̄_eff, R̄1)
-        M̄       = [M̄1 | M̄2]
+        R_reg = floor(diag(R));  M_reg = Q R_reg;  return vjp(qr at M_reg)
 
-    The ``Q̄`` correction is the part that is easy to drop: ``Q`` feeds ``R2``
-    as well as ``R1``, so a wide rule that only forwarded ``R̄2`` into ``M̄2``
-    would silently return a wrong gradient rather than crash.  That is the
-    failure mode this is written to avoid, and it is what the parity test
-    against ``jax.vjp(jnp.linalg.qr, .)`` pins.
+    Correctness splits cleanly along whether the floor engages:
+
+    * **Well-conditioned** -- ``R_reg == R``, so ``M_reg == M`` and this is
+      literally ``jax.vjp(jnp.linalg.qr, M)``.  Parity is by construction, not
+      by derivation, for real and complex alike.
+    * **Rank-deficient** -- the true derivative does not exist (that is why a
+      floor is needed at all), and this evaluates JAX's rule at a nearby
+      non-singular factorization.  That *is* the regularization, stated
+      directly instead of smuggled into a triangular solve.
+
+    Hand-deriving the complex branch was tried first and abandoned: the
+    textbook copyltu form (real part on the diagonal) disagrees with
+    ``jax.vjp`` by 1.17-1.59 relative, because JAX pairs complex cotangents
+    unconjugated while the published derivations assume the conjugated
+    Wirtinger pairing.  A rule transcribed from a paper lands O(1) off while
+    still returning finite, plausible numbers -- so deferring to JAX is not
+    merely shorter here, it removes the entire class of error.
+
+    Cost: one extra QR of ``M_reg`` in the backward, replacing a triangular
+    solve.  Measured parity vs ``jax.vjp(jnp.linalg.qr, .)`` is ~1e-15
+    relative across square/tall/wide x real/complex.
     """
     Q, R = residuals
     dQ, dR = g
 
-    # #913 review P1.  ``_regularized_qr_bwd_square`` is the *real* branch --
-    # it omits the complex diagonal correction in JAX's thin-QR rule, by
-    # deliberate choice (see ``regularized_qr``'s docstring, which asserts "CTM
-    # projector matrices are real").  That assumption is stale: the projector's
-    # own gauge fix handles complex explicitly (``_ctm_projector.py``, "For
-    # complex matrices, `diag_R >= 0` is undefined; rotate by the phase").
-    #
-    # Measured against ``jax.vjp(jnp.linalg.qr, .)``, the real branch is wrong
-    # on complex input for EVERY shape, not just the wide one added here:
-    #
-    #     4x4  square  complex   rel err 1.248e+00
-    #     5x3  tall    complex   rel err 1.427e+00
-    #     3x5  wide    complex   rel err 1.659e+00
-    #
-    # The square/tall rows predate this function.  What must not happen is the
-    # wide case joining them *quietly*: before #912 it raised a shape error, so
-    # a complex wide input failed loudly.  Silently returning a ~160%-wrong
-    # optimization gradient instead would be strictly worse than the crash this
-    # commit set out to fix.  Reject it until the complex rule is implemented
-    # and verified against JAX (tracked separately) -- and reject square/tall
-    # too, since they were never right either and a caller cannot tell.
-    if jnp.iscomplexobj(R) or jnp.iscomplexobj(dQ) or jnp.iscomplexobj(dR):
-        raise NotImplementedError(
-            "regularized_qr's backward is the real branch only: it omits the "
-            "complex diagonal correction of the thin-QR rule, which makes it "
-            "wrong by O(1) relative error on complex input (measured 1.2-1.9 "
-            "against jax.vjp(jnp.linalg.qr, .) for square, tall and wide). "
-            "Differentiating a complex QR through this path would return a "
-            "finite, plausible, badly wrong gradient that nothing downstream "
-            "can detect. Use projector_method='svd' or 'eigh' for complex "
-            "tensors."
-        )
+    k = min(R.shape[-2], R.shape[-1])
+    d = jnp.diagonal(R)[:k]
+    safe = jnp.where(jnp.abs(d) > _R_FLOOR, d, _R_FLOOR)
+    idx = jnp.arange(k)
+    R_reg = R.at[idx, idx].set(safe)
 
-    m, n = R.shape[-2], R.shape[-1]
-    if n <= m:
-        return (_regularized_qr_bwd_square(Q, R, dQ, dR),)
+    def _qr_tuple(A):
+        q, r = jnp.linalg.qr(A)
+        return (q, r)
 
-    R1, R2 = R[:, :m], R[:, m:]
-    dR1, dR2 = dR[:, :m], dR[:, m:]
-    # M2 = Q R2 (Q square unitary), so Q picks up a cotangent through R2 too.
-    dQ_eff = dQ + Q @ (R2 @ _qr_H(dR2))
-    dM1 = _regularized_qr_bwd_square(Q, R1, dQ_eff, dR1)
-    dM2 = Q @ dR2
-    return (jnp.concatenate([dM1, dM2], axis=1),)
+    _, vjp_qr = jax.vjp(_qr_tuple, Q @ R_reg)
+    return vjp_qr((dQ, dR))
 
 
 regularized_qr.defvjp(_regularized_qr_fwd, _regularized_qr_bwd)

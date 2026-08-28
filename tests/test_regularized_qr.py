@@ -197,49 +197,69 @@ def test_regularized_qr_wide_stays_finite_at_rank_deficiency():
 
 @pytest.mark.core
 @pytest.mark.parametrize(
-    ("m", "n", "kind"),
-    [(4, 4, "square"), (5, 3, "tall"), (3, 5, "wide"), (16, 32, "wide-c4v")],
+    ("m", "n"),
+    [(4, 4), (5, 3), (12, 6), (3, 5), (4, 8), (16, 32)],
 )
-def test_regularized_qr_rejects_complex_instead_of_returning_a_wrong_gradient(
-    m, n, kind
-):
-    """Complex must fail loudly, not return an O(1)-wrong gradient (#917).
+def test_regularized_qr_backward_matches_jax_on_complex(m, n):
+    """Complex parity at every shape -- square, tall AND wide (#917).
 
-    The backward is the *real* branch by construction -- it omits the complex
-    diagonal correction of JAX's thin-QR rule (see ``regularized_qr``'s
-    docstring).  Measured against ``jax.vjp(jnp.linalg.qr, .)`` it is wrong by
-    115%-191% relative on complex input at **every** shape:
+    The backward used to be a hand-transposed copy of JAX's rule and was the
+    *real* branch: it omitted the complex diagonal correction, so on complex
+    input it returned a finite, plausible gradient wrong by 115%-191% relative
+    at every shape::
 
         4x4 square 1.248   5x3 tall 1.427   3x5 wide 1.659   16x32 wide 1.608
 
-    while real stays exact to 1e-16.  That is not an approximation -- such a
-    gradient does not point in the right direction.
+    while real stayed exact at 1e-16.  Nothing caught it because every
+    pre-existing test here used real input, and a wrong-but-finite gradient
+    does not announce itself.
 
-    The wide shapes matter most here.  Before #912 they raised a *shape* error,
-    so complex-wide already failed loudly; fixing the shape bug without this
-    guard would have converted that crash into a silent wrong gradient, which
-    is strictly worse than the bug #912 set out to fix.  Square and tall are
-    included because they were never right either and a caller cannot tell.
-
-    The forward is deliberately NOT restricted -- only differentiation is
-    broken, so a complex forward-only QR still works.
+    Deriving the complex branch by hand is what to avoid: the textbook copyltu
+    form (real part on the diagonal) also disagrees with ``jax.vjp``, by
+    1.17-1.59, because JAX pairs complex cotangents *unconjugated* while the
+    published derivations assume the conjugated Wirtinger pairing.  The fix
+    delegates to JAX instead, so this test is what pins that it really did.
     """
-    rng = np.random.default_rng(917)
-    M = jnp.asarray(rng.standard_normal((m, n)) + 1j * rng.standard_normal((m, n)))
+    rng = np.random.default_rng(m * 1000 + n + 7)
+
+    def _c(*shape):
+        return jnp.asarray(rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+
+    k = min(m, n)
+    M, cot = _c(m, n), (_c(m, k), _c(k, n))
+    got = jax.vjp(regularized_qr, M)[1](cot)[0]
+    want = jax.vjp(_ref_qr_tuple, M)[1](cot)[0]
+    scale = float(jnp.max(jnp.abs(want))) + 1e-300
+    rel = float(jnp.max(jnp.abs(got - want))) / scale
+    assert rel < 1e-10, f"complex {m}x{n}: relative deviation {rel:.3e}"
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("wide", [False, True])
+def test_regularized_qr_complex_stays_finite_at_rank_deficiency(wide):
+    """The floor must survive for complex too, not just real (#917).
+
+    Parity above uses well-conditioned inputs, where the floor never activates
+    -- so it cannot see a complex branch that quietly lost the regularization.
+    """
+    rng = np.random.default_rng(3)
+    m, n = (8, 16) if wide else (10, 10)
+    M = rng.standard_normal((m, n)) + 1j * rng.standard_normal((m, n))
+    M[m // 2 :, :] = 0.0  # kill half the row space
+    M = jnp.asarray(M)
     k = min(m, n)
     cot = (
         jnp.asarray(rng.standard_normal((m, k)) + 1j * rng.standard_normal((m, k))),
         jnp.asarray(rng.standard_normal((k, n)) + 1j * rng.standard_normal((k, n))),
     )
+    got = jax.vjp(regularized_qr, M)[1](cot)[0]
+    assert jnp.all(jnp.isfinite(got)), "complex backward went non-finite"
 
-    # Forward still works: this guard is about the gradient, not the value.
-    Q, R = regularized_qr(M)
-    np.testing.assert_allclose(Q @ R, M, atol=1e-10)
-
-    _, vjp = jax.vjp(regularized_qr, M)
-    with pytest.raises(NotImplementedError, match="real branch only"):
-        vjp(cot)
-
-    # The message has to be actionable: name a projector that does work.
-    with pytest.raises(NotImplementedError, match="svd"):
-        vjp(cot)
+    if wide:
+        # Non-vacuity: raw JAX really does go non-finite on this input, so the
+        # floor is doing work rather than the test passing for free.
+        raw = jax.vjp(_ref_qr_tuple, M)[1](cot)[0]
+        assert not jnp.all(jnp.isfinite(raw)), (
+            "raw jnp.linalg.qr is finite here, so this input does not exercise "
+            "the floor and the assertion above proves nothing"
+        )
