@@ -656,6 +656,40 @@ def _regularized_qr_bwd(residuals, g):
     """
     Q, R = residuals
     dQ, dR = g
+
+    # #913 review P1.  ``_regularized_qr_bwd_square`` is the *real* branch --
+    # it omits the complex diagonal correction in JAX's thin-QR rule, by
+    # deliberate choice (see ``regularized_qr``'s docstring, which asserts "CTM
+    # projector matrices are real").  That assumption is stale: the projector's
+    # own gauge fix handles complex explicitly (``_ctm_projector.py``, "For
+    # complex matrices, `diag_R >= 0` is undefined; rotate by the phase").
+    #
+    # Measured against ``jax.vjp(jnp.linalg.qr, .)``, the real branch is wrong
+    # on complex input for EVERY shape, not just the wide one added here:
+    #
+    #     4x4  square  complex   rel err 1.248e+00
+    #     5x3  tall    complex   rel err 1.427e+00
+    #     3x5  wide    complex   rel err 1.659e+00
+    #
+    # The square/tall rows predate this function.  What must not happen is the
+    # wide case joining them *quietly*: before #912 it raised a shape error, so
+    # a complex wide input failed loudly.  Silently returning a ~160%-wrong
+    # optimization gradient instead would be strictly worse than the crash this
+    # commit set out to fix.  Reject it until the complex rule is implemented
+    # and verified against JAX (tracked separately) -- and reject square/tall
+    # too, since they were never right either and a caller cannot tell.
+    if jnp.iscomplexobj(R) or jnp.iscomplexobj(dQ) or jnp.iscomplexobj(dR):
+        raise NotImplementedError(
+            "regularized_qr's backward is the real branch only: it omits the "
+            "complex diagonal correction of the thin-QR rule, which makes it "
+            "wrong by O(1) relative error on complex input (measured 1.2-1.9 "
+            "against jax.vjp(jnp.linalg.qr, .) for square, tall and wide). "
+            "Differentiating a complex QR through this path would return a "
+            "finite, plausible, badly wrong gradient that nothing downstream "
+            "can detect. Use projector_method='svd' or 'eigh' for complex "
+            "tensors."
+        )
+
     m, n = R.shape[-2], R.shape[-1]
     if n <= m:
         return (_regularized_qr_bwd_square(Q, R, dQ, dR),)

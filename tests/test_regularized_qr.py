@@ -193,3 +193,53 @@ def test_regularized_qr_wide_stays_finite_at_rank_deficiency():
         "raw jnp.linalg.qr is finite on this input, so it does not exercise "
         "the floor and this test proves nothing -- pick a more singular M"
     )
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    ("m", "n", "kind"),
+    [(4, 4, "square"), (5, 3, "tall"), (3, 5, "wide"), (16, 32, "wide-c4v")],
+)
+def test_regularized_qr_rejects_complex_instead_of_returning_a_wrong_gradient(
+    m, n, kind
+):
+    """Complex must fail loudly, not return an O(1)-wrong gradient (#917).
+
+    The backward is the *real* branch by construction -- it omits the complex
+    diagonal correction of JAX's thin-QR rule (see ``regularized_qr``'s
+    docstring).  Measured against ``jax.vjp(jnp.linalg.qr, .)`` it is wrong by
+    115%-191% relative on complex input at **every** shape:
+
+        4x4 square 1.248   5x3 tall 1.427   3x5 wide 1.659   16x32 wide 1.608
+
+    while real stays exact to 1e-16.  That is not an approximation -- such a
+    gradient does not point in the right direction.
+
+    The wide shapes matter most here.  Before #912 they raised a *shape* error,
+    so complex-wide already failed loudly; fixing the shape bug without this
+    guard would have converted that crash into a silent wrong gradient, which
+    is strictly worse than the bug #912 set out to fix.  Square and tall are
+    included because they were never right either and a caller cannot tell.
+
+    The forward is deliberately NOT restricted -- only differentiation is
+    broken, so a complex forward-only QR still works.
+    """
+    rng = np.random.default_rng(917)
+    M = jnp.asarray(rng.standard_normal((m, n)) + 1j * rng.standard_normal((m, n)))
+    k = min(m, n)
+    cot = (
+        jnp.asarray(rng.standard_normal((m, k)) + 1j * rng.standard_normal((m, k))),
+        jnp.asarray(rng.standard_normal((k, n)) + 1j * rng.standard_normal((k, n))),
+    )
+
+    # Forward still works: this guard is about the gradient, not the value.
+    Q, R = regularized_qr(M)
+    np.testing.assert_allclose(Q @ R, M, atol=1e-10)
+
+    _, vjp = jax.vjp(regularized_qr, M)
+    with pytest.raises(NotImplementedError, match="real branch only"):
+        vjp(cot)
+
+    # The message has to be actionable: name a projector that does work.
+    with pytest.raises(NotImplementedError, match="svd"):
+        vjp(cot)
