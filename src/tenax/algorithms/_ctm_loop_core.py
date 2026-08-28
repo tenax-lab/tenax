@@ -267,10 +267,16 @@ def _run_ctm_loop_with_bump(
             # #903 P1: rank 1 is a collapse only if more was reachable.
             # Per coordinate, not per cell (#903 review): a cell-wide
             # aggregate fails open with `min` and wrongly closed with `max`.
-            _mr = {
-                c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2)
-                for c, A in site_tensors.items()
-            }
+            # #903 P1: a corner can be built from a NEIGHBOUR's tensor in the
+            # 2x2 recipe, so a bound keyed on the storage coordinate can accept
+            # a collapsed corner.  `neighbors` is not in scope here, so this
+            # takes the max over every site -- a strict superset of any
+            # coordinate's contributors, and therefore conservative: a larger
+            # bound only makes the exemption harder to obtain.
+            _mr_all = _forced_corner_rank(
+                max(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
+            )
+            _mr = {c: _mr_all for c in site_tensors}
             converged = True
             max_diff = 0.0
             for c in sorted(envs):
