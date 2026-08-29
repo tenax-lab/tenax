@@ -774,63 +774,6 @@ def test_the_exemption_needs_every_virtual_leg_to_be_trivial(dims, expected, why
 
 @pytest.mark.core
 @pytest.mark.parametrize(
-    "cell",
-    [
-        {"trivial": (1, 1, 1, 1, 2), "rich": (4, 4, 4, 4, 2)},
-        {"rich": (4, 4, 4, 4, 2), "trivial": (1, 1, 1, 1, 2)},
-        {"trivial": (1, 1, 1, 1, 2), "rich": (1, 1, 4, 4, 2)},
-    ],
-)
-def test_each_coordinate_of_a_mixed_cell_is_judged_on_its_own_site(cell):
-    """The bound is per coordinate, never per cell (#903 review).
-
-    A cell-wide aggregate is wrong in **both** directions, and this PR shipped
-    each in turn:
-
-    * ``min`` lets one trivial site exempt every corner, so a rank-one
-      spectrum at the *rich* coordinate is read as informative and the loop
-      exits on the collapsed environment -- **fails open**.
-    * ``max`` gives the rich site's bound to every corner, so the *trivial*
-      coordinate is blind on every sweep, the loop can never certify it, and
-      it exhausts ``max_iter`` while emitting the strong collapsed-environment
-      warning -- fails closed, but wrongly.
-
-    ``ctm_multisite`` does not require uniform bond dimensions, so both are
-    reachable on supported input.  Reachable rank is a property of the site
-    sitting at a coordinate, so both halves are asserted **in the same cell**:
-    the earlier aggregate-only test could not have caught either failure,
-    because it never looked at an individual coordinate.
-
-    Cell order is varied because a bound that reads one position passes any
-    fixture that happens to order the cell favourably.
-    """
-    from tenax.algorithms._ctm_tensor_convergence import (
-        _forced_corner_rank,
-        _max_virtual_bond_dim,
-    )
-
-    sites = {k: _FakeTensor(d, ("u", "d", "l", "r", "phys")) for k, d in cell.items()}
-    bounds = {
-        c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2) for c, A in sites.items()
-    }
-    sv = jnp.asarray([1.0, 0.0, 0.0, 0.0])
-
-    exempt = {
-        c: bool(jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=b)))
-        for c, b in bounds.items()
-    }
-    assert exempt["trivial"] is True, (
-        f"the D=1 coordinate is an exact fixed point and must certify; "
-        f"bounds={bounds} -- a cell-wide max would make it blind forever"
-    )
-    assert exempt["rich"] is False, (
-        f"the nontrivial coordinate must stay fail-closed; bounds={bounds} -- "
-        f"a cell-wide min would let the trivial site exempt it"
-    )
-
-
-@pytest.mark.core
-@pytest.mark.parametrize(
     "sv,uninformative,why",
     [
         ([1.0, 0.5, float("nan")], True, "NaN in the tail, healthy leading value"),
@@ -887,48 +830,42 @@ def test_two_empty_spectra_fail_closed_instead_of_raising():
 
 
 @pytest.mark.core
-def test_the_bound_covers_every_site_that_can_build_the_corner():
-    """A corner may be built from a NEIGHBOUR's tensor (#903 review, P1).
+@pytest.mark.parametrize(
+    "cell,exempt,why",
+    [
+        ({"a": (1, 1, 1, 1, 2), "b": (1, 1, 1, 1, 2)}, True, "uniformly trivial"),
+        ({"a": (1, 1, 1, 1, 2), "b": (4, 4, 4, 4, 2)}, False, "one rich site"),
+        ({"a": (4, 4, 4, 4, 2), "b": (1, 1, 1, 1, 2)}, False, "same, order swapped"),
+        ({"a": (1, 1, 1, 1, 2), "b": (1, 1, 4, 4, 2)}, False, "one anisotropic site"),
+    ],
+)
+def test_one_global_bound_per_cell_can_never_under_cover(cell, exempt, why):
+    """The bound is the max over EVERY site, and nothing finer (#898, #916).
 
-    `_ctm_tensor_sweep_multisite`'s 2x2 top phase sets the destination's ``C1``
-    from ``s_src = neighbors[s_dst]["top"]`` and ``double_layers[s_src]``, so
-    ``envs[c].C1`` is not necessarily produced by the site stored at ``c``.
-    Keying the bound on ``c`` alone -- which the per-coordinate fix did -- gives
-    a ``D=1`` destination fed by a rich source ``max_rank=1``, and a collapsed
-    rank-one corner there is accepted as informative.  The reverse mismatch
-    leaves a legitimate comparison blind for the whole budget.
+    Six successive per-corner derivations were each a correct fix to the last
+    and each still under-covered: ``indices[0]``; ``min`` across sites; ``max``
+    across sites; per coordinate; ``{c} | neighbours(c)`` -- which still misses
+    the *diagonal* sites of the four-site plaquettes the ``2x2`` projectors are
+    built from.  Every miss failed **open**: too small a bound certifies a
+    collapsed corner, and no downstream signal distinguishes that from a real
+    fixed point.
 
-    Per-coordinate was the right *shape* and the wrong *index*: the fifth
-    variation on one theme in this PR, a reachable-rank bound derived from the
-    wrong thing.  Taking the max over the contributing set is deliberately the
-    conservative reading -- a larger bound only makes the exemption harder to
-    obtain, so a mis-attribution fails closed rather than certifying.
+    A global max cannot under-cover, in any recipe, by construction.  The price
+    is that a legitimate ``D=1`` coordinate inside a heterogeneous cell is no
+    longer exempt and spends its budget instead -- the safe direction, and the
+    exemption only ever mattered for *uniformly* trivial states, where the
+    global max is still 1.  That is the first row below; the rest are the cases
+    where being conservative is the whole point.
     """
     from tenax.algorithms._ctm_tensor_convergence import (
         _forced_corner_rank,
         _max_virtual_bond_dim,
     )
 
-    dl = {
-        (0, 0): _FakeTensor((1, 1, 1, 1), ("u", "d", "l", "r")),  # D=1 destination
-        (1, 0): _FakeTensor((4, 4, 4, 4), ("u", "d", "l", "r")),  # rich source
-    }
-    neighbors = {(0, 0): {"top": (1, 0)}, (1, 0): {"top": (0, 0)}}
-
-    def contributors(c):
-        return {c} | {s for s in neighbors.get(c, {}).values() if s in dl}
-
-    bounds = {
-        c: _forced_corner_rank(
-            max(_max_virtual_bond_dim(dl[s]) for s in contributors(c))
-        )
-        for c in dl
-    }
-    sv = jnp.asarray([1.0, 0.0, 0.0, 0.0])
-
-    assert not jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=bounds[(0, 0)])), (
-        f"the D=1 coordinate is fed by a rich source, so its rank-one corner "
-        f"must stay blind; bounds={bounds} -- keying on the coordinate alone "
-        f"gives 1 here and certifies a collapsed corner"
+    sites = {k: _FakeTensor(d, ("u", "d", "l", "r", "phys")) for k, d in cell.items()}
+    bound = _forced_corner_rank(
+        max(_max_virtual_bond_dim(A) ** 2 for A in sites.values())
     )
-    assert bounds[(0, 0)] == bounds[(1, 0)] == 4, bounds
+    sv = jnp.asarray([1.0, 0.0, 0.0, 0.0])
+    got = bool(jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=bound)))
+    assert got is exempt, f"{why}: exemption should be {exempt}, bound={bound}"

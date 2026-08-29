@@ -690,15 +690,25 @@ def _split_ctm_multisite(
     # Taking the max over the contributing set is the conservative reading:
     # a larger bound can only make the exemption harder to obtain, so a
     # mis-attribution fails closed rather than certifying.
-    def _contributors2(c):
-        return {c} | {s for s in neighbors.get(c, {}).values() if s in site_tensors}
+    # ONE bound for the whole cell: the max over every site (#898, #916).
+    #
+    # Six successive derivations of a per-corner bound were each a correct fix
+    # to the previous one and each still under-covered: `indices[0]`, then
+    # `min` across sites, then `max` across sites, then per coordinate, then
+    # `{c} | neighbours(c)` -- which still misses the DIAGONAL sites of the
+    # four-site plaquettes the 2x2 projectors are built from.  Every miss
+    # failed OPEN: too small a bound certifies a collapsed corner, and nothing
+    # downstream can tell.
+    #
+    # A global max cannot under-cover, by construction, in any recipe.  The
+    # price is that a legitimate D=1 coordinate in a heterogeneous cell is no
+    # longer exempt and will spend its budget -- the safe direction, and the
+    # exemption only ever mattered for uniformly trivial states, where the
+    # global max still equals 1.
+    _mr2 = _forced_corner_rank(
+        max(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
+    )
 
-    _mr2 = {
-        c: _forced_corner_rank(
-            max(_max_virtual_bond_dim(site_tensors[s]) ** 2 for s in _contributors2(c))
-        )
-        for c in site_tensors
-    }
     for _ in range(max_iter):
         envs = _split_ctm_sweep_multisite(
             envs, site_tensors, bars, neighbors, chi, chi_I, renormalize, recipe
@@ -707,7 +717,7 @@ def _split_ctm_multisite(
         for c in sorted(envs):
             sv = _corner_singular_values(envs[c].C1)
             if c in prev_svs:
-                if float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr2[c])) >= conv_tol:
+                if float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr2)) >= conv_tol:
                     converged = False
             else:
                 converged = False

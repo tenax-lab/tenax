@@ -1068,15 +1068,25 @@ def _ctm_tensor_multisite(
     # Taking the max over the contributing set is the conservative reading:
     # a larger bound can only make the exemption harder to obtain, so a
     # mis-attribution fails closed rather than certifying.
-    def _contributors(c):
-        return {c} | {s for s in neighbors.get(c, {}).values() if s in double_layers}
+    # ONE bound for the whole cell: the max over every site (#898, #916).
+    #
+    # Six successive derivations of a per-corner bound were each a correct fix
+    # to the previous one and each still under-covered: `indices[0]`, then
+    # `min` across sites, then `max` across sites, then per coordinate, then
+    # `{c} | neighbours(c)` -- which still misses the DIAGONAL sites of the
+    # four-site plaquettes the 2x2 projectors are built from.  Every miss
+    # failed OPEN: too small a bound certifies a collapsed corner, and nothing
+    # downstream can tell.
+    #
+    # A global max cannot under-cover, by construction, in any recipe.  The
+    # price is that a legitimate D=1 coordinate in a heterogeneous cell is no
+    # longer exempt and will spend its budget -- the safe direction, and the
+    # exemption only ever mattered for uniformly trivial states, where the
+    # global max still equals 1.
+    max_rank = _forced_corner_rank(
+        max(_max_virtual_bond_dim(dl) for dl in double_layers.values())
+    )
 
-    max_ranks = {
-        c: _forced_corner_rank(
-            max(_max_virtual_bond_dim(double_layers[s]) for s in _contributors(c))
-        )
-        for c in double_layers
-    }
     for _ in range(max_iter):
         envs, _, _ = _ctm_tensor_sweep_multisite(
             envs,
@@ -1119,7 +1129,7 @@ def _ctm_tensor_multisite(
             # knows the budget ran out rather than the criterion being
             # satisfied.  Mirror the ``or`` in the criterion exactly: reading
             # one side would leave the other silently uncertified.
-            _mr_c = max_ranks[c]
+            _mr_c = max_rank
             sv_blind = not _spectrum_can_show_change(sv, max_rank=_mr_c)
             if sv_blind:
                 # Still blind *now*: the environment being returned is the

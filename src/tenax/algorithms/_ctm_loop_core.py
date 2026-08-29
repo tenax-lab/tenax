@@ -276,13 +276,12 @@ def _run_ctm_loop_with_bump(
             _mr_all = _forced_corner_rank(
                 max(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
             )
-            _mr = {c: _mr_all for c in site_tensors}
             converged = True
             max_diff = 0.0
             for c in sorted(envs):
                 sv = _corner_singular_values(envs[c].C1)
                 if c in prev_svs:
-                    diff = float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr[c]))
+                    diff = float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr_all))
                     max_diff = max(max_diff, diff)
                     if diff >= conv_tol:
                         converged = False
