@@ -23,6 +23,7 @@ __all__ = [
 ]
 
 import warnings
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -55,6 +56,12 @@ from tenax.core import EPS
 from tenax.core.lattice import Lattice
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 from tenax.linalg import _dense_svd
+
+if TYPE_CHECKING:
+    # Type-only: ``ipeps_ctm_convergence`` imports *from* this module, so a
+    # runtime import here would be circular.  ``ctm_tensor`` imports it inside
+    # the function body instead, on the ``return_meta`` branch only.
+    from tenax.algorithms.ipeps_ctm_convergence import CTMConvergenceInfo
 
 # ------------------------------------------------------------------ #
 # Sweep + renormalize                                                  #
@@ -851,7 +858,9 @@ def ctm_tensor(
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
     recipe: str = "2x2",
-) -> tuple[CTMTensorEnv, float]:
+    *,
+    return_meta: bool = False,
+) -> tuple[CTMTensorEnv, float] | tuple[CTMTensorEnv, float, CTMConvergenceInfo]:
     """Run standard CTM to convergence using the Tensor protocol.
 
     Builds the full double-layer tensor via ``bar()`` + ``contract()`` +
@@ -886,14 +895,43 @@ def ctm_tensor(
                            chi.  Switching ``projector_method`` does not help:
                            ``eigh``/``qr`` escape the rank collapse but are
                            wildly non-convergent on the same recipe.
+        return_meta:       When ``True``, return a third element, a
+                           :class:`~tenax.algorithms.ipeps_ctm_convergence.CTMConvergenceInfo`,
+                           saying whether the loop converged or exhausted
+                           ``max_iter`` (#839).  Keyword-only and off by
+                           default so the return arity of this public entry
+                           point is unchanged.  This is the same type and the
+                           same flag :func:`ctm`, :func:`ctm_2site` and
+                           :func:`ctm_split` already take.
+
+                           **Whether the returned environment is a fixed point
+                           is not otherwise observable here.**  Unlike
+                           ``_ctm_tensor_multisite``, this function does not
+                           warn: a budget-exhausted CTM and a converged one
+                           return the same shape of result, and the tensors do
+                           not distinguish them.  Any caller that reads a
+                           physical observable off ``env`` should pass this and
+                           check ``info.converged`` -- an energy taken from a
+                           limit cycle moves with ``max_iter`` without ever
+                           settling (#901).
+
+                           ``info`` reports the *criterion*, not the rank.  A
+                           rank-collapsed corner reports ``converged=False``
+                           with ``diff=inf`` (#898), which is correct but does
+                           not say *why*; for that, pass the returned ``env``
+                           to :func:`~tenax.algorithms._ctm_diagnostics.env_is_collapsed`.
+                           The distinction matters because the two failures
+                           have opposite fixes -- more sweeps will never
+                           un-collapse a corner.
 
     Returns:
-        ``(env, max_truncation_error)`` where ``env`` is the converged
-        CTMTensorEnv and ``max_truncation_error`` is the maximum per-move
-        truncation error ε_T from the **last** sweep before convergence
-        (or the last sweep if ``max_iter`` was reached without convergence).
-        This is a Python ``float`` suitable for use in the optimizer loop
-        (variPEPS §2.8.2 auto-χ trigger).
+        ``(env, max_truncation_error)``, or ``(env, max_truncation_error, info)``
+        when ``return_meta=True``.  ``env`` is the converged CTMTensorEnv and
+        ``max_truncation_error`` is the maximum per-move truncation error ε_T
+        from the **last** sweep before convergence (or the last sweep if
+        ``max_iter`` was reached without convergence).  This is a Python
+        ``float`` suitable for use in the optimizer loop (variPEPS §2.8.2
+        auto-χ trigger).
 
         **v1 scope caveat:** ``max_truncation_error`` is meaningful only on
         the dense, non-tracer SVD path.  It is ``0.0`` when
@@ -977,6 +1015,17 @@ def ctm_tensor(
     last_max_eps: float = 0.0
     prev_sv = None
     max_rank = _forced_corner_rank(_max_virtual_bond_dim(a))
+    # Assigned before the loop, not inside it: a zero-iteration budget (either
+    # ``max_iter=0``, or a warm-up that consumes the whole budget) must still be
+    # able to report, rather than raise ``UnboundLocalError`` from the reporting
+    # path (#901).
+    converged = False
+    # ``inf``, not ``0.0``.  The criterion compares a *pair* of spectra, so it
+    # does not exist until two sweeps have run; a ``0.0`` initialiser would make
+    # a one-sweep budget report the most perfectly converged number available in
+    # the same breath as ``converged=False``.  Matches :func:`ctm` (#839).
+    diff = float("inf")
+    n_iter = 0
     for _ in range(max_iter):
         env, last_max_eps = sweep_fn(
             env,
@@ -986,14 +1035,30 @@ def ctm_tensor(
             projector_method,
             projector_backward=projector_backward,
         )
+        n_iter += 1
 
         current_sv = _corner_singular_values(env.C1)
         if prev_sv is not None:
-            diff = _ctm_sv_diff(current_sv, prev_sv, max_rank=max_rank)
-            if float(diff) < conv_tol:
+            diff = float(_ctm_sv_diff(current_sv, prev_sv, max_rank=max_rank))
+            # ``_ctm_sv_diff`` returns ``inf`` on a rank-collapsed spectrum
+            # (#898), so this fails closed: a collapsed corner cannot certify.
+            if diff < conv_tol:
+                converged = True
                 break
         prev_sv = current_sv
 
+    if return_meta:
+        # Imported here, not at module scope: ``ipeps_ctm_convergence`` imports
+        # *from* this module, so a top-level import would be circular.  The type
+        # is shared rather than re-invented -- ``ctm``, ``ctm_2site`` and
+        # ``ctm_split`` already return this exact NamedTuple for this exact
+        # question (#839), and a second same-named class with different field
+        # names would be indistinguishable in a traceback.
+        from tenax.algorithms.ipeps_ctm_convergence import CTMConvergenceInfo
+
+        # Python scalars, like ``ctm_split``: this loop is a Python loop, not a
+        # ``lax.while_loop`` carry.
+        return env, last_max_eps, CTMConvergenceInfo(converged, n_iter, diff)
     return env, last_max_eps
 
 

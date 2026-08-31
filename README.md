@@ -571,9 +571,9 @@ E = compute_energy_split_ctm(A, env, gate, d=2)
 
 ### Checking whether the CTM actually converged
 
-`ctm`, `ctm_2site` and `ctm_split` return an environment whether or not the
-sweep met `conv_tol` — running out of `max_iter` is not an error. Pass
-`return_meta=True` for a `CTMConvergenceInfo` saying which happened, rather
+`ctm`, `ctm_2site`, `ctm_split` and `ctm_tensor` return an environment whether
+or not the sweep met `conv_tol` — running out of `max_iter` is not an error.
+Pass `return_meta=True` for a `CTMConvergenceInfo` saying which happened, rather
 than inferring it from an energy that silently moves with `max_iter` (#839):
 
 ```python
@@ -587,6 +587,22 @@ if not bool(info.converged):
 
 `info.diff` is the convergence criterion — the change in the corner singular
 values, not in the energy. `ipeps()` performs this check itself and warns.
+
+`ctm_tensor` takes the same flag, and returns the info as a *third* element
+after `(env, max_truncation_error)`:
+
+```python
+from tenax import ctm_tensor
+from tenax.algorithms._ctm_diagnostics import env_is_collapsed
+
+env, eps_T, info = ctm_tensor(A, chi=16, max_iter=100, return_meta=True)
+if not info.converged:
+    # inf means the criterion never produced a value: either fewer than two
+    # sweeps ran, or the corner collapsed to rank 1 and the criterion refused
+    # to certify it (#898).  Only the second is unfixable by more sweeps.
+    reason = "collapsed" if env_is_collapsed(env) else "budget"
+    print(f"not a fixed point ({reason}): {info.n_iter} sweeps, diff {info.diff:.2e}")
+```
 
 ## Fermionic iPEPS (fPEPS)
 

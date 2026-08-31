@@ -99,6 +99,12 @@ _FILE_MARKERS = {
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
+    # ``ctm_tensor(return_info=True)``: the only way a caller can find out
+    # whether the environment it is about to read an energy from is a fixed
+    # point.  Same defect class as the two files above -- a silent wrong answer
+    # on the default path -- so it belongs in the required gate for the same
+    # reason.  Shares one D=2 chi=8 module fixture across every case (~50s).
+    "test_ctm_tensor_return_info.py": "core",
     # #785: the only thing that says whether a root-implicit gradient is
     # accurate.  The contract tests run on a closed-form quartic with no CTM
     # anywhere (~0.2s), so the measurement semantics -- a wrong gradient
