@@ -107,7 +107,26 @@ strict element-wise convergence is needed at large chi.
 |-------|-------------|
 | ``"svd"`` (default) | Fishman two-projector SVD with safe singular-value handling. |
 | ``"eigh"`` | Hermitian eigendecomposition of the corner density matrix. |
-| ``"qr"`` | Reduced-corner QR-CTMRG isometry (Zhang, Yang & Corboz, arXiv:2505.00494). On the dense single-site (``recipe="1x1"``) path this is a real reduced-corner QR projector. As of Phase 2 it is also usable under AD ground-state optimization: set ``gs_recipe="1x1"`` + ``gs_projector_method="qr"`` to run reduced-corner QR-CTMRG under the implicit-diff AD optimizer (dense). The SymmetricTensor/block-sparse ``"qr"`` path is a later phase; the default remains ``"svd"`` with ``gs_recipe="2x2"``. |
+| ``"qr"`` | Reduced-corner QR-CTMRG isometry (Zhang, Yang & Corboz, arXiv:2505.00494). |
+
+```{warning}
+**``projector_method`` is consulted only on the ``"1x1"`` recipe, and that
+recipe is deprecated (#911).** The ``"2x2"`` default hardcodes Fishman SVD and
+ignores this parameter entirely -- ``svd``/``eigh``/``qr`` give bit-identical
+``2x2`` energies.
+
+This page used to say "set ``gs_recipe="1x1"`` + ``gs_projector_method="qr"`` to
+run reduced-corner QR-CTMRG under the implicit-diff AD optimizer". Do not: #911
+measured that recipe reaching **no** fixed point in any reachable configuration.
+Under ``svd`` it collapses the corner to rank 1; under ``eigh``/``qr`` it holds
+full rank but limit-cycles, with the energy ranging over 3.4e-3--4.9e-3 across
+the last 40 of 240 sweeps.
+
+For ``qr`` or ``eigh`` on a C4v-symmetric state, use ``ctm_tensor_c4v`` -- a
+different function that calls the same projector, runs all three methods at full
+rank, and agrees with ``recipe="2x2"`` to 1e-12. The SymmetricTensor/block-sparse
+``"qr"`` path is a later phase.
+```
 
 ### AD backward method
 

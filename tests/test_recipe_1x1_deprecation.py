@@ -39,6 +39,10 @@ from tenax.algorithms._ctm_tensor_convergence import (
     ctm_tensor,
     ctm_tensor_2site,
 )
+from tenax.algorithms._split_ctm_tensor_convergence import (
+    ctm_split_tensor,
+    ctm_split_tensor_2site,
+)
 from tenax.algorithms.ipeps_config import iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -92,6 +96,27 @@ def test_ipeps_config_warns_on_gs_recipe():
         iPEPSConfig(max_bond_dim=2, gs_recipe="1x1")
 
 
+def test_ctm_split_tensor_warns():
+    """The split path is not exempt (#911 review).
+
+    ``ctm_split_tensor`` and ``ctm_split_tensor_2site`` are both exported from
+    ``tenax`` and both accept the recipe, and they reuse the *same* legacy
+    single-site projector.  Measured on the D=2 Heisenberg SU state, the split
+    1x1 collapses exactly as the fused one does: corner rank 1 at chi=4/8/16/32
+    with the energy bit-identical to 12 digits (-0.649578563296) across an 8x
+    change in chi, against -0.65782 at full rank on "2x2".
+    """
+    with pytest.warns(DeprecationWarning, match=MATCH):
+        ctm_split_tensor(_site(), chi=4, max_iter=2, recipe="1x1")
+
+
+def test_ctm_split_tensor_2site_warns():
+    with pytest.warns(DeprecationWarning, match=MATCH):
+        ctm_split_tensor_2site(
+            _site(seed=0), _site(seed=1), chi=4, max_iter=2, recipe="1x1"
+        )
+
+
 # ------------------------------------------------------------------ #
 # ...and nothing else. These are the false positives that matter.     #
 # ------------------------------------------------------------------ #
@@ -135,6 +160,54 @@ def test_warns_once_per_call_not_once_per_sweep():
         warnings.simplefilter("always")
         ctm_tensor(_site(), chi=4, max_iter=50, conv_tol=0.0, recipe="1x1")
     assert sum(1 for w in rec if issubclass(w.category, DeprecationWarning)) == 1
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(
+            lambda: ctm_tensor(_site(), chi=4, max_iter=2, recipe="1x1"),
+            id="ctm_tensor",
+        ),
+        pytest.param(
+            lambda: ctm_tensor_2site(
+                _site(seed=0), _site(seed=1), chi=4, max_iter=2, recipe="1x1"
+            ),
+            id="ctm_tensor_2site",
+        ),
+        pytest.param(
+            lambda: ctm_split_tensor(_site(), chi=4, max_iter=2, recipe="1x1"),
+            id="ctm_split_tensor",
+        ),
+        pytest.param(
+            lambda: ctm_split_tensor_2site(
+                _site(seed=0), _site(seed=1), chi=4, max_iter=2, recipe="1x1"
+            ),
+            id="ctm_split_tensor_2site",
+        ),
+    ],
+)
+def test_warning_points_at_the_caller_not_inside_the_library(call):
+    """#911 review P2: the delegating wrappers add a frame.
+
+    Left at the helper's default ``stacklevel=3``, ``ctm_tensor_2site`` resolved
+    to ``_ctm_tensor_convergence.py:1360`` -- the delegating line inside this
+    library.  That is an unhelpful location, and worse, the default warning
+    registry keys on (message, module, lineno), so two unrelated user call sites
+    would collapse into one report and the second caller would never be told.
+
+    Asserting the filename is what makes this non-vacuous: a test that only
+    counted warnings passed with the bug present.
+    """
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        call()
+    dep = [w for w in rec if issubclass(w.category, DeprecationWarning)]
+    assert dep, "no deprecation warning raised"
+    assert all(w.filename == __file__ for w in dep), (
+        "warning points inside the library instead of at the caller: "
+        + ", ".join(f"{w.filename}:{w.lineno}" for w in dep)
+    )
 
 
 def test_message_names_both_migration_targets():

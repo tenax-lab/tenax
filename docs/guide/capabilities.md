@@ -108,11 +108,18 @@ research.
   memory win over the fused double layer is a large-D effect (D ≳ 16).
 
   :::{warning}
-  `gs_recipe="1x1"` is retained only for regression bisection and **must not be
-  used for physics**. Its corner-pair projector collapses the environment to
-  rank-1 corners, giving a χ_eff = 1 mean-field boundary whose energy is
-  bit-identical across any range of χ. Nothing raises -- the collapsed
-  environment is still finite, Hermitian and PSD. See #723, #726, #746, #747.
+  `gs_recipe="1x1"` is **deprecated** (#911) and emits a `DeprecationWarning`.
+  It is retained only for regression bisection and **must not be used for
+  physics**. Its corner-pair projector collapses the environment to rank-1
+  corners, giving a χ_eff = 1 mean-field boundary whose energy is bit-identical
+  across any range of χ. Nothing raises -- the collapsed environment is still
+  finite, Hermitian and PSD. See #723, #726, #746, #747.
+
+  #911 widened this: the recipe reaches no fixed point in *any* reachable
+  configuration, not only under the default `svd` projector. `eigh`/`qr` escape
+  the rank collapse but limit-cycle instead, and C4v-symmetrizing the state does
+  not help. Use `gs_recipe="2x2"`; if you need `projector_method` honoured at
+  all, use `ctm_tensor_c4v`, since `2x2` hardcodes Fishman SVD.
   :::
 - **Fermionic iPEPS (fPEPS)** -- graded tensors with Koszul signs,
   `FermionParity` / `FermionicU1`, and a `spinless_fermion_gate` (hopping +
