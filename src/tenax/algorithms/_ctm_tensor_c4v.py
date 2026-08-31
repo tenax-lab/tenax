@@ -131,10 +131,20 @@ def _c4v_sweep(
 def _c4v_to_full_env(C: Tensor, T: Tensor) -> CTMTensorEnv:
     """Expand one corner + one edge to the full 8-tensor CTMTensorEnv.
 
+    The flow conventions reproduced below are the **pre-#905** ones, and they
+    are not self-consistent: four of the eight chi bonds come out same-flow
+    (C2.c2_d~T2.t2_u, C3.c3_l~T3.t3_l, C4.c4_r~T4.t4_u, T4.t4_d~C1.c1_d) and
+    every edge's D² leg has the same flow as the double-layer face it meets.
+    ``_contract_symmetric`` pairs blocks by charge value and drops products
+    outside the output's valid set, so on those bonds the charged sectors are
+    deleted -- which is #762/#760, and was #905 on the general path until
+    ``_STD_EDGE_SPECS`` / ``_STD_CORNER_SPECS`` were made to alternate.  This
+    function has NOT been ported to the #905 convention; do not read the list
+    below as the environment convention, only as what this function emits.
+
     C has labels ``(c_a=IN, c_b=OUT)``.
     T has labels ``(t_l=IN, D2=IN, t_r=OUT)``.
 
-    The full environment label/flow conventions are:
         C1: (c1_d=IN, c1_r=OUT)
         C2: (c2_l=IN, c2_d=OUT)
         C3: (c3_u=OUT, c3_l=IN)

@@ -206,6 +206,74 @@
 
 ### Fixed
 
+- **The symmetric CTM no longer annihilates its charged environment sectors**
+  (#905). A block-sparse U(1)-Sz CTM converged to an environment in which every
+  corner and edge block carrying a non-zero charge was *allocated but exactly
+  `0.0`*. The tell was that the symmetric energy was **flat in chi to ten
+  digits** (chi=8 and chi=16 agreed) while the dense energy kept moving, and
+  `rank(C1)` equalled the number of charge-0 slots on its legs, nothing more.
+
+  `_contract_symmetric` pairs blocks by charge **value** and drops any product
+  whose output key falls outside the output legs' conservation law. A bond whose
+  two ends carry the *same* flow therefore *adds* the two flow-weighted charges
+  instead of cancelling them, so only the `q = 0` product survives. Three such
+  faults were live at once, each sufficient on its own:
+
+  1. `_apply_proj_unfused` flow-flipped the whole projector before splitting its
+     fused leg — but `split_index` restores the parents with the flows recorded
+     in `fuse_info`, so the flip survived on `chi_new` **alone** and left
+     `net(P_un) = 2 * q_chi_new`.
+  2. Every edge's D² leg was declared with the **same** flow as the double-layer
+     tensor's matching face rather than the opposite one, so charge died at each
+     `T · a` contraction. `_flip_leg_flow` on the renormalised edge made it
+     worse: the leg it dualed was already the correct dual of the next cell's
+     face, so dualing it produced same-flow *and* conjugated charges.
+  3. Four of the initial environment's eight chi bonds were same-flow
+     (`_STD_EDGE_SPECS` / `_CORNER_SPECS`). The chi ring now alternates via
+     `_STD_CORNER_SPECS`, which is `_CORNER_SPECS` with C3 flipped; the
+     split-CTM path keeps the shared table.
+
+  Making the ring alternate exposed a fourth defect in the same family. A chi
+  charge *list* belongs to the bond, not to either end: `contract` pairs blocks
+  by charge value while dense einsum pairs by position, so the two ends must
+  enumerate the same charge per dense slot. `_fused_chi_charges` derived the
+  list with the leg's own flow, which negates it on one end, and
+  `_tile_fused_to_chi` truncates to `chi` *before* sorting — so for
+  `chi < D**2` the truncated multiset is not closed under negation and the two
+  ends disagreed (D=3, `chi=4`: `[-1, 0, 1, 1]` against `[-1, -1, 0, 1]` on four
+  of the eight bonds). Same-flow ends had hidden this by agreeing trivially. The
+  derivation is now pinned to `IN` and only the declared flow varies; measured
+  after, every chi and D² bond is a proper dual and the enlarged corner is exact
+  on full-support operands (rel < 1.5e-16) at D=2 and D=3 for `chi` in
+  4/8/9/12 — including `chi < D**2`, where it was ~82% wrong.
+
+  Measured on a D=2 U(1)-Sz pair at chi=8, `recipe="2x2"`, against the
+  flow-insensitive dense path:
+
+  | | before | after | dense |
+  |---|---|---|---|
+  | `E` (chi=8)  | −0.4138113307 | **−0.5748913759** | −0.5758837997 |
+  | `E` (chi=16) | −0.4138113307 | **−0.5757558561** | −0.5783088110 |
+  | `rank(C1)` (chi=8) | 4 | **8** | — |
+  | `‖C1[±2,±2]‖` (chi=8) | 0.0 | **0.580** | — |
+
+  The energy is no longer flat in chi, and the residual 1e-3 gap to dense is the
+  expected per-sector-vs-global truncation difference, not a lost sector.
+
+  Every contraction is now exact: wrapping `_contract_symmetric` and scoring
+  every call of a charged run against the same einsum on densified operands gives
+  **zero** lossy sites — 386 calls over two sweeps for the CTM, and 52 more for
+  the RDM/energy path. Before, a three-sweep run had exactly one lossy site,
+  `_apply_proj_unfused`, discarding **16.8 of 30.2** in summed result norm over
+  its 48 lossy calls. `TENAX_STRICT_CONTRACT=1` now runs the sweep without
+  refusing anything, so it is asserted positively rather than as a pinned
+  defect.
+
+  Not ported: `_ctm_tensor_c4v._c4v_to_full_env` still emits the pre-#905
+  convention (that is #762/#760), and the fermionic 2-plaquette path keeps its
+  `_flip_leg_flow` calls — harmless for `FermionParity`, where charges are
+  self-dual and `2q ≡ 0`, but the same defect is latent for `FermionicU1`.
+
 - **The CTM convergence criterion no longer certifies a collapsed
   environment** (#898). `_ctm_sv_diff` compares the corner spectrum
   *normalised by its sum*. That normalisation is deliberate — under
