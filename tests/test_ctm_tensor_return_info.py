@@ -21,7 +21,9 @@ they are properties of this loop:
   reading "no change" as convergence.
 """
 
+import inspect
 import math
+import typing
 
 import jax
 import pytest
@@ -77,6 +79,40 @@ def test_return_meta_does_not_change_the_first_two_elements(su_state):
     assert eps_a == eps_b
     delta = jax.numpy.max(jax.numpy.abs(env_a.C1._data - env_b.C1._data))
     assert float(delta) == 0.0
+
+
+def test_the_public_return_annotation_is_resolvable_at_runtime():
+    """#920 review P2: a `TYPE_CHECKING`-only import breaks introspection.
+
+    `ctm_tensor` is public API, so `typing.get_type_hints` and
+    `inspect.signature(..., eval_str=True)` must work on it -- runtime validators
+    and doc tooling call them.  The first version imported
+    `CTMConvergenceInfo` only under `TYPE_CHECKING` (to dodge a circular import)
+    and inside the `return_meta` branch, so the name was absent from the
+    function's runtime globals and both calls raised `NameError`.
+
+    Fixed by moving the type down into this module rather than papering over the
+    cycle -- `ipeps_ctm_convergence` already imports *from* here, so defining it
+    here removes the cycle instead of deferring it.  No CTM runs in this test.
+    """
+    hints = typing.get_type_hints(ctm_tensor)
+    assert "return" in hints
+    assert inspect.signature(ctm_tensor, eval_str=True) is not None
+
+
+def test_there_is_exactly_one_CTMConvergenceInfo_class():  # noqa: N802
+    """Every import path must reach the *same* class object.
+
+    A second same-named class is not a hypothetical: the first attempt at this
+    feature defined one in `_ctm_tensor_convergence` while `tenax` was already
+    bound to the #839 NamedTuple, and it failed its own isinstance check with an
+    identical-looking repr.  Nothing in a traceback distinguishes them.
+    """
+    from tenax import CTMConvergenceInfo as via_tenax
+    from tenax.algorithms.ipeps_ctm import CTMConvergenceInfo as via_shim
+    from tenax.algorithms.ipeps_ctm_convergence import CTMConvergenceInfo as via_ipeps
+
+    assert via_tenax is via_shim is via_ipeps is CTMConvergenceInfo
 
 
 def test_return_meta_is_keyword_only(su_state):

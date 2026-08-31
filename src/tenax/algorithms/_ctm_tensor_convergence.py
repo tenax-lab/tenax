@@ -20,10 +20,11 @@ __all__ = [
     "make_neighbors",
     "ctm_tensor",
     "ctm_tensor_2site",
+    "CTMConvergenceInfo",
 ]
 
 import warnings
-from typing import TYPE_CHECKING
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -56,12 +57,6 @@ from tenax.core import EPS
 from tenax.core.lattice import Lattice
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 from tenax.linalg import _dense_svd
-
-if TYPE_CHECKING:
-    # Type-only: ``ipeps_ctm_convergence`` imports *from* this module, so a
-    # runtime import here would be circular.  ``ctm_tensor`` imports it inside
-    # the function body instead, on the ``return_meta`` branch only.
-    from tenax.algorithms.ipeps_ctm_convergence import CTMConvergenceInfo
 
 # ------------------------------------------------------------------ #
 # Sweep + renormalize                                                  #
@@ -848,6 +843,45 @@ def _corner_singular_values(C):  # noqa: N802
     return _dense_svd(data, compute_uv=False)
 
 
+class CTMConvergenceInfo(NamedTuple):
+    """Whether a dense CTM sweep converged, and what it did (#839).
+
+    These entry points used to compute ``converged`` and the iteration count
+    inside their loop and then discard both, so a caller could not tell a
+    converged environment from one that silently exhausted ``max_iter`` --
+    the forward-side twin of #801/#824.  ``ipeps()`` in particular returned an
+    energy with no channel to report the environment's status.
+
+    Obtained by passing ``return_meta=True`` to :func:`ctm`, :func:`ctm_2site`
+    or :func:`ctm_split`.  Opt-in because all three are public API and their
+    return arity cannot change.
+
+    ``converged`` and ``n_iter`` come straight out of a ``lax.while_loop``
+    carry for :func:`ctm` / :func:`ctm_2site`, so they are **JAX arrays**, not
+    Python scalars.  That keeps the entry points jittable; call ``bool(...)``
+    / ``int(...)`` at the point of use.  :func:`ctm_split` runs a Python loop
+    and returns Python scalars.
+
+    Attributes:
+        converged: True when the sweep met ``conv_tol`` and stopped early.
+                   False means it ran out of iterations -- the value is
+                   whatever the last sweep produced.
+        n_iter:    Sweeps actually performed.  Equal to ``max_iter`` exactly
+                   when ``converged`` is False.  For :func:`ctm` with a QR
+                   warm-up this counts the post-warm-up loop only, matching
+                   the budget that loop was given.
+        diff:      Final value of the convergence criterion -- the max
+                   absolute difference between successive normalized corner
+                   singular-value vectors.  ``inf`` if no comparison was ever
+                   made (fewer than two sweeps).  Note this watches the corner
+                   spectrum, not the energy.
+    """
+
+    converged: jax.Array | bool
+    n_iter: jax.Array | int
+    diff: jax.Array | float
+
+
 def ctm_tensor(
     A: Tensor,
     chi: int,
@@ -896,7 +930,7 @@ def ctm_tensor(
                            ``eigh``/``qr`` escape the rank collapse but are
                            wildly non-convergent on the same recipe.
         return_meta:       When ``True``, return a third element, a
-                           :class:`~tenax.algorithms.ipeps_ctm_convergence.CTMConvergenceInfo`,
+                           :class:`CTMConvergenceInfo`,
                            saying whether the loop converged or exhausted
                            ``max_iter`` (#839).  Keyword-only and off by
                            default so the return arity of this public entry
@@ -1048,14 +1082,6 @@ def ctm_tensor(
         prev_sv = current_sv
 
     if return_meta:
-        # Imported here, not at module scope: ``ipeps_ctm_convergence`` imports
-        # *from* this module, so a top-level import would be circular.  The type
-        # is shared rather than re-invented -- ``ctm``, ``ctm_2site`` and
-        # ``ctm_split`` already return this exact NamedTuple for this exact
-        # question (#839), and a second same-named class with different field
-        # names would be indistinguishable in a traceback.
-        from tenax.algorithms.ipeps_ctm_convergence import CTMConvergenceInfo
-
         # Python scalars, like ``ctm_split``: this loop is a Python loop, not a
         # ``lax.while_loop`` carry.
         return env, last_max_eps, CTMConvergenceInfo(converged, n_iter, diff)
