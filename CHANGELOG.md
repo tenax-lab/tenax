@@ -28,6 +28,10 @@
   implementation semantics: on an identical chi=8 critical-Ising gram both
   produce identical cascade structure (43 refinement iterations) and
   environment-metric insertion errors agreeing to 3e-6 at gilt_eps=1e-4.
+  Fermionic symmetries are rejected with `NotImplementedError` — the gram
+  densify-and-transpose and the `bar()` double layer are bosonic-only, and
+  a silent wrong answer on `compute_free_wilson_fermion_tensor()` input is
+  worse than no answer (Codex P1 on #924).
 
 - **`ctm_ad_mode="root_implicit_symmetric"` is wired to `optimize_gs_ad`**
   (#715 Phase 3). The block-sparse engine has existed and been tested since

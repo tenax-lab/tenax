@@ -13,6 +13,7 @@ from tenax.algorithms.gilt import (
 )
 from tenax.algorithms.trg import (
     TRGConfig,
+    compute_free_wilson_fermion_tensor,
     compute_ising_tensor,
     ising_free_energy_exact,
     trg,
@@ -126,6 +127,13 @@ class TestGiltPlaquette:
     def test_rejects_non_tensor(self):
         with pytest.raises(TypeError):
             gilt_plaquette(np.zeros((2, 2, 2, 2)), GiltConfig())
+
+    def test_rejects_fermionic(self):
+        """The gram densify-and-transpose and the bar() double layer are
+        bosonic-only; fermionic input must be rejected, not corrupted."""
+        T = compute_free_wilson_fermion_tensor(mass=1.0)
+        with pytest.raises(NotImplementedError):
+            gilt_plaquette(T, GiltConfig(gilt_eps=1e-6))
 
 
 class TestGiltTNRStep:

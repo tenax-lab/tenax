@@ -374,6 +374,15 @@ def gilt_plaquette(T: Tensor, config: GiltConfig) -> tuple[Tensor, Tensor, dict]
     """
     if not isinstance(T, Tensor):
         raise TypeError(f"gilt_plaquette() requires a Tensor, got {type(T).__name__}")
+    if any(idx.symmetry.is_fermionic for idx in T.indices):
+        # The gram is densified and its legs reordered with a plain
+        # transpose (no Koszul signs), and the double layer uses ``bar()``
+        # (no fermionic twists) — both are only correct for bosonic
+        # braiding. Fermionic GILT needs a sign-aware audit of the whole
+        # plaquette wiring; reject rather than silently corrupt.
+        raise NotImplementedError(
+            "gilt_plaquette() does not support fermionic symmetries"
+        )
     B1, B2 = T, T
     if config.gilt_eps == 0.0:
         return B1, B2, {"laps": [], "bond_dims": _leg_dims(B1)}
