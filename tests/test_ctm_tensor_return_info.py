@@ -203,10 +203,10 @@ def test_zero_budget_reports_instead_of_raising(su_state):
 def test_a_warmup_that_consumes_the_whole_budget_still_reports(su_state):
     """``qr_warmup_steps == max_iter`` leaves the measured loop with nothing.
 
-    Three sweeps really ran, so ``n_iter`` is 3 -- not 0 (#920 review P2).  The
-    criterion still never existed, because it compares a pair of spectra and the
-    measured loop never executed, so ``diff`` stays ``inf``.  Those two facts
-    are independent and both have to be reported.
+    Three sweeps really ran, so ``n_iter`` is 3 -- not 0 -- and the criterion is
+    a real measured number, not ``inf`` (#920 review P2, both rounds).  Counting
+    the sweeps while discarding their spectra made the report contradict itself:
+    "three sweeps ran" alongside "nothing was measured".
     """
     _env, _eps, info = ctm_tensor(
         su_state,
@@ -219,7 +219,36 @@ def test_a_warmup_that_consumes_the_whole_budget_still_reports(su_state):
     )
     assert info.n_iter == 3, "warm-up sweeps moved the environment; count them"
     assert not info.converged
-    assert info.diff == math.inf
+    assert math.isfinite(info.diff), "warm-up spectra must be measured, not discarded"
+
+
+def test_a_pure_warmup_run_measures_what_the_same_sweeps_measure_without_one(su_state):
+    """The sharpest form of #920 review P2, on the default recipe.
+
+    ``recipe="2x2"`` ignores ``projector_method`` -- its sweep wrapper hardcodes
+    the plaquette projector -- so a warm-up that consumes the whole budget runs
+    the *same* sweeps that otherwise converge.  Before the fix this reported
+    ``converged=False, diff=inf``: a genuine fixed point, certified as nothing.
+
+    The two runs do not agree on ``n_iter``, and that is by design rather than a
+    loose end.  The warm-up deliberately does not break on ``conv_tol`` -- having
+    converged under eigh is not the same as having converged under the projector
+    the caller asked for, and breaking there would silently skip QR -- so it
+    spends the whole budget where the plain run exits early.  It therefore ends
+    up *more* converged, which is the direction that cannot mislead.
+    """
+    common = dict(chi=8, max_iter=30, conv_tol=1e-10, recipe="2x2", return_meta=True)
+    _e, _x, warmed = ctm_tensor(
+        su_state, projector_method="qr", qr_warmup_steps=30, **common
+    )
+    _e, _x, plain = ctm_tensor(su_state, projector_method="svd", **common)
+
+    # The control must actually converge, or "warmed converged too" proves nothing.
+    assert plain.converged and plain.diff < 1e-10
+    assert warmed.converged, "a converged fixed point must not report uncertified"
+    assert math.isfinite(warmed.diff) and warmed.diff < 1e-10
+    # It ran the full budget precisely because the warm-up does not early-break.
+    assert warmed.n_iter == 30 and plain.n_iter < 30
 
 
 def test_n_iter_equals_the_callers_max_iter_when_the_budget_is_exhausted(su_state):
