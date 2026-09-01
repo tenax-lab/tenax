@@ -302,11 +302,15 @@ _FILE_MARKERS = {
     # *withholding* this ``core``; see ``pytest_collection_modifyitems``.
     "test_multisite_clamped_gate.py": "core",
     "test_ctm_tensor.py": "algorithm",
-    # The invariant that keeps the 2x2 enlarged corner contraction-correct on
-    # non-dual bonds (#834/#762).  It is a property of the *sweep*, not of the
-    # flow convention, so nothing in the type system enforces it -- required
-    # gate.  The D=3 case carries its own ``@pytest.mark.slow``.
+    # The invariant that keeps the 2x2 enlarged corner contraction-correct
+    # (#834/#762/#905).  Since #905 it is a property of the flow convention
+    # rather than of the sweep, but still nothing in the type system enforces
+    # it -- required gate.  The D=3 case carries its own ``@pytest.mark.slow``.
     "test_enlarged_corner_flow_invariant_834.py": "core",
+    # #905: the charged environment sectors themselves.  Two D=2 chi=8 CTM
+    # convergences (one symmetric, one dense) plus one RDM -- core budget; the
+    # chi-scan that needs chi=16 carries its own ``@pytest.mark.slow``.
+    "test_ctm_charged_sectors_905.py": "core",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",
     "test_tdvp.py": "algorithm",
