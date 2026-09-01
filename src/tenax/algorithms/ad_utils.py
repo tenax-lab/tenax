@@ -1345,10 +1345,17 @@ def ctm_split_tensor_converge_explicit(
     Returns:
         Converged SplitCTMTensorEnv.
     """
-    from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+    from tenax.algorithms._ctm_tensor_convergence import (
+        SINGLE_SITE_NEIGHBORS,
+        _warn_recipe_1x1_deprecated,
+    )
     from tenax.algorithms._split_ctm_tensor_convergence import (
         _split_ctm_sweep_multisite,
     )
+
+    # #911: once per convergence call, at the boundary the caller reaches.
+    if recipe == "1x1":
+        _warn_recipe_1x1_deprecated("ctm_split_tensor_converge_explicit")
     from tenax.algorithms._split_ctm_tensor_init import (
         initialize_split_ctm_tensor_env,
     )

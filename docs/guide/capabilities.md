@@ -115,8 +115,11 @@ research.
   across any range of χ. Nothing raises -- the collapsed environment is still
   finite, Hermitian and PSD. See #723, #726, #746, #747.
 
-  #911 widened this: the recipe reaches no fixed point in *any* reachable
-  configuration, not only under the default `svd` projector. `eigh`/`qr` escape
+  #911 widened this: for any state with **D > 1** the recipe reaches no fixed
+  point in *any* reachable configuration, not only under the default `svd`
+  projector. (At D=1 rank 1 is the *maximum* reachable corner rank, so the
+  collapse is vacuous and `1x1` matches `2x2` exactly -- but the API is still
+  being removed.) `eigh`/`qr` escape
   the rank collapse but limit-cycle instead, and C4v-symmetrizing the state does
   not help. Use `gs_recipe="2x2"`; if you need `projector_method` honoured at
   all, use `ctm_tensor_c4v`, since `2x2` hardcodes Fishman SVD.

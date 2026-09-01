@@ -30,6 +30,7 @@ from tenax.algorithms._ctm_loop_core import (
 from tenax.algorithms._ctm_tensor_convergence import (
     Coord,
     _ctm_tensor_sweep_multisite,
+    _warn_recipe_1x1_deprecated,
 )
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
@@ -235,6 +236,13 @@ def python_loop_ctm_converge(
     Returns:
         ``(envs, CTMConvergeInfo)`` — converged environments and info.
     """
+    # #911: warned here rather than in ``_make_jit_ctm_step`` or
+    # ``_python_loop_chi_ramp`` -- this is the once-per-convergence boundary,
+    # those are once-per-sweep and once-per-ramp-stage.  Before the chi_ramp
+    # early-return below, or a ramped call would never reach it.
+    if recipe == "1x1":
+        _warn_recipe_1x1_deprecated("python_loop_ctm_converge")
+
     # Reject ``ctmrg_heuristic_increase_chi`` + ``chi_ramp`` BEFORE the
     # chi_ramp early-return, otherwise the bump flag is silently ignored
     # by ``_python_loop_chi_ramp`` (which doesn't accept the new knobs).

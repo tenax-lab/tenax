@@ -112,6 +112,11 @@ _FILE_MARKERS = {
     # notice.  No CTM convergence anywhere -- ``max_iter=2`` on a random D=2
     # site, since the warning does not depend on physics (~4.5s).
     "test_recipe_1x1_deprecation.py": "core",
+    # The #911 coverage rule: every public function taking ``recipe`` warns or
+    # is explicitly exempt.  Pure AST over ``src/tenax``, no JAX, ~1s -- and it
+    # is the guard that three review rounds of hand-maintained lists could not
+    # replace, so it belongs in the required gate.
+    "test_recipe_1x1_coverage.py": "core",
     # #785: the only thing that says whether a root-implicit gradient is
     # accurate.  The contract tests run on a closed-form quartic with no CTM
     # anywhere (~0.2s), so the measurement semantics -- a wrong gradient

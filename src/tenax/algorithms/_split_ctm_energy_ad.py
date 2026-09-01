@@ -18,6 +18,10 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
+from tenax.algorithms._ctm_tensor_convergence import (
+    _warn_recipe_1x1_deprecated,
+)
+
 __all__ = [
     "converge_split_env",
     "converge_split_env_2site",
@@ -54,6 +58,11 @@ def ctm_energy_split_explicit(
     **_ignored,
 ):
     """Single-site iPEPS energy with explicit (unrolled) split-CTM AD."""
+    # #911: the once-per-call boundary for this path.  Not in
+    # ``_converge_split_gauge_fixed`` / ``_split_step``, which run per
+    # convergence-restart and per sweep respectively.
+    if recipe == "1x1":
+        _warn_recipe_1x1_deprecated("ctm_energy_split_explicit")
     A = _extract_single_site(site_tensors)
     if energy_fn is not None:
         raise NotImplementedError(
@@ -293,6 +302,11 @@ def ctm_energy_split_implicit(
             "custom energy_fn (e.g. coarse-grain) is not supported on the split "
             "path yet; use fuse_virtual_legs=True."
         )
+    # #911: the once-per-call boundary for this path.  Not in
+    # ``_converge_split_gauge_fixed`` / ``_split_step``, which run per
+    # convergence-restart and per sweep respectively.
+    if recipe == "1x1":
+        _warn_recipe_1x1_deprecated("ctm_energy_split_implicit")
     if chi_I is None:
         chi_I = chi
 
@@ -330,6 +344,11 @@ def converge_split_env(
     *env_init* is an optional ``SplitCTMTensorEnv`` warm-start seed; ``None``
     cold-starts from a fresh init.
     """
+    # #911: the once-per-call boundary for this path.  Not in
+    # ``_converge_split_gauge_fixed`` / ``_split_step``, which run per
+    # convergence-restart and per sweep respectively.
+    if recipe == "1x1":
+        _warn_recipe_1x1_deprecated("converge_split_env")
     if chi_I is None:
         chi_I = chi
     return _converge_split_gauge_fixed(

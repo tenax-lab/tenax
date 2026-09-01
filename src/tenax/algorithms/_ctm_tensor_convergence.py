@@ -976,9 +976,12 @@ def ctm_tensor(
                            projector, kept only for regression bisection.
 
                            **``"1x1"`` is deprecated and emits a
-                           ``DeprecationWarning`` (#911).**  It reaches no fixed
-                           point in any configuration reachable from the public
-                           API: ``svd`` collapses to rank 1, ``eigh``/``qr``
+                           ``DeprecationWarning`` (#911).**  For any state with
+                           ``D > 1`` it reaches no fixed point in any
+                           configuration reachable from the public API
+                           (at ``D=1`` rank 1 is the *maximum* reachable corner
+                           rank, so the collapse is vacuous and ``1x1`` matches
+                           ``2x2`` exactly -- the removal still applies): ``svd`` collapses to rank 1, ``eigh``/``qr``
                            limit-cycle at full rank, and a non-uniform cell
                            truncates one bond with two inequivalent projectors
                            on alternating sweeps.  Migrate to ``"2x2"``, or to

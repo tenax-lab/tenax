@@ -117,7 +117,10 @@ ignores this parameter entirely -- ``svd``/``eigh``/``qr`` give bit-identical
 
 This page used to say "set ``gs_recipe="1x1"`` + ``gs_projector_method="qr"`` to
 run reduced-corner QR-CTMRG under the implicit-diff AD optimizer". Do not: #911
-measured that recipe reaching **no** fixed point in any reachable configuration.
+measured that recipe reaching **no** fixed point in any reachable
+configuration, for any state with D > 1. (D=1 is the one exception -- rank 1 is
+the maximum reachable corner rank there, so the collapse is vacuous and ``1x1``
+matches ``2x2`` exactly -- but the recipe is still being removed.)
 Under ``svd`` it collapses the corner to rank 1; under ``eigh``/``qr`` it holds
 full rank but limit-cycles, with the energy ranging over 3.4e-3--4.9e-3 across
 the last 40 of 240 sweeps.
