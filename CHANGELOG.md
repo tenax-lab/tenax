@@ -206,6 +206,53 @@
 
 ### Fixed
 
+- **The CTM chi bond follows its own spectrum; `base_charges` is now only a
+  floor** (#922). With #905's flow faults gone the symmetric CTM still
+  saturated below the dense reference, and the gap *grew* with chi instead of
+  shrinking — 9.9e-4 at chi=8, 2.55e-3 at chi=16, 2.58e-3 at chi=24 on a D=2
+  U(1)-Sz pair, while the dense arm kept improving. Flat-or-growing
+  disagreement in chi is this project's defect signature (#898), and the cause
+  was the truncation policy rather than the contraction.
+
+  `base_charges` (the double-layer `u2` charge list) was tiled by
+  `_derive_charges` into a per-sector **quota**: each sector was capped at its
+  tiled share, and any charge *absent* from `base_charges` was allocated a
+  share of zero. On that pair the full bond offered
+  `{-4: 4, -2: 16, 0: 24, 2: 16, 4: 4}` and the quota kept `{-2: 4, 0: 8, 2: 4}`
+  — the `|q| = 4` sectors could not be given a slot at any chi, however much
+  weight they carried.
+
+  The cut is now the global top-chi with `base_charges` reserving one slot per
+  charge it names. Measured against the same-state dense reference:
+
+  | D | chi | before | after |
+  |---|-----|--------|-------|
+  | 2 | 8   | 9.92e-04 | 1.54e-04 |
+  | 2 | 16  | 2.55e-03 | 4.23e-14 |
+  | 2 | 24  | 2.58e-03 | 2.22e-16 |
+  | 3 | 16  | 1.84e-07 | 4.44e-16 |
+
+  The floor is kept on principle, not on measurement: it never bound on any
+  fixture measured here, and it exists because `contract()` pairs blocks by
+  charge value, so a charge that leaves a bond index cannot be recreated
+  through it. It is unit-tested directly rather than claimed as a physics gain.
+  The policy now lives in one place, `_ctm_utils._select_chi_slots`, replacing
+  three hand-rolled copies (the 2x2 re-truncation and both `_ctm_projector`
+  projectors).
+
+  **This does not reach the AD path, and `optimize_gs_ad` still truncates the
+  old way.** `jax.jit` bakes the per-sector block shapes at trace time, so
+  under tracing which sector owns each chi slot must be decided before the SVD
+  runs and the quota stays. Two static replacements were built and measured,
+  and each is worse somewhere — the quota misses by 2.6e-3 at D=2 chi=24, and a
+  capacity-proportional inventory (which fixes that) misses by 1.1e-5 at D=3
+  chi=8 where the quota is exact — so neither was shipped and `linalg.svd` is
+  untouched, which also leaves fPEPS simple update's pinned bond layout alone
+  (#558). The divergence is pinned by
+  `test_the_traced_path_pins_the_chi_new_inventory` and tracked separately.
+  The gradient itself is unaffected: differentiating the traced forward matches
+  finite differences of that same forward to 1.5e-12.
+
 - **The symmetric CTM no longer annihilates its charged environment sectors**
   (#905). A block-sparse U(1)-Sz CTM converged to an environment in which every
   corner and edge block carrying a non-zero charge was *allocated but exactly
