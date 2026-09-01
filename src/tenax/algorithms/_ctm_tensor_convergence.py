@@ -1047,39 +1047,66 @@ def ctm_tensor(
     a = _build_double_layer_tensor(A)
     env = initialize_ctm_tensor_env(A, chi)
 
-    # Assigned outside the branch: the warm-up is conditional, the count is not.
-    warmup_run = 0
-
-    # QR warm-up: run a few eigh iterations before switching to QR
-    if projector_method == "qr" and qr_warmup_steps > 0:
-        warmup = min(qr_warmup_steps, max_iter)
-        for _ in range(warmup):
-            env, _ = sweep_fn(
-                env, a, chi, renormalize, "eigh", projector_backward=projector_backward
-            )
-        # Counted, not discarded (#920 review P2).  These are real sweeps that
-        # really moved the environment being returned, and the field's own
-        # invariant -- ``n_iter == max_iter`` exactly when ``converged`` is
-        # False -- is only true against the caller's ``max_iter`` if they are
-        # included.  Excluding them reported ``n_iter=0`` after three executed
-        # sweeps when the warm-up consumed the whole budget.
-        warmup_run = warmup
-        max_iter = max_iter - warmup
-
     last_max_eps: float = 0.0
     prev_sv = None
     max_rank = _forced_corner_rank(_max_virtual_bond_dim(a))
-    # Assigned before the loop, not inside it: a zero-iteration budget (either
-    # ``max_iter=0``, or a warm-up that consumes the whole budget) must still be
-    # able to report, rather than raise ``UnboundLocalError`` from the reporting
-    # path (#901).
+    # Assigned before either loop, not inside them: a zero-iteration budget
+    # (``max_iter=0``, or a warm-up that consumes the whole budget) must still
+    # be able to report, rather than raise ``UnboundLocalError`` from the
+    # reporting path (#901).
     converged = False
     # ``inf``, not ``0.0``.  The criterion compares a *pair* of spectra, so it
     # does not exist until two sweeps have run; a ``0.0`` initialiser would make
     # a one-sweep budget report the most perfectly converged number available in
     # the same breath as ``converged=False``.  Matches :func:`ctm` (#839).
     diff = float("inf")
-    n_iter = warmup_run
+    n_iter = 0
+
+    # QR warm-up: run a few eigh iterations before switching to QR.
+    #
+    # Counted **and measured** (#920 review P2, both rounds).  These are real
+    # sweeps that really moved the environment being returned, so they count
+    # toward ``n_iter`` -- the field's invariant (``n_iter == max_iter`` exactly
+    # when ``converged`` is False) is only true against the caller's
+    # ``max_iter`` if they are included.  But counting them while discarding
+    # their corner spectra made the report contradict itself: ``n_iter=30``
+    # alongside ``diff=inf`` says thirty sweeps ran and nothing was measured.
+    #
+    # Sharpest on the default ``recipe="2x2"``, whose sweep wrapper ignores
+    # ``projector_method``: a long warm-up there runs the *same* sweeps that
+    # otherwise converge.  Measured, ``qr_warmup_steps=30, max_iter=30`` gave
+    # ``converged=False, diff=inf`` on an environment that had reached 2.6e-16.
+    if projector_method == "qr" and qr_warmup_steps > 0:
+        warmup = min(qr_warmup_steps, max_iter)
+        for _ in range(warmup):
+            env, _ = sweep_fn(
+                env, a, chi, renormalize, "eigh", projector_backward=projector_backward
+            )
+            n_iter += 1
+            current_sv = _corner_singular_values(env.C1)
+            if prev_sv is not None:
+                diff = float(_ctm_sv_diff(current_sv, prev_sv, max_rank=max_rank))
+                converged = diff < conv_tol
+            prev_sv = current_sv
+        max_iter = max_iter - warmup
+
+    # ``prev_sv`` carries across deliberately: the first measured sweep compares
+    # against the last warm-up spectrum, and those are consecutive sweeps of the
+    # same environment.  The projector changes at that boundary, so that one
+    # comparison can read high -- which fails closed (it cannot certify), the
+    # safe direction.
+    #
+    # The warm-up does **not** break early on ``conv_tol``.  Converging under
+    # eigh is not converging under the projector the caller asked for, and
+    # stopping there would silently skip QR altogether.  It only reports.
+    if max_iter > 0:
+        # Defence in depth, and NOT covered by a test -- see the commit message.
+        # The mechanism is real (a warm-up that satisfied conv_tol would leave
+        # ``converged`` True while the measured sweeps then move the environment
+        # away), but a 192-config scan over conv_tol, warm-up length, budget,
+        # chi and recipe produced no state that reaches it, with or without this
+        # line.  Kept because it is free and the alternative is a stale True.
+        converged = False
     for _ in range(max_iter):
         env, last_max_eps = sweep_fn(
             env,
