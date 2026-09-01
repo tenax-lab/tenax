@@ -822,9 +822,13 @@ def _max_env_leaf_diff(env_old: CTMTensorEnv, env_new: CTMTensorEnv) -> float:
 
 
 _RECIPE_1X1_DEPRECATION = (
-    "recipe='1x1' is deprecated and will be removed in a future release: it "
-    "reaches no fixed point in any configuration reachable from the public API "
-    "(#911). Three separate mechanisms, measured on a D=2 Heisenberg state at "
+    "recipe='1x1' is deprecated and will be removed in a future release: for "
+    "any state with virtual bond dimension D > 1 it reaches no fixed point in "
+    "any configuration reachable from the public API (#911). "
+    "(D=1 is the one exception and it is not a reprieve: a product state has "
+    "rank 1 as its *maximum* reachable corner rank, so the collapse is vacuous "
+    "there and 1x1 agrees with 2x2 exactly. The removal still applies.) "
+    "Three separate mechanisms, measured on a D=2 Heisenberg state at "
     "chi=16 over 240 sweeps, none of which crossed conv_tol=1e-10: "
     "projector_method='svd' (the default) collapses the corner to rank 1, "
     "because M = C1g^H C4g is chi x chi and the chi*D**2 seam is summed away, "

@@ -1,8 +1,8 @@
 """``recipe="1x1"`` deprecation (#911), phase 1: warn, do not yet reject.
 
-#911 measured that this recipe reaches **no fixed point in any configuration
-reachable from the public API** -- three separate mechanisms, none of which
-crossed ``conv_tol=1e-10`` in 240 sweeps:
+#911 measured that for any state with **D > 1** this recipe reaches no fixed
+point in any configuration reachable from the public API -- three separate
+mechanisms, none of which crossed ``conv_tol=1e-10`` in 240 sweeps:
 
 * ``projector_method='svd'`` (the default) collapses the corner to rank 1, so
   the energy is bit-identical across a 4x change in chi;
@@ -11,10 +11,17 @@ crossed ``conv_tol=1e-10`` in 240 sweeps:
 * on a non-uniform cell one bond is truncated by two inequivalent projectors on
   alternating sweeps, so nothing is stationary under both.
 
-These tests do not re-measure any of that -- #911 and the tests it cites already
-do. What is pinned here is the *deprecation contract*: that every entry point
-which accepts the recipe warns, that the healthy engines do not, and that the
-message names a migration target the user can actually act on.
+The D > 1 qualifier is load-bearing and was missing from the first version of
+the message: at D=1 rank 1 is the *maximum* reachable corner rank, so the
+collapse is vacuous and ``1x1`` reaches the exact fixed point, identical to
+``2x2``. The deprecation still applies there -- the API is going away -- but the
+diagnosis does not, and a warning whose stated reason is visibly false of the
+caller's own run is a warning that gets filtered out wholesale.
+
+These tests do not re-measure the D > 1 failures -- #911 and the tests it cites
+already do. What is pinned here is the *deprecation contract*: that every entry
+point which accepts the recipe warns, that the healthy engines do not, and that
+the message names a migration target the user can actually act on.
 
 ``pyproject.toml`` suppresses this warning suite-wide, because a dozen tests pass
 ``recipe="1x1"`` deliberately -- they exist to assert the collapse. Every test
@@ -32,6 +39,7 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 
+from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
 from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
 from tenax.algorithms._ctm_tensor_convergence import (
     SINGLE_SITE_NEIGHBORS,
@@ -43,6 +51,7 @@ from tenax.algorithms._split_ctm_tensor_convergence import (
     ctm_split_tensor,
     ctm_split_tensor_2site,
 )
+from tenax.algorithms.ipeps import heisenberg_gate
 from tenax.algorithms.ipeps_config import iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -208,6 +217,79 @@ def test_warning_points_at_the_caller_not_inside_the_library(call):
         "warning points inside the library instead of at the caller: "
         + ", ".join(f"{w.filename}:{w.lineno}" for w in dep)
     )
+
+
+def test_ctm_energy_implicit_warns():
+    """#911 review P1: the AD entry point reached none of the other warn sites.
+
+    ``ctm_energy_implicit`` takes ``recipe`` directly and dispatches it into the
+    AD convergence machinery.  Callers get there without building an
+    ``iPEPSConfig`` and without passing through ``ctm_tensor`` or
+    ``_ctm_tensor_multisite`` -- and that is the *supported* way to run the QR
+    projector under AD (``test_reduced_corner_qr.py``,
+    ``examples/spike_chunk_backward_gate.py``), so the experiments most likely
+    to be steered wrong were the ones hearing nothing.
+    """
+    A = _site()
+    with pytest.warns(DeprecationWarning, match=MATCH):
+        ctm_energy_implicit(
+            {(0, 0): A},
+            SINGLE_SITE_NEIGHBORS,
+            heisenberg_gate(),
+            chi=4,
+            max_iter=2,
+            min_iter=1,
+            recipe="1x1",
+        )
+
+
+def test_d1_product_state_actually_converges_under_1x1():
+    """#911 review P2: the one case where the recipe is not broken.
+
+    At D=1 rank 1 is the *maximum* reachable corner rank, so the collapse is
+    vacuous and ``1x1`` hits the exact fixed point -- identical to ``2x2``.  The
+    convergence code already knows this (``_spectrum_is_uninformative`` takes
+    ``max_rank``); the deprecation message did not, and asserted a universal
+    "reaches no fixed point in any configuration".
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        _e, _x, bad = ctm_tensor(
+            _site(D=1),
+            chi=4,
+            max_iter=20,
+            conv_tol=1e-10,
+            recipe="1x1",
+            return_meta=True,
+        )
+        _e, _x, good = ctm_tensor(
+            _site(D=1),
+            chi=4,
+            max_iter=20,
+            conv_tol=1e-10,
+            recipe="2x2",
+            return_meta=True,
+        )
+    assert bad.converged and good.converged
+    assert bad.diff == good.diff == 0.0
+    assert bad.n_iter == good.n_iter
+
+
+def test_the_message_does_not_claim_d1_fails():
+    """It must still warn at D=1 -- the API is going away -- but not lie about why.
+
+    A user whose D=1 run converges exactly, told it "reaches no fixed point in
+    any configuration reachable from the public API", learns that the warning
+    does not describe their situation, which is how warnings get filtered out
+    wholesale.
+    """
+    with pytest.warns(DeprecationWarning) as rec:
+        ctm_tensor(_site(D=1), chi=4, max_iter=2, recipe="1x1")
+    msg = str(rec[0].message)
+    assert "D > 1" in msg, "the no-fixed-point claim must be scoped to D > 1"
+    assert "D=1 is the one exception" in msg
+    # ...and the deprecation itself is NOT scoped away: removal still applies.
+    assert "will be removed" in msg
 
 
 def test_message_names_both_migration_targets():
