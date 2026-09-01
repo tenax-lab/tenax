@@ -147,6 +147,27 @@ def _bond_gram(corners: tuple[Tensor, ...], bond: str) -> jax.Array:
     are the bra copies. Built by chaining the four double-layer corners
     around the plaquette (chi^6 cost, block-sparse for SymmetricTensor),
     then densified — a (r, r, r, r) object with r the cut bond dimension.
+
+    For ``bond="top"`` the ket layer of E is the plaquette with the top
+    bond cut open (ends i, j); the bra copy closes every outer leg::
+
+                 │                     │
+                 ▼                     ▼
+                 │                     │
+               ┌─┴──┐                ┌─┴──┐
+          ──▶──┤ B1 ├─▶─── i  j ──▶──┤ B2 ├──▶──
+               └─┬──┘                └─┬──┘
+                 │                     │
+                 │                     │
+                 ▼                     ▼
+                 │                     │
+                 │                     │
+               ┌─┴──┐                ┌─┴──┐
+          ──▶──┤ B2 ├───────▶────────┤ B1 ├──▶──
+               └─┬──┘                └─┬──┘
+                 │                     │
+                 ▼                     ▼
+                 │                     │
     """
     ci, leg_i, cj, leg_j = _BONDS[bond]["ends"]
     layers = {}
@@ -362,6 +383,27 @@ def gilt_plaquette(T: Tensor, config: GiltConfig) -> tuple[Tensor, Tensor, dict]
     ``max_laps`` laps; a lap in which every bond converges in at most one
     refinement ends the stage (Ebel et al. Eq. C4).
 
+    The plaquette and its four named bonds (arrows = charge flow, in on
+    up/left, out on down/right)::
+
+                 │                     │
+                 ▼                     ▼
+                 │                     │
+               ┌─┴──┐      top       ┌─┴──┐
+          ──▶──┤ B1 ├───────▶────────┤ B2 ├──▶──
+               └─┬──┘                └─┬──┘
+                 │                     │
+                 │                     │
+          left   ▼                     ▼  right
+                 │                     │
+                 │                     │
+               ┌─┴──┐     bottom     ┌─┴──┐
+          ──▶──┤ B2 ├───────▶────────┤ B1 ├──▶──
+               └─┬──┘                └─┬──┘
+                 │                     │
+                 ▼                     ▼
+                 │                     │
+
     Args:
         T:      Site tensor with legs (up, down, left, right).
         config: GILT parameters.
@@ -429,6 +471,28 @@ def _ln_step_pair(
     on the 45-degree rotated lattice with half the sites, and its legs
     come out in the library flow convention (up IN, down OUT, left IN,
     right OUT) with no extra permutation.
+
+    The four half-tensors around the un-filtered plaquette (bare index
+    lines; the split bonds become the coarse legs up=nw, down=se,
+    left=sw, right=ne)::
+
+                 │                     │
+                 │ nw                  │ ne
+                 │                     │
+               ┌─┴──┐      tbond     ┌─┴──┐
+               │ K2 ├────────────────┤ P1 │
+               └─┬──┘                └─┬──┘
+                 │                     │
+                 │                     │
+          lbond  │                     │  rbond
+                 │                     │
+                 │                     │
+               ┌─┴──┐     bbond      ┌─┴──┐
+               │ K1 ├────────────────┤ P2 │
+               └─┬──┘                └─┬──┘
+                 │                     │
+                 │ sw                  │ se
+                 │                     │
     """
     U1, s1, V1, _ = truncated_svd(
         BA,
