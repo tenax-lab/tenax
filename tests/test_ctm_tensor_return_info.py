@@ -203,9 +203,10 @@ def test_zero_budget_reports_instead_of_raising(su_state):
 def test_a_warmup_that_consumes_the_whole_budget_still_reports(su_state):
     """``qr_warmup_steps == max_iter`` leaves the measured loop with nothing.
 
-    ``n_iter`` counts the post-warm-up loop, matching :func:`ctm`'s documented
-    semantics -- so it is 0 here even though three sweeps really ran.  What must
-    not happen is a crash or a ``converged=True``.
+    Three sweeps really ran, so ``n_iter`` is 3 -- not 0 (#920 review P2).  The
+    criterion still never existed, because it compares a pair of spectra and the
+    measured loop never executed, so ``diff`` stays ``inf``.  Those two facts
+    are independent and both have to be reported.
     """
     _env, _eps, info = ctm_tensor(
         su_state,
@@ -216,9 +217,29 @@ def test_a_warmup_that_consumes_the_whole_budget_still_reports(su_state):
         qr_warmup_steps=3,
         return_meta=True,
     )
-    assert info.n_iter == 0
+    assert info.n_iter == 3, "warm-up sweeps moved the environment; count them"
     assert not info.converged
     assert info.diff == math.inf
+
+
+def test_n_iter_equals_the_callers_max_iter_when_the_budget_is_exhausted(su_state):
+    """The field's documented invariant, under a warm-up that does not consume it.
+
+    ``n_iter == max_iter`` exactly when ``converged`` is False -- against the
+    ``max_iter`` the *caller* passed, not the post-warm-up remainder.  With
+    ``qr_warmup_steps=6, max_iter=10`` the old behaviour reported 4.
+    """
+    _env, _eps, info = ctm_tensor(
+        su_state,
+        chi=8,
+        max_iter=10,
+        conv_tol=1e-14,
+        projector_method="qr",
+        qr_warmup_steps=6,
+        return_meta=True,
+    )
+    assert not info.converged
+    assert info.n_iter == 10
 
 
 # ------------------------------------------------------------------ #
