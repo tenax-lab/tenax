@@ -25,6 +25,7 @@ _FILE_MARKERS = {
     "test_idmrg.py": "algorithm",
     "test_itebd.py": "algorithm",
     "test_trg.py": "algorithm",
+    "test_gilt.py": "algorithm",
     "test_hotrg.py": "algorithm",
     "test_ipeps.py": "algorithm",
     "test_ipeps_bp_gauge.py": "algorithm",

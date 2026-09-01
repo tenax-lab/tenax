@@ -4,6 +4,35 @@
 
 ### Added
 
+- **GILT and Gilt-TNR** (`tenax.algorithms.gilt`): graph-independent local
+  truncation (Hauru-Delcamp-Mizera PRB 97, 045111) with the iterative cascade
+  of Ebel-Kennedy-Rychkov (PRX 15, 031047, App. C), and a `gilt_tnr` driver
+  that is a drop-in counterpart of `trg` with the plaquette filter applied
+  before every TRG step. Works on `DenseTensor` and `SymmetricTensor`; the
+  environment gram is built with label-based contractions (block-sparse for
+  symmetric tensors) and the cascade is sector-resolved — per
+  charge-difference-sector eigendecompositions with the spectrum
+  sum-normalized over all sectors, and per-charge-block Q splits — so the
+  inserted bond matrices are charge-conserving by construction (a dense
+  eigendecomposition mixes accidentally near-degenerate eigenvectors across
+  sectors, and the weight function's steep eps-shoulder amplifies that into
+  charge-violating leakage; measured at O(1e-6) before the fix). Exports:
+  `GiltConfig`, `GiltTNRConfig`, `gilt_plaquette`, `gilt_tnr_step`,
+  `gilt_tnr`. Measured at the Ising critical point (error in log Z per site
+  vs Onsager): chi=8 gilt 5.5e-5 vs plain TRG 2.1e-3; chi=12 gilt 4.8e-6 vs
+  plain TRG 2.1e-3 — plain TRG's plateau is the corner-double-line
+  accumulation GILT removes, and a pure-CDL tensor collapses to bond
+  dimension 2 exactly (guarded in `tests/test_gilt.py`, along with a
+  negative control: diagonally-crossed line correlations are non-local and
+  must NOT be truncated). Cross-validated against Hauru et al.'s reference
+  implementation semantics: on an identical chi=8 critical-Ising gram both
+  produce identical cascade structure (43 refinement iterations) and
+  environment-metric insertion errors agreeing to 3e-6 at gilt_eps=1e-4.
+  Fermionic symmetries are rejected with `NotImplementedError` — the gram
+  densify-and-transpose and the `bar()` double layer are bosonic-only, and
+  a silent wrong answer on `compute_free_wilson_fermion_tensor()` input is
+  worse than no answer (Codex P1 on #924).
+
 - **`ctm_ad_mode="root_implicit_symmetric"` is wired to `optimize_gs_ad`**
   (#715 Phase 3). The block-sparse engine has existed and been tested since
   #729; what was missing was the optimizer contract, and it was blocked on
