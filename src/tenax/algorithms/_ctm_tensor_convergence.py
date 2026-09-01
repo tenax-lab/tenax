@@ -867,9 +867,19 @@ class CTMConvergenceInfo(NamedTuple):
                    False means it ran out of iterations -- the value is
                    whatever the last sweep produced.
         n_iter:    Sweeps actually performed.  Equal to ``max_iter`` exactly
-                   when ``converged`` is False.  For :func:`ctm` with a QR
-                   warm-up this counts the post-warm-up loop only, matching
-                   the budget that loop was given.
+                   when ``converged`` is False.
+
+                   **The two producers differ under a QR warm-up, and only one
+                   of them satisfies the invariant above.**  :func:`ctm_tensor`
+                   counts the warm-up sweeps, so ``n_iter`` is the caller's
+                   ``max_iter`` when the budget is exhausted (#920 review).
+                   :func:`ctm` counts the post-warm-up loop only, matching the
+                   budget *that loop* was given rather than the one the caller
+                   passed -- so with ``qr_warmup_steps=6, max_iter=10`` it
+                   reports 4 against a ``max_iter`` of 10.  That is the same
+                   defect #910 fixed in the multisite warning and it is left
+                   alone here only because changing :func:`ctm` is out of scope
+                   for the PR that noticed it.
         diff:      Final value of the convergence criterion -- the max
                    absolute difference between successive normalized corner
                    singular-value vectors.  ``inf`` if no comparison was ever
@@ -1037,6 +1047,9 @@ def ctm_tensor(
     a = _build_double_layer_tensor(A)
     env = initialize_ctm_tensor_env(A, chi)
 
+    # Assigned outside the branch: the warm-up is conditional, the count is not.
+    warmup_run = 0
+
     # QR warm-up: run a few eigh iterations before switching to QR
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
@@ -1044,6 +1057,13 @@ def ctm_tensor(
             env, _ = sweep_fn(
                 env, a, chi, renormalize, "eigh", projector_backward=projector_backward
             )
+        # Counted, not discarded (#920 review P2).  These are real sweeps that
+        # really moved the environment being returned, and the field's own
+        # invariant -- ``n_iter == max_iter`` exactly when ``converged`` is
+        # False -- is only true against the caller's ``max_iter`` if they are
+        # included.  Excluding them reported ``n_iter=0`` after three executed
+        # sweeps when the warm-up consumed the whole budget.
+        warmup_run = warmup
         max_iter = max_iter - warmup
 
     last_max_eps: float = 0.0
@@ -1059,7 +1079,7 @@ def ctm_tensor(
     # a one-sweep budget report the most perfectly converged number available in
     # the same breath as ``converged=False``.  Matches :func:`ctm` (#839).
     diff = float("inf")
-    n_iter = 0
+    n_iter = warmup_run
     for _ in range(max_iter):
         env, last_max_eps = sweep_fn(
             env,
