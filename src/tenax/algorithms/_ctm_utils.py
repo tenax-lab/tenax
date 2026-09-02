@@ -85,25 +85,30 @@ def _select_chi_slots(
 ) -> list[int]:
     """Choose which slots of a full decomposition survive the chi cut.
 
-    The per-sector counts come from :func:`_allocate_chi_counts`; ``values``
-    then decides *which* slots inside each sector, largest first.  Splitting it
-    that way is what keeps the eager and traced paths computing the same
-    function: under ``jax.jit`` the block shapes are static, so the counts have
-    to be fixed before any singular value exists, and a cut that chose them
-    from ``values`` would make ``jax.grad`` differentiate a differently-shaped
-    projector than the forward pass built (a 9.9% AD-vs-finite-difference gap,
-    caught by
-    ``test_compute_2x2_projector_grad_matches_finite_difference``).
+    Global top-``chi`` by ``values``, after reserving ``floor`` slots for each
+    charge named in ``base_charges`` (taking that sector's own largest values).
 
-    ``base_charges`` used to *pin* the counts, via
+    ``base_charges`` used to *pin* the per-sector counts, via
     ``_derive_charges(base_charges, chi)``.  That capped every sector at its
-    tiled share and gave the sectors absent from ``base_charges`` a share of
+    tiled share and gave the charges absent from ``base_charges`` a share of
     zero, so the CTM chi bond could never allocate a slot to them however much
     weight they carried -- the environment saturated below the dense reference
     and the gap *grew* with chi (#922).  It now only raises a floor.
 
-    With ``base_charges`` ``None`` there is no sector structure to preserve and
-    this is the plain global top-``chi``.
+    Two limits, both deliberate:
+
+    * The floor can only ration slots that exist.  A charge named by
+      ``base_charges`` that contributes no entry to ``values`` gets nothing
+      here, because there is no vector to keep; callers needing such a sector
+      on the bond have to supply one first, as
+      :func:`~tenax.algorithms._ctm_projector._eigh_projector_symmetric` does.
+    * With more distinct base charges than ``chi``, the floor spends the whole
+      budget and the largest values can lose.  The floor costs at most one slot
+      per distinct charge, bounded by D^2 and normally far below chi.
+
+    This is the *eager* rule.  Under ``jax.jit`` the per-sector block shapes are
+    baked at trace time, so the cut cannot read ``values`` at all and
+    ``linalg._truncated_svd_symmetric_traced`` keeps the old quota -- see #929.
 
     Args:
         values:        Singular/eigen values, one per slot.  Need not be sorted.

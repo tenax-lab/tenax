@@ -99,6 +99,23 @@ def test_the_floor_keeps_a_base_sector_whose_weight_is_below_the_cut():
     assert _select_chi_slots(values, charges, base_charges=None, chi=4) == [0, 1, 2, 3]
 
 
+def test_the_floor_cannot_conjure_a_sector_the_decomposition_omits():
+    """A named charge with no entry at all gets no slot — there is none to give.
+
+    The floor rations existing slots; it does not create vectors.  Callers that
+    need an absent sector represented have to seed one first, which
+    ``_eigh_projector_symmetric`` does and ``_svd_projector_symmetric`` does
+    not (pre-existing on both sides of #922; tracked in #929).
+    """
+    values = np.array([1.0, 0.9, 0.8])
+    charges = np.array([0, 0, 0], dtype=np.int32)  # BASE also names -2 and +2
+
+    keep = _select_chi_slots(values, charges, base_charges=BASE, chi=3)
+
+    assert keep == [0, 1, 2]
+    assert set(charges[keep].tolist()) == {0}
+
+
 def test_selection_returns_chi_slots_in_ascending_order():
     values = np.array([0.5, 1.0, 0.2, 0.9, 0.1])
     charges = np.array([0, 2, -2, 0, 2], dtype=np.int32)

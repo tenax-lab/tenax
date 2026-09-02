@@ -704,6 +704,15 @@ def _svd_projector_symmetric(
     # Global top-n_keep, with one slot floored per charge in base_charges
     # (#922); with base_charges None the floor is empty and this is the plain
     # global cut.
+    #
+    # Unlike the eigh path this does *not* seed named sectors the data omits.
+    # A charge whose grown corners give ``M_q.size == 0`` never reaches
+    # ``sector_results``, contributes no singular value, and so has nothing for
+    # the floor to reserve -- the projector here is built from the corner data
+    # (``C4g @ V S^-1/2``), and with no data there is no column to build.
+    # Pre-existing: the ``_derive_charges`` quota this replaced skipped those
+    # sectors too (it had no ``else`` branch).  Tracked in #929; the default
+    # 2x2 recipe does not come through here.
     from tenax.algorithms._ctm_utils import _select_chi_slots
 
     sector_keep: dict[int, list[int]] = {}
