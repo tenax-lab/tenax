@@ -257,13 +257,24 @@
   between sweeps. The leg is refused when it is not exactly `chi` wide, so a
   chi ramp falls back rather than sizing the new bond by the old chi.
 
-  **This is half of #929, and the issue stays open for the other half.** A cold
-  environment starts from `initialize_ctm_tensor_env`, whose inventory is the
-  same tiled guess, and inheritance then perpetuates it — so `optimize_gs_ad`
-  from a cold start still truncates the #922 way. What changes is that a *good*
-  inventory now survives: before this, handing the AD path a converged
-  environment did not help, because the first traced sweep re-imposed the tiled
-  guess. Seeding `env_init` from an eager pre-pass is the remaining work.
+  **Correction to #929 as filed:** it said `optimize_gs_ad` still carries #922's
+  truncation. That is wrong for the documented symmetric optimiser.
+  `ctm_ad_mode="root_implicit_symmetric"` does not use the 2x2 projector at all
+  — measured, zero calls through a full `sym_root_implicit_energy_and_grad` —
+  and its own `_ctm_root_implicit_sym_sectors.sector_svd` decomposes each
+  sector and then takes **one global top-chi** over the union of the spectra,
+  recording it in a `BondLayout` frozen for the adjoint. That path was never
+  affected, and a guard now pins it so it cannot regress into a quota the way
+  the other one did.
+
+  What this fixes is the traced 2x2 projector, which is reachable: symmetric
+  site tensors through `ctm_energy_explicit` / `ctm_energy_implicit` under
+  `jax.grad` take it 8 times in a 2-sweep warmup, eagerly zero. There the cold
+  environment's inventory still comes from `initialize_ctm_tensor_env`, and
+  inheritance perpetuates it — so a cold run of *those* entry points is
+  unchanged. What changes is that a good inventory now survives: before this,
+  handing them a converged environment did not help, because the first traced
+  sweep re-imposed the guess.
 
 - **The CTM chi bond follows its own spectrum; `base_charges` is now only a
   floor** (#922). With #905's flow faults gone the symmetric CTM still

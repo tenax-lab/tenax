@@ -164,3 +164,59 @@ def test_the_eager_cut_is_untouched():
     # The floor still applies: every named charge keeps a slot.
     for q in (0, 1):
         assert eager[q] >= 1
+
+
+# --------------------------------------------------------------------------- #
+# The root-implicit symmetric path truncates globally already                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_root_implicit_layout_is_the_global_top_chi():
+    """``ctm_ad_mode="root_implicit_symmetric"`` never had the #922 defect.
+
+    That path does not go through the 2x2 projector at all — it has its own
+    sweep, and ``_ctm_root_implicit_sym_sectors.sector_svd`` decomposes each
+    charge sector and then takes **one global top-chi** over the union of the
+    spectra, recording the result in a ``BondLayout`` that is frozen for the
+    adjoint.  So the retained charge distribution is data-dependent there, and
+    the quota that #922 removed from the eager cut was never imposed on it.
+
+    Pinned here because the other path shows how this regresses: a per-sector
+    quota looks like a stabilisation and silently caps the bond.  The fixture
+    is deliberately lopsided — sector ``q = 0`` holds every large singular
+    value — so an even or capacity-shaped split would fail.
+    """
+    from tenax.algorithms._ctm_root_implicit_sym_sectors import sector_svd
+
+    sym = U1Symmetry()
+    charges = np.array([0, 0, 0, 1, 1, 1], dtype=np.int32)
+    row = TensorIndex.from_charges(sym, charges, IN, label="row")
+    col = TensorIndex.from_charges(sym, charges, OUT, label="col")
+
+    blocks = {
+        (0, 0): jnp.diag(jnp.array([9.0, 8.0, 7.0])),
+        (1, 1): jnp.diag(jnp.array([0.3, 0.2, 0.1])),
+    }
+    M = SymmetricTensor._from_blocks_unchecked(blocks, (row, col))
+
+    _sectors, layout = sector_svd(M, chi=4, row_axis=0, col_axis=1)
+
+    assert layout.total == 4
+    assert layout.dim_of(0) == 3, (
+        f"q=0 holds the three largest singular values but kept "
+        f"{layout.dim_of(0)} — the truncation is not global"
+    )
+    assert layout.dim_of(1) == 1
+
+    # ... and the split follows the values, not the sector sizes: swap which
+    # sector is dominant and the layout swaps with it.
+    swapped = SymmetricTensor._from_blocks_unchecked(
+        {
+            (0, 0): jnp.diag(jnp.array([0.3, 0.2, 0.1])),
+            (1, 1): jnp.diag(jnp.array([9.0, 8.0, 7.0])),
+        },
+        (row, col),
+    )
+    _s2, layout2 = sector_svd(swapped, chi=4, row_axis=0, col_axis=1)
+
+    assert (layout2.dim_of(0), layout2.dim_of(1)) == (1, 3)
