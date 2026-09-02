@@ -97,6 +97,18 @@ def _filter_bond(T: Tensor, bond: str, config: GiltConfig) -> Tensor:
     """
     if config.gilt_eps == 0.0:
         return T
+    if any(idx.symmetry.is_fermionic for idx in T.indices):
+        # The environment gram (_bond_gram) is densified and its legs reordered
+        # with a plain transpose and ``bar()`` double layer -- no Koszul/
+        # fermionic signs -- so an active GILT filter on a fermionic tensor
+        # would silently compute a bosonic (scientifically wrong) environment.
+        # gilt_plaquette rejects the same case; do so here rather than corrupt.
+        # (gilt_eps == 0.0 returned above, so plain-HOTRG use of fermionic
+        # tensors -- which hotrg() supports -- is unaffected.)
+        raise NotImplementedError(
+            "gilt_hotrg() does not support fermionic symmetries with an active "
+            "GILT filter (gilt_eps > 0); set gilt_eps=0.0 for plain HOTRG."
+        )
     _ci, leg_i, _cj, leg_j = _BONDS[bond]["ends"]
     idx_i = _index_of(T, leg_i)
     idx_j = _index_of(T, leg_j)

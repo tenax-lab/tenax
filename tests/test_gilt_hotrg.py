@@ -11,6 +11,7 @@ from tenax.algorithms.gilt_hotrg import (
 )
 from tenax.algorithms.hotrg import HOTRGConfig, hotrg
 from tenax.algorithms.trg import (
+    compute_free_wilson_fermion_tensor,
     compute_ising_tensor,
     ising_free_energy_exact,
 )
@@ -62,6 +63,15 @@ class TestGiltHOTRGStep:
         cfg = GiltHOTRGConfig(max_bond_dim=8, gilt=GiltConfig(gilt_eps=1e-3))
         T_new, _, _ = gilt_hotrg_step(T, cfg, horizontal=True)
         assert isinstance(T_new, SymmetricTensor)
+
+    def test_rejects_fermionic_with_active_filter(self):
+        """The GILT gram is bosonic-only (no Koszul signs), so an active
+        filter (gilt_eps > 0) on a fermionic tensor must be rejected, not
+        silently corrupted -- matching gilt_plaquette."""
+        T = compute_free_wilson_fermion_tensor(mass=1.0)
+        cfg = GiltHOTRGConfig(max_bond_dim=8, gilt=GiltConfig(gilt_eps=1e-6))
+        with pytest.raises(NotImplementedError):
+            gilt_hotrg_step(T, cfg, horizontal=True)
 
 
 class TestGiltHOTRGDropIn:
