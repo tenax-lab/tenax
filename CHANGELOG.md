@@ -235,6 +235,36 @@
 
 ### Fixed
 
+- **The traced CTM chi bond inherits the environment's inventory instead of
+  re-guessing it** (#929). #922 fixed the *eager* cut; the AD path could not
+  have it, because `jax.jit` bakes the per-sector block shapes at trace time
+  and the sector owning each chi slot must be fixed before the SVD runs. Its
+  fallback was the double-layer `u2` charge list tiled to chi — a guess about
+  the environment made from the *state* — and it is measurably wrong against
+  the same-state dense reference:
+
+  | D | chi | eager (#922) | traced, tiled guess |
+  |---|-----|--------------|---------------------|
+  | 2 | 8   | 1.540e-04    | 9.924e-04 |
+  | 3 | 16  | 4.441e-16    | 1.839e-07 |
+
+  The environment's own chi leg is a far better guess and is static metadata
+  even under tracing: at a fixed point it *is* the bond `chi_new` replaces.
+  Seeding the static rule with the eager inventory and re-converging reproduces
+  the eager environment exactly — `|E_eager - E_seeded| = 0.0` at both D=2
+  chi=8 and D=3 chi=16 — and gets there faster than the eager cut (168s vs
+  279s at D=3 chi=16), because a fixed inventory does not churn block shapes
+  between sweeps. The leg is refused when it is not exactly `chi` wide, so a
+  chi ramp falls back rather than sizing the new bond by the old chi.
+
+  **This is half of #929, and the issue stays open for the other half.** A cold
+  environment starts from `initialize_ctm_tensor_env`, whose inventory is the
+  same tiled guess, and inheritance then perpetuates it — so `optimize_gs_ad`
+  from a cold start still truncates the #922 way. What changes is that a *good*
+  inventory now survives: before this, handing the AD path a converged
+  environment did not help, because the first traced sweep re-imposed the tiled
+  guess. Seeding `env_init` from an eager pre-pass is the remaining work.
+
 - **The CTM chi bond follows its own spectrum; `base_charges` is now only a
   floor** (#922). With #905's flow faults gone the symmetric CTM still
   saturated below the dense reference, and the gap *grew* with chi instead of

@@ -307,6 +307,7 @@ _FILE_MARKERS = {
     # chi-scan that needs chi=16 carries its own ``@pytest.mark.slow``.
     "test_ctm_charged_sectors_905.py": "core",
     "test_ctm_chi_truncation_policy_922.py": "core",
+    "test_ctm_traced_chi_inventory_929.py": "core",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",
     "test_tdvp.py": "algorithm",
