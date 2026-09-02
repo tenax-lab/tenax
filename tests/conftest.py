@@ -117,6 +117,11 @@ _FILE_MARKERS = {
     # is the guard that three review rounds of hand-maintained lists could not
     # replace, so it belongs in the required gate.
     "test_recipe_1x1_coverage.py": "core",
+    # #726: the split-CTM corner gradient.  Moved out of _UNBUCKETED_LEGACY,
+    # where it ran in no required job -- which is how a comment asserting the
+    # rank-1 corner was physics survived, and how the corner contribution to
+    # the explicit-AD gradient went untested.  D=2 chi=4, 3 sweeps (~21s).
+    "test_regularized_svd.py": "core",
     # #785: the only thing that says whether a root-implicit gradient is
     # accurate.  The contract tests run on a closed-form quartic with no CTM
     # anywhere (~0.2s), so the measurement semantics -- a wrong gradient
@@ -526,7 +531,6 @@ _UNBUCKETED_LEGACY = {
     "test_projector_backward_dispatch.py",
     "test_reduced_corner_qr.py",
     "test_regularized_qr.py",
-    "test_regularized_svd.py",
     "test_split_ctm_chi_frozen_726.py",
     "test_split_ctm_doublelayer_projector.py",
     "test_split_ctm_energy_gauge.py",
