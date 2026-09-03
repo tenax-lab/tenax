@@ -895,12 +895,41 @@ def ctm_tensor(
         This is a Python ``float`` suitable for use in the optimizer loop
         (variPEPS §2.8.2 auto-χ trigger).
 
-        **v1 scope caveat:** ``max_truncation_error`` is meaningful only on
-        the dense, non-tracer SVD path.  It is ``0.0`` when
-        ``projector_method`` is ``"eigh"`` or ``"qr"``, when the input is a
-        ``SymmetricTensor`` (block-sparse truncation; global ε_T extraction
-        is a v2 follow-up), or when the SVD runs inside a JAX tracer (AD
-        backward pass).
+        **Scope (#727, measured).**  ε_T is genuine on some configurations
+        and structurally ``0.0`` on others, and a ``0.0`` from the second
+        group is indistinguishable from a lossless truncation.  Anything
+        reading this to decide whether to grow ``chi`` -- the variPEPS
+        §2.8.2 auto-bump -- is dead on the blind rows:
+
+        =============  ==================  ==========================
+        ``recipe``     ``projector_method``  ε_T
+        =============  ==================  ==========================
+        ``"2x2"``      *(ignored)*         genuine
+        ``"1x1"``      ``"svd"``           **structurally 0**
+        ``"1x1"``      ``"eigh"``          genuine
+        ``"1x1"``      ``"qr"``            **0, never computed**
+        =============  ==================  ==========================
+
+        The ``"1x1"``/``"svd"`` zero is a *shape* artifact, not a
+        measurement: ``_ctm_projector.py`` forms ``M = C1g^H C4g``, which is
+        chi x chi because the chi*D**2 ``fused`` seam is contracted away, so
+        ``S_full`` has exactly ``chi`` entries and the discarded tail
+        ``S_full[chi:]`` is empty.  The truncation is real (``fused`` ->
+        ``chi``); none of it is visible.  ``"eigh"`` escapes this because it
+        diagonalises ``rho = C1g C1g^H + C4g C4g^H`` on the ``fused`` index,
+        so its spectrum is (chi*D**2)-long and the discarded weight is
+        there to be measured.  ``"qr"`` returns a literal ``0.0``: the
+        reduced-corner isometry never computes an ε_T at all.
+
+        Also ``0.0``, for unrelated reasons: ``SymmetricTensor`` input
+        (block-sparse truncation; global ε_T extraction is a v2 follow-up),
+        and any path running inside a JAX tracer (AD backward).
+
+        Note this table corrects a previous version of this docstring that
+        claimed ε_T was meaningful "only on the dense, non-tracer SVD path"
+        and ``0.0`` for ``"eigh"``/``"qr"``.  Both halves were wrong: SVD is
+        blind on ``"1x1"`` and ``"eigh"`` is the method that works there.
+        ``test_eps_t_blindness_727.py`` pins the table.
     """
     # Determine sweep function: use paired moves for SymmetricTensors
     # with non-trivial virtual charges (fixes charge-sector mismatch

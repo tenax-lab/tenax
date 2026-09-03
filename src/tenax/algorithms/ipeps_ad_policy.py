@@ -265,9 +265,19 @@ def make_ctm_energy_fn(
         recipe:           CTM sweep recipe for the implicit-AD path:
                           ``"2x2"`` (Fishman, default) or ``"1x1"`` (enables
                           ``projector_method``, incl. reduced-corner "qr").
-                          Sourced from ``iPEPSConfig.gs_recipe``.  No-op for
-                          the explicit-AD branch (it uses the hardcoded
-                          ``"2x2"`` step).
+                          Sourced from ``iPEPSConfig.gs_recipe``.  The fused
+                          explicit-AD branch has no ``"1x1"`` step, so it
+                          **rejects** any recipe but ``"2x2"`` (#755) rather
+                          than accepting one and running ``"2x2"`` anyway.
+
+    Raises:
+        NotImplementedError: if ``use_explicit`` is set on the fused path with
+            ``recipe != "2x2"``.  ``ctm_energy_explicit`` takes no ``recipe``
+            and always runs the 2x2 step, so threading ``"1x1"`` here used to
+            return the 2x2 answer under a ``gs_recipe="1x1"`` label — measured
+            agreeing with ``2x2``+explicit to all 12 digits (#755).  A study
+            mislabelled in its own config is worse than one that fails, and
+            the 2-site split branch below already rejects for this reason.
     """
     # Deferred to avoid pulling the CTM/AD stack at module import time.
     from tenax.algorithms._ctm_energy_ad import (
@@ -413,6 +423,24 @@ def make_ctm_energy_fn(
         # validate the combination (chi_max required, step_size > 0, etc.)
         # so we don't re-check here.
         if use_explicit:
+            # #755: ``ctm_energy_explicit`` takes no ``recipe`` and always runs
+            # the 2x2 step.  Threading "1x1" here returned the 2x2 answer under
+            # a ``gs_recipe="1x1"`` label — measured identical to 2x2+explicit
+            # to all 12 digits, with no diagnostic — so the experiment was
+            # mislabelled in its own config.  Reject, matching the 2-site split
+            # branch above.  Scoped to the *fused* path deliberately: the split
+            # explicit path does thread ``recipe`` into
+            # ``ctm_energy_split_explicit``, and rejecting there would break a
+            # supported combination (``test_split_ctm_fuse_flag.py``).
+            if recipe != "2x2":
+                raise NotImplementedError(
+                    "The fused explicit-AD path only supports gs_recipe='2x2'; "
+                    f"got recipe={recipe!r}. ctm_energy_explicit has no '1x1' "
+                    "step, so it would silently run '2x2' and mislabel the "
+                    "run (#755). Use gs_implicit_ad=True for the '1x1' recipe, "
+                    "or CTMConfig(fuse_virtual_legs=False) for the split "
+                    "explicit path, which does implement it."
+                )
             return ctm_energy_explicit(
                 site_tensors,
                 neighbors,
