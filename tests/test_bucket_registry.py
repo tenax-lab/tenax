@@ -257,3 +257,78 @@ def test_a_file_is_not_in_both_the_registry_and_the_legacy_list():
         "these files are both bucketed and listed as legacy debt; remove them "
         "from `_UNBUCKETED_LEGACY`:\n  " + "\n  ".join(both)
     )
+
+
+# ------------------------------------------------------------------ #
+# The third route in (#933)                                           #
+# ------------------------------------------------------------------ #
+#
+# The guard above assumes ``_FILE_MARKERS`` and ``_UNBUCKETED_LEGACY`` between
+# them describe every file's bucket. They do not. A file can also opt *itself*
+# into a bucket with a module-level ``pytestmark = pytest.mark.core`` -- one
+# line, no justification, and invisible here, because such files sit in
+# ``_UNBUCKETED_LEGACY`` and the guard therefore considers them accounted for.
+#
+# That route was carrying **29% of the required gate's runtime** when this was
+# written: test_split_ctm_doublelayer_projector.py (843s), fuse_flag (241s) and
+# implicit_warm_start_adjoint (217s), none of them reviewed as a `core` entry,
+# while adding a 1-second file to `_FILE_MARKERS` requires writing a paragraph
+# defending it. The asymmetry is the defect.
+
+
+def _module_level_pytestmarks() -> dict[str, set[str]]:
+    """Files declaring ``pytestmark = pytest.mark.<bucket>`` at module level."""
+    found: dict[str, set[str]] = {}
+    pat = re.compile(r"^pytestmark\s*=\s*(.+)$", re.M)
+    for path in sorted(TESTS_DIR.glob("test_*.py")):
+        for m in pat.finditer(path.read_text()):
+            buckets = {b for b in _VALID_BUCKETS if f"pytest.mark.{b}" in m.group(1)}
+            if buckets:
+                found.setdefault(path.name, set()).update(buckets)
+    return found
+
+
+def test_module_level_pytestmark_does_not_bypass_the_registry():
+    """A file may not put itself in a bucket without a registry entry.
+
+    Registering in ``_FILE_MARKERS`` is reviewed -- every entry there carries a
+    written justification for the cost it adds to the gate. ``pytestmark`` is
+    not. Requiring both means the expensive path and the cheap path get the
+    same scrutiny, and ``--durations`` stops being the only way to discover
+    what is actually in the required gate.
+    """
+    offenders = sorted(
+        f"{name} (pytestmark={'/'.join(sorted(b))})"
+        for name, b in _module_level_pytestmarks().items()
+        if name not in _registered_keys()
+    )
+    assert not offenders, (
+        "these files set a module-level `pytestmark` bucket but are absent "
+        "from `_FILE_MARKERS`, so they enter the CI bucket without the "
+        "justification every registered file has to carry:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nAdd each to `_FILE_MARKERS` in tests/conftest.py (and drop it "
+        "from `_UNBUCKETED_LEGACY`), keeping or removing the `pytestmark` as "
+        "appropriate -- conftest will apply the registered bucket either way."
+    )
+
+
+def test_a_registered_file_does_not_contradict_its_own_pytestmark():
+    """Both routes must agree, or the file lands in two buckets at once.
+
+    ``conftest`` *adds* its marker rather than replacing, so a file registered
+    as ``slow`` while declaring ``pytestmark = pytest.mark.core`` ends up with
+    both -- and ``-m core``, a positive selector, still runs it. Silently
+    moving such a file to ``slow`` would therefore change nothing, which is a
+    trap worth failing on rather than discovering from a flat profile.
+    """
+    registered = _registered_items()
+    conflicts = sorted(
+        f"{name}: registered {registered[name]!r} but declares pytestmark={'/'.join(sorted(b))}"
+        for name, b in _module_level_pytestmarks().items()
+        if name in registered and registered[name] not in b
+    )
+    assert not conflicts, (
+        "registry bucket and module-level pytestmark disagree; conftest adds "
+        "both markers, so the file runs in both buckets:\n  " + "\n  ".join(conflicts)
+    )
