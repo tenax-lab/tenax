@@ -15,7 +15,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **opt_einsum integration** — optimal contraction path finding for multi-tensor contractions
 - **Network class** — graph-based tensor network container with contraction caching
 - **`.net` file support** — cytnx-style declarative network topology; parse once, load tensors, contract repeatedly (template pattern)
-- **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), iTEBD (numerically stable infinite TEBD, incl. inversion-free Hastings update), TRG, Gilt-TNR (TRG with graph-independent local truncation), HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
+- **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), iTEBD (numerically stable infinite TEBD, incl. inversion-free Hastings update), TRG, Gilt-TNR (TRG with graph-independent local truncation), HOTRG, Gilt-HOTRG (HOTRG with GILT bond filtering), iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
 - **GPU/TPU-accelerated DMRG** — JIT-compiled sweeps via `jax.lax.scan` for dense tensors and per-operation JIT for block-sparse symmetric tensors; automatic warmup-to-JIT transition when bond dimensions are growing; multi-GPU sharding via GSPMD for large bond dimensions (`DMRGConfig(accelerator="jit"|"sharded")`)
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
 - **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via iterative VJP (default) and optional GMRES route; explicit AD through unrolled CTM iterations for 1-site C4v path; **2-site shared-tensor C4v path** (`unit_cell="2site"` + `gs_c4v=True`) where a single C4v tensor is optimized and the second sublattice is derived by spin-π rotation, stable across χ=8–24 for spin-1/2 AFMs; opt-in reference-mode dense C4v Appendix C-F mode (`ctm_ad_mode="c4v_reference"`) with Krylov implicit backward (`bicgstab` + `gmres` fallback); **root implicit AD** (`ctm_ad_mode="root_implicit"`, dense 1x1 only; Burgelman et al. arXiv:2607.15030) driving the characteristic equations rather than back-propagating the CTM sweep, so no SVD/eigh backward appears in the gradient path — an accuracy/stability lever, not a speed one (~63x slower than explicit AD at D=2 χ=6, reproducing the paper's §VI.3), whose reason to exist is that explicit backprop NaNs on every entry at D=3 χ=4 where this path stays finite and FD-correct. Its gradient accuracy is state-dependent and **no diagnostic predicts it** (#785) — measure it with `measure_gradient_error` rather than reading the root residual, which is anti-correlated with it; sigma gauge fixing (`forward_gauge="sigma"`) on the explicit-AD path — the implicit path validates `forward_gauge="phase"` and refuses every other value; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement
@@ -265,6 +265,22 @@ log_z_per_n = gilt_tnr(T, config)
 `gilt_eps` is measured against the sum-normalized environment spectrum (the
 convention of Hauru et al.'s reference code); `gilt_plaquette` is also exported
 standalone for use in other coarse-graining schemes.
+
+`gilt_hotrg` applies the same GILT filter before every **HOTRG** move (a
+drop-in counterpart of `hotrg`; `gilt_eps=0.0` recovers plain HOTRG exactly).
+Because HOTRG's HOSVD already suppresses most corner-double-line entanglement,
+GILT does not improve the smooth *free energy* here — its payoff shows in the
+*critical data*: the estimated `beta_c` lands closer to Onsager than plain
+HOTRG at the same bond dimension. It reuses the same χ⁶ sharding via
+`GiltHOTRGConfig(device_mesh=mesh)`. See `examples/gilt_hotrg_ising.py`.
+
+```python
+from tenax import GiltConfig, GiltHOTRGConfig, gilt_hotrg, compute_ising_tensor
+
+T = compute_ising_tensor(0.44068679350977147, symmetric=True)
+config = GiltHOTRGConfig(max_bond_dim=16, num_steps=18, gilt=GiltConfig(gilt_eps=1e-3))
+log_z_per_n = gilt_hotrg(T, config)
+```
 
 For large-χ dense HOTRG, set `HOTRGConfig(device_mesh=mesh)` (a 1-D
 `jax.sharding.Mesh`) to shard the dominant χ⁶ intermediate across multiple GPUs —
