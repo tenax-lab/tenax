@@ -4,6 +4,35 @@
 
 ### Added
 
+- **GILT and Gilt-TNR** (`tenax.algorithms.gilt`): graph-independent local
+  truncation (Hauru-Delcamp-Mizera PRB 97, 045111) with the iterative cascade
+  of Ebel-Kennedy-Rychkov (PRX 15, 031047, App. C), and a `gilt_tnr` driver
+  that is a drop-in counterpart of `trg` with the plaquette filter applied
+  before every TRG step. Works on `DenseTensor` and `SymmetricTensor`; the
+  environment gram is built with label-based contractions (block-sparse for
+  symmetric tensors) and the cascade is sector-resolved — per
+  charge-difference-sector eigendecompositions with the spectrum
+  sum-normalized over all sectors, and per-charge-block Q splits — so the
+  inserted bond matrices are charge-conserving by construction (a dense
+  eigendecomposition mixes accidentally near-degenerate eigenvectors across
+  sectors, and the weight function's steep eps-shoulder amplifies that into
+  charge-violating leakage; measured at O(1e-6) before the fix). Exports:
+  `GiltConfig`, `GiltTNRConfig`, `gilt_plaquette`, `gilt_tnr_step`,
+  `gilt_tnr`. Measured at the Ising critical point (error in log Z per site
+  vs Onsager): chi=8 gilt 5.5e-5 vs plain TRG 2.1e-3; chi=12 gilt 4.8e-6 vs
+  plain TRG 2.1e-3 — plain TRG's plateau is the corner-double-line
+  accumulation GILT removes, and a pure-CDL tensor collapses to bond
+  dimension 2 exactly (guarded in `tests/test_gilt.py`, along with a
+  negative control: diagonally-crossed line correlations are non-local and
+  must NOT be truncated). Cross-validated against Hauru et al.'s reference
+  implementation semantics: on an identical chi=8 critical-Ising gram both
+  produce identical cascade structure (43 refinement iterations) and
+  environment-metric insertion errors agreeing to 3e-6 at gilt_eps=1e-4.
+  Fermionic symmetries are rejected with `NotImplementedError` — the gram
+  densify-and-transpose and the `bar()` double layer are bosonic-only, and
+  a silent wrong answer on `compute_free_wilson_fermion_tensor()` input is
+  worse than no answer (Codex P1 on #924).
+
 - **`ctm_ad_mode="root_implicit_symmetric"` is wired to `optimize_gs_ad`**
   (#715 Phase 3). The block-sparse engine has existed and been tested since
   #729; what was missing was the optimizer contract, and it was blocked on
@@ -205,6 +234,192 @@
   and a `SymmetricTensor` pair still takes the eager route bit-identically.
 
 ### Fixed
+
+- **The CTM chi bond follows its own spectrum; `base_charges` is now only a
+  floor** (#922). With #905's flow faults gone the symmetric CTM still
+  saturated below the dense reference, and the gap *grew* with chi instead of
+  shrinking — 9.9e-4 at chi=8, 2.55e-3 at chi=16, 2.58e-3 at chi=24 on a D=2
+  U(1)-Sz pair, while the dense arm kept improving. Flat-or-growing
+  disagreement in chi is this project's defect signature (#898), and the cause
+  was the truncation policy rather than the contraction.
+
+  `base_charges` (the double-layer `u2` charge list) was tiled by
+  `_derive_charges` into a per-sector **quota**: each sector was capped at its
+  tiled share, and any charge *absent* from `base_charges` was allocated a
+  share of zero. On that pair the full bond offered
+  `{-4: 4, -2: 16, 0: 24, 2: 16, 4: 4}` and the quota kept `{-2: 4, 0: 8, 2: 4}`
+  — the `|q| = 4` sectors could not be given a slot at any chi, however much
+  weight they carried.
+
+  The cut is now the global top-chi with `base_charges` reserving one slot per
+  charge it names. Measured against the same-state dense reference:
+
+  | D | chi | before | after |
+  |---|-----|--------|-------|
+  | 2 | 8   | 9.92e-04 | 1.54e-04 |
+  | 2 | 16  | 2.55e-03 | 4.23e-14 |
+  | 2 | 24  | 2.58e-03 | 2.22e-16 |
+  | 3 | 16  | 1.84e-07 | 4.44e-16 |
+
+  The floor is kept on principle, not on measurement: it never bound on any
+  fixture measured here, and it exists because `contract()` pairs blocks by
+  charge value, so a charge that leaves a bond index cannot be recreated
+  through it. It is unit-tested directly rather than claimed as a physics gain.
+  The policy now lives in one place, `_ctm_utils._select_chi_slots`, replacing
+  three hand-rolled copies (the 2x2 re-truncation and both `_ctm_projector`
+  projectors).
+
+  **This does not reach the AD path, and `optimize_gs_ad` still truncates the
+  old way.** `jax.jit` bakes the per-sector block shapes at trace time, so
+  under tracing which sector owns each chi slot must be decided before the SVD
+  runs and the quota stays. Two static replacements were built and measured,
+  and each is worse somewhere — the quota misses by 2.6e-3 at D=2 chi=24, and a
+  capacity-proportional inventory (which fixes that) misses by 1.1e-5 at D=3
+  chi=8 where the quota is exact — so neither was shipped and `linalg.svd` is
+  untouched, which also leaves fPEPS simple update's pinned bond layout alone
+  (#558). The divergence is pinned by
+  `test_the_traced_path_pins_the_chi_new_inventory` and tracked separately.
+  The gradient itself is unaffected: differentiating the traced forward matches
+  finite differences of that same forward to 1.5e-12.
+
+- **The symmetric CTM no longer annihilates its charged environment sectors**
+  (#905). A block-sparse U(1)-Sz CTM converged to an environment in which every
+  corner and edge block carrying a non-zero charge was *allocated but exactly
+  `0.0`*. The tell was that the symmetric energy was **flat in chi to ten
+  digits** (chi=8 and chi=16 agreed) while the dense energy kept moving, and
+  `rank(C1)` equalled the number of charge-0 slots on its legs, nothing more.
+
+  `_contract_symmetric` pairs blocks by charge **value** and drops any product
+  whose output key falls outside the output legs' conservation law. A bond whose
+  two ends carry the *same* flow therefore *adds* the two flow-weighted charges
+  instead of cancelling them, so only the `q = 0` product survives. Three such
+  faults were live at once, each sufficient on its own:
+
+  1. `_apply_proj_unfused` flow-flipped the whole projector before splitting its
+     fused leg — but `split_index` restores the parents with the flows recorded
+     in `fuse_info`, so the flip survived on `chi_new` **alone** and left
+     `net(P_un) = 2 * q_chi_new`.
+  2. Every edge's D² leg was declared with the **same** flow as the double-layer
+     tensor's matching face rather than the opposite one, so charge died at each
+     `T · a` contraction. `_flip_leg_flow` on the renormalised edge made it
+     worse: the leg it dualed was already the correct dual of the next cell's
+     face, so dualing it produced same-flow *and* conjugated charges.
+  3. Four of the initial environment's eight chi bonds were same-flow
+     (`_STD_EDGE_SPECS` / `_CORNER_SPECS`). The chi ring now alternates via
+     `_STD_CORNER_SPECS`, which is `_CORNER_SPECS` with C3 flipped; the
+     split-CTM path keeps the shared table.
+
+  Making the ring alternate exposed a fourth defect in the same family. A chi
+  charge *list* belongs to the bond, not to either end: `contract` pairs blocks
+  by charge value while dense einsum pairs by position, so the two ends must
+  enumerate the same charge per dense slot. `_fused_chi_charges` derived the
+  list with the leg's own flow, which negates it on one end, and
+  `_tile_fused_to_chi` truncates to `chi` *before* sorting — so for
+  `chi < D**2` the truncated multiset is not closed under negation and the two
+  ends disagreed (D=3, `chi=4`: `[-1, 0, 1, 1]` against `[-1, -1, 0, 1]` on four
+  of the eight bonds). Same-flow ends had hidden this by agreeing trivially. The
+  derivation is now pinned to `IN` and only the declared flow varies; measured
+  after, every chi and D² bond is a proper dual and the enlarged corner is exact
+  on full-support operands (rel < 1.5e-16) at D=2 and D=3 for `chi` in
+  4/8/9/12 — including `chi < D**2`, where it was ~82% wrong.
+
+  Measured on a D=2 U(1)-Sz pair at chi=8, `recipe="2x2"`, against the
+  flow-insensitive dense path:
+
+  | | before | after | dense |
+  |---|---|---|---|
+  | `E` (chi=8)  | −0.4138113307 | **−0.5748913759** | −0.5758837997 |
+  | `E` (chi=16) | −0.4138113307 | **−0.5757558561** | −0.5783088110 |
+  | `rank(C1)` (chi=8) | 4 | **8** | — |
+  | `‖C1[±2,±2]‖` (chi=8) | 0.0 | **0.580** | — |
+
+  The energy is no longer flat in chi, and the residual 1e-3 gap to dense is the
+  expected per-sector-vs-global truncation difference, not a lost sector.
+
+  Every contraction is now exact: wrapping `_contract_symmetric` and scoring
+  every call of a charged run against the same einsum on densified operands gives
+  **zero** lossy sites — 386 calls over two sweeps for the CTM, and 52 more for
+  the RDM/energy path. Before, a three-sweep run had exactly one lossy site,
+  `_apply_proj_unfused`, discarding **16.8 of 30.2** in summed result norm over
+  its 48 lossy calls. `TENAX_STRICT_CONTRACT=1` now runs the sweep without
+  refusing anything, so it is asserted positively rather than as a pinned
+  defect.
+
+  Not ported: `_ctm_tensor_c4v._c4v_to_full_env` still emits the pre-#905
+  convention (that is #762/#760), and the fermionic 2-plaquette path keeps its
+  `_flip_leg_flow` calls — harmless for `FermionParity`, where charges are
+  self-dual and `2q ≡ 0`, but the same defect is latent for `FermionicU1`.
+
+- **The CTM convergence criterion no longer certifies a collapsed
+  environment** (#898). `_ctm_sv_diff` compares the corner spectrum
+  *normalised by its sum*. That normalisation is deliberate — under
+  `renormalize=True` the absolute corner scale is meaningless — but it also
+  means a **rank-1** spectrum normalises to `[1, 0, ..., 0]` whatever the
+  environment is doing. Two completely different environments then compared
+  equal, so every loop testing it against `conv_tol` exited on sweep 2 or 3 and
+  reported success.
+
+  Measured on a collapsing 2-site fixture: the returned energy was
+  bit-identical at `max_iter` 60/120/300/400/800, `conv_tol` 1e-9/1e-12/1e-14
+  **and** `chi` 8/12/24/48 — sitting **8.8e-3 above** the fixed point the same
+  loop reaches by sweep 41. There was no knob a caller could turn to notice,
+  and nothing warned.
+
+  The criterion now returns **`inf`** when either spectrum has numerical rank
+  ≤ 1. That is the honest value rather than a sentinel: on a rank-1 corner the
+  true difference between the two environments is genuinely *unbounded*,
+  because the normalised spectrum carries no information about them.
+
+  **The guard went into the criterion rather than the call sites, because there
+  are nine of them** — `_ctm_tensor_convergence` (×2),
+  `_split_ctm_tensor_convergence` (×2), `_ctm_tensor_c4v`,
+  `_ctm_tensor_c4v_reference_ad`, `ipeps_ctm_convergence` (×3), `ad_utils` and
+  `_ctm_loop_core` all share the identical `compare against conv_tol → certify`
+  pattern. Every one now fails closed with no change at the call site,
+  including the one inside `jax.lax.while_loop` (which is why the predicate is
+  written in `jnp` and returns an array). A tenth loop inherits the guard
+  instead of re-acquiring the bug — the #828/#829 duplicate-implementation
+  lesson applied up front.
+
+  **That lesson had to be applied once more before the claim above was true.**
+  `ipeps_ctm_convergence` did not share the criterion — it defined its own
+  copy of `_ctm_sv_diff`, without the rank test — and that copy is the one the
+  **public** path ran: `ipeps()` imports `ctm_2site` from there
+  (`ipeps.py:30`, called at `:462`). So the first version of this fix guarded
+  the tensor loops while every `ipeps()` call kept comparing `[1, 0, ..., 0]`
+  against `[1, 0, ..., 0]` and exiting early — a fix that leaves the production
+  path broken, which is worse than no fix because the closed issue stops anyone
+  looking. The duplicate now imports the guarded implementation, and two tests
+  pin it: one asserts object identity (a fresh unguarded copy returns the same
+  number as the guarded one on every input *except* the collapsed ones, so a
+  value assertion would not catch the regression), the other pins the routing
+  that makes the first one load-bearing.
+
+  After the fix the budget means something again: 4 / 12 / 30 sweeps give
+  −0.428341 / −0.433246 / −0.433290, i.e. 30 sweeps lands within 1e-9 of the
+  true fixed point. `_ctm_tensor_multisite` also warns, naming the collapsed
+  coordinate, since it is the only place that knows the budget ran out rather
+  than the criterion being satisfied.
+
+  **Inert on healthy states**, which is the constraint that shaped it: a
+  physical state has full-rank corners (measured 6/6 at χ=8), still exits early,
+  still emits nothing, and `_ctm_sv_diff` returns bit-identically what it did
+  before. Two regimes are pinned by test so they cannot be "tidied" away: the
+  `+1e-15` denominator guard leaves a scale-dependent residue of about
+  `1e-15/min(scale)` rather than an exact zero, and below that guard the
+  criterion already failed *closed* (~1.0), which is the safe direction.
+
+  **What happens to the two red tests that surfaced it** — measured on CI, not
+  predicted. `test_ctm_direction_dependent_bonds` now **passes** on
+  ubuntu-3.12 and macOS-3.12: once the criterion stops certifying the collapsed
+  corner, the loop reaches the real fixed point and the symmetric and dense
+  paths agree. `test_ctm_670_symmetric_2x2` still fails, and the reason is worth
+  stating precisely — it now computes **−0.4332902680573903**, which is the true
+  fixed point recorded above (30 sweeps → −0.433290), against a frozen
+  expectation of `−0.5421160718`, which is the *pre-fix collapsed* value. That
+  test is therefore failing because it froze the bug, not because the bug
+  survives; re-freezing it needs the sweep-count scan #836 requires and is left
+  to its own change.
 
 - **The root-implicit adjoint no longer compiles its operator into a loop
   body** (#731). The symmetric engine peaked at **8.63 GB** of host RAM for a
@@ -803,6 +1018,15 @@
   error), D=3 → −0.663196204307 and D=4 → −0.6674, χ-converged with corner rank
   = χ. The state is now dt-stable (−0.6570 / −0.6593 / −0.6591 at dt =
   0.3 / 0.05 / 0.01).
+
+  > **Corrected by #900.** Every energy in the paragraph above is a reading of
+  > the *uniform A–A* lattice, not of the A–B checkerboard `_to_physical_pair`
+  > actually returns. On the checkerboard the same runs give **−0.659004 /
+  > −0.662859 / −0.667071** at D = 2/3/4. D=2 and D=3 move by only 3.3e-4, but
+  > the D=4 figure was additionally a *transient of the wrong lattice*: past
+  > ~500 steps the uniform reading falls to −0.65684, i.e. **above** D=2, which
+  > is what macOS CI had been reporting. The ordering D=2 > D=3 > D=4 does hold
+  > — on the checkerboard, where it is flat to 5e-7 between 800 and 1600 steps.
 
   **Two consequences for existing results.** Any nominally-D=3 state from
   `ipeps()` was really D=2 — its third Schmidt value was ~2e-6. And

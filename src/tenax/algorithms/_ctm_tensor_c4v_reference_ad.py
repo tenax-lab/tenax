@@ -32,7 +32,11 @@ from jax.scipy.sparse.linalg import bicgstab as _krylov_bicgstab
 from jax.scipy.sparse.linalg import gmres as _krylov_gmres
 
 from tenax.algorithms._ctm_tensor_c4v import _c4v_sweep, _c4v_to_full_env
-from tenax.algorithms._ctm_tensor_convergence import _ctm_sv_diff
+from tenax.algorithms._ctm_tensor_convergence import (
+    _ctm_sv_diff,
+    _forced_corner_rank,
+    _max_virtual_bond_dim,
+)
 from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
@@ -104,7 +108,13 @@ def _ctm_tensor_c4v_reference_fixed_point_reduced(
         current_sv = _dense_svd(C.todense(), compute_uv=False)
 
         if prev_sv is not None:
-            residual = float(_ctm_sv_diff(current_sv, prev_sv))
+            residual = float(
+                _ctm_sv_diff(
+                    current_sv,
+                    prev_sv,
+                    max_rank=_forced_corner_rank(_max_virtual_bond_dim(a)),
+                )
+            )
             if iters >= min_iter and residual < float(config.conv_tol):
                 converged = True
                 break

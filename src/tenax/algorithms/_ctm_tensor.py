@@ -46,6 +46,12 @@ from tenax.algorithms._ctm_tensor_convergence import (
     _ctm_tensor_sweep_paired as _ctm_tensor_sweep_paired,
 )
 from tenax.algorithms._ctm_tensor_convergence import (
+    _forced_corner_rank as _forced_corner_rank,
+)
+from tenax.algorithms._ctm_tensor_convergence import (
+    _max_virtual_bond_dim as _max_virtual_bond_dim,
+)
+from tenax.algorithms._ctm_tensor_convergence import (
     _normalize_tensor as _normalize_tensor,
 )
 from tenax.algorithms._ctm_tensor_convergence import (

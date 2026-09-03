@@ -20,6 +20,11 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from tenax.algorithms._ctm_tensor_convergence import (
+    _ctm_sv_diff,
+    _forced_corner_rank,
+    _max_virtual_bond_dim,
+)
 from tenax.algorithms.ipeps_config import (
     CTMConfig,
     CTMEnvironment,
@@ -62,11 +67,24 @@ def _ctm_sweep(
     return env
 
 
-def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
-    """Compute max absolute difference between normalized singular value vectors."""
-    sv1 = sv_new / (jnp.sum(sv_new) + 1e-15)
-    sv2 = sv_old / (jnp.sum(sv_old) + 1e-15)
-    return jnp.max(jnp.abs(sv1 - sv2))
+# ``_ctm_sv_diff`` is imported, not defined here.
+#
+# This module used to carry its own copy, and the copy is what the **public**
+# path ran: ``ipeps()`` imports ``ctm_2site`` from here (``ipeps.py:30``, called
+# at ``:462``), so #898's guard in ``_ctm_tensor_convergence`` protected the
+# tensor loops while every ``ipeps()`` call kept the unguarded comparison --
+# the rank-1 corner still normalised to ``[1, 0, ..., 0]``, still compared
+# equal to an unrelated environment, and still reported convergence early.
+# A fix that leaves the production path broken is worse than no fix, because
+# the closed issue stops anyone looking.
+#
+# The guarded implementation is written to be shared: it uses ``jnp.where``
+# rather than a Python ``if`` precisely so it can run inside the
+# ``jax.lax.while_loop`` in this module, and its own docstring says the guard
+# belongs in one place so "a future tenth loop inherits the guard instead of
+# re-acquiring the bug".  This is that inheritance, and it also picks up the
+# #670 zero-padding, which is a no-op on the dense path where the spectrum
+# length is fixed by ``chi``.
 
 
 class CTMConvergenceInfo(NamedTuple):
@@ -185,6 +203,10 @@ def ctm(
     # care.
     _sv_dtype = jnp.zeros((), dtype=env.C1.dtype).real.dtype
     prev_sv = jnp.zeros(min(chi, env.C1.shape[0]), dtype=_sv_dtype)
+    # A rank-1 corner is a collapse only if a higher rank was on offer; at
+    # D=1 or chi=1 it is the exact fixed point (#903 review, P1).  Static, so
+    # it is fine to close over inside the traced body below.
+    max_rank = _forced_corner_rank(_max_virtual_bond_dim(a))
 
     # Carry: (env, prev_sv, iteration, converged, diff)
     # ``diff`` rides along purely so it can be reported (#839); ``converged``
@@ -207,7 +229,7 @@ def ctm(
         env_i, prev_sv_i, iteration, _, _ = carry
         env_i = _ctm_sweep(env_i, a, chi, renormalize, projector_method)
         current_sv = _dense_svd(env_i.C1, compute_uv=False)
-        diff = _ctm_sv_diff(current_sv, prev_sv_i)
+        diff = _ctm_sv_diff(current_sv, prev_sv_i, max_rank=max_rank)
         converged = diff < conv_tol
         return (env_i, current_sv, iteration + 1, converged, diff)
 
@@ -336,6 +358,12 @@ def ctm_2site(
     _sv_dtype_B = jnp.zeros((), dtype=env_B.C1.dtype).real.dtype
     prev_sv_A = jnp.zeros(min(chi, env_A.C1.shape[0]), dtype=_sv_dtype_A)
     prev_sv_B = jnp.zeros(min(chi, env_B.C1.shape[0]), dtype=_sv_dtype_B)
+    # See ``ctm`` above (#903 review, P1).  Both sublattices share one bound:
+    # the smaller, so neither is certified on the other's headroom.
+    # Per sublattice, not aggregated (#903 review): each corner is judged by
+    # the reachable rank of the site sitting under it.
+    max_rank_A = _forced_corner_rank(_max_virtual_bond_dim(a_A))
+    max_rank_B = _forced_corner_rank(_max_virtual_bond_dim(a_B))
 
     # Carry: (env_A, env_B, prev_sv_A, prev_sv_B, iteration, converged, diff)
     # ``diff`` rides along only so it can be reported (#839); ``converged`` is
@@ -364,8 +392,8 @@ def ctm_2site(
         eA, eB = _ctm_2site_sweep(eA, eB, a_A, a_B, chi, renormalize)
         sv_A = _dense_svd(eA.C1, compute_uv=False)
         sv_B = _dense_svd(eB.C1, compute_uv=False)
-        diff_A = _ctm_sv_diff(sv_A, psA)
-        diff_B = _ctm_sv_diff(sv_B, psB)
+        diff_A = _ctm_sv_diff(sv_A, psA, max_rank=max_rank_A)
+        diff_B = _ctm_sv_diff(sv_B, psB, max_rank=max_rank_B)
         diff = jnp.maximum(diff_A, diff_B)
         converged = diff < conv_tol
         return (eA, eB, sv_A, sv_B, iteration + 1, converged, diff)
@@ -509,7 +537,13 @@ def ctm_split(
 
         current_sv = _dense_svd(env.C1, compute_uv=False)
         if prev_sv is not None:
-            diff_val = float(_ctm_sv_diff(current_sv, prev_sv))
+            diff_val = float(
+                _ctm_sv_diff(
+                    current_sv,
+                    prev_sv,
+                    max_rank=_forced_corner_rank(_max_virtual_bond_dim(A) ** 2),
+                )
+            )
             if diff_val < config.conv_tol:
                 converged = True
                 break

@@ -22,6 +22,8 @@ __all__ = [
     "ctm_tensor_2site",
 ]
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 
@@ -541,7 +543,9 @@ def _ctm_tensor_sweep_multisite(
 # ------------------------------------------------------------------ #
 
 
-def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
+def _ctm_sv_diff(
+    sv_new: jax.Array, sv_old: jax.Array, max_rank: int | None = None
+) -> jax.Array:
     """Compute max absolute difference between normalized singular value vectors.
 
     On direction-dependent (asymmetric-bond) states the corner block
@@ -552,13 +556,245 @@ def _ctm_sv_diff(sv_new: jax.Array, sv_old: jax.Array) -> jax.Array:
     which correctly reports the env as *not yet converged* while it is still
     changing shape.  Once the block structure stabilises the lengths match
     and the diff reduces to the usual element-wise comparison.
+
+    **Returns ``inf`` when the comparison cannot mean anything (#898).**
+    Normalising by the sum is what makes this comparable across sweeps under
+    ``renormalize`` -- the absolute corner scale is meaningless by design --
+    but it also means a **rank-1** spectrum normalises to ``[1, 0, ..., 0]``
+    *whatever* the environment is doing.  Two completely different
+    environments then compare equal to within an ulp, so every loop that tests
+    this against ``conv_tol`` certifies a collapsed environment as converged:
+    measured, the returned energy was bit-identical at ``max_iter``
+    60/120/300/400/800, ``conv_tol`` 1e-9/1e-12/1e-14 and ``chi`` 8/12/24/48,
+    while sitting 8.8e-3 above the fixed point the same loop reaches by sweep
+    41.
+
+    ``inf`` is the honest value rather than a sentinel: on a rank-1 corner the
+    true difference between the two environments is *unbounded*, because the
+    spectrum carries no information about them.  Reporting it here rather than
+    at the nine separate call sites is deliberate -- every one of them already
+    compares against ``conv_tol``, so they all fail closed with no change, and
+    a future tenth loop inherits the guard instead of re-acquiring the bug.
     """
+    # ``jnp.where``, not a Python ``if``: one of the nine loops runs inside
+    # ``jax.lax.while_loop`` (``ipeps_ctm_convergence``), where the predicate
+    # is a tracer and branching on it raises TracerBoolConversionError.  Both
+    # arms are cheap, so evaluating them unconditionally costs nothing.
+    blind = _spectrum_is_uninformative(
+        sv_new, max_rank=max_rank
+    ) | _spectrum_is_uninformative(sv_old, max_rank=max_rank)
     n = max(sv_new.shape[0], sv_old.shape[0])
+    if n == 0:
+        # Both empty: a ``SymmetricTensor`` corner with no populated blocks
+        # returns an empty spectrum, and if that persists across sweeps the
+        # reduction below raises on an empty array *before* the ``jnp.where``
+        # can return the fail-closed value (#903 review).  Shapes are static,
+        # so this branch is safe under tracing.
+        return jnp.asarray(jnp.inf)
     sv_new = jnp.pad(sv_new, (0, n - sv_new.shape[0]))
     sv_old = jnp.pad(sv_old, (0, n - sv_old.shape[0]))
     sv1 = sv_new / (jnp.sum(sv_new) + 1e-15)
     sv2 = sv_old / (jnp.sum(sv_old) + 1e-15)
-    return jnp.max(jnp.abs(sv1 - sv2))
+    diff = jnp.max(jnp.abs(sv1 - sv2))
+    return jnp.where(blind, jnp.inf, diff)
+
+
+#: Relative singular-value cutoff for the rank test, matching
+#: ``_ctm_diagnostics.ctm_corner_rank`` so the convergence detector and the
+#: collapse detector cannot disagree about the same corner.
+_RANK_TOL = 1e-10
+
+
+def _max_virtual_bond_dim(t) -> int:
+    """Largest virtual bond dimension, over **all** virtual legs.
+
+    Reading ``indices[0]`` alone -- which this did until #903's review caught it
+    -- is wrong for anisotropic states.  A chain embedding with
+    ``(u, d, l, r) = (1, 1, 4, 4)`` reports ``1`` purely because the first leg
+    is trivial, the call sites then pass ``max_rank=1``, and every positive
+    rank-one corner is accepted as informative while the horizontal bonds still
+    carry correlations.  That silently restores the premature-convergence defect
+    this whole change exists to remove -- a *wrong* bound is worse than a
+    missing one, because a missing one fails closed.
+
+    The rank-one exemption belongs only to states whose virtual dimensions are
+    **all** one, so the maximum is the quantity to take: it is 1 exactly when
+    every virtual leg is 1.
+
+    Physical legs are excluded by label, so this is correct for a site tensor
+    ``(u, d, l, r, phys)`` and for a double layer, which has no physical leg.
+    """
+    idx = getattr(t, "indices", None)
+    if idx is None:
+        shape = tuple(t.shape)
+        dims = list(shape[:4]) if len(shape) >= 4 else list(shape)
+        return max(int(d) for d in dims) if dims else 1
+    labels = tuple(t.labels()) if hasattr(t, "labels") else ()
+    dims = [
+        int(ix.dim)
+        for k, ix in enumerate(idx)
+        if not (k < len(labels) and str(labels[k]).startswith("phys"))
+    ]
+    return max(dims) if dims else 1
+
+
+def _forced_corner_rank(bond_dim: int) -> int:
+    """The rank the *state* holds a corner to, as opposed to a collapse.
+
+    **``chi`` is deliberately not an argument.**  The first version of this took
+    ``min(chi, bond_dim)``, reasoning that rank 1 says nothing about collapse
+    whenever rank 1 was all that was on offer.  The first half of that is true
+    for ``chi == 1`` as well as ``D == 1``; the second half is not, and the
+    difference is the whole point (#903 review, P1 round 2).
+
+    At ``chi = 1`` with ``D > 1`` the corner is 1x1, so its sum-normalised
+    spectrum is ``[1]`` *however the environment moves* -- which is #898's
+    blindness exactly, not a fixed point.  Certifying there would report
+    success on the first eligible comparison of an environment still in
+    motion.  Only ``D == 1`` makes the environment exact by construction,
+    because only then has the state nothing further to express.
+
+    A small ``chi`` makes the comparison *less* able to see, which is a reason
+    to stay fail-closed and never a licence to certify.  Do not reintroduce it
+    here; ``test_the_rank_ceiling_comes_from_the_state_not_from_chi`` pins that.
+
+    **This is not a tight bound on corner rank and does not claim to be.**  A
+    healthy ``D=2`` corner at ``chi=12`` reaches rank 12, far above
+    ``D**2 = 4``.  It only has to be tight at ``D == 1``.  For ``D >= 2`` it is
+    at least 4, so a rank-1 corner is still read as collapsed and #898's guard
+    is untouched -- the property this whole change puts at risk.
+
+    Args:
+        bond_dim: Double-layer bond dimension (``D**2`` for a PEPS of bond
+                  dimension ``D``).
+
+    Returns:
+        ``max(1, bond_dim)``.
+    """
+    return max(1, int(bond_dim))
+
+
+def _spectrum_is_uninformative(
+    sv: jax.Array, tol: float = _RANK_TOL, max_rank: int | None = None
+) -> jax.Array:
+    """Whether a sum-normalised comparison of ``sv`` is forced (#898).
+
+    True when the corner has numerical rank <= 1 -- one non-zero singular value
+    normalises to ``1.0`` and the rest to ``0.0`` regardless of the environment
+    -- or when the spectrum is empty or non-finite.  This is deliberately
+    ``env_is_collapsed``'s predicate: a corner the collapse detector calls dead
+    is exactly one the convergence detector cannot see.
+
+    **Unless rank 1 was all the corner could carry** (#903 review, P1).  A
+    ``D=1`` PEPS is an exact product state, and this project supports and tests
+    one (``TestProductStateEnergy``); a ``chi=1`` environment is legitimate
+    too.  Every corner there is rank 1 *at the exact fixed point*, so equating
+    rank 1 with collapse made those states unable to converge at all: measured,
+    ``ctm(D=1, chi=4, max_iter=20)`` returned ``converged=False`` with
+    ``diff=inf`` after burning the whole budget, ``ipeps()`` warned that a
+    state which had converged exactly had not, and ``_ctm_sv_diff(sv, sv)`` --
+    a spectrum against *itself* -- returned ``inf``.
+
+    Rank is therefore not the discriminator; **reachable** rank is.  Pass
+    ``max_rank = min(chi, D_doublelayer)`` and a corner sitting at its ceiling
+    is read as informative, because there is nothing further for it to show.
+    Omitting ``max_rank`` keeps the conservative reading -- a caller that has
+    not said what was reachable gets the fail-closed answer.
+
+    Written in ``jnp`` and returning an array so it survives tracing; one of
+    the nine convergence loops runs inside ``jax.lax.while_loop``.  ``max_rank``
+    comes from tensor shapes, so it is static and safe to branch on in Python.
+    """
+    if sv.shape[0] == 0:
+        return jnp.asarray(True)
+    top = sv[0]
+    # EVERY element, not just the leading one (#903 review, P1).  A block-sparse
+    # corner can go non-finite in one block while others stay healthy, giving
+    # e.g. ``[1, 0.5, nan]``.  Checking ``sv[0]`` alone calls that informative,
+    # ``_ctm_sv_diff`` then returns NaN, and the Python loops compare
+    # ``diff >= conv_tol`` -- which is **False** for NaN -- so the corrupted
+    # environment is silently certified.  Failing closed requires the whole
+    # spectrum to be finite.
+    healthy = jnp.all(jnp.isfinite(sv)) & (top > 0.0)
+    rank = jnp.sum(sv > tol * top)
+    informative = healthy & (rank > 1)
+    if max_rank is not None:
+        # At the ceiling: no higher rank was available, so a low rank is not
+        # evidence of collapse.  ``healthy`` still gates it -- a zero or
+        # non-finite corner is not a fixed point at any ceiling.
+        informative = informative | (healthy & (rank >= max_rank))
+    return jnp.logical_not(informative)
+
+
+def _blind_corner_message(blind: set[Coord], collapsed: set[Coord]) -> str:
+    """Text for the uncertified-environment warning (#898).
+
+    Pure, and separate from the loop, because the interesting cases are
+    combinations of two coordinate sets and driving a real CTM into each of
+    them is far harder than the message logic deserves.  Every combination is
+    unit-tested directly.
+
+    Two claims of very different strength are on offer here, and which one is
+    licensed is **per coordinate**:
+
+    * A corner that is *still* rank <= 1 licenses the strong statement -- that
+      environment is not a converged fixed point and its energy is a mean-field
+      number that will not respond to ``chi``.
+    * A corner that was rank <= 1 on an earlier sweep and has since recovered
+      licenses only the weak one: the comparison could not be certified, but
+      the environment returned has a full-rank corner and is **not** known to
+      be bad.
+
+    Applying the strong text to a recovered coordinate invites the caller to
+    discard a healthy environment, which is the opposite of this warning's
+    purpose -- so a mixed sweep must name each group separately rather than
+    picking one diagnosis for all of them.
+
+    Args:
+        blind:     Coordinates whose comparison had a rank <= 1 spectrum on
+                   either side.  Non-empty whenever this is called.
+        collapsed: The subset of ``blind`` still rank <= 1 on the final sweep.
+
+    Returns:
+        The warning text.
+    """
+    parts = [
+        "CTM convergence could not be certified: the corner-spectrum "
+        "criterion compares spectra normalised by their sum, which a rank-1 "
+        "corner forces to [1, 0, ..., 0], so it is structurally blind there. "
+        "The full max_iter budget was run instead of exiting early."
+    ]
+    if collapsed:
+        where = ", ".join(str(c) for c in sorted(collapsed))
+        parts.append(
+            f" The corner at {where} is STILL rank <= 1: that environment is "
+            "NOT a converged fixed point, and its energy is a mean-field "
+            "number that will not respond to chi."
+        )
+    recovered = blind - collapsed
+    if recovered:
+        where = ", ".join(str(c) for c in sorted(recovered))
+        parts.append(
+            f" The corner at {where} was rank <= 1 on an earlier sweep and has "
+            "since recovered to rank > 1: that environment is NOT known to be "
+            "bad, only uncertified. Re-run with a larger max_iter to get a "
+            "comparison the criterion can read."
+        )
+    parts.append(" (#898, #723/#726/#747)")
+    return "".join(parts)
+
+
+def _spectrum_can_show_change(
+    sv: jax.Array, tol: float = _RANK_TOL, max_rank: int | None = None
+) -> bool:
+    """Eager ``bool`` form of :func:`_spectrum_is_uninformative`, negated.
+
+    For the loops that want to *report* the blindness rather than merely fail
+    closed on it.  ``max_rank`` must match whatever the loop passes to
+    :func:`_ctm_sv_diff`, or the warning will name coordinates the criterion
+    did not actually refuse.
+    """
+    return not bool(_spectrum_is_uninformative(sv, tol, max_rank))
 
 
 def _tensor_leaf_data(leaf):
@@ -740,6 +976,7 @@ def ctm_tensor(
 
     last_max_eps: float = 0.0
     prev_sv = None
+    max_rank = _forced_corner_rank(_max_virtual_bond_dim(a))
     for _ in range(max_iter):
         env, last_max_eps = sweep_fn(
             env,
@@ -752,7 +989,7 @@ def ctm_tensor(
 
         current_sv = _corner_singular_values(env.C1)
         if prev_sv is not None:
-            diff = _ctm_sv_diff(current_sv, prev_sv)
+            diff = _ctm_sv_diff(current_sv, prev_sv, max_rank=max_rank)
             if float(diff) < conv_tol:
                 break
         prev_sv = current_sv
@@ -793,6 +1030,16 @@ def _ctm_tensor_multisite(
     double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
     envs = {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
 
+    # #910 review: capture the caller's budget *here*, above the QR warm-up.
+    # The warm-up rewrites ``max_iter`` to the remainder
+    # (``max_iter = max_iter - warmup``), so reading it after the loop quoted a
+    # number the caller never passed -- with ``qr_warmup_steps=6``, a caller
+    # passing ``max_iter=40`` was told it "ran the full max_iter=34 sweeps".
+    # That matters because the message's own advice is "Raise max_iter", which
+    # is unactionable against a value that is not the parameter.  The warm-up
+    # sweeps do run, so the caller's total is also the honest sweep count.
+    budget = max_iter
+
     # QR warm-up: run a few eigh iterations before switching to QR
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
@@ -810,6 +1057,32 @@ def _ctm_tensor_multisite(
         max_iter = max_iter - warmup
 
     prev_svs: dict[Coord, jax.Array] = {}
+    blind_coords: set[Coord] = set()
+    # Per coordinate, not per cell (#903 review).  A cell-wide aggregate is
+    # wrong in both directions: `min` lets one trivial site exempt every
+    # corner (fails open), and `max` makes a legitimate D=1 coordinate blind
+    # on every sweep so the loop can never certify it (fails closed, but
+    # wrongly).  The reachable rank is a property of the site sitting at that
+    # coordinate, so it is computed there.  Built before the loop and outside
+    # every branch.
+    max_ranks = {
+        c: _forced_corner_rank(_max_virtual_bond_dim(dl))
+        for c, dl in double_layers.items()
+    }
+    # #901: assigned before the loop, not inside it.  Everything below the
+    # loop reads them, and a zero-iteration budget would otherwise raise
+    # ``UnboundLocalError`` from the reporting path rather than return.
+    converged = False
+    final_diff = float("inf")
+    # #910 review P2: the criterion is a property of a *pair* of spectra, so it
+    # does not exist until two sweeps have been compared.  ``sweep_diff`` starts
+    # at 0.0 and is only raised by an actual comparison, so on a budget with one
+    # measured sweep every ``prev`` is None, nothing is computed, and assigning
+    # it anyway made the warning report "final criterion 0" -- a perfectly
+    # converged number -- in the same breath as saying conv_tol was not reached.
+    # Reachable two ways: ``max_iter=1``, and any QR warm-up that leaves exactly
+    # one measured sweep (``max_iter=7, qr_warmup_steps=6``).
+    ever_measured = False
     for _ in range(max_iter):
         envs, _, _ = _ctm_tensor_sweep_multisite(
             envs,
@@ -822,16 +1095,103 @@ def _ctm_tensor_multisite(
             recipe=recipe,
         )
         converged = True
+        sweep_diff = 0.0
+        # Rebuilt each sweep rather than accumulated, and keyed on the whole
+        # comparison rather than on the current spectrum alone.
+        #
+        # Accumulating was wrong because a corner can be blind while the
+        # environment is warming up and informative by the time the loop exits;
+        # an append-only set keeps naming it, and the warning below would then
+        # assert -- in its own text -- that the budget ran out when the loop had
+        # in fact exited early.
+        #
+        # But rebuilding from ``sv`` alone is wrong in the mirror case, and it
+        # fails in the direction that matters.  ``_ctm_sv_diff`` reads **both**
+        # spectra: a corner blind on sweep ``N-1`` and healthy on sweep ``N``
+        # still forces ``inf`` on sweep ``N``, so the loop spends its whole
+        # budget uncertified -- while a set built from the current spectrum is
+        # empty exactly then, and the caller is told nothing. What must be
+        # recorded is whether the comparison the loop actually made was blind,
+        # which is a property of the pair.
+        blind_coords = set()
+        collapsed_coords = set()
         for c in sorted(envs):
             sv = _corner_singular_values(envs[c].C1)
-            if c in prev_svs:
-                if float(_ctm_sv_diff(sv, prev_svs[c])) >= conv_tol:
+            prev = prev_svs.get(c)
+            # ``_ctm_sv_diff`` returns ``inf`` when *either* spectrum has rank
+            # <= 1 (#898), so the comparison below already fails closed and no
+            # special case is needed for *correctness*.  What is recorded here
+            # is only which coordinate's comparison went blind, so the warning
+            # after the loop can name it -- the loop is the only place that
+            # knows the budget ran out rather than the criterion being
+            # satisfied.  Mirror the ``or`` in the criterion exactly: reading
+            # one side would leave the other silently uncertified.
+            _mr_c = max_ranks[c]
+            sv_blind = not _spectrum_can_show_change(sv, max_rank=_mr_c)
+            if sv_blind:
+                # Still blind *now*: the environment being returned is the
+                # collapsed one, so the strong diagnosis below applies.
+                collapsed_coords.add(c)
+            if sv_blind or (
+                prev is not None and not _spectrum_can_show_change(prev, max_rank=_mr_c)
+            ):
+                blind_coords.add(c)
+            if prev is not None:
+                d = float(_ctm_sv_diff(sv, prev, max_rank=_mr_c))
+                sweep_diff = max(sweep_diff, d)
+                ever_measured = True
+                if d >= conv_tol:
                     converged = False
             else:
                 converged = False
             prev_svs[c] = sv
+        # Only overwrite the reported criterion once a comparison has actually
+        # produced one; otherwise ``final_diff`` keeps its ``inf``, which is what
+        # the zero-measured-sweep case already reports.
+        if ever_measured:
+            final_diff = sweep_diff
         if converged:
             break
+
+    if blind_coords:
+        # Not silent, and not fatal.  The sweeps still ran, so the environment
+        # returned here is the best this budget reached.  What the caller must
+        # not do is read it as converged.
+        warnings.warn(
+            _blind_corner_message(blind_coords, collapsed_coords),
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    elif not converged:
+        # #901.  The blind branch above covers a criterion that could not
+        # *see*; this covers one that saw fine and never settled -- full-rank
+        # corners on a genuine limit cycle.  That case returned **silently**,
+        # which is how a 2-site ``recipe="1x1"`` cycle of ~6e-3 amplitude sat
+        # underneath a passing ``|E_qr - E_eigh| < 1e-3`` assertion for weeks:
+        # nothing in the call chain said the number was not a fixed point.
+        # ``ipeps()`` already warns in exactly this situation, and the wording
+        # deliberately mirrors it -- same category, so a caller filtering one
+        # filters both.
+        criterion = (
+            f"final criterion {final_diff:.3g}"
+            if ever_measured
+            else (
+                "the criterion was never evaluated -- fewer than two corner "
+                "spectra were compared, so no measurement of it exists"
+            )
+        )
+        warnings.warn(
+            f"CTM did not converge in ctm_tensor_multisite(): ran the full "
+            f"max_iter={budget} sweeps at chi={chi} without reaching "
+            f"conv_tol={conv_tol:g} ({criterion}). The "
+            f"returned environment is not a fixed point and any observable "
+            f"read from it can move with max_iter -- on a limit cycle it will "
+            f"move without ever settling, so raising max_iter is not always a "
+            f"fix. Raise max_iter, or switch recipe: the 1x1 recipe does not "
+            f"converge on a non-C4v multisite cell (#425/#426/#901).",
+            UserWarning,
+            stacklevel=2,
+        )
 
     return envs
 

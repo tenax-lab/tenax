@@ -25,6 +25,7 @@ _FILE_MARKERS = {
     "test_idmrg.py": "algorithm",
     "test_itebd.py": "algorithm",
     "test_trg.py": "algorithm",
+    "test_gilt.py": "algorithm",
     "test_hotrg.py": "algorithm",
     "test_ipeps.py": "algorithm",
     "test_ipeps_bp_gauge.py": "algorithm",
@@ -242,6 +243,15 @@ _FILE_MARKERS = {
     # duplicate under-reported rho on complex input, so the guard passed a
     # divergent adjoint -- and a guard that runs in no required job is not one.
     "test_arnoldi.py": "core",
+    # #898: the CTM convergence criterion reads identically zero on a rank-1
+    # corner, so a collapsed environment was certified as converged at ANY
+    # max_iter, conv_tol and chi.  The unit half is pure array algebra --
+    # milliseconds -- and belongs in the required gate because the defect is
+    # *silence*: nothing failed, the loop just exited early and returned a
+    # mean-field number.  The three end-to-end cases converge 2-site CTMs and
+    # carry their own explicit ``@pytest.mark.slow``, which the rule below
+    # honours by *withholding* this ``core``.
+    "test_ctm_criterion_rank_blind_898.py": "core",
     # The eager-loop GMRES every root-implicit adjoint runs through (#731).
     # ~20s on dense matrices, no CTM.  ``core`` because the property it guards
     # is *structural* and invisible to every numerical test: put the loop back
@@ -287,11 +297,16 @@ _FILE_MARKERS = {
     # *withholding* this ``core``; see ``pytest_collection_modifyitems``.
     "test_multisite_clamped_gate.py": "core",
     "test_ctm_tensor.py": "algorithm",
-    # The invariant that keeps the 2x2 enlarged corner contraction-correct on
-    # non-dual bonds (#834/#762).  It is a property of the *sweep*, not of the
-    # flow convention, so nothing in the type system enforces it -- required
-    # gate.  The D=3 case carries its own ``@pytest.mark.slow``.
+    # The invariant that keeps the 2x2 enlarged corner contraction-correct
+    # (#834/#762/#905).  Since #905 it is a property of the flow convention
+    # rather than of the sweep, but still nothing in the type system enforces
+    # it -- required gate.  The D=3 case carries its own ``@pytest.mark.slow``.
     "test_enlarged_corner_flow_invariant_834.py": "core",
+    # #905: the charged environment sectors themselves.  Two D=2 chi=8 CTM
+    # convergences (one symmetric, one dense) plus one RDM -- core budget; the
+    # chi-scan that needs chi=16 carries its own ``@pytest.mark.slow``.
+    "test_ctm_charged_sectors_905.py": "core",
+    "test_ctm_chi_truncation_policy_922.py": "core",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",
     "test_tdvp.py": "algorithm",

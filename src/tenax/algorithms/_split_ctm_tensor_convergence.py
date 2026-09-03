@@ -24,6 +24,8 @@ from tenax.algorithms._ctm_tensor_convergence import (
     Coord,
     _corner_singular_values,
     _ctm_sv_diff,
+    _forced_corner_rank,
+    _max_virtual_bond_dim,
     _sort_coords_for_direction,
 )
 from tenax.algorithms._split_ctm_tensor_init import (
@@ -197,6 +199,10 @@ def ctm_split_tensor(
     prev_sv = None
     converged = False
     iterations = 0
+    # #903 P1: rank 1 is a collapse only if more was reachable.  Hoisted above
+    # the loop and outside the recipe branch -- it depends on neither, and
+    # defining it in one arm left the other raising UnboundLocalError.
+    _mr = _forced_corner_rank(_max_virtual_bond_dim(A) ** 2)
     for iteration in range(max_iter):
         iterations = iteration + 1
         if recipe == "2x2":
@@ -215,7 +221,7 @@ def ctm_split_tensor(
 
         current_sv = _corner_singular_values(env.C1)
         if prev_sv is not None and iteration + 1 >= min_iter:
-            diff = _ctm_sv_diff(current_sv, prev_sv)
+            diff = _ctm_sv_diff(current_sv, prev_sv, max_rank=_mr)
             if float(diff) < conv_tol:
                 converged = True
                 break
@@ -663,6 +669,18 @@ def _split_ctm_multisite(
     bars = {c: A.bar() for c, A in site_tensors.items()}
     envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
     prev_svs: dict[Coord, jax.Array] = {}
+    # #903 P1: rank 1 is a collapse only if more was reachable.
+    # Per coordinate, not per cell (#903 review).  A cell-wide aggregate is
+    # wrong in both directions: `min` lets one trivial site exempt every
+    # corner (fails open), and `max` makes a legitimate D=1 coordinate blind
+    # on every sweep so the loop can never certify it (fails closed, but
+    # wrongly).  The reachable rank is a property of the site sitting at that
+    # coordinate, so it is computed there.  Built before the loop and outside
+    # every branch.
+    _mr2 = {
+        c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2)
+        for c, A in site_tensors.items()
+    }
     for _ in range(max_iter):
         envs = _split_ctm_sweep_multisite(
             envs, site_tensors, bars, neighbors, chi, chi_I, renormalize, recipe
@@ -671,7 +689,7 @@ def _split_ctm_multisite(
         for c in sorted(envs):
             sv = _corner_singular_values(envs[c].C1)
             if c in prev_svs:
-                if float(_ctm_sv_diff(sv, prev_svs[c])) >= conv_tol:
+                if float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr2[c])) >= conv_tol:
                     converged = False
             else:
                 converged = False

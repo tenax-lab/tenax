@@ -33,12 +33,21 @@ call site                                    calls  max rel. gap
   ``_apply_proj_unfused``                       56  **8.3e-01**
 ===========================================  =====  ==============
 
-Every refusal is a false alarm, and the one genuinely wrong site is allowed.
-Turning the check on by default would break the default path *and* still miss
-the defect on it.  So both checks are armed by ``TENAX_STRICT_CONTRACT=1``,
-under which they are sound and complete on the grid below, and
-``test_strict_mode_reports_real_weight_loss_in_the_ctm_sweep`` pins the
-production defect that remains.
+Every refusal was a false alarm, and the one genuinely wrong site was allowed.
+Turning the check on by default would have broken the default path *and* still
+missed the defect on it.  So both checks are armed by
+``TENAX_STRICT_CONTRACT=1``, under which they are sound and complete on the grid
+below.
+
+The table above is the pre-#905 measurement and is kept as the record of why the
+checks are opt-in.  #905 fixed the flow convention the CTM path was built on
+(the ``chi_new``-only flip in ``_apply_proj_unfused``, the same-flow edge/double-
+layer D^2 bonds, and four same-flow chi bonds in the initial environment), which
+removed *both* columns: re-measured the same way, all 386 calls of a two-sweep
+D=2 chi=8 charged sweep now match the densified contraction exactly, and strict
+mode runs the sweep without refusing anything
+(``test_strict_mode_finds_no_weight_loss_in_the_ctm_sweep``).  The checks stay
+opt-in because nothing makes the property hold for callers outside this path.
 
 ## Why not ``TensorIndex.is_dual_of``
 
@@ -460,10 +469,12 @@ def test_trivial_charges_are_unaffected(monkeypatch):
 def test_same_flow_is_allowed_when_only_the_identity_sector_is_populated(monkeypatch):
     """The escape that keeps the predicate block-aware rather than structural.
 
-    ``_STD_EDGE_SPECS`` builds the CTM initial environment with same-flow chi
-    bonds.  It is exact because the rank-1 corners carry weight only in the
-    sector that would otherwise be discarded.  A predicate reading leg metadata
-    alone cannot see that.
+    Pre-#905 ``_STD_EDGE_SPECS`` built the CTM initial environment with
+    same-flow chi bonds, and it was exact because the rank-1 corners carried
+    weight only in the sector that would otherwise be discarded.  A predicate
+    reading leg metadata alone cannot see that, which is why the discard check
+    is block-aware -- and why it stays that way now that the CTM specs no longer
+    supply the example.
     """
     monkeypatch.setenv(STRICT, "1")
     charges = np.array([0, 1, -1], np.int32)
@@ -545,33 +556,40 @@ def _charged_u1_sweep(max_iter: int = 3):
 def test_the_default_ctm_path_still_contracts():
     """A charged U(1)-Sz sweep must not be refused.
 
-    This is the constraint that shaped the whole change.  The default path
-    contracts same-flow chi bonds carrying non-cancelling charges and discards
-    ~2000 products per sweep, and is *exact* anyway -- the discarded products are
-    all zero.  Both checks refuse it, which is why both are opt-in.
+    This is the constraint that shaped the whole change.  Pre-#905 the default
+    path contracted same-flow chi bonds carrying non-cancelling charges and
+    discarded ~2000 products per sweep; both checks refused it, which is why
+    both are opt-in.  #905 removed the same-flow bonds, but the checks stay
+    opt-in: nothing guarantees that every future caller of ``contract`` pairs
+    duals, and the discard predicate is block-aware by design (see
+    ``test_same_flow_is_allowed_when_only_the_identity_sector_is_populated``).
     """
     _charged_u1_sweep()
 
 
-def test_strict_mode_reports_real_weight_loss_in_the_ctm_sweep(monkeypatch):
-    """The rest of #834 is live on the default CTM path -- pinned, not fixed.
+def test_strict_mode_finds_no_weight_loss_in_the_ctm_sweep(monkeypatch):
+    """#905 closed the last discarding site on the default CTM path.
 
-    Measured with the checks disarmed, scoring every call against the densified
-    contraction of the same operands: ``_apply_proj_unfused`` is **8.3e-01
-    relative wrong** on 56 of 96 calls, and discards 192 non-zero products (max
-    ``|product|`` 8.15).  Every *other* refused site in the sweep is exact to
-    1.7e-16, so this is not the same false alarm as the enlarged corner.
+    This was the negative form of the same assertion, and its docstring asked
+    for exactly this conversion when a fix landed.  What it pinned: measured
+    with the checks disarmed and every call scored against the densified
+    contraction of the same operands, ``_apply_proj_unfused`` was **8.3e-01
+    relative wrong** on 56 of 96 calls and discarded 192 non-zero products (max
+    ``|product|`` 8.15), while every other refused site in the sweep was exact
+    to 1.7e-16.
 
-    It is filed separately because the mechanism is target inference over
-    mixed-charge operands (``_parse_contraction_prelude`` credits a tensor's
-    target only when all of its blocks agree), not the leg pairing above.
+    The cause was the unconditional ``_flow_flip_no_conj`` in
+    ``_apply_proj_unfused``: ``split_index`` restores the fused leg's parents
+    with their recorded flows, so the flip survived on ``chi_new`` alone and
+    left the projector with ``net = 2 * q_chi_new``.  Every charged product was
+    then correctly refused -- which is what annihilated the charged sectors of
+    the environment (#905).
 
-    When a fix lands this test starts failing. That is the intended signal:
-    re-measure and convert it to the positive form rather than deleting it.
+    Strict mode is now a clean gate on this path, so it is asserted positively:
+    a re-broken flow convention fails here rather than as a wrong energy.
     """
     monkeypatch.setenv(STRICT, "1")
-    with pytest.raises(ValueError, match="#834"):
-        _charged_u1_sweep()
+    _charged_u1_sweep()
 
 
 # The accelerated execution paths, each of which returns from
