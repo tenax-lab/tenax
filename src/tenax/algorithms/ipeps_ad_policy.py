@@ -437,9 +437,17 @@ def make_ctm_energy_fn(
                     "The fused explicit-AD path only supports gs_recipe='2x2'; "
                     f"got recipe={recipe!r}. ctm_energy_explicit has no '1x1' "
                     "step, so it would silently run '2x2' and mislabel the "
-                    "run (#755). Use gs_implicit_ad=True for the '1x1' recipe, "
-                    "or CTMConfig(fuse_virtual_legs=False) for the split "
-                    "explicit path, which does implement it."
+                    "run (#755). Use gs_recipe='2x2': per #911 the '1x1' "
+                    "recipe reaches no fixed point for any state with D > 1 "
+                    "under any projector method, so it is deprecated and is "
+                    "not a result you want under any AD mode. If you need "
+                    "'1x1' for regression bisection specifically, "
+                    "CTMConfig(fuse_virtual_legs=False) routes the split "
+                    "explicit path, which does implement it end to end. "
+                    "gs_implicit_ad=True threads '1x1' into the loss but not "
+                    "into the line-search or final-evaluation forwards "
+                    "(ctm_converge_kwargs drops recipe, #938), so it is not "
+                    "a consistent way to get a '1x1' run either."
                 )
             return ctm_energy_explicit(
                 site_tensors,

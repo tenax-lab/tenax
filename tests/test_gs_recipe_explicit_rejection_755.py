@@ -50,18 +50,37 @@ def test_fused_explicit_rejects_1x1():
 
 
 @pytest.mark.core
-def test_the_rejection_names_both_ways_out():
-    """A raise that does not say where to go just moves the problem.
+def test_the_rejection_points_at_2x2_not_at_implicit_ad():
+    """A raise that names a broken alternative is worse than one that names none.
 
-    Both alternatives are real: ``gs_implicit_ad=True`` threads ``"1x1"`` into
-    ``ctm_energy_implicit``, and the split path implements it directly.
+    The first version of this message said "Use gs_implicit_ad=True for the
+    '1x1' recipe".  That is not a consistent way to get a 1x1 run:
+    ``ctm_converge_kwargs`` does not forward ``recipe``, so the implicit
+    path's line-search and final-evaluation forwards fall back to
+    ``python_loop_ctm_converge``'s ``"2x2"`` default while only the loss sees
+    ``"1x1"`` (#938).  It would have sent callers from one silent
+    substitution into a subtler one.
+
+    The honest recommendation is ``2x2``, because per #911 the ``1x1`` recipe
+    reaches no fixed point for any state with ``D > 1`` under any projector
+    method — so it is not a result the caller wants under *any* AD mode.
     """
     fn = _energy_fn(recipe="1x1")
     with pytest.raises(NotImplementedError) as exc:
         fn({(0, 0): None})
     msg = str(exc.value)
-    assert "gs_implicit_ad=True" in msg
+
+    assert "gs_recipe='2x2'" in msg, "the message must name the recipe to migrate to"
+    assert "#911" in msg, "and say why 1x1 is not worth rescuing"
+    # The split path is the one place 1x1 is genuinely wired end to end.
     assert "fuse_virtual_legs=False" in msg
+    # Implicit AD may be mentioned, but only as a caveat carrying #938 —
+    # never as the bare recommendation it used to be.
+    if "gs_implicit_ad=True" in msg:
+        assert "#938" in msg, (
+            "the message names gs_implicit_ad=True without flagging that it "
+            "threads recipe into the loss only (#938)"
+        )
 
 
 @pytest.mark.core

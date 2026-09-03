@@ -925,6 +925,19 @@ def ctm_tensor(
         (block-sparse truncation; global ε_T extraction is a v2 follow-up),
         and any path running inside a JAX tracer (AD backward).
 
+        **The auto-χ bump is not necessarily dead on the blind rows.**  It
+        would be, if it read this value -- but the fused single-site
+        optimizer does not.  ``ipeps_optimize.py:1279-1292`` re-measures ε_T
+        with a non-JIT ``_ctm_tensor_sweep(..., "eigh")`` whenever
+        ``chi_auto_bump`` is on and the CG path is not in use, specifically
+        so the bump decision gets a genuine number whatever
+        ``projector_method`` says.  That measurement drives the bump only and
+        never the gradient.  So "ε_T is blind here" and "the bump cannot
+        fire here" are different claims, and the second does not follow from
+        the first -- it depends on which optimizer path runs, which is not
+        knowable from the config.  #727 asserts the second; it holds only
+        where no such re-measurement happens.
+
         Note this table corrects a previous version of this docstring that
         claimed ε_T was meaningful "only on the dense, non-tracer SVD path"
         and ``0.0`` for ``"eigh"``/``"qr"``.  Both halves were wrong: SVD is

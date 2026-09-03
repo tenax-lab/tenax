@@ -222,17 +222,73 @@ def test_1x1_eps_t_follows_the_projector_not_the_recipe():
 
 
 # --------------------------------------------------------------------------- #
-# The consequence: a dead auto-bump is now loud.                               #
+# "eps_T is blind here" does NOT imply "the auto-bump is dead here".           #
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.core
+def test_the_fused_optimizer_remeasures_eps_t_with_eigh_for_the_bump():
+    """The step that makes a blind projector survive, and the reason there is
+    no config-time warning about it.
+
+    An earlier version of this file asserted that ``chi_auto_bump`` +
+    ``gs_recipe="1x1"`` + ``projector_method`` in {"svd", "qr"} emitted a
+    "cannot fire" warning.  That warning was **false on the path most
+    callers are on**: ``ipeps_optimize.py`` re-measures ε_T with a non-JIT
+    ``_ctm_tensor_sweep(..., "eigh")`` whenever ``chi_auto_bump`` is on and
+    the CG path is not in use, precisely so the bump decision gets a genuine
+    number whatever the configured projector is.
+
+    So the two claims come apart:
+
+        "eps_T from this projector is structurally 0"   <- true, pinned above
+        "the auto-bump cannot fire here"                <- does not follow
+
+    #727 asserts the second.  It holds only where no such re-measurement
+    happens, and *which* optimizer path runs is not knowable from the config
+    (CG vs not, fused vs split, 1-site vs 2-site all resolve later).  That is
+    why the guard is this test rather than a warning.
+
+    Pinned structurally: if the ``"eigh"`` literal is ever dropped so the
+    re-measurement follows ``projector_method``, the bump silently dies on
+    the default projector and this fails.
+    """
+    import inspect
+
+    from tenax.algorithms import ipeps_optimize
+
+    src = inspect.getsource(ipeps_optimize)
+    assert "chi_auto_bump and not _use_cg" in src, (
+        "the eps_T re-measurement guard moved or changed shape; re-check "
+        "whether the bump still gets a genuine number on a blind projector"
+    )
+    # The literal is load-bearing: it must NOT be ctm_cfg.projector_method.
+    i = src.index("chi_auto_bump and not _use_cg")
+    block = src[i : i + 1200]
+    assert '"eigh"' in block, (
+        "the bump's eps_T re-measurement no longer hardcodes 'eigh'. If it "
+        "now follows projector_method, the bump is dead on 'svd'/'qr' — the "
+        "very thing #727 describes — and this file's claim that it survives "
+        "is stale"
+    )
+    assert "projector_method=ctm_cfg.projector_method" not in block
+
+
+@pytest.mark.core
 @pytest.mark.parametrize("method", ["svd", "qr"])
-def test_auto_bump_on_a_blind_projector_warns(method):
-    """Asking for a reactive χ bump that provably cannot fire should say so."""
+def test_no_false_dead_bump_warning_at_config_time(method):
+    """The removed warning must stay removed.
+
+    A warning that fires where the trigger is actually live trains callers to
+    ignore it, which costs more than the warning was ever worth — and the
+    same message is load-bearing elsewhere (#747, #839, #898).
+    """
+    import warnings
+
     from tenax import CTMConfig, iPEPSConfig
 
-    with pytest.warns(UserWarning, match="chi_auto_bump cannot fire"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         iPEPSConfig(
             max_bond_dim=2,
             gs_recipe="1x1",
@@ -240,26 +296,6 @@ def test_auto_bump_on_a_blind_projector_warns(method):
                 chi=4, chi_auto_bump=True, chi_max=8, projector_method=method
             ),
         )
-
-
-@pytest.mark.core
-def test_auto_bump_does_not_warn_where_eps_t_is_genuine():
-    """The negative half — otherwise the guard could be an unconditional warn.
-
-    ``"1x1"``/``"eigh"`` measures a real ε_T, and ``"2x2"`` measures one for
-    any projector method, so neither should be flagged.
-    """
-    import warnings
-
-    from tenax import CTMConfig, iPEPSConfig
-
-    for recipe, method in (("1x1", "eigh"), ("2x2", "svd"), ("2x2", "qr")):
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", UserWarning)
-            iPEPSConfig(
-                max_bond_dim=2,
-                gs_recipe=recipe,
-                ctm=CTMConfig(
-                    chi=4, chi_auto_bump=True, chi_max=8, projector_method=method
-                ),
-            )
+    assert not [w for w in caught if "chi_auto_bump cannot fire" in str(w.message)], (
+        "the false dead-bump warning is back"
+    )

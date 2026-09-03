@@ -771,33 +771,27 @@ class iPEPSConfig:
             object.__setattr__(self, "gs_implicit_ad", not self.gs_explicit_ad)
         object.__setattr__(self, "gs_explicit_ad", None)
 
-        # #727: the eps_T-driven auto-chi bump is structurally dead on the
-        # "1x1" recipe's svd and qr projectors -- not "rarely fires", *cannot*
-        # fire.  "svd" forms M = C1g^H C4g, which is chi x chi, so the
-        # discarded tail S_full[chi:] is empty and eps_T is 0 whatever the
-        # environment does; "qr" returns a literal 0.0 and never computes one.
-        # A 0.0 from either is indistinguishable from a lossless truncation,
-        # so the bump silently never triggers however saturated chi is.
-        # ("1x1"/"eigh" is fine -- it diagonalises rho on the chi*D**2 fused
-        # index, so the discarded weight is visible.  See ctm_tensor's
-        # docstring for the measured table.)
-        if (
-            self.ctm.chi_auto_bump
-            and self.gs_recipe == "1x1"
-            and self.ctm.projector_method in ("svd", "qr")
-        ):
-            warnings.warn(
-                "chi_auto_bump cannot fire with "
-                f"gs_recipe='1x1' + projector_method="
-                f"{self.ctm.projector_method!r}: eps_T is structurally 0.0 on "
-                "that combination (#727), so the variPEPS auto-chi trigger is "
-                "dead and chi stays fixed at its initial value. Use "
-                "gs_recipe='2x2' (the default, where eps_T is genuine for any "
-                "projector_method), or projector_method='eigh' if you must "
-                "stay on '1x1' -- itself deprecated (#911).",
-                UserWarning,
-                stacklevel=2,
-            )
+        # #727 note -- deliberately NOT a warning here.  An earlier version of
+        # this block warned that ``chi_auto_bump`` could never fire with
+        # ``gs_recipe="1x1"`` + ``projector_method`` in {"svd", "qr"}, because
+        # eps_T is structurally 0.0 on those projector kernels (see
+        # ``ctm_tensor``'s docstring for the measured table).  That warning was
+        # **false on the path most callers are on**, and the reason is worth
+        # keeping: whether the bump is live is a property of the *optimizer
+        # path*, not of the config.
+        #
+        # ``ipeps_optimize.py:1279-1292`` re-measures eps_T with a non-JIT
+        # ``_ctm_tensor_sweep(..., "eigh")`` whenever ``chi_auto_bump`` is on
+        # and the CG path is not in use, precisely so the bump gets a genuine
+        # number regardless of the configured projector.  So on the fused
+        # single-site optimizer the trigger works fine on "svd".
+        #
+        # A config-time check cannot see which optimizer path will run (CG vs
+        # not, fused vs split, 1-site vs 2-site all resolve later), so it can
+        # only guess -- and a false warning about a dead trigger is worse than
+        # none, because it teaches callers to ignore the real ones.  The
+        # measured projector-kernel behaviour is documented and pinned in
+        # ``tests/test_eps_t_blindness_727.py`` instead.
 
         valid_unit_cells = {"1x1", "2site"}
         if (
