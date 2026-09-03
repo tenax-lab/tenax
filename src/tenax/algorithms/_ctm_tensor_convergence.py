@@ -821,6 +821,53 @@ def _max_env_leaf_diff(env_old: CTMTensorEnv, env_new: CTMTensorEnv) -> float:
     return max_diff
 
 
+_RECIPE_1X1_DEPRECATION = (
+    "recipe='1x1' is deprecated and will be removed in a future release: for "
+    "any state with virtual bond dimension D > 1 it reaches no fixed point in "
+    "any configuration reachable from the public API (#911). "
+    "(D=1 is the one exception and it is not a reprieve: a product state has "
+    "rank 1 as its *maximum* reachable corner rank, so the collapse is vacuous "
+    "there and 1x1 agrees with 2x2 exactly. The removal still applies.) "
+    "Three separate mechanisms, measured on a D=2 Heisenberg state at "
+    "chi=16 over 240 sweeps, none of which crossed conv_tol=1e-10: "
+    "projector_method='svd' (the default) collapses the corner to rank 1, "
+    "because M = C1g^H C4g is chi x chi and the chi*D**2 seam is summed away, "
+    "so the energy is bit-identical across a 4x change in chi; "
+    "'eigh'/'qr' hold full rank but limit-cycle, with the energy ranging over "
+    "3.4e-3 to 4.9e-3 across the last 40 sweeps; and on a non-uniform cell one "
+    "bond is truncated by two inequivalent projectors on alternating sweeps, "
+    "so no environment is stationary under both. "
+    "Migration: use recipe='2x2', which is the default and converges to 1e-13 "
+    "on the same states. If you specifically need projector_method='qr' or "
+    "'eigh' -- which '2x2' ignores, since it hardcodes Fishman SVD -- and your "
+    "state is C4v-symmetric, use ctm_tensor_c4v(), a different function that "
+    "runs all three methods correctly and agrees with '2x2' to 1e-12. "
+    "Note C4v symmetrization of the *state* does not rescue this recipe; only "
+    "changing the recipe or the engine does."
+)
+
+
+def _warn_recipe_1x1_deprecated(entry_point: str, stacklevel: int = 3) -> None:
+    """Emit the ``recipe="1x1"`` deprecation for one entry point (#911).
+
+    Deliberately raised at the *entry points* rather than inside the sweep, so
+    it fires once per call instead of once per sweep, and so ``stacklevel``
+    lands on the caller's own line.
+
+    Not raised by :func:`ctm_tensor_c4v`, which is a different function despite
+    also being "single site": it passes ``(Qf, Qf)`` -- a Gram matrix of a
+    corner that has already absorbed the double layer -- into the same
+    projector, so it has neither the rank collapse nor the limit cycle.  The
+    name collision between the two things called "1x1" is the reason this note
+    exists.
+    """
+    warnings.warn(
+        f"{entry_point}: {_RECIPE_1X1_DEPRECATION}",
+        DeprecationWarning,
+        stacklevel=stacklevel,
+    )
+
+
 def _corner_singular_values(C):  # noqa: N802
     """Extract sorted singular values from a 2-leg corner tensor.
 
@@ -928,6 +975,20 @@ def ctm_tensor(
                            ``"1x1"`` — the legacy single-site corner-pair
                            projector, kept only for regression bisection.
 
+                           **``"1x1"`` is deprecated and emits a
+                           ``DeprecationWarning`` (#911).**  For any state with
+                           ``D > 1`` it reaches no fixed point in any
+                           configuration reachable from the public API
+                           (at ``D=1`` rank 1 is the *maximum* reachable corner
+                           rank, so the collapse is vacuous and ``1x1`` matches
+                           ``2x2`` exactly -- the removal still applies): ``svd`` collapses to rank 1, ``eigh``/``qr``
+                           limit-cycle at full rank, and a non-uniform cell
+                           truncates one bond with two inequivalent projectors
+                           on alternating sweeps.  Migrate to ``"2x2"``, or to
+                           :func:`ctm_tensor_c4v` if you need
+                           ``projector_method`` to be honoured (``"2x2"``
+                           hardcodes Fishman SVD and ignores it).
+
                            **``"1x1"`` collapses the environment to rank-1
                            corners and must not be used for physics** (#723,
                            #726, #747).  Its projector comes from
@@ -1021,6 +1082,8 @@ def ctm_tensor(
             f"Unknown projector_method={projector_method!r}; "
             f"expected 'eigh', 'qr', or 'svd'."
         )
+    if recipe == "1x1":
+        _warn_recipe_1x1_deprecated("ctm_tensor")
 
     if recipe == "2x2":
         # A uniform 1-site lattice is just the multisite path with a
@@ -1146,6 +1209,7 @@ def _ctm_tensor_multisite(
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
     recipe: str = "2x2",
+    _deprecation_stacklevel: int = 3,
 ) -> dict[Coord, CTMTensorEnv]:
     """Run multisite CTM to convergence using the Tensor protocol.
 
@@ -1160,11 +1224,30 @@ def _ctm_tensor_multisite(
         qr_warmup_steps:  Number of eigh warm-up sweeps before QR kicks in.
         recipe:       ``"2x2"`` (default) uses the variPEPS-style 2x2
                       plaquette projector at every site/direction.  ``"1x1"``
-                      falls back to the legacy single-site projector pair.
+                      falls back to the legacy single-site projector pair, and
+                      is **deprecated** (#911) — on a non-uniform cell it
+                      truncates each bond with two inequivalent projectors on
+                      alternating sweeps, so no environment is stationary under
+                      both and there is no fixed point to converge to.
 
     Returns:
         Dict mapping coordinates to converged CTMTensorEnv.
     """
+    # Raised here rather than in ``ctm_tensor_2site`` / ``ctm_multisite``, which
+    # both delegate to this function: one warning per call, from the one place
+    # every multisite caller passes through.
+    #
+    # ``_deprecation_stacklevel`` exists because those wrappers add a frame.
+    # Left at the default the warning resolves to the delegating line *inside
+    # this module*, which is both an unhelpful location and a dedup hazard --
+    # the default warning registry keys on (message, module, lineno), so two
+    # unrelated user call sites would collapse into one report and the second
+    # caller would never be told.  The wrappers pass 4.
+    if recipe == "1x1":
+        _warn_recipe_1x1_deprecated(
+            "ctm_tensor_multisite", stacklevel=_deprecation_stacklevel
+        )
+
     double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
     envs = {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
 
@@ -1375,6 +1458,9 @@ def ctm_tensor_2site(
         qr_warmup_steps,
         projector_backward=projector_backward,
         recipe=recipe,
+        # One extra frame: this wrapper sits between the helper and the
+        # user, so the default 3 would name this line, not the caller's.
+        _deprecation_stacklevel=4,
     )
     return envs[(0, 0)], envs[(1, 0)]
 
@@ -1494,6 +1580,9 @@ def ctm_multisite(
         qr_warmup_steps,
         projector_backward=projector_backward,
         recipe=recipe,
+        # One extra frame: this wrapper sits between the helper and the
+        # user, so the default 3 would name this line, not the caller's.
+        _deprecation_stacklevel=4,
     )
 
     # Map results back to site names

@@ -27,6 +27,7 @@ from tenax.algorithms._ctm_tensor_convergence import (
     _forced_corner_rank,
     _max_virtual_bond_dim,
     _sort_coords_for_direction,
+    _warn_recipe_1x1_deprecated,
 )
 from tenax.algorithms._split_ctm_tensor_init import (
     SplitCTMTensorEnv,
@@ -188,6 +189,14 @@ def ctm_split_tensor(
         raise ValueError(
             f"Unknown split CTM recipe {recipe!r}: expected '1x1' or '2x2'."
         )
+    if recipe == "1x1":
+        # The split path is not exempt (#911 review).  Measured on the D=2
+        # Heisenberg SU state, this collapses exactly as the fused one does --
+        # corner rank 1 at chi=4/8/16/32 with the energy bit-identical to 12
+        # digits (-0.649578563296) across an 8x change in chi, against
+        # -0.65782 at full rank on "2x2".  Same signature, same cause: the
+        # legacy single-site projector.
+        _warn_recipe_1x1_deprecated("ctm_split_tensor")
 
     env = initialize_split_ctm_tensor_env(A, chi, chi_I)
     # A uniform 1-site lattice is just the multisite path with a
@@ -646,6 +655,7 @@ def _split_ctm_multisite(
     chi_I: int | None = None,
     renormalize: bool = True,
     recipe: str = "2x2",
+    _deprecation_stacklevel: int = 3,
 ) -> dict[Coord, SplitCTMTensorEnv]:
     """Run split multisite CTM to convergence (mirrors ``_ctm_tensor_multisite``).
 
@@ -666,6 +676,13 @@ def _split_ctm_multisite(
     """
     if chi_I is None:
         chi_I = chi
+    # Covers ``ctm_split_tensor_2site``, which delegates here.  Stacklevel 4,
+    # not the default 3: the wrapper adds a frame, so 3 would name the
+    # delegating line inside this module rather than the caller's.
+    if recipe == "1x1":
+        _warn_recipe_1x1_deprecated(
+            "ctm_split_tensor_multisite", stacklevel=_deprecation_stacklevel
+        )
     bars = {c: A.bar() for c, A in site_tensors.items()}
     envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
     prev_svs: dict[Coord, jax.Array] = {}
@@ -742,5 +759,8 @@ def ctm_split_tensor_2site(
         chi_I=chi_I,
         renormalize=renormalize,
         recipe=recipe,
+        # One extra frame: this wrapper sits between the helper and the user,
+        # so the default 3 would name this line, not the caller's.
+        _deprecation_stacklevel=4,
     )
     return envs[(0, 0)], envs[(1, 0)]
