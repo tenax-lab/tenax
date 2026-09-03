@@ -135,6 +135,21 @@ class TestGiltPlaquette:
         with pytest.raises(NotImplementedError):
             gilt_plaquette(T, GiltConfig(gilt_eps=1e-6))
 
+    def test_symmetric_gram_never_densified(self):
+        """The environment gram of a SymmetricTensor must be kept in the
+        charge-difference-block representation (the full chi^4 dense array is
+        never materialized); a DenseTensor keeps the whole matrix."""
+        from tenax.algorithms.gilt import _bond_gram
+
+        Ts = compute_ising_tensor(beta=BETA_C, symmetric=True)
+        gram_sym = _bond_gram((Ts, Ts, Ts, Ts), "top")
+        assert gram_sym.dense_full is None  # no chi^4 array formed
+        assert gram_sym.blocks  # block-diagonal sectors present
+
+        Td = compute_ising_tensor(beta=BETA_C, symmetric=False)
+        gram_dense = _bond_gram((Td, Td, Td, Td), "top")
+        assert gram_dense.dense_full is not None  # dense path keeps the matrix
+
 
 class TestGiltTNRStep:
     def test_step_returns_normalized_tensor(self):
