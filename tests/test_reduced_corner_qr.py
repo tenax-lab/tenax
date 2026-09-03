@@ -340,6 +340,52 @@ def test_the_projector_method_actually_reaches_the_projector(monkeypatch):
 
 
 @pytest.mark.core
+def test_the_energy_helper_is_wired_to_the_engine_that_honours_the_selector(
+    monkeypatch,
+):
+    """Pin the *wiring*, not just the engine.
+
+    ``test_the_projector_method_actually_reaches_the_projector`` proves
+    ``ctm_tensor_c4v`` consults ``projector_method``.  It does not prove the
+    energy helper below calls ``ctm_tensor_c4v`` — so pointing the helper back
+    at ``ctm_tensor`` would make every energy comparison vacuous again while
+    that test carried on passing.  That is the exact shape of the original
+    defect, so it gets its own guard.
+
+    Stubbed rather than converged: this asserts a call, and the physics is
+    covered by the ``algorithm``-marked tests below.
+    """
+    recorded = {}
+
+    def _fake_c4v(A, **kwargs):
+        recorded.update(kwargs)
+        return "sentinel-env"
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "the energy helper called ctm_tensor, whose default recipe='2x2' "
+            "ignores projector_method — the comparison is vacuous again"
+        )
+
+    # The module caches the SU state in a global; seed it so this stays cheap.
+    import sys
+
+    mod = sys.modules[__name__]
+    monkeypatch.setattr(mod, "_PHYS_STATE", (_c4v_probe_state(), None))
+    monkeypatch.setattr(mod, "ctm_tensor_c4v", _fake_c4v)
+    monkeypatch.setattr(mod, "ctm_tensor", _forbidden)
+    monkeypatch.setattr(mod, "compute_energy_ctm_tensor", lambda *a, **k: -1.0)
+
+    e = _heisenberg_D2_ctm_energy_c4v(chi=4, projector_method="qr")
+
+    assert e == -1.0
+    assert recorded.get("projector_method") == "qr", (
+        f"the selector did not reach the engine: {recorded}"
+    )
+    assert recorded.get("chi") == 4
+
+
+@pytest.mark.core
 def test_recipe_2x2_ignores_projector_method(monkeypatch):
     """Pin the trap that made this module vacuous (#911, #765).
 
