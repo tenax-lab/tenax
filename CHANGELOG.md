@@ -235,6 +235,47 @@
 
 ### Fixed
 
+- **The traced CTM chi bond inherits the environment's inventory instead of
+  re-guessing it** (#929). #922 fixed the *eager* cut; the AD path could not
+  have it, because `jax.jit` bakes the per-sector block shapes at trace time
+  and the sector owning each chi slot must be fixed before the SVD runs. Its
+  fallback was the double-layer `u2` charge list tiled to chi — a guess about
+  the environment made from the *state* — and it is measurably wrong against
+  the same-state dense reference:
+
+  | D | chi | eager (#922) | traced, tiled guess |
+  |---|-----|--------------|---------------------|
+  | 2 | 8   | 1.540e-04    | 9.924e-04 |
+  | 3 | 16  | 4.441e-16    | 1.839e-07 |
+
+  The environment's own chi leg is a far better guess and is static metadata
+  even under tracing: at a fixed point it *is* the bond `chi_new` replaces.
+  Seeding the static rule with the eager inventory and re-converging reproduces
+  the eager environment exactly — `|E_eager - E_seeded| = 0.0` at both D=2
+  chi=8 and D=3 chi=16 — and gets there faster than the eager cut (168s vs
+  279s at D=3 chi=16), because a fixed inventory does not churn block shapes
+  between sweeps. The leg is refused when it is not exactly `chi` wide, so a
+  chi ramp falls back rather than sizing the new bond by the old chi.
+
+  **Correction to #929 as filed:** it said `optimize_gs_ad` still carries #922's
+  truncation. That is wrong for the documented symmetric optimiser.
+  `ctm_ad_mode="root_implicit_symmetric"` does not use the 2x2 projector at all
+  — measured, zero calls through a full `sym_root_implicit_energy_and_grad` —
+  and its own `_ctm_root_implicit_sym_sectors.sector_svd` decomposes each
+  sector and then takes **one global top-chi** over the union of the spectra,
+  recording it in a `BondLayout` frozen for the adjoint. That path was never
+  affected, and a guard now pins it so it cannot regress into a quota the way
+  the other one did.
+
+  What this fixes is the traced 2x2 projector, which is reachable: symmetric
+  site tensors through `ctm_energy_explicit` / `ctm_energy_implicit` under
+  `jax.grad` take it 8 times in a 2-sweep warmup, eagerly zero. There the cold
+  environment's inventory still comes from `initialize_ctm_tensor_env`, and
+  inheritance perpetuates it — so a cold run of *those* entry points is
+  unchanged. What changes is that a good inventory now survives: before this,
+  handing them a converged environment did not help, because the first traced
+  sweep re-imposed the guess.
+
 - **The CTM chi bond follows its own spectrum; `base_charges` is now only a
   floor** (#922). With #905's flow faults gone the symmetric CTM still
   saturated below the dense reference, and the gap *grew* with chi instead of
