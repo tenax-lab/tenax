@@ -124,14 +124,32 @@ before a single solve runs; see ``tests/test_ipeps_gauge_perf.py``, whose gate
 *asserts* that budget (it recorded a shortfall while only the solve was traced,
 and stopped once ``gauge_fix``'s own boundary went inside the jit too).
 
-``SymmetricTensor`` stays on the eager loop, because it cannot be traced today:
-``_eigh_symmetric`` derives the output bond's charges from eigenvalue
-*magnitudes* via ``np.array(...)``, and rerouting through the traceable
-symmetric SVD instead hits ``_zero_subrank_singular_values``, whose relative
-floor snaps small bond weights to exactly zero and broke the gauge by 4.9e-01
-on 2 of 8 fixtures.  Both live outside this module.  The sweep body is shared
-verbatim between the two loops, so there is one implementation of the physics
-and only the driver differs.
+``SymmetricTensor`` stays on the eager loop.  Two things stopped it being
+traced and **one of them is now gone**:
+
+1. ``_eigh_symmetric`` laid its bond out by ranking the whole spectrum, reading
+   the eigenvalues through ``np.array(...)``, which raises on a tracer.  Fixed:
+   :func:`_sqrt_pinv` never truncates, so the ranking decides nothing there, and
+   it now asks for ``eigh(..., bond_order="sector")`` -- the charge-grouped
+   layout, which needs no host read.
+2. The SVD in :func:`_gauge_bond` still does.  Putting :func:`_sweep` behind a
+   ``jax.jit`` reroutes it to the traced symmetric SVD, which emits the bond in
+   sector-block rather than descending order and applies
+   ``_zero_subrank_singular_values``' relative floor; the solve then **stops
+   being a gauge** -- measured 3.0e-01 on
+   ``test_the_whole_solve_preserves_a_state_with_nontrivial_weights[symmetric]``
+   and 4.6e-01 on the f64-walk cell, against a 1e-13 tolerance.  That is the
+   same failure the earlier attempt recorded at 4.9e-01.
+
+So the win is real but not yet available: with (1) fixed the sweep body *does*
+compile, and measured at ``D=3`` it goes from 921 ms to 0.200 ms -- one compile
+(4.6 s) paying for itself after 4.9 sweeps, with the block structure preserved
+and the charge layout stable across sweeps.  What is left is (2), and it lives
+outside this module.
+
+Both live outside this module.  The sweep body is shared verbatim between the
+two loops, so there is one implementation of the physics and only the driver
+differs.
 """
 
 from __future__ import annotations
@@ -227,7 +245,19 @@ def _message(gamma: Tensor, site: str, out_leg: str, weights: BondWeights) -> Te
 
 def _sqrt_pinv(m: Tensor, out_leg: str) -> tuple[Tensor, Tensor]:
     """Factor a PSD message ``m = X^dag X``; return ``X`` and ``X^-1``."""
-    V, w = eigh(m, left_labels=[out_leg], right_labels=[_BRA], new_bond_label=_K)
+    # ``bond_order="sector"`` rather than the default magnitude ranking: this
+    # call never truncates, so the ranking decides nothing, and asking for it
+    # is what pinned the SymmetricTensor pair to the eager driver -- the rank
+    # is read through ``np.array`` on the eigenvalues, which raises on a tracer.
+    # ``s`` is used through ``jnp.max`` and paired with ``V`` column by column,
+    # so nothing here depends on which order the bond comes back in.
+    V, w = eigh(
+        m,
+        left_labels=[out_leg],
+        right_labels=[_BRA],
+        new_bond_label=_K,
+        bond_order="sector",
+    )
     w = jnp.clip(w, 0.0, None)
     s = jnp.sqrt(w)
     keep = s > _PINV_CUTOFF * jnp.max(s)

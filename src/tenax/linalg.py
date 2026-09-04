@@ -1564,11 +1564,21 @@ def _eigh_symmetric(
     right_labels: Sequence[Label],
     new_bond_label: Label,
     max_eigenvalues: int | None,
+    bond_order: str = "descending",
 ) -> tuple[SymmetricTensor, jax.Array]:
     """Block-diagonal Hermitian eigendecomposition for SymmetricTensor.
 
     Each charge sector is eigendecomposed independently, then eigenvalues
     are merged and truncated globally (keeping the largest).
+
+    ``bond_order="sector"`` emits the output bond charge-grouped instead, which
+    is what makes this **traceable**: ranking the sectors against each other
+    means reading eigenvalue magnitudes on the host, and ``np.array`` on a
+    tracer raises.  Without a truncation there is nothing to rank *for* -- every
+    eigenvalue is kept either way and the order is a convention -- so the two
+    modes differ only by a permutation of the bond, with ``V`` and
+    ``eigenvalues`` permuted together.  It is rejected with
+    ``max_eigenvalues``, where the ranking is load-bearing.
     """
     all_labels = tensor.labels()
     label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}
@@ -1675,27 +1685,42 @@ def _eigh_symmetric(
         left_subkeys, left_row_sizes = _eigh_meta_by_q[q]
         sector_results[q] = (eigvecs_q, eigvals_q, left_subkeys, left_row_sizes)
 
-    # Global truncation: merge eigenvalues across sectors, keep top-k
-    all_eig_pairs: list[tuple[float, int, int]] = []
-    for q, (_, eigvals_q, _, _) in sector_results.items():
-        ev_np = np.array(eigvals_q)
-        for i, val in enumerate(ev_np):
-            all_eig_pairs.append((float(val), q, i))
+    if bond_order == "sector":
+        # Charge-grouped, and no eigenvalue is read on the host: the bond's
+        # layout follows the sector structure, which is static.  Sectors are
+        # visited in sorted charge order so the layout is reproducible rather
+        # than dict-insertion dependent.
+        order = sorted(sector_results)
+        kept = [
+            (0.0, q, i) for q in order for i in range(sector_results[q][1].shape[0])
+        ]
+        eigenvalues = (
+            jnp.concatenate([sector_results[q][1] for q in order])
+            if order
+            else jnp.zeros((0,), dtype=tensor.dtype)
+        )
+    else:
+        # Global truncation: merge eigenvalues across sectors, keep top-k
+        all_eig_pairs: list[tuple[float, int, int]] = []
+        for q, (_, eigvals_q, _, _) in sector_results.items():
+            ev_np = np.array(eigvals_q)
+            for i, val in enumerate(ev_np):
+                all_eig_pairs.append((float(val), q, i))
 
-    # Sort descending by eigenvalue, then descending by index to match
-    # the dense convention of taking eigvecs[:, -k:] for degenerate eigenvalues.
-    all_eig_pairs.sort(key=lambda x: (-x[0], -x[2]))
+        # Sort descending by eigenvalue, then descending by index to match the
+        # dense convention of taking eigvecs[:, -k:] for degenerate eigenvalues.
+        all_eig_pairs.sort(key=lambda x: (-x[0], -x[2]))
 
-    n_total = len(all_eig_pairs)
-    n_keep = n_total
-    if max_eigenvalues is not None:
-        n_keep = min(n_keep, max_eigenvalues)
-    n_keep = max(1, min(n_keep, n_total))
+        n_total = len(all_eig_pairs)
+        n_keep = n_total
+        if max_eigenvalues is not None:
+            n_keep = min(n_keep, max_eigenvalues)
+        n_keep = max(1, min(n_keep, n_total))
 
-    kept = all_eig_pairs[:n_keep]
+        kept = all_eig_pairs[:n_keep]
 
-    # Eigenvalues in descending order
-    eigenvalues = jnp.array([v for v, _, _ in kept])
+        # Eigenvalues in descending order
+        eigenvalues = jnp.array([v for v, _, _ in kept])
 
     # Build bond charges in global descending eigenvalue order (matching
     # the eigenvalues array) so that V[:,k] pairs with eigenvalues[k].
@@ -2360,6 +2385,7 @@ def eigh(
     right_labels: Sequence[Label],
     new_bond_label: Label = "bond",
     max_eigenvalues: int | None = None,
+    bond_order: str = "descending",
 ) -> tuple[Tensor, jax.Array]:
     """Eigendecompose a Hermitian tensor.
 
@@ -2380,15 +2406,46 @@ def eigh(
         right_labels:     Labels forming the column side of the matrix.
         new_bond_label:   Label for the eigenvector bond index.
         max_eigenvalues:  Keep only the top-k eigenvalues.
+        bond_order:       ``"descending"`` (default) ranks the whole spectrum by
+                          magnitude.  ``"sector"`` emits a ``SymmetricTensor``'s
+                          bond charge-grouped instead, which is the **traceable**
+                          option: ranking sectors against each other reads
+                          eigenvalue magnitudes on the host, and that raises on a
+                          tracer.  The two differ only by a permutation of the
+                          bond -- ``V`` and ``eigenvalues`` are permuted together
+                          -- so it is only available untruncated, where the
+                          ranking decides nothing.  Ignored on the dense path,
+                          which has no sectors to group by and is already
+                          traceable.
+
+    Raises:
+        ValueError: if ``bond_order`` is not one of the two, or if
+            ``bond_order="sector"`` is combined with ``max_eigenvalues``.
 
     Returns:
         ``(V, eigenvalues)`` where V has labels ``(left_labels..., new_bond_label)``
         and eigenvalues is a 1-D JAX array sorted descending.
     """
+    if bond_order not in ("descending", "sector"):
+        raise ValueError(
+            f"bond_order must be 'descending' or 'sector', got {bond_order!r}"
+        )
+    if bond_order == "sector" and max_eigenvalues is not None:
+        raise ValueError(
+            "bond_order='sector' cannot be combined with max_eigenvalues: "
+            "truncation has to rank the sectors against each other, which is "
+            "exactly the host read that makes 'descending' untraceable"
+        )
+
     # Dispatch to block-sparse path for SymmetricTensor
     if isinstance(tensor, SymmetricTensor):
         return _eigh_symmetric(
-            tensor, left_labels, right_labels, new_bond_label, max_eigenvalues
+            tensor,
+            left_labels,
+            right_labels,
+            new_bond_label,
+            max_eigenvalues,
+            bond_order=bond_order,
         )
 
     # Dense path

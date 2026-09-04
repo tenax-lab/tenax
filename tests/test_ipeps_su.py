@@ -3469,15 +3469,16 @@ def test_d2_reaches_the_heisenberg_energy_not_the_product_state(seed, kind):
     a caller did not choose is exactly how a recorded number comes to be quoted
     for a run that did not produce it.
 
-    **The symmetric arm reads -0.650094, and it passes this cell for a reason
-    that is not the one it looks like.**  ``abs=0.02`` is Task 12's tolerance
-    and it is deliberately left alone, so -0.650094 clears it -- but the dense
-    arm reads -0.658880 on a state that is, to 2.8e-17 on the closed-torus
-    witness, *the same state*.  The 8.8e-03 between them is the symmetric CTM,
-    not the symmetric simple update, and it is
-    :func:`test_the_symmetric_d2_state_reads_the_dense_reference_through_a_dense_ctm`
-    that says so with the measurement.  Do not read a pass here as agreement
-    between the arms.
+    **The two arms now read the same number.**  They did not: the symmetric arm
+    read -0.658880 against the dense arm's -0.650094 on a state that is, to
+    2.8e-17 on the closed-torus witness, *the same state*, and Task 12's
+    ``abs=0.02`` was wide enough to absorb the 8.8e-03 between them.  That gap
+    was the symmetric CTM rather than the symmetric simple update -- #905 (the
+    charged environment sectors were being annihilated) and #922 (the chi bond
+    could not follow its own spectrum) closed it to 0.0.
+    :func:`test_the_symmetric_and_dense_ctm_agree_on_the_same_d2_state` is what
+    holds it closed; the tolerance here is still Task 12's and is still wider
+    than the arms need.
 
     **The symmetric arm reintroduces exactly one ``gauge_fix`` warning, and the
     section header's "zero" is now a statement about the dense arm.**  Task 12
@@ -3837,12 +3838,13 @@ def test_su_evolve_collapses_from_a_maximally_random_init():
 # **3. At ``D=2`` the engine is right and the *reading* is 8.8e-03 short.**
 # This is the finding worth carrying forward.  The symmetric SU state and the
 # dense one are the same state -- 2.8e-17 on the closed-torus witness, all four
-# bond spectra equal to six decimals -- and that state reads ``-0.658880``
-# through the dense CTM and ``-0.650094`` through the symmetric one, **flat in
-# chi on both sides** (16, 24, 32 and 8), with the symmetric environment's
-# ``C1`` stuck at rank 3 whatever chi it is given.  Flat in chi is this
-# project's own discriminator for "defect" against "truncation".  See
-# :func:`test_the_symmetric_d2_state_reads_the_dense_reference_through_a_dense_ctm`.
+# bond spectra equal to six decimals -- and that state used to read
+# ``-0.658880`` through the dense CTM and ``-0.650094`` through the symmetric
+# one, **flat in chi on both sides** (16, 24, 32 and 8), with the symmetric
+# environment's ``C1`` stuck at rank 3 whatever chi it was given.  Flat in chi
+# is this project's own discriminator for "defect" against "truncation", and it
+# was one: #905 and #922 closed the gap to 0.0 and the rank now grows.  See
+# :func:`test_the_symmetric_and_dense_ctm_agree_on_the_same_d2_state`.
 #
 # Cost, so the ``slow`` marks below are not mysterious: at ``D=2``, 800 steps,
 # ``JAX_PLATFORMS=cpu``, the dense evolve is 1.5 s and the symmetric one 490 s.
@@ -4034,7 +4036,7 @@ def test_the_unrotated_gate_reaches_the_same_dense_energy():
 
 
 @pytest.mark.slow
-def test_the_symmetric_d2_state_reads_the_dense_reference_through_a_dense_ctm():
+def test_the_symmetric_and_dense_ctm_agree_on_the_same_d2_state():
     """**The symmetric arm's 8.8e-03 shortfall is the CTM, not the simple update.**
 
     ``test_d2_reaches_the_heisenberg_energy_not_the_product_state[symmetric-*]``
@@ -4139,53 +4141,42 @@ def test_the_symmetric_d2_state_reads_the_dense_reference_through_a_dense_ctm():
         f"cell asserts is about the apparatus and is moot until this passes"
     )
 
-    gap = E_sym_ctm - E_dense_ctm
-    assert 5e-3 < gap < 2e-2, (
-        f"the symmetric CTM reads {E_sym_ctm:.6f} on the same state the dense "
-        f"CTM reads {E_dense_ctm:.6f}, a gap of {gap:.3e}, outside the measured "
-        f"band [5e-03, 2e-02].  If the gap has CLOSED, the symmetric CTM has "
-        f"been fixed: that is a FIX, not a failure -- promote the symmetric arm "
-        f"into the ordinary acceptance sweep and delete this cell's second half "
-        f"rather than widening the band"
+    gap = abs(E_sym_ctm - E_dense_ctm)
+    assert gap < 1e-9, (
+        f"the symmetric CTM reads {E_sym_ctm:.6f} where the dense one reads "
+        f"{E_dense_ctm:.6f} on the same state, a gap of {gap:.3e}.  This cell "
+        f"used to assert that gap was 5e-03..2e-02 and attribute it; #905 and "
+        f"#922 closed it to 0.0, so what is guarded now is the agreement"
     )
 
-    ranks, energies = {}, {}
+    # The direct observable of the fix, and the half of this cell worth keeping:
+    # the symmetric C1 used to be stuck at rank 3 however much chi it was given
+    # -- an environment that does not grow with chi is what the old gap was made
+    # of -- while the dense one was full.  Both are full now.
+    ranks = {}
     for label, pair in (("symmetric", state), ("densified", densified)):
-        H = _H_HEISENBERG
         for chi in (_CHI[2], 32):
             env_A, _env_B = ctm_tensor_2site(
                 pair.A, pair.B, chi=chi, max_iter=200, conv_tol=1e-10, recipe="2x2"
             )
             sv = np.linalg.svd(np.asarray(env_A.C1.todense()), compute_uv=False)
             ranks[label, chi] = int(np.sum(sv > sv[0] * 1e-10))
-            energies[label, chi] = _energy_of(pair, chi, hamiltonian=H)
 
-    assert ranks["symmetric", _CHI[2]] == 3 and ranks["symmetric", 32] == 3, (
-        f"the symmetric environment's C1 has rank "
-        f"{ranks['symmetric', _CHI[2]]} at chi={_CHI[2]} and "
-        f"{ranks['symmetric', 32]} at chi=32.  Measured it is 3 at both, and 3 "
-        f"at chi=8 and chi=24 as well -- an environment that does not grow with "
-        f"chi is what the gap above is made of"
-    )
-    assert ranks["densified", _CHI[2]] >= _CHI[2] - 1, (
-        f"the dense environment's C1 has rank {ranks['densified', _CHI[2]]} at "
-        f"chi={_CHI[2]}; measured it is full.  If it is not, the control arm has "
-        f"collapsed too and the rank reading above is not a difference between "
-        f"the two paths"
+    assert ranks["symmetric", _CHI[2]] > 3, (
+        f"the symmetric environment's C1 has rank {ranks['symmetric', _CHI[2]]} "
+        f"at chi={_CHI[2]}; it was pinned at 3 at every chi before #905/#922, "
+        f"which is the confinement those fixed"
     )
     for label in ("symmetric", "densified"):
-        moved = abs(energies[label, 32] - energies[label, _CHI[2]])
-        assert moved < 1e-9, (
-            f"the {label} reading moves {moved:.3e} between chi={_CHI[2]} and "
-            f"chi=32, so it is still truncation-limited and the gap above is "
-            f"not yet a statement about either implementation"
+        assert ranks[label, _CHI[2]] >= _CHI[2] - 1, (
+            f"the {label} environment's C1 has rank {ranks[label, _CHI[2]]} at "
+            f"chi={_CHI[2]}; measured it is full on both arms"
         )
 
 
 @pytest.mark.slow
-def test_symmetric_simple_update_still_breaks_the_bp_gauge_at_D3():
-    """**A blocker, pinned rather than worked around.**  Why ``D >= 3`` has no
-    symmetric arm.
+def test_symmetric_simple_update_survives_the_bp_gauge_at_D3():
+    """**The blocker that stopped ``D >= 3`` -- lifted, and pinned open.**
 
     ``_su_evolve`` on a U(1)-Sz pair at ``D >= 3`` raises ``TypeError: sub got
     incompatible shapes for broadcasting: (2,), (3,)``.  Measured, unrotated
@@ -4213,12 +4204,23 @@ def test_symmetric_simple_update_still_breaks_the_bp_gauge_at_D3():
     that pair has no dead slot, so the refusal is about what the evolution did
     to the charge layout and not about symmetric pairs in general.
 
-    **If this test starts failing, the blocker is gone.**  Promote ``D=3`` and
-    ``D=4`` into the symmetric arm of the acceptance sweep -- the references are
-    already there in :data:`_SU_REFERENCE` -- and re-take the ``D=2`` CTM
-    attribution at the larger bond dimension.  Do not delete the cell and do not
-    replace it with an ``xfail``: an ``xfail`` reports "still broken" and
-    "silently fixed" with the same green tick.
+    **It lifted with #906** ("a bond weight vector may change length between BP
+    sweeps"), and this cell holds the fix open from the other side: the dead
+    slot is still produced -- every assertion above still passes, so the charge
+    layout still moves under the evolution -- and the solve absorbs it instead
+    of raising.
+
+    **The arm is measured but not promoted, and the reason is cost.**  Seed 0,
+    1600 steps, ``JAX_PLATFORMS=cpu``: symmetric reaches ``-0.662839`` at ``D=3``
+    and ``-0.667012`` at ``D=4``, the dense reading to six decimals at both, so
+    the physics is there.  It takes 5768 s and 22091 s against dense's 51 s and
+    77 s -- 113x and 287x -- and three seeds of that is most of a CI day.  The
+    cost is ``ipeps_bp_gauge``'s eager driver, whose sweep body is ~900 ms
+    uncompiled; compiling it is worth ~4600x per sweep and is blocked on one
+    thing, that ``_gauge_bond`` pairs ``lam`` with its bond positionally while
+    the traced SVD orders that bond by sector.  Promote ``D=3``/``D=4`` into
+    :func:`test_su_evolve_reaches_the_simple_update_reference_energy` once that
+    lands, not before.
     """
     D, seed = 3, 0
     state = _low_entanglement_state(D, seed, kind="symmetric")
@@ -4252,18 +4254,19 @@ def test_symmetric_simple_update_still_breaks_the_bp_gauge_at_D3():
         "coincidence this cell rests on is not one"
     )
 
-    with pytest.raises(
-        TypeError, match=r"incompatible shapes for broadcasting: \(2,\), \(3,\)"
-    ):
-        gauge_fix(state.A, state.B)
+    # The dead slot is still there -- the charge layout still moves under the
+    # evolution -- but the solve absorbs it now instead of raising.
+    _A, _B, _w, solved = gauge_fix(state.A, state.B)
+    assert solved.converged, (
+        f"gauge_fix no longer raises on the stepped pair but does not converge "
+        f"either ({solved.iterations} sweeps, residual {solved.residual:.3e}); "
+        f"the blocker moved rather than lifting"
+    )
 
-    # ... and that is what a caller sees: the same raise, through _su_evolve,
-    # from the builder rather than from a hand-stepped pair.
+    # ... and the same through the caller's own entry point.
     fresh = _low_entanglement_state(D, seed, kind="symmetric")
-    with pytest.raises(
-        TypeError, match=r"incompatible shapes for broadcasting: \(2,\), \(3,\)"
-    ):
-        _su_evolve(fresh, _su_heisenberg_gate(fresh), D, 4)
+    evolved = _su_evolve(fresh, _su_heisenberg_gate(fresh), D, 4)
+    assert float(evolved.A.norm()) > 0 and np.isfinite(float(evolved.A.norm()))
 
 
 @pytest.mark.parametrize(
