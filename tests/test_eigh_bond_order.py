@@ -112,5 +112,28 @@ def test_sector_order_is_refused_where_the_ranking_is_load_bearing():
     with pytest.raises(ValueError, match="cannot be combined with max_eigenvalues"):
         eigh(m, ["row"], ["col"], max_eigenvalues=2, bond_order="sector")
 
+
+def test_the_dense_path_ignores_bond_order_rather_than_refusing_it():
+    """Dense has no sectors to group by, so the incompatibility does not apply.
+
+    The guard used to sit ahead of the dispatch and rejected this combination on
+    a ``DenseTensor`` too -- refusing a truncation the dense code does perfectly
+    well, on the strength of an argument that did nothing (Codex P2 on #939).
+    """
+    from tenax.core.tensor import DenseTensor
+
+    m = _psd()
+    dense = DenseTensor(m.todense(), m.indices)
+
+    V, w = eigh(dense, ["row"], ["col"], max_eigenvalues=2, bond_order="sector")
+
+    assert len(w) == 2
+    assert np.all(np.diff(np.asarray(w)) <= 1e-12), (
+        "the dense path ignores bond_order, so it must still rank descending"
+    )
+    # ... and the value check still applies on both paths.
+    with pytest.raises(ValueError, match="must be 'descending' or 'sector'"):
+        eigh(dense, ["row"], ["col"], bond_order="ascending")
+
     with pytest.raises(ValueError, match="must be 'descending' or 'sector'"):
         eigh(m, ["row"], ["col"], bond_order="ascending")

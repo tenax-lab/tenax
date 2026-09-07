@@ -2419,8 +2419,10 @@ def eigh(
                           traceable.
 
     Raises:
-        ValueError: if ``bond_order`` is not one of the two, or if
-            ``bond_order="sector"`` is combined with ``max_eigenvalues``.
+        ValueError: if ``bond_order`` is not one of the two, or -- on a
+            ``SymmetricTensor`` only -- if ``bond_order="sector"`` is combined
+            with ``max_eigenvalues``.  The dense path ignores ``bond_order``
+            and truncates as usual.
 
     Returns:
         ``(V, eigenvalues)`` where V has labels ``(left_labels..., new_bond_label)``
@@ -2430,15 +2432,18 @@ def eigh(
         raise ValueError(
             f"bond_order must be 'descending' or 'sector', got {bond_order!r}"
         )
-    if bond_order == "sector" and max_eigenvalues is not None:
-        raise ValueError(
-            "bond_order='sector' cannot be combined with max_eigenvalues: "
-            "truncation has to rank the sectors against each other, which is "
-            "exactly the host read that makes 'descending' untraceable"
-        )
-
     # Dispatch to block-sparse path for SymmetricTensor
     if isinstance(tensor, SymmetricTensor):
+        # Only here: on the dense path ``bond_order`` is documented as ignored
+        # -- there are no sectors to group by -- so refusing the combination
+        # there would reject a truncation the dense code performs perfectly
+        # well, on the strength of an argument that did nothing.
+        if bond_order == "sector" and max_eigenvalues is not None:
+            raise ValueError(
+                "bond_order='sector' cannot be combined with max_eigenvalues: "
+                "truncation has to rank the sectors against each other, which "
+                "is exactly the host read that makes 'descending' untraceable"
+            )
         return _eigh_symmetric(
             tensor,
             left_labels,
