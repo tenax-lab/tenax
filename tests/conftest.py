@@ -100,6 +100,25 @@ _FILE_MARKERS = {
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
+    # ``ctm_tensor(return_info=True)``: the only way a caller can find out
+    # whether the environment it is about to read an energy from is a fixed
+    # point.  Same defect class as the two files above -- a silent wrong answer
+    # on the default path -- so it belongs in the required gate for the same
+    # reason.  Shares one D=2 chi=8 module fixture across every case (~50s).
+    "test_ctm_tensor_return_info.py": "core",
+    # #933: these seven carried a module-level ``pytestmark = pytest.mark.core``
+    # and no registry entry, so they entered the required gate without the
+    # justification every line in this table has to carry.  Three of them were
+    # 29% of its runtime.  Registered here so the cost is visible; the
+    # expensive cases inside them now carry explicit ``@pytest.mark.slow``,
+    # which this table's "core" mapping deliberately withholds ``core`` from.
+    "test_chi_ramp_chi_auto_bump_deprecation.py": "core",
+    "test_ctm_explicit_tbptt.py": "core",
+    "test_ctm_implicit_warm_start_adjoint.py": "core",
+    "test_ctm_in_loop_bump_ad_paths.py": "core",
+    "test_line_search_auto.py": "core",
+    "test_split_ctm_doublelayer_projector.py": "core",
+    "test_split_ctm_fuse_flag.py": "core",
     # #785: the only thing that says whether a root-implicit gradient is
     # accurate.  The contract tests run on a closed-form quartic with no CTM
     # anywhere (~0.2s), so the measurement semantics -- a wrong gradient
@@ -307,6 +326,7 @@ _FILE_MARKERS = {
     # chi-scan that needs chi=16 carries its own ``@pytest.mark.slow``.
     "test_ctm_charged_sectors_905.py": "core",
     "test_ctm_chi_truncation_policy_922.py": "core",
+    "test_ctm_traced_chi_inventory_929.py": "core",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",
     "test_tdvp.py": "algorithm",
@@ -438,7 +458,6 @@ _UNBUCKETED_LEGACY = {
     "test_architecture_imports.py",
     "test_block_sparse_ctm_ad.py",
     "test_c4v_reference_ad.py",
-    "test_chi_ramp_chi_auto_bump_deprecation.py",
     "test_coarse_grain.py",
     "test_complex128_ad.py",
     "test_ctm_2x2_projector_symmetric.py",
@@ -451,7 +470,6 @@ _UNBUCKETED_LEGACY = {
     "test_ctm_energy_implicit.py",
     "test_ctm_energy_implicit_chi_bump.py",
     "test_ctm_env_pad_chi_schedule.py",
-    "test_ctm_explicit_tbptt.py",
     "test_ctm_honeycomb_ad.py",
     "test_ctm_honeycomb_convergence.py",
     "test_ctm_honeycomb_cross_path.py",
@@ -463,8 +481,6 @@ _UNBUCKETED_LEGACY = {
     "test_ctm_honeycomb_moves.py",
     "test_ctm_honeycomb_projector.py",
     "test_ctm_honeycomb_safeguards.py",
-    "test_ctm_implicit_warm_start_adjoint.py",
-    "test_ctm_in_loop_bump_ad_paths.py",
     "test_ctm_in_loop_chi_bump.py",
     "test_ctm_loop_core.py",
     "test_ctm_multisite_2x2_contract.py",
@@ -496,7 +512,6 @@ _UNBUCKETED_LEGACY = {
     "test_ipeps_tree_dot.py",
     "test_ipeps_u1sz.py",
     "test_line_search.py",
-    "test_line_search_auto.py",
     "test_lorentzian_eigh_kernel.py",
     "test_make_neighbors.py",
     "test_metric_precond.py",
@@ -513,9 +528,7 @@ _UNBUCKETED_LEGACY = {
     "test_regularized_qr.py",
     "test_regularized_svd.py",
     "test_split_ctm_chi_frozen_726.py",
-    "test_split_ctm_doublelayer_projector.py",
     "test_split_ctm_energy_gauge.py",
-    "test_split_ctm_fuse_flag.py",
     "test_split_ctm_large_d_memory.py",
     "test_split_ctm_production_correctness.py",
     "test_sublattice_rotation.py",

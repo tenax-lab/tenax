@@ -54,7 +54,13 @@ def su_state():
                 num_imaginary_steps=40,
                 dt=0.05,
                 unit_cell="1x1",
-                ctm=CTMConfig(chi=6, max_iter=100, conv_tol=1e-10),
+                # This CTM is dead weight: ``ipeps()`` runs simple update first and the
+                # tensors are fixed before it starts, so ``config.ctm`` cannot affect
+                # them -- and this fixture discards both the energy and the env.  It
+                # was spending its whole budget without converging (the
+                # "CTM did not converge in ipeps()" warning), then throwing the
+                # result away.  chi is unchanged; only the sweep count is cut (#933).
+                ctm=CTMConfig(chi=6, max_iter=2, conv_tol=1e-10),
             ),
         )
     return A.todense(), B.todense(), gate.todense()

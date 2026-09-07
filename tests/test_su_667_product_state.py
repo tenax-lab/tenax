@@ -59,7 +59,13 @@ def _run_su(D: int, *, steps: int = 200, dt: float = 0.05):
         max_bond_dim=D,
         num_imaginary_steps=steps,
         dt=dt,
-        ctm=CTMConfig(chi=8, max_iter=40, conv_tol=1e-8),
+        # This CTM is dead weight: ``ipeps()`` runs simple update first and the
+        # tensors are fixed before it starts, so ``config.ctm`` cannot affect
+        # them -- and this fixture discards both the energy and the env.  It
+        # was spending its whole budget without converging (the
+        # "CTM did not converge in ipeps()" warning), then throwing the
+        # result away.  chi is unchanged; only the sweep count is cut (#933).
+        ctm=CTMConfig(chi=8, max_iter=2, conv_tol=1e-8),
     )
     # ipeps() may warn that its own (legacy) 2-site CTM did not converge (#839)
     # at the small chi used here.  That is a property of ctm_2site, not of the
