@@ -15,7 +15,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **opt_einsum integration** — optimal contraction path finding for multi-tensor contractions
 - **Network class** — graph-based tensor network container with contraction caching
 - **`.net` file support** — cytnx-style declarative network topology; parse once, load tensors, contract repeatedly (template pattern)
-- **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), iTEBD (numerically stable infinite TEBD, incl. inversion-free Hastings update), TRG, HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
+- **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), iTEBD (numerically stable infinite TEBD, incl. inversion-free Hastings update), TRG, Gilt-TNR (TRG with graph-independent local truncation), HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
 - **GPU/TPU-accelerated DMRG** — JIT-compiled sweeps via `jax.lax.scan` for dense tensors and per-operation JIT for block-sparse symmetric tensors; automatic warmup-to-JIT transition when bond dimensions are growing; multi-GPU sharding via GSPMD for large bond dimensions (`DMRGConfig(accelerator="jit"|"sharded")`)
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
 - **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via iterative VJP (default) and optional GMRES route; explicit AD through unrolled CTM iterations for 1-site C4v path; **2-site shared-tensor C4v path** (`unit_cell="2site"` + `gs_c4v=True`) where a single C4v tensor is optimized and the second sublattice is derived by spin-π rotation, stable across χ=8–24 for spin-1/2 AFMs; opt-in reference-mode dense C4v Appendix C-F mode (`ctm_ad_mode="c4v_reference"`) with Krylov implicit backward (`bicgstab` + `gmres` fallback); **root implicit AD** (`ctm_ad_mode="root_implicit"`, dense 1x1 only; Burgelman et al. arXiv:2607.15030) driving the characteristic equations rather than back-propagating the CTM sweep, so no SVD/eigh backward appears in the gradient path — an accuracy/stability lever, not a speed one (~63x slower than explicit AD at D=2 χ=6, reproducing the paper's §VI.3), whose reason to exist is that explicit backprop NaNs on every entry at D=3 χ=4 where this path stays finite and FD-correct. Its gradient accuracy is state-dependent and **no diagnostic predicts it** (#785) — measure it with `measure_gradient_error` rather than reading the root residual, which is anti-correlated with it; sigma gauge fixing (`forward_gauge="sigma"`) on the explicit-AD path — the implicit path validates `forward_gauge="phase"` and refuses every other value; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement
@@ -243,6 +243,28 @@ print(f"Exact: {f_exact:.8f}")
 
 See `examples/ising_trg.py` and `examples/ising_hotrg.py` for full TRG and HOTRG
 examples at multiple temperatures compared against the Onsager exact solution.
+
+## Gilt-TNR Example
+
+GILT (graph-independent local truncation, Hauru-Delcamp-Mizera PRB 97, 045111)
+removes corner-double-line short-range entanglement from the plaquette before
+each TRG step. At the Ising critical point this breaks through the plain-TRG
+accuracy plateau: at chi=8 the free-energy error drops from ~2e-3 to ~5e-5,
+and unlike plain TRG it keeps improving with chi.
+
+```python
+from tenax import GiltConfig, GiltTNRConfig, gilt_tnr, compute_ising_tensor
+
+beta_c = 0.44068679350977147  # Onsager critical point
+T = compute_ising_tensor(beta_c, symmetric=True)  # dense also works
+
+config = GiltTNRConfig(max_bond_dim=8, num_steps=20, gilt=GiltConfig(gilt_eps=1e-6))
+log_z_per_n = gilt_tnr(T, config)
+```
+
+`gilt_eps` is measured against the sum-normalized environment spectrum (the
+convention of Hauru et al.'s reference code); `gilt_plaquette` is also exported
+standalone for use in other coarse-graining schemes.
 
 For large-χ dense HOTRG, set `HOTRGConfig(device_mesh=mesh)` (a 1-D
 `jax.sharding.Mesh`) to shard the dominant χ⁶ intermediate across multiple GPUs —

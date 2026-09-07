@@ -228,20 +228,20 @@ def _scale_blocks_per_charge(t, scale_per_charge):
 def test_compute_projector_tensor_eps_t_symmetric_uses_actual_kept_set_svd():
     """Regression for PR #430 codex review: ε_T must reflect the kept set.
 
-    When ``base_charges`` forces the per-sector allocation, the kept
-    (fused_charge, index) pairs can differ from the global top-``n_keep``
-    cutoff. ε_T must be computed against the COMPLEMENT of the actually
-    kept pairs — otherwise it under-reports truncation whenever the forced
-    allocation keeps a small singular value while discarding a larger one
-    from another sector.
+    Whenever ``base_charges`` makes the kept (fused_charge, index) pairs differ
+    from the global top-``n_keep`` cutoff, ε_T has to be computed against the
+    COMPLEMENT of the pairs actually kept — otherwise it under-reports
+    truncation exactly when the allocation keeps a small singular value and
+    discards a larger one from another sector.
 
-    Construction: an 8-dim corner with two sectors of dim 4 each, with
-    the q=0 block amplified 10× over q=1. ``chi_target=4`` with
-    ``base_charges=[0, 1]`` forces a 2+2 sector allocation, so two
-    large q=0 singular values are discarded in favour of two small q=1
-    values. The global top-4 cutoff keeps all 4 q=0 SVs and discards
-    the 4 q=1 SVs (small), giving a much smaller ε_T. Pre-fix both
-    paths used the global cutoff and reported the same ε_T.
+    Construction: an 8-dim corner with two sectors of dim 4 each, the q=0 block
+    amplified 10x over q=1.  At ``chi_target=4`` the global cut keeps all four
+    q=0 singular values; ``base_charges=[0, 1]`` floors one slot for q=1, so a
+    dominant q=0 value is discarded for a small q=1 one and the discarded
+    weight strictly rises.  Before #922 ``base_charges`` was a *quota* and
+    forced a 2+2 split, which made the effect larger — the mechanism changed,
+    the invariant did not.  Pre-#430 both paths used the global cutoff and
+    reported the same ε_T.
     """
     chi_in = 8
     chi_target = 4
@@ -266,13 +266,16 @@ def test_compute_projector_tensor_eps_t_symmetric_uses_actual_kept_set_svd():
         projector_method="svd",
         base_charges=np.array([0, 1], dtype=np.int32),
     )
-    # Forced sector allocation discards dominant q=0 values that global
-    # truncation would have kept → strictly more discarded weight.
-    assert float(eps_forced) > 2.0 * float(eps_global), (
-        f"ε_T(base_charges=[0,1])={float(eps_forced):.4e} should be much "
-        f"larger than ε_T(no base_charges)={float(eps_global):.4e} when the "
-        "forced 2+2 allocation discards dominant q=0 SVs. Pre-fix both used "
-        "the global top-N cutoff and reported equal values."
+    # The floored q=1 slot displaces a dominant q=0 value that global
+    # truncation would have kept → strictly more discarded weight.  Measured
+    # ratio 1.68; the guard leaves margin but stays well clear of equality,
+    # which is what the pre-#430 bug looked like.
+    assert float(eps_forced) > 1.4 * float(eps_global), (
+        f"ε_T(base_charges=[0,1])={float(eps_forced):.4e} should exceed "
+        f"ε_T(no base_charges)={float(eps_global):.4e}: the floor keeps a small "
+        "q=1 singular value in place of a dominant q=0 one, so more weight is "
+        "discarded. Pre-#430 both used the global top-N cutoff and reported "
+        "equal values."
     )
 
 

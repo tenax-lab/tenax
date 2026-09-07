@@ -345,9 +345,10 @@ def _compute_2x2_projector(
             - ``"right"`` truncates the RIGHT-column chi seam (T2's chi),
             - ``"top"``   truncates the TOP-row chi seam (T1's chi),
             - ``"bottom"`` truncates the BOTTOM-row chi seam (T3's chi).
-        base_charges: Optional 1-D ``np.ndarray`` of bond charges driving
-            per-sector ``chi_new`` allocation via ``_derive_charges`` in the
-            symmetric branch.  Ignored on the dense path (no charge sectors).
+        base_charges: Optional 1-D ``np.ndarray`` of bond charges.  In the
+            symmetric branch each named charge is floored at one ``chi_new``
+            slot; the rest of the budget follows the singular values (#922).
+            Ignored on the dense path (no charge sectors).
 
     Returns:
         Triple ``(P_top, P_bot, eps_T)`` of rank-3 :class:`DenseTensor`
@@ -715,7 +716,7 @@ def _compute_2x2_projector(
     )
 
 
-def _retruncate_by_base_charges(
+def _retruncate_chi_bond(
     U_T: SymmetricTensor,
     S: jax.Array,
     Vh_T: SymmetricTensor,
@@ -723,47 +724,36 @@ def _retruncate_by_base_charges(
     base_charges: np.ndarray,
     chi: int,
 ) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor]:
-    """Re-truncate a full SymmetricTensor SVD to ``chi`` entries with per-sector allocation.
+    """Cut a full SymmetricTensor SVD down to ``chi`` bond slots.
 
-    Allocates target counts via ``_derive_charges(base_charges, chi)``; greedy
-    top-k fills any remaining budget across sectors.  Mirrors the per-sector
-    allocation logic in ``_svd_projector_symmetric`` (``_ctm_projector.py``).
+    Global top-``chi`` by singular value, with :func:`_select_chi_slots`
+    reserving one slot per charge in ``base_charges`` so no sector can be
+    deleted from the bond outright.
+
+    Until #922 this pinned the per-sector counts to
+    ``_derive_charges(base_charges, chi)``, which capped every sector at its
+    tiled share and allocated *nothing* to charges outside ``base_charges``.
+    On a D=2 U(1)-Sz pair that left the ``|q| = 4`` sectors permanently empty
+    and the converged energy short of the dense reference by 2.6e-3 at chi=24,
+    a gap that grew with chi instead of shrinking.
 
     The returned U/S/Vh are gauge-consistent with the input (same U/Vh slot
     values, just a subset of bond columns/rows).
     """
-    from tenax.algorithms._ctm_utils import _derive_charges
+    from tenax.algorithms._ctm_utils import _select_chi_slots
 
     bond_charges_full = np.asarray(U_T.indices[-1].charges, dtype=np.int32)
-    target_charges = _derive_charges(base_charges, chi)
-    target_count: dict[int, int] = {}
-    for q in target_charges:
-        target_count[int(q)] = target_count.get(int(q), 0) + 1
 
     in_sector_idx_of: dict[int, list[int]] = {}
     for j, q in enumerate(bond_charges_full):
-        q_int = int(q)
-        in_sector_idx_of.setdefault(q_int, []).append(j)
+        in_sector_idx_of.setdefault(int(q), []).append(j)
 
-    keep_global: list[int] = []
-    for q, want in sorted(target_count.items()):
-        slots = in_sector_idx_of.get(q, [])
-        take = min(want, len(slots))
-        keep_global.extend(slots[:take])
-
-    # Fill any remaining budget greedily from any unused entry (global SV order).
-    remaining = chi - len(keep_global)
-    if remaining > 0:
-        used_set = set(keep_global)
-        for j in range(len(bond_charges_full)):
-            if remaining <= 0:
-                break
-            if j not in used_set:
-                keep_global.append(j)
-                used_set.add(j)
-                remaining -= 1
-
-    keep_global.sort()  # ascending order makes downstream rebuilds simpler
+    keep_global = _select_chi_slots(
+        np.asarray(S, dtype=float),
+        bond_charges_full,
+        base_charges=base_charges,
+        chi=chi,
+    )
 
     new_bond_charges = bond_charges_full[np.asarray(keep_global, dtype=np.int32)]
     S_new = jnp.asarray(S)[jnp.asarray(keep_global)]
@@ -834,7 +824,8 @@ def _compute_2x2_projector_symmetric(
         chi: Target bond dimension of the new chi_new leg.
         direction: One of ``"left"``, ``"right"``, ``"top"``, ``"bottom"``.
         base_charges: Optional 1-D ``np.ndarray`` of charges. When supplied,
-            chi_new is allocated per sector (added in Task 5; ignored in Task 2).
+            each named charge keeps at least one ``chi_new`` slot; the rest
+            of the budget is the global top-chi (#922).
 
     Returns:
         ``(P_top, P_bot, eps_T)`` SymmetricTensor projectors with the same
@@ -958,7 +949,7 @@ def _compute_2x2_projector_symmetric(
         )
     else:
         # Eager path: full-spectrum SVD then per-sector re-truncation honoring
-        # base_charges (mirrors _retruncate_by_base_charges).  Under tracing,
+        # base_charges (mirrors _retruncate_chi_bond).  Under tracing,
         # the dispatcher in _truncated_svd_symmetric routes to the traced
         # variant which consumes base_charges directly.
         is_traced_inputs = any(
@@ -984,7 +975,7 @@ def _compute_2x2_projector_symmetric(
                 new_bond_label="chi_new",
                 max_singular_values=None,
             )
-            U_Mp_T, S_Mp, Vh_Mp_T = _retruncate_by_base_charges(
+            U_Mp_T, S_Mp, Vh_Mp_T = _retruncate_chi_bond(
                 U_Mp_T, S_Mp, Vh_Mp_T, base_charges=base_charges, chi=chi
             )
     U_Mp_T, Vh_Mp_T = _gauge_fix_symmetric_svd(U_Mp_T, Vh_Mp_T)

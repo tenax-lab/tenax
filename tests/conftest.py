@@ -25,6 +25,7 @@ _FILE_MARKERS = {
     "test_idmrg.py": "algorithm",
     "test_itebd.py": "algorithm",
     "test_trg.py": "algorithm",
+    "test_gilt.py": "algorithm",
     "test_hotrg.py": "algorithm",
     "test_ipeps.py": "algorithm",
     "test_ipeps_bp_gauge.py": "algorithm",
@@ -341,6 +342,7 @@ _FILE_MARKERS = {
     # convergences (one symmetric, one dense) plus one RDM -- core budget; the
     # chi-scan that needs chi=16 carries its own ``@pytest.mark.slow``.
     "test_ctm_charged_sectors_905.py": "core",
+    "test_ctm_chi_truncation_policy_922.py": "core",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",
     "test_tdvp.py": "algorithm",

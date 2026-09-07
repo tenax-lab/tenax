@@ -28,8 +28,11 @@ unbucketed.  Tracked in #805.
 
 from __future__ import annotations
 
+import ast
 import pathlib
 import re
+
+import pytest
 
 TESTS_DIR = pathlib.Path(__file__).parent
 
@@ -276,15 +279,58 @@ def test_a_file_is_not_in_both_the_registry_and_the_legacy_list():
 # defending it. The asymmetry is the defect.
 
 
-def _module_level_pytestmarks() -> dict[str, set[str]]:
-    """Files declaring ``pytestmark = pytest.mark.<bucket>`` at module level."""
+def _module_level_pytestmarks(root: pathlib.Path | None = None) -> dict[str, set[str]]:
+    """Files declaring a bucket via a module-level ``pytestmark``.
+
+    Parsed with ``ast``, not a regex.  The first version of this matched
+    ``^pytestmark\\s*=\\s*(.+)$``, which captures only to end-of-line -- so the
+    standard multiline form
+
+        pytestmark = [
+            pytest.mark.core,
+        ]
+
+    captured ``"["`` and was not detected, leaving the bypass this guard exists
+    to close wide open (#935 review).  The AST sees the assignment whatever its
+    layout, and covers the list/tuple and ``pytest.mark.x(...)`` call forms too.
+
+    ``rglob``, matching :func:`_test_files` above: eight test files live under
+    ``tests/stacked/``, and a top-level-only scan would exempt every one of
+    them.
+    """
+
+    def _buckets(node: ast.AST) -> set[str]:
+        # Any ``pytest.mark.<bucket>`` anywhere in the assigned value, including
+        # inside a list/tuple or as the callee of ``pytest.mark.x(...)``.
+        return {
+            n.attr
+            for n in ast.walk(node)
+            if isinstance(n, ast.Attribute)
+            and n.attr in _VALID_BUCKETS
+            and isinstance(n.value, ast.Attribute)
+            and n.value.attr == "mark"
+        }
+
     found: dict[str, set[str]] = {}
-    pat = re.compile(r"^pytestmark\s*=\s*(.+)$", re.M)
-    for path in sorted(TESTS_DIR.glob("test_*.py")):
-        for m in pat.finditer(path.read_text()):
-            buckets = {b for b in _VALID_BUCKETS if f"pytest.mark.{b}" in m.group(1)}
-            if buckets:
-                found.setdefault(path.name, set()).update(buckets)
+    for path in sorted((root or TESTS_DIR).rglob("test_*.py")):
+        try:
+            tree = ast.parse(path.read_text(), filename=str(path))
+        except SyntaxError:  # pragma: no cover - a broken file fails elsewhere
+            continue
+        for node in tree.body:  # module level only, not inside classes/functions
+            targets = (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else [node.target]
+                if isinstance(node, ast.AnnAssign)
+                else []
+            )
+            if not any(
+                isinstance(t, ast.Name) and t.id == "pytestmark" for t in targets
+            ):
+                continue
+            if node.value is not None and (b := _buckets(node.value)):
+                found.setdefault(path.name, set()).update(b)
     return found
 
 
@@ -332,3 +378,72 @@ def test_a_registered_file_does_not_contradict_its_own_pytestmark():
         "registry bucket and module-level pytestmark disagree; conftest adds "
         "both markers, so the file runs in both buckets:\n  " + "\n  ".join(conflicts)
     )
+
+
+@pytest.mark.parametrize(
+    "layout,src",
+    [
+        ("single line", "pytestmark = pytest.mark.core\n"),
+        ("list, one line", "pytestmark = [pytest.mark.core]\n"),
+        # The form the first version of the helper missed (#935 review): a
+        # line-anchored regex captures "[" and finds no bucket in it.
+        ("list, multiline", "pytestmark = [\n    pytest.mark.core,\n]\n"),
+        (
+            "tuple, multiline",
+            "pytestmark = (\n    pytest.mark.core,\n    pytest.mark.slow,\n)\n",
+        ),
+        ("annotated", "pytestmark: object = pytest.mark.core\n"),
+        (
+            "mixed with a call",
+            "pytestmark = [\n    pytest.mark.usefixtures('x'),\n    pytest.mark.core,\n]\n",
+        ),
+    ],
+)
+def test_the_pytestmark_scan_sees_every_declaration_layout(tmp_path, layout, src):
+    """The bypass guard must not be defeated by formatting.
+
+    A guard that only recognises one spelling of the thing it forbids is worse
+    than none: it reports success while the route stays open, and the failure
+    is invisible because nothing currently uses the other spelling.
+    """
+    f = tmp_path / "test_probe.py"
+    f.write_text("import pytest\n" + src)
+    tree = ast.parse(f.read_text())
+    found = {
+        n.attr
+        for node in tree.body
+        for n in ast.walk(node)
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and isinstance(n, ast.Attribute)
+        and n.attr in _VALID_BUCKETS
+        and isinstance(n.value, ast.Attribute)
+        and n.value.attr == "mark"
+    }
+    assert "core" in found, f"{layout}: bucket not detected in {src!r}"
+
+
+def test_the_scan_covers_subdirectories(tmp_path):
+    """``rglob``, matching ``_test_files``.
+
+    Exercised through the helper, not by re-running ``rglob`` beside it: the
+    first version of this test asserted on ``TESTS_DIR.rglob`` directly, so
+    reverting the helper to ``glob`` left it passing.  A nested probe file is
+    the only thing that actually distinguishes the two.
+    """
+    nested = tmp_path / "stacked"
+    nested.mkdir()
+    (nested / "test_probe.py").write_text(
+        "import pytest\npytestmark = pytest.mark.core\n"
+    )
+    found = _module_level_pytestmarks(root=tmp_path)
+    assert found == {"test_probe.py": {"core"}}, (
+        "a bucketed file in a subdirectory was not seen; the scan is "
+        "top-level only and every file under tests/stacked/ is exempt"
+    )
+
+
+def test_real_subdirectory_files_are_still_bucketed():
+    """The eight ``tests/stacked/`` files exist and are registered."""
+    nested = {p.name for p in TESTS_DIR.rglob("test_*.py") if p.parent != TESTS_DIR}
+    assert nested, "expected nested test files; fixture assumption changed"
+    assert nested <= _test_files()

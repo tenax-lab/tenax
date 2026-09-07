@@ -202,6 +202,12 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "spinless_fermion_gate",
     ),
     "sublattice_gap": ("tenax.algorithms.fermionic_ipeps", "sublattice_gap"),
+    # gilt
+    "GiltConfig": ("tenax.algorithms.gilt", "GiltConfig"),
+    "GiltTNRConfig": ("tenax.algorithms.gilt", "GiltTNRConfig"),
+    "gilt_plaquette": ("tenax.algorithms.gilt", "gilt_plaquette"),
+    "gilt_tnr": ("tenax.algorithms.gilt", "gilt_tnr"),
+    "gilt_tnr_step": ("tenax.algorithms.gilt", "gilt_tnr_step"),
     # hotrg
     "HOTRGConfig": ("tenax.algorithms.hotrg", "HOTRGConfig"),
     "hotrg": ("tenax.algorithms.hotrg", "hotrg"),
@@ -446,6 +452,12 @@ __all__ = [
     "ising_free_energy_exact",
     "potts_critical_beta",
     "wilson_fermion_free_energy_exact",
+    # GILT
+    "GiltConfig",
+    "GiltTNRConfig",
+    "gilt_plaquette",
+    "gilt_tnr",
+    "gilt_tnr_step",
     # HOTRG
     "HOTRGConfig",
     "hotrg",

@@ -227,19 +227,20 @@ def test_compute_2x2_projector_symmetric_closure_other_directions(
     )
 
 
-def test_compute_2x2_projector_symmetric_base_charges_drive_chi_new(symmetric_corners):
-    """When base_charges is supplied, chi_new charges match _derive_charges(base_charges, chi).
+def test_compute_2x2_projector_symmetric_base_charges_floor_chi_new(symmetric_corners):
+    """base_charges guarantees each named charge a chi_new slot — and no more.
 
-    Multiset (not ordered) comparison: the per-sector allocation in
-    ``_retruncate_by_base_charges`` traverses ``target_count`` in sorted
-    charge order, while ``_derive_charges`` preserves the interleaved
-    ``base_charges`` tile order.  The two agree as multisets — that is
-    the meaningful per-sector-budget invariant — but not element-wise.
-    Aligned with ``_svd_projector_symmetric``'s sorted-charge convention.
+    This test used to require the chi_new multiset to *equal*
+    ``_derive_charges(base_charges, chi)``.  That is the #922 defect written
+    down as a guard: the tiled quota capped every sector at its share and gave
+    the charges outside ``base_charges`` a share of zero, so the CTM chi bond
+    could not follow its own spectrum and the converged environment saturated
+    below the dense reference.  The invariant that survives is weaker and true
+    — the bond is exactly ``chi`` wide and every named charge keeps a slot.
+    ``tests/test_ctm_chi_truncation_policy_922.py`` pins the selection rule
+    itself, where the spectrum can be dictated.
     """
     from collections import Counter
-
-    from tenax.algorithms._ctm_utils import _derive_charges
 
     Q_TL, Q_TR, Q_BL, Q_BR = symmetric_corners
     chi = 4
@@ -248,15 +249,16 @@ def test_compute_2x2_projector_symmetric_base_charges_drive_chi_new(symmetric_co
     P_top, P_bot, _, _ = _compute_2x2_projector(
         Q_TL, Q_TR, Q_BL, Q_BR, chi=chi, direction="left", base_charges=base_charges
     )
-    expected_chi_new = _derive_charges(base_charges, P_top.indices[2].dim)
     actual_chi_new = np.asarray(P_top.indices[2].charges, dtype=np.int32)
-    assert Counter(int(q) for q in actual_chi_new) == Counter(
-        int(q) for q in expected_chi_new
-    ), (
-        f"chi_new charge multiset must match _derive_charges(base_charges, "
-        f"{P_top.indices[2].dim}); got {actual_chi_new.tolist()} vs "
-        f"{expected_chi_new.tolist()}"
+    kept = Counter(int(q) for q in actual_chi_new)
+
+    assert sum(kept.values()) == chi, (
+        f"chi_new must be exactly {chi} wide, got {actual_chi_new.tolist()}"
     )
+    for q in sorted({int(q) for q in base_charges}):
+        assert kept[q] >= 1, (
+            f"base charge {q} lost its floor slot: {actual_chi_new.tolist()}"
+        )
 
 
 def test_compute_2x2_projector_symmetric_ad_fallback_passes_tracer(symmetric_corners):
@@ -731,11 +733,19 @@ def test_compute_2x2_projector_grad_matches_finite_difference(symmetric_corners)
         )
         return Q_blocks_sum * P_abs_sum
 
+    # Both sides must go through the *same* projector.  ``jax.grad`` traces,
+    # and under tracing the chi_new inventory is the static one, while an
+    # un-jitted call takes the eager value-aware cut (#922) — differencing the
+    # eager function and differentiating the traced one compares two different
+    # maps and reports a 2.5% "gradient error" that is nothing of the sort.
+    # ``tests/test_ctm_chi_truncation_policy_922.py`` pins that divergence.
+    loss_traced = jax.jit(loss)
+
     alpha0 = jnp.asarray(1.0)
-    g_ad = jax.grad(loss)(alpha0)
+    g_ad = jax.grad(loss_traced)(alpha0)
 
     eps = 1e-4
-    g_fd = (loss(alpha0 + eps) - loss(alpha0 - eps)) / (2 * eps)
+    g_fd = (loss_traced(alpha0 + eps) - loss_traced(alpha0 - eps)) / (2 * eps)
 
     # Both AD and FD must be of comparable magnitude.  When the FD value is
     # tiny (the projector is alpha-invariant in this regime), AD should also
@@ -745,6 +755,58 @@ def test_compute_2x2_projector_grad_matches_finite_difference(symmetric_corners)
     rel_err = jnp.abs(g_ad - g_fd) / denom
     assert rel_err < 1e-3, (
         f"AD vs FD relative error too large: {rel_err} (g_ad={g_ad}, g_fd={g_fd})"
+    )
+
+
+def test_the_traced_path_pins_the_chi_new_inventory(symmetric_corners):
+    """Under tracing the chi bond keeps the quota #922 removed from eager.
+
+    The eager cut reads singular values.  Under tracing there are none to read:
+    ``jax.jit`` bakes the per-sector block shapes at trace time, so which
+    sector owns each chi slot has to be decided before the SVD runs, and
+    ``linalg._truncated_svd_symmetric_traced`` keeps the ``_derive_charges``
+    quota.  Here eager keeps ``{0: 3, 1: 1}`` and traced keeps ``{0: 2, 1: 2}``.
+
+    That means `optimize_gs_ad` still carries #922's truncation, and this test
+    exists to say so rather than let it be rediscovered.  Two static
+    replacements were measured and each is worse somewhere: the quota misses by
+    2.6e-3 at D=2 chi=24, and a capacity-proportional inventory (which fixes
+    that) misses by 1.1e-5 at D=3 chi=8, where the quota is exact.  Neither
+    proxy tracks the spectrum.  The gradient itself is unaffected —
+    differentiating the traced forward matches finite differences of that same
+    forward to 1.5e-12, which is what the test above checks.
+    """
+    from collections import Counter
+
+    Q_TL, Q_TR, Q_BL, Q_BR = symmetric_corners
+    base_charges = np.array([0, 1], dtype=np.int32)
+
+    from tenax.algorithms._ctm_tensor_projector_2x2 import (
+        _compute_2x2_projector_symmetric,
+    )
+
+    def _inventory(Q):
+        P_top = _compute_2x2_projector_symmetric(
+            Q, Q_TR, Q_BL, Q_BR, chi=4, direction="left", base_charges=base_charges
+        )[0]
+        return Counter(int(q) for q in np.asarray(P_top.indices[2].charges))
+
+    eager = _inventory(Q_TL)
+    traced: Counter = Counter()
+
+    def _probe(alpha):
+        scaled = {k: alpha * b for k, b in Q_TL.blocks.items()}
+        traced.update(
+            _inventory(SymmetricTensor._from_blocks_unchecked(scaled, Q_TL.indices))
+        )
+        return jnp.asarray(0.0)
+
+    jax.eval_shape(_probe, jnp.asarray(1.0))
+
+    assert sum(eager.values()) == sum(traced.values()) == 4
+    assert eager != traced, (
+        "eager and traced now agree — if that is deliberate, this test and the "
+        "AD-path caveat in the #922 changelog entry both need updating"
     )
 
 
