@@ -1573,8 +1573,9 @@ def _eigh_symmetric(
 
     ``bond_order="sector"`` emits the output bond charge-grouped instead, which
     is what makes this **traceable**: ranking the sectors against each other
-    means reading eigenvalue magnitudes on the host, and ``np.array`` on a
-    tracer raises.  Without a truncation there is nothing to rank *for* -- every
+    means reading the eigenvalues on the host, and ``np.array`` on a tracer
+    raises.  The result is not value-ordered -- sectors ascend by charge and
+    each sector keeps ``jnp.linalg.eigh``'s own ascending order.  Without a truncation there is nothing to rank *for* -- every
     eigenvalue is kept either way and the order is a convention -- so the two
     modes differ only by a permutation of the bond, with ``V`` and
     ``eigenvalues`` permuted together.  It is rejected with
@@ -2392,9 +2393,11 @@ def eigh(
     Reshapes the tensor into a square matrix (left_labels vs right_labels),
     computes the eigendecomposition, and returns eigenvectors as a Tensor.
 
-    Eigenvalues are sorted in descending order. If ``max_eigenvalues`` is
-    given, only the top-k eigenvalues (and corresponding eigenvectors) are
-    kept.
+    Eigenvalues are sorted **algebraically** descending -- largest first, so a
+    negative eigenvalue sorts below every positive one regardless of magnitude.
+    If ``max_eigenvalues`` is given, only the top-k (and their eigenvectors) are
+    kept, by that same algebraic ranking.  ``bond_order="sector"`` orders the
+    output differently; see below.
 
     Output labels::
 
@@ -2406,17 +2409,21 @@ def eigh(
         right_labels:     Labels forming the column side of the matrix.
         new_bond_label:   Label for the eigenvector bond index.
         max_eigenvalues:  Keep only the top-k eigenvalues.
-        bond_order:       ``"descending"`` (default) ranks the whole spectrum by
-                          magnitude.  ``"sector"`` emits a ``SymmetricTensor``'s
-                          bond charge-grouped instead, which is the **traceable**
-                          option: ranking sectors against each other reads
-                          eigenvalue magnitudes on the host, and that raises on a
-                          tracer.  The two differ only by a permutation of the
-                          bond -- ``V`` and ``eigenvalues`` are permuted together
-                          -- so it is only available untruncated, where the
-                          ranking decides nothing.  Ignored on the dense path,
-                          which has no sectors to group by and is already
-                          traceable.
+        bond_order:       ``"descending"`` (default) ranks the whole spectrum
+                          algebraically, across sectors.  ``"sector"`` emits a
+                          ``SymmetricTensor``'s bond **charge-grouped** instead
+                          -- sectors in ascending charge order, and within each
+                          sector whatever order ``jnp.linalg.eigh`` returns,
+                          which is ascending.  So it is *not* sorted by value at
+                          all, and ``eigenvalues[0]`` is not the largest.  It is
+                          the **traceable** option: ranking sectors against each
+                          other reads eigenvalues on the host, and that raises on
+                          a tracer.  The two differ only by a permutation of the
+                          bond -- ``V`` and ``eigenvalues`` are permuted together,
+                          so ``V diag(w) V^dag`` is unchanged -- which is why it
+                          is only available untruncated, where the ranking
+                          decides nothing.  Ignored on the dense path, which has
+                          no sectors to group by and is already traceable.
 
     Raises:
         ValueError: if ``bond_order`` is not one of the two, or -- on a
@@ -2425,8 +2432,11 @@ def eigh(
             and truncates as usual.
 
     Returns:
-        ``(V, eigenvalues)`` where V has labels ``(left_labels..., new_bond_label)``
-        and eigenvalues is a 1-D JAX array sorted descending.
+        ``(V, eigenvalues)`` where V has labels ``(left_labels...,
+        new_bond_label)``.  ``eigenvalues`` is a 1-D JAX array, algebraically
+        descending under the default ``bond_order``; under ``"sector"`` it is
+        charge-grouped and ascending within each sector, and pairs with ``V``
+        column by column either way.
     """
     if bond_order not in ("descending", "sector"):
         raise ValueError(

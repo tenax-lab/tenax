@@ -79,6 +79,60 @@ def _sum_eigs(m, alpha, order):
     return jnp.sum(w)
 
 
+def _indefinite():
+    """Two sectors straddling zero, so algebraic and magnitude order disagree."""
+    sym = U1Symmetry()
+    ch = np.array([0, 0, 1, 1], dtype=np.int32)
+    row = TensorIndex.from_charges(sym, ch, OUT, label="row")
+    col = TensorIndex.from_charges(sym, ch, IN, label="col")
+    blocks = {
+        (0, 0): jnp.asarray(np.diag([-5.0, -3.0])),
+        (1, 1): jnp.asarray(np.diag([2.0, 0.5])),
+    }
+    return SymmetricTensor._from_blocks_unchecked(blocks, (row, col))
+
+
+def test_the_default_order_is_algebraic_not_by_magnitude():
+    """ "Descending" ranks by value, so a negative sorts below every positive.
+
+    On a PSD operand the two readings coincide, which is how the docs came to
+    say "by magnitude" (Codex P2 on #939).  They do not coincide here.
+    """
+    _V, w = eigh(_indefinite(), ["row"], ["col"], new_bond_label="k")
+    w = np.asarray(w)
+
+    assert w.tolist() == [2.0, 0.5, -3.0, -5.0]
+    assert np.all(np.diff(w) <= 0), "not algebraically descending"
+    assert not np.all(np.diff(np.abs(w)) <= 0), (
+        "this fixture is meant to separate algebraic from magnitude order; if "
+        "it is descending by magnitude too, it discriminates nothing"
+    )
+
+
+def test_sector_order_is_not_value_ordered_at_all():
+    """It is charge-grouped, and ascending *within* a sector.
+
+    So ``w[0]`` is not the largest and the array is not monotone -- the
+    unqualified "sorted descending" the docstring used to promise is false
+    here, which is what the corrected wording now says.
+    """
+    V, w = eigh(
+        _indefinite(), ["row"], ["col"], new_bond_label="k", bond_order="sector"
+    )
+    w = np.asarray(w)
+
+    assert w.tolist() == [0.5, 2.0, -5.0, -3.0]
+    assert not np.all(np.diff(w) <= 0), "sector order must not be descending"
+    charges = np.asarray(V.indices[-1].charges).tolist()
+    assert charges == sorted(charges), f"bond is not charge-grouped: {charges}"
+    # ... and it is still the same decomposition.
+    assert sorted(w.tolist()) == sorted(
+        np.asarray(
+            eigh(_indefinite(), ["row"], ["col"], new_bond_label="k")[1]
+        ).tolist()
+    )
+
+
 def test_sector_order_survives_tracing():
     """The whole point: this one can go inside ``jax.jit``."""
     m = _psd()
