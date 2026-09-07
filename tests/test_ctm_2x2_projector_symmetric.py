@@ -763,18 +763,22 @@ def test_the_traced_path_pins_the_chi_new_inventory(symmetric_corners):
 
     The eager cut reads singular values.  Under tracing there are none to read:
     ``jax.jit`` bakes the per-sector block shapes at trace time, so which
-    sector owns each chi slot has to be decided before the SVD runs, and
-    ``linalg._truncated_svd_symmetric_traced`` keeps the ``_derive_charges``
-    quota.  Here eager keeps ``{0: 3, 1: 1}`` and traced keeps ``{0: 2, 1: 2}``.
+    sector owns each chi slot has to be decided before the SVD runs.  Since
+    #929 the traced rule inherits the incoming chi leg's multiset; this
+    fixture's corners carry ``{0: 2, 1: 2}`` on that leg while the spectrum
+    picks ``{0: 3, 1: 1}``, so the two still disagree here.
 
-    That means `optimize_gs_ad` still carries #922's truncation, and this test
-    exists to say so rather than let it be rediscovered.  Two static
-    replacements were measured and each is worse somewhere: the quota misses by
-    2.6e-3 at D=2 chi=24, and a capacity-proportional inventory (which fixes
-    that) misses by 1.1e-5 at D=3 chi=8, where the quota is exact.  Neither
-    proxy tracks the spectrum.  The gradient itself is unaffected —
-    differentiating the traced forward matches finite differences of that same
-    forward to 1.5e-12, which is what the test above checks.
+    They agree exactly once the environment has converged — that is the point
+    of inheriting — but a cold environment starts from the tiled guess in
+    ``initialize_ctm_tensor_env``, so `optimize_gs_ad` still carries #922's
+    truncation until ``env_init`` is seeded from an eager pre-pass (#929).
+    Two *value-blind* replacements were measured and each is worse somewhere:
+    the tiled quota misses by 2.6e-3 at D=2 chi=24, and a capacity-proportional
+    inventory (which fixes that) misses by 1.1e-5 at D=3 chi=8, where the quota
+    is exact.  Neither proxy tracks the spectrum, which is why the inventory
+    has to be inherited rather than computed.  The gradient itself is
+    unaffected — differentiating the traced forward matches finite differences
+    of that same forward to 1.5e-12, which is what the test above checks.
     """
     from collections import Counter
 
