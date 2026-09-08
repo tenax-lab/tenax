@@ -72,8 +72,18 @@ def test_the_rejection_points_at_2x2_not_at_implicit_ad():
 
     assert "gs_recipe='2x2'" in msg, "the message must name the recipe to migrate to"
     assert "#911" in msg, "and say why 1x1 is not worth rescuing"
-    # The split path is the one place 1x1 is genuinely wired end to end.
+    # The split path is the one place 1x1 is genuinely wired end to end --
+    # but only for a single-site cell.  The 2-site split branch rejects every
+    # recipe but "2x2" twenty lines further up in this same function, so an
+    # unqualified "use fuse_virtual_legs=False" sends a 2-site caller from
+    # one NotImplementedError straight into another.
     assert "fuse_virtual_legs=False" in msg
+    assert "unit_cell='1x1'" in msg, (
+        "the split-path suggestion must be qualified as single-site-only"
+    )
+    assert "2-site split branch rejects" in msg, (
+        "and must say why it is not available for unit_cell='2site'"
+    )
     # Implicit AD may be mentioned, but only as a caveat carrying #938 —
     # never as the bare recommendation it used to be.
     if "gs_implicit_ad=True" in msg:

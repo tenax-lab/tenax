@@ -921,9 +921,28 @@ def ctm_tensor(
         there to be measured.  ``"qr"`` returns a literal ``0.0``: the
         reduced-corner isometry never computes an ε_T at all.
 
-        Also ``0.0``, for unrelated reasons: ``SymmetricTensor`` input
-        (block-sparse truncation; global ε_T extraction is a v2 follow-up),
-        and any path running inside a JAX tracer (AD backward).
+        Also ``0.0``, for an unrelated reason: any path running inside a JAX
+        tracer (AD backward), where the SVD branch short-circuits ε_T rather
+        than tracing it.
+
+        **``SymmetricTensor`` input is not a blind row**, contrary to what
+        this docstring said before (and said for a long time -- the claim
+        predates the table).  ``_svd_projector_symmetric`` and
+        ``_eigh_projector_symmetric`` both compute ε_T from the *merged
+        per-sector* spectrum, so it is genuine whenever that merged spectrum
+        is longer than ``chi``; ``tests/test_ctm_truncation_error.py``
+        requires ``0.0 < eps_T <= 1.0`` from both.  Only the symmetric
+        ``"qr"`` branch returns a hardcoded ``0.0``, mirroring its dense
+        counterpart.
+
+        The useful generalisation, which is what the ``"1x1"``/``"svd"`` row
+        above is really an instance of: **ε_T can only see weight that
+        survives into the spectrum the projector actually diagonalises.**  It
+        is 0 exactly when that spectrum has no more than ``chi`` entries --
+        which the dense ``1x1`` cross-product guarantees by construction
+        (``M`` is ``chi x chi``), and which a block-sparse truncation merely
+        may or may not do depending on its sector dims.  Dense-vs-symmetric
+        is the wrong axis; matrix shape is the right one.
 
         **The auto-χ bump is not necessarily dead on the blind rows.**  It
         would be, if it read this value -- but the fused single-site

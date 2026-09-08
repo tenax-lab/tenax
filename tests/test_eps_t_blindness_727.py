@@ -152,6 +152,69 @@ def test_qr_projector_returns_a_hardcoded_zero():
 
 
 # --------------------------------------------------------------------------- #
+# SymmetricTensor is NOT a blind row.                                          #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("method", ["svd", "eigh"])
+def test_symmetric_svd_and_eigh_report_a_genuine_eps_t(method):
+    """The row the docstring got wrong for far longer than the others.
+
+    ``ctm_tensor``'s docstring claimed a blanket ``0.0`` for every
+    ``SymmetricTensor`` input ("block-sparse truncation; global ε_T
+    extraction is a v2 follow-up").  That was false and had been false for
+    long enough that ``tests/test_ctm_truncation_error.py`` already asserted
+    the opposite -- ``0.0 < eps_T <= 1.0`` from symmetric SVD *and* eigh.
+    Both compute it from the merged per-sector spectrum.
+
+    Kept here, duplicating that file's coverage on purpose: this is the file
+    that carries the ε_T table, and the table is what went wrong.  A claim
+    contradicted by a test two modules away is not actually guarded.
+    """
+    from tenax.core.tensor import SymmetricTensor
+
+    # 8 merged singular values (two q-sectors of dim 4) truncated to 4, so
+    # the discarded tail is non-empty and eps_T has something to report.
+    chi_target = 4
+    sym = U1Symmetry()
+    charges = np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int32)
+    fused = TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="fused")
+    col = TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="col")
+
+    def corner(seed):
+        return SymmetricTensor.random_normal((fused, col), jax.random.PRNGKey(seed))
+
+    C1g, C4g = corner(0), corner(1)
+
+    _P1, _P2, eps = _compute_projector_tensor(
+        C1g, C4g, chi_target, method, None, "auto"
+    )
+    assert 0.0 < float(eps) <= 1.0, (
+        f"symmetric {method} must report a genuine eps_T from the merged "
+        f"per-sector spectrum, got {float(eps)}"
+    )
+
+
+@pytest.mark.core
+def test_the_docstring_does_not_claim_symmetric_is_blind():
+    """Pin the retraction itself.
+
+    The false claim survived a rewrite of the very paragraph it sat in, so
+    the guard is on the text: if a blanket SymmetricTensor-is-zero statement
+    comes back, this fails.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
+
+    doc = ctm_tensor.__doc__ or ""
+    assert "SymmetricTensor`` input is not a blind row" in doc, (
+        "the SymmetricTensor retraction is missing from ctm_tensor's docstring"
+    )
+    # The specific false phrasing that was there before.
+    assert "global ε_T extraction is a v2 follow-up" not in doc
+
+
+# --------------------------------------------------------------------------- #
 # End to end, through the public entry point.                                  #
 # --------------------------------------------------------------------------- #
 
