@@ -29,6 +29,7 @@ _FILE_MARKERS = {
     "test_hotrg.py": "algorithm",
     "test_ipeps.py": "algorithm",
     "test_ipeps_bp_gauge.py": "algorithm",
+    "test_bp_gauge_rank_collapse.py": "core",
     "test_ipeps_gauge.py": "algorithm",
     # #882 Tasks 7 and 7b: the dense ``gauge_fix`` is one traced call -- a
     # ``lax.while_loop`` solve with ``absorb_weights`` compiled around it --

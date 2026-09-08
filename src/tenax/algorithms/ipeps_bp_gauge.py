@@ -166,6 +166,23 @@ __all__ = ["BPGaugeInfo", "BondWeights", "bp_gauge_checkerboard"]
 # carry shape-stable.  A dynamic slice here would break the while_loop.
 _PINV_CUTOFF = 1e-12
 
+#: A weight this small, relative to its bond's largest, is on its way to zero
+#: rather than describing the state.  Used only by
+#: :func:`_a_weight_underflowed`, and **bracketed by measurement on both
+#: sides** rather than chosen:
+#:
+#: * a direction the state genuinely does not use dies from a relative
+#:   ``1.0`` -- it is full-sized on the sweep before it goes, and goes in one
+#:   step (measured on the starved pair of
+#:   ``test_su_step_survives_a_bond_direction_the_state_does_not_use``);
+#: * a weight that underflows dies from ``1.1e-08`` at the very worst, and
+#:   typically ``3e-10``, after decaying geometrically for tens of sweeps.
+#:
+#: So anything from ~1e-7 to ~1e-2 separates them.  This sits two orders above
+#: every fatal observation and six below the legitimate one.
+_UNDERFLOW_EPS = 1e-6
+
+
 _BRA = "__bra"
 _K = "__k"
 _K2 = "__k2"
@@ -322,6 +339,54 @@ def _is_representable(gam: dict[str, Tensor], new_weights) -> jax.Array:
     for w in jax.tree_util.tree_leaves(new_weights):
         ok = ok & jnp.all(jnp.isfinite(w)) & (jnp.max(w) > 0.0)
     return ok
+
+
+def _a_weight_underflowed(new_weights, old_weights) -> jax.Array:
+    """Did a weight that was already collapsing reach exactly zero?
+
+    :func:`_is_representable` cannot see this.  It is scale-invariant by design,
+    and a bond that loses its smallest weight keeps ``max(lambda) = 1`` -- so a
+    *partial* collapse passes every clause of it while a *total* one does not.
+    Measured on a D=3 U(1)-Sz pair: the smallest weight on each bond decayed
+    geometrically (1.1e-08, 9.1e-10, 3.3e-10 ...) and reached exactly 0.0 at
+    sweep 109.  ``_sqrt_pinv`` then had no direction left to invert, so the
+    transformation stopped being a gauge, and by sweep 114 the solve reported
+    ``residual = 1.19e-16`` and *converged* on a state that had moved by
+    3.0e-01, with the health gate returning True throughout.  #870 is the same
+    failure with the sign flipped -- growth to ``inf`` there -- and in both the
+    residual certifies the corpse.
+
+    **A weight reaching zero is not by itself wrong**, which is why this asks
+    where it came *from*.  A direction the state genuinely does not use dies
+    from a relative 1.0 in a single sweep, and refusing that breaks a real
+    solve: an earlier version of this check counted rank instead, and rejected
+    ``test_su_step_survives_a_bond_direction_the_state_does_not_use`` on its
+    very first sweep.  Only a weight that was already collapsing --
+    below :data:`_UNDERFLOW_EPS` of its bond's largest -- and then hit zero is
+    the failure this describes.
+
+    **Shape changes are not inspected.**  A bond weight may legitimately change
+    length between sweeps when a charge sector empties (#904/#906), and the two
+    vectors then cannot be aligned entry by entry.  Such a sweep is accepted;
+    the failure this exists for does not change any length (all four bonds stay
+    at their width throughout the trajectory above).  The shape test is a
+    Python-level branch on static shapes, so it costs nothing under trace.
+
+    Returns a 0-d ``jnp`` bool, like :func:`_is_representable`, so both drivers
+    can use it -- the traced one inside its ``while_loop``.
+    """
+    bad = jnp.asarray(False)
+    for new, old in zip(
+        jax.tree_util.tree_leaves(new_weights),
+        jax.tree_util.tree_leaves(old_weights),
+        strict=True,
+    ):
+        if new.shape != old.shape:
+            continue
+        m = jnp.max(old)
+        was_collapsing = (old > 0) & (old < _UNDERFLOW_EPS * jnp.where(m > 0, m, 1.0))
+        bad = bad | jnp.any((new == 0) & was_collapsing)
+    return bad
 
 
 def _sweep_is_healthy(gam: dict[str, Tensor], new_weights, sweep) -> jax.Array:
@@ -593,7 +658,10 @@ def _bp_solve_eager(
     for sweep in range(max_iter):
         cand_gam, cand_weights = _sweep(gam, weights)
 
-        if not bool(_sweep_is_healthy(cand_gam, cand_weights, sweep)):
+        healthy = _sweep_is_healthy(cand_gam, cand_weights, sweep) & (
+            ~_a_weight_underflowed(cand_weights, weights)
+        )
+        if not bool(healthy):
             # Reject the candidate; do not call it converged.  ``_sweep`` does
             # not mutate its input, so ``gam``/``weights`` still hold the last
             # healthy iterate -- which is an exact gauge of the caller's state,
@@ -710,7 +778,9 @@ def _bp_solve(
     def body(carry):
         arr_in, w_in, _, done, _, _ = carry
         cand_gam, cand_weights = _sweep(as_tensors(arr_in), w_in)
-        ok = _sweep_is_healthy(cand_gam, cand_weights, done)
+        ok = _sweep_is_healthy(cand_gam, cand_weights, done) & (
+            ~_a_weight_underflowed(cand_weights, w_in)
+        )
         res = _residual(cand_weights, w_in)
         accept = lambda cand, prev: jnp.where(ok, cand, prev)  # noqa: E731
         return (
