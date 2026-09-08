@@ -325,3 +325,91 @@ def test_the_suite_wide_suppression_still_lets_it_fire():
         # the pyproject ignore.
         ctm_tensor(_site(), chi=4, max_iter=2, recipe="1x1")
     assert not [w for w in rec if issubclass(w.category, DeprecationWarning)]
+
+
+# ------------------------------------------------------------------ #
+# Once per operation -- not once per ramp stage, not twice per call   #
+# ------------------------------------------------------------------ #
+
+
+def _count_1x1_warnings(fn):
+    """Run ``fn`` with every filter off and count the #911 deprecations."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fn()
+    return [w for w in caught if "recipe='1x1' is deprecated" in str(w.message)]
+
+
+def test_a_chi_ramped_call_warns_once_not_once_per_stage():
+    """#921 review r4.
+
+    The warning sits in ``python_loop_ctm_converge`` *before* the ``chi_ramp``
+    early-return, which was deliberate -- otherwise a ramped call would return
+    into ``_python_loop_chi_ramp`` and never warn at all.  But that helper
+    calls ``python_loop_ctm_converge`` back once per stage, so the fix for
+    "never warns" produced "warns N+1 times", with N of them attributed to the
+    internal delegation instead of the caller's line.
+
+    Three stages here, so the pre-fix count would be 4.
+    """
+    from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
+
+    ramp = [(2, 1), (3, 1), (4, 1)]
+    hits = _count_1x1_warnings(
+        lambda: python_loop_ctm_converge(
+            {(0, 0): _site()},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=1,
+            min_iter=1,
+            chi_ramp=ramp,
+            recipe="1x1",
+        )
+    )
+    assert len(hits) == 1, (
+        f"expected exactly one deprecation for one ramped convergence, got "
+        f"{len(hits)} (one per ramp stage plus the outer call means the "
+        f"per-stage suppression regressed)"
+    )
+
+
+def test_the_split_explicit_path_warns_once_not_twice():
+    """#921 review r4.
+
+    ``ctm_energy_split_explicit`` warns and then delegates the same recipe to
+    ``ctm_split_tensor_converge_explicit``, which warns too.  One operation,
+    two full deprecation messages, the second pointing at the internal
+    delegation rather than the user.
+    """
+    from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_explicit
+
+    gate = heisenberg_gate()
+    hits = _count_1x1_warnings(
+        lambda: ctm_energy_split_explicit(
+            {(0, 0): _site()},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+            warmup_steps=1,
+            backprop_steps=1,
+            recipe="1x1",
+        )
+    )
+    assert len(hits) == 1, f"expected one deprecation per operation, got {len(hits)}"
+
+
+def test_the_delegate_still_warns_when_called_directly():
+    """The negative half: suppression must be scoped to the internal call.
+
+    ``ctm_split_tensor_converge_explicit`` is itself a public entry point, so
+    silencing it outright would open exactly the gap the coverage rule exists
+    to close.
+    """
+    from tenax.algorithms.ad_utils import ctm_split_tensor_converge_explicit
+
+    hits = _count_1x1_warnings(
+        lambda: ctm_split_tensor_converge_explicit(
+            _site(), chi=4, num_steps=1, warmup_steps=1, recipe="1x1"
+        )
+    )
+    assert len(hits) == 1, f"direct callers must still be warned, got {len(hits)}"

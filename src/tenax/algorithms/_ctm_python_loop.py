@@ -176,6 +176,7 @@ def python_loop_ctm_converge(
     recipe: str = "2x2",
     device_mesh=None,
     ctm_chunk_size: int | None = None,
+    _recipe_warning_emitted: bool = False,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM to convergence using a Python for-loop over JIT'd sweeps.
 
@@ -240,7 +241,16 @@ def python_loop_ctm_converge(
     # ``_python_loop_chi_ramp`` -- this is the once-per-convergence boundary,
     # those are once-per-sweep and once-per-ramp-stage.  Before the chi_ramp
     # early-return below, or a ramped call would never reach it.
-    if recipe == "1x1":
+    #
+    # ``_recipe_warning_emitted`` is private and exists for exactly one
+    # caller: ``_python_loop_chi_ramp`` re-enters this function once per ramp
+    # stage, so without it a ramped ``recipe="1x1"`` call warns N+1 times --
+    # once here and once per stage, with the stage warnings attributed to the
+    # internal delegation rather than the user's line.  Placing the warning
+    # before the early-return fixed "a ramped call never warns" and created
+    # "a ramped call warns per stage"; this closes the second without
+    # reopening the first.  (#921 review r4.)
+    if recipe == "1x1" and not _recipe_warning_emitted:
         _warn_recipe_1x1_deprecated("python_loop_ctm_converge")
 
     # Reject ``ctmrg_heuristic_increase_chi`` + ``chi_ramp`` BEFORE the
@@ -449,6 +459,10 @@ def _python_loop_chi_ramp(
             gauge_fix_fn=gauge_fix_fn,
             plateau_patience=stage_patience,
             recipe=recipe,
+            # Stage calls re-enter the function that already warned for
+            # this convergence; without this a ramped 1x1 run emits N+1
+            # deprecations, N of them attributed here (#921 review r4).
+            _recipe_warning_emitted=True,
             device_mesh=device_mesh,
             ctm_chunk_size=ctm_chunk_size,
         )

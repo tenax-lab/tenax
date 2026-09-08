@@ -90,6 +90,9 @@ def ctm_energy_split_explicit(
         num_steps=backprop_steps,
         warmup_steps=warmup_steps,
         recipe=recipe,
+        # This function already warned, with a stacklevel that
+        # names the user's call site (#921 review r4).
+        _recipe_warning_emitted=True,
     )
     return compute_energy_split_ctm_tensor(A, env, gate)
 

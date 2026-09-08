@@ -39,41 +39,41 @@ WARN_FN = "_warn_recipe_1x1_deprecated"
 # *because* of that reachability, which is what the reason has to state.
 EXEMPT: dict[str, str] = {
     # --- per-sweep, called inside a convergence loop that already warned ---
-    "_ctm_tensor_sweep_multisite": (
+    "algorithms/_ctm_tensor_convergence.py::_ctm_tensor_sweep_multisite": (
         "one sweep, not a run: called max_iter times by ctm_tensor and "
         "_ctm_tensor_multisite, both of which warn once at entry"
     ),
-    "_split_ctm_sweep_multisite": (
+    "algorithms/_split_ctm_tensor_convergence.py::_split_ctm_sweep_multisite": (
         "one sweep; called by _split_ctm_multisite, which warns once at entry"
     ),
-    "_split_step": (
+    "algorithms/_split_ctm_energy_ad.py::_split_step": (
         "one sweep; called by ctm_energy_split_explicit, which warns at entry"
     ),
-    "_make_jit_ctm_step": (
+    "algorithms/_ctm_python_loop.py::_make_jit_ctm_step": (
         "builds a single jitted sweep; the recipe is closed over, and the "
         "callers (python_loop_ctm_converge, _python_loop_chi_ramp) warn"
     ),
     # --- private, reachable only through a public function that warns ---
-    "_sigma_gauged_ctm_converge": (
+    "algorithms/_ctm_energy_ad.py::_sigma_gauged_ctm_converge": (
         "inner convergence for ctm_energy_implicit, which warns at entry; "
         "warning here would fire once per chi-ramp stage"
     ),
-    "_ctm_energy_implicit_dispatch": "internal dispatch under ctm_energy_implicit",
-    "_make_implicit_vjp_fn": "backward-pass factory under ctm_energy_implicit",
-    "_converge_split_gauge_fixed": (
+    "algorithms/_ctm_energy_ad.py::_ctm_energy_implicit_dispatch": "internal dispatch under ctm_energy_implicit",
+    "algorithms/_ctm_energy_ad.py::_make_implicit_vjp_fn": "backward-pass factory under ctm_energy_implicit",
+    "algorithms/_split_ctm_energy_ad.py::_converge_split_gauge_fixed": (
         "inner convergence shared by ctm_energy_split_implicit and "
         "converge_split_env; both warn at entry"
     ),
-    "_python_loop_chi_ramp": (
+    "algorithms/_ctm_python_loop.py::_python_loop_chi_ramp": (
         "per-stage helper under python_loop_ctm_converge, which warns; "
         "warning here would fire once per ramp stage"
     ),
-    "_ctm_tensor_multisite": (
+    "algorithms/_ctm_tensor_convergence.py::_ctm_tensor_multisite": (
         "private, but warns anyway -- it is the single point every multisite "
         "caller passes through.  Listed here only so the rule below does not "
         "have to special-case private-functions-that-do-warn"
     ),
-    "_split_ctm_multisite": (
+    "algorithms/_split_ctm_tensor_convergence.py::_split_ctm_multisite": (
         "private, but warns anyway -- the single point ctm_split_tensor_2site "
         "and every other split multisite caller passes through"
     ),
@@ -81,24 +81,24 @@ EXEMPT: dict[str, str] = {
     # These pass ``_deprecation_stacklevel=4`` so the warning the delegate
     # raises still names the *caller's* line rather than the delegating one --
     # which is what makes delegation acceptable here instead of a second warn.
-    "ctm_tensor_2site": (
+    "algorithms/_ctm_tensor_convergence.py::ctm_tensor_2site": (
         "delegates to _ctm_tensor_multisite, which warns; passes "
         "_deprecation_stacklevel=4 so the warning names the caller"
     ),
-    "ctm_multisite": (
+    "algorithms/_ctm_tensor_convergence.py::ctm_multisite": (
         "delegates to _ctm_tensor_multisite, which warns; passes "
         "_deprecation_stacklevel=4 so the warning names the caller"
     ),
-    "ctm_split_tensor_2site": (
+    "algorithms/_split_ctm_tensor_convergence.py::ctm_split_tensor_2site": (
         "delegates to _split_ctm_multisite, which warns; passes "
         "_deprecation_stacklevel=4 so the warning names the caller"
     ),
     # --- takes the recipe but never runs a sweep ---
-    "validate_split_ctm_config": (
+    "algorithms/ipeps_ad_policy.py::validate_split_ctm_config": (
         "validator: inspects the recipe and raises, never converges anything. "
         "Warning here would fire on configs that are about to be rejected"
     ),
-    "make_ctm_energy_fn": (
+    "algorithms/ipeps_ad_policy.py::make_ctm_energy_fn": (
         "factory: returns an energy_fn closing over the recipe.  The function "
         "it returns runs the CTM through an entry point that warns, so warning "
         "at construction would fire for callers who never evaluate it"
@@ -118,7 +118,22 @@ def _public_recipe_functions() -> dict[str, tuple[pathlib.Path, ast.FunctionDef]
                 a.arg for a in node.args.kwonlyargs
             ]
             if "recipe" in names:
-                found[node.name] = (path, node)
+                # Keyed by module *and* name, deliberately.  Keying by bare
+                # ``node.name`` had two holes, both of which let an uncovered
+                # entry point pass this file (#921 review r4):
+                #
+                #   1. two recipe-taking functions sharing a name in different
+                #      modules overwrote each other, so one was never scanned;
+                #   2. a new function sharing a name with any EXEMPT entry was
+                #      silently exempt without anyone adding it -- which is
+                #      precisely the "deliberate act a reviewer can see" this
+                #      allowlist is supposed to require.
+                #
+                # There are no collisions today (24 names, 24 definitions); the
+                # rule exists for the next one, so hole 2 is the live risk.
+                key = f"{path.relative_to(SRC)}::{node.name}"
+                assert key not in found, f"duplicate scan key {key}"
+                found[key] = (path, node)
     return found
 
 
@@ -137,15 +152,15 @@ def test_the_scan_finds_something():
     """Non-vacuity: if the AST walk silently found nothing, everything below passes."""
     found = _public_recipe_functions()
     assert len(found) >= 20, f"expected ~24 recipe-taking functions, found {len(found)}"
-    assert "ctm_tensor" in found
+    assert "algorithms/_ctm_tensor_convergence.py::ctm_tensor" in found
 
 
 def test_every_recipe_taking_function_warns_or_is_explicitly_exempt():
     """The rule. A new uncovered entry point fails here, not two rounds later."""
     uncovered = [
-        f"{path.name}::{name}"
-        for name, (path, node) in sorted(_public_recipe_functions().items())
-        if name not in EXEMPT and not _calls_the_warning(node)
+        key
+        for key, (_path, node) in sorted(_public_recipe_functions().items())
+        if key not in EXEMPT and not _calls_the_warning(node)
     ]
     assert not uncovered, (
         "these functions accept recipe='1x1' but neither warn nor appear in "
@@ -172,3 +187,62 @@ def test_exempt_entries_carry_a_reason(name):
     """'It is private' is not a reason; reachability through a warner is."""
     reason = EXEMPT[name]
     assert len(reason) > 30, f"{name}: give a real reason, got {reason!r}"
+
+
+def test_every_exempt_key_is_module_qualified():
+    """Bare names are the hole this file had; reject them structurally.
+
+    A bare ``"foo"`` entry exempts *every* function named ``foo`` anywhere in
+    ``src/tenax``, present and future, without anyone deciding to.  The
+    allowlist's whole premise is that adding to it is a deliberate act a
+    reviewer can see, so the key has to name one definition.
+    """
+    unqualified = sorted(k for k in EXEMPT if "::" not in k)
+    assert not unqualified, (
+        "EXEMPT keys must be 'module/path.py::function', not a bare name — a "
+        "bare name silently exempts any same-named function added later:\n  "
+        + "\n  ".join(unqualified)
+    )
+
+
+def test_a_same_named_function_in_another_module_is_not_auto_exempt(tmp_path):
+    """The live half of the keying bug (#921 review r4).
+
+    There are no name collisions in ``src/tenax`` today, so the *overwrite*
+    half is latent.  This half is not: before the fix, adding a function named
+    like any EXEMPT entry — in any module — inherited its exemption and never
+    had to warn.  Exercised through the real scanner against a probe tree, so
+    reverting the key to ``node.name`` fails here.
+    """
+    victim = sorted(EXEMPT)[0]
+    assert "::" in victim
+    bare = victim.split("::", 1)[1]
+
+    pkg = tmp_path / "src" / "tenax" / "algorithms"
+    pkg.mkdir(parents=True)
+    (pkg / "_probe_module.py").write_text(
+        f"def {bare}(site_tensors, *, recipe: str = '2x2'):\n    return site_tensors\n"
+    )
+
+    import ast as _ast
+
+    found = {}
+    for path in sorted((tmp_path / "src" / "tenax").rglob("*.py")):
+        tree = _ast.parse(path.read_text(), filename=str(path))
+        for node in _ast.walk(tree):
+            if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                continue
+            names = [a.arg for a in node.args.args] + [
+                a.arg for a in node.args.kwonlyargs
+            ]
+            if "recipe" in names:
+                key = f"{path.relative_to(tmp_path / 'src' / 'tenax')}::{node.name}"
+                found[key] = (path, node)
+
+    assert len(found) == 1, found
+    probe_key = next(iter(found))
+    assert probe_key != victim, "the probe must not collide with a real key"
+    assert probe_key not in EXEMPT, (
+        f"a new function named {bare!r} in a different module inherited "
+        f"{victim!r}'s exemption — the allowlist is keyed too loosely"
+    )
