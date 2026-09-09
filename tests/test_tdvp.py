@@ -292,17 +292,21 @@ class TestTwoSiteIntegrator942:
         """At full bond dimension every effective Hamiltonian is H itself, so
         the projector splitting is exact and 2TDVP must reproduce dense
         exp(-i dt H) to Krylov/roundoff -- entangled dynamics, all bonds, both
-        sweeps, no truncation excuse.  Codex's independent full-bond check saw
-        the same (L-1)-fold excess evolution here before the fix."""
+        sweeps, no truncation excuse.
+
+        The initial state is a RANDOM full-rank MPS, not a product state, for
+        two reasons the #952 review surfaced.  |+>^4 is an exact eigenstate of
+        the isotropic Heisenberg H (residual verified 0.0), so starting there
+        pins only the accumulated phase.  And a full-rank start is what makes
+        the 1e-8 bound legitimate: from a bond-dim-1 start the early tangent
+        projectors are rank-deficient and the splitting carries a genuine
+        O(dt^3) error that no fix should be asked to beat.  The variance
+        assert pins the non-eigenstate regime so the fixture cannot drift
+        back into one.
+        """
         L, dt = 4, 0.05
-        mps = _product_plus_state(L)
+        mps = FiniteMPS.random(L=L, d=2, chi=4, key=jax.random.PRNGKey(11))
         mpo = _build_dense_heisenberg(L)
-        out = tdvp_step(
-            mps,
-            mpo,
-            TDVPConfig(mode="2site", time_type="real", dt=dt, max_bond_dim=4),
-        )
-        psi = _statevector(out)
 
         Sz = np.diag([0.5, -0.5])
         Sp = np.array([[0.0, 1.0], [0.0, 0.0]])
@@ -321,10 +325,27 @@ class TestTwoSiteIntegrator942:
                 ops = [I2] * L
                 ops[i], ops[i + 1] = oi, oj
                 H += coeff * kron_chain(ops)
+
+        initial = _statevector(mps)
+        nrm = np.linalg.norm(initial)
+        assert nrm > 1e-12
+        unit = initial / nrm
+        variance = float((unit @ H @ H @ unit) - (unit @ H @ unit) ** 2)
+        assert variance > 0.05, (
+            f"H-variance {variance}: the initial state is (near) an "
+            f"eigenstate, which pins only the phase (#952 review)"
+        )
+
+        out = tdvp_step(
+            mps,
+            mpo,
+            TDVPConfig(mode="2site", time_type="real", dt=dt, max_bond_dim=4),
+        )
+        psi = _statevector(out)
+
         evals, evecs = np.linalg.eigh(H)
-        initial = np.ones(2**L) / np.sqrt(2**L)
         exact = evecs @ (np.exp(-1j * dt * evals) * (evecs.conj().T @ initial))
-        assert np.linalg.norm(psi - exact) < 1e-8
+        assert np.linalg.norm(psi - exact) < 1e-8 * max(nrm, 1.0)
 
 
 class TestTwoSiteComplexTime943:
