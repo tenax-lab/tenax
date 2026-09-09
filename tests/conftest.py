@@ -100,12 +100,24 @@ _FILE_MARKERS = {
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
-    # ``ctm_tensor(return_info=True)``: the only way a caller can find out
+    # ``ctm_tensor(return_meta=True)``: the only way a caller can find out
     # whether the environment it is about to read an energy from is a fixed
     # point.  Same defect class as the two files above -- a silent wrong answer
     # on the default path -- so it belongs in the required gate for the same
-    # reason.  Shares one D=2 chi=8 module fixture across every case (~50s).
+    # reason.  Shares one D=2 chi=8 module fixture across every case (~9s).
     "test_ctm_tensor_return_info.py": "core",
+    # The #911 ``recipe="1x1"`` deprecation contract.  ``core`` rather than the
+    # ``_UNBUCKETED_LEGACY`` set the older deprecation files sit in: a warning
+    # that silently stops firing is indistinguishable from one nobody hit, and
+    # the suite-wide ``ignore:`` filter in pyproject means nothing else would
+    # notice.  No CTM convergence anywhere -- ``max_iter=2`` on a random D=2
+    # site, since the warning does not depend on physics (~4.5s).
+    "test_recipe_1x1_deprecation.py": "core",
+    # The #911 coverage rule: every public function taking ``recipe`` warns or
+    # is explicitly exempt.  Pure AST over ``src/tenax``, no JAX, ~1s -- and it
+    # is the guard that three review rounds of hand-maintained lists could not
+    # replace, so it belongs in the required gate.
+    "test_recipe_1x1_coverage.py": "core",
     # #933: these seven carried a module-level ``pytestmark = pytest.mark.core``
     # and no registry entry, so they entered the required gate without the
     # justification every line in this table has to carry.  Three of them were
@@ -119,6 +131,11 @@ _FILE_MARKERS = {
     "test_line_search_auto.py": "core",
     "test_split_ctm_doublelayer_projector.py": "core",
     "test_split_ctm_fuse_flag.py": "core",
+    # #726: the split-CTM corner gradient.  Moved out of _UNBUCKETED_LEGACY,
+    # where it ran in no required job -- which is how a comment asserting the
+    # rank-1 corner was physics survived, and how the corner contribution to
+    # the explicit-AD gradient went untested.  D=2 chi=4, 3 sweeps (~21s).
+    "test_regularized_svd.py": "core",
     # #785: the only thing that says whether a root-implicit gradient is
     # accurate.  The contract tests run on a closed-form quartic with no CTM
     # anywhere (~0.2s), so the measurement semantics -- a wrong gradient
@@ -526,7 +543,6 @@ _UNBUCKETED_LEGACY = {
     "test_projector_backward_dispatch.py",
     "test_reduced_corner_qr.py",
     "test_regularized_qr.py",
-    "test_regularized_svd.py",
     "test_split_ctm_chi_frozen_726.py",
     "test_split_ctm_energy_gauge.py",
     "test_split_ctm_large_d_memory.py",

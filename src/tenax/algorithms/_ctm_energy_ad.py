@@ -27,6 +27,9 @@ from tenax.algorithms._ctm_python_loop import (
     _make_jit_ctm_step,
     python_loop_ctm_converge,
 )
+from tenax.algorithms._ctm_tensor_convergence import (
+    _warn_recipe_1x1_deprecated,
+)
 from tenax.algorithms._ctm_tensor_energy import (
     compute_energy_ctm_tensor,
     compute_energy_ctm_tensor_multisite,
@@ -631,6 +634,20 @@ def ctm_energy_implicit(
     # passing both would get a bump-off run with no error.  Mirrors
     # ``python_loop_ctm_converge``'s identical check (#514 Task 5
     # review follow-up).
+    if recipe == "1x1":
+        # #911 review P1.  This entry point dispatches the recipe straight into
+        # the AD convergence machinery: callers reach it without constructing an
+        # ``iPEPSConfig`` and without passing through ``ctm_tensor`` or
+        # ``_ctm_tensor_multisite``, so none of the other three warn sites see
+        # them.  That is the *supported* way to run the QR projector under AD
+        # (``tests/test_reduced_corner_qr.py``,
+        # ``examples/spike_chunk_backward_gate.py``), i.e. exactly the
+        # experiments most likely to be steered wrong.
+        #
+        # Here rather than in ``_sigma_gauged_ctm_converge``: this runs once per
+        # energy evaluation, that runs once per sweep.
+        _warn_recipe_1x1_deprecated("ctm_energy_implicit")
+
     if ctmrg_heuristic_increase_chi and chi_ramp is not None:
         raise ValueError(
             "ctmrg_heuristic_increase_chi and chi_ramp are mutually "
