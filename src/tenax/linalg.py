@@ -447,7 +447,17 @@ def _truncated_svd_symmetric(
                     n_keep = i + 1
                     break
             else:
-                n_keep = n_total
+                # The loop never reaches index 0, so exhausting it means
+                # every value behind the leading one fits inside the error
+                # budget -- keep only the leading value.  This used to reset
+                # to ``n_total``, silently retaining negligible/zero sectors
+                # that dense SVD at the same tolerance discards (#946).
+                n_keep = 1
+        else:
+            # Identically zero spectrum: any rank satisfies the budget, so
+            # keep the minimum the API guarantees, matching the dense path's
+            # zero-tensor policy (#946/#947).
+            n_keep = 1
 
     if max_singular_values is not None:
         n_keep = min(n_keep, max_singular_values)
@@ -1087,7 +1097,17 @@ def _truncated_svd_symmetric_np(
                     n_keep = i + 1
                     break
             else:
-                n_keep = n_total
+                # The loop never reaches index 0, so exhausting it means
+                # every value behind the leading one fits inside the error
+                # budget -- keep only the leading value.  This used to reset
+                # to ``n_total``, silently retaining negligible/zero sectors
+                # that dense SVD at the same tolerance discards (#946).
+                n_keep = 1
+        else:
+            # Identically zero spectrum: any rank satisfies the budget, so
+            # keep the minimum the API guarantees, matching the dense path's
+            # zero-tensor policy (#946/#947).
+            n_keep = 1
 
     if max_singular_values is not None:
         n_keep = min(n_keep, max_singular_values)
@@ -1893,14 +1913,22 @@ def svd(
         if max_truncation_err is not None:
             # Keep singular values until truncation error <= max_truncation_err
             total_sq = float(np.sum(s_np**2))
-            trunc_sq = 0.0
-            for i in range(len(s_np) - 1, -1, -1):
-                trunc_sq += float(s_np[i] ** 2)
-                if trunc_sq / total_sq > max_truncation_err**2:
-                    n_keep = i + 1
-                    break
+            if total_sq > 0.0:
+                trunc_sq = 0.0
+                for i in range(len(s_np) - 1, -1, -1):
+                    trunc_sq += float(s_np[i] ** 2)
+                    if trunc_sq / total_sq > max_truncation_err**2:
+                        n_keep = i + 1
+                        break
+                else:
+                    n_keep = len(s_np)
             else:
-                n_keep = len(s_np)
+                # Identically zero spectrum: dividing by ``total_sq`` raised
+                # ZeroDivisionError, so a zero tensor could be decomposed
+                # without a tolerance but crashed with one (#947).  Any rank
+                # reconstructs a zero tensor exactly; keep the minimum the
+                # API guarantees.
+                n_keep = 1
 
         if max_singular_values is not None:
             n_keep = min(n_keep, max_singular_values)
