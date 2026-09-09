@@ -1261,3 +1261,69 @@ class TestZeroTensorTruncation947:
             f"symmetric zero spectrum kept {s.shape[0]} values; the dense "
             "policy keeps the minimum rank (#946/#947)"
         )
+
+
+class TestReviewRound1949:
+    """The three #949 review findings, each pinned.
+
+    All three are consequences of the same review insight: the #946/#947 fix
+    keyed "is this a zero spectrum" off ``total_sq``, but squaring halves the
+    exponent range, so the sum of squares is the wrong observable -- the
+    leading singular value is the right one.
+    """
+
+    @pytest.mark.parametrize("scale", [1.0, 1e-200], ids=["unit", "underflow"])
+    def test_a_tiny_but_nonzero_tail_survives_the_budget(self, scale):
+        """diag(s, s/2, s/2.5) at s=1e-200: s^2 underflows to 0.0, and the
+        total_sq==0 branch then truncated a spectrum carrying 38% of its
+        weight outside the leading value to rank 1."""
+        values = [scale, scale / 2.0, scale / 2.5]
+        dense_t, sym_t = _diag_pair_946(values)
+        for t in (dense_t, sym_t):
+            _, s, _, _ = svd(t, ["a"], ["b"], max_truncation_err=1e-6)
+            assert s.shape[0] == 3, (
+                f"{type(t).__name__} at scale {scale}: kept {s.shape[0]} of a "
+                f"3-value spectrum whose tail exceeds the budget (#949)"
+            )
+
+    def test_an_underflowing_rank_one_spectrum_still_truncates(self):
+        """The counterpart: rescaling must not stop rank-one detection."""
+        _, sym_t = _diag_pair_946([1e-200, 1e-210, 1e-220])
+        _, s, _, _ = svd(sym_t, ["a"], ["b"], max_truncation_err=1e-6)
+        assert s.shape[0] == 1
+
+    def test_a_budget_of_one_or_more_keeps_minimum_rank_on_dense(self):
+        """err >= 1 means the whole spectrum fits the budget.  The dense
+        exhausted-loop fallback kept everything, inconsistent with the
+        symmetric paths' new fallback."""
+        dense_t, sym_t = _diag_pair_946([1.0, 0.5, 0.4])
+        for t in (dense_t, sym_t):
+            _, s, _, _ = svd(t, ["a"], ["b"], max_truncation_err=1.0)
+            assert s.shape[0] == 1, f"{type(t).__name__} kept {s.shape[0]}"
+
+    def test_normalize_on_a_zero_spectrum_returns_finite_factors(self):
+        """normalize=True divided a zero spectrum by its zero sum: the
+        ZeroDivisionError removed by #947 resurfaced as NaN factors."""
+        sym = U1Symmetry()
+        charges = np.zeros(3, dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(sym, charges, IN, label="a"),
+            TensorIndex.from_charges(sym, charges, OUT, label="b"),
+        )
+        t = DenseTensor(jnp.zeros((3, 3)), indices)
+        U, s, Vh, _ = svd(t, ["a"], ["b"], max_truncation_err=1e-6, normalize=True)
+        assert bool(jnp.all(jnp.isfinite(s))), f"NaN in s: {np.asarray(s)}"
+        assert bool(jnp.all(jnp.isfinite(U.todense())))
+        assert bool(jnp.all(jnp.isfinite(Vh.todense())))
+
+    def test_numpy_symmetric_survives_underflow_too(self):
+        from tenax.linalg import _truncated_svd_symmetric_np
+
+        _, sym_t = _diag_pair_946([1e-200, 5e-201, 4e-201])
+        _, s_np, _, _ = _truncated_svd_symmetric_np(
+            sym_t, ["a"], ["b"], None, 1e-6, "bond", False
+        )
+        assert s_np.shape[0] == 3, (
+            f"the DMRG truncation path kept {s_np.shape[0]} of an "
+            f"underflowing 3-value spectrum (#949)"
+        )
