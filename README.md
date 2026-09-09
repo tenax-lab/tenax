@@ -981,6 +981,46 @@ Those paths drop out-of-set output keys without consulting the check, so an
 audit that left them enabled would report clean on the products it never
 inspected — and a diagnostic whose silence is unreliable is worse than none.
 
+### Bond ordering of a block-sparse `eigh`
+
+`tenax.linalg.eigh` returns its eigenvalues **algebraically descending** by
+default — largest first, so a negative eigenvalue sorts below every positive one
+whatever its magnitude — and lays the output bond out in that order. On a
+`SymmetricTensor` that ranking is a comparison *across* charge sectors, so it
+reads the eigenvalues on the host, and that raises under `jax.jit`. It is why a
+block-sparse `eigh` cannot appear in a traced computation.
+
+Pass `bond_order="sector"` to get the bond charge-grouped instead:
+
+```python
+from tenax.linalg import eigh
+
+V, w = eigh(m, ["row"], ["col"], new_bond_label="k", bond_order="sector")
+```
+
+`"sector"` is **not value-ordered at all**: sectors come in ascending charge
+order and each keeps `jnp.linalg.eigh`'s own ascending output, so `w[0]` is not
+the largest and the array is not monotone. On an indefinite operator with
+sectors `{0: [-5, -3], 1: [2, 0.5]}` the default returns `[2, 0.5, -3, -5]` and
+`"sector"` returns `[0.5, 2, -5, -3]`.
+
+The two modes differ only by a permutation of the bond — `V` and `w` are permuted
+together, and `V diag(w) V†` is unchanged — so nothing that pairs the two is
+affected. Anything that reads `w[0]` as "the largest", or assumes the array is
+sorted, is.
+
+Two constraints:
+
+- It is **rejected with `max_eigenvalues`**, because a truncation has to rank the
+  sectors against each other; that is exactly the host read the option exists to
+  avoid. Without a truncation the ranking decides nothing, which is what makes
+  the option safe.
+- It is **ignored on the dense path**, which has no sectors to group by and is
+  traceable already.
+
+The caller this exists for is `ipeps_bp_gauge._sqrt_pinv`, which factors a PSD
+message and never truncates.
+
 ## Gotchas
 
 ### Float64 precision and `JAX_ENABLE_X64`
