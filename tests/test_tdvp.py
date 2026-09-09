@@ -12,6 +12,7 @@ jax.config.update("jax_enable_x64", True)
 from tenax import DMRGConfig, build_random_mps, dmrg
 from tenax.algorithms.auto_mpo import build_auto_mpo
 from tenax.algorithms.tdvp import TDVPConfig, TDVPResult, tdvp, tdvp_step
+from tenax.core.mps import FiniteMPS
 from tenax.network.network import TensorNetwork
 
 
@@ -205,3 +206,160 @@ class TestTDVPComplexTime:
         np.testing.assert_allclose(
             result_real.energies, result_complex.energies, atol=1e-10
         )
+
+
+# ------------------------------------------------------------------ #
+# #942 / #943: the 2-site integrator against exact evolution           #
+# ------------------------------------------------------------------ #
+#
+# Nothing above compares a 2-site evolved STATE against exact evolution, and
+# the invariants that are checked are provably blind to both defects: any
+# exp(-i c dt H) conserves <H> whatever c is (#942 multiplied the time by the
+# bond count), and the imaginary-time path renormalizes away the exp(-dt H)
+# scale that #943 leaked into "complex".  These oracles are marked ``core``:
+# a state evolved by the wrong time or the wrong exponent is a shipped wrong
+# number, and every case here is a <=16-dimensional exact computation.
+
+
+def _product_plus_state(L: int) -> FiniteMPS:
+    from tenax.algorithms.tdvp import _make_site_tensor
+
+    sites = [
+        _make_site_tensor(jnp.ones((1, 2, 1)) / np.sqrt(2.0), i, L) for i in range(L)
+    ]
+    return FiniteMPS.from_tensors(sites)
+
+
+def _sz_at_site_1_mpo(L: int, mps: FiniteMPS) -> TensorNetwork:
+    """MPO for the single local term H = Sz_1."""
+    from tenax.algorithms.tdvp import _identity_mpo_site
+    from tenax.core.tensor import DenseTensor
+
+    sz = np.diag([0.5, -0.5])
+    mpo = TensorNetwork()
+    for i in range(L):
+        w = _identity_mpo_site(mps.get_tensor(i))
+        if i == 1:
+            w = DenseTensor(jnp.array(sz.reshape(1, 2, 2, 1)), w.indices)
+        mpo.add_node(i, w)
+    return mpo
+
+
+def _statevector(mps: FiniteMPS) -> np.ndarray:
+    psi = np.asarray(mps.get_tensor(0).todense())
+    for i in range(1, mps.n_nodes()):
+        psi = np.tensordot(psi, np.asarray(mps.get_tensor(i).todense()), axes=(-1, 0))
+    return psi.reshape(-1)
+
+
+def _sz1_diagonal(L: int) -> np.ndarray:
+    diag = np.ones(1)
+    for i in range(L):
+        # np.array, NOT np.diag: np.diag(vector) *constructs* a matrix, and
+        # the resulting exact vector silently broadcasts to a matrix whose
+        # distance from psi is coincidentally the size of the #942 defect.
+        diag = np.kron(diag, np.array([0.5, -0.5]) if i == 1 else np.ones(2))
+    assert diag.shape == (2**L,)
+    return diag
+
+
+class TestTwoSiteIntegrator942:
+    @pytest.mark.core
+    @pytest.mark.parametrize("L", [3, 4])
+    def test_a_local_field_advances_by_dt_not_by_bond_count_times_dt(self, L):
+        """H = Sz_1, product state: exact evolution stays in the product
+        manifold, so truncation explains nothing.  Without the backward
+        one-site steps every bond re-applied the term, advancing site 1 by
+        (L-1)*dt (#942)."""
+        dt = 0.1
+        mps = _product_plus_state(L)
+        out = tdvp_step(
+            mps,
+            _sz_at_site_1_mpo(L, mps),
+            TDVPConfig(mode="2site", time_type="real", dt=dt, max_bond_dim=8),
+        )
+        psi = _statevector(out)
+        initial = np.ones(2**L) / np.sqrt(2**L)
+        diag = _sz1_diagonal(L)
+        exact = np.exp(-1j * dt * diag) * initial
+        wrong = np.exp(-1j * dt * (L - 1) * diag) * initial
+        assert np.linalg.norm(psi - exact) < 1e-12
+        # Anti-vacuous: the defect this guards is far away, not inside tol.
+        assert np.linalg.norm(psi - wrong) > 0.04
+
+    @pytest.mark.core
+    def test_full_bond_heisenberg_matches_dense_expm(self):
+        """At full bond dimension every effective Hamiltonian is H itself, so
+        the projector splitting is exact and 2TDVP must reproduce dense
+        exp(-i dt H) to Krylov/roundoff -- entangled dynamics, all bonds, both
+        sweeps, no truncation excuse.  Codex's independent full-bond check saw
+        the same (L-1)-fold excess evolution here before the fix."""
+        L, dt = 4, 0.05
+        mps = _product_plus_state(L)
+        mpo = _build_dense_heisenberg(L)
+        out = tdvp_step(
+            mps,
+            mpo,
+            TDVPConfig(mode="2site", time_type="real", dt=dt, max_bond_dim=4),
+        )
+        psi = _statevector(out)
+
+        Sz = np.diag([0.5, -0.5])
+        Sp = np.array([[0.0, 1.0], [0.0, 0.0]])
+        Sm = Sp.T
+        I2 = np.eye(2)
+
+        def kron_chain(ops):
+            m = ops[0]
+            for o in ops[1:]:
+                m = np.kron(m, o)
+            return m
+
+        H = np.zeros((2**L, 2**L))
+        for i in range(L - 1):
+            for coeff, oi, oj in [(1.0, Sz, Sz), (0.5, Sp, Sm), (0.5, Sm, Sp)]:
+                ops = [I2] * L
+                ops[i], ops[i + 1] = oi, oj
+                H += coeff * kron_chain(ops)
+        evals, evecs = np.linalg.eigh(H)
+        initial = np.ones(2**L) / np.sqrt(2**L)
+        exact = evecs @ (np.exp(-1j * dt * evals) * (evecs.conj().T @ initial))
+        assert np.linalg.norm(psi - exact) < 1e-8
+
+
+class TestTwoSiteComplexTime943:
+    @pytest.mark.core
+    def test_complex_time_type_is_a_timestep_not_imaginary_evolution(self):
+        """L=2 excludes #942 (a single bond has no backward step): a purely
+        real complex timestep must give exp(-i dt H), and the pre-fix
+        exp(-dt H) must be far away."""
+        dt = 0.05 + 0j
+        mps = _product_plus_state(2)
+        out = tdvp_step(
+            mps,
+            _sz_at_site_1_mpo(2, mps),
+            TDVPConfig(mode="2site", time_type="complex", dt=dt, max_bond_dim=8),
+        )
+        psi = _statevector(out)
+        initial = np.ones(4) / 2.0
+        diag = _sz1_diagonal(2)
+        exact = np.exp(-1j * dt * diag) * initial
+        wrong = np.exp(-dt * diag) * initial
+        assert np.linalg.norm(psi - exact) < 1e-12
+        assert np.linalg.norm(psi - wrong) > 0.03
+
+    @pytest.mark.core
+    def test_a_genuinely_complex_timestep_rotates_and_damps(self):
+        """dt = a - ib must produce exp(-i dt H): rotation from a, damping
+        from b -- distinguishing the exponent from both pure conventions."""
+        dt = 0.05 - 0.02j
+        mps = _product_plus_state(2)
+        out = tdvp_step(
+            mps,
+            _sz_at_site_1_mpo(2, mps),
+            TDVPConfig(mode="2site", time_type="complex", dt=dt, max_bond_dim=8),
+        )
+        psi = _statevector(out)
+        initial = np.ones(4) / 2.0
+        exact = np.exp(-1j * dt * _sz1_diagonal(2)) * initial
+        assert np.linalg.norm(psi - exact) < 1e-12
