@@ -125,6 +125,12 @@ class FiniteMPS:
     def __setitem__(self, i: int, tensor: Tensor) -> None:
         self.tensors[i] = tensor
         self.orth_center = None  # invalidate
+        # Every cached bond spectrum, not just the neighbours: a nonunitary
+        # local replacement changes Schmidt spectra at distant cuts (project
+        # one site of a Bell pair and the far bond's entropy drops to zero).
+        # Leaving these cached let entanglement_entropy() report the OLD
+        # state's spectrum after the state changed (#945).
+        self.singular_values = [None] * max(len(self.tensors) - 1, 0)
 
     def __iter__(self) -> Iterator[Tensor]:
         return iter(self.tensors)
@@ -385,13 +391,15 @@ class FiniteMPS:
                 "state is a positive real, so the overlap contraction is wrong. "
                 "This is a bug in tenax, not in your state (#819)."
             )
-        if raw_c.real == 0.0 and any(float(t.norm()) > 0.0 for t in self.tensors):
-            raise ValueError(
-                "<psi|psi> came back exactly 0 for an MPS whose site tensors "
-                "are not all zero, so the overlap contraction is wrong rather "
-                "than the state being null (#819). A genuinely zero state "
-                "would have zero tensors."
-            )
+        # NOTE(#948): there is deliberately no "zero overlap but nonzero site
+        # tensors must be a contraction bug" guard here.  One stood between
+        # #819 and #948, and its premise is false: nonzero site tensors can
+        # contract to an exactly zero state (disjoint support on a shared
+        # bond, e.g. A living only in bond channel 0 and B only in channel 1),
+        # so the guard raised on legitimate states.  No local certificate over
+        # site norms can distinguish that from a broken contraction; the #819
+        # defect class is instead pinned by the exact-contraction oracle tests
+        # in test_mps_norm.py.
         return float(jnp.exp(self.log_norm) * jnp.sqrt(raw_c.real))
 
     def entanglement_entropy(self, bond: int) -> float:

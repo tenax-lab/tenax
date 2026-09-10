@@ -800,6 +800,51 @@ def _retruncate_chi_bond(
     )
 
 
+def _incoming_chi_charges(
+    Q_TL: SymmetricTensor,
+    Q_TR: SymmetricTensor,
+    Q_BL: SymmetricTensor,
+    Q_BR: SymmetricTensor,
+    direction: str,
+    chi: int,
+) -> np.ndarray | None:
+    """Charges of the chi leg whose bond ``chi_new`` is about to replace.
+
+    Under ``jax.jit`` the per-sector block shapes are baked at trace time, so
+    the traced SVD cannot choose its chi inventory from the singular values the
+    way :func:`_retruncate_chi_bond` does eagerly (#922).  Its fallback was the
+    double-layer ``u2`` charge list tiled to ``chi``, which is a guess about the
+    environment made from the *state*; the environment's own chi leg is a much
+    better one, and it is static metadata even under tracing.
+
+    At a CTM fixed point the two are the same bond, so inheriting the incoming
+    leg's multiset reproduces whatever inventory the environment converged to.
+    Measured on a D=3 U(1)-Sz pair at chi=16: the tiled guess keeps
+    ``{-2: 3, 0: 9, 2: 4}`` and lands 1.8e-07 off the dense reference, while
+    inheriting keeps ``{-4: 1, -2: 4, 0: 6, 2: 4, 4: 1}`` and reproduces the
+    eager environment *exactly* (#929).
+
+    Returns ``None`` when the leg is missing or is not ``chi`` wide -- during a
+    chi ramp the environment is still at the old width, and a stale inventory
+    is worse than the tiled guess.
+    """
+    corner, label = {
+        "left": (Q_TL, "chi_B"),
+        "right": (Q_TR, "chi_B"),
+        "top": (Q_TL, "chi_R"),
+        "bottom": (Q_BL, "chi_R"),
+    }[direction]
+    if not isinstance(corner, SymmetricTensor):
+        return None
+    labels = corner.labels()
+    if label not in labels:
+        return None
+    idx = corner.indices[labels.index(label)]
+    if idx.dim != chi:
+        return None
+    return np.asarray(idx.charges, dtype=np.int32)
+
+
 def _compute_2x2_projector_symmetric(
     Q_TL: SymmetricTensor,
     Q_TR: SymmetricTensor,
@@ -959,13 +1004,20 @@ def _compute_2x2_projector_symmetric(
             for b in q.blocks.values()
         )
         if is_traced_inputs:
+            # The traced allocation is static, so it cannot read the singular
+            # values.  Give it the environment's own chi inventory rather than
+            # the double-layer charges tiled to chi -- see
+            # :func:`_incoming_chi_charges` (#929).
+            traced_base = _incoming_chi_charges(Q_TL, Q_TR, Q_BL, Q_BR, direction, chi)
+            if traced_base is None:
+                traced_base = base_charges
             U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
                 M_prime_T,
                 left_labels=mp_left_labels,
                 right_labels=mp_right_labels,
                 new_bond_label="chi_new",
                 max_singular_values=chi,
-                base_charges=base_charges,
+                base_charges=traced_base,
             )
         else:
             U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(

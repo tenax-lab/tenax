@@ -20,9 +20,11 @@ __all__ = [
     "make_neighbors",
     "ctm_tensor",
     "ctm_tensor_2site",
+    "CTMConvergenceInfo",
 ]
 
 import warnings
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -819,6 +821,53 @@ def _max_env_leaf_diff(env_old: CTMTensorEnv, env_new: CTMTensorEnv) -> float:
     return max_diff
 
 
+_RECIPE_1X1_DEPRECATION = (
+    "recipe='1x1' is deprecated and will be removed in a future release: for "
+    "any state with virtual bond dimension D > 1 it reaches no fixed point in "
+    "any configuration reachable from the public API (#911). "
+    "(D=1 is the one exception and it is not a reprieve: a product state has "
+    "rank 1 as its *maximum* reachable corner rank, so the collapse is vacuous "
+    "there and 1x1 agrees with 2x2 exactly. The removal still applies.) "
+    "Three separate mechanisms, measured on a D=2 Heisenberg state at "
+    "chi=16 over 240 sweeps, none of which crossed conv_tol=1e-10: "
+    "projector_method='svd' (the default) collapses the corner to rank 1, "
+    "because M = C1g^H C4g is chi x chi and the chi*D**2 seam is summed away, "
+    "so the energy is bit-identical across a 4x change in chi; "
+    "'eigh'/'qr' hold full rank but limit-cycle, with the energy ranging over "
+    "3.4e-3 to 4.9e-3 across the last 40 sweeps; and on a non-uniform cell one "
+    "bond is truncated by two inequivalent projectors on alternating sweeps, "
+    "so no environment is stationary under both. "
+    "Migration: use recipe='2x2', which is the default and converges to 1e-13 "
+    "on the same states. If you specifically need projector_method='qr' or "
+    "'eigh' -- which '2x2' ignores, since it hardcodes Fishman SVD -- and your "
+    "state is C4v-symmetric, use ctm_tensor_c4v(), a different function that "
+    "runs all three methods correctly and agrees with '2x2' to 1e-12. "
+    "Note C4v symmetrization of the *state* does not rescue this recipe; only "
+    "changing the recipe or the engine does."
+)
+
+
+def _warn_recipe_1x1_deprecated(entry_point: str, stacklevel: int = 3) -> None:
+    """Emit the ``recipe="1x1"`` deprecation for one entry point (#911).
+
+    Deliberately raised at the *entry points* rather than inside the sweep, so
+    it fires once per call instead of once per sweep, and so ``stacklevel``
+    lands on the caller's own line.
+
+    Not raised by :func:`ctm_tensor_c4v`, which is a different function despite
+    also being "single site": it passes ``(Qf, Qf)`` -- a Gram matrix of a
+    corner that has already absorbed the double layer -- into the same
+    projector, so it has neither the rank collapse nor the limit cycle.  The
+    name collision between the two things called "1x1" is the reason this note
+    exists.
+    """
+    warnings.warn(
+        f"{entry_point}: {_RECIPE_1X1_DEPRECATION}",
+        DeprecationWarning,
+        stacklevel=stacklevel,
+    )
+
+
 def _corner_singular_values(C):  # noqa: N802
     """Extract sorted singular values from a 2-leg corner tensor.
 
@@ -841,6 +890,55 @@ def _corner_singular_values(C):  # noqa: N802
     return _dense_svd(data, compute_uv=False)
 
 
+class CTMConvergenceInfo(NamedTuple):
+    """Whether a dense CTM sweep converged, and what it did (#839).
+
+    These entry points used to compute ``converged`` and the iteration count
+    inside their loop and then discard both, so a caller could not tell a
+    converged environment from one that silently exhausted ``max_iter`` --
+    the forward-side twin of #801/#824.  ``ipeps()`` in particular returned an
+    energy with no channel to report the environment's status.
+
+    Obtained by passing ``return_meta=True`` to :func:`ctm`, :func:`ctm_2site`
+    or :func:`ctm_split`.  Opt-in because all three are public API and their
+    return arity cannot change.
+
+    ``converged`` and ``n_iter`` come straight out of a ``lax.while_loop``
+    carry for :func:`ctm` / :func:`ctm_2site`, so they are **JAX arrays**, not
+    Python scalars.  That keeps the entry points jittable; call ``bool(...)``
+    / ``int(...)`` at the point of use.  :func:`ctm_split` runs a Python loop
+    and returns Python scalars.
+
+    Attributes:
+        converged: True when the sweep met ``conv_tol`` and stopped early.
+                   False means it ran out of iterations -- the value is
+                   whatever the last sweep produced.
+        n_iter:    Sweeps actually performed.  Equal to ``max_iter`` exactly
+                   when ``converged`` is False.
+
+                   **The two producers differ under a QR warm-up, and only one
+                   of them satisfies the invariant above.**  :func:`ctm_tensor`
+                   counts the warm-up sweeps, so ``n_iter`` is the caller's
+                   ``max_iter`` when the budget is exhausted (#920 review).
+                   :func:`ctm` counts the post-warm-up loop only, matching the
+                   budget *that loop* was given rather than the one the caller
+                   passed -- so with ``qr_warmup_steps=6, max_iter=10`` it
+                   reports 4 against a ``max_iter`` of 10.  That is the same
+                   defect #910 fixed in the multisite warning and it is left
+                   alone here only because changing :func:`ctm` is out of scope
+                   for the PR that noticed it.
+        diff:      Final value of the convergence criterion -- the max
+                   absolute difference between successive normalized corner
+                   singular-value vectors.  ``inf`` if no comparison was ever
+                   made (fewer than two sweeps).  Note this watches the corner
+                   spectrum, not the energy.
+    """
+
+    converged: jax.Array | bool
+    n_iter: jax.Array | int
+    diff: jax.Array | float
+
+
 def ctm_tensor(
     A: Tensor,
     chi: int,
@@ -851,7 +949,9 @@ def ctm_tensor(
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
     recipe: str = "2x2",
-) -> tuple[CTMTensorEnv, float]:
+    *,
+    return_meta: bool = False,
+) -> tuple[CTMTensorEnv, float] | tuple[CTMTensorEnv, float, CTMConvergenceInfo]:
     """Run standard CTM to convergence using the Tensor protocol.
 
     Builds the full double-layer tensor via ``bar()`` + ``contract()`` +
@@ -875,6 +975,20 @@ def ctm_tensor(
                            ``"1x1"`` — the legacy single-site corner-pair
                            projector, kept only for regression bisection.
 
+                           **``"1x1"`` is deprecated and emits a
+                           ``DeprecationWarning`` (#911).**  For any state with
+                           ``D > 1`` it reaches no fixed point in any
+                           configuration reachable from the public API
+                           (at ``D=1`` rank 1 is the *maximum* reachable corner
+                           rank, so the collapse is vacuous and ``1x1`` matches
+                           ``2x2`` exactly -- the removal still applies): ``svd`` collapses to rank 1, ``eigh``/``qr``
+                           limit-cycle at full rank, and a non-uniform cell
+                           truncates one bond with two inequivalent projectors
+                           on alternating sweeps.  Migrate to ``"2x2"``, or to
+                           :func:`ctm_tensor_c4v` if you need
+                           ``projector_method`` to be honoured (``"2x2"``
+                           hardcodes Fishman SVD and ignores it).
+
                            **``"1x1"`` collapses the environment to rank-1
                            corners and must not be used for physics** (#723,
                            #726, #747).  Its projector comes from
@@ -886,14 +1000,43 @@ def ctm_tensor(
                            chi.  Switching ``projector_method`` does not help:
                            ``eigh``/``qr`` escape the rank collapse but are
                            wildly non-convergent on the same recipe.
+        return_meta:       When ``True``, return a third element, a
+                           :class:`CTMConvergenceInfo`,
+                           saying whether the loop converged or exhausted
+                           ``max_iter`` (#839).  Keyword-only and off by
+                           default so the return arity of this public entry
+                           point is unchanged.  This is the same type and the
+                           same flag :func:`ctm`, :func:`ctm_2site` and
+                           :func:`ctm_split` already take.
+
+                           **Whether the returned environment is a fixed point
+                           is not otherwise observable here.**  Unlike
+                           ``_ctm_tensor_multisite``, this function does not
+                           warn: a budget-exhausted CTM and a converged one
+                           return the same shape of result, and the tensors do
+                           not distinguish them.  Any caller that reads a
+                           physical observable off ``env`` should pass this and
+                           check ``info.converged`` -- an energy taken from a
+                           limit cycle moves with ``max_iter`` without ever
+                           settling (#901).
+
+                           ``info`` reports the *criterion*, not the rank.  A
+                           rank-collapsed corner reports ``converged=False``
+                           with ``diff=inf`` (#898), which is correct but does
+                           not say *why*; for that, pass the returned ``env``
+                           to :func:`~tenax.algorithms._ctm_diagnostics.env_is_collapsed`.
+                           The distinction matters because the two failures
+                           have opposite fixes -- more sweeps will never
+                           un-collapse a corner.
 
     Returns:
-        ``(env, max_truncation_error)`` where ``env`` is the converged
-        CTMTensorEnv and ``max_truncation_error`` is the maximum per-move
-        truncation error ε_T from the **last** sweep before convergence
-        (or the last sweep if ``max_iter`` was reached without convergence).
-        This is a Python ``float`` suitable for use in the optimizer loop
-        (variPEPS §2.8.2 auto-χ trigger).
+        ``(env, max_truncation_error)``, or ``(env, max_truncation_error, info)``
+        when ``return_meta=True``.  ``env`` is the converged CTMTensorEnv and
+        ``max_truncation_error`` is the maximum per-move truncation error ε_T
+        from the **last** sweep before convergence (or the last sweep if
+        ``max_iter`` was reached without convergence).  This is a Python
+        ``float`` suitable for use in the optimizer loop (variPEPS §2.8.2
+        auto-χ trigger).
 
         **Scope (#727, measured).**  ε_T is genuine on some configurations
         and structurally ``0.0`` on others, and a ``0.0`` from the second
@@ -1000,6 +1143,8 @@ def ctm_tensor(
             f"Unknown projector_method={projector_method!r}; "
             f"expected 'eigh', 'qr', or 'svd'."
         )
+    if recipe == "1x1":
+        _warn_recipe_1x1_deprecated("ctm_tensor")
 
     if recipe == "2x2":
         # A uniform 1-site lattice is just the multisite path with a
@@ -1026,18 +1171,66 @@ def ctm_tensor(
     a = _build_double_layer_tensor(A)
     env = initialize_ctm_tensor_env(A, chi)
 
-    # QR warm-up: run a few eigh iterations before switching to QR
+    last_max_eps: float = 0.0
+    prev_sv = None
+    max_rank = _forced_corner_rank(_max_virtual_bond_dim(a))
+    # Assigned before either loop, not inside them: a zero-iteration budget
+    # (``max_iter=0``, or a warm-up that consumes the whole budget) must still
+    # be able to report, rather than raise ``UnboundLocalError`` from the
+    # reporting path (#901).
+    converged = False
+    # ``inf``, not ``0.0``.  The criterion compares a *pair* of spectra, so it
+    # does not exist until two sweeps have run; a ``0.0`` initialiser would make
+    # a one-sweep budget report the most perfectly converged number available in
+    # the same breath as ``converged=False``.  Matches :func:`ctm` (#839).
+    diff = float("inf")
+    n_iter = 0
+
+    # QR warm-up: run a few eigh iterations before switching to QR.
+    #
+    # Counted **and measured** (#920 review P2, both rounds).  These are real
+    # sweeps that really moved the environment being returned, so they count
+    # toward ``n_iter`` -- the field's invariant (``n_iter == max_iter`` exactly
+    # when ``converged`` is False) is only true against the caller's
+    # ``max_iter`` if they are included.  But counting them while discarding
+    # their corner spectra made the report contradict itself: ``n_iter=30``
+    # alongside ``diff=inf`` says thirty sweeps ran and nothing was measured.
+    #
+    # Sharpest on the default ``recipe="2x2"``, whose sweep wrapper ignores
+    # ``projector_method``: a long warm-up there runs the *same* sweeps that
+    # otherwise converge.  Measured, ``qr_warmup_steps=30, max_iter=30`` gave
+    # ``converged=False, diff=inf`` on an environment that had reached 2.6e-16.
     if projector_method == "qr" and qr_warmup_steps > 0:
         warmup = min(qr_warmup_steps, max_iter)
         for _ in range(warmup):
             env, _ = sweep_fn(
                 env, a, chi, renormalize, "eigh", projector_backward=projector_backward
             )
+            n_iter += 1
+            current_sv = _corner_singular_values(env.C1)
+            if prev_sv is not None:
+                diff = float(_ctm_sv_diff(current_sv, prev_sv, max_rank=max_rank))
+                converged = diff < conv_tol
+            prev_sv = current_sv
         max_iter = max_iter - warmup
 
-    last_max_eps: float = 0.0
-    prev_sv = None
-    max_rank = _forced_corner_rank(_max_virtual_bond_dim(a))
+    # ``prev_sv`` carries across deliberately: the first measured sweep compares
+    # against the last warm-up spectrum, and those are consecutive sweeps of the
+    # same environment.  The projector changes at that boundary, so that one
+    # comparison can read high -- which fails closed (it cannot certify), the
+    # safe direction.
+    #
+    # The warm-up does **not** break early on ``conv_tol``.  Converging under
+    # eigh is not converging under the projector the caller asked for, and
+    # stopping there would silently skip QR altogether.  It only reports.
+    if max_iter > 0:
+        # Defence in depth, and NOT covered by a test -- see the commit message.
+        # The mechanism is real (a warm-up that satisfied conv_tol would leave
+        # ``converged`` True while the measured sweeps then move the environment
+        # away), but a 192-config scan over conv_tol, warm-up length, budget,
+        # chi and recipe produced no state that reaches it, with or without this
+        # line.  Kept because it is free and the alternative is a stale True.
+        converged = False
     for _ in range(max_iter):
         env, last_max_eps = sweep_fn(
             env,
@@ -1047,14 +1240,22 @@ def ctm_tensor(
             projector_method,
             projector_backward=projector_backward,
         )
+        n_iter += 1
 
         current_sv = _corner_singular_values(env.C1)
         if prev_sv is not None:
-            diff = _ctm_sv_diff(current_sv, prev_sv, max_rank=max_rank)
-            if float(diff) < conv_tol:
+            diff = float(_ctm_sv_diff(current_sv, prev_sv, max_rank=max_rank))
+            # ``_ctm_sv_diff`` returns ``inf`` on a rank-collapsed spectrum
+            # (#898), so this fails closed: a collapsed corner cannot certify.
+            if diff < conv_tol:
+                converged = True
                 break
         prev_sv = current_sv
 
+    if return_meta:
+        # Python scalars, like ``ctm_split``: this loop is a Python loop, not a
+        # ``lax.while_loop`` carry.
+        return env, last_max_eps, CTMConvergenceInfo(converged, n_iter, diff)
     return env, last_max_eps
 
 
@@ -1069,6 +1270,7 @@ def _ctm_tensor_multisite(
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
     recipe: str = "2x2",
+    _deprecation_stacklevel: int = 3,
 ) -> dict[Coord, CTMTensorEnv]:
     """Run multisite CTM to convergence using the Tensor protocol.
 
@@ -1083,11 +1285,30 @@ def _ctm_tensor_multisite(
         qr_warmup_steps:  Number of eigh warm-up sweeps before QR kicks in.
         recipe:       ``"2x2"`` (default) uses the variPEPS-style 2x2
                       plaquette projector at every site/direction.  ``"1x1"``
-                      falls back to the legacy single-site projector pair.
+                      falls back to the legacy single-site projector pair, and
+                      is **deprecated** (#911) — on a non-uniform cell it
+                      truncates each bond with two inequivalent projectors on
+                      alternating sweeps, so no environment is stationary under
+                      both and there is no fixed point to converge to.
 
     Returns:
         Dict mapping coordinates to converged CTMTensorEnv.
     """
+    # Raised here rather than in ``ctm_tensor_2site`` / ``ctm_multisite``, which
+    # both delegate to this function: one warning per call, from the one place
+    # every multisite caller passes through.
+    #
+    # ``_deprecation_stacklevel`` exists because those wrappers add a frame.
+    # Left at the default the warning resolves to the delegating line *inside
+    # this module*, which is both an unhelpful location and a dedup hazard --
+    # the default warning registry keys on (message, module, lineno), so two
+    # unrelated user call sites would collapse into one report and the second
+    # caller would never be told.  The wrappers pass 4.
+    if recipe == "1x1":
+        _warn_recipe_1x1_deprecated(
+            "ctm_tensor_multisite", stacklevel=_deprecation_stacklevel
+        )
+
     double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
     envs = {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
 
@@ -1298,6 +1519,9 @@ def ctm_tensor_2site(
         qr_warmup_steps,
         projector_backward=projector_backward,
         recipe=recipe,
+        # One extra frame: this wrapper sits between the helper and the
+        # user, so the default 3 would name this line, not the caller's.
+        _deprecation_stacklevel=4,
     )
     return envs[(0, 0)], envs[(1, 0)]
 
@@ -1417,6 +1641,9 @@ def ctm_multisite(
         qr_warmup_steps,
         projector_backward=projector_backward,
         recipe=recipe,
+        # One extra frame: this wrapper sits between the helper and the
+        # user, so the default 3 would name this line, not the caller's.
+        _deprecation_stacklevel=4,
     )
 
     # Map results back to site names

@@ -8,7 +8,9 @@ from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._split_ctm_tensor_energy import _split_env_to_tensor_standard
 
-pytestmark = pytest.mark.core
+# Bucket comes from ``_FILE_MARKERS`` in conftest, not from a module-level
+# ``pytestmark`` (#933): conftest *adds* its marker, so a module-level core
+# mark would override the per-test ``@pytest.mark.slow`` withholding below.
 
 
 def _oracle():
@@ -50,7 +52,10 @@ def test_split_corner_init_is_rank1(D):
         assert rank == 1, f"{name} init rank={rank} (spectrum {np.round(s, 3)})"
 
 
-@pytest.mark.parametrize("D", [2, 3])
+@pytest.mark.parametrize(
+    "D",
+    [2, pytest.param(3, marks=pytest.mark.slow)],  # D=3 is 99s (#933)
+)
 def test_fused_to_split_roundtrip(D):
     make_site, heisenberg_gate, fused_env_to_split = _oracle()
     A = make_site(D, 2, seed=7)
@@ -67,7 +72,17 @@ from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
 from tenax.algorithms._split_ctm_tensor_energy import compute_energy_split_ctm_tensor
 
 
-@pytest.mark.parametrize("D,chi", [(2, 4), (2, 8), (3, 6)])
+@pytest.mark.parametrize(
+    "D,chi",
+    [
+        (2, 4),
+        (2, 8),
+        # 371s alone -- 8% of the whole required gate (#933).  The D=2 rows
+        # above cover the same parity claim; this one raises confidence in D,
+        # not in the mechanism, so it belongs in the nightly bucket.
+        pytest.param(3, 6, marks=pytest.mark.slow),
+    ],
+)
 def test_split_matches_fused_lossless_chi_I(D, chi):
     # With the double-layer corner-pair projector and a lossless interlayer bond
     # (chi_I = chi*D), the split path is an exact factorization of the fused path
@@ -137,6 +152,7 @@ def test_factorize_projector_reconstructs():
     np.testing.assert_allclose(b, a, atol=1e-10)
 
 
+@pytest.mark.slow  # 314s -- 7% of the required gate on its own (#933)
 def test_split_production_chi_I_converges_to_lossless():
     """Production interlayer bond (chi_I=chi) is physical and tracks lossless.
 

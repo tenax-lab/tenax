@@ -5,7 +5,9 @@ import pytest
 
 from tenax.algorithms.ipeps_config import CTMConfig
 
-pytestmark = pytest.mark.core
+# Bucket comes from ``_FILE_MARKERS`` in conftest, not from a module-level
+# ``pytestmark`` (#933): conftest *adds* its marker, so a module-level core
+# mark would override the per-test ``@pytest.mark.slow`` withholding below.
 
 
 def test_fuse_virtual_legs_defaults_true():
@@ -147,7 +149,10 @@ def _split_implicit_loss(D, seed=7, chi=None):
     return loss, A
 
 
-@pytest.mark.parametrize("D", [2, 3])
+@pytest.mark.parametrize(
+    "D",
+    [2, pytest.param(3, marks=pytest.mark.slow)],  # D=3 is 69s (#933)
+)
 def test_split_implicit_energy_finite(D):
     """ctm_energy_split_implicit returns a finite energy (forward correctness)."""
     loss, A = _split_implicit_loss(D)
@@ -155,7 +160,10 @@ def test_split_implicit_energy_finite(D):
     assert jnp.isfinite(e), f"energy is not finite: {e}"
 
 
-@pytest.mark.parametrize("D", [2, 3])
+@pytest.mark.parametrize(
+    "D",
+    [2, pytest.param(3, marks=pytest.mark.slow)],  # D=3 is 94s (#933)
+)
 def test_split_implicit_grad_finite(D):
     """ctm_energy_split_implicit returns a finite, non-zero gradient."""
     loss, A = _split_implicit_loss(D)

@@ -144,6 +144,15 @@ filterwarnings = [
     # ``pytest.warns`` to verify both still fire.
     "ignore:chi_ramp is deprecated:DeprecationWarning",
     "ignore:chi_auto_bump .* is deprecated:DeprecationWarning",
+    # Phase-1 deprecation (issue #911): ``recipe='1x1'`` / ``gs_recipe='1x1'``
+    # reaches no fixed point in any reachable configuration.  A dozen tests
+    # pass it *deliberately* — they exist to assert the collapse and the limit
+    # cycle (``test_ctm_723_single_site_collapse.py``,
+    # ``test_ctm_collapse_detector.py``, ``test_split_ctm_chi_frozen_726.py``)
+    # — so the warning would be pure noise there.  The dedicated regression
+    # tests in ``tests/test_recipe_1x1_deprecation.py`` un-suppress via
+    # ``pytest.warns`` to verify each entry point still fires.
+    "ignore:.*recipe='1x1' is deprecated:DeprecationWarning",
 ]
 
 [tool.ruff]
