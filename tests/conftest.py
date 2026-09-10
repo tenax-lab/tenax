@@ -343,6 +343,16 @@ _FILE_MARKERS = {
     # convergences (one symmetric, one dense) plus one RDM -- core budget; the
     # chi-scan that needs chi=16 carries its own ``@pytest.mark.slow``.
     "test_ctm_charged_sectors_905.py": "core",
+    # #853's severity-attribution control, relocated out of the deleted #610
+    # prototype suite (review of #959): the only PSD-and-attainable-energy
+    # check on the plain symmetric U(1)-Sz CTM path.  One D=3 chi=12
+    # convergence at ~44 min cold -- far too expensive for the gate, and
+    # "algorithm" is currently aspirational: the fast-other bucket has hit the
+    # 6h job limit on every run since at least 2026-09-03 (#960), so nothing
+    # this deep in it executes.  Registered here so the control survives in
+    # the tree and runs the day #960 is fixed, not as a claim that it runs
+    # today.
+    "test_ctm_symmetric_rdm_positive_853.py": "algorithm",
     "test_ctm_chi_truncation_policy_922.py": "core",
     "test_ctm_traced_chi_inventory_929.py": "core",
     "test_integration_regression.py": "algorithm",
@@ -553,7 +563,6 @@ _UNBUCKETED_LEGACY = {
     "test_symmetric_custom_vjp.py",
     "test_truncated_lowrank_svd.py",
     "test_tuning_registry.py",
-    "test_u1sz_defrag_prototype_610.py",
     "test_varipeps_compare.py",
     "test_varipeps_compare_payload.py",
     "test_varipeps_compare_su.py",
