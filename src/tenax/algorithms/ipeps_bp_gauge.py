@@ -365,6 +365,17 @@ def _a_weight_underflowed(new_weights, old_weights) -> jax.Array:
     below :data:`_UNDERFLOW_EPS` of its bond's largest -- and then hit zero is
     the failure this describes.
 
+    **The first sweep is exempt, because the caller's stored weights are not a
+    trajectory.**  They are exactly the drifted numbers this module exists to
+    discard, so "was collapsing" cannot be judged against them: a state whose
+    unused direction carries a stored weight of 1e-8 is the same state as one
+    carrying 1.0 there, and only the caller's arbitrary number would separate
+    "accepted" from "rejected at sweep 0" (Codex P2 on #940 -- measured: the
+    starved pair converges in 52 sweeps from a tail of 1.0 and was refused with
+    0 iterations from a tail of 1e-8).  Both call sites therefore consult this
+    only from the second sweep on, where both operands are the solve's own
+    iterates.  The fatal trajectory dies at sweep 109; nothing is lost.
+
     **Shape changes are not inspected.**  A bond weight may legitimately change
     length between sweeps when a charge sector empties (#904/#906), and the two
     vectors then cannot be aligned entry by entry.  Such a sweep is accepted;
@@ -658,9 +669,12 @@ def _bp_solve_eager(
     for sweep in range(max_iter):
         cand_gam, cand_weights = _sweep(gam, weights)
 
-        healthy = _sweep_is_healthy(cand_gam, cand_weights, sweep) & (
-            ~_a_weight_underflowed(cand_weights, weights)
-        )
+        healthy = _sweep_is_healthy(cand_gam, cand_weights, sweep)
+        if sweep >= 1:
+            # From the second sweep on, ``weights`` is the solve's own iterate;
+            # at sweep 0 it is the caller's stored numbers, which are not a
+            # trajectory -- see :func:`_a_weight_underflowed`.
+            healthy = healthy & ~_a_weight_underflowed(cand_weights, weights)
         if not bool(healthy):
             # Reject the candidate; do not call it converged.  ``_sweep`` does
             # not mutate its input, so ``gam``/``weights`` still hold the last
@@ -778,8 +792,11 @@ def _bp_solve(
     def body(carry):
         arr_in, w_in, _, done, _, _ = carry
         cand_gam, cand_weights = _sweep(as_tensors(arr_in), w_in)
-        ok = _sweep_is_healthy(cand_gam, cand_weights, done) & (
-            ~_a_weight_underflowed(cand_weights, w_in)
+        # ``done >= 1`` for the same reason the eager driver gates on
+        # ``sweep >= 1``: at ``done == 0`` the carry still holds the caller's
+        # stored weights, which are not a trajectory.
+        ok = _sweep_is_healthy(cand_gam, cand_weights, done) & ~(
+            _a_weight_underflowed(cand_weights, w_in) & (done >= 1)
         )
         res = _residual(cand_weights, w_in)
         accept = lambda cand, prev: jnp.where(ok, cand, prev)  # noqa: E731

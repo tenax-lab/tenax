@@ -123,6 +123,41 @@ def test_a_length_change_is_accepted_rather_than_raising():
     assert not bool(_a_weight_underflowed(after, before))
 
 
+def test_an_arbitrary_stored_weight_on_an_unused_direction_is_not_history():
+    """Codex P2 on #940, reproduced before fixing and pinned here end to end.
+
+    The starved pair represents the same state whether the unused third
+    direction's *stored* weight is 1.0 or 1e-8 -- the direction carries no
+    amplitude, so that number is arbitrary.  Measured before the first-sweep
+    exemption: tail 1.0 converged in 52 sweeps, tail 1e-8 was refused with
+    **zero** completed iterations.  Success depended on the caller's arbitrary
+    number, on a valid public input.
+
+    The stored weights are exactly the drifted numbers this module exists to
+    discard, so "was collapsing" is never judged against them: the underflow
+    check applies only between the solve's own iterates.
+    """
+    import _ipeps_gauge_helpers as h
+
+    from tenax.algorithms.ipeps_bp_gauge import bp_gauge_checkerboard
+    from tenax.core._tensor_utils import scale_bond_axis
+
+    D = 3
+    A, B = h._dense_pair(D=D)
+    dead = jnp.asarray([1.0] * (D - 1) + [0.0])
+    for leg in ("u", "d", "l", "r"):
+        A, B = scale_bond_axis(A, leg, dead), scale_bond_axis(B, leg, dead)
+
+    for tail in (1.0, 1e-8):
+        w = BondWeights(*(jnp.array([1.0, 1.0, tail]) for _ in range(4)))
+        _A2, _B2, _w2, info = bp_gauge_checkerboard(A, B, w, max_iter=200, tol=1e-13)
+        assert info.converged, (
+            f"stored tail {tail}: refused after {info.iterations} sweeps "
+            f"(residual {info.residual:.2e}) -- the gate judged the caller's "
+            f"stored weight as if it were the solve's own trajectory"
+        )
+
+
 def test_the_check_is_traceable():
     """Both drivers use it, and the traced one from inside a while_loop."""
     before = _w(h_AB=jnp.array([1.0, 0.4, 1e-10]))
