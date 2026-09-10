@@ -21,6 +21,7 @@ from __future__ import annotations
 import dataclasses
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -97,16 +98,53 @@ def test_the_fast_path_does_not_touch_the_contraction(monkeypatch):
     assert d.norm() > 0.0
 
 
-def test_a_zero_overlap_from_nonzero_tensors_raises(monkeypatch):
-    """The laundering fix: abs() turned a broken contraction into a number.
+def _zero_state_disjoint_support() -> FiniteMPS:
+    """Nonzero site tensors whose contraction is exactly the zero state.
 
-    A state whose site tensors are not all zero cannot have <t|t> == 0, so this
-    is a contraction bug and must surface as one rather than as ``0.0``.
+    Site 0 lives only in bond channel 0, site 1 only in channel 1: every
+    term of the contraction crosses a zero, but both tensors have norm 1.
     """
-    f = _symmetric_mps()
-    monkeypatch.setattr(FiniteMPS, "_raw_overlap", lambda self, other: 0j)
-    with pytest.raises(ValueError, match="exactly 0"):
-        f.norm()
+    from tenax.algorithms.tdvp import _make_site_tensor
+
+    a = np.zeros((1, 2, 2))
+    a[0, 0, 0] = 1.0
+    b = np.zeros((2, 2, 1))
+    b[1, 0, 0] = 1.0
+    return FiniteMPS.from_tensors(
+        [
+            _make_site_tensor(jnp.array(a), 0, 2),
+            _make_site_tensor(jnp.array(b), 1, 2),
+        ]
+    )
+
+
+def test_a_zero_state_from_disjoint_bond_support_has_zero_norm():
+    """The premise the old guard encoded is false (#948).
+
+    ``test_a_zero_overlap_from_nonzero_tensors_raises`` asserted that nonzero
+    site tensors imply a nonzero state, and the guard it pinned raised a
+    "this is a tenax bug" ValueError on this perfectly legitimate state.
+    Zero states are reachable representations, not contraction failures, and
+    no local certificate over site norms can tell the two apart -- the #819
+    defect class is pinned by the exact-contraction oracle tests above.
+    """
+    mps = _zero_state_disjoint_support()
+    assert all(float(t.norm()) > 0.0 for t in mps.tensors)
+    assert _explicit_tensor_norm(mps) == 0.0
+    assert mps.norm() == 0.0
+
+
+def test_a_single_zero_site_among_nonzero_sites_has_zero_norm():
+    """|0>*0*|0>: one zero tensor annihilates the state; the rest are fine."""
+    from tenax.algorithms.tdvp import _make_site_tensor
+
+    arrs = [np.zeros((1, 2, 1)) for _ in range(3)]
+    arrs[0][0, 0, 0] = 1.0
+    arrs[2][0, 0, 0] = 1.0  # arrs[1] stays identically zero
+    mps = FiniteMPS.from_tensors(
+        [_make_site_tensor(jnp.array(a), i, 3) for i, a in enumerate(arrs)]
+    )
+    assert mps.norm() == 0.0
 
 
 def test_a_negative_overlap_raises(monkeypatch):
