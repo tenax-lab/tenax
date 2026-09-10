@@ -1327,3 +1327,60 @@ class TestReviewRound1949:
             f"the DMRG truncation path kept {s_np.shape[0]} of an "
             f"underflowing 3-value spectrum (#949)"
         )
+
+
+class TestReviewRound2With949BaseCharges:
+    """The canonical-allocation recheck squares the spectrum a SECOND time.
+
+    Round 2 of the #949 review: the global cutoff was rescaled by the leading
+    value, but the ``base_charges`` rank-expansion recheck still squared raw
+    values — at ~1e-200 both its total and discarded weights underflow to
+    exactly 0.0, so ``0 <= 0`` ends the expansion while the canonical prefix
+    discards 67% relative weight against a 5% budget (and keeps a junk value
+    from the required charge-0 sector instead).
+    """
+
+    def _svd_with_base_charges(self, values, scale):
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.linalg import svd
+
+        sym = U1Symmetry()
+        charges = np.array([0, 1, 1], dtype=np.int32)
+        idx_l = TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="l")
+        idx_r = TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="r")
+        M = jnp.diag(jnp.array(values) * scale)
+        T = SymmetricTensor.from_dense(M, (idx_l, idx_r))
+        _, s, _, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=3,
+            max_truncation_err=0.05,
+            base_charges=charges,
+        )
+        return np.asarray(s)
+
+    # The q0 sector holds a negligible value that base_charges forces into the
+    # canonical prefix, evicting the q1 value carrying 45% of the weight; the
+    # recheck must expand the rank to 3.  values[0] is q0; q1 holds the rest.
+    _VALUES = [1e-2, 1.0, 0.9]
+
+    @pytest.mark.parametrize("scale", [1.0, 1e-198])
+    def test_rank_expansion_survives_an_underflowing_spectrum(self, scale):
+        """Identical spectra up to scale must make identical rank decisions.
+
+        At scale 1.0 this documents the intended behaviour of the recheck (the
+        well-conditioned control); at 1e-198 the raw squares underflow and the
+        pre-fix loop broke on 0 <= 0 at rank 2.
+        """
+        s_np = self._svd_with_base_charges(self._VALUES, scale)
+        kept_rel_sq = (s_np / (scale * 1.0)) ** 2
+        all_rel_sq = (np.array(self._VALUES)) ** 2
+        discarded = np.sqrt(max(0.0, 1.0 - kept_rel_sq.sum() / all_rel_sq.sum()))
+        assert discarded <= 0.05, (
+            f"canonical prefix discarded {discarded:.3f} relative weight "
+            f"against a 0.05 budget at scale {scale} (#949 round 2)"
+        )
+        assert s_np.size == 3, f"rank {s_np.size} at scale {scale}"

@@ -530,14 +530,24 @@ def _truncated_svd_symmetric(
         # the budget. Expand up to ``max_singular_values``; if the budget
         # still cannot be met we return what we have at the cap. (PR #561
         # codex P2 review.)
-        if max_truncation_err is not None and n_total > 0:
-            total_sq = sum(p[0] ** 2 for p in all_sv_pairs)
+        if max_truncation_err is not None and n_total > 0 and all_sv_pairs[0][0] > 0:
+            # Rescale by the leading value here too: this is a SECOND squaring
+            # of the raw spectrum, independent of the global cutoff above, and
+            # at ~1e-200 scales the unscaled ``total_sq`` and ``discarded_sq``
+            # both underflow to exactly 0.0 — the loop then breaks on
+            # ``0 <= 0`` while the canonical prefix discards macroscopic
+            # relative weight (0.669 measured vs a 0.05 budget in the #949
+            # round-2 review).  The budget comparison is scale-invariant.
+            leading = all_sv_pairs[0][0]
+            total_sq = sum((p[0] / leading) ** 2 for p in all_sv_pairs)
             err_sq_budget = max_truncation_err**2 * total_sq
             cap = max_singular_values
             while n_keep < cap:
                 _, _, pair_set = _canonical_select(n_keep)
                 discarded_sq = sum(
-                    p[0] ** 2 for p in all_sv_pairs if (p[1], p[2]) not in pair_set
+                    (p[0] / leading) ** 2
+                    for p in all_sv_pairs
+                    if (p[1], p[2]) not in pair_set
                 )
                 if discarded_sq <= err_sq_budget:
                     break
