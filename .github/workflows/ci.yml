@@ -59,6 +59,11 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
+          # uv.lock is gitignored in this repo, so the action's default
+          # ``**/uv.lock`` glob would match nothing and the cache would never
+          # invalidate; key on pyproject.toml instead.
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -66,20 +71,59 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      # tenax enables JAX's persistent compile cache (~/.cache/jax, see
+      # src/tenax/__init__.py) but CI never restored it, so every run compiled
+      # cold.  Honest sizing, measured 2026-09-09: a full 56-min gate run
+      # deposits only ~15 MB / 56 entries (min_compile_time_secs=1 skips the
+      # small compiles), and a warm rerun of the single most compile-heavy
+      # gate file saved 17% (155 s vs 188 s) -- the wall on the block-sparse
+      # files is TRACING, which this cache cannot skip (#566).  So this is a
+      # ~10-15% lever, not a 2x one; the 2x levers are the --no-cov toggle
+      # below and (future) sharding.
+      #
+      # The run_id key means every run SAVES a fresh cache and the prefixed
+      # restore-key loads the most recent one -- an exact-match key would be
+      # immutable after the first save and never absorb new entries.
+      - name: Restore JAX persistent compile cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/jax
+          key: jax-xla-${{ runner.os }}-py${{ matrix.python-version }}-${{ github.run_id }}
+          restore-keys: |
+            jax-xla-${{ runner.os }}-py${{ matrix.python-version }}-
+
       - name: Run linter
         run: uv run ruff check src/ tests/
 
       - name: Run core tests
         env:
           JAX_PLATFORMS: cpu
+          # Coverage instruments every Python-level operation, and pyproject's
+          # addopts turn it on by default -- so the gate needs an explicit
+          # --no-cov in the contexts where wall-clock is the constraint.
+          # Measured 2026-09-09: +155% on unit-heavy files (test_tensor +
+          # test_symmetry + test_index: 3.3 s -> 8.5 s), +17% on the most
+          # compile-heavy file; blended, roughly 25-35% of the CI gate's
+          # 90-112 min, against a 120-min merge-queue wait limit that has
+          # already dropped one PR (#936) and grazed another (#920, 120.1).
+          # Coverage still runs on push-to-main, the nightly schedule, and
+          # manual dispatch, so Codecov keeps its main-branch trend; what is
+          # given up is per-PR patch coverage -- the accepted trade (see the
+          # PR that introduced this toggle, git blame on this line).
+          WITH_COV: ${{ contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && '1' || '0' }}
         run: |
-          uv run pytest tests/ -m "core" \
-            --cov=tenax \
-            --cov-report=xml \
-            --cov-report=term-missing \
+          if [ "$WITH_COV" = "1" ]; then
+            COV_ARGS="--cov=tenax --cov-report=xml --cov-report=term-missing"
+          else
+            COV_ARGS="--no-cov"
+          fi
+          uv run pytest tests/ -m "core" $COV_ARGS \
+            --durations=50 \
             -v
 
       - name: Upload coverage to Codecov
+        # Only the contexts that produced coverage.xml (see WITH_COV above).
+        if: contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name)
         uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -238,6 +282,10 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
+          # Same rationale as the ubuntu job: uv.lock is gitignored, so key
+          # the package cache on pyproject.toml.
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python 3.12
         run: uv python install 3.12
@@ -245,16 +293,34 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      # See the ubuntu job for sizing; keyed by runner.os because jaxlib's
+      # compiled artifacts differ per platform.
+      - name: Restore JAX persistent compile cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/jax
+          key: jax-xla-${{ runner.os }}-py3.12-${{ github.run_id }}
+          restore-keys: |
+            jax-xla-${{ runner.os }}-py3.12-
+
       - name: Run linter
         run: uv run ruff check src/ tests/
 
       - name: Run core tests
         env:
           JAX_PLATFORMS: cpu
+          # Same toggle and measurements as the ubuntu job.  This job never
+          # uploaded to Codecov, so in the coverage contexts it keeps only the
+          # terminal report it always had.
+          WITH_COV: ${{ contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && '1' || '0' }}
         run: |
-          uv run pytest tests/ -m "core" \
-            --cov=tenax \
-            --cov-report=term-missing \
+          if [ "$WITH_COV" = "1" ]; then
+            COV_ARGS="--cov=tenax --cov-report=term-missing"
+          else
+            COV_ARGS="--no-cov"
+          fi
+          uv run pytest tests/ -m "core" $COV_ARGS \
+            --durations=50 \
             -v
 
   docs:
