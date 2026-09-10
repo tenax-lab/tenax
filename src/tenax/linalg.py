@@ -1977,11 +1977,16 @@ def svd(
     s = s[:n_keep]
     Vh = Vh[:n_keep, :]
 
-    if normalize and jnp.sum(s) > 0:
-        # The sum-guard matters since #947: a zero spectrum now reaches this
-        # point instead of crashing earlier, and 0/0 would hand back NaN
-        # factors for a tensor that reconstructs exactly (#949 review).
-        s = s / jnp.sum(s)
+    if normalize:
+        # The zero-spectrum guard matters since #947 (0/0 would hand back NaN
+        # factors for a tensor that reconstructs exactly), but it must stay
+        # traceable: a Python ``if`` on ``jnp.sum(s) > 0`` raised
+        # TracerBoolConversionError under jit/vmap even for nonzero matrices
+        # (#949 round 3).  Fence the DENOMINATOR, not the quotient — a
+        # ``jnp.where`` on the result would fix the value and still send 0/0
+        # through the backward pass (the #789 lesson).
+        denom = jnp.sum(s)
+        s = s / jnp.where(denom > 0, denom, 1.0)
 
     # Reshape back and build output tensors
     left_shape = tuple(idx.dim for idx in left_indices)

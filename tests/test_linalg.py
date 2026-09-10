@@ -1384,3 +1384,45 @@ class TestReviewRound2With949BaseCharges:
             f"against a 0.05 budget at scale {scale} (#949 round 2)"
         )
         assert s_np.size == 3, f"rank {s_np.size} at scale {scale}"
+
+
+class TestReviewRound3NormalizeTraceable:
+    """The #947 zero-spectrum guard must not cost the traced path (#949 r3).
+
+    Round 1 wrote ``if normalize and jnp.sum(s) > 0:`` — a Python branch on a
+    traced scalar, which raises TracerBoolConversionError under ``jax.jit``
+    even for a nonzero matrix.  The guard now fences the denominator instead,
+    which is jit-safe and keeps the zero spectrum's factors finite.
+    """
+
+    def _svd_s(self, arr):
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import DenseTensor
+        from tenax.linalg import svd
+
+        sym = U1Symmetry()
+        idx_l = TensorIndex.from_charges(
+            sym, np.zeros(2, np.int32), FlowDirection.IN, label="l"
+        )
+        idx_r = TensorIndex.from_charges(
+            sym, np.zeros(2, np.int32), FlowDirection.OUT, label="r"
+        )
+        T = DenseTensor(arr, (idx_l, idx_r))
+        _, s, _, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="b",
+            normalize=True,
+        )
+        return s
+
+    def test_normalize_survives_jit(self):
+        s = jax.jit(self._svd_s)(jnp.eye(2))
+        np.testing.assert_allclose(np.asarray(s), [0.5, 0.5], atol=1e-12)
+
+    def test_zero_spectrum_still_finite_under_jit(self):
+        s = jax.jit(self._svd_s)(jnp.zeros((2, 2)))
+        assert np.all(np.isfinite(np.asarray(s)))
+        np.testing.assert_allclose(np.asarray(s), 0.0, atol=1e-15)
