@@ -413,6 +413,27 @@ def _resolve_line_search_method(config: iPEPSConfig, ctm_cfg: CTMConfig) -> str:
     return method
 
 
+def _euclidean_grads(grads):
+    """Convert a JAX cotangent tree to Euclidean (descent) gradients.
+
+    For a real objective of complex parameters, JAX's cotangent pairs
+    UNCONJUGATED: ``df = Re sum(g * dz)``.  The steepest-descent direction —
+    and the vector every Euclidean consumer here expects (Optax updates,
+    ``_tree_dot`` slopes, CG beta, L-BFGS curvature pairs, the metric
+    preconditioner) — is therefore ``-conj(g)``, not ``-g``.  Feeding the
+    raw cotangent to Optax made the update *ascend* along the imaginary
+    coordinates and made the result depend on the global phase of the
+    initial tensor (#957).  ``conj`` is the identity on real leaves, so the
+    default real-tensor paths are bit-for-bit unchanged.
+
+    Must be applied at every gradient production site (the main-loop
+    ``value_and_grad`` of each dispatcher and the trial gradients inside
+    the Hager-Zhang ``dphi`` callbacks) so that every gradient object in
+    circulation carries one convention.
+    """
+    return jax.tree.map(jnp.conj, grads)
+
+
 def _tree_dot(a, b) -> float:
     """Compute real dot product between two pytrees of arrays.
 
@@ -951,6 +972,7 @@ def _optimize_gs_ad_tensor_reference_c4v(
                 )
             continue
         grads = jnp.where(jnp.isfinite(grads), grads, 0.0)
+        grads = _euclidean_grads(grads)
         E = float(energy_val)
 
         # Score / convergence-check on the *pre-step* params.  ``energy_val``
@@ -1690,6 +1712,7 @@ def _optimize_gs_ad_tensor(
             _step_t0 = _time.perf_counter()
         try:
             energy_val, grads = jax.value_and_grad(loss_fn)(params)
+            grads = _euclidean_grads(grads)
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -2115,7 +2138,7 @@ def _optimize_gs_ad_tensor(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
                     _, g = jax.value_and_grad(loss_fn)(trial)
-                    return _tree_dot(g, direction)
+                    return _tree_dot(_euclidean_grads(g), direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                 param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -3246,6 +3269,7 @@ def _optimize_gs_ad_tensor_2site(
                 _step_t0 = _time.perf_counter()
             try:
                 energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                grads = _euclidean_grads(grads)
             except CTMRGGradientError as exc:
                 _logger.warning(
                     "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -3755,7 +3779,7 @@ def _optimize_gs_ad_tensor_2site(
                             _tree_add(params, _tree_scale(direction, alpha))
                         )
                         _, g = jax.value_and_grad(loss_fn)(trial)
-                        return _tree_dot(g, direction)
+                        return _tree_dot(_euclidean_grads(g), direction)
 
                     dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                     param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -4468,6 +4492,7 @@ def _optimize_gs_ad_multisite(
             _step_t0 = _time.perf_counter()
         try:
             energy_val, grads = jax.value_and_grad(loss_fn)(params)
+            grads = _euclidean_grads(grads)
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -4831,7 +4856,7 @@ def _optimize_gs_ad_multisite(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
                     _, g = jax.value_and_grad(loss_fn)(trial)
-                    return _tree_dot(g, direction)
+                    return _tree_dot(_euclidean_grads(g), direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                 param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))

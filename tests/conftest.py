@@ -342,6 +342,12 @@ _FILE_MARKERS = {
     # convergences (one symmetric, one dense) plus one RDM -- core budget; the
     # chi-scan that needs chi=16 carries its own ``@pytest.mark.slow``.
     "test_ctm_charged_sectors_905.py": "core",
+    # #957: complex cotangents fed unconjugated to Optax — the optimizer
+    # ASCENDED on complex tensors and the result depended on the initial
+    # tensor's global phase.  Silent-wrong-answer class, so it belongs in the
+    # gate; the fixture is an exact D=chi=1 product state, ~15s for all nine
+    # cases with in-process compile sharing.
+    "test_ipeps_optimize_complex_grads_957.py": "core",
     "test_ctm_chi_truncation_policy_922.py": "core",
     "test_ctm_traced_chi_inventory_929.py": "core",
     "test_integration_regression.py": "algorithm",
