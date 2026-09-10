@@ -438,16 +438,34 @@ def _truncated_svd_symmetric(
     n_keep = n_total
 
     if max_truncation_err is not None and n_total > 0:
-        total_sq = sum(x[0] ** 2 for x in all_sv_pairs)
-        if total_sq > 0:
+        leading = all_sv_pairs[0][0]
+        if leading > 0:
+            # Rescale by the leading value before squaring.  The kept/discarded
+            # ratio is scale-invariant, and squaring an unscaled spectrum
+            # halves the exponent range: float64 values around 1e-200 square
+            # to exactly 0.0, and an unscaled ``total_sq == 0`` would misread
+            # a small-but-nonzero spectrum as a zero tensor and truncate it
+            # to rank 1 (#949 review).
+            scaled = [x[0] / leading for x in all_sv_pairs]
+            total_sq = sum(v * v for v in scaled)
             trunc_sq = 0.0
             for i in range(n_total - 1, 0, -1):
-                trunc_sq += all_sv_pairs[i][0] ** 2
+                trunc_sq += scaled[i] * scaled[i]
                 if trunc_sq / total_sq > max_truncation_err**2:
                     n_keep = i + 1
                     break
             else:
-                n_keep = n_total
+                # The loop never reaches index 0, so exhausting it means
+                # every value behind the leading one fits inside the error
+                # budget -- keep only the leading value.  This used to reset
+                # to ``n_total``, silently retaining negligible/zero sectors
+                # that dense SVD at the same tolerance discards (#946).
+                n_keep = 1
+        else:
+            # Identically zero spectrum: any rank satisfies the budget, so
+            # keep the minimum the API guarantees, matching the dense path's
+            # zero-tensor policy (#946/#947).
+            n_keep = 1
 
     if max_singular_values is not None:
         n_keep = min(n_keep, max_singular_values)
@@ -512,14 +530,24 @@ def _truncated_svd_symmetric(
         # the budget. Expand up to ``max_singular_values``; if the budget
         # still cannot be met we return what we have at the cap. (PR #561
         # codex P2 review.)
-        if max_truncation_err is not None and n_total > 0:
-            total_sq = sum(p[0] ** 2 for p in all_sv_pairs)
+        if max_truncation_err is not None and n_total > 0 and all_sv_pairs[0][0] > 0:
+            # Rescale by the leading value here too: this is a SECOND squaring
+            # of the raw spectrum, independent of the global cutoff above, and
+            # at ~1e-200 scales the unscaled ``total_sq`` and ``discarded_sq``
+            # both underflow to exactly 0.0 — the loop then breaks on
+            # ``0 <= 0`` while the canonical prefix discards macroscopic
+            # relative weight (0.669 measured vs a 0.05 budget in the #949
+            # round-2 review).  The budget comparison is scale-invariant.
+            leading = all_sv_pairs[0][0]
+            total_sq = sum((p[0] / leading) ** 2 for p in all_sv_pairs)
             err_sq_budget = max_truncation_err**2 * total_sq
             cap = max_singular_values
             while n_keep < cap:
                 _, _, pair_set = _canonical_select(n_keep)
                 discarded_sq = sum(
-                    p[0] ** 2 for p in all_sv_pairs if (p[1], p[2]) not in pair_set
+                    (p[0] / leading) ** 2
+                    for p in all_sv_pairs
+                    if (p[1], p[2]) not in pair_set
                 )
                 if discarded_sq <= err_sq_budget:
                     break
@@ -1078,16 +1106,34 @@ def _truncated_svd_symmetric_np(
     n_keep = n_total
 
     if max_truncation_err is not None and n_total > 0:
-        total_sq = sum(x[0] ** 2 for x in all_sv_pairs)
-        if total_sq > 0:
+        leading = all_sv_pairs[0][0]
+        if leading > 0:
+            # Rescale by the leading value before squaring.  The kept/discarded
+            # ratio is scale-invariant, and squaring an unscaled spectrum
+            # halves the exponent range: float64 values around 1e-200 square
+            # to exactly 0.0, and an unscaled ``total_sq == 0`` would misread
+            # a small-but-nonzero spectrum as a zero tensor and truncate it
+            # to rank 1 (#949 review).
+            scaled = [x[0] / leading for x in all_sv_pairs]
+            total_sq = sum(v * v for v in scaled)
             trunc_sq = 0.0
             for i in range(n_total - 1, 0, -1):
-                trunc_sq += all_sv_pairs[i][0] ** 2
+                trunc_sq += scaled[i] * scaled[i]
                 if trunc_sq / total_sq > max_truncation_err**2:
                     n_keep = i + 1
                     break
             else:
-                n_keep = n_total
+                # The loop never reaches index 0, so exhausting it means
+                # every value behind the leading one fits inside the error
+                # budget -- keep only the leading value.  This used to reset
+                # to ``n_total``, silently retaining negligible/zero sectors
+                # that dense SVD at the same tolerance discards (#946).
+                n_keep = 1
+        else:
+            # Identically zero spectrum: any rank satisfies the budget, so
+            # keep the minimum the API guarantees, matching the dense path's
+            # zero-tensor policy (#946/#947).
+            n_keep = 1
 
     if max_singular_values is not None:
         n_keep = min(n_keep, max_singular_values)
@@ -1892,15 +1938,34 @@ def svd(
 
         if max_truncation_err is not None:
             # Keep singular values until truncation error <= max_truncation_err
-            total_sq = float(np.sum(s_np**2))
-            trunc_sq = 0.0
-            for i in range(len(s_np) - 1, -1, -1):
-                trunc_sq += float(s_np[i] ** 2)
-                if trunc_sq / total_sq > max_truncation_err**2:
-                    n_keep = i + 1
-                    break
+            leading = float(s_np[0]) if len(s_np) else 0.0
+            if leading > 0.0:
+                # Rescaled by the leading value, like the symmetric paths:
+                # the ratio is scale-invariant, and squaring an unscaled
+                # spectrum halves the exponent range, so ~1e-200 values would
+                # underflow to ``total_sq == 0`` and be misread as a zero
+                # tensor (#949 review).
+                scaled = s_np / leading
+                total_sq = float(np.sum(scaled**2))
+                trunc_sq = 0.0
+                for i in range(len(s_np) - 1, -1, -1):
+                    trunc_sq += float(scaled[i] ** 2)
+                    if trunc_sq / total_sq > max_truncation_err**2:
+                        n_keep = i + 1
+                        break
+                else:
+                    # This loop DOES reach index 0, so it only exhausts when
+                    # the whole spectrum fits the budget (err >= 1).  Keep
+                    # the minimum rank, matching the symmetric paths' policy
+                    # -- this used to keep everything (#949 review).
+                    n_keep = 1
             else:
-                n_keep = len(s_np)
+                # Identically zero spectrum: dividing by ``total_sq`` raised
+                # ZeroDivisionError, so a zero tensor could be decomposed
+                # without a tolerance but crashed with one (#947).  Any rank
+                # reconstructs a zero tensor exactly; keep the minimum the
+                # API guarantees.
+                n_keep = 1
 
         if max_singular_values is not None:
             n_keep = min(n_keep, max_singular_values)
@@ -1913,7 +1978,15 @@ def svd(
     Vh = Vh[:n_keep, :]
 
     if normalize:
-        s = s / jnp.sum(s)
+        # The zero-spectrum guard matters since #947 (0/0 would hand back NaN
+        # factors for a tensor that reconstructs exactly), but it must stay
+        # traceable: a Python ``if`` on ``jnp.sum(s) > 0`` raised
+        # TracerBoolConversionError under jit/vmap even for nonzero matrices
+        # (#949 round 3).  Fence the DENOMINATOR, not the quotient — a
+        # ``jnp.where`` on the result would fix the value and still send 0/0
+        # through the backward pass (the #789 lesson).
+        denom = jnp.sum(s)
+        s = s / jnp.where(denom > 0, denom, 1.0)
 
     # Reshape back and build output tensors
     left_shape = tuple(idx.dim for idx in left_indices)

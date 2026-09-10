@@ -1130,3 +1130,299 @@ def test_traced_svd_honors_permuted_label_split(u1_sym_tensor_3leg_mult2):
 
     # jit forces the blocks to be tracers -> _truncated_svd_symmetric_traced.
     np.testing.assert_allclose(float(jax.jit(loss)(x0)), expected, rtol=1e-10)
+
+
+# ------------------------------------------------------------------ #
+# #946 / #947: truncation with an exhausted or empty error budget     #
+# ------------------------------------------------------------------ #
+
+
+def _diag_pair_946(values):
+    """A diagonal matrix as (DenseTensor, SymmetricTensor) with U(1) charges.
+
+    Charges [0, 1, 2] put each diagonal entry in its own 1x1 block, so the
+    symmetric merged spectrum is exactly ``values`` -- the shape of #946.
+    """
+    sym = U1Symmetry()
+    charges = np.array([0, 1, 2], dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, charges, IN, label="a"),
+        TensorIndex.from_charges(sym, charges, OUT, label="b"),
+    )
+    data = jnp.diag(jnp.array(values))
+    return DenseTensor(data, indices), SymmetricTensor.from_dense(data, indices)
+
+
+class TestExhaustedTruncationBudget946:
+    """When every trailing value fits the budget, keep ONE value, not all.
+
+    The symmetric truncation loop walks indices n-1..1 and never reaches the
+    leading value; exhausting it means everything behind index 0 fits inside
+    ``max_truncation_err``.  The ``else`` branch used to reset ``n_keep`` to
+    ``n_total``, so exactly the spectra that deserve the *hardest* truncation
+    (rank-one and nearly rank-one) kept full rank, inconsistent with the dense
+    path at the same tolerance (#946).  The NumPy copy feeds DMRG/iDMRG bond
+    truncation, where the kept junk sectors inflate the bond for the rest of
+    the sweep.
+    """
+
+    @pytest.mark.parametrize(
+        "values",
+        [[1.0, 0.0, 0.0], [1.0, 1e-8, 1e-9]],
+        ids=["exact-rank-one", "nearly-rank-one"],
+    )
+    def test_symmetric_matches_dense_rank(self, values):
+        dense_t, sym_t = _diag_pair_946(values)
+        _, s_dense, _, _ = svd(dense_t, ["a"], ["b"], max_truncation_err=1e-6)
+        _, s_sym, _, _ = svd(sym_t, ["a"], ["b"], max_truncation_err=1e-6)
+        assert s_dense.shape[0] == 1, "dense reference regressed"
+        assert s_sym.shape[0] == 1, (
+            f"symmetric SVD kept {s_sym.shape[0]} values where the budget "
+            f"needs 1 (#946): {np.asarray(s_sym)}"
+        )
+        np.testing.assert_allclose(np.asarray(s_sym), [1.0], rtol=1e-12)
+
+    @pytest.mark.parametrize(
+        "values",
+        [[1.0, 0.0, 0.0], [1.0, 1e-8, 1e-9]],
+        ids=["exact-rank-one", "nearly-rank-one"],
+    )
+    def test_truncated_reconstruction_meets_the_budget(self, values):
+        _, sym_t = _diag_pair_946(values)
+        U, s, Vh, _ = svd(sym_t, ["a"], ["b"], max_truncation_err=1e-6)
+        from tenax.algorithms._tensor_utils import scale_bond_axis
+        from tenax.contraction.contractor import contract as _contract
+
+        recon = _contract(scale_bond_axis(U, "bond", s), Vh).todense()
+        err = float(jnp.linalg.norm(recon - jnp.diag(jnp.array(values))))
+        assert err <= 1e-6, f"truncation error {err} exceeds the budget"
+
+    def test_numpy_symmetric_agrees_with_jax(self):
+        from tenax.linalg import (
+            _truncated_svd_symmetric,
+            _truncated_svd_symmetric_np,
+        )
+
+        _, sym_t = _diag_pair_946([1.0, 1e-8, 1e-9])
+        _, s_jax, _, _ = _truncated_svd_symmetric(
+            sym_t, ["a"], ["b"], None, 1e-6, "bond", False
+        )
+        _, s_np, _, _ = _truncated_svd_symmetric_np(
+            sym_t, ["a"], ["b"], None, 1e-6, "bond", False
+        )
+        assert np.asarray(s_jax).shape[0] == 1
+        assert s_np.shape[0] == 1, (
+            f"NumPy symmetric SVD (the DMRG/iDMRG truncation path) kept "
+            f"{s_np.shape[0]} values where the budget needs 1 (#946)"
+        )
+
+    def test_a_budget_that_cannot_absorb_the_tail_still_keeps_it(self):
+        """Anti-overreach: a tail too heavy for the budget must survive."""
+        dense_t, sym_t = _diag_pair_946([1.0, 0.5, 0.4])
+        for t in (dense_t, sym_t):
+            _, s, _, _ = svd(t, ["a"], ["b"], max_truncation_err=1e-6)
+            assert s.shape[0] == 3, f"{type(t).__name__} over-truncated"
+
+
+class TestZeroTensorTruncation947:
+    """A zero tensor with a truncation tolerance must decompose, not crash.
+
+    The dense path divided by ``total_sq`` unguarded, so the same zero tensor
+    decomposed fine without ``max_truncation_err`` and raised
+    ZeroDivisionError with it (#947).
+    """
+
+    def _zero_pair(self):
+        sym = U1Symmetry()
+        charges = np.zeros(3, dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(sym, charges, IN, label="a"),
+            TensorIndex.from_charges(sym, charges, OUT, label="b"),
+        )
+        data = jnp.zeros((3, 3))
+        return DenseTensor(data, indices), SymmetricTensor.from_dense(data, indices)
+
+    @pytest.mark.parametrize("cap", [None, 2], ids=["no-cap", "hard-cap"])
+    def test_dense_zero_tensor_decomposes(self, cap):
+        dense_t, _ = self._zero_pair()
+        U, s, Vh, _ = svd(
+            dense_t, ["a"], ["b"], max_truncation_err=1e-6, max_singular_values=cap
+        )
+        assert s.shape[0] == 1, "zero spectrum should keep the minimum rank"
+        assert bool(jnp.all(jnp.isfinite(U.todense())))
+        assert bool(jnp.all(jnp.isfinite(Vh.todense())))
+        recon = U.todense().reshape(3, -1) @ jnp.diag(s) @ Vh.todense().reshape(-1, 3)
+        np.testing.assert_array_equal(np.asarray(recon), np.zeros((3, 3)))
+
+    def test_symmetric_zero_tensor_matches_the_dense_policy(self):
+        _, sym_t = self._zero_pair()
+        _, s, _, _ = svd(sym_t, ["a"], ["b"], max_truncation_err=1e-6)
+        assert s.shape[0] == 1, (
+            f"symmetric zero spectrum kept {s.shape[0]} values; the dense "
+            "policy keeps the minimum rank (#946/#947)"
+        )
+
+
+class TestReviewRound1949:
+    """The three #949 review findings, each pinned.
+
+    All three are consequences of the same review insight: the #946/#947 fix
+    keyed "is this a zero spectrum" off ``total_sq``, but squaring halves the
+    exponent range, so the sum of squares is the wrong observable -- the
+    leading singular value is the right one.
+    """
+
+    @pytest.mark.parametrize("scale", [1.0, 1e-200], ids=["unit", "underflow"])
+    def test_a_tiny_but_nonzero_tail_survives_the_budget(self, scale):
+        """diag(s, s/2, s/2.5) at s=1e-200: s^2 underflows to 0.0, and the
+        total_sq==0 branch then truncated a spectrum carrying 38% of its
+        weight outside the leading value to rank 1."""
+        values = [scale, scale / 2.0, scale / 2.5]
+        dense_t, sym_t = _diag_pair_946(values)
+        for t in (dense_t, sym_t):
+            _, s, _, _ = svd(t, ["a"], ["b"], max_truncation_err=1e-6)
+            assert s.shape[0] == 3, (
+                f"{type(t).__name__} at scale {scale}: kept {s.shape[0]} of a "
+                f"3-value spectrum whose tail exceeds the budget (#949)"
+            )
+
+    def test_an_underflowing_rank_one_spectrum_still_truncates(self):
+        """The counterpart: rescaling must not stop rank-one detection."""
+        _, sym_t = _diag_pair_946([1e-200, 1e-210, 1e-220])
+        _, s, _, _ = svd(sym_t, ["a"], ["b"], max_truncation_err=1e-6)
+        assert s.shape[0] == 1
+
+    def test_a_budget_of_one_or_more_keeps_minimum_rank_on_dense(self):
+        """err >= 1 means the whole spectrum fits the budget.  The dense
+        exhausted-loop fallback kept everything, inconsistent with the
+        symmetric paths' new fallback."""
+        dense_t, sym_t = _diag_pair_946([1.0, 0.5, 0.4])
+        for t in (dense_t, sym_t):
+            _, s, _, _ = svd(t, ["a"], ["b"], max_truncation_err=1.0)
+            assert s.shape[0] == 1, f"{type(t).__name__} kept {s.shape[0]}"
+
+    def test_normalize_on_a_zero_spectrum_returns_finite_factors(self):
+        """normalize=True divided a zero spectrum by its zero sum: the
+        ZeroDivisionError removed by #947 resurfaced as NaN factors."""
+        sym = U1Symmetry()
+        charges = np.zeros(3, dtype=np.int32)
+        indices = (
+            TensorIndex.from_charges(sym, charges, IN, label="a"),
+            TensorIndex.from_charges(sym, charges, OUT, label="b"),
+        )
+        t = DenseTensor(jnp.zeros((3, 3)), indices)
+        U, s, Vh, _ = svd(t, ["a"], ["b"], max_truncation_err=1e-6, normalize=True)
+        assert bool(jnp.all(jnp.isfinite(s))), f"NaN in s: {np.asarray(s)}"
+        assert bool(jnp.all(jnp.isfinite(U.todense())))
+        assert bool(jnp.all(jnp.isfinite(Vh.todense())))
+
+    def test_numpy_symmetric_survives_underflow_too(self):
+        from tenax.linalg import _truncated_svd_symmetric_np
+
+        _, sym_t = _diag_pair_946([1e-200, 5e-201, 4e-201])
+        _, s_np, _, _ = _truncated_svd_symmetric_np(
+            sym_t, ["a"], ["b"], None, 1e-6, "bond", False
+        )
+        assert s_np.shape[0] == 3, (
+            f"the DMRG truncation path kept {s_np.shape[0]} of an "
+            f"underflowing 3-value spectrum (#949)"
+        )
+
+
+class TestReviewRound2With949BaseCharges:
+    """The canonical-allocation recheck squares the spectrum a SECOND time.
+
+    Round 2 of the #949 review: the global cutoff was rescaled by the leading
+    value, but the ``base_charges`` rank-expansion recheck still squared raw
+    values — at ~1e-200 both its total and discarded weights underflow to
+    exactly 0.0, so ``0 <= 0`` ends the expansion while the canonical prefix
+    discards 67% relative weight against a 5% budget (and keeps a junk value
+    from the required charge-0 sector instead).
+    """
+
+    def _svd_with_base_charges(self, values, scale):
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.linalg import svd
+
+        sym = U1Symmetry()
+        charges = np.array([0, 1, 1], dtype=np.int32)
+        idx_l = TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="l")
+        idx_r = TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="r")
+        M = jnp.diag(jnp.array(values) * scale)
+        T = SymmetricTensor.from_dense(M, (idx_l, idx_r))
+        _, s, _, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="bond",
+            max_singular_values=3,
+            max_truncation_err=0.05,
+            base_charges=charges,
+        )
+        return np.asarray(s)
+
+    # The q0 sector holds a negligible value that base_charges forces into the
+    # canonical prefix, evicting the q1 value carrying 45% of the weight; the
+    # recheck must expand the rank to 3.  values[0] is q0; q1 holds the rest.
+    _VALUES = [1e-2, 1.0, 0.9]
+
+    @pytest.mark.parametrize("scale", [1.0, 1e-198])
+    def test_rank_expansion_survives_an_underflowing_spectrum(self, scale):
+        """Identical spectra up to scale must make identical rank decisions.
+
+        At scale 1.0 this documents the intended behaviour of the recheck (the
+        well-conditioned control); at 1e-198 the raw squares underflow and the
+        pre-fix loop broke on 0 <= 0 at rank 2.
+        """
+        s_np = self._svd_with_base_charges(self._VALUES, scale)
+        kept_rel_sq = (s_np / (scale * 1.0)) ** 2
+        all_rel_sq = (np.array(self._VALUES)) ** 2
+        discarded = np.sqrt(max(0.0, 1.0 - kept_rel_sq.sum() / all_rel_sq.sum()))
+        assert discarded <= 0.05, (
+            f"canonical prefix discarded {discarded:.3f} relative weight "
+            f"against a 0.05 budget at scale {scale} (#949 round 2)"
+        )
+        assert s_np.size == 3, f"rank {s_np.size} at scale {scale}"
+
+
+class TestReviewRound3NormalizeTraceable:
+    """The #947 zero-spectrum guard must not cost the traced path (#949 r3).
+
+    Round 1 wrote ``if normalize and jnp.sum(s) > 0:`` — a Python branch on a
+    traced scalar, which raises TracerBoolConversionError under ``jax.jit``
+    even for a nonzero matrix.  The guard now fences the denominator instead,
+    which is jit-safe and keeps the zero spectrum's factors finite.
+    """
+
+    def _svd_s(self, arr):
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import DenseTensor
+        from tenax.linalg import svd
+
+        sym = U1Symmetry()
+        idx_l = TensorIndex.from_charges(
+            sym, np.zeros(2, np.int32), FlowDirection.IN, label="l"
+        )
+        idx_r = TensorIndex.from_charges(
+            sym, np.zeros(2, np.int32), FlowDirection.OUT, label="r"
+        )
+        T = DenseTensor(arr, (idx_l, idx_r))
+        _, s, _, _ = svd(
+            T,
+            left_labels=["l"],
+            right_labels=["r"],
+            new_bond_label="b",
+            normalize=True,
+        )
+        return s
+
+    def test_normalize_survives_jit(self):
+        s = jax.jit(self._svd_s)(jnp.eye(2))
+        np.testing.assert_allclose(np.asarray(s), [0.5, 0.5], atol=1e-12)
+
+    def test_zero_spectrum_still_finite_under_jit(self):
+        s = jax.jit(self._svd_s)(jnp.zeros((2, 2)))
+        assert np.all(np.isfinite(np.asarray(s)))
+        np.testing.assert_allclose(np.asarray(s), 0.0, atol=1e-15)
