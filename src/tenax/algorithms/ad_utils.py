@@ -1322,6 +1322,7 @@ def ctm_split_tensor_converge_explicit(
     num_steps: int | None = None,
     warmup_steps: int = 0,
     recipe: str = "2x2",
+    _recipe_warning_emitted: bool = False,
 ):
     """Split-CTM with explicit (unrolled) autodiff.
 
@@ -1345,10 +1346,22 @@ def ctm_split_tensor_converge_explicit(
     Returns:
         Converged SplitCTMTensorEnv.
     """
-    from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+    from tenax.algorithms._ctm_tensor_convergence import (
+        SINGLE_SITE_NEIGHBORS,
+        _warn_recipe_1x1_deprecated,
+    )
     from tenax.algorithms._split_ctm_tensor_convergence import (
         _split_ctm_sweep_multisite,
     )
+
+    # #911: once per convergence call, at the boundary the caller reaches.
+    # ``_recipe_warning_emitted`` is private, for the one internal caller
+    # that already warned with a stacklevel pointing at the user's line:
+    # ``ctm_energy_split_explicit`` warns and then delegates here, so
+    # without it one operation emitted two full deprecations, the second
+    # attributed to the internal delegation (#921 review r4).
+    if recipe == "1x1" and not _recipe_warning_emitted:
+        _warn_recipe_1x1_deprecated("ctm_split_tensor_converge_explicit")
     from tenax.algorithms._split_ctm_tensor_init import (
         initialize_split_ctm_tensor_env,
     )
