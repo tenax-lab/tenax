@@ -661,6 +661,10 @@ class iPEPSConfig:
     )
     # CTM recipe for the GS-AD path: "2x2" (Fishman, default) or "1x1"
     # (1-site moves that enable projector_method, incl. reduced-corner "qr").
+    # "1x1" is DEPRECATED (#911): it reaches no fixed point in any reachable
+    # configuration, so the projector_method it unlocks is only reachable on a
+    # non-converging recipe.  For "qr"/"eigh" on a C4v state use
+    # ctm_tensor_c4v, which runs all three methods at full rank.
     gs_recipe: str = "2x2"
     # CTM convergence tolerance schedule: list of (step_fraction, conv_tol) pairs.
     # Ramps conv_tol from loose (early) to tight (late) during AD optimization.
@@ -868,6 +872,20 @@ class iPEPSConfig:
                 "recoveries, causing premature exit. "
                 "Set gs_conv_criterion='grad_norm' to opt in now, or 'both' "
                 "for the most conservative criterion.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if self.gs_recipe == "1x1":
+            # Raised at config construction, not per gradient step: every AD and
+            # optimizer path threads ``gs_recipe`` down to a CTM entry point, so
+            # warning there would fire once per L-BFGS iteration.  The CTM
+            # entry points warn too, for callers who never build a config.
+            from tenax.algorithms._ctm_tensor_convergence import (
+                _RECIPE_1X1_DEPRECATION,
+            )
+
+            warnings.warn(
+                f"gs_recipe='1x1': {_RECIPE_1X1_DEPRECATION}",
                 DeprecationWarning,
                 stacklevel=2,
             )

@@ -650,10 +650,17 @@ def _tdvp_step_2site(
         arr = _site_to_3d(mps.get_tensor(i))
         tensors_3d.append(arr)
 
+    # exp(dt_factor * H) is the evolution operator.  This dispatch must match
+    # _tdvp_step_1site's: "complex" is a complex-valued *timestep* for
+    # exp(-i dt H), not imaginary-time evolution.  The old two-way branch sent
+    # "complex" to -dt, so a purely real complex timestep silently performed
+    # exp(-dt H) (#943).
     if config.time_type == "real":
         dt_factor = -1j * config.dt
-    else:
+    elif config.time_type == "imaginary":
         dt_factor = -config.dt
+    else:  # "complex"
+        dt_factor = -1j * config.dt
     dt_half = dt_factor / 2.0
 
     # Right-canonicalize
@@ -737,6 +744,32 @@ def _tdvp_step_2site(
         site_i = _make_site_tensor(tensors_3d[i], i, L)
         L_envs[i + 1] = _update_left_env(l_env, site_i, mpo_tensors[i])
 
+        # Backward-evolve the one-site centre by -dt_half, except after the
+        # sweep's last bond.  The projector splitting requires it: each bond's
+        # forward step re-evolves the centre the previous bond just evolved,
+        # and the backward step is what cancels that overlap.  Without it a
+        # single local term acted (L-1) times per full step -- a product state
+        # under one Sz evolved for 2*dt on three sites (#942).
+        if i < L - 2:
+            centre_shape = tensors_3d[i + 1].shape
+            l_env_c = L_envs[i + 1]
+            assert l_env_c is not None
+            C_L = l_env_c.todense()
+            C_R = r_env.todense()  # same R_envs[i + 2] the 2-site block used
+            C_W = mpo_tensors[i + 1].todense()
+
+            def centre_mv(v, _s=centre_shape, _L=C_L, _W=C_W, _R=C_R):
+                return _matvec_1site_jit(v, _s, _L, _W, _R)
+
+            back_flat = krylov_expm(
+                centre_mv,
+                tensors_3d[i + 1].ravel(),
+                -dt_half,
+                config.krylov_dim,
+                config.krylov_tol,
+            )
+            tensors_3d[i + 1] = back_flat.reshape(centre_shape)
+
     # ---- Right-to-left sweep ----
     R_envs_new: list[Tensor | None] = [None] * (L + 1)
     last_mpo = mpo_tensors[L - 1].todense()
@@ -808,6 +841,32 @@ def _tdvp_step_2site(
         # Update right environment
         site_j = _make_site_tensor(tensors_3d[i + 1], i + 1, L)
         R_envs_new[i + 1] = _update_right_env(r_env, site_j, mpo_tensors[i + 1])
+
+        # Mirror of the left-to-right sweep's backward step (#942): the
+        # centre now sits at site i; undo its double-counted dt_half before
+        # the next bond re-evolves it, except at the sweep's last bond
+        # (i == 0), where the centre is the finished orthogonality centre.
+        if i > 0:
+            centre_shape = tensors_3d[i].shape
+            r_env_c = R_envs_new[i + 1]
+            assert r_env_c is not None
+            l_env_c = L_envs[i]
+            assert l_env_c is not None
+            C_L = l_env_c.todense()
+            C_R = r_env_c.todense()
+            C_W = mpo_tensors[i].todense()
+
+            def centre_mv_r(v, _s=centre_shape, _L=C_L, _W=C_W, _R=C_R):
+                return _matvec_1site_jit(v, _s, _L, _W, _R)
+
+            back_flat = krylov_expm(
+                centre_mv_r,
+                tensors_3d[i].ravel(),
+                -dt_half,
+                config.krylov_dim,
+                config.krylov_tol,
+            )
+            tensors_3d[i] = back_flat.reshape(centre_shape)
 
     # Normalize for imaginary time
     if config.time_type == "imaginary":

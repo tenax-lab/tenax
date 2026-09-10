@@ -29,6 +29,7 @@ _FILE_MARKERS = {
     "test_hotrg.py": "algorithm",
     "test_ipeps.py": "algorithm",
     "test_ipeps_bp_gauge.py": "algorithm",
+    "test_bp_gauge_rank_collapse.py": "core",
     "test_ipeps_gauge.py": "algorithm",
     # #882 Tasks 7 and 7b: the dense ``gauge_fix`` is one traced call -- a
     # ``lax.while_loop`` solve with ``absorb_weights`` compiled around it --
@@ -100,12 +101,24 @@ _FILE_MARKERS = {
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
-    # ``ctm_tensor(return_info=True)``: the only way a caller can find out
+    # ``ctm_tensor(return_meta=True)``: the only way a caller can find out
     # whether the environment it is about to read an energy from is a fixed
     # point.  Same defect class as the two files above -- a silent wrong answer
     # on the default path -- so it belongs in the required gate for the same
-    # reason.  Shares one D=2 chi=8 module fixture across every case (~50s).
+    # reason.  Shares one D=2 chi=8 module fixture across every case (~9s).
     "test_ctm_tensor_return_info.py": "core",
+    # The #911 ``recipe="1x1"`` deprecation contract.  ``core`` rather than the
+    # ``_UNBUCKETED_LEGACY`` set the older deprecation files sit in: a warning
+    # that silently stops firing is indistinguishable from one nobody hit, and
+    # the suite-wide ``ignore:`` filter in pyproject means nothing else would
+    # notice.  No CTM convergence anywhere -- ``max_iter=2`` on a random D=2
+    # site, since the warning does not depend on physics (~4.5s).
+    "test_recipe_1x1_deprecation.py": "core",
+    # The #911 coverage rule: every public function taking ``recipe`` warns or
+    # is explicitly exempt.  Pure AST over ``src/tenax``, no JAX, ~1s -- and it
+    # is the guard that three review rounds of hand-maintained lists could not
+    # replace, so it belongs in the required gate.
+    "test_recipe_1x1_coverage.py": "core",
     # #933: these seven carried a module-level ``pytestmark = pytest.mark.core``
     # and no registry entry, so they entered the required gate without the
     # justification every line in this table has to carry.  Three of them were
@@ -119,6 +132,11 @@ _FILE_MARKERS = {
     "test_line_search_auto.py": "core",
     "test_split_ctm_doublelayer_projector.py": "core",
     "test_split_ctm_fuse_flag.py": "core",
+    # #726: the split-CTM corner gradient.  Moved out of _UNBUCKETED_LEGACY,
+    # where it ran in no required job -- which is how a comment asserting the
+    # rank-1 corner was physics survived, and how the corner contribution to
+    # the explicit-AD gradient went untested.  D=2 chi=4, 3 sweeps (~21s).
+    "test_regularized_svd.py": "core",
     # #785: the only thing that says whether a root-implicit gradient is
     # accurate.  The contract tests run on a closed-form quartic with no CTM
     # anywhere (~0.2s), so the measurement semantics -- a wrong gradient
@@ -325,6 +343,16 @@ _FILE_MARKERS = {
     # convergences (one symmetric, one dense) plus one RDM -- core budget; the
     # chi-scan that needs chi=16 carries its own ``@pytest.mark.slow``.
     "test_ctm_charged_sectors_905.py": "core",
+    # #853's severity-attribution control, relocated out of the deleted #610
+    # prototype suite (review of #959): the only PSD-and-attainable-energy
+    # check on the plain symmetric U(1)-Sz CTM path.  One D=3 chi=12
+    # convergence at ~44 min cold -- far too expensive for the gate, and
+    # "algorithm" is currently aspirational: the fast-other bucket has hit the
+    # 6h job limit on every run since at least 2026-09-03 (#960), so nothing
+    # this deep in it executes.  Registered here so the control survives in
+    # the tree and runs the day #960 is fixed, not as a claim that it runs
+    # today.
+    "test_ctm_symmetric_rdm_positive_853.py": "algorithm",
     "test_ctm_chi_truncation_policy_922.py": "core",
     "test_ctm_traced_chi_inventory_929.py": "core",
     "test_integration_regression.py": "algorithm",
@@ -364,6 +392,7 @@ _FILE_MARKERS = {
     "test_cbe.py": "algorithm",
     "test_lattice.py": "algorithm",
     "test_linalg.py": "core",
+    "test_eigh_bond_order.py": "core",
     "test_linalg_np.py": "core",
     "test_observables.py": "algorithm",
     "test_cbe_validation.py": "algorithm",
@@ -583,11 +612,9 @@ _UNBUCKETED_LEGACY = {
     "test_pess_local_energy.py",
     "test_profiler_u1sz_arm.py",
     "test_reduced_corner_qr.py",
-    "test_regularized_svd.py",
     "test_split_ctm_chi_frozen_726.py",
     "test_split_ctm_energy_gauge.py",
     "test_sublattice_rotation.py",
-    "test_u1sz_defrag_prototype_610.py",
     "test_varipeps_compare.py",
     "test_varipeps_compare_su.py",
 }

@@ -124,14 +124,32 @@ before a single solve runs; see ``tests/test_ipeps_gauge_perf.py``, whose gate
 *asserts* that budget (it recorded a shortfall while only the solve was traced,
 and stopped once ``gauge_fix``'s own boundary went inside the jit too).
 
-``SymmetricTensor`` stays on the eager loop, because it cannot be traced today:
-``_eigh_symmetric`` derives the output bond's charges from eigenvalue
-*magnitudes* via ``np.array(...)``, and rerouting through the traceable
-symmetric SVD instead hits ``_zero_subrank_singular_values``, whose relative
-floor snaps small bond weights to exactly zero and broke the gauge by 4.9e-01
-on 2 of 8 fixtures.  Both live outside this module.  The sweep body is shared
-verbatim between the two loops, so there is one implementation of the physics
-and only the driver differs.
+``SymmetricTensor`` stays on the eager loop.  Two things stopped it being
+traced and **one of them is now gone**:
+
+1. ``_eigh_symmetric`` laid its bond out by ranking the whole spectrum, reading
+   the eigenvalues through ``np.array(...)``, which raises on a tracer.  Fixed:
+   :func:`_sqrt_pinv` never truncates, so the ranking decides nothing there, and
+   it now asks for ``eigh(..., bond_order="sector")`` -- the charge-grouped
+   layout, which needs no host read.
+2. The SVD in :func:`_gauge_bond` still does.  Putting :func:`_sweep` behind a
+   ``jax.jit`` reroutes it to the traced symmetric SVD, which emits the bond in
+   sector-block rather than descending order and applies
+   ``_zero_subrank_singular_values``' relative floor; the solve then **stops
+   being a gauge** -- measured 3.0e-01 on
+   ``test_the_whole_solve_preserves_a_state_with_nontrivial_weights[symmetric]``
+   and 4.6e-01 on the f64-walk cell, against a 1e-13 tolerance.  That is the
+   same failure the earlier attempt recorded at 4.9e-01.
+
+So the win is real but not yet available: with (1) fixed the sweep body *does*
+compile, and measured at ``D=3`` it goes from 921 ms to 0.200 ms -- one compile
+(4.6 s) paying for itself after 4.9 sweeps, with the block structure preserved
+and the charge layout stable across sweeps.  What is left is (2), and it lives
+outside this module.
+
+Both live outside this module.  The sweep body is shared verbatim between the
+two loops, so there is one implementation of the physics and only the driver
+differs.
 """
 
 from __future__ import annotations
@@ -165,6 +183,23 @@ __all__ = ["BPGaugeInfo", "BondWeights", "bp_gauge_checkerboard"]
 # leaves the ``__k`` bond dimension static, which is what makes the traced
 # carry shape-stable.  A dynamic slice here would break the while_loop.
 _PINV_CUTOFF = 1e-12
+
+#: A weight this small, relative to its bond's largest, is on its way to zero
+#: rather than describing the state.  Used only by
+#: :func:`_a_weight_underflowed`, and **bracketed by measurement on both
+#: sides** rather than chosen:
+#:
+#: * a direction the state genuinely does not use dies from a relative
+#:   ``1.0`` -- it is full-sized on the sweep before it goes, and goes in one
+#:   step (measured on the starved pair of
+#:   ``test_su_step_survives_a_bond_direction_the_state_does_not_use``);
+#: * a weight that underflows dies from ``1.1e-08`` at the very worst, and
+#:   typically ``3e-10``, after decaying geometrically for tens of sweeps.
+#:
+#: So anything from ~1e-7 to ~1e-2 separates them.  This sits two orders above
+#: every fatal observation and six below the legitimate one.
+_UNDERFLOW_EPS = 1e-6
+
 
 _BRA = "__bra"
 _K = "__k"
@@ -227,7 +262,19 @@ def _message(gamma: Tensor, site: str, out_leg: str, weights: BondWeights) -> Te
 
 def _sqrt_pinv(m: Tensor, out_leg: str) -> tuple[Tensor, Tensor]:
     """Factor a PSD message ``m = X^dag X``; return ``X`` and ``X^-1``."""
-    V, w = eigh(m, left_labels=[out_leg], right_labels=[_BRA], new_bond_label=_K)
+    # ``bond_order="sector"`` rather than the default magnitude ranking: this
+    # call never truncates, so the ranking decides nothing, and asking for it
+    # is what pinned the SymmetricTensor pair to the eager driver -- the rank
+    # is read through ``np.array`` on the eigenvalues, which raises on a tracer.
+    # ``s`` is used through ``jnp.max`` and paired with ``V`` column by column,
+    # so nothing here depends on which order the bond comes back in.
+    V, w = eigh(
+        m,
+        left_labels=[out_leg],
+        right_labels=[_BRA],
+        new_bond_label=_K,
+        bond_order="sector",
+    )
     w = jnp.clip(w, 0.0, None)
     s = jnp.sqrt(w)
     keep = s > _PINV_CUTOFF * jnp.max(s)
@@ -322,6 +369,65 @@ def _is_representable(gam: dict[str, Tensor], new_weights) -> jax.Array:
     for w in jax.tree_util.tree_leaves(new_weights):
         ok = ok & jnp.all(jnp.isfinite(w)) & (jnp.max(w) > 0.0)
     return ok
+
+
+def _a_weight_underflowed(new_weights, old_weights) -> jax.Array:
+    """Did a weight that was already collapsing reach exactly zero?
+
+    :func:`_is_representable` cannot see this.  It is scale-invariant by design,
+    and a bond that loses its smallest weight keeps ``max(lambda) = 1`` -- so a
+    *partial* collapse passes every clause of it while a *total* one does not.
+    Measured on a D=3 U(1)-Sz pair: the smallest weight on each bond decayed
+    geometrically (1.1e-08, 9.1e-10, 3.3e-10 ...) and reached exactly 0.0 at
+    sweep 109.  ``_sqrt_pinv`` then had no direction left to invert, so the
+    transformation stopped being a gauge, and by sweep 114 the solve reported
+    ``residual = 1.19e-16`` and *converged* on a state that had moved by
+    3.0e-01, with the health gate returning True throughout.  #870 is the same
+    failure with the sign flipped -- growth to ``inf`` there -- and in both the
+    residual certifies the corpse.
+
+    **A weight reaching zero is not by itself wrong**, which is why this asks
+    where it came *from*.  A direction the state genuinely does not use dies
+    from a relative 1.0 in a single sweep, and refusing that breaks a real
+    solve: an earlier version of this check counted rank instead, and rejected
+    ``test_su_step_survives_a_bond_direction_the_state_does_not_use`` on its
+    very first sweep.  Only a weight that was already collapsing --
+    below :data:`_UNDERFLOW_EPS` of its bond's largest -- and then hit zero is
+    the failure this describes.
+
+    **The first sweep is exempt, because the caller's stored weights are not a
+    trajectory.**  They are exactly the drifted numbers this module exists to
+    discard, so "was collapsing" cannot be judged against them: a state whose
+    unused direction carries a stored weight of 1e-8 is the same state as one
+    carrying 1.0 there, and only the caller's arbitrary number would separate
+    "accepted" from "rejected at sweep 0" (Codex P2 on #940 -- measured: the
+    starved pair converges in 52 sweeps from a tail of 1.0 and was refused with
+    0 iterations from a tail of 1e-8).  Both call sites therefore consult this
+    only from the second sweep on, where both operands are the solve's own
+    iterates.  The fatal trajectory dies at sweep 109; nothing is lost.
+
+    **Shape changes are not inspected.**  A bond weight may legitimately change
+    length between sweeps when a charge sector empties (#904/#906), and the two
+    vectors then cannot be aligned entry by entry.  Such a sweep is accepted;
+    the failure this exists for does not change any length (all four bonds stay
+    at their width throughout the trajectory above).  The shape test is a
+    Python-level branch on static shapes, so it costs nothing under trace.
+
+    Returns a 0-d ``jnp`` bool, like :func:`_is_representable`, so both drivers
+    can use it -- the traced one inside its ``while_loop``.
+    """
+    bad = jnp.asarray(False)
+    for new, old in zip(
+        jax.tree_util.tree_leaves(new_weights),
+        jax.tree_util.tree_leaves(old_weights),
+        strict=True,
+    ):
+        if new.shape != old.shape:
+            continue
+        m = jnp.max(old)
+        was_collapsing = (old > 0) & (old < _UNDERFLOW_EPS * jnp.where(m > 0, m, 1.0))
+        bad = bad | jnp.any((new == 0) & was_collapsing)
+    return bad
 
 
 def _sweep_is_healthy(gam: dict[str, Tensor], new_weights, sweep) -> jax.Array:
@@ -593,7 +699,13 @@ def _bp_solve_eager(
     for sweep in range(max_iter):
         cand_gam, cand_weights = _sweep(gam, weights)
 
-        if not bool(_sweep_is_healthy(cand_gam, cand_weights, sweep)):
+        healthy = _sweep_is_healthy(cand_gam, cand_weights, sweep)
+        if sweep >= 1:
+            # From the second sweep on, ``weights`` is the solve's own iterate;
+            # at sweep 0 it is the caller's stored numbers, which are not a
+            # trajectory -- see :func:`_a_weight_underflowed`.
+            healthy = healthy & ~_a_weight_underflowed(cand_weights, weights)
+        if not bool(healthy):
             # Reject the candidate; do not call it converged.  ``_sweep`` does
             # not mutate its input, so ``gam``/``weights`` still hold the last
             # healthy iterate -- which is an exact gauge of the caller's state,
@@ -710,7 +822,12 @@ def _bp_solve(
     def body(carry):
         arr_in, w_in, _, done, _, _ = carry
         cand_gam, cand_weights = _sweep(as_tensors(arr_in), w_in)
-        ok = _sweep_is_healthy(cand_gam, cand_weights, done)
+        # ``done >= 1`` for the same reason the eager driver gates on
+        # ``sweep >= 1``: at ``done == 0`` the carry still holds the caller's
+        # stored weights, which are not a trajectory.
+        ok = _sweep_is_healthy(cand_gam, cand_weights, done) & ~(
+            _a_weight_underflowed(cand_weights, w_in) & (done >= 1)
+        )
         res = _residual(cand_weights, w_in)
         accept = lambda cand, prev: jnp.where(ok, cand, prev)  # noqa: E731
         return (

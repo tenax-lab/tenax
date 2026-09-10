@@ -438,16 +438,34 @@ def _truncated_svd_symmetric(
     n_keep = n_total
 
     if max_truncation_err is not None and n_total > 0:
-        total_sq = sum(x[0] ** 2 for x in all_sv_pairs)
-        if total_sq > 0:
+        leading = all_sv_pairs[0][0]
+        if leading > 0:
+            # Rescale by the leading value before squaring.  The kept/discarded
+            # ratio is scale-invariant, and squaring an unscaled spectrum
+            # halves the exponent range: float64 values around 1e-200 square
+            # to exactly 0.0, and an unscaled ``total_sq == 0`` would misread
+            # a small-but-nonzero spectrum as a zero tensor and truncate it
+            # to rank 1 (#949 review).
+            scaled = [x[0] / leading for x in all_sv_pairs]
+            total_sq = sum(v * v for v in scaled)
             trunc_sq = 0.0
             for i in range(n_total - 1, 0, -1):
-                trunc_sq += all_sv_pairs[i][0] ** 2
+                trunc_sq += scaled[i] * scaled[i]
                 if trunc_sq / total_sq > max_truncation_err**2:
                     n_keep = i + 1
                     break
             else:
-                n_keep = n_total
+                # The loop never reaches index 0, so exhausting it means
+                # every value behind the leading one fits inside the error
+                # budget -- keep only the leading value.  This used to reset
+                # to ``n_total``, silently retaining negligible/zero sectors
+                # that dense SVD at the same tolerance discards (#946).
+                n_keep = 1
+        else:
+            # Identically zero spectrum: any rank satisfies the budget, so
+            # keep the minimum the API guarantees, matching the dense path's
+            # zero-tensor policy (#946/#947).
+            n_keep = 1
 
     if max_singular_values is not None:
         n_keep = min(n_keep, max_singular_values)
@@ -512,14 +530,24 @@ def _truncated_svd_symmetric(
         # the budget. Expand up to ``max_singular_values``; if the budget
         # still cannot be met we return what we have at the cap. (PR #561
         # codex P2 review.)
-        if max_truncation_err is not None and n_total > 0:
-            total_sq = sum(p[0] ** 2 for p in all_sv_pairs)
+        if max_truncation_err is not None and n_total > 0 and all_sv_pairs[0][0] > 0:
+            # Rescale by the leading value here too: this is a SECOND squaring
+            # of the raw spectrum, independent of the global cutoff above, and
+            # at ~1e-200 scales the unscaled ``total_sq`` and ``discarded_sq``
+            # both underflow to exactly 0.0 — the loop then breaks on
+            # ``0 <= 0`` while the canonical prefix discards macroscopic
+            # relative weight (0.669 measured vs a 0.05 budget in the #949
+            # round-2 review).  The budget comparison is scale-invariant.
+            leading = all_sv_pairs[0][0]
+            total_sq = sum((p[0] / leading) ** 2 for p in all_sv_pairs)
             err_sq_budget = max_truncation_err**2 * total_sq
             cap = max_singular_values
             while n_keep < cap:
                 _, _, pair_set = _canonical_select(n_keep)
                 discarded_sq = sum(
-                    p[0] ** 2 for p in all_sv_pairs if (p[1], p[2]) not in pair_set
+                    (p[0] / leading) ** 2
+                    for p in all_sv_pairs
+                    if (p[1], p[2]) not in pair_set
                 )
                 if discarded_sq <= err_sq_budget:
                     break
@@ -1078,16 +1106,34 @@ def _truncated_svd_symmetric_np(
     n_keep = n_total
 
     if max_truncation_err is not None and n_total > 0:
-        total_sq = sum(x[0] ** 2 for x in all_sv_pairs)
-        if total_sq > 0:
+        leading = all_sv_pairs[0][0]
+        if leading > 0:
+            # Rescale by the leading value before squaring.  The kept/discarded
+            # ratio is scale-invariant, and squaring an unscaled spectrum
+            # halves the exponent range: float64 values around 1e-200 square
+            # to exactly 0.0, and an unscaled ``total_sq == 0`` would misread
+            # a small-but-nonzero spectrum as a zero tensor and truncate it
+            # to rank 1 (#949 review).
+            scaled = [x[0] / leading for x in all_sv_pairs]
+            total_sq = sum(v * v for v in scaled)
             trunc_sq = 0.0
             for i in range(n_total - 1, 0, -1):
-                trunc_sq += all_sv_pairs[i][0] ** 2
+                trunc_sq += scaled[i] * scaled[i]
                 if trunc_sq / total_sq > max_truncation_err**2:
                     n_keep = i + 1
                     break
             else:
-                n_keep = n_total
+                # The loop never reaches index 0, so exhausting it means
+                # every value behind the leading one fits inside the error
+                # budget -- keep only the leading value.  This used to reset
+                # to ``n_total``, silently retaining negligible/zero sectors
+                # that dense SVD at the same tolerance discards (#946).
+                n_keep = 1
+        else:
+            # Identically zero spectrum: any rank satisfies the budget, so
+            # keep the minimum the API guarantees, matching the dense path's
+            # zero-tensor policy (#946/#947).
+            n_keep = 1
 
     if max_singular_values is not None:
         n_keep = min(n_keep, max_singular_values)
@@ -1564,11 +1610,22 @@ def _eigh_symmetric(
     right_labels: Sequence[Label],
     new_bond_label: Label,
     max_eigenvalues: int | None,
+    bond_order: str = "descending",
 ) -> tuple[SymmetricTensor, jax.Array]:
     """Block-diagonal Hermitian eigendecomposition for SymmetricTensor.
 
     Each charge sector is eigendecomposed independently, then eigenvalues
     are merged and truncated globally (keeping the largest).
+
+    ``bond_order="sector"`` emits the output bond charge-grouped instead, which
+    is what makes this **traceable**: ranking the sectors against each other
+    means reading the eigenvalues on the host, and ``np.array`` on a tracer
+    raises.  The result is not value-ordered -- sectors ascend by charge and
+    each sector keeps ``jnp.linalg.eigh``'s own ascending order.  Without a truncation there is nothing to rank *for* -- every
+    eigenvalue is kept either way and the order is a convention -- so the two
+    modes differ only by a permutation of the bond, with ``V`` and
+    ``eigenvalues`` permuted together.  It is rejected with
+    ``max_eigenvalues``, where the ranking is load-bearing.
     """
     all_labels = tensor.labels()
     label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}
@@ -1675,27 +1732,42 @@ def _eigh_symmetric(
         left_subkeys, left_row_sizes = _eigh_meta_by_q[q]
         sector_results[q] = (eigvecs_q, eigvals_q, left_subkeys, left_row_sizes)
 
-    # Global truncation: merge eigenvalues across sectors, keep top-k
-    all_eig_pairs: list[tuple[float, int, int]] = []
-    for q, (_, eigvals_q, _, _) in sector_results.items():
-        ev_np = np.array(eigvals_q)
-        for i, val in enumerate(ev_np):
-            all_eig_pairs.append((float(val), q, i))
+    if bond_order == "sector":
+        # Charge-grouped, and no eigenvalue is read on the host: the bond's
+        # layout follows the sector structure, which is static.  Sectors are
+        # visited in sorted charge order so the layout is reproducible rather
+        # than dict-insertion dependent.
+        order = sorted(sector_results)
+        kept = [
+            (0.0, q, i) for q in order for i in range(sector_results[q][1].shape[0])
+        ]
+        eigenvalues = (
+            jnp.concatenate([sector_results[q][1] for q in order])
+            if order
+            else jnp.zeros((0,), dtype=tensor.dtype)
+        )
+    else:
+        # Global truncation: merge eigenvalues across sectors, keep top-k
+        all_eig_pairs: list[tuple[float, int, int]] = []
+        for q, (_, eigvals_q, _, _) in sector_results.items():
+            ev_np = np.array(eigvals_q)
+            for i, val in enumerate(ev_np):
+                all_eig_pairs.append((float(val), q, i))
 
-    # Sort descending by eigenvalue, then descending by index to match
-    # the dense convention of taking eigvecs[:, -k:] for degenerate eigenvalues.
-    all_eig_pairs.sort(key=lambda x: (-x[0], -x[2]))
+        # Sort descending by eigenvalue, then descending by index to match the
+        # dense convention of taking eigvecs[:, -k:] for degenerate eigenvalues.
+        all_eig_pairs.sort(key=lambda x: (-x[0], -x[2]))
 
-    n_total = len(all_eig_pairs)
-    n_keep = n_total
-    if max_eigenvalues is not None:
-        n_keep = min(n_keep, max_eigenvalues)
-    n_keep = max(1, min(n_keep, n_total))
+        n_total = len(all_eig_pairs)
+        n_keep = n_total
+        if max_eigenvalues is not None:
+            n_keep = min(n_keep, max_eigenvalues)
+        n_keep = max(1, min(n_keep, n_total))
 
-    kept = all_eig_pairs[:n_keep]
+        kept = all_eig_pairs[:n_keep]
 
-    # Eigenvalues in descending order
-    eigenvalues = jnp.array([v for v, _, _ in kept])
+        # Eigenvalues in descending order
+        eigenvalues = jnp.array([v for v, _, _ in kept])
 
     # Build bond charges in global descending eigenvalue order (matching
     # the eigenvalues array) so that V[:,k] pairs with eigenvalues[k].
@@ -1866,15 +1938,34 @@ def svd(
 
         if max_truncation_err is not None:
             # Keep singular values until truncation error <= max_truncation_err
-            total_sq = float(np.sum(s_np**2))
-            trunc_sq = 0.0
-            for i in range(len(s_np) - 1, -1, -1):
-                trunc_sq += float(s_np[i] ** 2)
-                if trunc_sq / total_sq > max_truncation_err**2:
-                    n_keep = i + 1
-                    break
+            leading = float(s_np[0]) if len(s_np) else 0.0
+            if leading > 0.0:
+                # Rescaled by the leading value, like the symmetric paths:
+                # the ratio is scale-invariant, and squaring an unscaled
+                # spectrum halves the exponent range, so ~1e-200 values would
+                # underflow to ``total_sq == 0`` and be misread as a zero
+                # tensor (#949 review).
+                scaled = s_np / leading
+                total_sq = float(np.sum(scaled**2))
+                trunc_sq = 0.0
+                for i in range(len(s_np) - 1, -1, -1):
+                    trunc_sq += float(scaled[i] ** 2)
+                    if trunc_sq / total_sq > max_truncation_err**2:
+                        n_keep = i + 1
+                        break
+                else:
+                    # This loop DOES reach index 0, so it only exhausts when
+                    # the whole spectrum fits the budget (err >= 1).  Keep
+                    # the minimum rank, matching the symmetric paths' policy
+                    # -- this used to keep everything (#949 review).
+                    n_keep = 1
             else:
-                n_keep = len(s_np)
+                # Identically zero spectrum: dividing by ``total_sq`` raised
+                # ZeroDivisionError, so a zero tensor could be decomposed
+                # without a tolerance but crashed with one (#947).  Any rank
+                # reconstructs a zero tensor exactly; keep the minimum the
+                # API guarantees.
+                n_keep = 1
 
         if max_singular_values is not None:
             n_keep = min(n_keep, max_singular_values)
@@ -1887,7 +1978,15 @@ def svd(
     Vh = Vh[:n_keep, :]
 
     if normalize:
-        s = s / jnp.sum(s)
+        # The zero-spectrum guard matters since #947 (0/0 would hand back NaN
+        # factors for a tensor that reconstructs exactly), but it must stay
+        # traceable: a Python ``if`` on ``jnp.sum(s) > 0`` raised
+        # TracerBoolConversionError under jit/vmap even for nonzero matrices
+        # (#949 round 3).  Fence the DENOMINATOR, not the quotient — a
+        # ``jnp.where`` on the result would fix the value and still send 0/0
+        # through the backward pass (the #789 lesson).
+        denom = jnp.sum(s)
+        s = s / jnp.where(denom > 0, denom, 1.0)
 
     # Reshape back and build output tensors
     left_shape = tuple(idx.dim for idx in left_indices)
@@ -2360,15 +2459,18 @@ def eigh(
     right_labels: Sequence[Label],
     new_bond_label: Label = "bond",
     max_eigenvalues: int | None = None,
+    bond_order: str = "descending",
 ) -> tuple[Tensor, jax.Array]:
     """Eigendecompose a Hermitian tensor.
 
     Reshapes the tensor into a square matrix (left_labels vs right_labels),
     computes the eigendecomposition, and returns eigenvectors as a Tensor.
 
-    Eigenvalues are sorted in descending order. If ``max_eigenvalues`` is
-    given, only the top-k eigenvalues (and corresponding eigenvectors) are
-    kept.
+    Eigenvalues are sorted **algebraically** descending -- largest first, so a
+    negative eigenvalue sorts below every positive one regardless of magnitude.
+    If ``max_eigenvalues`` is given, only the top-k (and their eigenvectors) are
+    kept, by that same algebraic ranking.  ``bond_order="sector"`` orders the
+    output differently; see below.
 
     Output labels::
 
@@ -2380,15 +2482,58 @@ def eigh(
         right_labels:     Labels forming the column side of the matrix.
         new_bond_label:   Label for the eigenvector bond index.
         max_eigenvalues:  Keep only the top-k eigenvalues.
+        bond_order:       ``"descending"`` (default) ranks the whole spectrum
+                          algebraically, across sectors.  ``"sector"`` emits a
+                          ``SymmetricTensor``'s bond **charge-grouped** instead
+                          -- sectors in ascending charge order, and within each
+                          sector whatever order ``jnp.linalg.eigh`` returns,
+                          which is ascending.  So it is *not* sorted by value at
+                          all, and ``eigenvalues[0]`` is not the largest.  It is
+                          the **traceable** option: ranking sectors against each
+                          other reads eigenvalues on the host, and that raises on
+                          a tracer.  The two differ only by a permutation of the
+                          bond -- ``V`` and ``eigenvalues`` are permuted together,
+                          so ``V diag(w) V^dag`` is unchanged -- which is why it
+                          is only available untruncated, where the ranking
+                          decides nothing.  Ignored on the dense path, which has
+                          no sectors to group by and is already traceable.
+
+    Raises:
+        ValueError: if ``bond_order`` is not one of the two, or -- on a
+            ``SymmetricTensor`` only -- if ``bond_order="sector"`` is combined
+            with ``max_eigenvalues``.  The dense path ignores ``bond_order``
+            and truncates as usual.
 
     Returns:
-        ``(V, eigenvalues)`` where V has labels ``(left_labels..., new_bond_label)``
-        and eigenvalues is a 1-D JAX array sorted descending.
+        ``(V, eigenvalues)`` where V has labels ``(left_labels...,
+        new_bond_label)``.  ``eigenvalues`` is a 1-D JAX array, algebraically
+        descending under the default ``bond_order``; under ``"sector"`` it is
+        charge-grouped and ascending within each sector, and pairs with ``V``
+        column by column either way.
     """
+    if bond_order not in ("descending", "sector"):
+        raise ValueError(
+            f"bond_order must be 'descending' or 'sector', got {bond_order!r}"
+        )
     # Dispatch to block-sparse path for SymmetricTensor
     if isinstance(tensor, SymmetricTensor):
+        # Only here: on the dense path ``bond_order`` is documented as ignored
+        # -- there are no sectors to group by -- so refusing the combination
+        # there would reject a truncation the dense code performs perfectly
+        # well, on the strength of an argument that did nothing.
+        if bond_order == "sector" and max_eigenvalues is not None:
+            raise ValueError(
+                "bond_order='sector' cannot be combined with max_eigenvalues: "
+                "truncation has to rank the sectors against each other, which "
+                "is exactly the host read that makes 'descending' untraceable"
+            )
         return _eigh_symmetric(
-            tensor, left_labels, right_labels, new_bond_label, max_eigenvalues
+            tensor,
+            left_labels,
+            right_labels,
+            new_bond_label,
+            max_eigenvalues,
+            bond_order=bond_order,
         )
 
     # Dense path
