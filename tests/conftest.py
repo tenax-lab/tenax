@@ -29,6 +29,7 @@ _FILE_MARKERS = {
     "test_hotrg.py": "algorithm",
     "test_ipeps.py": "algorithm",
     "test_ipeps_bp_gauge.py": "algorithm",
+    "test_bp_gauge_rank_collapse.py": "core",
     "test_ipeps_gauge.py": "algorithm",
     # #882 Tasks 7 and 7b: the dense ``gauge_fix`` is one traced call -- a
     # ``lax.while_loop`` solve with ``absorb_weights`` compiled around it --
@@ -348,6 +349,16 @@ _FILE_MARKERS = {
     # gate; the fixture is an exact D=chi=1 product state, ~15s for all nine
     # cases with in-process compile sharing.
     "test_ipeps_optimize_complex_grads_957.py": "core",
+    # #853's severity-attribution control, relocated out of the deleted #610
+    # prototype suite (review of #959): the only PSD-and-attainable-energy
+    # check on the plain symmetric U(1)-Sz CTM path.  One D=3 chi=12
+    # convergence at ~44 min cold -- far too expensive for the gate, and
+    # "algorithm" is currently aspirational: the fast-other bucket has hit the
+    # 6h job limit on every run since at least 2026-09-03 (#960), so nothing
+    # this deep in it executes.  Registered here so the control survives in
+    # the tree and runs the day #960 is fixed, not as a claim that it runs
+    # today.
+    "test_ctm_symmetric_rdm_positive_853.py": "algorithm",
     "test_ctm_chi_truncation_policy_922.py": "core",
     "test_ctm_traced_chi_inventory_929.py": "core",
     "test_integration_regression.py": "algorithm",
@@ -558,7 +569,6 @@ _UNBUCKETED_LEGACY = {
     "test_symmetric_custom_vjp.py",
     "test_truncated_lowrank_svd.py",
     "test_tuning_registry.py",
-    "test_u1sz_defrag_prototype_610.py",
     "test_varipeps_compare.py",
     "test_varipeps_compare_payload.py",
     "test_varipeps_compare_su.py",

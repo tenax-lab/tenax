@@ -903,3 +903,67 @@ class TestSymmetricMPSNonzeroTargetCharge:
         # Target charge is recoverable from block structure
         sector = compute_mps_sector(list(mps.tensors))
         assert sector == 2
+
+
+class TestSetitemInvalidatesCaches945:
+    """__setitem__ must invalidate every cached bond spectrum (#945).
+
+    It cleared only ``orth_center``, so after a nonunitary local replacement
+    ``entanglement_entropy`` served the OLD state's Schmidt spectrum from the
+    ``singular_values`` cache.  All bonds must go, not just the neighbours:
+    projecting one site of a Bell pair changes the spectrum at the far cut.
+    """
+
+    def _bell_mps(self):
+        from tenax.algorithms.tdvp import _make_site_tensor
+        from tenax.core.mps import FiniteMPS
+
+        a = np.zeros((1, 2, 2))
+        a[0, 0, 0] = a[0, 1, 1] = 1.0 / np.sqrt(2.0)
+        b = np.zeros((2, 2, 1))
+        b[0, 0, 0] = b[1, 1, 0] = 1.0
+        return FiniteMPS.from_tensors(
+            [
+                _make_site_tensor(jnp.array(a), 0, 2),
+                _make_site_tensor(jnp.array(b), 1, 2),
+            ]
+        ).compute_singular_values()
+
+    def test_projecting_a_bell_pair_drops_the_cached_entropy(self):
+        mps = self._bell_mps()
+        np.testing.assert_allclose(mps.entanglement_entropy(0), np.log(2), atol=1e-12)
+        data = mps[0].todense().at[:, 1, :].set(0)
+        mps[0] = DenseTensor(data, mps[0].indices)
+        S = mps.entanglement_entropy(0)
+        assert abs(S) < 1e-12, (
+            f"entropy {S} served from a stale cache; the projected state is a "
+            f"product state (#945)"
+        )
+
+    def test_every_bond_is_invalidated_not_just_the_neighbours(self):
+        from tenax.algorithms.tdvp import _make_site_tensor
+        from tenax.core.mps import FiniteMPS
+
+        key = jax.random.PRNGKey(3)
+        arrs = [
+            jax.random.normal(k, s)
+            for k, s in zip(
+                jax.random.split(key, 4),
+                [(1, 2, 2), (2, 2, 2), (2, 2, 2), (2, 2, 1)],
+            )
+        ]
+        mps = FiniteMPS.from_tensors(
+            [_make_site_tensor(a, i, 4) for i, a in enumerate(arrs)]
+        ).compute_singular_values()
+        assert all(sv is not None for sv in mps.singular_values)
+        mps[3] = mps[3]  # replacement at the far right edge
+        assert all(sv is None for sv in mps.singular_values), (
+            "a site replacement must blank every cached bond spectrum, "
+            "including bonds far from the replaced site (#945)"
+        )
+
+    def test_entropy_recomputes_after_invalidation(self):
+        """The None path canonicalizes and recomputes -- not an error path."""
+        mps = self._bell_mps()
+        mps[0] = mps[0]  # same tensor: state unchanged, caches blanked
+        np.testing.assert_allclose(mps.entanglement_entropy(0), np.log(2), atol=1e-12)
