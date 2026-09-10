@@ -134,7 +134,6 @@ _FROZEN_LEGACY = {
     "test_symmetric_custom_vjp.py",
     "test_truncated_lowrank_svd.py",
     "test_tuning_registry.py",
-    "test_u1sz_defrag_prototype_610.py",
     "test_varipeps_compare.py",
     "test_varipeps_compare_payload.py",
     "test_varipeps_compare_su.py",

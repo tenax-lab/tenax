@@ -553,22 +553,18 @@ def _charged_u1_sweep(max_iter: int = 3):
     return ctm_tensor_2site(A, B, chi=8, max_iter=max_iter, conv_tol=1e-8)
 
 
-def test_the_default_ctm_path_still_contracts():
-    """A charged U(1)-Sz sweep must not be refused.
-
-    This is the constraint that shaped the whole change.  Pre-#905 the default
-    path contracted same-flow chi bonds carrying non-cancelling charges and
-    discarded ~2000 products per sweep; both checks refused it, which is why
-    both are opt-in.  #905 removed the same-flow bonds, but the checks stay
-    opt-in: nothing guarantees that every future caller of ``contract`` pairs
-    duals, and the discard predicate is block-aware by design (see
-    ``test_same_flow_is_allowed_when_only_the_identity_sector_is_populated``).
-    """
-    _charged_u1_sweep()
-
-
 def test_strict_mode_finds_no_weight_loss_in_the_ctm_sweep(monkeypatch):
     """#905 closed the last discarding site on the default CTM path.
+
+    This test SUBSUMES the former ``test_the_default_ctm_path_still_contracts``
+    (a bare ``_charged_u1_sweep()`` with the checks disarmed, ~280 s of gate
+    time): ``TENAX_BATCH_BLOCKSPARSE`` defaults to ``"0"``, so the default
+    path and this strict run execute the identical contraction machinery, and
+    strict mode only ADDS refusals -- a strict sweep that completes proves the
+    default sweep completes.  The accelerated paths the smoke could not have
+    covered anyway are pinned separately by the ``_ACCEL_FLAGS``
+    parametrisations below.  If batching ever becomes the default, that
+    subsumption argument breaks and the bare-default smoke must come back.
 
     This was the negative form of the same assertion, and its docstring asked
     for exactly this conversion when a fix landed.  What it pinned: measured
