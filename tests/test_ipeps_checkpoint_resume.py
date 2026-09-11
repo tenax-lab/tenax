@@ -559,14 +559,70 @@ def test_normal_completion_flushes_last_checkpoint_despite_cadence(tmp_path):
     assert load_checkpoint(ckpt_path)["step"] == 1
 
 
+def _counting_save_checkpoint(monkeypatch):
+    """Route every ``save_checkpoint`` through a (step, is_best) recorder.
+
+    ``ipeps_optimize`` imports the function lazily inside the loop body, so
+    patching the ``_checkpoint`` module attribute intercepts all call sites.
+    """
+    import tenax.algorithms._checkpoint as _ckpt_mod
+
+    calls: list[tuple[int, bool]] = []
+    real = _ckpt_mod.save_checkpoint
+
+    def counting(state, path, *args, **kwargs):
+        calls.append((state["step"], bool(kwargs.get("is_best", False))))
+        return real(state, path, *args, **kwargs)
+
+    monkeypatch.setattr(_ckpt_mod, "save_checkpoint", counting)
+    return calls
+
+
 @pytest.mark.core
-def test_first_evaluation_convergence_writes_checkpoints_2site(tmp_path):
+def test_final_step_state_is_serialized_once(tmp_path, monkeypatch):
+    """The post-loop flush must not re-write what the final step just wrote.
+
+    With ``gs_checkpoint_every=1`` the end-of-step save always fires on the
+    last step, and every break path runs its own force flush; the
+    unconditional post-loop flush then serialized the identical
+    params/env bundle a second time (review P2 on the #958 fix).  No state
+    mutates between a same-step pair, so each (step, file) pair must be
+    written exactly once.
+    """
+    calls = _counting_save_checkpoint(monkeypatch)
+    # Tilted off the ground state so the run exhausts its steps normally.
+    A = jnp.array([1.0, 0.3]).reshape(1, 1, 1, 1, 2)
+    cfg = _converged_1site_cfg(
+        str(tmp_path / "ckpt"),
+        gs_checkpoint_every=1,
+        gs_grad_norm_tol=1e-30,  # unreachable: run all steps
+        gs_num_steps=2,
+    )
+
+    out = optimize_gs_ad(_ferro_gate(), A, cfg)
+    assert not out[3]["converged"], "regime drifted: tolerance was reachable"
+
+    assert calls, "premise: the run must have written checkpoints at all"
+    assert (1, False) in calls, "premise: the final step must write ckpt.last"
+    assert len(calls) == len(set(calls)), (
+        f"duplicate checkpoint serializations of the same step: {calls}"
+    )
+
+
+@pytest.mark.core
+def test_first_evaluation_convergence_writes_checkpoints_2site(tmp_path, monkeypatch):
     """The 2-site loop's convergence exit bypassed its save the same way.
 
     An unreachable-in-reverse tolerance (1e9) makes the first evaluation
     "converge" whatever the state, which is exactly the break-before-save
     path; the physics of the state is irrelevant to the defect.
+
+    Doubles as a duplicate-write guard for this exit path (see
+    ``test_final_step_state_is_serialized_once``): the 2-site convergence
+    break writes nothing in-loop, so the post-loop flush must produce
+    exactly one write pair here.
     """
+    calls = _counting_save_checkpoint(monkeypatch)
     gate = _heisenberg_gate()
     ckpt_path = str(tmp_path / "ckpt")
     cfg = _base_cfg(ckpt_path, gs_num_steps=3, gs_resume=False)
@@ -584,3 +640,36 @@ def test_first_evaluation_convergence_writes_checkpoints_2site(tmp_path):
         "a converged 2-site run wrote no checkpoint at all (#958)"
     )
     assert load_checkpoint(ckpt_path)["step"] == 0
+    assert calls, "premise: the run must have written checkpoints at all"
+    assert len(calls) == len(set(calls)), (
+        f"duplicate checkpoint serializations of the same step: {calls}"
+    )
+
+
+@pytest.mark.core
+def test_final_step_state_is_serialized_once_2site(tmp_path, monkeypatch):
+    """2-site twin of ``test_final_step_state_is_serialized_once``.
+
+    The duplicate pair on this path is cadence-aligned *normal completion*:
+    with ``gs_checkpoint_every=1`` the end-of-step save fires on the last
+    step, and the unconditional post-loop flush then re-serialized the same
+    step's bundle (the first-eval convergence test above cannot see this —
+    that break writes nothing in-loop, so its post-loop flush is the only
+    writer).
+    """
+    calls = _counting_save_checkpoint(monkeypatch)
+    gate = _heisenberg_gate()
+    cfg = _base_cfg(str(tmp_path / "ckpt"), gs_num_steps=2, gs_resume=False)
+    from dataclasses import replace
+
+    cfg = replace(cfg, gs_grad_norm_tol=1e-30, return_history=True)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = optimize_gs_ad(gate, None, cfg)
+    assert not out[3]["converged"], "regime drifted: tolerance was reachable"
+
+    assert (1, False) in calls, "premise: the final step must write ckpt.last"
+    assert len(calls) == len(set(calls)), (
+        f"duplicate checkpoint serializations of the same step: {calls}"
+    )
