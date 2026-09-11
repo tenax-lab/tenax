@@ -1076,16 +1076,22 @@ def test_re_gauging_every_step_fits_the_simple_update_budget(record_property):
     )
 
 
-def test_the_eager_driver_is_still_reachable_and_agrees():
-    """``SymmetricTensor`` has no traced path, so the Python loop is live code.
+def test_the_eager_driver_is_still_reachable_and_agrees(monkeypatch):
+    """The Python loop must stay live code: it is the traced driver's
+    reference and its structural fallback.
 
-    Dispatch is on the tensor type, and the symmetric arm is the one that keeps
-    the eager loop from rotting into something nothing executes.
+    ``SymmetricTensor`` pairs used to be what kept it exercised; they take
+    the traced driver now, so the eager loop is reached the way the fallback
+    reaches it -- by refusing the traced dispatch -- and must still converge
+    to a usable gauge on its own.
     """
     from _ipeps_gauge_helpers import _symmetric_pair
 
     A, B = _symmetric_pair()
-    assert not bp._use_traced_loop(A, B)
+    assert bp._use_traced_loop(A, B), (
+        "a SymmetricTensor pair should take the traced driver now"
+    )
+    monkeypatch.setattr(bp, "_use_traced_loop", lambda A, B: False)
     _, _, w, info = bp.bp_gauge_checkerboard(
         A, B, BondWeights.ones(3, 3), max_iter=400, tol=1e-13
     )
