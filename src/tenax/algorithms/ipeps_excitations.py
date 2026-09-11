@@ -696,7 +696,14 @@ def _project_out_ground_state(
     """
     a = np.asarray(A).ravel().astype(np.complex128)
     a = a / np.linalg.norm(a)
-    if np.allclose(np.asarray(k), 0.0):
+    # Gamma modulo reciprocal lattice vectors, not literal zero: every phase
+    # in the pencil is e^{i k r} with integer r, so k = (2 pi, 0) assembles
+    # matrices *identical* to k = 0 and must take the same projector -- a
+    # literal comparison handed physically equivalent momenta different
+    # spectra (#961 review round 4).  Folding into (-pi, pi] first makes the
+    # test exact up to the float representation of 2 pi.
+    k_folded = np.mod(np.asarray(k, dtype=float) + np.pi, 2.0 * np.pi) - np.pi
+    if np.allclose(k_folded, 0.0):
         na = np.asarray(N_mat).conj().T @ a
         denom = a.conj() @ np.asarray(N_mat) @ a
         if abs(denom) < 1e-12 * max(np.linalg.norm(na), 1e-300):
