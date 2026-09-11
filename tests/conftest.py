@@ -238,6 +238,11 @@ _FILE_MARKERS = {
     # a NaN cotangent there is as fatal as a NaN value.  Milliseconds for the
     # unit half; the reachability test converges one D=2 chi=8 CTM.
     "test_normalise_rdm_zero_grad.py": "core",
+    # Complex-Hermitian gate expectations across every energy path (#966):
+    # Tr(rho H) vs Tr(rho H^T) separate only there, and the whole rest of the
+    # suite is real-symmetric, so nothing else can catch a regression.  Exact
+    # D=1 product fixtures, seconds.
+    "test_rdm_gate_transpose_966.py": "core",
     # The bucket guard itself (#805). Pure filesystem inspection, microseconds,
     # and it must run in the gate it protects or it protects nothing.
     "test_bucket_registry.py": "core",

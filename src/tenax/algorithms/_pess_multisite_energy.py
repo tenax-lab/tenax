@@ -46,7 +46,7 @@ def kagome_xxz_pair_hamiltonian(delta: float = 1.0, d: int = 2) -> np.ndarray:
     ``H = δ Sz Sz + 0.5 (S+ S- + S- S+)``. Returned as ``(d, d, d, d)`` array
     with index layout ``(site1_out, site2_out, site1_in, site2_in)`` matching
     the gate convention consumed by ``_rdm{2x1,1x2}_tensor_2site``'s
-    ``einsum("ijkl,ijkl->", rdm, H)`` contraction.
+    ``einsum("ijkl,klij->", rdm, H)`` contraction.
     """
     ops = _site_ops(d)
     Sz = ops["Sz"]
@@ -368,7 +368,7 @@ def compute_energy_pess_3site_multisite(
             rdm = _rdm2x1_tensor_2site(A, B, env_A, env_B)
         else:
             rdm = _rdm1x2_tensor_2site(A, B, env_A, env_B)
-        total_energy = total_energy + jnp.einsum("ijkl,ijkl->", rdm, H)
+        total_energy = total_energy + jnp.einsum("ijkl,klij->", rdm, H)
 
     # ----- 2 marginalised-3-site bonds: v–w via T_u (h-row) and T_d (v-col) -----
     S_u = site_tensors["u"]
@@ -380,10 +380,10 @@ def compute_energy_pess_3site_multisite(
 
     H_h = _gate(frozenset({("v", "right"), ("w", "left")}))
     rdm_vw_h = _rdm_3site_marginal_vw_row(S_u, S_v, S_w, env_u, env_v, env_w)
-    total_energy = total_energy + jnp.einsum("ijkl,ijkl->", rdm_vw_h, H_h)
+    total_energy = total_energy + jnp.einsum("ijkl,klij->", rdm_vw_h, H_h)
 
     H_v = _gate(frozenset({("v", "bottom"), ("w", "top")}))
     rdm_vw_v = _rdm_3site_marginal_vw_col(S_u, S_v, S_w, env_u, env_v, env_w)
-    total_energy = total_energy + jnp.einsum("ijkl,ijkl->", rdm_vw_v, H_v)
+    total_energy = total_energy + jnp.einsum("ijkl,klij->", rdm_vw_v, H_v)
 
     return total_energy.real / n_sites
