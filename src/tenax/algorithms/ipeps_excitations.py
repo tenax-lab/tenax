@@ -21,7 +21,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms._ctm_tensor_energy import _normalise_rdm
 from tenax.algorithms._einsum_compat import einsum_promoted
 from tenax.algorithms.ipeps_config import CTMEnvironment
 from tenax.core.tensor import SymmetricTensor, Tensor
@@ -217,7 +216,7 @@ def _rdm2x1_with_open_tensors(
     env: CTMEnvironment,
     d: int,
 ) -> jax.Array:
-    """Horizontal 2-site RDM from two open double-layer tensors and CTM env.
+    """Raw horizontal 2-site transition RDM from open double-layer tensors.
 
     Reuses the contraction structure from ``_rdm2x1`` but accepts
     pre-built open double-layer tensors (which may contain B substitutions).
@@ -229,7 +228,16 @@ def _rdm2x1_with_open_tensors(
         d:   Physical dimension.
 
     Returns:
-        RDM of shape ``(d, d, d, d)``.
+        Raw transition RDM of shape ``(d, d, d, d)`` in the grouped
+        ``(ket1, ket2, bra1, bra2)`` convention of ``ipeps_rdm._rdm2x1`` —
+        **neither trace-normalised nor Hermitian-symmetrised**.  A transition
+        operator carries the excitation tensor's amplitude and is not
+        Hermitian on its own; dividing by its own trace cancels that
+        amplitude (#954), and symmetrising it mixes the ``B``-in-ket and
+        ``B``-in-bra sectors.  Callers normalise against the B-independent
+        pure-``AA`` contraction of the same geometry, which carries the same
+        arbitrary environment phase and cancels it just as exactly (see
+        ``_normalise_rdm`` for why that phase must not survive).
     """
     C1, C2, C3, C4, T1, T2, T3, T4 = env
 
@@ -246,9 +254,11 @@ def _rdm2x1_with_open_tensors(
 
     rdm = jnp.einsum("crjst,cjruv->stuv", Lenv_ao1, Renv_ao2)
 
-    rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
-    return rdm_mat.reshape(d, d, d, d)
+    # (ket1, bra1, ket2, bra2) -> (ket1, ket2, bra1, bra2): the same transpose
+    # ``ipeps_rdm._rdm2x1`` applies.  Reshaping the interleaved layout straight
+    # to a matrix was #955 — the trace ran over (ket1=ket2, bra1=bra2), which
+    # is not a trace, and the Hamiltonian contraction hit transposed axes.
+    return rdm.transpose(0, 2, 1, 3)
 
 
 def _rdm1x2_with_open_tensors(
@@ -257,7 +267,7 @@ def _rdm1x2_with_open_tensors(
     env: CTMEnvironment,
     d: int,
 ) -> jax.Array:
-    """Vertical 2-site RDM from two open double-layer tensors and CTM env.
+    """Raw vertical 2-site transition RDM from open double-layer tensors.
 
     Args:
         ao1: Top site open double-layer ``(D^2, D^2, D^2, D^2, d, d)``.
@@ -266,7 +276,10 @@ def _rdm1x2_with_open_tensors(
         d:   Physical dimension.
 
     Returns:
-        RDM of shape ``(d, d, d, d)``.
+        Raw transition RDM ``(d, d, d, d)`` in the grouped
+        ``(ket1, ket2, bra1, bra2)`` convention — unnormalised and
+        unsymmetrised, for the same reasons as
+        ``_rdm2x1_with_open_tensors`` (#954/#955).
     """
     C1, C2, C3, C4, T1, T2, T3, T4 = env
 
@@ -281,9 +294,14 @@ def _rdm1x2_with_open_tensors(
     bot_row = einsum_promoted("hj,jqk,ik->hqi", C4, T3, C3)
     rdm = jnp.einsum("hqistwx,hqi->stwx", site12_r, bot_row)
 
-    rdm_mat = rdm.reshape(d * d, d * d)
-    rdm_mat = _normalise_rdm(rdm_mat)
-    return rdm_mat.reshape(d, d, d, d)
+    # (ket1, bra1, ket2, bra2) -> (ket1, ket2, bra1, bra2), as in the
+    # horizontal helper (#955).
+    return rdm.transpose(0, 2, 1, 3)
+
+
+def _transition_trace(rdm: jax.Array) -> jax.Array:
+    """Trace of a grouped ``(ket1, ket2, bra1, bra2)`` transition RDM."""
+    return jnp.einsum("ijij->", rdm)
 
 
 def _rdm2x1_mixed(
@@ -305,11 +323,21 @@ def _rdm2x1_mixed(
         sub_right: ``(ket, bra)`` for right site, each ``"A"`` or ``"B"``.
 
     Returns:
-        RDM of shape ``(d, d, d, d)``.
+        Transition RDM ``(d, d, d, d)``, grouped ``(ket1, ket2, bra1, bra2)``,
+        normalised by the pure-``AA`` contraction of the same geometry: that
+        scalar is B-independent (so the RDM stays quadratic in B, #954) and
+        carries the same arbitrary environment phase (so the gauge still
+        cancels).  With all-``A`` substitutions this reduces to the standard
+        ``_rdm2x1`` up to its Hermitian symmetrisation.
     """
+    from tenax.algorithms.ipeps_rdm import _build_double_layer_open
+
     ao1 = _make_open_tensor(A, B, sub_left)
     ao2 = _make_open_tensor(A, B, sub_right)
-    return _rdm2x1_with_open_tensors(ao1, ao2, env, d)
+    rdm = _rdm2x1_with_open_tensors(ao1, ao2, env, d)
+    ao_AA = _build_double_layer_open(A)
+    n0 = _transition_trace(_rdm2x1_with_open_tensors(ao_AA, ao_AA, env, d))
+    return rdm / n0
 
 
 def _rdm1x2_mixed(
@@ -331,11 +359,18 @@ def _rdm1x2_mixed(
         sub_bottom: ``(ket, bra)`` for bottom site.
 
     Returns:
-        RDM of shape ``(d, d, d, d)``.
+        Transition RDM ``(d, d, d, d)``, grouped and normalised by the
+        pure-``AA`` contraction of the same geometry — see
+        ``_rdm2x1_mixed`` (#954/#955).
     """
+    from tenax.algorithms.ipeps_rdm import _build_double_layer_open
+
     ao1 = _make_open_tensor(A, B, sub_top)
     ao2 = _make_open_tensor(A, B, sub_bottom)
-    return _rdm1x2_with_open_tensors(ao1, ao2, env, d)
+    rdm = _rdm1x2_with_open_tensors(ao1, ao2, env, d)
+    ao_AA = _build_double_layer_open(A)
+    n0 = _transition_trace(_rdm1x2_with_open_tensors(ao_AA, ao_AA, env, d))
+    return rdm / n0
 
 
 def _make_open_tensor(
@@ -387,8 +422,10 @@ def _compute_norm(
     from B at neighboring sites enter with momentum phases
     :math:`e^{i k \cdot r}`.
 
-    The norm is bilinear in B and B*, so ``jax.grad`` of this w.r.t. B
-    at ``B = e_m`` gives the m-th column of the norm matrix N.
+    The norm is a sesquilinear form in (B*, B): every contraction below is
+    divided by the **B-independent** pure-``AA`` contraction of its geometry,
+    never by its own trace, so scaling B scales the norm quadratically
+    (#954) while the environment's arbitrary phase still cancels.
     """
     from tenax.algorithms.ipeps_rdm import _build_double_layer_open
 
@@ -396,43 +433,45 @@ def _compute_norm(
     ao_BB = _build_double_layer_BB_open(B)
     ao_AA = _build_double_layer_open(A)
 
-    # Horizontal on-site: (BB, AA) and (AA, BB)
-    rdm_h_onsite = _rdm2x1_with_open_tensors(ao_BB, ao_AA, env, d)
-    rdm_h_onsite2 = _rdm2x1_with_open_tensors(ao_AA, ao_BB, env, d)
-    # Vertical on-site
-    rdm_v_onsite = _rdm1x2_with_open_tensors(ao_BB, ao_AA, env, d)
-    rdm_v_onsite2 = _rdm1x2_with_open_tensors(ao_AA, ao_BB, env, d)
+    # B-independent normalisation: <psi|psi> under each contraction geometry.
+    n0_h = _transition_trace(_rdm2x1_with_open_tensors(ao_AA, ao_AA, env, d))
+    n0_v = _transition_trace(_rdm1x2_with_open_tensors(ao_AA, ao_AA, env, d))
 
-    # Identity operator for computing norm from RDMs
-    Id = jnp.eye(d)
-    Id4 = jnp.einsum("ij,kl->ijkl", Id, Id)  # (d,d,d,d)
-
-    norm_onsite = (
-        jnp.einsum("ijkl,ijkl->", rdm_h_onsite, Id4)
-        + jnp.einsum("ijkl,ijkl->", rdm_h_onsite2, Id4)
-        + jnp.einsum("ijkl,ijkl->", rdm_v_onsite, Id4)
-        + jnp.einsum("ijkl,ijkl->", rdm_v_onsite2, Id4)
+    # Horizontal on-site: (BB, AA) and (AA, BB); vertical likewise.  The norm
+    # is the plain trace of each transition RDM.  All four windows measure
+    # the SAME quantity — the on-site overlap <Phi_r|Phi_r> — so they are
+    # averaged, not summed: summing counted that overlap four times while
+    # each energy window contributes a *different* bond operator once, which
+    # scaled every generalized eigenvalue by exactly 1/4 on an exact product
+    # state (review P1 on #961; each off-site pair below lives in exactly
+    # one window, so those are correctly counted once).
+    norm_onsite = 0.25 * (
+        _transition_trace(_rdm2x1_with_open_tensors(ao_BB, ao_AA, env, d)) / n0_h
+        + _transition_trace(_rdm2x1_with_open_tensors(ao_AA, ao_BB, env, d)) / n0_h
+        + _transition_trace(_rdm1x2_with_open_tensors(ao_BB, ao_AA, env, d)) / n0_v
+        + _transition_trace(_rdm1x2_with_open_tensors(ao_AA, ao_BB, env, d)) / n0_v
     )
 
     # Off-site terms: B at neighboring sites with momentum phases
-    # Horizontal: B_ket at left, B*_bra at right with phase e^{-ik_x}
     ao_Bket = _build_mixed_double_layer_open(A, B, "ket")
     ao_Bbra = _build_mixed_double_layer_open(A, B, "bra")
 
     phase_x = jnp.exp(1j * k[0])
     phase_y = jnp.exp(1j * k[1])
 
-    rdm_h_off = _rdm2x1_with_open_tensors(ao_Bket, ao_Bbra, env, d)
-    rdm_h_off_rev = _rdm2x1_with_open_tensors(ao_Bbra, ao_Bket, env, d)
-
-    rdm_v_off = _rdm1x2_with_open_tensors(ao_Bket, ao_Bbra, env, d)
-    rdm_v_off_rev = _rdm1x2_with_open_tensors(ao_Bbra, ao_Bket, env, d)
-
     norm_offsite = (
-        phase_x * jnp.einsum("ijkl,ijkl->", rdm_h_off, Id4)
-        + jnp.conj(phase_x) * jnp.einsum("ijkl,ijkl->", rdm_h_off_rev, Id4)
-        + phase_y * jnp.einsum("ijkl,ijkl->", rdm_v_off, Id4)
-        + jnp.conj(phase_y) * jnp.einsum("ijkl,ijkl->", rdm_v_off_rev, Id4)
+        phase_x
+        * _transition_trace(_rdm2x1_with_open_tensors(ao_Bket, ao_Bbra, env, d))
+        / n0_h
+        + jnp.conj(phase_x)
+        * _transition_trace(_rdm2x1_with_open_tensors(ao_Bbra, ao_Bket, env, d))
+        / n0_h
+        + phase_y
+        * _transition_trace(_rdm1x2_with_open_tensors(ao_Bket, ao_Bbra, env, d))
+        / n0_v
+        + jnp.conj(phase_y)
+        * _transition_trace(_rdm1x2_with_open_tensors(ao_Bbra, ao_Bket, env, d))
+        / n0_v
     )
 
     return (norm_onsite + norm_offsite).real
@@ -458,9 +497,11 @@ def _compute_excitation_energy(
     from tenax.algorithms.ipeps_rdm import _build_double_layer_open
 
     H = hamiltonian_gate.reshape(d, d, d, d)
-    # Shift Hamiltonian: subtract E_gs/2 per bond (2 bonds per site)
-    Id = jnp.eye(d)
-    Id4 = jnp.einsum("ij,kl->ijkl", Id, Id)
+    # Shift Hamiltonian: subtract E_gs/2 per bond (2 bonds per site).  The
+    # identity must live in the same grouped (ket1, ket2, bra1, bra2) layout
+    # as the gate and the transition RDMs (#955): eye(d*d) reshaped is
+    # delta(ket1, bra1) * delta(ket2, bra2) in that layout.
+    Id4 = jnp.eye(d * d).reshape(d, d, d, d)
     H_shifted = H - (E_gs / 2.0) * Id4
 
     ao_AA = _build_double_layer_open(A)
@@ -468,40 +509,41 @@ def _compute_excitation_energy(
     ao_Bket = _build_mixed_double_layer_open(A, B, "ket")
     ao_Bbra = _build_mixed_double_layer_open(A, B, "bra")
 
+    # B-independent normalisation per geometry, as in _compute_norm (#954).
+    n0_h = _transition_trace(_rdm2x1_with_open_tensors(ao_AA, ao_AA, env, d))
+    n0_v = _transition_trace(_rdm1x2_with_open_tensors(ao_AA, ao_AA, env, d))
+
+    # The transition RDM is grouped (ket1, ket2, bra1, bra2) and the gate is
+    # (out1, out2, in1, in2) = <o1 o2|H|i1 i2>, so the expectation pairs the
+    # RDM's bra axes with the gate's out axes: Tr(rho H).  Pairing axes
+    # elementwise ("ijkl,ijkl") instead computes Tr(rho H^T) — identical for
+    # the real-symmetric gates the oracle tests use, but sign-flipped for
+    # complex Hermitian entries: Sy (x) I on |+y,+y> gave -0.5 instead of
+    # +0.5 (review P2 on #961).
+    def _e_h(ao1, ao2):
+        rdm = _rdm2x1_with_open_tensors(ao1, ao2, env, d)
+        return jnp.einsum("ijkl,klij->", rdm, H_shifted) / n0_h
+
+    def _e_v(ao1, ao2):
+        rdm = _rdm1x2_with_open_tensors(ao1, ao2, env, d)
+        return jnp.einsum("ijkl,klij->", rdm, H_shifted) / n0_v
+
     phase_x = jnp.exp(1j * k[0])
     phase_y = jnp.exp(1j * k[1])
 
-    energy = jnp.array(0.0 + 0.0j)
-
-    # --- On-site contributions: B at same site in ket and bra ---
-    # Horizontal bonds
-    rdm = _rdm2x1_with_open_tensors(ao_BB, ao_AA, env, d)
-    energy = energy + jnp.einsum("ijkl,ijkl->", rdm, H_shifted)
-
-    rdm = _rdm2x1_with_open_tensors(ao_AA, ao_BB, env, d)
-    energy = energy + jnp.einsum("ijkl,ijkl->", rdm, H_shifted)
-
-    # Vertical bonds
-    rdm = _rdm1x2_with_open_tensors(ao_BB, ao_AA, env, d)
-    energy = energy + jnp.einsum("ijkl,ijkl->", rdm, H_shifted)
-
-    rdm = _rdm1x2_with_open_tensors(ao_AA, ao_BB, env, d)
-    energy = energy + jnp.einsum("ijkl,ijkl->", rdm, H_shifted)
-
-    # --- Off-site: B_ket at one site, B*_bra at neighbor with phase ---
-    # Horizontal
-    rdm = _rdm2x1_with_open_tensors(ao_Bket, ao_Bbra, env, d)
-    energy = energy + phase_x * jnp.einsum("ijkl,ijkl->", rdm, H_shifted)
-
-    rdm = _rdm2x1_with_open_tensors(ao_Bbra, ao_Bket, env, d)
-    energy = energy + jnp.conj(phase_x) * jnp.einsum("ijkl,ijkl->", rdm, H_shifted)
-
-    # Vertical
-    rdm = _rdm1x2_with_open_tensors(ao_Bket, ao_Bbra, env, d)
-    energy = energy + phase_y * jnp.einsum("ijkl,ijkl->", rdm, H_shifted)
-
-    rdm = _rdm1x2_with_open_tensors(ao_Bbra, ao_Bket, env, d)
-    energy = energy + jnp.conj(phase_y) * jnp.einsum("ijkl,ijkl->", rdm, H_shifted)
+    # On-site contributions (B at the same site in ket and bra), then
+    # off-site (B in ket at one site, B* in bra at the neighbor) with
+    # momentum phases.
+    energy = (
+        _e_h(ao_BB, ao_AA)
+        + _e_h(ao_AA, ao_BB)
+        + _e_v(ao_BB, ao_AA)
+        + _e_v(ao_AA, ao_BB)
+        + phase_x * _e_h(ao_Bket, ao_Bbra)
+        + jnp.conj(phase_x) * _e_h(ao_Bbra, ao_Bket)
+        + phase_y * _e_v(ao_Bket, ao_Bbra)
+        + jnp.conj(phase_y) * _e_v(ao_Bbra, ao_Bket)
+    )
 
     return energy.real
 
@@ -544,8 +586,14 @@ def _build_H_and_N(
 
         H_{:,m} = \nabla_{B^*} \langle\Phi_k(B)|(H-E_{gs})|\Phi_k(B)\rangle\big|_{B=e_m}
 
-    Since the functionals are bilinear in B and B*, the gradient w.r.t. B*
-    at ``B = e_m`` gives the m-th column.
+    Both functionals are real-valued sesquilinear forms ``f(B) = B^dag M B``
+    with ``M`` Hermitian, so the m-th column is ``M e_m = grad_{B*} f`` at
+    ``B = e_m``.  That gradient is assembled from **separate real and
+    imaginary coordinate derivatives**, ``M e_m = (df/dx + i df/dy) / 2``:
+    differentiating a real-only basis loses every imaginary matrix element
+    (the float cotangent cannot carry them, #956), and going through JAX's
+    complex-cotangent convention instead invites conjugation mistakes — the
+    (x, y) route needs neither.
 
     Args:
         A:                Optimized ground state tensor.
@@ -566,32 +614,103 @@ def _build_H_and_N(
     # Stack basis tensors into a single JAX array: (basis_size, D, D, D, D, d)
     B_stacked = jnp.stack(basis)
 
-    # Gradient of energy functional w.r.t. B
     def energy_fn(B):
         return _compute_excitation_energy(A, B, env, k, hamiltonian_gate, E_gs, d)
 
-    # Gradient of norm functional w.r.t. B
     def norm_fn(B):
         return _compute_norm(A, B, env, k, d)
 
-    # Batch-compute all gradients using vmap instead of a Python loop.
-    # Each row of the output contains the gradient for the corresponding
-    # basis vector.  Transposing gives the matrix whose m-th column is
-    # the gradient for the m-th basis vector (matching the original API).
-    H_grads = jax.vmap(jax.grad(energy_fn))(B_stacked)  # (basis_size, D, D, D, D, d)
-    N_grads = jax.vmap(jax.grad(norm_fn))(B_stacked)  # (basis_size, D, D, D, D, d)
+    y0 = jnp.zeros_like(B_stacked[0])
 
-    # Reshape to (basis_size, basis_size) and transpose so that column m
-    # corresponds to the gradient for basis vector m, then transfer to host.
-    H_eff = np.array(H_grads.reshape(basis_size, basis_size).T)
-    N_mat = np.array(N_grads.reshape(basis_size, basis_size).T)
+    def _matrix(fn):
+        # grad_{B*} f = (df/dx + i df/dy) / 2 at B = x + iy, evaluated at
+        # each real basis vector (y = 0).  Row m of the vmapped result holds
+        # M e_m, i.e. the m-th column of M, so the matrix is the transpose
+        # (plain, not conjugate: the rows already ARE the columns).
+        def f_xy(x, y):
+            return fn(x + 1j * y)
 
-    return H_eff, N_mat
+        gx, gy = jax.vmap(jax.grad(f_xy, argnums=(0, 1)), in_axes=(0, None))(
+            B_stacked, y0
+        )
+        cols = 0.5 * (gx + 1j * gy)  # (basis_size, D, D, D, D, d)
+        return np.array(cols.reshape(basis_size, basis_size).T)
+
+    return _matrix(energy_fn), _matrix(norm_fn)
 
 
 # ---------------------------------------------------------------------------
 # Generalized eigenvalue problem
 # ---------------------------------------------------------------------------
+
+
+def _project_out_ground_state(
+    H_eff: np.ndarray,
+    N_mat: np.ndarray,
+    A: jax.Array,
+    k: jax.Array,
+) -> tuple[np.ndarray, np.ndarray]:
+    r"""Remove the ground-state direction from the excitation pencil.
+
+    ``B \propto A`` is *exactly* null at any ``k != 0``: replacing the site
+    tensor by itself leaves the state untouched, so
+    :math:`|\Phi_k(A)\rangle = \sum_r e^{ikr}|GS\rangle = N_s\,\delta_{k,0}
+    |GS\rangle`.  The full norm form annihilates that direction through its
+    infinite separation sum, but this module truncates the sum to
+    nearest-neighbour separations, which misrepresents the null as
+    ``1 + 2\cos k_x + 2\cos k_y`` — as low as ``-3`` near the M point
+    (#961 review round 2).  Modes with a large ground-state component then
+    carry spuriously negative norm and are silently discarded by the
+    solver's null filter, distorting the spectrum near M.  Projecting the
+    direction out *before* solving removes the artifact at its source
+    while keeping the physical (tangent-space) quotient exact — rescaling
+    the off-site norm windows instead would restore positivity by making
+    the metric's k-dependence wrong for every mode that overlaps A.
+
+    **At** ``k = 0`` **the same direction is not null — it is the ground
+    state itself** (#961 review round 3), and there the removal has to be
+    orthogonal with respect to the *physical* metric ``N``, not the
+    Euclidean one: tangent tensors are generally not ground-state-orthogonal
+    under ``N`` (measured on an optimized ``D=2`` Heisenberg state:
+    ``sin(angle(N a, a)) = 0.58``), so restricting with ``I - |a><a|``
+    leaves ground-state weight in the retained metric and admixes the
+    ``omega ~ 0`` direction into every retained mode — the Gamma point grew
+    a spurious low level at ``0.113`` where the ``N``-orthogonal reduction
+    puts the lowest physical mode at ``0.365``.  The oblique projector
+
+    .. math::
+
+        \Pi = I - \frac{a\,(a^\dagger N)}{a^\dagger N a}
+
+    annihilates ``a`` and maps onto the ``N``-orthogonal complement
+    ``\{v : a^\dagger N v = 0\}``; sandwiching both matrices restricts the
+    pencil to that subspace, and the exact null it leaves along ``a`` is
+    dropped by the solver's null filter.  Away from Gamma the direction is
+    being deleted as spurious rather than quotiented out, any transverse
+    complement is equivalent to truncation order, and the Euclidean
+    projector is kept.
+
+    The remaining gauge redundancy of the ansatz (``B`` obtained from ``A``
+    by bond gauge transformations) is smaller in norm and stays with the
+    solver's relative null filter, as in the reference implementations.
+    """
+    a = np.asarray(A).ravel().astype(np.complex128)
+    a = a / np.linalg.norm(a)
+    if np.allclose(np.asarray(k), 0.0):
+        na = np.asarray(N_mat).conj().T @ a
+        denom = a.conj() @ np.asarray(N_mat) @ a
+        if abs(denom) < 1e-12 * max(np.linalg.norm(na), 1e-300):
+            # The truncated metric thinks the ground state has no norm --
+            # degenerate input the oblique quotient would amplify into an
+            # unbounded projector.  The Euclidean deletion is the honest
+            # remaining move: it removes the direction without dividing by
+            # its vanishing N-weight.
+            P = np.eye(a.size, dtype=np.complex128) - np.outer(a, a.conj())
+        else:
+            P = np.eye(a.size, dtype=np.complex128) - np.outer(a, na.conj()) / denom
+    else:
+        P = np.eye(a.size, dtype=np.complex128) - np.outer(a, a.conj())
+    return P.conj().T @ H_eff @ P, P.conj().T @ N_mat @ P
 
 
 def _solve_excitations(
@@ -768,6 +887,7 @@ def compute_excitations(
             d,
             config,
         )
+        H_eff, N_mat = _project_out_ground_state(H_eff, N_mat, A, k)
         excitation_energies = _solve_excitations(
             H_eff,
             N_mat,
