@@ -438,8 +438,14 @@ def _compute_norm(
     n0_v = _transition_trace(_rdm1x2_with_open_tensors(ao_AA, ao_AA, env, d))
 
     # Horizontal on-site: (BB, AA) and (AA, BB); vertical likewise.  The norm
-    # is the plain trace of each transition RDM.
-    norm_onsite = (
+    # is the plain trace of each transition RDM.  All four windows measure
+    # the SAME quantity — the on-site overlap <Phi_r|Phi_r> — so they are
+    # averaged, not summed: summing counted that overlap four times while
+    # each energy window contributes a *different* bond operator once, which
+    # scaled every generalized eigenvalue by exactly 1/4 on an exact product
+    # state (review P1 on #961; each off-site pair below lives in exactly
+    # one window, so those are correctly counted once).
+    norm_onsite = 0.25 * (
         _transition_trace(_rdm2x1_with_open_tensors(ao_BB, ao_AA, env, d)) / n0_h
         + _transition_trace(_rdm2x1_with_open_tensors(ao_AA, ao_BB, env, d)) / n0_h
         + _transition_trace(_rdm1x2_with_open_tensors(ao_BB, ao_AA, env, d)) / n0_v
@@ -507,13 +513,20 @@ def _compute_excitation_energy(
     n0_h = _transition_trace(_rdm2x1_with_open_tensors(ao_AA, ao_AA, env, d))
     n0_v = _transition_trace(_rdm1x2_with_open_tensors(ao_AA, ao_AA, env, d))
 
+    # The transition RDM is grouped (ket1, ket2, bra1, bra2) and the gate is
+    # (out1, out2, in1, in2) = <o1 o2|H|i1 i2>, so the expectation pairs the
+    # RDM's bra axes with the gate's out axes: Tr(rho H).  Pairing axes
+    # elementwise ("ijkl,ijkl") instead computes Tr(rho H^T) — identical for
+    # the real-symmetric gates the oracle tests use, but sign-flipped for
+    # complex Hermitian entries: Sy (x) I on |+y,+y> gave -0.5 instead of
+    # +0.5 (review P2 on #961).
     def _e_h(ao1, ao2):
         rdm = _rdm2x1_with_open_tensors(ao1, ao2, env, d)
-        return jnp.einsum("ijkl,ijkl->", rdm, H_shifted) / n0_h
+        return jnp.einsum("ijkl,klij->", rdm, H_shifted) / n0_h
 
     def _e_v(ao1, ao2):
         rdm = _rdm1x2_with_open_tensors(ao1, ao2, env, d)
-        return jnp.einsum("ijkl,ijkl->", rdm, H_shifted) / n0_v
+        return jnp.einsum("ijkl,klij->", rdm, H_shifted) / n0_v
 
     phase_x = jnp.exp(1j * k[0])
     phase_y = jnp.exp(1j * k[1])

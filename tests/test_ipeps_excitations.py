@@ -852,6 +852,65 @@ class TestEnergyFunctionalOracle:
         # (each 1) and none of the off-site ones (orthogonal transition).
         np.testing.assert_allclose(e, e0 - 2.0 * 0.3, atol=1e-12)
 
+    def test_norm_counts_the_onsite_overlap_once(self):
+        """<Phi|Phi> per site is exactly 1 on this fixture: <B|B> = 1 on-site
+        and every off-site overlap vanishes (<A|B> = 0).
+
+        Pre-fix the four windows each contributed the same on-site overlap
+        and were summed, giving 4.0 — which silently scaled every
+        generalized eigenvalue by 1/4 (review P1 on #961: the energy
+        numerator was exact, so the pinned oracles above never noticed).
+        """
+        for k in (jnp.array([0.0, 0.0]), jnp.array([0.4, 0.7])):
+            n = float(_compute_norm(self.A, self.B, self.env, k, 2))
+            np.testing.assert_allclose(n, 1.0, atol=1e-12)
+
+    def test_generalized_eigenvalue_matches_the_exact_dispersion(self):
+        """End to end through H/N assembly: the Rayleigh quotient on the
+        B = |1> direction equals the exact single-flip dispersion
+
+            w(k) = -2 Jz + (Jx / 2)(cos kx + cos ky),   E_gs = Jz / 2.
+
+        This is the ratio the P1 norm fix restores; it is exact on the
+        product fixture, so any window double-counting (in H or N), a wrong
+        E_gs bookkeeping, or an axis-layout slip moves it.
+        """
+        Jz, Jx = 0.7, 1.0
+        gate = Jz * self.Hzz + Jx * self.Hxx
+        for kx, ky in ((0.0, 0.0), (np.pi, 0.0), (0.4, 0.7)):
+            H, N = _build_H_and_N(
+                self.A,
+                self.env,
+                jnp.array([kx, ky]),
+                gate,
+                Jz / 2.0,
+                2,
+                ExcitationConfig(num_excitations=1),
+            )
+            quot = float((H[1, 1] / N[1, 1]).real)
+            true = -2.0 * Jz + 0.5 * Jx * (np.cos(kx) + np.cos(ky))
+            np.testing.assert_allclose(quot, true, atol=1e-12)
+
+    def test_complex_hermitian_gate_contracts_against_bra_axes(self):
+        """Sx (x) Sy is Hermitian but transposes to its negative, so it
+        separates Tr(rho H) from Tr(rho H^T): the hopping dispersion is
+
+            E(k) = -(1/2)(sin kx + sin ky),
+
+        and the pre-fix elementwise contraction returned its negation
+        (review P2 on #961 — every other oracle gate here is real
+        symmetric, which is exactly the class that hides the transpose).
+        """
+        sy = 0.5 * jnp.array([[0.0, -1j], [1j, 0.0]])
+        gate = jnp.einsum("ab,cd->acbd", _SX, sy)
+        for kx, ky in ((0.5, 0.0), (0.0, 0.5), (0.4, 0.7)):
+            e = float(
+                _compute_excitation_energy(
+                    self.A, self.B, self.env, jnp.array([kx, ky]), gate, 0.0, 2
+                )
+            )
+            np.testing.assert_allclose(e, -0.5 * (np.sin(kx) + np.sin(ky)), atol=1e-12)
+
 
 class TestComplexAssembly956:
     """#956: the H/N assembly must keep imaginary matrix elements.
