@@ -275,6 +275,7 @@ def optimize_gs_ad_root_implicit(
     from tenax.algorithms._ipeps_optimize_shared import (
         _build_optimizer,
         _converged_outer,
+        _euclidean_grads,
         _grad_l2_norm,
         _log_ad_converged,
         _normalize_params,
@@ -531,6 +532,12 @@ def optimize_gs_ad_root_implicit(
                 stacklevel=2,
             )
         grads = jax.tree.map(lambda g: jnp.where(jnp.isfinite(g), g, 0.0), grads)
+        # The engine returns a raw JAX cotangent; every consumer below (the
+        # plain gradient-descent step, both Optax branches, _grad_l2_norm) is
+        # Euclidean, so the same conversion every other optimizer loop applies
+        # after value_and_grad is required here too (#957 — this loop was the
+        # missed production site).
+        grads = _euclidean_grads(grads)
         E = float(jnp.real(energy_val))
         if config.return_history:
             _step_dt = float(_time.perf_counter() - _step_t0)

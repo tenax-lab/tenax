@@ -20,6 +20,7 @@ from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms._ipeps_optimize_shared import (  # noqa: F401
     _build_optimizer,
     _converged_outer,
+    _euclidean_grads,
     _grad_l2_norm,
     _log_ad_converged,
     _normalize_params,
@@ -951,6 +952,7 @@ def _optimize_gs_ad_tensor_reference_c4v(
                 )
             continue
         grads = jnp.where(jnp.isfinite(grads), grads, 0.0)
+        grads = _euclidean_grads(grads)
         E = float(energy_val)
 
         # Score / convergence-check on the *pre-step* params.  ``energy_val``
@@ -1703,6 +1705,7 @@ def _optimize_gs_ad_tensor(
             _step_t0 = _time.perf_counter()
         try:
             energy_val, grads = jax.value_and_grad(loss_fn)(params)
+            grads = _euclidean_grads(grads)
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -2128,7 +2131,7 @@ def _optimize_gs_ad_tensor(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
                     _, g = jax.value_and_grad(loss_fn)(trial)
-                    return _tree_dot(g, direction)
+                    return _tree_dot(_euclidean_grads(g), direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                 param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -3277,6 +3280,7 @@ def _optimize_gs_ad_tensor_2site(
                 _step_t0 = _time.perf_counter()
             try:
                 energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                grads = _euclidean_grads(grads)
             except CTMRGGradientError as exc:
                 _logger.warning(
                     "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -3786,7 +3790,7 @@ def _optimize_gs_ad_tensor_2site(
                             _tree_add(params, _tree_scale(direction, alpha))
                         )
                         _, g = jax.value_and_grad(loss_fn)(trial)
-                        return _tree_dot(g, direction)
+                        return _tree_dot(_euclidean_grads(g), direction)
 
                     dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                     param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -4508,6 +4512,7 @@ def _optimize_gs_ad_multisite(
             _step_t0 = _time.perf_counter()
         try:
             energy_val, grads = jax.value_and_grad(loss_fn)(params)
+            grads = _euclidean_grads(grads)
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -4871,7 +4876,7 @@ def _optimize_gs_ad_multisite(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
                     _, g = jax.value_and_grad(loss_fn)(trial)
-                    return _tree_dot(g, direction)
+                    return _tree_dot(_euclidean_grads(g), direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                 param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
