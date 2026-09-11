@@ -1021,6 +1021,41 @@ Two constraints:
 The caller this exists for is `ipeps_bp_gauge._sqrt_pinv`, which factors a PSD
 message and never truncates.
 
+### Bond ordering of a block-sparse `svd`
+
+`tenax.linalg.svd` has the same pair of modes, for the same reason: the default
+ranks the whole spectrum on the host, which raises under `jax.jit`, and under a
+tracer the block-sparse path is silently rerouted to a static-allocation
+variant whose per-sector SVD applies a subrank floor — real singular values
+below `1e-12 · (s_max + 1e-30)` come back **exactly zero**, which on a 1×1
+sector makes the `+1e-30` term an absolute ~1e-42 cutoff.
+
+```python
+from tenax.linalg import svd
+
+U, s, Vh, s_full = svd(t, ["row"], ["col"], new_bond_label="k", bond_order="sector")
+```
+
+`"sector"` emits the bond charge-grouped — ascending by the bond charge each
+sector carries, values **descending within** each sector — and takes the same
+code path eager and traced, so no reroute and no floor: a 4.6e-43 singular
+value comes back as itself. The array is not globally monotone, `s[0]` is not
+the largest, and `s_full` **is** `s` (nothing was truncated). As with `eigh`,
+the two modes differ only by a permutation of the bond, with `U`, `s`, `Vh`
+permuted together.
+
+Constraints, one more than `eigh`'s:
+
+- It is **rejected with `max_singular_values` and with `max_truncation_err`** —
+  both truncation knobs rank sectors against each other on the host.
+- It is **ignored on the dense path**, which has no sectors to group by.
+- Reverse-mode AD through sector mode uses the default SVD JVP, not the
+  Lorentzian-regularized `truncated_svd_ad`; do not differentiate it at
+  degenerate spectra.
+
+The caller this exists for is `ipeps_bp_gauge._gauge_bond`, which re-gauges a
+bond at full rank and never truncates.
+
 ## Gotchas
 
 ### Float64 precision and `JAX_ENABLE_X64`
