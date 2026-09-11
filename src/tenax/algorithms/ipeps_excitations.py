@@ -644,6 +644,38 @@ def _build_H_and_N(
 # ---------------------------------------------------------------------------
 
 
+def _project_out_ground_state(
+    H_eff: np.ndarray,
+    N_mat: np.ndarray,
+    A: jax.Array,
+) -> tuple[np.ndarray, np.ndarray]:
+    r"""Remove the ground-state direction from the excitation pencil.
+
+    ``B \propto A`` is *exactly* null at any ``k != 0``: replacing the site
+    tensor by itself leaves the state untouched, so
+    :math:`|\Phi_k(A)\rangle = \sum_r e^{ikr}|GS\rangle = N_s\,\delta_{k,0}
+    |GS\rangle`.  The full norm form annihilates that direction through its
+    infinite separation sum, but this module truncates the sum to
+    nearest-neighbour separations, which misrepresents the null as
+    ``1 + 2\cos k_x + 2\cos k_y`` — as low as ``-3`` near the M point
+    (#961 review round 2).  Modes with a large ground-state component then
+    carry spuriously negative norm and are silently discarded by the
+    solver's null filter, distorting the spectrum near M.  Projecting the
+    direction out *before* solving removes the artifact at its source
+    while keeping the physical (tangent-space) quotient exact — rescaling
+    the off-site norm windows instead would restore positivity by making
+    the metric's k-dependence wrong for every mode that overlaps A.
+
+    The remaining gauge redundancy of the ansatz (``B`` obtained from ``A``
+    by bond gauge transformations) is smaller in norm and stays with the
+    solver's relative null filter, as in the reference implementations.
+    """
+    a = np.asarray(A).ravel().astype(np.complex128)
+    a = a / np.linalg.norm(a)
+    P = np.eye(a.size, dtype=np.complex128) - np.outer(a, a.conj())
+    return P @ H_eff @ P, P @ N_mat @ P
+
+
 def _solve_excitations(
     H_eff: np.ndarray,
     N_mat: np.ndarray,
@@ -818,6 +850,7 @@ def compute_excitations(
             d,
             config,
         )
+        H_eff, N_mat = _project_out_ground_state(H_eff, N_mat, A)
         excitation_energies = _solve_excitations(
             H_eff,
             N_mat,

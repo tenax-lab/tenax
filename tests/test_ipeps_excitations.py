@@ -23,6 +23,7 @@ from tenax.algorithms.ipeps_excitations import (
     _build_mixed_double_layer_open,
     _compute_excitation_energy,
     _compute_norm,
+    _project_out_ground_state,
     _rdm1x2_mixed,
     _rdm2x1_mixed,
     _solve_excitations,
@@ -890,6 +891,54 @@ class TestEnergyFunctionalOracle:
             quot = float((H[1, 1] / N[1, 1]).real)
             true = -2.0 * Jz + 0.5 * Jx * (np.cos(kx) + np.cos(ky))
             np.testing.assert_allclose(quot, true, atol=1e-12)
+
+    def test_ground_state_direction_is_projected_to_an_exact_null(self):
+        """B = A is exactly null at k != 0, but the NN-truncated norm
+        misrepresents it as 1 + 2cos kx + 2cos ky — down to -3 at M (#961
+        review round 2).  The projector must zero that direction in both
+        matrices, restoring a PSD pencil, while the physical orthogonal
+        mode keeps its exact dispersion through the solver.
+        """
+        k = jnp.array([np.pi, np.pi])
+        # Regime pin: the raw truncated form really is -3 along B = A at M.
+        np.testing.assert_allclose(
+            float(_compute_norm(self.A, self.A, self.env, k, 2)), -3.0, atol=1e-12
+        )
+        Jz, Jx = 0.7, 1.0
+        gate = Jz * self.Hzz + Jx * self.Hxx
+        H, N = _build_H_and_N(
+            self.A, self.env, k, gate, Jz / 2.0, 2, ExcitationConfig(num_excitations=2)
+        )
+        Hp, Np = _project_out_ground_state(H, N, self.A)
+        eigs = np.linalg.eigvalsh(0.5 * (Np + Np.conj().T))
+        assert eigs.min() > -1e-12, f"pencil still indefinite after projection: {eigs}"
+        true = -2.0 * Jz + 0.5 * Jx * (np.cos(np.pi) + np.cos(np.pi))
+        np.testing.assert_allclose(_solve_excitations(Hp, Np, 1)[0], true, atol=1e-12)
+
+    def test_contaminated_momentum_returns_the_exact_dispersion_end_to_end(self):
+        """The unprojected A-direction is a spurious ZERO level, not a
+        shifted one: the E_gs identity annihilates every pure-GS window, so
+        H[A-dir, A-dir] == 0 identically while its truncated norm at
+        k = (1.8, 1.8) is small but positive (1 + 4cos 1.8 ~ 0.09) and
+        survives the solver's null filter.  On a positive dispersion — the
+        physical situation for a gapped system — that fake omega = 0 level
+        undercuts the true mode and compute_excitations reports a gapless
+        spectrum.  With the projection the direction is exactly removed and
+        the exact dispersion comes back (review round 2 on #961).
+        """
+        Jz, Jx = -0.7, 1.0  # sign chosen so the true dispersion is positive
+        gate = Jz * self.Hzz + Jx * self.Hxx
+        result = compute_excitations(
+            self.A,
+            self.env,
+            gate,
+            Jz / 2.0,
+            [(1.8, 1.8)],
+            ExcitationConfig(num_excitations=1),
+        )
+        true = -2.0 * Jz + 0.5 * Jx * (np.cos(1.8) + np.cos(1.8))
+        assert true > 1.0  # regime pin: the spurious 0 must sit BELOW the mode
+        np.testing.assert_allclose(result.energies[0][0], true, atol=1e-12)
 
     def test_complex_hermitian_gate_contracts_against_bra_axes(self):
         """Sx (x) Sy is Hermitian but transposes to its negative, so it
