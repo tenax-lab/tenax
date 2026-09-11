@@ -182,6 +182,50 @@ class TestComputeEnergyCG:
         E = compute_energy_cg(A, env, gates, d_eff=4)
         np.testing.assert_allclose(float(E), 0.375, atol=1e-4)
 
+    def test_complex_hermitian_intra_gate_reads_the_right_sign(self):
+        """|+y,+y> with ``h_intra = Sy(x)I + I(x)Sy``: +1.0 per cell, not -1.0.
+
+        The two-site energies contract ``ijkl,klij`` since #966, but the
+        1-site intra term still paired the ``(phys, phys_bra)`` RDM with the
+        gate elementwise -- ``Tr(rho H^T)``.  Every shipped ``h_intra`` is
+        real-symmetric, which is why nothing noticed: this gate is the
+        smallest Hermitian one whose transpose is its negative, so the two
+        contractions give opposite signs and the assertion can only pass on
+        the right one.  (The file's own oracle above,
+        ``jnp.trace(rdm @ h_intra)``, always contracted the right way --
+        the mismatch was in ``src``.)
+        """
+        plus_y = np.array([1.0, 1.0j]) / np.sqrt(2)
+        d_eff = 4
+        phys = np.kron(plus_y, plus_y)
+        data = np.zeros((1, 1, 1, 1, d_eff), dtype=np.complex128)
+        data[0, 0, 0, 0, :] = phys
+        sym = U1Symmetry()
+        z1 = np.zeros(1, dtype=np.int32)
+        zd = np.zeros(d_eff, dtype=np.int32)
+        A = DenseTensor(
+            jnp.asarray(data),
+            (
+                TensorIndex.from_charges(sym, z1.copy(), FlowDirection.OUT, label="u"),
+                TensorIndex.from_charges(sym, z1.copy(), FlowDirection.IN, label="d"),
+                TensorIndex.from_charges(sym, z1.copy(), FlowDirection.OUT, label="l"),
+                TensorIndex.from_charges(sym, z1.copy(), FlowDirection.IN, label="r"),
+                TensorIndex.from_charges(
+                    sym, zd.copy(), FlowDirection.IN, label="phys"
+                ),
+            ),
+        )
+        env = _converge_ctm_env(A, chi=4, max_iter=20)
+
+        Sy = np.array([[0.0, -0.5j], [0.5j, 0.0]])
+        eye = np.eye(2)
+        h_intra = np.kron(Sy, eye) + np.kron(eye, Sy)
+        gates = CGGates(h_intra=jnp.asarray(h_intra), h_inter={}, n_sites=2)
+
+        E = compute_energy_cg(A, env, gates, d_eff=d_eff)
+        # <+y|Sy|+y> = +1/2 on each of the two sites; per site: 1.0 / 2.
+        np.testing.assert_allclose(float(E), 0.5, atol=1e-10)
+
 
 class TestComputeEnergyCGSplit:
     """``compute_energy_cg_split`` must match ``compute_energy_cg`` for bosonic A."""
@@ -230,6 +274,69 @@ class TestComputeEnergyCGSplit:
 
         E_split = compute_energy_cg_split(A, split_env, gates, d_eff)
         E_std = compute_energy_cg(A, std_env, gates, d_eff)
+        np.testing.assert_allclose(float(E_split), float(E_std), atol=1e-10)
+
+    def test_split_intra_contraction_matches_std_on_a_complex_state(self):
+        """The split path's 1-site term, pinned where a transpose slip shows.
+
+        The parity above runs on a *real* tensor, whose 1-site RDM is real
+        symmetric -- there ``Tr(rho H^T) == Tr(rho H)`` identically, so that
+        cell cannot see the intra contraction at all (measured: reverting
+        the split-path einsum to ``"ij,ij->"`` left it green).  This one
+        makes the RDM genuinely Hermitian-not-symmetric with a complex
+        state, uses an ``h_intra`` whose transpose is its negative, and
+        asserts its own discriminating power before asserting the parity --
+        so it cannot silently degrade back into the vacuous form.
+        """
+        from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            _split_env_to_tensor_standard,
+        )
+        from tenax.algorithms.coarse_grain import compute_energy_cg_split
+
+        D, chi, d_eff = 2, 8, 8
+        rng = np.random.default_rng(seed=0)
+        data = rng.normal(size=(D, D, D, D, d_eff)) + 1j * rng.normal(
+            size=(D, D, D, D, d_eff)
+        )
+        data /= np.linalg.norm(data)
+        sym = U1Symmetry()
+        zD = np.zeros(D, dtype=np.int32)
+        zd = np.zeros(d_eff, dtype=np.int32)
+        A = DenseTensor(
+            jnp.asarray(data),
+            (
+                TensorIndex.from_charges(sym, zD.copy(), FlowDirection.OUT, label="u"),
+                TensorIndex.from_charges(sym, zD.copy(), FlowDirection.IN, label="d"),
+                TensorIndex.from_charges(sym, zD.copy(), FlowDirection.OUT, label="l"),
+                TensorIndex.from_charges(sym, zD.copy(), FlowDirection.IN, label="r"),
+                TensorIndex.from_charges(
+                    sym, zd.copy(), FlowDirection.IN, label="phys"
+                ),
+            ),
+        )
+        split_env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        std_env = _split_env_to_tensor_standard(split_env)
+
+        Sy = np.array([[0.0, -0.5j], [0.5j, 0.0]])
+        h_intra_c = jnp.asarray(np.kron(Sy, np.eye(4)))
+
+        # Premise: on this state the two contractions genuinely differ, so
+        # the parity below can actually fail on a transpose slip.
+        rdm_1 = _rdm_1site_tensor(A, std_env)
+        discriminates = abs(
+            complex(jnp.einsum("ij,ij->", rdm_1, h_intra_c))
+            - complex(jnp.einsum("ij,ji->", rdm_1, h_intra_c))
+        )
+        assert discriminates > 1e-3, (
+            f"the fixture's RDM cannot see a transposed gate "
+            f"(|Tr(rho H) - Tr(rho H^T)| = {discriminates:.2e}); a complex "
+            f"state was supposed to prevent exactly this"
+        )
+
+        gates_c = CGGates(h_intra=h_intra_c, h_inter={}, n_sites=3)
+        E_split = compute_energy_cg_split(A, split_env, gates_c, d_eff)
+        E_std = compute_energy_cg(A, std_env, gates_c, d_eff)
         np.testing.assert_allclose(float(E_split), float(E_std), atol=1e-10)
 
     @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
