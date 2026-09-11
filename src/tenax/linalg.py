@@ -442,15 +442,17 @@ def _truncated_svd_symmetric(
             if order
             else jnp.zeros((0,), dtype=jnp.finfo(tensor.dtype).dtype)
         )
-        # Nothing was truncated, so the spectrum *is* the full spectrum --
-        # the traced convention, adopted here for the same reason: a
-        # separate host-sorted copy would defeat the mode.
-        s_full = s_final
         if normalize:
             # The descending branch's ``jnp.sum(s_final) > 0`` is a host
             # read; fence the zero case with ``where`` instead.
             denom = jnp.sum(s_final)
             s_final = s_final / jnp.where(denom > 0, denom, 1.0)
+        # Nothing was truncated, so the spectrum *is* the full spectrum --
+        # the traced convention, which normalizes before returning the pair,
+        # adopted whole: captured *after* the rescale, so the documented
+        # identity ``s_full is s`` survives ``normalize=True`` instead of
+        # silently handing back one raw and one rescaled copy.
+        s_full = s_final
     else:
         # Global ("democratic") truncation: merge singular values from all charge
         # sectors and sort globally descending.  The largest singular values are
@@ -1948,7 +1950,8 @@ def svd(
         useful for computing truncation error without a second SVD.  With
         ``bond_order="sector"`` nothing is truncated and
         ``singular_values_full`` *is* ``singular_values``, in the same
-        charge-grouped order.
+        charge-grouped order -- including under ``normalize``, where both
+        are the normalized spectrum.
 
     Raises:
         ValueError: If left_labels + right_labels don't cover all tensor

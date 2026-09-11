@@ -124,6 +124,33 @@ def test_sector_mode_returns_the_spectrum_as_its_own_full_spectrum():
     assert np.array_equal(np.asarray(s), np.asarray(s_full))
 
 
+def test_the_s_full_identity_survives_normalize():
+    """``normalize=True`` must rescale both copies, or the identity lies.
+
+    Watched failing with ``s_full`` captured before the rescale: ``s`` summed
+    to 1 while ``s_full`` kept the raw spectrum, so the documented
+    "``s_full`` *is* ``s``" handed back one normalized and one raw copy.
+    """
+    t = _two_sector()
+
+    def factor(t):
+        _U, s, _Vh, s_full = svd(
+            t,
+            ["row"],
+            ["col"],
+            new_bond_label="k",
+            bond_order="sector",
+            normalize=True,
+        )
+        return s, s_full
+
+    for tag, (s, s_full) in (("eager", factor(t)), ("traced", jax.jit(factor)(t))):
+        assert float(jnp.sum(s)) == pytest.approx(1.0), f"{tag}: s not normalized"
+        assert np.array_equal(np.asarray(s), np.asarray(s_full)), (
+            f"{tag}: s_full diverged from s under normalize"
+        )
+
+
 def _sum_s(t, alpha, order):
     blocks = {k: alpha * b for k, b in t.blocks.items()}
     scaled = SymmetricTensor._from_blocks_unchecked(blocks, t.indices)

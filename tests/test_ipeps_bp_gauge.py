@@ -818,7 +818,47 @@ def test_the_canonical_relayout_is_the_same_state():
                 np.asarray(getattr(wc2, bond)), np.asarray(getattr(wc, bond))
             ), f"{tag}: weights moved on the second pass"
 
+        # A wrong-but-self-consistent relabel would survive both checks
+        # above -- the torus is invariant under any consistent relabel, and
+        # a wrong reading can be idempotent.  What it cannot survive is the
+        # sweep: the carry needs the relayout to be the sweep's own fixed
+        # point, so assert that directly.
+        swept, _ = bp_mod._sweep(dict(canon), wc)
+        for s in ("A", "B"):
+            out = bp_mod._restore_caller_structure(swept[s], canon[s])
+            assert out.indices == canon[s].indices, (
+                f"{tag}/{s}: one sweep left the canonical layout -- the "
+                f"relayout is not the sweep's fixed point, so the traced "
+                f"carry could not hold it"
+            )
 
+
+@pytest.mark.usefixtures("retraced")
+def test_the_flow_inverted_su_pair_stays_on_the_traced_path(monkeypatch):
+    """The dual-relabel path -- the headline case -- must not fall back.
+
+    A simple-update-evolved pair carries the opposite flow convention, so
+    every virtual leg takes the full canonicalization: dual relabel, sort,
+    weight permutation.  If any of that ever raises
+    ``_StructureNotTraceable``, the solve would still be *correct* through
+    the eager fallback -- and silently 10^4 times slower, which is the
+    regression this cell exists to catch.  ``retraced`` keeps the assertion
+    honest: served from a warm cache, a refusal would never fire either.
+    """
+    A, B, stored = _simple_update(*_symmetric_pair(), phases=4, rotate=False)
+    before = _direction(_torus_2x2(A, B, stored))
+
+    def no_fallback(*a, **k):
+        raise AssertionError("the SU-evolved pair fell back to the eager loop")
+
+    monkeypatch.setattr(bp_mod, "_bp_solve_eager", no_fallback)
+    A2, B2, w2, info = bp_gauge_checkerboard(A, B, stored, max_iter=400, tol=1e-13)
+    assert info.converged, f"the traced solve did not converge: {info}"
+    drift = float(np.max(np.abs(_direction(_torus_2x2(A2, B2, w2)) - before)))
+    assert drift < GAUGE_TOL, f"the solve moved the state by {drift:.3e}"
+
+
+@pytest.mark.usefixtures("retraced")
 def test_a_slot_no_block_occupies_is_dropped_and_stays_on_the_traced_path(
     monkeypatch,
 ):
@@ -874,6 +914,7 @@ def test_a_slot_no_block_occupies_is_dropped_and_stays_on_the_traced_path(
     assert drift < GAUGE_TOL, f"the solve moved the state by {drift:.3e}"
 
 
+@pytest.mark.usefixtures("retraced")
 def test_a_pair_the_carry_cannot_hold_falls_back_to_the_eager_loop(monkeypatch):
     """The traced driver's refusal is a dispatch, not a failure.
 
@@ -883,11 +924,25 @@ def test_a_pair_the_carry_cannot_hold_falls_back_to_the_eager_loop(monkeypatch):
     that genuinely defeats the canonicalization also defeats the eager
     positional-weight convention, so no honest fixture reaches the fallback
     today; the fallback exists for the structures we have not met yet.
+
+    Two things keep this cell honest, both watched being necessary:
+    ``retraced``, because the injection fires at *trace* time and an earlier
+    cell has already compiled this exact key -- served from that cache, the
+    refusal never runs and every assertion here passes off the traced
+    result; and the eager spy, which turns "the fallback ran" from an
+    assumption into an assertion.
     """
+    eager_runs = []
+    real_eager = bp_mod._bp_solve_eager
+
+    def spy(*args, **kwargs):
+        eager_runs.append(1)
+        return real_eager(*args, **kwargs)
 
     def refuse(gam, weights):
         raise bp_mod._StructureNotTraceable("injected: carry cannot hold this pair")
 
+    monkeypatch.setattr(bp_mod, "_bp_solve_eager", spy)
     monkeypatch.setattr(bp_mod, "_canonical_symmetric_layout", refuse)
 
     A, B = _symmetric_pair()
@@ -895,6 +950,10 @@ def test_a_pair_the_carry_cannot_hold_falls_back_to_the_eager_loop(monkeypatch):
     before = _direction(_torus_2x2(A, B, w))
 
     A2, B2, w2, info = bp_gauge_checkerboard(A, B, w, max_iter=400, tol=1e-13)
+    assert eager_runs, (
+        "the eager fallback never ran -- the traced call was served from a "
+        "stale jit cache and this cell asserted nothing about the fallback"
+    )
     assert info.converged, f"the fallback did not converge: {info}"
     drift = float(np.max(np.abs(_direction(_torus_2x2(A2, B2, w2)) - before)))
     assert drift < GAUGE_TOL, f"the fallback moved the state by {drift:.3e}"
@@ -902,7 +961,11 @@ def test_a_pair_the_carry_cannot_hold_falls_back_to_the_eager_loop(monkeypatch):
     # ... and gauge_fix's own traced route falls back the same way.  The
     # helpers' pair doubles as an absorbed-form pair (its implicit weights
     # are ones), which is the form gauge_fix takes.
+    runs_before_gauge_fix = len(eager_runs)
     A3, B3, w3, info3 = gauge_fix(A, B, max_iter=400, tol=1e-10)
+    assert len(eager_runs) > runs_before_gauge_fix, (
+        "gauge_fix's fallback never reached the eager driver"
+    )
     assert info3.converged, f"gauge_fix's fallback did not converge: {info3}"
 
 
