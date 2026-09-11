@@ -400,6 +400,7 @@ _FILE_MARKERS = {
     "test_lattice.py": "algorithm",
     "test_linalg.py": "core",
     "test_eigh_bond_order.py": "core",
+    "test_svd_bond_order.py": "core",
     "test_linalg_np.py": "core",
     "test_observables.py": "algorithm",
     "test_cbe_validation.py": "algorithm",
