@@ -648,6 +648,7 @@ def _project_out_ground_state(
     H_eff: np.ndarray,
     N_mat: np.ndarray,
     A: jax.Array,
+    k: jax.Array,
 ) -> tuple[np.ndarray, np.ndarray]:
     r"""Remove the ground-state direction from the excitation pencil.
 
@@ -666,14 +667,50 @@ def _project_out_ground_state(
     the off-site norm windows instead would restore positivity by making
     the metric's k-dependence wrong for every mode that overlaps A.
 
+    **At** ``k = 0`` **the same direction is not null — it is the ground
+    state itself** (#961 review round 3), and there the removal has to be
+    orthogonal with respect to the *physical* metric ``N``, not the
+    Euclidean one: tangent tensors are generally not ground-state-orthogonal
+    under ``N`` (measured on an optimized ``D=2`` Heisenberg state:
+    ``sin(angle(N a, a)) = 0.58``), so restricting with ``I - |a><a|``
+    leaves ground-state weight in the retained metric and admixes the
+    ``omega ~ 0`` direction into every retained mode — the Gamma point grew
+    a spurious low level at ``0.113`` where the ``N``-orthogonal reduction
+    puts the lowest physical mode at ``0.365``.  The oblique projector
+
+    .. math::
+
+        \Pi = I - \frac{a\,(a^\dagger N)}{a^\dagger N a}
+
+    annihilates ``a`` and maps onto the ``N``-orthogonal complement
+    ``\{v : a^\dagger N v = 0\}``; sandwiching both matrices restricts the
+    pencil to that subspace, and the exact null it leaves along ``a`` is
+    dropped by the solver's null filter.  Away from Gamma the direction is
+    being deleted as spurious rather than quotiented out, any transverse
+    complement is equivalent to truncation order, and the Euclidean
+    projector is kept.
+
     The remaining gauge redundancy of the ansatz (``B`` obtained from ``A``
     by bond gauge transformations) is smaller in norm and stays with the
     solver's relative null filter, as in the reference implementations.
     """
     a = np.asarray(A).ravel().astype(np.complex128)
     a = a / np.linalg.norm(a)
-    P = np.eye(a.size, dtype=np.complex128) - np.outer(a, a.conj())
-    return P @ H_eff @ P, P @ N_mat @ P
+    if np.allclose(np.asarray(k), 0.0):
+        na = np.asarray(N_mat).conj().T @ a
+        denom = a.conj() @ np.asarray(N_mat) @ a
+        if abs(denom) < 1e-12 * max(np.linalg.norm(na), 1e-300):
+            # The truncated metric thinks the ground state has no norm --
+            # degenerate input the oblique quotient would amplify into an
+            # unbounded projector.  The Euclidean deletion is the honest
+            # remaining move: it removes the direction without dividing by
+            # its vanishing N-weight.
+            P = np.eye(a.size, dtype=np.complex128) - np.outer(a, a.conj())
+        else:
+            P = np.eye(a.size, dtype=np.complex128) - np.outer(a, na.conj()) / denom
+    else:
+        P = np.eye(a.size, dtype=np.complex128) - np.outer(a, a.conj())
+    return P.conj().T @ H_eff @ P, P.conj().T @ N_mat @ P
 
 
 def _solve_excitations(
@@ -850,7 +887,7 @@ def compute_excitations(
             d,
             config,
         )
-        H_eff, N_mat = _project_out_ground_state(H_eff, N_mat, A)
+        H_eff, N_mat = _project_out_ground_state(H_eff, N_mat, A, k)
         excitation_energies = _solve_excitations(
             H_eff,
             N_mat,

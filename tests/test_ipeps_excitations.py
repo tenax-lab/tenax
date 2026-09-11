@@ -909,11 +909,87 @@ class TestEnergyFunctionalOracle:
         H, N = _build_H_and_N(
             self.A, self.env, k, gate, Jz / 2.0, 2, ExcitationConfig(num_excitations=2)
         )
-        Hp, Np = _project_out_ground_state(H, N, self.A)
+        Hp, Np = _project_out_ground_state(H, N, self.A, k)
         eigs = np.linalg.eigvalsh(0.5 * (Np + Np.conj().T))
         assert eigs.min() > -1e-12, f"pencil still indefinite after projection: {eigs}"
         true = -2.0 * Jz + 0.5 * Jx * (np.cos(np.pi) + np.cos(np.pi))
         np.testing.assert_allclose(_solve_excitations(Hp, Np, 1)[0], true, atol=1e-12)
+
+    def test_gamma_removes_the_ground_state_with_the_physical_metric(self):
+        """At Gamma the same direction is the ground state, not a null --
+        and tangent vectors are not ground-state-orthogonal under the
+        physical ``N`` (#961 review round 3), so deleting it with the
+        Euclidean projector leaves ground-state weight in the retained
+        metric.  Measured on an optimized D=2 Heisenberg state, that
+        admixture grew a spurious low level at 0.113 where the
+        N-orthogonal reduction puts the lowest physical mode at 0.365.
+
+        Pinned here without an analytic oracle, in three steps on a
+        correlated random fixture: (1) the premise -- ``N a`` is genuinely
+        not parallel to ``a``, so the two quotients can differ and this
+        cell has discriminating power; (2) parity -- the function's Gamma
+        output solves the same spectrum as an independently constructed
+        restriction to ``{v : a^dag N v = 0}``; (3) the regression -- the
+        Euclidean deletion's spectrum differs from it by a finite amount,
+        so reverting the fix fails (2) loudly.
+        """
+        key = jax.random.PRNGKey(42)
+        A = jax.random.normal(key, (2, 2, 2, 2, 2))
+        A = A / (jnp.linalg.norm(A) + 1e-10)
+        env = ctm(A, CTMConfig(chi=8, max_iter=40))
+        gate = self.Hzz + 0.5 * self.Hxx
+        E_gs = float(compute_energy_ctm(A, env, gate, 2))
+        k = jnp.array([0.0, 0.0])
+        H, N = _build_H_and_N(
+            A, env, k, gate, E_gs, 2, ExcitationConfig(num_excitations=3)
+        )
+        H = 0.5 * (H + H.conj().T)
+        N = 0.5 * (N + N.conj().T)
+        a = np.asarray(A).ravel().astype(np.complex128)
+        a /= np.linalg.norm(a)
+
+        # (1) premise: the fixture can tell the two projections apart.
+        Na = N @ a
+        sin_angle = float(np.linalg.norm(Na - (a.conj() @ Na) * a) / np.linalg.norm(Na))
+        assert sin_angle > 0.1, (
+            f"N a is (near-)parallel to a (sin = {sin_angle:.2e}); this "
+            f"fixture cannot discriminate the projections and pins nothing"
+        )
+
+        # (2) the projection is the identity on the physical subspace
+        # {v : a^dag N v = 0} and annihilates the ground-state direction --
+        # exact linear-algebra identities, no solver pipeline in the loop.
+        Hp, Np = _project_out_ground_state(H, N, A, k)
+        nvec = N.conj().T @ a
+        nvec /= np.linalg.norm(nvec)
+        M = np.eye(a.size, dtype=np.complex128) - np.outer(nvec, nvec.conj())
+        W = np.linalg.qr(M)[0][:, : a.size - 1]
+        np.testing.assert_allclose(
+            W.conj().T @ Np @ W,
+            W.conj().T @ N @ W,
+            atol=1e-10,
+            err_msg="the projection changed the metric on the physical subspace",
+        )
+        np.testing.assert_allclose(
+            W.conj().T @ Hp @ W,
+            W.conj().T @ H @ W,
+            atol=1e-10,
+            err_msg="the projection changed H on the physical subspace",
+        )
+        np.testing.assert_allclose(Np @ a, 0.0, atol=1e-10)
+        np.testing.assert_allclose(a.conj() @ Np, 0.0, atol=1e-10)
+
+        # (3) the Euclidean deletion measurably distorts that same metric on
+        # this fixture, so reverting the fix cannot pass (2).
+        P = np.eye(a.size, dtype=np.complex128) - np.outer(a, a.conj())
+        distortion = float(
+            np.max(np.abs(W.conj().T @ (P @ N @ P) @ W - W.conj().T @ N @ W))
+        )
+        assert distortion > 0.01, (
+            f"the Euclidean projector preserves the physical-subspace metric "
+            f"here (distortion {distortion:.2e}); the assertions above have "
+            f"no discriminating power on this fixture"
+        )
 
     def test_contaminated_momentum_returns_the_exact_dispersion_end_to_end(self):
         """The unprojected A-direction is a spurious ZERO level, not a
