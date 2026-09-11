@@ -743,6 +743,27 @@ def optimize_gs_ad(
             "Multisite / C4v-reference checkpoint wiring is a follow-up (#497)."
         )
 
+    # gs_recipe='1x1' is wired end-to-end only on the single-site split-CTM
+    # path (fuse_virtual_legs=False), whose forwards all thread the recipe.
+    # Every fused path packs its warm-start, line-search probe, and final
+    # evaluation through ctm_converge_kwargs, which deliberately does not
+    # forward recipe (#938): accepting '1x1' there descends a 1x1 gradient
+    # and then reports an energy measured on a 2x2 environment -- an
+    # internally inconsistent, mislabelled experiment (the same
+    # accept-then-silently-run-2x2 class #755 closed for one branch).
+    # Refuse rather than thread: threading would make nine forwards
+    # genuinely non-convergent, since '1x1' reaches no fixed point (#911).
+    if config.gs_recipe == "1x1" and config.ctm.fuse_virtual_legs:
+        raise ValueError(
+            "gs_recipe='1x1' is only supported with fuse_virtual_legs=False "
+            "(the single-site split-CTM path). On the fused optimizer paths "
+            "the warm-start, line-search probe, and final evaluation run "
+            "recipe='2x2' regardless (#938), so a '1x1' run would descend a "
+            "1x1 gradient and report a 2x2 energy. Set gs_recipe='2x2', or "
+            "use fuse_virtual_legs=False -- and note that recipe='1x1' is "
+            "deprecated and reaches no CTM fixed point for D > 1 (#911)."
+        )
+
     # Root implicit AD (#715).  Placed ahead of the unit-cell branches because
     # the variant (dense 1x1 vs dense cell vs symmetric) is selected from the
     # unit cell *inside* that dispatcher, and its own validator decides what it
