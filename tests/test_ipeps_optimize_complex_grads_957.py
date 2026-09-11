@@ -31,12 +31,18 @@ _E_INITIAL = 0.6
 
 # (path, optimizer): the two paths the issue measured, plus the two other
 # optimizers of the explicit path.  The reference loop drives Optax directly,
-# so it is exercised with adam only, as in the issue.
+# so it is exercised with adam only, as in the issue.  The root-implicit loop
+# is a third, independent production site for raw cotangents — missed by the
+# first #957 pass and caught in review (the duplicate-implementation trap);
+# pre-fix, adam returned its untouched initial energy with a 9.8e-2 phase
+# gap and lbfgs landed 0.69 apart depending on the global phase.
 _CASES = [
     ("explicit", "adam"),
     ("explicit", "lbfgs"),
     ("explicit", "cg"),
     ("reference", "adam"),
+    ("root_implicit", "adam"),
+    ("root_implicit", "lbfgs"),
 ]
 
 
@@ -51,6 +57,23 @@ def _initial_state():
 
 
 def _config(path: str, optimizer: str) -> iPEPSConfig:
+    if path == "root_implicit":
+        # ``validate_root_implicit_config`` owns this path's knob surface:
+        # no explicit-AD staging, and line search never actually runs there
+        # (silence its default-on warning rather than exercise a no-op).
+        return iPEPSConfig(
+            max_bond_dim=1,
+            unit_cell="1x1",
+            ctm=CTMConfig(chi=1, max_iter=5, min_iter=2, ctm_ad_mode="root_implicit"),
+            gs_optimizer=optimizer,
+            gs_learning_rate=0.05,
+            gs_num_steps=4,
+            gs_conv_criterion="grad_norm",
+            gs_grad_norm_tol=1e-12,
+            su_init=False,
+            gs_line_search=False,
+            gs_metric_precond=False,
+        )
     reference = path == "reference"
     return iPEPSConfig(
         max_bond_dim=1,

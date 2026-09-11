@@ -20,6 +20,7 @@ from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms._ipeps_optimize_shared import (  # noqa: F401
     _build_optimizer,
     _converged_outer,
+    _euclidean_grads,
     _grad_l2_norm,
     _log_ad_converged,
     _normalize_params,
@@ -411,27 +412,6 @@ def _resolve_line_search_method(config: iPEPSConfig, ctm_cfg: CTMConfig) -> str:
             return "armijo"
         return "hager_zhang"
     return method
-
-
-def _euclidean_grads(grads):
-    """Convert a JAX cotangent tree to Euclidean (descent) gradients.
-
-    For a real objective of complex parameters, JAX's cotangent pairs
-    UNCONJUGATED: ``df = Re sum(g * dz)``.  The steepest-descent direction —
-    and the vector every Euclidean consumer here expects (Optax updates,
-    ``_tree_dot`` slopes, CG beta, L-BFGS curvature pairs, the metric
-    preconditioner) — is therefore ``-conj(g)``, not ``-g``.  Feeding the
-    raw cotangent to Optax made the update *ascend* along the imaginary
-    coordinates and made the result depend on the global phase of the
-    initial tensor (#957).  ``conj`` is the identity on real leaves, so the
-    default real-tensor paths are bit-for-bit unchanged.
-
-    Must be applied at every gradient production site (the main-loop
-    ``value_and_grad`` of each dispatcher and the trial gradients inside
-    the Hager-Zhang ``dphi`` callbacks) so that every gradient object in
-    circulation carries one convention.
-    """
-    return jax.tree.map(jnp.conj, grads)
 
 
 def _tree_dot(a, b) -> float:

@@ -32,6 +32,7 @@ from tenax.core.tensor import DenseTensor
 __all__ = [
     "_build_optimizer",
     "_converged_outer",
+    "_euclidean_grads",
     "_grad_l2_norm",
     "_log_ad_converged",
     "_normalize_params",
@@ -238,6 +239,30 @@ def _converged_outer(
     if criterion == "grad_norm":
         return g_ok
     return de_ok and g_ok  # "both"
+
+
+def _euclidean_grads(grads):
+    """Convert a JAX cotangent tree to Euclidean (descent) gradients.
+
+    For a real objective of complex parameters, JAX's cotangent pairs
+    UNCONJUGATED: ``df = Re sum(g * dz)``.  The steepest-descent direction —
+    and the vector every Euclidean consumer here expects (Optax updates,
+    ``_tree_dot`` slopes, CG beta, L-BFGS curvature pairs, the metric
+    preconditioner) — is therefore ``-conj(g)``, not ``-g``.  Feeding the
+    raw cotangent to Optax made the update *ascend* along the imaginary
+    coordinates and made the result depend on the global phase of the
+    initial tensor (#957).  ``conj`` is the identity on real leaves, so the
+    default real-tensor paths are bit-for-bit unchanged.
+
+    Must be applied at every gradient production site: the main-loop
+    ``value_and_grad`` of each dispatcher in ``ipeps_optimize``, the trial
+    gradients inside the Hager-Zhang ``dphi`` callbacks, and the
+    ``*_energy_and_grad`` results in ``ipeps_optimize_root_implicit`` —
+    the root-implicit loop was missed on the first pass and found by review
+    (the duplicate-implementation trap), which is why this lives in the
+    shared module now: one definition, every optimizer loop.
+    """
+    return jax.tree.map(jnp.conj, grads)
 
 
 def _grad_l2_norm(grads) -> float:
