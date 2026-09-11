@@ -108,6 +108,58 @@ def test_split_single_site_energy():
     np.testing.assert_allclose(e, _TRUE_PER_SITE, atol=1e-12)
 
 
+def test_trotter_gate_applies_exp_minus_dt_H():
+    """The SU sweeps contract (si, sj) with the state's physical legs, so
+    those axes must hold exp(-dt H)'s columns.  A plain reshape put the rows
+    there and applied exp(-dt H^T) — invisible for real-symmetric gates,
+    Hermitian-conjugate wrong otherwise (#968 review P1)."""
+    from tenax.algorithms.ipeps_simple_update import _make_trotter_gate_tensor
+
+    gate = jnp.einsum("ab,cd->acbd", _SY, jnp.eye(2)) + jnp.einsum(
+        "ab,cd->acbd", jnp.eye(2), _SY
+    )
+    dt = 0.3
+    G = _make_trotter_gate_tensor(gate, dt).todense()
+    psi = jnp.array([1.0, 0.2 + 0.1j, -0.3, 0.5j], dtype=jnp.complex128)
+    psi = (psi / jnp.linalg.norm(psi)).reshape(2, 2)
+    applied = jnp.einsum("ijkl,ij->kl", G, psi)
+    H_mat = gate.reshape(4, 4)
+    w, V = jnp.linalg.eigh(0.5 * (H_mat + H_mat.conj().T))
+    U = V @ jnp.diag(jnp.exp(-dt * w)) @ V.conj().T
+    exact = (U @ psi.reshape(4)).reshape(2, 2)
+    np.testing.assert_allclose(np.asarray(applied), np.asarray(exact), atol=1e-12)
+    # Regime pin: U and U^T genuinely differ on this gate, so the assert
+    # above is not vacuous.
+    transposed = (U.T @ psi.reshape(4)).reshape(2, 2)
+    assert float(jnp.linalg.norm(applied - transposed)) > 0.1
+
+
+def test_simple_update_evolves_under_the_hamiltonian_it_measures():
+    """End to end: SU + energy must sit at the same extremum.
+
+    Gate = Sy(x)I + I(x)Sy per bond: the per-site ground state is |-y> with
+    2-bond per-site energy -2.0.  Pre-fix, SU drove the state to |+y> (the
+    ground state of -H) and the corrected energy contraction reported +2.0
+    — the maximum of the Hamiltonian it claimed to have minimised."""
+    from tenax.algorithms.ipeps import ipeps
+    from tenax.algorithms.ipeps_config import iPEPSConfig
+
+    gate = jnp.einsum("ab,cd->acbd", _SY, jnp.eye(2)) + jnp.einsum(
+        "ab,cd->acbd", jnp.eye(2), _SY
+    )
+    cfg = iPEPSConfig(
+        max_bond_dim=1,
+        num_imaginary_steps=60,
+        dt=0.1,
+        unit_cell="1x1",
+        su_init=True,
+        gs_num_steps=0,
+        ctm=CTMConfig(chi=2, max_iter=30, conv_tol=1e-10),
+    )
+    E, _tensors, _envs = ipeps(gate, None, cfg)
+    np.testing.assert_allclose(float(E), -2.0, atol=1e-3)
+
+
 def test_real_symmetric_gate_is_bit_identical_either_way():
     """Regression guard on the guard: for a real-symmetric gate the flip is
     the identity, so the whole pre-existing (real) suite is untouched.  A
