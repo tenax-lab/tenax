@@ -4,6 +4,17 @@
 
 ### Added
 
+- **`svd(..., bond_order="sector")`** (`tenax.linalg.svd`): the traceable
+  ordering of a block-sparse SVD, twin to `eigh`'s (#939). The bond comes
+  back charge-grouped (values descending within each sector), `s_full` is
+  the returned spectrum, and — the point — sector mode takes the *same*
+  code path eager and traced instead of the tracer reroute to
+  `_truncated_svd_symmetric_traced`, so no subrank floor is applied: the
+  reroute's `1e-12 · (s_max + 1e-30)` floor zeroes real ~1e-43 singular
+  values on 1×1 sectors, which is what made a jitted BP-gauge sweep stop
+  being a gauge (3.0e-01 state drift). Rejected with `max_singular_values`
+  and `max_truncation_err`; ignored on the dense path.
+
 - **GILT and Gilt-TNR** (`tenax.algorithms.gilt`): graph-independent local
   truncation (Hauru-Delcamp-Mizera PRB 97, 045111) with the iterative cascade
   of Ebel-Kennedy-Rychkov (PRX 15, 031047, App. C), and a `gilt_tnr` driver
