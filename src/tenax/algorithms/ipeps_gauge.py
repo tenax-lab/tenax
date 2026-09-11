@@ -236,12 +236,20 @@ def gauge_fix(
             # float, bool)``, and a 0-d array would satisfy ``assert
             # info.converged`` *silently* while failing ``info.residual ==
             # float("inf")`` loudly.
-            return (
-                A_out,
-                B_out,
-                weights,
-                BPGaugeInfo(int(done), float(residual), bool(converged)),
-            )
+            if int(done) > 0:
+                return (
+                    A_out,
+                    B_out,
+                    weights,
+                    BPGaugeInfo(int(done), float(residual), bool(converged)),
+                )
+            # Zero sweeps: the traced carry holds a relabeled copy of the
+            # input (canonical charge order, dead slots dropped), and with no
+            # sweep accepted that relabel would be the only change -- a
+            # caller-visible one the eager route does not make (see
+            # ``bp_gauge_checkerboard``).  Fall through to the eager-parity
+            # route, whose own traced dispatch handles the zero-sweep case by
+            # returning the caller's prepared state.
 
     A_v, B_v, weights, info = bp_gauge_checkerboard(
         A, B, _identity_weights(A), tol=tol, max_iter=max_iter

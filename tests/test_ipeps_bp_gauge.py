@@ -915,6 +915,61 @@ def test_a_slot_no_block_occupies_is_dropped_and_stays_on_the_traced_path(
 
 
 @pytest.mark.usefixtures("retraced")
+def test_a_zero_sweep_solve_returns_the_callers_own_slot_structure(monkeypatch):
+    """The carry's relabel must not leak on a path where no sweep ever ran.
+
+    The traced carry canonicalizes its input -- sorted charges, module
+    flows, dead slots dropped.  After one accepted sweep that structure is
+    what the sweep itself would have stamped, eager or traced; after ZERO
+    accepted sweeps the relabel would be the only change, and it is
+    caller-visible.  Watched failing on the D=4 seed-2 SU trajectory: its
+    gauge rejects the first sweep, the dropped dead slot left a 3-slot bond
+    on a 4-slot pair, and ``_su_evolve``'s ``max_D`` uniformity check raised
+    where the eager driver's identical rejection sails through with a
+    warning.
+
+    Forced here by patching the health gate shut (hence ``retraced``), on a
+    pair carrying a dead slot so the drop would be visible if it leaked.
+    """
+    from tenax.core.tensor import SymmetricTensor
+
+    def kill(t, leg):
+        ax = t.labels().index(leg)
+        blocks = {k: b for k, b in t.blocks.items() if k[ax] != 0}
+        return SymmetricTensor._from_blocks_unchecked(blocks, t.indices)
+
+    A, B = _symmetric_pair()
+    A, B = kill(A, "u"), kill(B, "d")
+    w = _nontrivial_weights()
+
+    monkeypatch.setattr(bp_mod, "_sweep_is_healthy", lambda *a, **k: jnp.asarray(False))
+
+    A2, B2, w2, info = bp_gauge_checkerboard(A, B, w, max_iter=8, tol=1e-13)
+    assert info.iterations == 0 and not info.converged
+    for tag, before, after in (("A", A, A2), ("B", B, B2)):
+        for leg in "udlr":
+            n_in = len(before.indices[before.labels().index(leg)].charges)
+            n_out = len(after.indices[after.labels().index(leg)].charges)
+            assert n_out == n_in, (
+                f"{tag}.{leg}: a zero-sweep solve changed the leg from "
+                f"{n_in} to {n_out} slots -- the carry's relabel leaked"
+            )
+    for bond in w._fields:
+        assert len(np.asarray(getattr(w2, bond))) == len(
+            np.asarray(getattr(w, bond))
+        ), f"{bond}: the weight vector changed length on a zero-sweep solve"
+
+    # ... and through gauge_fix, whose traced route absorbs before returning.
+    A3, B3, _w3, info3 = gauge_fix(A, B, max_iter=8, tol=1e-13)
+    assert info3.iterations == 0 and not info3.converged
+    for tag, before, after in (("A", A, A3), ("B", B, B3)):
+        for leg in "udlr":
+            n_in = len(before.indices[before.labels().index(leg)].charges)
+            n_out = len(after.indices[after.labels().index(leg)].charges)
+            assert n_out == n_in, f"gauge_fix {tag}.{leg}: {n_in} -> {n_out} slots"
+
+
+@pytest.mark.usefixtures("retraced")
 def test_a_pair_the_carry_cannot_hold_falls_back_to_the_eager_loop(monkeypatch):
     """The traced driver's refusal is a dispatch, not a failure.
 

@@ -1185,13 +1185,29 @@ def bp_gauge_checkerboard(
             # failed trace repeats per call (see the exception's docstring).
             traced = False
         else:
-            weights = weights_out
             # The only host syncs in the whole traced solve: three, to
             # rebuild ``BPGaugeInfo`` at its documented ``(int, float,
             # bool)`` type.  A 0-d array would satisfy ``assert
             # info.converged`` *silently*, and would fail ``info.residual ==
             # float("inf")`` loudly.
             info = BPGaugeInfo(int(done), float(residual), bool(converged))
+            if info.iterations == 0:
+                # Eager parity on the zero-sweep path.  A solve that accepted
+                # nothing returns the caller's own prepared state -- which is
+                # what the eager driver does -- and NOT the carry's
+                # canonicalized copy: the relayout (sorted charges, module
+                # flows, dead slots dropped) is the carry's requirement, not
+                # part of this function's contract, and after >= 1 sweep the
+                # sweep itself stamps the same structure eager would.  With
+                # zero sweeps the relabel would be the only change, and it is
+                # caller-visible: measured on the D=4 seed-2 SU trajectory,
+                # whose gauge rejects its first sweep, the dropped dead slot
+                # left a 3-slot bond that failed ``_su_evolve``'s ``max_D``
+                # uniformity check -- a crash the eager driver's identical
+                # rejection does not produce.
+                gam, weights = _prepare(A, B, weights)
+            else:
+                weights = weights_out
     if not traced:
         gam, weights, info = _bp_solve_eager(*_prepare(A, B, weights), max_iter, tol)
 
