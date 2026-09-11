@@ -1619,14 +1619,22 @@ def _optimize_gs_ad_tensor(
                 flush=True,
             )
 
+    # Last step each checkpoint file was written for.  Every exit path pairs
+    # a save with the post-loop force flush (#958): cadence-aligned normal
+    # completion pairs it with the end-of-step save, and the in-body break
+    # sites pair it with their own force_last call.  No state mutates between
+    # a same-step pair, so the second serialization of the large
+    # params/env bundle is pure I/O waste — skip it (codex P2 on #963).
+    _ckpt_written_1s = {"last": None, "best": None}
+
     def _maybe_save_1s_checkpoint(step, chi_before, e_prev, *, force_last=False):
         if config.gs_checkpoint_path is None:
             return
         chi_changed = ctm_cfg.chi != chi_before
-        is_new_best = best_energy < e_prev
+        is_new_best = best_energy < e_prev and _ckpt_written_1s["best"] != step
         should_save_last = (
             force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
-        )
+        ) and _ckpt_written_1s["last"] != step
         if not (should_save_last or is_new_best):
             return
         _ckpt_state = {
@@ -1656,10 +1664,15 @@ def _optimize_gs_ad_tensor(
         }
         if should_save_last:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path)
+            _ckpt_written_1s["last"] = step
         if is_new_best:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path, is_best=True)
+            _ckpt_written_1s["best"] = step
 
     _log_ad_compile_notice(config)
+    # Sentinel for the post-loop checkpoint flush: stays None only if the
+    # loop body never ran (nothing new to save).
+    _chi_at_step_start = None
     for step in range(start_step, config.gs_num_steps):
         # Snapshots for checkpoint "did chi change / new best" detection.
         # ``best_energy`` only decreases, so a strict < comparison after the
@@ -2412,6 +2425,17 @@ def _optimize_gs_ad_tensor(
         # End-of-step save: cadence-based + new-best detection.
         _maybe_save_1s_checkpoint(step, _chi_at_step_start, _best_energy_at_step_start)
 
+    # Every ``break`` above (convergence, stall budgets) exits before the
+    # end-of-step save, so a run that converged at its first evaluation wrote
+    # NO checkpoint at all even with gs_checkpoint_every=1, and gs_resume
+    # then raised FileNotFoundError (#958).  One forced flush covers every
+    # exit path — break or normal exhaustion — and runs before the final
+    # fresh-CTM re-evaluation below, so a crash there cannot lose the run.
+    if _chi_at_step_start is not None:
+        _maybe_save_1s_checkpoint(
+            step, _chi_at_step_start, _best_energy_at_step_start, force_last=True
+        )
+
     # Re-evaluate both final A and best_A with fully converged fresh CTM.
     # In-loop energies use warm-started CTM that can produce unphysical values
     # (non-variational at finite chi), so we compare fresh evaluations only.
@@ -3150,6 +3174,9 @@ def _optimize_gs_ad_tensor_2site(
     # closure; step-local snapshots (``chi_before``, ``e_prev``) are
     # passed explicitly so the caller controls the "did chi change /
     # did we accept a new best this step" detection.
+    # Same-step rewrite guard — see ``_ckpt_written_1s`` in the 1-site path.
+    _ckpt_written_2s = {"last": None, "best": None}
+
     def _maybe_save_2s_checkpoint(
         step: int,
         chi_before: int,
@@ -3160,10 +3187,10 @@ def _optimize_gs_ad_tensor_2site(
         if config.gs_checkpoint_path is None:
             return
         chi_changed = ctm_cfg_2s.chi != chi_before
-        is_new_best = best_energy < e_prev
+        is_new_best = best_energy < e_prev and _ckpt_written_2s["best"] != step
         should_save_last = (
             force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
-        )
+        ) and _ckpt_written_2s["last"] != step
         if not (should_save_last or is_new_best):
             return
         _ckpt_state = {
@@ -3192,8 +3219,10 @@ def _optimize_gs_ad_tensor_2site(
         }
         if should_save_last:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path)
+            _ckpt_written_2s["last"] = step
         if is_new_best:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path, is_best=True)
+            _ckpt_written_2s["best"] = step
 
     # Enable per-backward ``||lam||`` extraction in the implicit-AD F3 path
     # only when a consumer is reading them (verbose logging in this loop).
@@ -3213,6 +3242,8 @@ def _optimize_gs_ad_tensor_2site(
 
     try:
         _log_ad_compile_notice(config)
+        # Sentinel for the post-loop checkpoint flush, as in the 1-site path.
+        _chi_at_step_start = None
         for step in range(start_step, config.gs_num_steps):
             # Snapshots for checkpoint "did chi change / new best" detection.
             # ``best_energy`` only decreases, so a strict < comparison after
@@ -4101,6 +4132,15 @@ def _optimize_gs_ad_tensor_2site(
 
             # End-of-step save: cadence-based + new-best detection.
             _maybe_save_2s_checkpoint(step, chi_before, _best_energy_at_step_start)
+
+        # Same #958 flush as the 1-site path.  ``_chi_at_step_start`` (top of
+        # the iteration), not ``chi_before``: the latter is assigned after the
+        # convergence/stall breaks, so it can be undefined on a first-step
+        # convergence exit.
+        if _chi_at_step_start is not None:
+            _maybe_save_2s_checkpoint(
+                step, _chi_at_step_start, _best_energy_at_step_start, force_last=True
+            )
 
         # Re-evaluate both final params and best_params with fully converged
         # fresh CTM.  In-loop energies use warm-started CTM that can produce
