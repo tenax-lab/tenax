@@ -991,6 +991,34 @@ class TestEnergyFunctionalOracle:
             f"no discriminating power on this fixture"
         )
 
+        # (4) Gamma modulo reciprocal lattice vectors is Gamma: every phase
+        # in the pencil is e^{i k r} with integer r, so k = (2 pi, 0) builds
+        # the same matrices as k = 0 -- and must take the same projector,
+        # or physically equivalent momenta return different spectra (#961
+        # review round 4).  Distortion above is the discriminating power:
+        # a literal k == 0 test sends this through the Euclidean branch.
+        k_2pi = jnp.array([2.0 * np.pi, 0.0])
+        H2, N2 = _build_H_and_N(
+            A, env, k_2pi, gate, E_gs, 2, ExcitationConfig(num_excitations=3)
+        )
+        np.testing.assert_allclose(
+            0.5 * (H2 + H2.conj().T),
+            H,
+            atol=1e-10,
+            err_msg="the pencil at (2 pi, 0) is not the Gamma pencil; the "
+            "premise of the equivalence assertion below is broken",
+        )
+        Hp2, Np2 = _project_out_ground_state(
+            0.5 * (H2 + H2.conj().T), 0.5 * (N2 + N2.conj().T), A, k_2pi
+        )
+        np.testing.assert_allclose(
+            Hp2,
+            Hp,
+            atol=1e-10,
+            err_msg="(2 pi, 0) took a different projector than Gamma",
+        )
+        np.testing.assert_allclose(Np2, Np, atol=1e-10)
+
     def test_contaminated_momentum_returns_the_exact_dispersion_end_to_end(self):
         """The unprojected A-direction is a spurious ZERO level, not a
         shifted one: the E_gs identity annihilates every pure-GS window, so
