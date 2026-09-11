@@ -162,22 +162,58 @@ jobs:
        github.event_name == 'workflow_dispatch' ||
        contains(github.event.pull_request.labels.*.name, 'run-full-tests'))
     runs-on: ${{ matrix.os }}
+    # Bound the burn: before sharding, ``fast-other`` and ``slow`` hit the 6 h
+    # job-limit ``cancelled`` on every run (#960), which reports nothing AND
+    # occupies a runner all day -- six such jobs per push starved the merge
+    # queue's own group builds past the 2 h drop limit.  A shard that trips
+    # this limit reports ``failure`` (a real alert) instead.  Tighten once
+    # the post-shard timings from #960 have a few days of history.
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
-        bucket: ["fast-ipeps", "fast-other", "slow"]
+        bucket: ["fast-other", "slow"]
+        shard: ["1", "2", "3"]
+        # ``fast-ipeps`` finishes in ~13 min unsharded (#960), so it stays a
+        # single job: these include entries match no cross-product row (the
+        # bucket/os differ) and are therefore ADDED as standalone combinations
+        # without a ``shard`` key.
         include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+            bucket: "fast-ipeps"
+          - os: ubuntu-latest
+            python-version: "3.12"
+            bucket: "fast-ipeps"
           - os: macos-latest
             python-version: "3.12"
             bucket: "fast-ipeps"
           - os: macos-latest
             python-version: "3.12"
             bucket: "fast-other"
+            shard: "1"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "fast-other"
+            shard: "2"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "fast-other"
+            shard: "3"
           - os: macos-latest
             python-version: "3.12"
             bucket: "slow"
+            shard: "1"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "slow"
+            shard: "2"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "slow"
+            shard: "3"
 
     steps:
       - uses: actions/checkout@v6
@@ -186,6 +222,11 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
+          # uv.lock is gitignored in this repo, so the action's default
+          # ``**/uv.lock`` glob would match nothing and the cache would never
+          # invalidate; key on pyproject.toml instead (same as the gate).
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -193,58 +234,99 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Run non-core tests (${{ matrix.bucket }} bucket)
+      # Same lever as the gate's cache step (see the ``test`` job): tenax
+      # writes JAX's persistent compile cache to ~/.cache/jax on every
+      # platform, but these jobs always compiled cold.  Keyed per bucket and
+      # shard so each job warms exactly the entries its own tests compile.
+      - name: Restore JAX persistent compile cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/jax
+          key: jax-xla-full-${{ runner.os }}-py${{ matrix.python-version }}-${{ matrix.bucket }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}-${{ github.run_id }}
+          restore-keys: |
+            jax-xla-full-${{ runner.os }}-py${{ matrix.python-version }}-${{ matrix.bucket }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}-
+
+      - name: Run non-core tests (${{ matrix.bucket }} bucket, shard ${{ matrix.shard || 'n/a' }})
         # Skip ``-m core`` since the required ``test`` job already covers it.
-        # Three buckets give parallelism, isolation, and per-bucket retry
+        # Buckets give parallelism, isolation, and per-bucket retry
         # granularity:
         #   - ``fast-ipeps`` runs ``tests/test_ipeps.py`` and
         #     ``tests/test_fpeps_ad.py``.  These files alone consumed
         #     ~11+ min of the previous combined ``fast`` bucket (out of
         #     a ~57min total) because every test runs CTM convergence
-        #     and many run AD optimization.  Isolating them keeps the
-        #     other-bucket runtime under ~25 min on ubuntu.
+        #     and many run AD optimization.
         #   - ``fast-other`` runs the rest of the non-core, non-slow
         #     suite (DMRG / iDMRG / HOTRG / fermionic CTM / ad_utils /
         #     coarse-grain / etc.).
         #   - ``slow`` runs everything tagged ``@pytest.mark.slow``.
         # The earlier single combined ``fast`` bucket got reaped on
-        # Linux ~30–45 min in (see merge run 25197411849, where the
-        # runner died at ~01:45 mid-``test_optimize_gs_ad_symmetric_
-        # energy_decreases``).  The split addresses #354 / #370.
+        # Linux ~30–45 min in (see merge run 25197411849); the split into
+        # three addressed #354 / #370.  By 2026-09 ``fast-other`` and
+        # ``slow`` had themselves outgrown the 6 h job limit and died on
+        # every run (#960), so they are sharded by a stable hash of the
+        # test-file path -- unlike the required gate these are not
+        # branch-protection contexts, so multiplying jobs costs nothing.
+        # ``cksum`` is POSIX CRC-32: identical on ubuntu and macOS, and
+        # keyed on the file NAME so edits to a file's contents don't
+        # shuffle it to a different shard.
+        #
+        # Coverage: dropped here for the same reason as the gate's
+        # ``--no-cov`` toggle (+155% on unit-heavy files, measured for
+        # #953).  Codecov's main-branch trend comes from the gate's
+        # push/schedule uploads; these buckets never completed a run, so
+        # they never contributed coverage anyway (#960).
         env:
           JAX_PLATFORMS: cpu
           BUCKET: ${{ matrix.bucket }}
+          SHARD: ${{ matrix.shard }}
+          # Must equal the number of entries in the matrix ``shard`` list.
+          NSHARDS: 3
         run: |
           case "$BUCKET" in
             slow)
-              FILES="tests/"
               FILTER='slow'
+              EXCLUDE=''
               ;;
             fast-ipeps)
-              FILES="tests/test_ipeps.py tests/test_fpeps_ad.py"
               FILTER='not core and not slow'
               ;;
             fast-other)
-              FILES="tests/ --ignore=tests/test_ipeps.py --ignore=tests/test_fpeps_ad.py"
               FILTER='not core and not slow'
+              EXCLUDE='tests/test_ipeps.py tests/test_fpeps_ad.py'
               ;;
             *)
               echo "Unknown bucket: $BUCKET" >&2
               exit 1
               ;;
           esac
+          if [ "$BUCKET" = "fast-ipeps" ]; then
+            FILES="tests/test_ipeps.py tests/test_fpeps_ad.py"
+          else
+            # ``find`` (not a top-level glob): tests/stacked/ holds test
+            # files too, and the old ``tests/`` dir form collected them.
+            FILES=""
+            for f in $(find tests -name 'test_*.py' | LC_ALL=C sort); do
+              case " $EXCLUDE " in *" $f "*) continue ;; esac
+              h=$(printf '%s' "$f" | cksum | cut -d' ' -f1)
+              if [ $(( h % NSHARDS )) -eq $(( SHARD - 1 )) ]; then
+                FILES="$FILES $f"
+              fi
+            done
+          fi
+          set +e
           uv run pytest $FILES -m "$FILTER" \
-            --cov=tenax \
-            --cov-report=xml \
-            --cov-report=term-missing \
+            --no-cov \
+            --durations=100 \
             -v
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.xml
-          fail_ci_if_error: false
+          rc=$?
+          set -e
+          # Exit 5 = this shard's files hold no tests for this marker
+          # (likely for ``slow``, whose tests cluster in a few files).
+          if [ "$rc" -eq 5 ]; then
+            echo "Shard collected no tests for marker '$FILTER'; OK."
+            rc=0
+          fi
+          exit $rc
 
   test-no-cython:
     name: Tests without Cython (Python 3.12)
