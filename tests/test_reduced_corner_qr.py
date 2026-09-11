@@ -28,6 +28,7 @@ from tenax.algorithms._ctm_projector import (
     _gauge_fix_qr_dense,
     _reduced_qr_projector,
 )
+from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
 from tenax.algorithms._ctm_tensor_convergence import ctm_tensor, ctm_tensor_2site
 from tenax.algorithms._ctm_tensor_energy import (
     compute_energy_ctm_tensor,
@@ -198,9 +199,27 @@ def _build_physical_state_heisenberg_D2():
     Copied/adapted from the spike harness ``build_physical_state``: sublattice
     rotation makes the Neel AFM ground state a *uniform* single-site iPEPS;
     simple update converges a physical ``A``; then ``A`` is **C4v-symmetrized**
-    (load-bearing — otherwise the four directional 1x1 moves are inequivalent
-    and the single-site eigh sweep limit-cycles at the #425/#426 plateau, so the
-    eigh oracle is untrustworthy) and renormalized.
+    and renormalized.
+
+    **Why C4v symmetrization is load-bearing — corrected (#911).**  This used
+    to say it was load-bearing because *"otherwise the four directional 1x1
+    moves are inequivalent and the single-site eigh sweep limit-cycles at the
+    #425/#426 plateau, so the eigh oracle is untrustworthy"*.  #911 measured
+    that claim and it is false in the direction that matters: the
+    C4v-symmetrized state limit-cycles **as hard or harder** than the raw one
+    — energy range over the last 40 of 240 sweeps 4.47e-3 (C4v) against
+    4.86e-3 (raw), and C4v's terminal ``sv_diff`` is 4.41e-4 against raw's
+    1.08e-4, the *worse* of the two.  Neither state converges on the generic
+    1x1 sweep at any projector method.  Symmetrizing does not buy an oracle.
+
+    What it actually buys is **admission to a different engine**.
+    ``ctm_tensor_c4v`` requires a C4v-symmetric state, and it is the only
+    entry point that runs ``eigh``/``qr`` at full rank to a genuine fixed
+    point — #911's control has all three projector methods agreeing there to
+    1e-12, against ``recipe="1x1"`` where ``svd`` collapses to rank 1 and
+    ``eigh``/``qr`` limit-cycle.  So the symmetrization is what lets the
+    tests below compare projector methods on an engine that honours the
+    parameter at all.  See ``_heisenberg_D2_ctm_energy_c4v``.
     """
     global _PHYS_STATE
     if _PHYS_STATE is not None:
@@ -221,49 +240,189 @@ def _build_physical_state_heisenberg_D2():
     return _PHYS_STATE
 
 
-def _heisenberg_D2_ctm_energy_1x1(chi, projector_method, max_iter=200):
-    """Converged single-site (1x1) dense CTM energy for the given projector.
+def _heisenberg_D2_ctm_energy_c4v(chi, projector_method, max_iter=200):
+    """Converged dense CTM energy for the given projector, via ``ctm_tensor_c4v``.
 
-    Mirrors the spike's drive of the canonical single-site sweep
-    (``_ctm_tensor_sweep``, reached here via the public ``ctm_tensor`` entry on
-    a DenseTensor, which selects ``_ctm_tensor_sweep`` and therefore exercises
-    ``_compute_projector_tensor`` — the 1x1 path the spec points at).  The
-    ``"qr"`` method runs the ``qr_warmup_steps`` eigh warm-up (matching the
-    spike's 6-sweep eigh warm-up) before switching to the reduced-corner QR
-    projector; energy via ``compute_energy_ctm_tensor(A, env, gate_rot)``.
+    **This used to call ``ctm_tensor`` and test nothing.**  It was written
+    when ``ctm_tensor``'s ``recipe`` defaulted to ``"1x1"``, and it never
+    passed ``recipe=`` explicitly.  ``988c2a8`` (#765, 2026-08-03) flipped
+    that default to ``"2x2"`` — which hardcodes Fishman SVD and *ignores*
+    ``projector_method`` entirely — so from that commit every caller below
+    silently compared ``2x2`` against itself.  Measured on the state this
+    module builds, ``eigh``, ``qr`` and ``svd`` returned **bit-identical**
+    energies:
+
+        chi=8   all three  -0.659430578410895
+        chi=16  all three  -0.659430578425110
+
+    so ``test_reduced_qr_energy_matches_eigh_heisenberg_D2`` was asserting
+    ``abs(0.0) < 1e-3`` and would have passed with the reduced-corner QR
+    projector deleted from the codebase.  That is the whole point of this
+    module gone quiet for a month.
+
+    The fix is not to pass ``recipe="1x1"``: #911 established that recipe
+    reaches no fixed point at any projector method (``svd`` collapses to
+    rank 1, ``eigh``/``qr`` limit-cycle), so pinning it would pin an orbit
+    sample.  ``ctm_tensor_c4v`` is the engine that genuinely honours
+    ``projector_method`` — it is #911's own control, where all three methods
+    hold full rank and agree with ``2x2`` to 1e-12 — and the module's state
+    is already C4v-symmetrized, which is what admits it.  It is also exactly
+    the migration the ``recipe="1x1"`` deprecation message points callers to.
 
     ``max_iter`` is exposed so a fixed-point-stability check can re-converge
     with a larger sweep budget (the CTM still stops early at ``conv_tol``).
+    ``test_the_projector_method_actually_reaches_the_projector`` pins that
+    this helper is on a path that consults the parameter, so the comparison
+    below cannot quietly go vacuous again.
     """
     A, gate_rot = _build_physical_state_heisenberg_D2()
-    env, _eps = ctm_tensor(
+    env = ctm_tensor_c4v(
         A,
         chi=chi,
         max_iter=max_iter,
         conv_tol=1e-10,
         projector_method=projector_method,
-        qr_warmup_steps=6,
     )
     return float(compute_energy_ctm_tensor(A, env, gate_rot))
+
+
+def _c4v_probe_state(D=2, d=2, chi_seed=0):
+    """A tiny C4v-symmetric state, for liveness probes that need no physics."""
+    rng = np.random.default_rng(chi_seed)
+    sym = U1Symmetry()
+    idx = tuple(
+        TensorIndex.from_charges(sym, np.zeros(D, dtype=np.int32), flow, label=lbl)
+        for lbl, flow in [
+            ("u", FlowDirection.OUT),
+            ("d", FlowDirection.IN),
+            ("l", FlowDirection.OUT),
+            ("r", FlowDirection.IN),
+        ]
+    ) + (
+        TensorIndex.from_charges(
+            sym, np.zeros(d, dtype=np.int32), FlowDirection.IN, label="phys"
+        ),
+    )
+    A = DenseTensor(jnp.asarray(rng.standard_normal((D, D, D, D, d))), idx)
+    A = DenseTensor(symmetrize_c4v(A._data), A.indices)
+    return A * (1.0 / float(A.norm()))
+
+
+@pytest.mark.core
+def test_the_projector_method_actually_reaches_the_projector(monkeypatch):
+    """``projector_method`` must select a *different code path*, not a label.
+
+    This is the guard the module lacked.  For a month
+    ``_heisenberg_D2_ctm_energy_*`` ran ``ctm_tensor`` on the default
+    ``recipe="2x2"``, which hardcodes Fishman SVD and ignores
+    ``projector_method``, so every ``qr``-vs-``eigh`` comparison below was a
+    value against itself and would have passed with ``_reduced_qr_projector``
+    deleted.  An energy assertion cannot detect that — the two numbers agree
+    whether or not the parameter did anything.  Reachability can.
+
+    Sabotage the QR projector and require the failure to propagate on
+    ``"qr"`` and *not* on ``"eigh"``.  Both halves matter: the first says QR
+    is on the path, the second says the parameter chooses.
+    """
+    A = _c4v_probe_state()
+    sentinel = RuntimeError("reduced-corner QR projector reached")
+
+    def _boom(*args, **kwargs):
+        raise sentinel
+
+    monkeypatch.setattr("tenax.algorithms._ctm_projector._reduced_qr_projector", _boom)
+
+    with pytest.raises(RuntimeError, match="reduced-corner QR projector reached"):
+        ctm_tensor_c4v(A, chi=4, max_iter=2, projector_method="qr")
+
+    # ...and the selector genuinely selects: eigh must not touch it.
+    ctm_tensor_c4v(A, chi=4, max_iter=2, projector_method="eigh")
+
+
+@pytest.mark.core
+def test_the_energy_helper_is_wired_to_the_engine_that_honours_the_selector(
+    monkeypatch,
+):
+    """Pin the *wiring*, not just the engine.
+
+    ``test_the_projector_method_actually_reaches_the_projector`` proves
+    ``ctm_tensor_c4v`` consults ``projector_method``.  It does not prove the
+    energy helper below calls ``ctm_tensor_c4v`` — so pointing the helper back
+    at ``ctm_tensor`` would make every energy comparison vacuous again while
+    that test carried on passing.  That is the exact shape of the original
+    defect, so it gets its own guard.
+
+    Stubbed rather than converged: this asserts a call, and the physics is
+    covered by the ``algorithm``-marked tests below.
+    """
+    recorded = {}
+
+    def _fake_c4v(A, **kwargs):
+        recorded.update(kwargs)
+        return "sentinel-env"
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "the energy helper called ctm_tensor, whose default recipe='2x2' "
+            "ignores projector_method — the comparison is vacuous again"
+        )
+
+    # The module caches the SU state in a global; seed it so this stays cheap.
+    import sys
+
+    mod = sys.modules[__name__]
+    monkeypatch.setattr(mod, "_PHYS_STATE", (_c4v_probe_state(), None))
+    monkeypatch.setattr(mod, "ctm_tensor_c4v", _fake_c4v)
+    monkeypatch.setattr(mod, "ctm_tensor", _forbidden)
+    monkeypatch.setattr(mod, "compute_energy_ctm_tensor", lambda *a, **k: -1.0)
+
+    e = _heisenberg_D2_ctm_energy_c4v(chi=4, projector_method="qr")
+
+    assert e == -1.0
+    assert recorded.get("projector_method") == "qr", (
+        f"the selector did not reach the engine: {recorded}"
+    )
+    assert recorded.get("chi") == 4
+
+
+@pytest.mark.core
+def test_recipe_2x2_ignores_projector_method(monkeypatch):
+    """Pin the trap that made this module vacuous (#911, #765).
+
+    ``recipe="2x2"`` -- ``ctm_tensor``'s default since ``988c2a8`` --
+    hardcodes Fishman SVD.  Passing ``projector_method="qr"`` there is
+    accepted and silently ignored, which is why the energy tests above had to
+    move to ``ctm_tensor_c4v``.  If this ever starts raising, ``2x2`` grew a
+    QR path and the helper above can be reconsidered.
+    """
+    A = _c4v_probe_state()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("should not be reached on the 2x2 recipe")
+
+    monkeypatch.setattr("tenax.algorithms._ctm_projector._reduced_qr_projector", _boom)
+
+    # No raise: the 2x2 recipe never consults projector_method.
+    ctm_tensor(A, chi=4, max_iter=2, projector_method="qr", recipe="2x2")
 
 
 @pytest.mark.algorithm
 @pytest.mark.parametrize("chi", [8, 16])
 def test_reduced_qr_energy_matches_eigh_heisenberg_D2(chi):
-    e_eigh = _heisenberg_D2_ctm_energy_1x1(chi=chi, projector_method="eigh")
-    e_qr = _heisenberg_D2_ctm_energy_1x1(chi=chi, projector_method="qr")
+    e_eigh = _heisenberg_D2_ctm_energy_c4v(chi=chi, projector_method="eigh")
+    e_qr = _heisenberg_D2_ctm_energy_c4v(chi=chi, projector_method="qr")
     assert abs(e_qr - e_eigh) < 1e-3  # loosened vs eps; different scheme, same physics
 
 
 @pytest.mark.algorithm
 def test_reduced_qr_energy_gap_shrinks_with_chi():
     g8 = abs(
-        _heisenberg_D2_ctm_energy_1x1(8, "qr")
-        - _heisenberg_D2_ctm_energy_1x1(8, "eigh")
+        _heisenberg_D2_ctm_energy_c4v(8, "qr")
+        - _heisenberg_D2_ctm_energy_c4v(8, "eigh")
     )
     g16 = abs(
-        _heisenberg_D2_ctm_energy_1x1(16, "qr")
-        - _heisenberg_D2_ctm_energy_1x1(16, "eigh")
+        _heisenberg_D2_ctm_energy_c4v(16, "qr")
+        - _heisenberg_D2_ctm_energy_c4v(16, "eigh")
     )
     assert g16 <= g8 + 1e-12  # gap does not grow as chi increases
 
@@ -285,12 +444,12 @@ def test_reduced_qr_ctm_converges_with_warmup():
       hold the eigh fixed point) would surface here.
     """
     # Finite, real energy (no NaN/Inf) from the qr + warm-up CTM:
-    e = _heisenberg_D2_ctm_energy_1x1(chi=8, projector_method="qr")
+    e = _heisenberg_D2_ctm_energy_c4v(chi=8, projector_method="qr")
     assert np.isfinite(e)
 
     # Converged fixed point: doubling max_iter does not move the energy.
-    e_n = _heisenberg_D2_ctm_energy_1x1(chi=8, projector_method="qr", max_iter=100)
-    e_2n = _heisenberg_D2_ctm_energy_1x1(chi=8, projector_method="qr", max_iter=200)
+    e_n = _heisenberg_D2_ctm_energy_c4v(chi=8, projector_method="qr", max_iter=100)
+    e_2n = _heisenberg_D2_ctm_energy_c4v(chi=8, projector_method="qr", max_iter=200)
     assert np.isfinite(e_n) and np.isfinite(e_2n)
     assert abs(e_n - e_2n) < 1e-8
 
