@@ -124,32 +124,37 @@ before a single solve runs; see ``tests/test_ipeps_gauge_perf.py``, whose gate
 *asserts* that budget (it recorded a shortfall while only the solve was traced,
 and stopped once ``gauge_fix``'s own boundary went inside the jit too).
 
-``SymmetricTensor`` stays on the eager loop.  Two things stopped it being
-traced and **one of them is now gone**:
+``SymmetricTensor`` took the eager loop until both of the things that stopped
+it being traced were fixed, the same way:
 
 1. ``_eigh_symmetric`` laid its bond out by ranking the whole spectrum, reading
-   the eigenvalues through ``np.array(...)``, which raises on a tracer.  Fixed:
-   :func:`_sqrt_pinv` never truncates, so the ranking decides nothing there, and
-   it now asks for ``eigh(..., bond_order="sector")`` -- the charge-grouped
-   layout, which needs no host read.
-2. The SVD in :func:`_gauge_bond` still does.  Putting :func:`_sweep` behind a
-   ``jax.jit`` reroutes it to the traced symmetric SVD, which emits the bond in
-   sector-block rather than descending order and applies
-   ``_zero_subrank_singular_values``' relative floor; the solve then **stops
-   being a gauge** -- measured 3.0e-01 on
-   ``test_the_whole_solve_preserves_a_state_with_nontrivial_weights[symmetric]``
-   and 4.6e-01 on the f64-walk cell, against a 1e-13 tolerance.  That is the
-   same failure the earlier attempt recorded at 4.9e-01.
+   the eigenvalues through ``np.array(...)``, which raises on a tracer.  Fixed
+   in #939: :func:`_sqrt_pinv` never truncates, so the ranking decides nothing
+   there, and it asks for ``eigh(..., bond_order="sector")`` -- the
+   charge-grouped layout, which needs no host read.
+2. The SVD in :func:`_gauge_bond` read the spectrum the same way, and its
+   tracer reroute was worse than a crash: the rerouted path's per-sector floor
+   zeroes any singular value below ``1e-12 * (s_max + 1e-30)``, and on the 1x1
+   sectors these bonds carry the ``+1e-30`` arm is an *absolute* ~1e-42
+   cutoff.  A measured ``4.6e-43`` singular value came back exactly 0.0, the
+   zeroed direction carried 13.6% of the 2-site norm at the collapsed state
+   that reaches it, and iterating past the health gate reproduced the
+   historical 3.0e-01 "stopped being a gauge" drift bit-for-bit.  The bond
+   *order* -- the other suspect -- contributes exactly zero: every ``lam`` is
+   consumed positionally against the very bond its own decomposition emitted.
+   Fixed the same way as (1): ``svd(..., bond_order="sector")`` runs the one
+   eager code path under the tracer, floor-free.  The floor is not a
+   tightenable knob, it is semantically wrong here -- legitimate f64-walk
+   trajectories dip to ~1e-27 relative and recover, so *any* relative floor
+   breaks states this module handles fine.
 
-So the win is real but not yet available: with (1) fixed the sweep body *does*
-compile, and measured at ``D=3`` it goes from 921 ms to 0.200 ms -- one compile
-(4.6 s) paying for itself after 4.9 sweeps, with the block structure preserved
-and the charge layout stable across sweeps.  What is left is (2), and it lives
-outside this module.
-
-Both live outside this module.  The sweep body is shared verbatim between the
-two loops, so there is one implementation of the physics and only the driver
-differs.
+With both fixed the sweep body compiles and is exact -- measured at ``D=3``,
+921 ms eager against 0.200 ms traced, one compile (4.6 s) paying for itself
+after 4.9 sweeps, block structure preserved and the charge layout stable
+across sweeps -- so a ``SymmetricTensor`` pair now takes the same traced
+driver a dense pair does (see :func:`_bp_solve` for how its carry holds
+block buffers).  The sweep body is shared verbatim between the two loops, so
+there is one implementation of the physics and only the driver differs.
 """
 
 from __future__ import annotations
@@ -158,6 +163,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 
 from tenax.algorithms._ctm_tensor_moves import _flow_flip_no_conj
@@ -170,7 +176,8 @@ from tenax.algorithms._ctm_tensor_moves import _flow_flip_no_conj
 from tenax.algorithms.ipeps_simple_update import BondWeights
 from tenax.contraction.contractor import contract
 from tenax.core._tensor_utils import scale_bond_axis
-from tenax.core.tensor import DenseTensor, Tensor
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 from tenax.linalg import eigh, svd
 
 __all__ = ["BPGaugeInfo", "BondWeights", "bp_gauge_checkerboard"]
@@ -305,7 +312,24 @@ def _gauge_bond(
     # X lam Y^T, not X Y^T.  Dropping it is not a gauge transformation.
     XL = scale_bond_axis(X.relabel(leg_L, _B), _B, lam)
     M = contract(XL, Y.relabel(leg_R, _B).relabel(_K, _K2))
-    U, s, Vh, _ = svd(M, left_labels=[_K], right_labels=[_K2], new_bond_label=_S)
+    # ``bond_order="sector"`` for the same reason :func:`_sqrt_pinv` asks
+    # eigh for it: this call never truncates, so the ranking decides
+    # nothing, and sector mode is the one that runs under a tracer as the
+    # same code path it runs eagerly.  The default's tracer reroute is not
+    # merely a permutation -- its per-sector floor zeroes real ~1e-43
+    # singular values (absolute, via the ``+1e-30`` arm on 1x1 sectors),
+    # and a gauge built from a floored SVD is not a gauge: measured
+    # 3.0e-01 state drift on the whole solve.  ``lam_new``/``U``/``Vh``
+    # pair with the ``_S`` bond positionally through ``scale_bond_axis``,
+    # so any single consistent layout is exact; dense pairs ignore the
+    # argument entirely.
+    U, s, Vh, _ = svd(
+        M,
+        left_labels=[_K],
+        right_labels=[_K2],
+        new_bond_label=_S,
+        bond_order="sector",
+    )
     smax = jnp.max(s)
     lam_new = s / jnp.where(smax > 0, smax, 1.0)
 
@@ -581,17 +605,190 @@ def _restore_caller_structure(t: Tensor, like: Tensor) -> Tensor:
     return t
 
 
+class _StructureNotTraceable(Exception):
+    """This pair's block structure cannot ride the traced carry.
+
+    Raised at **trace time** -- from :func:`_canonical_symmetric_layout` when a
+    bond's two ends disagree about their own layout, or from
+    :func:`_bp_solve`'s fixed-point probe when one sweep does not return to
+    the canonical metadata (a sweep that structurally empties or grows a
+    sector would).  Both drivers represent the same physics, so the caller's
+    remedy is the eager loop, and :func:`bp_gauge_checkerboard` and
+    ``ipeps_gauge.gauge_fix`` fall back to it on this exception.  Note the
+    cost profile of that fallback: the failed trace is *not* cached, so a
+    caller looping over such a pair pays a fresh trace attempt per solve --
+    correct, loud in the report, and slow, in that order of importance.
+    """
+
+
+def _canonical_symmetric_layout(
+    gam: dict[str, Tensor], weights: BondWeights
+) -> tuple[dict[str, Tensor], BondWeights]:
+    """Relayout a ``SymmetricTensor`` pair into the metadata the sweep emits.
+
+    The traced driver's carry holds bare buffers with the index metadata
+    closed over, so the loop needs input whose metadata is already the sweep's
+    fixed point: each virtual leg charge-grouped ascending, flows stamped
+    ``IN`` on the left/upper end of every bond and ``OUT`` on the right/lower
+    one (the convention :func:`_gauge_bond` produces).  Measured, one sweep
+    maps any accepted layout onto exactly that and a second sweep leaves it
+    there.
+
+    Every step is a *relabel*, not a transformation, so the represented state
+    is bit-for-bit the input:
+
+    * a leg whose flow already matches keeps its charges; one whose flow must
+      flip takes their duals -- charge ``q`` at one flow and ``dual(q)`` at
+      the other are the same conservation constraint, which is also why the
+      sweep itself emits the dual multiset for an opposite-convention caller
+      (measured: ``[-2, 1, 2]``/OUT in, ``[-2, -1, 2]``/IN out);
+    * the charge list is then stably sorted ascending, which moves **no block
+      data** -- a block's rows are its charge's slots in order of appearance,
+      and a stable sort preserves that order -- only the list itself and the
+      bond's weight vector, which is permuted identically;
+    * both ends of a bond carry the same list, so one permutation serves the
+      leg on each site and the ``lambda`` between them, and the pairing
+      :func:`scale_bond_axis` does by position is preserved exactly.
+
+    A slot whose charge holds no block on **either** end is dropped along the
+    way, with its weight entry.  A ``D >= 3`` simple-update evolution
+    produces exactly that pair -- a leg counting three charges with one dead
+    (#906) -- and the sweep's SVD, which only sees occupied sectors, would
+    shrink the bond on its first pass; a static carry cannot follow a
+    shrink, but it does not have to, because dropping a chargeless slot is
+    as much a relabel as the rest: no block references it, so no data moves,
+    and the eager sweep's math annihilates the slot on contact anyway.
+
+    Raises:
+        _StructureNotTraceable: if a bond's two ends do not carry the same
+            charge list with opposite flows, if their ends disagree about
+            which charges are occupied (a one-sided zombie the drop rule
+            cannot relabel away), or if a bond has no occupied charge at all
+            -- input the positional weight convention cannot describe, so no
+            layout fixes it and the eager driver owns the case.
+    """
+    plans: dict[str, dict[str, tuple[TensorIndex, bool]]] = {"A": {}, "B": {}}
+    new_w: dict[str, jax.Array] = {}
+    for bond, (site_L, leg_L), (site_R, leg_R) in _BONDS:
+        ax_L = gam[site_L].labels().index(leg_L)
+        ax_R = gam[site_R].labels().index(leg_R)
+        idx_L = gam[site_L].indices[ax_L]
+        idx_R = gam[site_R].indices[ax_R]
+        if not np.array_equal(idx_L.charges, idx_R.charges) or (
+            idx_L.flow == idx_R.flow
+        ):
+            raise _StructureNotTraceable(
+                f"bond {bond}: its ends carry charges "
+                f"{idx_L.charges.tolist()}/{idx_L.flow.name} and "
+                f"{idx_R.charges.tolist()}/{idx_R.flow.name}; the positional "
+                f"weight convention needs one list with opposite flows"
+            )
+        occ_L = {key[ax_L] for key in gam[site_L].blocks}
+        occ_R = {key[ax_R] for key in gam[site_R].blocks}
+        if occ_L != occ_R:
+            raise _StructureNotTraceable(
+                f"bond {bond}: its ends disagree about occupied charges "
+                f"({sorted(occ_L)} vs {sorted(occ_R)})"
+            )
+        alive = np.array([c in occ_L for c in idx_L.charges.tolist()])
+        if not alive.any():
+            raise _StructureNotTraceable(f"bond {bond} has no occupied charge")
+        kept = np.where(alive)[0]
+        sym = idx_L.symmetry
+        flip = idx_L.flow != FlowDirection.IN
+        canon = np.asarray(sym.dual(idx_L.charges) if flip else idx_L.charges)[kept]
+        perm = kept[np.argsort(canon, kind="stable")]
+        sorted_charges = np.sort(canon, kind="stable")
+        plans[site_L][leg_L] = (
+            TensorIndex.from_charges(
+                sym, sorted_charges, FlowDirection.IN, label=leg_L
+            ),
+            flip,
+        )
+        plans[site_R][leg_R] = (
+            TensorIndex.from_charges(
+                sym, sorted_charges, FlowDirection.OUT, label=leg_R
+            ),
+            flip,
+        )
+        new_w[bond] = getattr(weights, bond)[perm]
+
+    out = {}
+    for site, t in gam.items():
+        labels = t.labels()
+        new_indices = tuple(
+            plans[site][lab][0] if lab in plans[site] else t.indices[ax]
+            for ax, lab in enumerate(labels)
+        )
+        flip_axes = [
+            ax
+            for ax, lab in enumerate(labels)
+            if plans[site].get(lab, (None, False))[1]
+        ]
+        if flip_axes:
+            sym = t.indices[0].symmetry
+            blocks = {}
+            for key, blk in t.blocks.items():
+                k = list(key)
+                for ax in flip_axes:
+                    k[ax] = int(np.asarray(sym.dual(np.array([key[ax]])))[0])
+                blocks[tuple(k)] = blk
+        else:
+            blocks = dict(t.blocks)
+        out[site] = SymmetricTensor._from_blocks_unchecked(blocks, new_indices)
+    return out, BondWeights(**new_w)
+
+
+def _embed_zero_blocks(t: SymmetricTensor, target: SymmetricTensor) -> SymmetricTensor:
+    """Rebuild ``t`` on ``target``'s block set, zero-filling what it lacks.
+
+    A sweep can *create* blocks its input did not carry structurally -- the
+    message and gauge contractions populate every conservation-allowed
+    product -- so an input's block set may be a strict subset of the sweep's
+    fixed point.  Adding an explicit zero block is value-identical to leaving
+    it out, so this is a relabel like the rest of the canonicalization: the
+    represented state does not move.
+
+    Raises:
+        _StructureNotTraceable: if ``t`` carries a block ``target`` lacks, or
+            their indices differ -- then ``target`` is not a structural
+            superset and the embedding would drop data.
+    """
+    if t.indices != target.indices:
+        raise _StructureNotTraceable(
+            "the sweep moved a leg's index metadata rather than only growing "
+            "the block set; the traced carry cannot follow"
+        )
+    blocks = dict(t.blocks)
+    missing = [k for k in blocks if k not in set(target._block_keys)]
+    if missing:
+        raise _StructureNotTraceable(
+            f"the sweep structurally dropped blocks {missing}; embedding "
+            f"into its layout would lose them"
+        )
+    out = {
+        key: blocks.get(key, jnp.zeros(shape, t.dtype))
+        for key, shape in zip(target._block_keys, target._block_shapes)
+    }
+    return SymmetricTensor._from_blocks_unchecked(out, t.indices)
+
+
 def _use_traced_loop(A: Tensor, B: Tensor) -> bool:
     """Does this pair take the traced driver?
 
-    ``DenseTensor`` yes, ``SymmetricTensor`` no -- see the module docstring for
-    the two blockers on the symmetric path, both of which live in files this
-    module does not own.  The dispatch is a named function rather than an
-    inline ``isinstance`` so a test can pin the two drivers against each other
-    on the *same* dense input, which is the only way to check that tracing did
-    not move the answer.
+    ``DenseTensor`` and ``SymmetricTensor`` pairs both do, since #939 and the
+    sector-mode SVD removed the two symmetric blockers the module docstring
+    records.  The dispatch is a named function rather than an inline
+    ``isinstance`` so a test can pin the two drivers against each other on the
+    *same* input, which is the only way to check that tracing did not move the
+    answer -- and so the drivers' callers can force the eager reference.  A
+    symmetric pair can still *end up* on the eager loop at runtime: the traced
+    driver rejects, via :class:`_StructureNotTraceable`, any pair whose
+    structure cannot hold its fixed carry, and the callers fall back.
     """
-    return isinstance(A, DenseTensor) and isinstance(B, DenseTensor)
+    if isinstance(A, DenseTensor) and isinstance(B, DenseTensor):
+        return True
+    return isinstance(A, SymmetricTensor) and isinstance(B, SymmetricTensor)
 
 
 def _validate_weights(weights: BondWeights) -> None:
@@ -686,8 +883,9 @@ def _bp_solve_eager(
     max_iter: int,
     tol: float,
 ) -> tuple[dict[str, Tensor], BondWeights, BPGaugeInfo]:
-    """The Python-loop driver.  Used for ``SymmetricTensor``, and as the
-    reference the traced driver is checked against.
+    """The Python-loop driver: the reference the traced driver is checked
+    against, and the fallback for a pair whose block structure the traced
+    carry cannot hold (:class:`_StructureNotTraceable`).
 
     Two host syncs per sweep (the health gate and the residual) and ~300 eager
     dispatches, which is what makes it 18.9 ms/sweep -- 555x the traced path's
@@ -732,7 +930,7 @@ def _bp_solve(
     max_iter: int,
     tol: float,
 ):
-    """The whole solve as one ``lax.while_loop``.  Dense only.
+    """The whole solve as one ``lax.while_loop``.
 
     Traceable, and deliberately **not** jitted itself -- :data:`_bp_solve_traced`
     is the jitted entry point, and a caller that wants a *wider* boundary calls
@@ -752,25 +950,38 @@ def _bp_solve(
 
     Carry, six slots::
 
-        gam        {"A", "B"} site *arrays*     (dict of jax.Array)
+        gam        {"A", "B"} site *leaves*     (dict of list[jax.Array])
         weights    the four bond weights        (BondWeights)
         residual   last healthy sweep's residual, or inf
         done       completed *healthy* sweeps
         converged  reached ``tol`` on a healthy sweep
         dead       the last sweep left f64
 
-    **Arrays, not ``Tensor``s, and the index metadata is a closure constant.**
-    ``TensorIndex`` is pytree *aux* data, and a swept tensor is not
-    metadata-identical to its input: ``contract`` permutes the legs and
-    ``_gauge_bond`` stamps its own flows (see
-    :func:`_restore_caller_structure`).  With ``Tensor``s in the carry that
-    changes the treedef between iterations and ``while_loop`` fails with
+    **Leaves, not ``Tensor``s, and the tree metadata is a closure constant.**
+    ``TensorIndex`` (and, for ``SymmetricTensor``, the block table) is pytree
+    *aux* data, and a swept tensor is not metadata-identical to its input:
+    ``contract`` permutes the legs and ``_gauge_bond`` stamps its own flows
+    (see :func:`_restore_caller_structure`).  With ``Tensor``s in the carry
+    that changes the treedef between iterations and ``while_loop`` fails with
     ``Mismatch custom node data`` -- which is precisely what a
     simple-update-evolved pair triggers, since its virtual flows are the
-    opposite of this module's.  Carrying bare arrays removes the aux data
-    entirely, so the carry is stable by construction rather than by a
-    coincidence of conventions, and its shapes are visibly fixed -- the property
-    the ``_PINV_CUTOFF`` mask exists to preserve.
+    opposite of this module's.  Carrying bare leaves removes the aux data
+    entirely (a ``DenseTensor`` is one array; a ``SymmetricTensor`` is one
+    flat block buffer), so the carry is stable by construction rather than by
+    a coincidence of conventions, and its shapes are visibly fixed -- the
+    property the ``_PINV_CUTOFF`` mask exists to preserve.
+
+    A dense pair's metadata is already loop-stable because
+    :func:`_restore_caller_structure` rebuilds its indices verbatim each
+    sweep.  A symmetric pair's has to be *made* stable, in two steps at trace
+    time: :func:`_canonical_symmetric_layout` relabels the caller's pair into
+    the layout the sweep emits, and the fixed-point probe above the loop
+    closes the block set with :func:`_embed_zero_blocks`.  Both are relabels
+    -- the state handed to sweep 0 is exactly the caller's, so the health
+    gate's semantics, including rejecting an unhealthy *first* sweep back to
+    the caller's own state, match the eager driver's.  A pair whose structure
+    defeats this raises :class:`_StructureNotTraceable` at trace time and the
+    entry points fall back to the eager loop.
 
     ``converged`` and ``dead`` are separate slots rather than one ``stop`` flag
     because the two exits carry different payloads: the tolerance exit reports
@@ -791,20 +1002,63 @@ def _bp_solve(
         unused sweep; nothing needs it today.
     """
     gam, weights = _prepare(A, B, weights)
+    if isinstance(gam["A"], SymmetricTensor):
+        # The carry needs input whose metadata already is the sweep's fixed
+        # point: relabel into it (charge-grouped legs, this module's flows,
+        # weights permuted along) and then let the probe below close the
+        # block set.  Every step is a relabel, so the state does not move.
+        gam, weights = _canonical_symmetric_layout(gam, weights)
     # Traced once per compile, then constant for every call that reuses it.
     like = dict(gam)
 
-    def as_tensors(arrays: dict[str, jax.Array]) -> dict[str, Tensor]:
-        return {s: DenseTensor(a, like[s].indices) for s, a in arrays.items()}
+    if isinstance(like["A"], SymmetricTensor):
+        # Fixed-point probe, trace time only.  One sweep from the canonical
+        # layout must land back on it for the carry to be stable; the one
+        # legitimate way it cannot is by *growing* the block set (message and
+        # gauge contractions populate every conservation-allowed product), so
+        # embed zero blocks and try again until the structure closes.  The
+        # probes' arrays are never used, so XLA's DCE removes the runtime
+        # cost; anything the embedding cannot absorb raises
+        # :class:`_StructureNotTraceable` and the caller falls back to the
+        # eager driver.  Two rounds close every structure seen in practice;
+        # four bounds the trace-time cost before declaring the pair untraceable.
+        for _ in range(4):
+            probe, _probe_w = _sweep(dict(like), weights)
+            probe = {s: _restore_caller_structure(t, like[s]) for s, t in probe.items()}
+            if all(
+                jax.tree_util.tree_flatten(probe[s])[1]
+                == jax.tree_util.tree_flatten(like[s])[1]
+                for s in like
+            ):
+                break
+            like = {s: _embed_zero_blocks(like[s], probe[s]) for s in like}
+        else:
+            raise _StructureNotTraceable(
+                "the sweep's block structure did not close after 4 rounds of "
+                "zero-block embedding"
+            )
+        gam = like
 
-    def as_arrays(tensors: dict[str, Tensor]) -> dict[str, jax.Array]:
+    treedef = {s: jax.tree_util.tree_flatten(t)[1] for s, t in like.items()}
+
+    def as_tensors(leaves: dict[str, list[jax.Array]]) -> dict[str, Tensor]:
         return {
-            s: _restore_caller_structure(t, like[s]).todense()
-            for s, t in tensors.items()
+            s: jax.tree_util.tree_unflatten(treedef[s], ls) for s, ls in leaves.items()
         }
 
+    def as_leaves(tensors: dict[str, Tensor]) -> dict[str, list[jax.Array]]:
+        out = {}
+        for s, t in tensors.items():
+            ls, td = jax.tree_util.tree_flatten(_restore_caller_structure(t, like[s]))
+            if td != treedef[s]:
+                raise _StructureNotTraceable(
+                    f"sweep output for site {s} left the carry's structure"
+                )
+            out[s] = ls
+        return out
+
     init = (
-        {s: t.todense() for s, t in gam.items()},
+        {s: jax.tree_util.tree_flatten(t)[0] for s, t in gam.items()},
         weights,
         # ``inf`` in the residual slot has to carry exactly the dtype the body
         # will write there or the carry is inconsistent, so take it from the
@@ -831,7 +1085,7 @@ def _bp_solve(
         res = _residual(cand_weights, w_in)
         accept = lambda cand, prev: jnp.where(ok, cand, prev)  # noqa: E731
         return (
-            jax.tree_util.tree_map(accept, as_arrays(cand_gam), arr_in),
+            jax.tree_util.tree_map(accept, as_leaves(cand_gam), arr_in),
             jax.tree_util.tree_map(accept, cand_weights, w_in),
             jnp.where(ok, res, jnp.inf),
             # After the health gate, never before: ``done`` counts completed
@@ -867,15 +1121,16 @@ def bp_gauge_checkerboard(
     the self-consistent BP messages rather than whatever the last SVD left
     behind.
 
-    A **dense** pair takes the traced driver.  Only the input validation stays
-    on the host, because it raises the documented ``ValueError`` and a traced
-    solve cannot; the initial rescale and the weight normalisation run *inside*
-    the jit (:func:`_prepare`), and three casts rebuild :class:`BPGaugeInfo` on
-    the way out.  So **four** host syncs for the whole solve -- one in
-    :func:`_validate_weights` plus those three casts -- down from 18 per sweep.
-    A ``SymmetricTensor`` pair takes the eager Python loop, which is unchanged;
-    see the module docstring for why it cannot be traced yet.  Both share the
-    sweep body verbatim.
+    Dense **and** symmetric pairs take the traced driver.  Only the input
+    validation stays on the host, because it raises the documented
+    ``ValueError`` and a traced solve cannot; the initial rescale and the
+    weight normalisation run *inside* the jit (:func:`_prepare`), and three
+    casts rebuild :class:`BPGaugeInfo` on the way out.  So **four** host syncs
+    for the whole solve -- one in :func:`_validate_weights` plus those three
+    casts -- down from 18 per sweep.  A ``SymmetricTensor`` pair whose block
+    structure cannot hold the traced carry falls back to the eager Python
+    loop at trace time (see :class:`_StructureNotTraceable`); the answer is
+    the same either way, since both drivers share the sweep body verbatim.
 
     .. warning::
         The dense path is **not reverse-mode differentiable** -- see
@@ -917,16 +1172,27 @@ def bp_gauge_checkerboard(
     """
     _validate_weights(weights)
 
-    if _use_traced_loop(A, B):
-        gam, weights, residual, done, converged, _ = _bp_solve_traced(
-            A, B, weights, max_iter, tol
-        )
-        # The only host syncs in the whole traced solve: three, to rebuild
-        # ``BPGaugeInfo`` at its documented ``(int, float, bool)`` type.  A 0-d
-        # array would satisfy ``assert info.converged`` *silently*, and would
-        # fail ``info.residual == float("inf")`` loudly.
-        info = BPGaugeInfo(int(done), float(residual), bool(converged))
-    else:
+    traced = _use_traced_loop(A, B)
+    if traced:
+        try:
+            gam, weights_out, residual, done, converged, _ = _bp_solve_traced(
+                A, B, weights, max_iter, tol
+            )
+        except _StructureNotTraceable:
+            # Raised at trace time: this pair's block structure cannot hold
+            # the traced carry.  The eager loop represents the same physics,
+            # so fall back rather than fail -- correct and slow, and the
+            # failed trace repeats per call (see the exception's docstring).
+            traced = False
+        else:
+            weights = weights_out
+            # The only host syncs in the whole traced solve: three, to
+            # rebuild ``BPGaugeInfo`` at its documented ``(int, float,
+            # bool)`` type.  A 0-d array would satisfy ``assert
+            # info.converged`` *silently*, and would fail ``info.residual ==
+            # float("inf")`` loudly.
+            info = BPGaugeInfo(int(done), float(residual), bool(converged))
+    if not traced:
         gam, weights, info = _bp_solve_eager(*_prepare(A, B, weights), max_iter, tol)
 
     # The caller's structure is handed back.  On the traced path this is

@@ -4,6 +4,22 @@
 
 ### Added
 
+- **The BP gauge solve is compiled for `SymmetricTensor` pairs** (#882
+  Phase 3): `bp_gauge_checkerboard` and `gauge_fix` now run a symmetric pair
+  through the same `lax.while_loop` driver a dense pair takes, via
+  `svd(bond_order="sector")` in `_gauge_bond` and a carry that holds block
+  buffers behind a trace-time canonical relayout (charge-grouped legs, this
+  module's flows, dead charge slots dropped, block set closed with zero
+  blocks). Measured on the D=3 fixture whose jitted sweep used to die at
+  sweep 108: eager and traced now converge on the identical 167-sweep
+  trajectory (state drift 1.6e-15), at 11.9 ms warm against ~150 s eager —
+  and a 1600-step symmetric simple-update run drops from 5768 s to ~12 min
+  at D=3 and from 22091 s to ~53 min at D=4, which promotes the symmetric
+  arm into the D=3/D=4 acceptance sweep (`kind` axis of
+  `test_su_evolve_reaches_the_simple_update_reference_energy`). A pair whose
+  block structure cannot hold the static carry falls back to the eager loop
+  at trace time.
+
 - **`svd(..., bond_order="sector")`** (`tenax.linalg.svd`): the traceable
   ordering of a block-sparse SVD, twin to `eigh`'s (#939). The bond comes
   back charge-grouped (values descending within each sector), `s_full` is

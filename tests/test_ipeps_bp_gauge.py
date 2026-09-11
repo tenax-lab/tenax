@@ -738,6 +738,175 @@ def test_prepare_reads_dtypes_without_densifying():
 
 
 # --------------------------------------------------------------------- #
+# The traced symmetric driver (#882 Phase 3)                             #
+# --------------------------------------------------------------------- #
+
+
+def _nontrivial_weights(D: int = 3) -> BondWeights:
+    return BondWeights(
+        h_AB=jnp.array([1.0, 0.4, 0.1][:D]),
+        h_BA=jnp.array([1.0, 0.6, 0.2][:D]),
+        v_AB=jnp.array([1.0, 0.3, 0.05][:D]),
+        v_BA=jnp.array([1.0, 0.7, 0.3][:D]),
+    )
+
+
+def test_the_traced_and_eager_drivers_agree_on_a_symmetric_pair(monkeypatch):
+    """The wiring's whole contract: tracing must not move the answer.
+
+    Same input through both drivers.  The verdict, the sweep count, the
+    spectrum and the physical state all have to match -- the sweep body is
+    shared verbatim and, since the sector-mode SVD, so is every decomposition
+    code path, which is what makes exact sweep-count agreement a fair
+    assertion rather than an aspiration.  Weights are compared sorted: both
+    drivers emit the sector-grouped layout today, but the contract is the
+    spectrum, not the layout.
+    """
+    A, B = _symmetric_pair()
+    w = _nontrivial_weights()
+    before = _direction(_torus_2x2(A, B, w))
+
+    results = {}
+    for traced in (True, False):
+        monkeypatch.setattr(bp_mod, "_use_traced_loop", lambda *a, **k: traced)
+        results[traced] = bp_gauge_checkerboard(A, B, w, max_iter=400, tol=1e-13)
+
+    (A_t, B_t, w_t, info_t), (A_e, B_e, w_e, info_e) = results[True], results[False]
+    assert info_t.converged == info_e.converged
+    assert info_t.iterations == info_e.iterations, (
+        f"the drivers took different trajectories: traced {info_t}, eager {info_e}"
+    )
+    for bond in w._fields:
+        st = np.sort(np.asarray(getattr(w_t, bond)))
+        se = np.sort(np.asarray(getattr(w_e, bond)))
+        assert st == pytest.approx(se, abs=1e-12), f"{bond} spectrum differs"
+    for tag, X, wx in (("traced", (A_t, B_t), w_t), ("eager", (A_e, B_e), w_e)):
+        drift = float(np.max(np.abs(_direction(_torus_2x2(*X, wx)) - before)))
+        assert drift < GAUGE_TOL, f"{tag} driver moved the state by {drift:.3e}"
+
+
+def test_the_canonical_relayout_is_the_same_state():
+    """``_canonical_symmetric_layout`` is a relabel, not a transformation.
+
+    Checked on both caller conventions it has to absorb: the helpers' pair
+    (this module's flows already, charges merely unsorted) and a
+    simple-update-evolved pair (flows inverted, so every leg is dual-relabeled
+    -- the sweep itself emits ``[-2, -1, 2]``/IN for a ``[-2, 1, 2]``/OUT
+    caller, and the relayout has to land on the same reading).  Also
+    idempotent: canonical input comes back metadata-identical.
+    """
+    su_A, su_B, su_w = _simple_update(*_symmetric_pair(), phases=4, rotate=False)
+    cases = {
+        "module-flow": (*_symmetric_pair(), _nontrivial_weights()),
+        "su-evolved": (su_A, su_B, su_w),
+    }
+    for tag, (A, B, w) in cases.items():
+        gam, wp = bp_mod._prepare(A, B, w)
+        before = _direction(_torus_2x2(gam["A"], gam["B"], wp))
+
+        canon, wc = bp_mod._canonical_symmetric_layout(gam, wp)
+        drift = float(
+            np.max(np.abs(_direction(_torus_2x2(canon["A"], canon["B"], wc)) - before))
+        )
+        assert drift < 1e-14, f"{tag}: the relayout moved the state by {drift:.3e}"
+
+        again, wc2 = bp_mod._canonical_symmetric_layout(canon, wc)
+        for s in ("A", "B"):
+            assert again[s].indices == canon[s].indices, f"{tag}: not idempotent"
+        for bond in wc._fields:
+            assert np.array_equal(
+                np.asarray(getattr(wc2, bond)), np.asarray(getattr(wc, bond))
+            ), f"{tag}: weights moved on the second pass"
+
+
+def test_a_slot_no_block_occupies_is_dropped_and_stays_on_the_traced_path(
+    monkeypatch,
+):
+    """The #906 pair class must not cost the traced driver.
+
+    A ``D >= 3`` simple-update evolution leaves legs counting a charge no
+    block occupies, and the sweep's SVD -- which sees occupied sectors only
+    -- shrinks the bond on contact.  A static carry cannot follow a shrink,
+    so the canonical relayout drops the dead slot up front instead: no block
+    references it, so nothing moves, and the pair this matters for most (the
+    D=3 acceptance fixture) stays on the compiled path rather than falling
+    back to the eager loop it just escaped.
+
+    Built synthetically: charge 0's blocks on ``v_BA``'s two ends (``B.d``,
+    ``A.u``) are zeroed -- value-identical to deleting them -- and then
+    structurally deleted.
+    """
+    from tenax.core.tensor import SymmetricTensor
+
+    A, B = _symmetric_pair()
+
+    def kill(t, leg):
+        ax = t.labels().index(leg)
+        blocks = {k: b for k, b in t.blocks.items() if k[ax] != 0}
+        return SymmetricTensor._from_blocks_unchecked(blocks, t.indices)
+
+    A_dead, B_dead = kill(A, "u"), kill(B, "d")
+    w = _nontrivial_weights()
+    before = _direction(_torus_2x2(A_dead, B_dead, w))
+
+    gam, wp = bp_mod._prepare(A_dead, B_dead, w)
+    canon, wc = bp_mod._canonical_symmetric_layout(gam, wp)
+    dead_leg = canon["A"].indices[canon["A"].labels().index("u")]
+    assert 0 not in dead_leg.charges.tolist(), (
+        f"the dead slot survived the relayout: {dead_leg.charges.tolist()}"
+    )
+    assert len(np.asarray(wc.v_BA)) == len(dead_leg.charges), (
+        "the weight vector did not shrink with its leg"
+    )
+    drift = float(
+        np.max(np.abs(_direction(_torus_2x2(canon["A"], canon["B"], wc)) - before))
+    )
+    assert drift < 1e-14, f"dropping the dead slot moved the state by {drift:.3e}"
+
+    # ... and the whole solve takes the traced driver, not the fallback.
+    def no_fallback(*a, **k):
+        raise AssertionError("the dead-slot pair fell back to the eager loop")
+
+    monkeypatch.setattr(bp_mod, "_bp_solve_eager", no_fallback)
+    A2, B2, w2, info = bp_gauge_checkerboard(A_dead, B_dead, w, max_iter=400, tol=1e-13)
+    assert info.converged, f"the traced solve did not converge: {info}"
+    drift = float(np.max(np.abs(_direction(_torus_2x2(A2, B2, w2)) - before)))
+    assert drift < GAUGE_TOL, f"the solve moved the state by {drift:.3e}"
+
+
+def test_a_pair_the_carry_cannot_hold_falls_back_to_the_eager_loop(monkeypatch):
+    """The traced driver's refusal is a dispatch, not a failure.
+
+    ``_StructureNotTraceable`` is raised at trace time; both entry points
+    must catch it and hand the pair to the eager loop, which represents the
+    same physics.  The trigger is injected rather than constructed -- a pair
+    that genuinely defeats the canonicalization also defeats the eager
+    positional-weight convention, so no honest fixture reaches the fallback
+    today; the fallback exists for the structures we have not met yet.
+    """
+
+    def refuse(gam, weights):
+        raise bp_mod._StructureNotTraceable("injected: carry cannot hold this pair")
+
+    monkeypatch.setattr(bp_mod, "_canonical_symmetric_layout", refuse)
+
+    A, B = _symmetric_pair()
+    w = _nontrivial_weights()
+    before = _direction(_torus_2x2(A, B, w))
+
+    A2, B2, w2, info = bp_gauge_checkerboard(A, B, w, max_iter=400, tol=1e-13)
+    assert info.converged, f"the fallback did not converge: {info}"
+    drift = float(np.max(np.abs(_direction(_torus_2x2(A2, B2, w2)) - before)))
+    assert drift < GAUGE_TOL, f"the fallback moved the state by {drift:.3e}"
+
+    # ... and gauge_fix's own traced route falls back the same way.  The
+    # helpers' pair doubles as an absorbed-form pair (its implicit weights
+    # are ones), which is the form gauge_fix takes.
+    A3, B3, w3, info3 = gauge_fix(A, B, max_iter=400, tol=1e-10)
+    assert info3.converged, f"gauge_fix's fallback did not converge: {info3}"
+
+
+# --------------------------------------------------------------------- #
 # A bond weight vector that changes length mid-solve (#904)              #
 # --------------------------------------------------------------------- #
 

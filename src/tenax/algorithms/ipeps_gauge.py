@@ -211,29 +211,37 @@ def gauge_fix(
         (``test_gauge_fix_returns_an_absorbed_pair_not_a_vidal_one``).
 
     Performance:
-        A **dense** pair takes :func:`_gauge_fix_traced` -- the solve *and* the
-        conversion back to absorbed form as one compiled call, so a warm solve
-        is ~0.92 ms rather than 2.47 and the only host syncs left are the three
-        casts below.  A ``SymmetricTensor`` pair takes the eager route
-        (``bp_gauge_checkerboard`` then :func:`absorb_weights`), which is the
-        original code path, unchanged and bit-identical; the two blockers on
-        tracing it live outside both modules and are named in
-        ``ipeps_bp_gauge``'s docstring.
+        A dense **or symmetric** pair takes :func:`_gauge_fix_traced` -- the
+        solve *and* the conversion back to absorbed form as one compiled
+        call, so a warm dense solve is ~0.92 ms rather than 2.47 and the only
+        host syncs left are the three casts below.  A ``SymmetricTensor``
+        pair whose block structure cannot hold the traced carry falls back at
+        trace time to the eager route (``bp_gauge_checkerboard`` then
+        :func:`absorb_weights`) -- the original code path, same answer,
+        without the compile win; see
+        ``ipeps_bp_gauge._StructureNotTraceable``.
     """
     if _bp._use_traced_loop(A, B):
-        A_out, B_out, weights, residual, done, converged = _gauge_fix_traced(
-            A, B, max_iter, tol
-        )
-        # The whole traced route's host syncs, all three of them, and they are
-        # not optional: ``BPGaugeInfo`` is documented as ``(int, float, bool)``,
-        # and a 0-d array would satisfy ``assert info.converged`` *silently*
-        # while failing ``info.residual == float("inf")`` loudly.
-        return (
-            A_out,
-            B_out,
-            weights,
-            BPGaugeInfo(int(done), float(residual), bool(converged)),
-        )
+        try:
+            A_out, B_out, weights, residual, done, converged = _gauge_fix_traced(
+                A, B, max_iter, tol
+            )
+        except _bp._StructureNotTraceable:
+            # Trace-time refusal: this pair's block structure cannot ride the
+            # traced carry.  The eager route below is the same physics.
+            pass
+        else:
+            # The whole traced route's host syncs, all three of them, and they
+            # are not optional: ``BPGaugeInfo`` is documented as ``(int,
+            # float, bool)``, and a 0-d array would satisfy ``assert
+            # info.converged`` *silently* while failing ``info.residual ==
+            # float("inf")`` loudly.
+            return (
+                A_out,
+                B_out,
+                weights,
+                BPGaugeInfo(int(done), float(residual), bool(converged)),
+            )
 
     A_v, B_v, weights, info = bp_gauge_checkerboard(
         A, B, _identity_weights(A), tol=tol, max_iter=max_iter
