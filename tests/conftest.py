@@ -14,6 +14,8 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor
 # ------------------------------------------------------------------ #
 
 _FILE_MARKERS = {
+    "test_eps_t_blindness_727.py": "core",
+    "test_gs_recipe_explicit_rejection_755.py": "core",
     "test_tensor.py": "core",
     "test_index.py": "core",
     "test_symmetry.py": "core",
