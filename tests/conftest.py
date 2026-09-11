@@ -479,6 +479,101 @@ _FILE_MARKERS = {
     # it does not gate a merge -- but it is what keeps a crashed gate cell from
     # being recorded as a confirmed rank-1 collapse (#747).
     "test_bench_672_driver_guard.py": "algorithm",
+    # ------------------------------------------------------------------ #
+    # #805 drain, tiers A and B.  Bucketed from a per-file measurement of   #
+    # all 87 legacy entries (see #805 for the full table): one file per     #
+    # process, ``-m "not slow"``, CPU, against a shared initially-cold JAX  #
+    # compile cache, so the cost model is one CI job rather than 87 cold    #
+    # starts.  Costs quoted below are *marginal* -- measured wall-clock     #
+    # minus the 4.9 s per-process floor (interpreter + ``import jax`` +     #
+    # conftest), which one gate run pays once, not once per file.           #
+    # ------------------------------------------------------------------ #
+    #
+    # Tier A, part 1: these 12 were **already in the required gate** --
+    # every one of their 62 tests carries an explicit ``@pytest.mark.core``.
+    # That is the third route in, the one #933 did not close: the registry
+    # guard treats a file as accounted for when it sits in
+    # ``_UNBUCKETED_LEGACY``, so per-test marks enter the gate unreviewed the
+    # same way module-level ``pytestmark`` used to.  Registering them changes
+    # no behaviour and costs no runtime; it makes the table describe what is
+    # already true, which is the only way the gate's contents stay reviewable.
+    "test_apply_chi_bump.py": "core",
+    "test_ctm_env_pad_chi_schedule.py": "core",
+    "test_ipeps_chi_adaptive_bump_unit.py": "core",
+    "test_ipeps_chi_bump_rollback_desync.py": "core",
+    "test_ipeps_chi_schedule_wiring.py": "core",
+    "test_ipeps_ctm_stall_recovery_cap.py": "core",
+    "test_ipeps_stall_recovery_cap.py": "core",
+    "test_optimize_gs_ad_chi_schedule_shim.py": "core",
+    "test_pess_3site_multisite_encoding.py": "core",
+    "test_pess_3site_multisite_wavefunction.py": "core",
+    "test_regularized_qr.py": "core",
+    "test_varipeps_compare_payload.py": "core",
+    #
+    # Tier A, part 2: every test in these 7 already carries an explicit
+    # ``@pytest.mark.slow``, and ``pytest_collection_modifyitems`` deliberately
+    # withholds ``core`` from a slow-marked test -- so no bucket here can add
+    # anything to the gate.  ``slow`` is simply the honest label: they run in
+    # the ``slow`` CI bucket today and continue to.
+    "test_ctm_honeycomb_lukin_sotnikov.py": "slow",
+    "test_ctm_multisite_2x2_contract.py": "slow",
+    "test_ctm_recipe_2x2_production_correctness.py": "slow",
+    "test_optimize_gs_ad_chi_schedule_unified.py": "slow",
+    "test_pess_ad_honeycomb.py": "slow",
+    "test_split_ctm_large_d_memory.py": "slow",
+    "test_split_ctm_production_correctness.py": "slow",
+    #
+    # Tier B, part 1 -- decomposition adjoints, linear solvers, line search
+    # (9 files, +66 gate tests, +38 s marginal).  This is the class
+    # #805's criterion is actually about: a wrong number here is not confined
+    # to one algorithm, it corrupts every gradient that flows through it.  The
+    # QR backward that #912/#917 fixed (real-only, assumed m>=n) shipped
+    # exactly this way.  All are kernel-level -- no CTM convergence, no
+    # optimisation -- which is why the whole group costs under half a minute.
+    "test_ad_primitives_rank_aware.py": "core",
+    "test_gmres_lax.py": "core",
+    "test_ipeps_tree_dot.py": "core",
+    "test_line_search.py": "core",
+    "test_lorentzian_eigh_kernel.py": "core",
+    "test_projector_backward_dispatch.py": "core",
+    "test_svd_adjoint_fd_750.py": "core",
+    "test_symmetric_custom_vjp.py": "core",
+    "test_truncated_lowrank_svd.py": "core",
+    #
+    # Tier B, part 2 -- CTM structural invariants (7 files, +47 gate tests,
+    # +18 s marginal).  Charge tiling (#667/#700), flow flips (#422),
+    # rank-1 padded init, the 2x2 projector, and the compiled raw-array moves.
+    # Each guards a defect class that has already shipped once; the expensive
+    # members of the same family (the symmetric/U(1)-Sz ones, 90-180 s apiece
+    # on block-sparse compile, #566) are deliberately NOT here -- they go to
+    # ``algorithm`` in tier D.
+    "test_complex128_ad.py": "core",
+    "test_ctm_compiled.py": "core",
+    "test_ctm_energy_implicit.py": "core",
+    "test_ctm_tensor_flow_flip.py": "core",
+    "test_ctm_tensor_init_rank1.py": "core",
+    "test_ctm_tensor_projector_2x2.py": "core",
+    "test_ctm_tensor_tiling.py": "core",
+    #
+    # Tier B, part 3 -- config, policy and dispatch (9 files, +201 gate tests,
+    # +3 s marginal).  These do not compute a number; they decide which
+    # code path computes it, so a silent failure routes the run somewhere the
+    # author did not intend and every number downstream is wrong without
+    # anything looking broken.  Nearly free -- ``test_tuning_registry.py`` is
+    # 155 parametrised cases in 0.2 s, because it is pure schema inspection
+    # over the registry rather than anything numerical.
+    # ``test_architecture_imports.py`` joins the gate here having been red on
+    # ``main`` for a month as #790 precisely because it was unbucketed; #790 is
+    # now closed and the file passes.
+    "test_architecture_imports.py": "core",
+    "test_ipeps_ad_policy.py": "core",
+    "test_ipeps_checkpoint.py": "core",
+    "test_ipeps_config_chi_ceiling_bailout.py": "core",
+    "test_ipeps_config_grad_spike.py": "core",
+    "test_ipeps_config_hz_max_iter.py": "core",
+    "test_ipeps_config_stall_recovery_retries.py": "core",
+    "test_make_neighbors.py": "core",
+    "test_tuning_registry.py": "core",
 }
 
 
@@ -489,23 +584,16 @@ _FILE_MARKERS = {
 # ------------------------------------------------------------------ #
 
 _UNBUCKETED_LEGACY = {
-    "test_ad_primitives_rank_aware.py",
-    "test_apply_chi_bump.py",
-    "test_architecture_imports.py",
     "test_block_sparse_ctm_ad.py",
     "test_c4v_reference_ad.py",
     "test_coarse_grain.py",
-    "test_complex128_ad.py",
     "test_ctm_2x2_projector_symmetric.py",
     "test_ctm_670_symmetric_2x2.py",
     "test_ctm_674_fermionic_fused.py",
     "test_ctm_700_env_collapse.py",
     "test_ctm_chi_ramp.py",
-    "test_ctm_compiled.py",
     "test_ctm_direction_dependent_bonds.py",
-    "test_ctm_energy_implicit.py",
     "test_ctm_energy_implicit_chi_bump.py",
-    "test_ctm_env_pad_chi_schedule.py",
     "test_ctm_honeycomb_ad.py",
     "test_ctm_honeycomb_convergence.py",
     "test_ctm_honeycomb_cross_path.py",
@@ -513,66 +601,29 @@ _UNBUCKETED_LEGACY = {
     "test_ctm_honeycomb_env.py",
     "test_ctm_honeycomb_forward.py",
     "test_ctm_honeycomb_init.py",
-    "test_ctm_honeycomb_lukin_sotnikov.py",
     "test_ctm_honeycomb_moves.py",
     "test_ctm_honeycomb_projector.py",
     "test_ctm_honeycomb_safeguards.py",
     "test_ctm_in_loop_chi_bump.py",
     "test_ctm_loop_core.py",
-    "test_ctm_multisite_2x2_contract.py",
     "test_ctm_projector.py",
-    "test_ctm_recipe_2x2_production_correctness.py",
     "test_ctm_sharding_backward.py",
-    "test_ctm_tensor_flow_flip.py",
-    "test_ctm_tensor_init_rank1.py",
-    "test_ctm_tensor_projector_2x2.py",
-    "test_ctm_tensor_tiling.py",
-    "test_gmres_lax.py",
     "test_hotrg_sharding.py",
     "test_ipeps_ad_adjoint_methods.py",
     "test_ipeps_ad_conv_criterion.py",
     "test_ipeps_ad_f3_fused_bwd.py",
     "test_ipeps_ad_history.py",
-    "test_ipeps_ad_policy.py",
-    "test_ipeps_checkpoint.py",
     "test_ipeps_checkpoint_resume.py",
-    "test_ipeps_chi_adaptive_bump_unit.py",
-    "test_ipeps_chi_bump_rollback_desync.py",
-    "test_ipeps_chi_schedule_wiring.py",
-    "test_ipeps_config_chi_ceiling_bailout.py",
-    "test_ipeps_config_grad_spike.py",
-    "test_ipeps_config_hz_max_iter.py",
-    "test_ipeps_config_stall_recovery_retries.py",
-    "test_ipeps_ctm_stall_recovery_cap.py",
-    "test_ipeps_stall_recovery_cap.py",
-    "test_ipeps_tree_dot.py",
     "test_ipeps_u1sz.py",
-    "test_line_search.py",
-    "test_lorentzian_eigh_kernel.py",
-    "test_make_neighbors.py",
     "test_metric_precond.py",
-    "test_optimize_gs_ad_chi_schedule_shim.py",
-    "test_optimize_gs_ad_chi_schedule_unified.py",
-    "test_pess_3site_multisite_encoding.py",
     "test_pess_3site_multisite_rdm_invariants.py",
-    "test_pess_3site_multisite_wavefunction.py",
-    "test_pess_ad_honeycomb.py",
     "test_pess_local_energy.py",
     "test_profiler_u1sz_arm.py",
-    "test_projector_backward_dispatch.py",
     "test_reduced_corner_qr.py",
-    "test_regularized_qr.py",
     "test_split_ctm_chi_frozen_726.py",
     "test_split_ctm_energy_gauge.py",
-    "test_split_ctm_large_d_memory.py",
-    "test_split_ctm_production_correctness.py",
     "test_sublattice_rotation.py",
-    "test_svd_adjoint_fd_750.py",
-    "test_symmetric_custom_vjp.py",
-    "test_truncated_lowrank_svd.py",
-    "test_tuning_registry.py",
     "test_varipeps_compare.py",
-    "test_varipeps_compare_payload.py",
     "test_varipeps_compare_su.py",
 }
 
