@@ -1125,8 +1125,8 @@ def compute_energy_split_ctm_tensor(
 
     rdm_h = _rdm2x1_split_tensor(A, env)
     rdm_v = _rdm1x2_split_tensor(A, env)
-    E_h = jnp.einsum("ijkl,ijkl->", rdm_h, H)
-    E_v = jnp.einsum("ijkl,ijkl->", rdm_v, H)
+    E_h = jnp.einsum("ijkl,klij->", rdm_h, H)
+    E_v = jnp.einsum("ijkl,klij->", rdm_v, H)
     return (E_h + E_v).real
 
 
@@ -1236,7 +1236,7 @@ def compute_energy_split_ctm_tensor_multisite(
                 else:
                     rdm = _rdm1x2_split_tensor_2site(A, B, env_A, env_B)
 
-            bond_energy = jnp.einsum("ijkl,ijkl->", rdm, H)
+            bond_energy = jnp.einsum("ijkl,klij->", rdm, H)
             total_energy = total_energy + bond_energy
 
     return total_energy.real / n_sites

@@ -292,7 +292,7 @@ def compute_energy_cg(
         else:
             raise ValueError(f"Unknown inter-cell direction: {direction!r}")
         rdm = rdm_fn(A, env)  # (d_eff, d_eff, d_eff, d_eff)
-        e_inter = e_inter + jnp.einsum("ijkl,ijkl->", rdm, gate)
+        e_inter = e_inter + jnp.einsum("ijkl,klij->", rdm, gate)
 
     return ((e_intra + e_inter) / gates.n_sites).real
 
@@ -354,6 +354,6 @@ def compute_energy_cg_split(
         if direction not in dispatch:
             raise ValueError(f"Unknown inter-cell direction: {direction!r}")
         rdm = dispatch[direction](A, env)
-        e_inter = e_inter + jnp.einsum("ijkl,ijkl->", rdm, gate)
+        e_inter = e_inter + jnp.einsum("ijkl,klij->", rdm, gate)
 
     return ((e_intra + e_inter) / gates.n_sites).real
