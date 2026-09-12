@@ -437,3 +437,146 @@ def test_sigma_and_phase_converge_to_the_same_energy_on_2x2():
         f"sigma+2x2 disagrees with phase+2x2: E_phase={e_phase:.12f}, "
         f"E_sigma={e_sigma:.12f}, |dE|={abs(e_phase - e_sigma):.3e}"
     )
+
+
+def test_sigma_gauge_fix_ctm_tensor_is_a_pure_gauge_transform():
+    """ad_utils._sigma_gauge_fix_ctm_tensor must also be a pure gauge (#798).
+
+    The #798 defect had TWO instances: `_ctm_energy_ad._sigma_gauge_fix_env`
+    (the implicit-AD path, fixed first) and this sibling on the
+    Tensor-protocol path (`ctm_tensor_converge` and the explicit-AD sweep,
+    callers in ad_utils), which read corner legs positionally from
+    ``todense()`` arrays and hardcoded a C4 bond map contradicting the
+    verified connectivity in ``_ctm_tensor_energy.py`` (c4_u <-> t3_r on
+    the bottom bond, c4_r <-> t4_u on the left bond).  On the 2x2 sweep's
+    axis-reversed corner layout every corner got a bond gauge on the wrong
+    leg -- not a gauge transform at all.  Before the fix this test fails
+    with |dE| = 6.9e-03; after, the energy is invariant to 1e-11.
+
+    Fixture notes: the site is RANDOM (not SU) because the SU state is
+    C4v-symmetric to high accuracy, which makes all four edge sigmas
+    nearly equal -- and when s1 = s2 = s3 = s4 every mis-pairing is
+    accidentally still a gauge (measured: the defect shrinks to
+    |dE| ~ 1e-9 on the SU fixture).  The env pair is deliberately
+    UNCONVERGED (max_iter=6): near the fixed point the sigmas approach
+    identity and the defect shrinks toward the noise floor.  Sigma is
+    exactly unitary for ANY env pair (Q_new @ Q_old^H from QR), so gauge
+    purity must hold far from convergence too -- where mis-pairing is
+    glaring instead.
+    """
+    from functools import partial
+
+    import numpy as np
+
+    from tenax.algorithms._ctm_loop_core import _run_ctm_loop_with_bump
+    from tenax.algorithms._ctm_python_loop import _make_jit_ctm_step
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+    from tenax.algorithms.ad_utils import (
+        _phase_fix_ctm_tensor,
+        _sigma_gauge_fix_ctm_tensor,
+    )
+
+    rng = np.random.default_rng(7)
+    data = rng.standard_normal((2, 2, 2, 2, 2))
+    site = _wrap_as_dense_tensor(jnp.asarray(data / np.linalg.norm(data)))
+    gate = heisenberg_gate()
+    sts = {(0, 0): site}
+    step = partial(_make_jit_ctm_step(SINGLE_SITE_NEIGHBORS, "2x2"), chunk_size=None)
+    envs0 = {c: initialize_ctm_tensor_env(a, 6) for c, a in sts.items()}
+
+    def gauge_pair(envs_new, _old):
+        return {c: _phase_fix_ctm_tensor(envs_new[c]) for c in envs_new}
+
+    result = _run_ctm_loop_with_bump(
+        step,
+        sts,
+        envs0,
+        chi_current=6,
+        chi_max=None,
+        bump_enabled=False,
+        bump_threshold=1e-6,
+        bump_step_size=2,
+        projector_method="svd",
+        renormalize=True,
+        projector_backward="auto",
+        gauge_fix_fn=gauge_pair,
+        max_iter=6,
+        min_iter=4,
+        conv_tol=1e-8,
+        conv_method="sv",
+        plateau_patience=None,
+    )
+    env_old = result.envs[(0, 0)]
+    envs_new, _eps, _smin = step(
+        sts,
+        result.envs,
+        chi=6,
+        projector_method="svd",
+        renormalize=True,
+        projector_backward="auto",
+    )
+    env_new = envs_new[(0, 0)]
+
+    e_before = float(compute_energy_ctm_tensor(site, env_new, gate))
+    env_fixed = _sigma_gauge_fix_ctm_tensor(env_new, env_old)
+    e_after = float(compute_energy_ctm_tensor(site, env_fixed, gate))
+
+    assert abs(e_after - e_before) < 1e-11, (
+        f"ad_utils sigma gauge fix changed the energy: before={e_before:.12f}, "
+        f"after={e_after:.12f}, |dE|={abs(e_after - e_before):.3e} -- "
+        f"the applied transform is not a pure gauge (mis-paired bond sigmas)"
+    )
+
+
+def test_stationarity_warning_fires_once_per_cached_build():
+    """#841 guard noise control: warn once per cached vjp-fn build.
+
+    ``optimize_gs_ad`` (``gs_implicit_ad`` defaults True) reuses one cached
+    energy function across every optimizer iteration, and the residual it
+    embeds in the message drifts, so Python's default warning dedup never
+    collapses repeats: a per-call warning floods stderr for hundreds of
+    iterations and trains users to blanket-ignore RuntimeWarning -- which
+    silences the #841 signal entirely.  The guard therefore warns on the
+    FIRST non-stationary forward of each cached build and stays quiet
+    afterwards, while ``get_last_implicit_ad_diagnostics()`` keeps
+    reporting the freshly measured residual on every call.
+    """
+    import warnings as _warnings
+
+    from tenax.algorithms._ctm_energy_ad import get_last_implicit_ad_diagnostics
+
+    site = _normed_random_d2_site()
+    gate = heisenberg_gate()  # one gate object -> one cached build
+
+    def call():
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            ctm_energy_implicit(
+                {(0, 0): site},
+                SINGLE_SITE_NEIGHBORS,
+                gate,
+                chi=4,
+                max_iter=7,
+                min_iter=2,
+                conv_tol=2e-9,
+                conv_method="elementwise",
+            )
+        return [w for w in caught if "stationarity residual" in str(w.message)]
+
+    first = call()
+    assert len(first) == 1, (
+        f"expected exactly one stationarity warning on the first call of a "
+        f"fresh build, got {len(first)}"
+    )
+
+    second = call()
+    diag = get_last_implicit_ad_diagnostics()
+    assert diag["forward_stationarity_residual"] > 1e-4, (
+        "diagnostics must keep reporting the per-call residual even when "
+        "the warning is deduplicated"
+    )
+    assert not second, (
+        f"guard must warn once per cached build, not on every call: second "
+        f"call emitted {len(second)} stationarity warning(s)"
+    )

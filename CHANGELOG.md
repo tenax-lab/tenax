@@ -14,7 +14,12 @@
   the forward loop's own verdict are also exposed as
   `forward_stationarity_residual` / `forward_converged` in
   `get_last_implicit_ad_diagnostics()`, and `_sigma_gauged_ctm_converge`
-  returns its convergence flag instead of discarding it.
+  returns its convergence flag instead of discarding it.  The warning is
+  emitted once per cached energy-function build — optimizer loops reuse one
+  build across all iterations, and a per-call warning (whose drifting
+  residual defeats Python's warning dedup) would flood stderr and train
+  users to blanket-ignore `RuntimeWarning`; the residual itself stays
+  freshly measured in the diagnostics on every call.
 
 - **The BP gauge solve is compiled for `SymmetricTensor` pairs** (#882
   Phase 3): `bp_gauge_checkerboard` and `gauge_fix` now run a symmetric pair
@@ -289,6 +294,15 @@
   on the weak bond directions where the residual Z2 signs live), and its
   implicit gradient at the #841 state is worse than phase's
   (slope_fd/|g| = -0.008 vs 0.131) — it is not a repair for #841.
+  The same defect class lived in `ad_utils._sigma_gauge_fix_ctm_tensor` —
+  the sibling sigma implementation on the Tensor-protocol path
+  (`ctm_tensor_converge` and every `CTMConfig(forward_gauge="sigma")`
+  caller) — which read corner legs positionally from `todense()` arrays and
+  hardcoded a C4 bond map contradicting the verified connectivity
+  (sigma_bottom on `c4_r`, sigma_left on `c4_u`).  It now delegates to the
+  same label-based sigma application, keeping its per-tensor global-phase
+  alignment (measured: |dE| = 6.9e-3 per application on an unconverged
+  random D=2 env pair before, ≤ 2e-16 after).
 
 - **The traced CTM chi bond inherits the environment's inventory instead of
   re-guessing it** (#929). #922 fixed the *eager* cut; the AD path could not

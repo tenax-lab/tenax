@@ -1194,7 +1194,7 @@ def _make_implicit_vjp_fn(
     # to the previous one — using the previous ``λ`` as a warm seed for the
     # Neumann iteration converges in fewer iterations (#501).  Cleared on
     # divergence/non-convergence so the next call gets a fresh start.
-    _cached = {"prev_lam_leaves": None}
+    _cached = {"prev_lam_leaves": None, "stationarity_warned": False}
 
     def _invalidate_warm_start() -> None:
         """Drop the cached ``prev_lam_leaves`` warm-start seed.
@@ -1317,6 +1317,17 @@ def _make_implicit_vjp_fn(
 
         Cost: one extra jitted sweep + gauge fix per forward, ~1/max_iter of
         the forward's own cost.
+
+        Warns ONCE per cached vjp-fn build (the lifetime of the warm-start
+        cache): ``optimize_gs_ad`` reuses one build across every optimizer
+        iteration, and the residual embedded in the message drifts, so
+        Python's default warning dedup never collapses repeats -- a
+        per-call warning floods stderr for hundreds of iterations, buries
+        the genuinely discriminative "adjoint solve did not converge"
+        warning, and trains users to blanket-ignore RuntimeWarning (which
+        silences the #841 signal entirely).  The residual is still
+        measured and written to ``get_last_implicit_ad_diagnostics()``
+        on every call.
         """
         step_out, _eps, _smin = _stationarity_step(
             site_tensors,
@@ -1334,7 +1345,8 @@ def _make_implicit_vjp_fn(
         _F3_LAST_DIAGNOSTICS["forward_stationarity_residual"] = residual
         _F3_LAST_DIAGNOSTICS["forward_converged"] = forward_converged
         # Fails closed: a NaN residual is not <= threshold, so it warns.
-        if not (residual <= threshold):
+        if not (residual <= threshold) and not _cached["stationarity_warned"]:
+            _cached["stationarity_warned"] = True
             warnings.warn(
                 f"Implicit-AD CTM: the forward environment is not an "
                 f"element-wise fixed point of the gauged CTM step: one more "
@@ -1353,7 +1365,10 @@ def _make_implicit_vjp_fn(
                 f"bond-sign limit cycle, so raising max_iter alone may not "
                 f"help. The residual is also readable from "
                 f"get_last_implicit_ad_diagnostics()"
-                f"['forward_stationarity_residual'].",
+                f"['forward_stationarity_residual'] -- it stays updated on "
+                f"every call, while this warning is emitted once per cached "
+                f"energy function (further occurrences are suppressed to "
+                f"keep optimizer loops readable).",
                 RuntimeWarning,
                 stacklevel=4,
             )
