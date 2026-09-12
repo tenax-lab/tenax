@@ -392,13 +392,39 @@ def _wrap_sigma(sigma_data, contract_idx, output_idx, env_tensor):
     return DenseTensor(sigma_data, indices)
 
 
-def _apply_sigma_to_corner(corner, s_left_data, s_right_data):
+def _index_by_label(tensor, label):
+    """Return the TensorIndex of ``tensor`` carrying ``label``.
+
+    #798: the sigma-gauge path used to identify corner legs positionally
+    (``idx0, idx1 = corner.indices``), but the environment is a label-based
+    structure whose axis order is recipe-dependent — the 2x2 sweep writes
+    every corner axis-reversed relative to the canonical
+    ``_ctm_tensor_init`` order, and C4's canonical storage order
+    ``(c4_r, c4_u)`` is itself reversed relative to the ring order the
+    sigma calls assumed.  Positional reads therefore applied bond gauges
+    to the wrong legs on *both* layouts.  All sigma application is now
+    label-based through this helper.
+    """
+    for idx in tensor.indices:
+        if idx.label == label:
+            return idx
+    raise ValueError(
+        f"sigma gauge: expected a leg labeled {label!r}, tensor has "
+        f"{tuple(i.label for i in tensor.indices)}"
+    )
+
+
+def _apply_sigma_to_corner(corner, s_left_data, s_right_data, left_label, right_label):
     """Apply sigma gauge to a corner: s_left^H @ corner @ s_right.
 
-    corner is a 2-leg Tensor with indices (idx0, idx1).
-    s_left^H contracts with idx0, s_right contracts with idx1.
+    ``s_left^H`` contracts with the leg labeled ``left_label``; ``s_right``
+    contracts with the leg labeled ``right_label``.  Legs are found by
+    label, not position (#798) — the 2x2 sweep leaves corners axis-reversed
+    and label-based `contract` is indifferent to that, so this function
+    must be too.
     """
-    idx0, idx1 = corner.indices
+    idx0 = _index_by_label(corner, left_label)
+    idx1 = _index_by_label(corner, right_label)
     # Temporary output labels — must not collide with existing labels
     tmp0 = ("_sigma_out", idx0.label)
     tmp1 = ("_sigma_out", idx1.label)
@@ -417,13 +443,19 @@ def _apply_sigma_to_corner(corner, s_left_data, s_right_data):
     return result.relabel(tmp0, idx0.label).relabel(tmp1, idx1.label)
 
 
-def _apply_sigma_to_edge(edge, s_data):
-    """Apply sigma gauge to an edge: s^H @ edge @ s.
+def _apply_sigma_to_edge(edge, s_data, bra_label, ket_label):
+    """Apply sigma gauge to an edge: s^H on ``bra_label``, s on ``ket_label``.
 
-    edge is a 3-leg Tensor with indices (chi_left, phys, chi_right).
-    The same sigma acts on both chi legs.
+    The same sigma acts on both chi legs (they live on the same bond
+    family).  Legs are found by label, not position (#798): T3 and T4 are
+    *stored* axis-reversed relative to the ring order (``(t3_r, d2, t3_l)``
+    and ``(t4_d, l2, t4_u)``), so a positional read puts the conjugated
+    factor on the wrong side of those edges.  Invisible for real
+    environments (s^H = s^T), wrong for complex ones — and either way the
+    read should not depend on storage order.
     """
-    idx_l, idx_p, idx_r = edge.indices
+    idx_l = _index_by_label(edge, bra_label)
+    idx_r = _index_by_label(edge, ket_label)
     tmp_l = ("_sigma_out", idx_l.label)
     tmp_r = ("_sigma_out", idx_r.label)
 
@@ -485,18 +517,32 @@ def _sigma_gauge_fix_env(env_new, env_old):
     s3 = jax.lax.stop_gradient(_compute_sigma(T3_n_d, T3_o_d))
     s4 = jax.lax.stop_gradient(_compute_sigma(T4_n_d, T4_o_d))
 
-    # Apply sigma to corners: s_row^H @ C @ s_col
-    # Preserves SymmetricTensor type via label-based contraction.
-    C1_f = _apply_sigma_to_corner(env_new.C1, s4, s1)
-    C2_f = _apply_sigma_to_corner(env_new.C2, s1, s2)
-    C3_f = _apply_sigma_to_corner(env_new.C3, s2, s3)
-    C4_f = _apply_sigma_to_corner(env_new.C4, s3, s4)
+    # Apply sigma to corners and edges, identifying legs BY LABEL (#798).
+    # Bond map (verified connectivity, see _ctm_tensor_energy.py):
+    #   top row (s1):    c1_r <-> t1_l,  t1_r <-> c2_l
+    #   right col (s2):  c2_d <-> t2_u,  t2_d <-> c3_u
+    #   bottom row (s3): c3_l <-> t3_l,  t3_r <-> c4_u
+    #   left col (s4):   c4_r <-> t4_u,  t4_d <-> c1_d
+    # Around the ring each bond gets its sigma once conjugated (bra, the
+    # in-leg) and once plain (ket, the out-leg), so contracting any bond
+    # yields s s^H = 1: the transform is a pure gauge and gauge-invariant
+    # content is exactly preserved.  The old positional read applied bond
+    # gauges to the wrong legs — on the 2x2 layout for C1-C3 (the sweep
+    # writes corners axis-reversed) and on the canonical layout for C4
+    # (stored (c4_r, c4_u), reverse of the ring order assumed here) — which
+    # is not a gauge transform at all and corrupted the environment on
+    # every sigma-gauged sweep (energy off by O(1e-3) at D=2, O(1e-2) at
+    # D=3).  Preserves SymmetricTensor type via label-based contraction.
+    C1_f = _apply_sigma_to_corner(env_new.C1, s4, s1, "c1_d", "c1_r")
+    C2_f = _apply_sigma_to_corner(env_new.C2, s1, s2, "c2_l", "c2_d")
+    C3_f = _apply_sigma_to_corner(env_new.C3, s2, s3, "c3_u", "c3_l")
+    C4_f = _apply_sigma_to_corner(env_new.C4, s3, s4, "c4_u", "c4_r")
 
-    # Apply sigma to edges: s^H @ T @ s
-    T1_f = _apply_sigma_to_edge(env_new.T1, s1)
-    T2_f = _apply_sigma_to_edge(env_new.T2, s2)
-    T3_f = _apply_sigma_to_edge(env_new.T3, s3)
-    T4_f = _apply_sigma_to_edge(env_new.T4, s4)
+    # Edges: s^H on the ring in-leg, s on the ring out-leg.
+    T1_f = _apply_sigma_to_edge(env_new.T1, s1, "t1_l", "t1_r")
+    T2_f = _apply_sigma_to_edge(env_new.T2, s2, "t2_u", "t2_d")
+    T3_f = _apply_sigma_to_edge(env_new.T3, s3, "t3_l", "t3_r")
+    T4_f = _apply_sigma_to_edge(env_new.T4, s4, "t4_u", "t4_d")
 
     return CTMTensorEnv(
         C1=C1_f,
@@ -548,10 +594,12 @@ def ctm_energy_implicit(
     Backward: JIT-fused GMRES solve of ``(I - J_env^T) lam = dE/denv``,
     then chain rule to site tensor gradients.
 
-    The forward applies sigma gauge fixing (transfer-matrix eigenvector
-    alignment) at each CTM step, ensuring the converged environment is an
-    element-wise fixed point.  The backward VJP is taken through the sigma-
-    gauged step function, so ``(I - J_env^T)`` is well-conditioned.
+    The forward applies gauge fixing (``forward_gauge``) at each CTM step,
+    *intended* to make the converged environment an element-wise fixed
+    point.  Measured (#841), no available gauge achieves that on the 2x2
+    recipe — see the ``forward_gauge`` argument below and the stationarity
+    warning the forward now emits.  The backward VJP is taken through the
+    gauge-fixed step function.
 
     Uses SVD projectors with Lorentzian-regularized backward by default.
     SVD projectors achieve element-wise CTM convergence (no eigh sign
@@ -583,6 +631,22 @@ def ctm_energy_implicit(
         forward_gauge:     Gauge fixing in forward/backward: ``"phase"`` (default),
                            ``"sigma"`` (transfer-matrix eigenvector alignment), or
                            ``"none"`` (no gauge fixing).
+
+                           Measured on the 2x2 recipe (#841/#798, near-optimal
+                           D=3 state, chi=27): all three converge to the same
+                           energy (sigma-vs-phase parity 3e-15 post-#798), but
+                           NONE reaches an element-wise fixed point — the
+                           stationarity residual plateaus at O(0.4-0.6) for
+                           every gauge, because the residual freedom lives in
+                           per-bond-index Z2 signs (and near-degenerate
+                           multiplet rotations) that none of these constructions
+                           pin: the transfer-matrix eigenvector behind
+                           ``"sigma"`` has no weight on precisely those weak
+                           directions.  The implicit gradient there measured
+                           slope_fd/|g| = 0.131 for ``"phase"`` and -0.008 for
+                           ``"sigma"`` (direction inverted), so ``"sigma"`` is
+                           NOT a repair for #841; prefer the default
+                           ``"phase"`` and heed the stationarity warning.
         conv_method:       Convergence criterion: ``"sv"`` (corner singular
                            values, default) or ``"elementwise"`` (max element-wise
                            difference across all env tensors).

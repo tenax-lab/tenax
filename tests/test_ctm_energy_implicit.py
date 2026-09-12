@@ -313,3 +313,127 @@ def test_sv_convergence_does_not_certify_elementwise_premise():
     # 'sv' certifies converged spectra while the element-wise premise fails.
     assert diag["forward_converged"] is True
     assert diag["forward_stationarity_residual"] > 0.1
+
+
+# ---------------------------------------------------------------------------
+# #798: the 2x2 sweep writes corners in reversed axis order; the sigma-gauge
+# path read them positionally, so every corner got a gauge transform applied
+# to the wrong bond.  The pairing that matters (verified bond connectivity in
+# _ctm_tensor_energy.py):
+#     C1: c1_d <-> T4 (s4),  c1_r <-> T1 (s1)
+#     C2: c2_l <-> T1 (s1),  c2_d <-> T2 (s2)
+#     C3: c3_u <-> T2 (s2),  c3_l <-> T3 (s3)
+#     C4: c4_u <-> T3 (s3),  c4_r <-> T4 (s4)
+# The positional read paired C1-C3 wrongly on the 2x2 layout (all four
+# corners leave a 2x2 sweep axis-reversed) and C4 wrongly on the canonical
+# layout (its storage order (c4_r, c4_u) is reversed relative to the ring
+# order the sigma calls assume).  Label-based application fixes both.
+# ---------------------------------------------------------------------------
+
+
+def test_sigma_gauge_fix_is_a_pure_gauge_transform():
+    """_sigma_gauge_fix_env must preserve gauge-invariant content exactly.
+
+    Sigma alignment applies a unitary to every chi bond.  Whatever those
+    unitaries are, the 2-site energy contracted from the transformed
+    environment must equal the untransformed one: on each bond the two
+    transforms cancel (s s^H = 1).  A mis-paired application (s from one
+    bond applied to a leg living on another) is NOT a gauge transform and
+    changes the energy -- which is exactly the #798 defect: before the
+    fix this test fails with |dE| = 1.26e-04 on this D=2 SU fixture.
+    """
+    from functools import partial
+
+    from tenax.algorithms._ctm_energy_ad import _sigma_gauge_fix_env
+    from tenax.algorithms._ctm_loop_core import _run_ctm_loop_with_bump
+    from tenax.algorithms._ctm_python_loop import _make_jit_ctm_step
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+    from tenax.algorithms.ad_utils import _phase_fix_ctm_tensor
+
+    site = _make_su_tensor(D=2, d=2)
+    gate = heisenberg_gate()
+    sts = {(0, 0): site}
+    step = partial(_make_jit_ctm_step(SINGLE_SITE_NEIGHBORS, "2x2"), chunk_size=None)
+    envs0 = {c: initialize_ctm_tensor_env(a, 6) for c, a in sts.items()}
+
+    def gauge_pair(envs_new, _old):
+        return {c: _phase_fix_ctm_tensor(envs_new[c]) for c in envs_new}
+
+    result = _run_ctm_loop_with_bump(
+        step,
+        sts,
+        envs0,
+        chi_current=6,
+        chi_max=None,
+        bump_enabled=False,
+        bump_threshold=1e-6,
+        bump_step_size=2,
+        projector_method="svd",
+        renormalize=True,
+        projector_backward="auto",
+        gauge_fix_fn=gauge_pair,
+        max_iter=60,
+        min_iter=4,
+        conv_tol=1e-8,
+        conv_method="sv",
+        plateau_patience=None,
+    )
+    env_old = result.envs[(0, 0)]
+    envs_new, _eps, _smin = step(
+        sts,
+        result.envs,
+        chi=6,
+        projector_method="svd",
+        renormalize=True,
+        projector_backward="auto",
+    )
+    env_new = envs_new[(0, 0)]
+
+    e_before = float(compute_energy_ctm_tensor(site, env_new, gate))
+    env_fixed = _sigma_gauge_fix_env(env_new, env_old)
+    e_after = float(compute_energy_ctm_tensor(site, env_fixed, gate))
+
+    assert abs(e_after - e_before) < 1e-11, (
+        f"sigma gauge fix changed the energy: before={e_before:.12f}, "
+        f"after={e_after:.12f}, |dE|={abs(e_after - e_before):.3e} -- "
+        f"the applied transform is not a pure gauge (mis-paired bond sigmas)"
+    )
+
+
+@pytest.mark.slow
+def test_sigma_and_phase_converge_to_the_same_energy_on_2x2():
+    """forward_gauge='sigma' and 'phase' must agree on gauge-invariant content.
+
+    Both gauges fix only the redundant directions of the CTM environment;
+    the converged energy is gauge-invariant, so sigma+2x2 and phase+2x2
+    must produce the same energy.  Before the #798 fix the mis-paired
+    sigma application corrupted the environment every sweep and sigma
+    converged to a WRONG environment (measured on the issue-style D=3
+    state: E=-0.666676 vs phase's -0.656309, |dE| ~ 1e-2; this D=2
+    fixture shows the same signature at |dE| = 2.28e-03).
+    """
+    site = _make_su_tensor(D=2, d=2)
+    gate = heisenberg_gate()
+
+    def energy(forward_gauge):
+        return float(
+            ctm_energy_implicit(
+                {(0, 0): site},
+                SINGLE_SITE_NEIGHBORS,
+                gate,
+                chi=8,
+                max_iter=80,
+                conv_tol=1e-10,
+                conv_method="sv",
+                min_iter=4,
+                forward_gauge=forward_gauge,
+            )
+        )
+
+    e_phase = energy("phase")
+    e_sigma = energy("sigma")
+    assert abs(e_phase - e_sigma) < 1e-9, (
+        f"sigma+2x2 disagrees with phase+2x2: E_phase={e_phase:.12f}, "
+        f"E_sigma={e_sigma:.12f}, |dE|={abs(e_phase - e_sigma):.3e}"
+    )

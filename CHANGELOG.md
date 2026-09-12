@@ -274,6 +274,22 @@
 
 ### Fixed
 
+- **The sigma forward gauge is a pure gauge transform again** (#798): the
+  2x2 sweep writes every corner axis-reversed relative to the canonical
+  `_ctm_tensor_init` order, and `_apply_sigma_to_corner` /
+  `_apply_sigma_to_edge` read legs positionally, so every sigma-gauged sweep
+  applied bond gauges to the wrong corner legs — on the 2x2 layout for C1-C3
+  and on the canonical layout for C4 (stored `(c4_r, c4_u)`, the reverse of
+  the ring order the calls assumed).  That is not a gauge transform and
+  corrupted the environment (sigma+2x2 energy off by 2.3e-3 at D=2, ~1e-2 at
+  D=3).  Sigma application is now label-based; sigma+2x2 and phase+2x2 agree
+  to 3e-15 on the #841 D=3 state.  Measured caveat, in the `forward_gauge`
+  docstring: the repaired sigma still does not reach an element-wise fixed
+  point on the 2x2 recipe (the transfer-matrix eigenvector carries no weight
+  on the weak bond directions where the residual Z2 signs live), and its
+  implicit gradient at the #841 state is worse than phase's
+  (slope_fd/|g| = -0.008 vs 0.131) — it is not a repair for #841.
+
 - **The traced CTM chi bond inherits the environment's inventory instead of
   re-guessing it** (#929). #922 fixed the *eager* cut; the AD path could not
   have it, because `jax.jit` bakes the per-sector block shapes at trace time
