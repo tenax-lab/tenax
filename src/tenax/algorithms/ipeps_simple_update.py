@@ -638,7 +638,15 @@ def _make_trotter_gate_tensor(
     H_mat = 0.5 * (H_mat + H_mat.conj().T)
     eigvals, eigvecs = jnp.linalg.eigh(H_mat)
     gate_mat = eigvecs @ jnp.diag(jnp.exp(-dt * eigvals)) @ eigvecs.conj().T
-    gate_4leg = gate_mat.reshape(d, d, d, d)
+    # The sweeps contract the FIRST pair (si, sj) with the state's physical
+    # legs and keep (si_out, sj_out) as the new ones, so axes 0/1 must hold
+    # the matrix COLUMNS (inputs): G[i1,i2,o1,o2] = U[(o1 o2),(i1 i2)] = U.T
+    # reshaped.  A plain reshape put the rows there, which applied
+    # exp(-dt*H^T) -- invisible for every real-symmetric gate, but a complex
+    # Hermitian Sy-type gate drove the state to the ground state of -H while
+    # the (corrected, #966) energy measured +H: the opposite extremum
+    # (#968 review).
+    gate_4leg = gate_mat.T.reshape(d, d, d, d)
 
     # Derive index metadata from site tensor's physical leg if available
     if site_tensor is not None:

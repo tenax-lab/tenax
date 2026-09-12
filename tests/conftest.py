@@ -238,6 +238,11 @@ _FILE_MARKERS = {
     # a NaN cotangent there is as fatal as a NaN value.  Milliseconds for the
     # unit half; the reachability test converges one D=2 chi=8 CTM.
     "test_normalise_rdm_zero_grad.py": "core",
+    # Complex-Hermitian gate expectations across every energy path (#966):
+    # Tr(rho H) vs Tr(rho H^T) separate only there, and the whole rest of the
+    # suite is real-symmetric, so nothing else can catch a regression.  Exact
+    # D=1 product fixtures, seconds.
+    "test_rdm_gate_transpose_966.py": "core",
     # The bucket guard itself (#805). Pure filesystem inspection, microseconds,
     # and it must run in the gate it protects or it protects nothing.
     "test_bucket_registry.py": "core",
@@ -345,6 +350,12 @@ _FILE_MARKERS = {
     # convergences (one symmetric, one dense) plus one RDM -- core budget; the
     # chi-scan that needs chi=16 carries its own ``@pytest.mark.slow``.
     "test_ctm_charged_sectors_905.py": "core",
+    # #957: complex cotangents fed unconjugated to Optax — the optimizer
+    # ASCENDED on complex tensors and the result depended on the initial
+    # tensor's global phase.  Silent-wrong-answer class, so it belongs in the
+    # gate; the fixture is an exact D=chi=1 product state, ~15s for all nine
+    # cases with in-process compile sharing.
+    "test_ipeps_optimize_complex_grads_957.py": "core",
     # #853's severity-attribution control, relocated out of the deleted #610
     # prototype suite (review of #959): the only PSD-and-attainable-energy
     # check on the plain symmetric U(1)-Sz CTM path.  One D=3 chi=12
@@ -395,6 +406,7 @@ _FILE_MARKERS = {
     "test_lattice.py": "algorithm",
     "test_linalg.py": "core",
     "test_eigh_bond_order.py": "core",
+    "test_svd_bond_order.py": "core",
     "test_linalg_np.py": "core",
     "test_observables.py": "algorithm",
     "test_cbe_validation.py": "algorithm",
