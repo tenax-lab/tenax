@@ -96,7 +96,10 @@ def make_opt_config(
         unit_cell="1x1",
         gs_c4v=True,                  # removes bond-gauge freedom -> stable backward
         gs_implicit_ad=True,          # variational (ctm_ad_mode=None -> ckpt-wired)
-        gs_recipe="1x1",
+        # gs_recipe="2x2" (default): the study sweeps chi, and the deprecated
+        # "1x1" recipe collapsed the boundary to rank-1 corners whose energy
+        # never responded to chi (#747/#911) -- the sweep was chi-blind.  The
+        # fused optimizer now refuses "1x1" outright (#938).
         gs_optimizer="lbfgs",
         gs_line_search_method="hager_zhang",
         gs_metric_precond=True,

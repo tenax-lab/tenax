@@ -222,7 +222,10 @@ def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
             max_bond_dim=D,
             ctm=ctm,
             unit_cell="1x1",
-            gs_recipe="1x1",
+            # gs_recipe="2x2" (default) since #938: the fused optimizer now
+            # refuses the deprecated "1x1" recipe it used to run here.  Result
+            # files recorded before this change were measured on the collapsed
+            # rank-1 boundary described below -- do not mix them with new runs.
             gs_implicit_ad=True,
             gs_num_steps=gs_num_steps,
             su_init=True,
@@ -232,11 +235,12 @@ def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
         )
         _A_opt, envs, E_gs, history = optimize_gs_ad(gate, None, config)
 
-        # #747: this driver runs gs_recipe="1x1", whose corner-pair projector
-        # collapses the environment to rank-1 corners -- a chi_eff=1 mean-field
-        # boundary whose energy does not respond to chi.  Every energy this
-        # sweep has ever recorded was measured that way.  Record the rank so a
-        # reader can tell, and warn loudly at run time.
+        # #747 (historical): this driver used to run gs_recipe="1x1", whose
+        # corner-pair projector collapsed the environment to rank-1 corners --
+        # a chi_eff=1 mean-field boundary whose energy did not respond to chi.
+        # Every energy recorded before the #938 migration to "2x2" was
+        # measured that way.  Keep recording the rank so a reader can tell
+        # which regime a result file belongs to.
         try:
             from tenax.algorithms._ctm_diagnostics import check_ctm_env
 
