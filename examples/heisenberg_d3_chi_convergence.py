@@ -76,6 +76,46 @@ from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs  # noqa: E402
 
 QMC_REF = -0.6694  # E/site, square-lattice Heisenberg AFM (QMC)
 
+# CTM recipe of every artifact this script writes (must match make_opt_config).
+# Recorded in <outdir>/provenance.json and validated before anything is reused:
+# the resume workflow trusts A_opt.pkl, chi_convergence.json AND the optimizer
+# checkpoint blindly, so without this gate a pre-#938 outdir (produced by the
+# collapsed "1x1" recipe, #747/#911) would silently publish or blend old
+# numbers into a 2x2 study.
+RECIPE = "2x2"
+
+
+def check_provenance(outdir: str) -> None:
+    """Stamp a fresh outdir with the recipe; refuse a stale or unstamped one."""
+    prov_path = os.path.join(outdir, "provenance.json")
+    artifacts = [
+        name
+        for name in ("A_opt.pkl", "chi_convergence.json", "ckpt_opt")
+        if os.path.exists(os.path.join(outdir, name))
+    ]
+    if os.path.exists(prov_path):
+        with open(prov_path) as fh:
+            prov = json.load(fh)
+        if prov.get("gs_recipe") == RECIPE:
+            return
+        raise SystemExit(
+            f"[provenance] {outdir} was produced with "
+            f"gs_recipe={prov.get('gs_recipe')!r}, but this script now runs "
+            f"gs_recipe={RECIPE!r} (#938). Reusing its optimized tensor, "
+            f"χ-scan cache, or checkpoint would mix regimes; use a fresh "
+            f"--outdir (or delete the old artifacts)."
+        )
+    if artifacts:
+        raise SystemExit(
+            f"[provenance] {outdir} contains {', '.join(artifacts)} but no "
+            f"provenance.json — they predate the #938 migration to "
+            f"gs_recipe={RECIPE!r} and were produced by the collapsed '1x1' "
+            f"recipe (#747/#911). Refusing to resume from them; use a fresh "
+            f"--outdir (or delete the old artifacts)."
+        )
+    with open(prov_path, "w") as fh:
+        json.dump({"gs_recipe": RECIPE}, fh, indent=2)
+
 
 def make_opt_config(
     *, chi: int, ckpt_path: str, num_steps: int, resume: bool, probe_max_iter: int | None
@@ -96,7 +136,12 @@ def make_opt_config(
         unit_cell="1x1",
         gs_c4v=True,                  # removes bond-gauge freedom -> stable backward
         gs_implicit_ad=True,          # variational (ctm_ad_mode=None -> ckpt-wired)
-        gs_recipe="1x1",
+        # RECIPE ("2x2", the default): the study sweeps chi, and the deprecated
+        # "1x1" recipe collapsed the boundary to rank-1 corners whose energy
+        # never responded to chi (#747/#911) -- the sweep was chi-blind.  The
+        # fused optimizer now refuses "1x1" outright (#938); check_provenance
+        # keeps pre-migration outdirs from being resumed under this config.
+        gs_recipe=RECIPE,
         gs_optimizer="lbfgs",
         gs_line_search_method="hager_zhang",
         gs_metric_precond=True,
@@ -221,6 +266,7 @@ def main() -> None:
     print(f"D=3 χ-convergence study | optimize once at χ={chi_opt} ({opt_steps} steps)"
           f" | scan χ={chi_ladder} | outdir={outdir}", flush=True)
     os.makedirs(outdir, exist_ok=True)
+    check_provenance(outdir)
     A_opt, H = optimize_state(outdir, chi_opt, opt_steps, probe)
     scan_chi(A_opt, H, chi_ladder, outdir)
 

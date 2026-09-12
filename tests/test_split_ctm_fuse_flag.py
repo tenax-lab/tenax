@@ -558,12 +558,17 @@ def test_optimize_gs_ad_split_returns_split_env():
 
 
 def test_optimize_gs_ad_fused_still_returns_fused_env():
-    """Regression: the default fused path is unchanged (returns CTMTensorEnv)."""
+    """Regression: the default fused path is unchanged (returns CTMTensorEnv).
+
+    ``gs_recipe="2x2"`` explicitly: the helper's ``"1x1"`` default is for the
+    split tests, and the fused path always ran 2x2 under that label anyway --
+    since #938 it refuses the mislabel instead.
+    """
     from tenax.algorithms._ctm_tensor import CTMTensorEnv
     from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 
     A, gate = _split_opt_inputs()
-    _, env, E = optimize_gs_ad(gate, A, _split_opt_config(fuse=True))
+    _, env, E = optimize_gs_ad(gate, A, _split_opt_config(fuse=True, gs_recipe="2x2"))
     assert isinstance(env, CTMTensorEnv)
     assert jnp.isfinite(E)
 

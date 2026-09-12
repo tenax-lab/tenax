@@ -744,6 +744,27 @@ def optimize_gs_ad(
             "Multisite / C4v-reference checkpoint wiring is a follow-up (#497)."
         )
 
+    # gs_recipe='1x1' is wired end-to-end only on the single-site split-CTM
+    # path (fuse_virtual_legs=False), whose forwards all thread the recipe.
+    # Every fused path packs its warm-start, line-search probe, and final
+    # evaluation through ctm_converge_kwargs, which deliberately does not
+    # forward recipe (#938): accepting '1x1' there descends a 1x1 gradient
+    # and then reports an energy measured on a 2x2 environment -- an
+    # internally inconsistent, mislabelled experiment (the same
+    # accept-then-silently-run-2x2 class #755 closed for one branch).
+    # The c4v_reference and root-implicit engines are the same class with a
+    # different mechanism: they read no recipe at all, so '1x1' would be
+    # silently ignored even with fuse_virtual_legs=False (Codex on #972).
+    # So are the non-single-site cells (Codex round 4): the 2-site split
+    # branch rejects '1x1' at loss build but its zero-step _eval_fresh path
+    # measures 2x2 without ever building the loss, and the multisite Lattice
+    # loss threads gs_recipe while its env-cache/forward evals go through
+    # ctm_converge_kwargs, which drops it. Only unit_cell='1x1' threads the
+    # recipe end to end.
+    # Refuse rather than thread: threading would make nine forwards
+    # genuinely non-convergent, since '1x1' reaches no fixed point (#911).
+    _reject_mislabelled_1x1(config)
+
     # Root implicit AD (#715).  Placed ahead of the unit-cell branches because
     # the variant (dense 1x1 vs dense cell vs symmetric) is selected from the
     # unit cell *inside* that dispatcher, and its own validator decides what it
@@ -828,6 +849,36 @@ def optimize_gs_ad(
 def _use_reference_c4v_path(config: iPEPSConfig) -> bool:
     """Compatibility wrapper around the shared AD policy helper."""
     return use_reference_c4v_path(config)
+
+
+def _reject_mislabelled_1x1(config: iPEPSConfig) -> None:
+    """Refuse gs_recipe='1x1' everywhere it is not threaded end to end (#938).
+
+    Shared by every public optimizer entry point -- ``optimize_gs_ad`` and
+    ``optimize_fpeps_ad`` (which dispatches straight to
+    ``_optimize_gs_ad_tensor`` and would otherwise bypass the check, Codex
+    round 5 on #972). See the call site in ``optimize_gs_ad`` for the
+    per-path inventory of where the recipe gets dropped."""
+    if config.gs_recipe == "1x1" and (
+        config.ctm.fuse_virtual_legs
+        or config.unit_cell != "1x1"
+        or _use_reference_c4v_path(config)
+        or use_root_implicit_path(config)
+    ):
+        raise ValueError(
+            "gs_recipe='1x1' is only supported with fuse_virtual_legs=False, "
+            "unit_cell='1x1', and no ctm_ad_mode engine override (the "
+            "single-site split-CTM path). Every other configuration runs or "
+            "measures on recipe='2x2' somewhere (#938) -- fused warm-starts, "
+            "line-search probes and final evaluations, the 2-site zero-step "
+            "evaluation, and the multisite env cache all drop the recipe, "
+            "while the c4v_reference and root-implicit engines read no "
+            "recipe at all -- so a '1x1' run would mislabel a 2x2 result or "
+            "descend a gradient inconsistent with the energy it reports. Set "
+            "gs_recipe='2x2', or use the single-site split path -- and note "
+            "that recipe='1x1' is deprecated and reaches no CTM fixed point "
+            "for D > 1 (#911)."
+        )
 
 
 def _optimize_gs_ad_tensor_reference_c4v(
@@ -5289,4 +5340,8 @@ def optimize_fpeps_ad(
 
         A_init = _build_initial_fpeps_tensor(fpeps_config)
 
+    # Dispatches straight to the private optimizer, so it must run the #938
+    # recipe guard itself -- _optimize_gs_ad_tensor threads gs_recipe into
+    # the implicit loss while its warm-start and final evaluations drop it.
+    _reject_mislabelled_1x1(config)
     return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
