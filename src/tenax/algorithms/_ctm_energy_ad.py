@@ -28,6 +28,7 @@ from tenax.algorithms._ctm_python_loop import (
     python_loop_ctm_converge,
 )
 from tenax.algorithms._ctm_tensor_convergence import (
+    _max_env_leaf_diff,
     _warn_recipe_1x1_deprecated,
 )
 from tenax.algorithms._ctm_tensor_energy import (
@@ -747,8 +748,10 @@ def _sigma_gauged_ctm_converge(
     in-CTM chi bumping toward ``chi_max`` (see #492/#514); defaults keep
     bump-off behaviour for existing implicit-AD callers.
 
-    Returns ``(envs, final_chi)`` so callers can route the post-bump chi
-    into custom_vjp residuals for the chi-lock backward (#516).
+    Returns ``(envs, final_chi, converged)``: the post-bump chi routes into
+    custom_vjp residuals for the chi-lock backward (#516), and ``converged``
+    is the loop's own verdict (#841 — previously discarded here, so a
+    max_iter-starved forward was indistinguishable from a converged one).
     """
     # ---- validation (mirror python_loop_ctm_converge) ----
     chi_current = _validate_chi_bump_args(
@@ -831,7 +834,12 @@ def _sigma_gauged_ctm_converge(
         conv_method=conv_method,
         plateau_patience=plateau_patience,
     )
-    return result.envs, result.final_chi
+    # #841: return the loop's convergence verdict instead of discarding it.
+    # Callers on the implicit-AD path linearize the gauged step around
+    # ``result.envs``; swallowing ``converged`` here is how a max_iter-starved
+    # (or coincidentally-dipped) forward used to reach the backward with no
+    # diagnostic at all.
+    return result.envs, result.final_chi, result.converged
 
 
 _VJP_CACHE: dict = {}
@@ -929,6 +937,17 @@ def get_last_implicit_ad_diagnostics() -> dict:
       ratio indicates the linear adjoint operator ``(I - J^T)`` is
       near-singular (e.g. chi-ceiling with degenerate retained SVs in
       the frozen projectors).
+    * ``forward_stationarity_residual`` -- #841 guard: the literal
+      ``||gauge_fix(step(env*)) - env*||`` sup-norm residual measured with
+      one extra gauged sweep after the forward converged (or ran out of
+      budget).  This is the premise of the implicit backward; O(0.1+) here
+      means the gradient magnitude is untrustworthy even when
+      ``forward_converged`` is True.  Written by every forward (energy or
+      gradient), not cleared by the backward.
+    * ``forward_converged`` -- the forward CTM loop's own verdict under its
+      configured ``conv_method``.  Independent of the residual above: 'sv'
+      certifies spectra only, and the element-wise criterion can exit on a
+      coincidental dip of a bond-sign limit cycle.
 
     Returns a shallow copy so the caller cannot mutate internal state.
     Empty dict if no backward has run yet.
@@ -1128,6 +1147,16 @@ def _make_implicit_vjp_fn(
 
     mutables["_invalidate_warm_start"] = _invalidate_warm_start
 
+    # Step function for the #841 stationarity check below: the exact step the
+    # forward loop runs (same recipe, mesh, and chunking — memoised, so this
+    # is the same compiled function, not a second JIT cache entry).
+    _stationarity_step = partial(
+        _make_jit_ctm_step(
+            neighbors, recipe, device_mesh=device_mesh, ctm_chunk_size=ctm_chunk_size
+        ),
+        chunk_size=ctm_chunk_size,
+    )
+
     def _run_forward(site_tensors):
         """Run CTM convergence (shared by f and f_fwd).
 
@@ -1139,7 +1168,7 @@ def _make_implicit_vjp_fn(
         chi_ramp = mutables["chi_ramp"]
         env_init = mutables["env_init"]
         if chi_ramp is not None:
-            envs, _ = python_loop_ctm_converge(
+            envs, _loop_info = python_loop_ctm_converge(
                 site_tensors,
                 neighbors,
                 chi=chi,
@@ -1163,8 +1192,9 @@ def _make_implicit_vjp_fn(
             # chi_post is the final ramp stage's chi, which equals ``chi`` for
             # the implicit-AD entry point that uses ramp only.
             chi_post = chi
+            forward_converged = bool(_loop_info.converged)
         else:
-            envs, chi_post = _sigma_gauged_ctm_converge(
+            envs, chi_post, forward_converged = _sigma_gauged_ctm_converge(
                 site_tensors,
                 neighbors,
                 chi=chi,
@@ -1187,7 +1217,82 @@ def _make_implicit_vjp_fn(
                 device_mesh=device_mesh,
                 ctm_chunk_size=ctm_chunk_size,
             )
+        _check_forward_stationarity(site_tensors, envs, chi_post, forward_converged)
         return envs, chi_post
+
+    def _check_forward_stationarity(site_tensors, envs, chi_post, forward_converged):
+        """#841 honesty guard: measure ``||gauge_fix(step(env*)) - env*||``.
+
+        The implicit backward linearizes the gauged CTM step around ``envs``
+        under the premise that it is a literal (element-wise) fixed point.
+        Neither convergence criterion certifies that premise: ``"sv"``
+        certifies singular-value spectra only, and ``"elementwise"`` can exit
+        on a coincidental dip of a residual-gauge limit cycle — the phase
+        gauge pins each tensor's global phase but not the Z2^chi bond signs
+        the projector SVD re-draws every sweep, so consecutive-sweep diffs
+        touch 1e-13 on sweeps where the sign pattern happens to realign and
+        jump back to O(0.3) on the next (measured: dips at sweeps 3, 5, 9, 17
+        of a flat 3.3e-01 plateau on a D=2 SU state at chi=4).  So this check
+        applies the loop's own step + gauge fix once more and measures the
+        literal sup-norm residual — the one quantity the premise is about.
+
+        Threshold ``max(100 * conv_tol, 1e-8)``: a genuinely stationary
+        forward reproduces itself to roughly the loop's own convergence
+        metric, so ``conv_tol`` sets the scale; the 100x headroom absorbs
+        one sweep's noise amplification through the projector SVD, and the
+        1e-8 floor keeps a very tight ``conv_tol`` (1e-12 and below) from
+        turning float-level churn into warnings.  The #841 failure signature
+        sits at O(0.5) — seven orders above the floor — so the gap between
+        "healthy" and "warn" is wide, not tuned.
+
+        Warns rather than raises (#839 policy, same as ``ipeps()``): the
+        energy from a non-stationary environment is still gauge-invariant
+        and fine; it is the *gradient* whose magnitude becomes untrustworthy
+        (issue #841 measured slope_fd/|g| = 0.13), and callers evaluating
+        only the energy should not be aborted.
+
+        Cost: one extra jitted sweep + gauge fix per forward, ~1/max_iter of
+        the forward's own cost.
+        """
+        step_out, _eps, _smin = _stationarity_step(
+            site_tensors,
+            envs,
+            chi=chi_post,
+            projector_method=projector_method,
+            renormalize=renormalize,
+            projector_backward=projector_backward,
+        )
+        gauged = _apply_gauge_fix(step_out, envs)
+        residual = 0.0
+        for c in coords:
+            residual = max(residual, _max_env_leaf_diff(envs[c], gauged[c]))
+        threshold = max(100.0 * conv_tol, 1e-8)
+        _F3_LAST_DIAGNOSTICS["forward_stationarity_residual"] = residual
+        _F3_LAST_DIAGNOSTICS["forward_converged"] = forward_converged
+        # Fails closed: a NaN residual is not <= threshold, so it warns.
+        if not (residual <= threshold):
+            warnings.warn(
+                f"Implicit-AD CTM: the forward environment is not an "
+                f"element-wise fixed point of the gauged CTM step: one more "
+                f"gauge_fix(step(env)) sweep moved it by {residual:.1e} "
+                f"(sup-norm stationarity residual; threshold {threshold:.1e} "
+                f"= max(100*conv_tol, 1e-8); the convergence loop reported "
+                f"converged={forward_converged}, conv_method={conv_method!r}, "
+                f"forward_gauge={forward_gauge!r}). The implicit fixed-point "
+                f"backward linearizes the step around this environment, so "
+                f"the gradient's DIRECTION may remain a descent direction "
+                f"while its MAGNITUDE is wrong (issue #841 measured "
+                f"slope_fd/|g| = 0.13 at such a point) — line searches then "
+                f"fail silently. A converged=True loop verdict does not imply "
+                f"stationarity: 'sv' certifies spectra only, and the "
+                f"element-wise criterion can exit on a coincidental dip of a "
+                f"bond-sign limit cycle, so raising max_iter alone may not "
+                f"help. The residual is also readable from "
+                f"get_last_implicit_ad_diagnostics()"
+                f"['forward_stationarity_residual'].",
+                RuntimeWarning,
+                stacklevel=4,
+            )
 
     def _compute_energy(site_tensors, envs):
         """Compute energy using energy_fn or default."""

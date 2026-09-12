@@ -4,6 +4,18 @@
 
 ### Added
 
+- **The implicit-AD CTM forward now measures its own stationarity** (#841):
+  `ctm_energy_implicit` runs one extra gauged sweep after the forward loop and
+  warns (`RuntimeWarning`) when the literal residual
+  `||gauge_fix(step(env*)) - env*||` exceeds `max(100*conv_tol, 1e-8)` — the
+  premise the fixed-point backward linearizes under, which neither
+  `conv_method='sv'` (spectra only) nor `'elementwise'` (can exit on a
+  coincidental dip of a bond-sign limit cycle) certifies.  The residual and
+  the forward loop's own verdict are also exposed as
+  `forward_stationarity_residual` / `forward_converged` in
+  `get_last_implicit_ad_diagnostics()`, and `_sigma_gauged_ctm_converge`
+  returns its convergence flag instead of discarding it.
+
 - **The BP gauge solve is compiled for `SymmetricTensor` pairs** (#882
   Phase 3): `bp_gauge_checkerboard` and `gauge_fix` now run a symmetric pair
   through the same `lax.while_loop` driver a dense pair takes, via
