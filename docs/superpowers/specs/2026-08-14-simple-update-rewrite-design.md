@@ -1,6 +1,23 @@
 # Simple update without stored lambdas — design
 
-**Status:** accepted · **Date:** 2026-08-14, decisions 2026-08-15 · **Refs:** #667, #851, #863, #865, #869, #870, #875, #877, #878, #879, #881
+**Status:** record only — kept unmerged, v1 implementation unscheduled
+(2026-09-12) · **Date:** 2026-08-14, decisions 2026-08-15 · **Refs:** #667,
+#851, #863, #865, #869, #870, #875, #877, #878, #879, #881
+
+> **DISPOSITION (2026-09-12).** This design is retained as the reviewed record
+> of the SU-rewrite investigation; PR #882 is deliberately not merged and the
+> v1 phases are not scheduled. Reasoning: the production bosonic SU is done —
+> every defect class in §1's table is closed (#667/#851/#865/#869, plus the
+> #966/#969 Trotter-transpose class found later), its benchmarks are the
+> library's quoted numbers, and `bp_gauge_checkerboard` (#870) recovers honest
+> bond spectra from a converged state post-hoc — so the rewrite buys
+> architecture, not correctness, at a measured 85–122× default-D=2 cost before
+> the Phase 1 tracing gate. Effort moves to the fermionic SU track instead
+> (§9.1's v2: the Koszul sign fix, the §5.1 2-site layout experiment, and the
+> ~40× block-sparse dispatch wall). Six Codex review rounds ran on this text;
+> all findings were verified and folded in, including the round-6 correction
+> that the tree-optimal truncation needs whitened outer legs (§2), so the
+> record is sound if the rewrite is ever picked back up.
 
 ## 1. Why
 
@@ -59,21 +76,36 @@ One step, for each bond:
 1. gauge-fix the state          BP on the loopy lattice
                                 (== canonicalisation on a tree)
 2. apply the Trotter gate       to the two site tensors sharing the bond
-3. truncate                     bare SVD, in the gauge from step 1
+3. truncate                     whitened SVD: absorb the *other* sqrt(lambda)
+                                half onto the pair's outer legs (weights from
+                                step 1's solve), bare SVD, divide it back off
+                                the kept isometries, split the new sigma
 ```
 
 There is no lambda to initialise, no far-bond bookkeeping, no staleness, and no
 `steps % 4` dependence, because nothing is carried between steps. The gauge is
-re-derived from the tensors each time because the gate just invalidated it.
+re-derived from the tensors each time because the gate just invalidated it. The
+whitening in step 3 does not reintroduce stored weights: it uses the BondWeights
+step 1 just computed, inside the same step, and they die with the step.
 
-**Bare SVD is the right truncation here, not a simplification.** In the BP gauge
-on a tree, BP *is* the canonical form, so a bare SVD is the provably optimal
-truncation. On the loopy square lattice it degrades to the standard simple-update
-approximation — but against an *honest* gauge rather than a stale cached one.
-v1 is therefore exact where exactness is available and standard where it is not,
-with no metric-optimisation machinery to get wrong. (YASTN's iterative
-`truncate_optimize_` in a real NTU/CTM metric is the strictly better truncation
-and is explicitly **out of scope for v1**; see §8.)
+**Whitened SVD is the tree-optimal truncation; a bare SVD is not.** The state
+lives in the symmetric absorbed form (§3): each bond's weight is split
+`sqrt(lambda)` into both ends, so the contracted gate pair carries only
+`sqrt(lambda)` on its outer legs — while the canonical two-site wavefunction
+whose SVD is provably optimal on a tree carries the *full* outer weights. A
+bare SVD of the absorbed pair therefore optimises in the wrong outer-leg
+metric, and on non-flat neighbouring spectra can select a different rank-D
+subspace (the §6.2a sigma-split witness cannot see this: it checks where the
+new sigma went, not the metric the old lambdas defined). Absorbing the
+remaining `sqrt(lambda)` first makes the outer metric exact, and the tree
+ground-truth gate in §6.3 must be run with a deliberately non-flat spectrum so
+that dropping the whitening fails it. On the loopy square lattice the whitened
+SVD degrades to the standard simple-update approximation — but against an
+*honest* gauge rather than a stale cached one. v1 is therefore exact where
+exactness is available and standard where it is not, with no iterative
+metric-optimisation machinery to get wrong. (YASTN's `truncate_optimize_` in a
+real NTU/CTM metric is the strictly better truncation and is explicitly **out
+of scope for v1**; see §8.)
 
 ### Cadence: every step, by construction
 
@@ -790,8 +822,8 @@ Registered `core` where it runs without a CTM.
 The engine is built alongside the existing code, not in place.
 
 1. **Phase 0** — land **#881** (the fermionic baseline: five of six defects, and
-   fPEPS on a 2-site checkerboard) and **#879**. #881 is open; #879 is not
-   started.
+   fPEPS on a 2-site checkerboard) and **#879**. #881 has since **merged**
+   (`53ffe45`); #879 is not started.
 
    #879 is **not** "a variational bound on the CTM energies" — that phrasing
    survived here after §5.5 disclaimed it, and following it would restore the
@@ -800,10 +832,11 @@ The engine is built alongside the existing code, not in place.
    `reference_energy_2x2_pbc` alone. See §5.5.
 
    **Decided: runs in parallel with Phases 1–2**, which are bosonic and blocked
-   by neither. Phase 3 still needs both — without #881 the old path returns zero
-   so comparisons carry no information, and without #879 no fermionic energy can
-   serve as an acceptance criterion (§5.4, §5.5) — so Phase 0 is a prerequisite
-   for Phase 3, not for starting.
+   by neither. With the §9.1 gate taken (fermionic drops to v2), Phase 0 gates
+   **the fermionic v2 plan, not any v1 phase** — without #881 the old fermionic
+   path returned zero so comparisons carried no information, and without #879
+   no fermionic energy can serve as an acceptance criterion (§5.4, §5.5). The
+   v1 phases below are bosonic throughout and start unconditionally.
 2. **Phase 1** — `ipeps_gauge.py`: generalise the #870 gauge to 1-site and to
    fermionic. Prove exactness (§6.1, §6.2). Take the absorbed-form entry point
    (§3) — no incoming `BondWeights`, weights out as diagnostics only. **Go/no-go
@@ -819,16 +852,21 @@ The engine is built alongside the existing code, not in place.
    second representation does not exist until Phase 3, so listing it here leaves
    Phase 2 with an unsatisfiable gate. **Not** a reference spectrum either;
    §6.3 establishes there is no valid one.
-4. **Phase 3** — symmetric, then fermionic (gated on Phase 0, and on the
-   *2-site* layout question in §5.1 — not on the 1-site experiment). **This is
-   where dense-vs-symmetric cross-path agreement becomes evaluable**, once a
-   second representation of the same bosonic model exists.
-5. **Phase 4** — migrate `ipeps()` and `fpeps()`. The seven call sites are now
+4. **Phase 3** — **bosonic symmetric only** (§9.1 taken: the fermionic
+   extension, its Phase 0 gate, and the §5.1 2-site layout question all move
+   to the v2 plan). **This is where dense-vs-symmetric cross-path agreement
+   becomes evaluable**, once a second representation of the same bosonic model
+   exists.
+5. **Phase 4** — migrate `ipeps()` **only**; `fpeps()` stays on the
+   #881-repaired implementation per §9.1. The seven call sites are now
    one (#877), so this is a single edit rather than seven. **Also export
    `gauge_fix` in `src/tenax/__init__.py` (`__all__`) and document it in
    `README.md`** — it is the one public symbol this design adds (§3).
-6. **Phase 5** — delete the old path, `_inv_lambda`, `safe_inv_lambda`, and the
-   absorb/divide machinery.
+6. **Phase 5** — delete the **bosonic** old path: `_inv_lambda`,
+   `safe_inv_lambda`, and the absorb/divide machinery *where the fermionic
+   path does not still use them*. `fpeps()` keeps its #881-repaired engine
+   until fermionic v2 lands, so any machinery it shares survives Phase 5 with
+   it — deleting it here would break the path §9.1 explicitly keeps.
 
 Each phase is its own PR. The old path stays until Phase 5, so nothing regresses
 while the new one is unproven.
@@ -879,7 +917,8 @@ Resolved 2026-08-15; the reasoning is folded into the sections named.
 2. **`_SUState` is a new type** (internal for v1), not the existing container
    with lambda removed.
    See §3.
-3. **Phase 0 runs in parallel with Phases 1–2**, and gates Phase 3 only. See §7.
+3. **Phase 0 runs in parallel with Phases 1–2**, and — with decision 1 taken —
+   gates the fermionic v2 plan rather than any v1 phase. See §7.
 
 What remains genuinely open is empirical, not a choice: whether the 1-site layout
 constraint survives removing the storage (§5.1), and whether BP is an exact gauge
