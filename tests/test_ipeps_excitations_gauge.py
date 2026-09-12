@@ -75,7 +75,7 @@ def _state():
         # result away.  chi is unchanged; only the sweep count is cut (#933).
         ctm=CTMConfig(chi=4, max_iter=2, conv_tol=1e-10),
     )
-    _E, tensors, _envs = ipeps(gate_t, None, cfg)
+    _E, tensors, _envs = ipeps(gate_t, None, cfg, compute_energy=False)
     A_t = tensors[0] if isinstance(tensors, (list, tuple)) else tensors
     A = jnp.asarray(np.asarray(A_t.todense()))
     env = ctm(A, CTMConfig(chi=8, max_iter=200, conv_tol=1e-12))

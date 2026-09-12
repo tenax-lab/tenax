@@ -233,7 +233,9 @@ def _build_physical_state_heisenberg_D2():
         dt=0.05,
         ctm=CTMConfig(chi=16, max_iter=80, projector_method="eigh"),
     )
-    _E_su, (A, _B), _envs = ipeps(gate_rot, initial_peps=None, config=config)
+    _E_su, (A, _B), _envs = ipeps(
+        gate_rot, initial_peps=None, config=config, compute_energy=False
+    )
     A = DenseTensor(symmetrize_c4v(A._data), A.indices)
     A = A * (1.0 / float(A.norm()))
     _PHYS_STATE = (A, gate_rot)
@@ -500,7 +502,9 @@ def _build_physical_state_heisenberg_D2_2site():
         dt=0.05,
         ctm=CTMConfig(chi=16, max_iter=80, projector_method="eigh"),
     )
-    _E_su, (A, B), _envs = ipeps(gate, initial_peps=None, config=config)
+    _E_su, (A, B), _envs = ipeps(
+        gate, initial_peps=None, config=config, compute_energy=False
+    )
     A = A * (1.0 / float(A.norm()))
     B = B * (1.0 / float(B.norm()))
     gate_dense = jnp.asarray(gate.todense() if hasattr(gate, "todense") else gate)

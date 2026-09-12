@@ -371,7 +371,17 @@ flag — setting it would silently evolve the uniform model. Per-bond gates are
 The energy `ipeps()` reports comes from the legacy 2-site CTM, which does not
 converge on a genuinely entangled state — it sits ~0.02 above the truth. For an
 accurate number, measure the returned state with `ctm_tensor(recipe="2x2")`
-(D=2 gives −0.65933, χ-converged). Simple update itself was fixed in #667; if
+(D=2 gives −0.65933, χ-converged).
+
+When you want only the simple-update state — as a warm start or fixture — skip
+that measurement entirely:
+
+```python
+_, (A, B), _ = ipeps(gate, None, config, compute_energy=False)
+# returns (None, (A, B), None): no CTM is run, no energy is computed
+```
+
+Simple update itself was fixed in #667; if
 you have results from before that, note it converged to the product state and
 that *smaller* `dt` made it worse — see the changelog.
 

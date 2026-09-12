@@ -56,7 +56,7 @@ def su_state():
         # result away.  chi is unchanged; only the sweep count is cut (#933).
         ctm=CTMConfig(chi=8, max_iter=2, conv_tol=1e-10),
     )
-    _E, tensors, _envs = ipeps(gate, None, cfg)
+    _E, tensors, _envs = ipeps(gate, None, cfg, compute_energy=False)
     return tensors[0], heisenberg_gate()
 
 

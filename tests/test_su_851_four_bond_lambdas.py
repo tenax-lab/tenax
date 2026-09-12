@@ -416,7 +416,9 @@ def test_the_ad_warm_start_inherits_the_bond_mode(monkeypatch):
 
     seen = {}
 
-    def _recorder(gate, AB_init, su_config):
+    def _recorder(gate, AB_init, su_config, *, compute_energy=True):
+        # Signature mirrors ipeps() since #937 added compute_energy; the
+        # warm-start call sites pass it by keyword.
         seen["flag"] = su_config.su_independent_bond_lambdas
         raise _Stop
 
