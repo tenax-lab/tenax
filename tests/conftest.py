@@ -580,6 +580,15 @@ _FILE_MARKERS = {
     "test_ipeps_config_stall_recovery_retries.py": "core",
     "test_make_neighbors.py": "core",
     "test_tuning_registry.py": "core",
+    # #827/#824: the adjoint-method (fixed_point vs gmres) equivalence tests.
+    # Drained from ``_UNBUCKETED_LEGACY`` -- this file running in no gating
+    # job is how its energy assertion sat red on one platform for a month
+    # (#803, then #827).  Both tests already carry an explicit
+    # ``@pytest.mark.algorithm``, so the required ``-m core`` gate is
+    # unchanged; this entry makes the bucket reviewed rather than accidental.
+    # Cost: two D=2 chi=8 CTM gradient evaluations to conv_tol=1e-10 plus two
+    # 1-step optimizations (~40s CPU).
+    "test_ipeps_ad_adjoint_methods.py": "algorithm",
 }
 
 
@@ -615,7 +624,6 @@ _UNBUCKETED_LEGACY = {
     "test_ctm_projector.py",
     "test_ctm_sharding_backward.py",
     "test_hotrg_sharding.py",
-    "test_ipeps_ad_adjoint_methods.py",
     "test_ipeps_ad_conv_criterion.py",
     "test_ipeps_ad_f3_fused_bwd.py",
     "test_ipeps_ad_history.py",
