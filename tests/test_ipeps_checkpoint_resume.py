@@ -468,3 +468,208 @@ def test_resume_rejects_plain_to_cg(tmp_path):
     cg_cfg = _honeycomb_cg_cfg(tmp_path, nsteps=4, resume=True)
     with pytest.raises(ValueError, match="cg_gates|parameterization"):
         optimize_gs_ad(shared, None, cg_cfg)
+
+
+# ---------------------------------------------------------------------------
+# #958: convergence/stall exits must not bypass checkpoint saving
+# ---------------------------------------------------------------------------
+#
+# Every ``break`` in the optimizer loops ran before the end-of-step save, so
+# a run that converged at its FIRST evaluation wrote no checkpoint at all —
+# even with gs_checkpoint_every=1 — and ``gs_resume=True`` then raised
+# FileNotFoundError.  The exact D=chi=1 ferromagnetic product ground state
+# reproduces that corner deterministically and in seconds, so these carry
+# ``core``.
+
+
+def _ferro_gate():
+    sz = jnp.diag(jnp.array([0.5, -0.5]))
+    return -jnp.kron(sz, sz).reshape(2, 2, 2, 2)
+
+
+def _converged_1site_cfg(ckpt_path, **overrides):
+    kwargs = dict(
+        max_bond_dim=1,
+        ctm=CTMConfig(chi=1, max_iter=5),
+        gs_num_steps=3,
+        gs_implicit_ad=False,
+        gs_explicit_ad_steps=2,
+        gs_explicit_ad_warmup=1,
+        gs_optimizer="adam",
+        gs_conv_criterion="grad_norm",
+        gs_grad_norm_tol=1e-8,
+        gs_checkpoint_path=ckpt_path,
+        gs_checkpoint_every=1,
+        su_init=False,
+        return_history=True,  # the 4-tuple return carries the info dict
+    )
+    kwargs.update(overrides)
+    return iPEPSConfig(**kwargs)
+
+
+@pytest.mark.core
+def test_first_evaluation_convergence_still_writes_checkpoints(tmp_path):
+    """Converging at step 0 must leave a resumable run behind (#958)."""
+    A = jnp.array([1.0, 0.0]).reshape(1, 1, 1, 1, 2)
+    ckpt_path = str(tmp_path / "ckpt")
+    cfg = _converged_1site_cfg(ckpt_path)
+
+    out = optimize_gs_ad(_ferro_gate(), A, cfg)
+    info = out[3]
+    assert info["converged"], "regime drifted: the exact GS must converge at once"
+    assert info["num_steps"] == 1, "regime drifted: expected a first-eval exit"
+
+    assert checkpoint_exists(ckpt_path), (
+        "a converged run wrote no checkpoint at all (#958)"
+    )
+    bundle = load_checkpoint(ckpt_path)
+    assert bundle["step"] == 0
+    best = load_checkpoint(ckpt_path, prefer_best=True)
+    assert best is not None, "the accepted first-eval best was never flushed (#958)"
+
+    # The other half of the defect: resume must not raise FileNotFoundError.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out2 = optimize_gs_ad(
+            _ferro_gate(), A, _converged_1site_cfg(ckpt_path, gs_resume=True)
+        )
+    assert float(out2[2]) == pytest.approx(float(out[2]), abs=1e-10)
+
+
+@pytest.mark.core
+def test_normal_completion_flushes_last_checkpoint_despite_cadence(tmp_path):
+    """A finished run is checkpointed even if the cadence never fired (#958)."""
+    # Tilted off the ground state: the exact GS has gradient exactly 0.0,
+    # which "converges" under any tolerance, including 1e-30.
+    A = jnp.array([1.0, 0.3]).reshape(1, 1, 1, 1, 2)
+    ckpt_path = str(tmp_path / "ckpt")
+    cfg = _converged_1site_cfg(
+        ckpt_path,
+        gs_checkpoint_every=100,
+        gs_grad_norm_tol=1e-30,  # unreachable: run all steps
+        gs_num_steps=2,
+    )
+
+    out = optimize_gs_ad(_ferro_gate(), A, cfg)
+    assert not out[3]["converged"], "regime drifted: tolerance was reachable"
+
+    assert checkpoint_exists(ckpt_path), (
+        "normal completion flushed nothing with gs_checkpoint_every=100 (#958)"
+    )
+    assert load_checkpoint(ckpt_path)["step"] == 1
+
+
+def _counting_save_checkpoint(monkeypatch):
+    """Route every ``save_checkpoint`` through a (step, is_best) recorder.
+
+    ``ipeps_optimize`` imports the function lazily inside the loop body, so
+    patching the ``_checkpoint`` module attribute intercepts all call sites.
+    """
+    import tenax.algorithms._checkpoint as _ckpt_mod
+
+    calls: list[tuple[int, bool]] = []
+    real = _ckpt_mod.save_checkpoint
+
+    def counting(state, path, *args, **kwargs):
+        calls.append((state["step"], bool(kwargs.get("is_best", False))))
+        return real(state, path, *args, **kwargs)
+
+    monkeypatch.setattr(_ckpt_mod, "save_checkpoint", counting)
+    return calls
+
+
+@pytest.mark.core
+def test_final_step_state_is_serialized_once(tmp_path, monkeypatch):
+    """The post-loop flush must not re-write what the final step just wrote.
+
+    With ``gs_checkpoint_every=1`` the end-of-step save always fires on the
+    last step, and every break path runs its own force flush; the
+    unconditional post-loop flush then serialized the identical
+    params/env bundle a second time (review P2 on the #958 fix).  No state
+    mutates between a same-step pair, so each (step, file) pair must be
+    written exactly once.
+    """
+    calls = _counting_save_checkpoint(monkeypatch)
+    # Tilted off the ground state so the run exhausts its steps normally.
+    A = jnp.array([1.0, 0.3]).reshape(1, 1, 1, 1, 2)
+    cfg = _converged_1site_cfg(
+        str(tmp_path / "ckpt"),
+        gs_checkpoint_every=1,
+        gs_grad_norm_tol=1e-30,  # unreachable: run all steps
+        gs_num_steps=2,
+    )
+
+    out = optimize_gs_ad(_ferro_gate(), A, cfg)
+    assert not out[3]["converged"], "regime drifted: tolerance was reachable"
+
+    assert calls, "premise: the run must have written checkpoints at all"
+    assert (1, False) in calls, "premise: the final step must write ckpt.last"
+    assert len(calls) == len(set(calls)), (
+        f"duplicate checkpoint serializations of the same step: {calls}"
+    )
+
+
+@pytest.mark.core
+def test_first_evaluation_convergence_writes_checkpoints_2site(tmp_path, monkeypatch):
+    """The 2-site loop's convergence exit bypassed its save the same way.
+
+    An unreachable-in-reverse tolerance (1e9) makes the first evaluation
+    "converge" whatever the state, which is exactly the break-before-save
+    path; the physics of the state is irrelevant to the defect.
+
+    Doubles as a duplicate-write guard for this exit path (see
+    ``test_final_step_state_is_serialized_once``): the 2-site convergence
+    break writes nothing in-loop, so the post-loop flush must produce
+    exactly one write pair here.
+    """
+    calls = _counting_save_checkpoint(monkeypatch)
+    gate = _heisenberg_gate()
+    ckpt_path = str(tmp_path / "ckpt")
+    cfg = _base_cfg(ckpt_path, gs_num_steps=3, gs_resume=False)
+    from dataclasses import replace
+
+    cfg = replace(cfg, gs_grad_norm_tol=1e9, return_history=True)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = optimize_gs_ad(gate, None, cfg)
+    assert out[3]["converged"], "regime drifted: tol=1e9 must converge at once"
+    assert out[3]["num_steps"] == 1
+
+    assert checkpoint_exists(ckpt_path), (
+        "a converged 2-site run wrote no checkpoint at all (#958)"
+    )
+    assert load_checkpoint(ckpt_path)["step"] == 0
+    assert calls, "premise: the run must have written checkpoints at all"
+    assert len(calls) == len(set(calls)), (
+        f"duplicate checkpoint serializations of the same step: {calls}"
+    )
+
+
+@pytest.mark.core
+def test_final_step_state_is_serialized_once_2site(tmp_path, monkeypatch):
+    """2-site twin of ``test_final_step_state_is_serialized_once``.
+
+    The duplicate pair on this path is cadence-aligned *normal completion*:
+    with ``gs_checkpoint_every=1`` the end-of-step save fires on the last
+    step, and the unconditional post-loop flush then re-serialized the same
+    step's bundle (the first-eval convergence test above cannot see this —
+    that break writes nothing in-loop, so its post-loop flush is the only
+    writer).
+    """
+    calls = _counting_save_checkpoint(monkeypatch)
+    gate = _heisenberg_gate()
+    cfg = _base_cfg(str(tmp_path / "ckpt"), gs_num_steps=2, gs_resume=False)
+    from dataclasses import replace
+
+    cfg = replace(cfg, gs_grad_norm_tol=1e-30, return_history=True)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = optimize_gs_ad(gate, None, cfg)
+    assert not out[3]["converged"], "regime drifted: tolerance was reachable"
+
+    assert (1, False) in calls, "premise: the final step must write ckpt.last"
+    assert len(calls) == len(set(calls)), (
+        f"duplicate checkpoint serializations of the same step: {calls}"
+    )

@@ -3544,9 +3544,10 @@ def test_d2_reaches_the_heisenberg_energy_not_the_product_state(seed, kind):
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("kind", ["dense", "symmetric"])
 @pytest.mark.parametrize("seed", _SEEDS)
 @pytest.mark.parametrize("D", [3, 4])
-def test_su_evolve_reaches_the_simple_update_reference_energy(D, seed):
+def test_su_evolve_reaches_the_simple_update_reference_energy(D, seed, kind):
     """The D axis of the sweep: D=3 and D=4 against this project's references.
 
     Both axes are needed and neither alone discriminates.  D=3 is where #869
@@ -3587,16 +3588,35 @@ def test_su_evolve_reaches_the_simple_update_reference_energy(D, seed):
     old starting point is still asserted, by
     :func:`test_su_evolve_collapses_from_a_maximally_random_init`, so the fix
     did not retire the difference between the two engines -- it explained it.
+
+    **The ``kind`` axis is the #882 Phase 3 promotion.**  The symmetric arm
+    reaches the same six-decimal energies as the dense one (seed 0: -0.662839
+    at D=3, -0.667012 at D=4) but was kept out of this sweep while the BP
+    gauge ran its eager driver -- 5768 s and 22091 s per seed, 113x and 287x
+    dense, most of a CI day for the sweep.  With the solve traced
+    (``svd(bond_order="sector")`` plus the block-buffer carry) the same
+    1600-step runs extrapolate to ~12 min at D=3 and ~53 min at D=4 per seed
+    on a quiet 128-core CPU box: slow-bucket material.  What remains of the
+    gap is the step's own eager block-sparse machinery, which this sweep now
+    measures instead of hiding.
     """
-    state = _low_entanglement_state(D, seed)
+    if kind == "symmetric" and seed == 2:
+        # Not a tolerance case: at D=3 the pair is at |A| ~ 1e-13 after
+        # step 0 and exactly zero by step 2, bit-identically on main and on
+        # the traced BP branch, and at D=4 the same trajectory reaches the
+        # same all-zero endpoint -- a pre-existing engine defect this
+        # promotion exposed, not noise this sweep should absorb.  Remove
+        # with the fix.
+        pytest.xfail("#964: the symmetric engine collapses this seed to zero")
+    state = _low_entanglement_state(D, seed, kind=kind)
     state = _su_evolve(state, _su_heisenberg_gate(state), D, 1600)
     E = _energy_of(state, _CHI[D])
     assert E < -0.60, (
-        f"D={D} seed={seed}: E={E:.6f} -- at or above the product state "
+        f"{kind} D={D} seed={seed}: E={E:.6f} -- at or above the product state "
         f"({_PRODUCT_STATE_ENERGY})"
     )
     assert E == pytest.approx(_SU_REFERENCE[D], abs=0.01), (
-        f"D={D} seed={seed}: E={E:.6f}, reference {_SU_REFERENCE[D]}"
+        f"{kind} D={D} seed={seed}: E={E:.6f}, reference {_SU_REFERENCE[D]}"
     )
 
 
@@ -4215,12 +4235,17 @@ def test_symmetric_simple_update_survives_the_bp_gauge_at_D3():
     and ``-0.667012`` at ``D=4``, the dense reading to six decimals at both, so
     the physics is there.  It takes 5768 s and 22091 s against dense's 51 s and
     77 s -- 113x and 287x -- and three seeds of that is most of a CI day.  The
-    cost is ``ipeps_bp_gauge``'s eager driver, whose sweep body is ~900 ms
-    uncompiled; compiling it is worth ~4600x per sweep and is blocked on one
-    thing, that ``_gauge_bond`` pairs ``lam`` with its bond positionally while
-    the traced SVD orders that bond by sector.  Promote ``D=3``/``D=4`` into
-    :func:`test_su_evolve_reaches_the_simple_update_reference_energy` once that
-    lands, not before.
+    cost was ``ipeps_bp_gauge``'s eager driver, whose sweep body is ~900 ms
+    uncompiled against 0.2 ms compiled.  What blocked compiling it was **not**
+    the lam/bond pairing this docstring used to blame -- forcing the orderings
+    to agree changed nothing, and ``scale_bond_axis`` pairs weights to leg
+    positions self-consistently in either layout -- but the traced symmetric
+    SVD's subrank floor, whose ``+1e-30`` arm zeroes real ~1e-43 singular
+    values on 1x1 sectors (see ``svd(..., bond_order="sector")``).  With that
+    landed, a ``SymmetricTensor`` pair takes the traced driver, and the
+    ``kind`` axis of
+    :func:`test_su_evolve_reaches_the_simple_update_reference_energy` is the
+    promotion this docstring used to defer.
     """
     D, seed = 3, 0
     state = _low_entanglement_state(D, seed, kind="symmetric")
