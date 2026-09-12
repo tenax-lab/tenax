@@ -440,6 +440,12 @@ _FILE_MARKERS = {
     "test_ipeps_chi_bump_integration.py": "algorithm",
     "test_ctm_convergence_random_iPEPS.py": "algorithm",
     "test_ipeps_grad_spike_guard.py": "slow",
+    # #973 cross-run warm-start leak: wiring tests are ms-scale (planted
+    # cache entry + junk args); the end-to-end determinism repro runs five
+    # short implicit-AD optimizations and sits with the other multi-run
+    # optimizer integrations in slow.
+    "test_warm_start_entry_invalidation_973.py": "core",
+    "test_optimizer_run_independence_973.py": "slow",
     # Block-sparse stacked-contraction backend seam (#200 / #566): fast,
     # mechanism-level (small even-D fermionic tensors, no CTM convergence).
     "test_harness.py": "core",
