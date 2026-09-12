@@ -207,118 +207,61 @@ def _sigma_gauge_fix_ctm_tensor(env_new, env_old):
     This is the gauge-fixing approach from arxiv:2311.11894, used by YASTN
     to make the VJP backward Neumann series converge.
 
-    For each edge direction, computes:
-        rho_old = leading eigvec of TM(T_old)   ->  Q_old via QR
-        rho_new = leading eigvec of TM(T_new)   ->  Q_new via QR
-        sigma = Q_new @ Q_old^dagger
+    Sigma application is label-based (#798): it delegates to
+    ``_ctm_energy_ad._sigma_gauge_fix_env``, which identifies every corner
+    and edge leg by label against the verified bond connectivity of
+    ``_ctm_tensor_energy`` (top s1: c1_r<->t1_l, t1_r<->c2_l; right s2:
+    c2_d<->t2_u, t2_d<->c3_u; bottom s3: c3_l<->t3_l, t3_r<->c4_u; left
+    s4: c4_r<->t4_u, t4_d<->c1_d).  The previous implementation here read
+    corner legs positionally from ``todense()`` arrays and hardcoded a C4
+    map that contradicted that connectivity (sigma_bottom on c4_r,
+    sigma_left on c4_u), so a bond gauge could land on the wrong leg --
+    on the 2x2 sweep's axis-reversed corner layout for C1-C3 and on the
+    canonical layout for C4 -- which is not a gauge transform at all
+    (measured: |dE| = 6.9e-03 per application on a random D=2 state at
+    chi=6; invisible only when lattice symmetry makes all four sigmas
+    coincide).
 
-    Then applies sigma to corners and edges so that the gauge aligns
-    between iterations.
+    After the sigma alignment, the residual global U(1) phase per tensor
+    is removed by aligning with ``env_old`` (kept from the original
+    implementation: sigma pins the bond gauges only up to a per-tensor
+    phase, which is itself a pure gauge for the energy but shows up in
+    element-wise convergence checks).
     """
+    # Deferred import: _ctm_energy_ad imports from ad_utils at module
+    # level, so the shared label-based sigma helpers can only be imported
+    # at call time here.
+    from tenax.algorithms._ctm_energy_ad import _sigma_gauge_fix_env
 
-    C1_n, C2_n, C3_n, C4_n = (
-        c.todense() for c in (env_new.C1, env_new.C2, env_new.C3, env_new.C4)
-    )
-    T1_n, T2_n, T3_n, T4_n = (
-        t.todense() for t in (env_new.T1, env_new.T2, env_new.T3, env_new.T4)
-    )
-    T1_o, T2_o, T3_o, T4_o = (
-        t.todense() for t in (env_old.T1, env_old.T2, env_old.T3, env_old.T4)
-    )
+    fixed = _sigma_gauge_fix_env(env_new, env_old)
 
-    def _compute_sigma(T_new, T_old):
-        """Compute sigma = Q_new @ Q_old^H from transfer matrix eigenvectors."""
-        rho_new = _transfer_matrix_leading_eigvec(T_new)
-        rho_old = _transfer_matrix_leading_eigvec(T_old)
+    def _fix_phase(fixed_t, old_t):
+        """Remove residual global U(1) phase by aligning with the old tensor.
 
-        # QR with sign convention (positive diagonal on R)
-        Q_new, R_new = jnp.linalg.qr(rho_new)
-        Q_old, R_old = jnp.linalg.qr(rho_old)
-
-        # Fix sign: make diagonal of R positive
-        signs_new = jnp.sign(jnp.diag(R_new))
-        signs_old = jnp.sign(jnp.diag(R_old))
-        Q_new = Q_new * signs_new[None, :]
-        Q_old = Q_old * signs_old[None, :]
-
-        return Q_new @ Q_old.conj().T
-
-    # Compute sigma for each edge direction
-    # Convention: sigma_X acts on the chi bond on the X side
-    # T1 connects c1_r <-> c2_l (top bond)
-    # T2 connects c2_d <-> c3_u (right bond)
-    # T3 connects c4_r <-> c3_l (bottom bond)
-    # T4 connects c1_d <-> c4_u (left bond)
-    sigma_top = jax.lax.stop_gradient(_compute_sigma(T1_n, T1_o))
-    sigma_right = jax.lax.stop_gradient(_compute_sigma(T2_n, T2_o))
-    sigma_bottom = jax.lax.stop_gradient(_compute_sigma(T3_n, T3_o))
-    sigma_left = jax.lax.stop_gradient(_compute_sigma(T4_n, T4_o))
-
-    # Apply sigma to env_new:
-    # Corner: C(row_bond, col_bond) -> sigma_row^H @ C @ sigma_col
-    # Edge: T(left_bond, phys, right_bond) -> sigma_left^H @ T @ sigma_right
-    #
-    # CTM geometry (single-site, periodic):
-    # C1(c1_d, c1_r)    connects to T4(left) and T1(top)
-    # C2(c2_l, c2_d)    connects to T1(top) and T2(right)
-    # C3(c3_u, c3_l)    connects to T2(right) and T3(bottom)
-    # C4(c4_r, c4_u)    connects to T3(bottom) and T4(left)
-    #
-    # T1(t1_l, u2, t1_r) connects c1_r(left) and c2_l(right) via top bond
-    # T2(t2_u, r2, t2_d) connects c2_d(top) and c3_u(bottom) via right bond
-    # T3(t3_r, d2, t3_l) connects c4_r(left) and c3_l(right) via bottom bond
-    # T4(t4_d, l2, t4_u) connects c1_d(top) and c4_u(bottom) via left bond
-
-    sH_top = sigma_top.conj().T
-    sH_right = sigma_right.conj().T
-    sH_bottom = sigma_bottom.conj().T
-    sH_left = sigma_left.conj().T
-
-    # Corners: each corner sits at an intersection of two bonds
-    C1_fixed = sH_left @ C1_n @ sigma_top  # c1_d(left bond), c1_r(top bond)
-    C2_fixed = sH_top @ C2_n @ sigma_right  # c2_l(top bond), c2_d(right bond)
-    C3_fixed = sH_right @ C3_n @ sigma_bottom  # c3_u(right bond), c3_l(bottom bond)
-    C4_fixed = sH_bottom @ C4_n @ sigma_left  # c4_r(bottom bond), c4_u(left bond)
-
-    # Edges: each edge has chi bonds on both sides + D^2 physical bond
-    # T1(t1_l, u2, t1_r): left=top bond, right=top bond (same bond, wraps around)
-    T1_fixed = jnp.einsum("ab,bdc,ce->ade", sH_top, T1_n, sigma_top)
-    # T2(t2_u, r2, t2_d): top=right bond, bottom=right bond
-    T2_fixed = jnp.einsum("ab,bdc,ce->ade", sH_right, T2_n, sigma_right)
-    # T3(t3_r, d2, t3_l): left=bottom bond, right=bottom bond
-    T3_fixed = jnp.einsum("ab,bdc,ce->ade", sH_bottom, T3_n, sigma_bottom)
-    # T4(t4_d, l2, t4_u): top=left bond, bottom=left bond
-    T4_fixed = jnp.einsum("ab,bdc,ce->ade", sH_left, T4_n, sigma_left)
-
-    # Extract global U(1) phase per tensor from old env
-    C1_o, C2_o, C3_o, C4_o = (
-        c.todense() for c in (env_old.C1, env_old.C2, env_old.C3, env_old.C4)
-    )
-
-    def _fix_phase(fixed, old):
-        """Remove residual U(1) phase by aligning with old tensor."""
-        dot = jnp.sum(old.ravel().conj() * fixed.ravel())
+        The label-based contraction in ``_sigma_gauge_fix_env`` does not
+        guarantee the output axis order matches ``old_t``'s storage order,
+        so the overlap is computed after permuting to ``old_t``'s label
+        order -- an element-wise dot across mismatched axes would compute
+        a meaningless (though still unit-modulus, hence harmless-to-energy)
+        phase.
+        """
+        old_labels = tuple(i.label for i in old_t.indices)
+        fixed_labels = tuple(i.label for i in fixed_t.indices)
+        perm = tuple(fixed_labels.index(lab) for lab in old_labels)
+        fixed_aligned = jnp.transpose(fixed_t.todense(), perm)
+        dot = jnp.sum(old_t.todense().ravel().conj() * fixed_aligned.ravel())
         phase = dot / (jnp.abs(dot) + 1e-30)
-        return fixed * jnp.conj(phase)
-
-    C1_fixed = _fix_phase(C1_fixed, C1_o)
-    C2_fixed = _fix_phase(C2_fixed, C2_o)
-    C3_fixed = _fix_phase(C3_fixed, C3_o)
-    C4_fixed = _fix_phase(C4_fixed, C4_o)
-    T1_fixed = _fix_phase(T1_fixed, T1_o)
-    T2_fixed = _fix_phase(T2_fixed, T2_o)
-    T3_fixed = _fix_phase(T3_fixed, T3_o)
-    T4_fixed = _fix_phase(T4_fixed, T4_o)
+        return fixed_t * jnp.conj(phase)
 
     return CTMTensorEnv(
-        C1=_wrap_tensor(C1_fixed, env_new.C1),
-        C2=_wrap_tensor(C2_fixed, env_new.C2),
-        C3=_wrap_tensor(C3_fixed, env_new.C3),
-        C4=_wrap_tensor(C4_fixed, env_new.C4),
-        T1=_wrap_tensor(T1_fixed, env_new.T1),
-        T2=_wrap_tensor(T2_fixed, env_new.T2),
-        T3=_wrap_tensor(T3_fixed, env_new.T3),
-        T4=_wrap_tensor(T4_fixed, env_new.T4),
+        C1=_fix_phase(fixed.C1, env_old.C1),
+        C2=_fix_phase(fixed.C2, env_old.C2),
+        C3=_fix_phase(fixed.C3, env_old.C3),
+        C4=_fix_phase(fixed.C4, env_old.C4),
+        T1=_fix_phase(fixed.T1, env_old.T1),
+        T2=_fix_phase(fixed.T2, env_old.T2),
+        T3=_fix_phase(fixed.T3, env_old.T3),
+        T4=_fix_phase(fixed.T4, env_old.T4),
     )
 
 

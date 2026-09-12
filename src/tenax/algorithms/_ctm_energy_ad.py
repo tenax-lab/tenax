@@ -28,6 +28,7 @@ from tenax.algorithms._ctm_python_loop import (
     python_loop_ctm_converge,
 )
 from tenax.algorithms._ctm_tensor_convergence import (
+    _max_env_leaf_diff,
     _warn_recipe_1x1_deprecated,
 )
 from tenax.algorithms._ctm_tensor_energy import (
@@ -391,13 +392,39 @@ def _wrap_sigma(sigma_data, contract_idx, output_idx, env_tensor):
     return DenseTensor(sigma_data, indices)
 
 
-def _apply_sigma_to_corner(corner, s_left_data, s_right_data):
+def _index_by_label(tensor, label):
+    """Return the TensorIndex of ``tensor`` carrying ``label``.
+
+    #798: the sigma-gauge path used to identify corner legs positionally
+    (``idx0, idx1 = corner.indices``), but the environment is a label-based
+    structure whose axis order is recipe-dependent — the 2x2 sweep writes
+    every corner axis-reversed relative to the canonical
+    ``_ctm_tensor_init`` order, and C4's canonical storage order
+    ``(c4_r, c4_u)`` is itself reversed relative to the ring order the
+    sigma calls assumed.  Positional reads therefore applied bond gauges
+    to the wrong legs on *both* layouts.  All sigma application is now
+    label-based through this helper.
+    """
+    for idx in tensor.indices:
+        if idx.label == label:
+            return idx
+    raise ValueError(
+        f"sigma gauge: expected a leg labeled {label!r}, tensor has "
+        f"{tuple(i.label for i in tensor.indices)}"
+    )
+
+
+def _apply_sigma_to_corner(corner, s_left_data, s_right_data, left_label, right_label):
     """Apply sigma gauge to a corner: s_left^H @ corner @ s_right.
 
-    corner is a 2-leg Tensor with indices (idx0, idx1).
-    s_left^H contracts with idx0, s_right contracts with idx1.
+    ``s_left^H`` contracts with the leg labeled ``left_label``; ``s_right``
+    contracts with the leg labeled ``right_label``.  Legs are found by
+    label, not position (#798) — the 2x2 sweep leaves corners axis-reversed
+    and label-based `contract` is indifferent to that, so this function
+    must be too.
     """
-    idx0, idx1 = corner.indices
+    idx0 = _index_by_label(corner, left_label)
+    idx1 = _index_by_label(corner, right_label)
     # Temporary output labels — must not collide with existing labels
     tmp0 = ("_sigma_out", idx0.label)
     tmp1 = ("_sigma_out", idx1.label)
@@ -416,13 +443,19 @@ def _apply_sigma_to_corner(corner, s_left_data, s_right_data):
     return result.relabel(tmp0, idx0.label).relabel(tmp1, idx1.label)
 
 
-def _apply_sigma_to_edge(edge, s_data):
-    """Apply sigma gauge to an edge: s^H @ edge @ s.
+def _apply_sigma_to_edge(edge, s_data, bra_label, ket_label):
+    """Apply sigma gauge to an edge: s^H on ``bra_label``, s on ``ket_label``.
 
-    edge is a 3-leg Tensor with indices (chi_left, phys, chi_right).
-    The same sigma acts on both chi legs.
+    The same sigma acts on both chi legs (they live on the same bond
+    family).  Legs are found by label, not position (#798): T3 and T4 are
+    *stored* axis-reversed relative to the ring order (``(t3_r, d2, t3_l)``
+    and ``(t4_d, l2, t4_u)``), so a positional read puts the conjugated
+    factor on the wrong side of those edges.  Invisible for real
+    environments (s^H = s^T), wrong for complex ones — and either way the
+    read should not depend on storage order.
     """
-    idx_l, idx_p, idx_r = edge.indices
+    idx_l = _index_by_label(edge, bra_label)
+    idx_r = _index_by_label(edge, ket_label)
     tmp_l = ("_sigma_out", idx_l.label)
     tmp_r = ("_sigma_out", idx_r.label)
 
@@ -484,18 +517,32 @@ def _sigma_gauge_fix_env(env_new, env_old):
     s3 = jax.lax.stop_gradient(_compute_sigma(T3_n_d, T3_o_d))
     s4 = jax.lax.stop_gradient(_compute_sigma(T4_n_d, T4_o_d))
 
-    # Apply sigma to corners: s_row^H @ C @ s_col
-    # Preserves SymmetricTensor type via label-based contraction.
-    C1_f = _apply_sigma_to_corner(env_new.C1, s4, s1)
-    C2_f = _apply_sigma_to_corner(env_new.C2, s1, s2)
-    C3_f = _apply_sigma_to_corner(env_new.C3, s2, s3)
-    C4_f = _apply_sigma_to_corner(env_new.C4, s3, s4)
+    # Apply sigma to corners and edges, identifying legs BY LABEL (#798).
+    # Bond map (verified connectivity, see _ctm_tensor_energy.py):
+    #   top row (s1):    c1_r <-> t1_l,  t1_r <-> c2_l
+    #   right col (s2):  c2_d <-> t2_u,  t2_d <-> c3_u
+    #   bottom row (s3): c3_l <-> t3_l,  t3_r <-> c4_u
+    #   left col (s4):   c4_r <-> t4_u,  t4_d <-> c1_d
+    # Around the ring each bond gets its sigma once conjugated (bra, the
+    # in-leg) and once plain (ket, the out-leg), so contracting any bond
+    # yields s s^H = 1: the transform is a pure gauge and gauge-invariant
+    # content is exactly preserved.  The old positional read applied bond
+    # gauges to the wrong legs — on the 2x2 layout for C1-C3 (the sweep
+    # writes corners axis-reversed) and on the canonical layout for C4
+    # (stored (c4_r, c4_u), reverse of the ring order assumed here) — which
+    # is not a gauge transform at all and corrupted the environment on
+    # every sigma-gauged sweep (energy off by O(1e-3) at D=2, O(1e-2) at
+    # D=3).  Preserves SymmetricTensor type via label-based contraction.
+    C1_f = _apply_sigma_to_corner(env_new.C1, s4, s1, "c1_d", "c1_r")
+    C2_f = _apply_sigma_to_corner(env_new.C2, s1, s2, "c2_l", "c2_d")
+    C3_f = _apply_sigma_to_corner(env_new.C3, s2, s3, "c3_u", "c3_l")
+    C4_f = _apply_sigma_to_corner(env_new.C4, s3, s4, "c4_u", "c4_r")
 
-    # Apply sigma to edges: s^H @ T @ s
-    T1_f = _apply_sigma_to_edge(env_new.T1, s1)
-    T2_f = _apply_sigma_to_edge(env_new.T2, s2)
-    T3_f = _apply_sigma_to_edge(env_new.T3, s3)
-    T4_f = _apply_sigma_to_edge(env_new.T4, s4)
+    # Edges: s^H on the ring in-leg, s on the ring out-leg.
+    T1_f = _apply_sigma_to_edge(env_new.T1, s1, "t1_l", "t1_r")
+    T2_f = _apply_sigma_to_edge(env_new.T2, s2, "t2_u", "t2_d")
+    T3_f = _apply_sigma_to_edge(env_new.T3, s3, "t3_l", "t3_r")
+    T4_f = _apply_sigma_to_edge(env_new.T4, s4, "t4_u", "t4_d")
 
     return CTMTensorEnv(
         C1=C1_f,
@@ -547,10 +594,12 @@ def ctm_energy_implicit(
     Backward: JIT-fused GMRES solve of ``(I - J_env^T) lam = dE/denv``,
     then chain rule to site tensor gradients.
 
-    The forward applies sigma gauge fixing (transfer-matrix eigenvector
-    alignment) at each CTM step, ensuring the converged environment is an
-    element-wise fixed point.  The backward VJP is taken through the sigma-
-    gauged step function, so ``(I - J_env^T)`` is well-conditioned.
+    The forward applies gauge fixing (``forward_gauge``) at each CTM step,
+    *intended* to make the converged environment an element-wise fixed
+    point.  Measured (#841), no available gauge achieves that on the 2x2
+    recipe — see the ``forward_gauge`` argument below and the stationarity
+    warning the forward now emits.  The backward VJP is taken through the
+    gauge-fixed step function.
 
     Uses SVD projectors with Lorentzian-regularized backward by default.
     SVD projectors achieve element-wise CTM convergence (no eigh sign
@@ -582,6 +631,22 @@ def ctm_energy_implicit(
         forward_gauge:     Gauge fixing in forward/backward: ``"phase"`` (default),
                            ``"sigma"`` (transfer-matrix eigenvector alignment), or
                            ``"none"`` (no gauge fixing).
+
+                           Measured on the 2x2 recipe (#841/#798, near-optimal
+                           D=3 state, chi=27): all three converge to the same
+                           energy (sigma-vs-phase parity 3e-15 post-#798), but
+                           NONE reaches an element-wise fixed point — the
+                           stationarity residual plateaus at O(0.4-0.6) for
+                           every gauge, because the residual freedom lives in
+                           per-bond-index Z2 signs (and near-degenerate
+                           multiplet rotations) that none of these constructions
+                           pin: the transfer-matrix eigenvector behind
+                           ``"sigma"`` has no weight on precisely those weak
+                           directions.  The implicit gradient there measured
+                           slope_fd/|g| = 0.131 for ``"phase"`` and -0.008 for
+                           ``"sigma"`` (direction inverted), so ``"sigma"`` is
+                           NOT a repair for #841; prefer the default
+                           ``"phase"`` and heed the stationarity warning.
         conv_method:       Convergence criterion: ``"sv"`` (corner singular
                            values, default) or ``"elementwise"`` (max element-wise
                            difference across all env tensors).
@@ -747,8 +812,10 @@ def _sigma_gauged_ctm_converge(
     in-CTM chi bumping toward ``chi_max`` (see #492/#514); defaults keep
     bump-off behaviour for existing implicit-AD callers.
 
-    Returns ``(envs, final_chi)`` so callers can route the post-bump chi
-    into custom_vjp residuals for the chi-lock backward (#516).
+    Returns ``(envs, final_chi, converged)``: the post-bump chi routes into
+    custom_vjp residuals for the chi-lock backward (#516), and ``converged``
+    is the loop's own verdict (#841 — previously discarded here, so a
+    max_iter-starved forward was indistinguishable from a converged one).
     """
     # ---- validation (mirror python_loop_ctm_converge) ----
     chi_current = _validate_chi_bump_args(
@@ -831,7 +898,12 @@ def _sigma_gauged_ctm_converge(
         conv_method=conv_method,
         plateau_patience=plateau_patience,
     )
-    return result.envs, result.final_chi
+    # #841: return the loop's convergence verdict instead of discarding it.
+    # Callers on the implicit-AD path linearize the gauged step around
+    # ``result.envs``; swallowing ``converged`` here is how a max_iter-starved
+    # (or coincidentally-dipped) forward used to reach the backward with no
+    # diagnostic at all.
+    return result.envs, result.final_chi, result.converged
 
 
 _VJP_CACHE: dict = {}
@@ -929,6 +1001,17 @@ def get_last_implicit_ad_diagnostics() -> dict:
       ratio indicates the linear adjoint operator ``(I - J^T)`` is
       near-singular (e.g. chi-ceiling with degenerate retained SVs in
       the frozen projectors).
+    * ``forward_stationarity_residual`` -- #841 guard: the literal
+      ``||gauge_fix(step(env*)) - env*||`` sup-norm residual measured with
+      one extra gauged sweep after the forward converged (or ran out of
+      budget).  This is the premise of the implicit backward; O(0.1+) here
+      means the gradient magnitude is untrustworthy even when
+      ``forward_converged`` is True.  Written by every forward (energy or
+      gradient), not cleared by the backward.
+    * ``forward_converged`` -- the forward CTM loop's own verdict under its
+      configured ``conv_method``.  Independent of the residual above: 'sv'
+      certifies spectra only, and the element-wise criterion can exit on a
+      coincidental dip of a bond-sign limit cycle.
 
     Returns a shallow copy so the caller cannot mutate internal state.
     Empty dict if no backward has run yet.
@@ -1111,7 +1194,7 @@ def _make_implicit_vjp_fn(
     # to the previous one — using the previous ``λ`` as a warm seed for the
     # Neumann iteration converges in fewer iterations (#501).  Cleared on
     # divergence/non-convergence so the next call gets a fresh start.
-    _cached = {"prev_lam_leaves": None}
+    _cached = {"prev_lam_leaves": None, "stationarity_warned": False}
 
     def _invalidate_warm_start() -> None:
         """Drop the cached ``prev_lam_leaves`` warm-start seed.
@@ -1128,6 +1211,16 @@ def _make_implicit_vjp_fn(
 
     mutables["_invalidate_warm_start"] = _invalidate_warm_start
 
+    # Step function for the #841 stationarity check below: the exact step the
+    # forward loop runs (same recipe, mesh, and chunking — memoised, so this
+    # is the same compiled function, not a second JIT cache entry).
+    _stationarity_step = partial(
+        _make_jit_ctm_step(
+            neighbors, recipe, device_mesh=device_mesh, ctm_chunk_size=ctm_chunk_size
+        ),
+        chunk_size=ctm_chunk_size,
+    )
+
     def _run_forward(site_tensors):
         """Run CTM convergence (shared by f and f_fwd).
 
@@ -1139,7 +1232,7 @@ def _make_implicit_vjp_fn(
         chi_ramp = mutables["chi_ramp"]
         env_init = mutables["env_init"]
         if chi_ramp is not None:
-            envs, _ = python_loop_ctm_converge(
+            envs, _loop_info = python_loop_ctm_converge(
                 site_tensors,
                 neighbors,
                 chi=chi,
@@ -1163,8 +1256,9 @@ def _make_implicit_vjp_fn(
             # chi_post is the final ramp stage's chi, which equals ``chi`` for
             # the implicit-AD entry point that uses ramp only.
             chi_post = chi
+            forward_converged = bool(_loop_info.converged)
         else:
-            envs, chi_post = _sigma_gauged_ctm_converge(
+            envs, chi_post, forward_converged = _sigma_gauged_ctm_converge(
                 site_tensors,
                 neighbors,
                 chi=chi,
@@ -1187,7 +1281,97 @@ def _make_implicit_vjp_fn(
                 device_mesh=device_mesh,
                 ctm_chunk_size=ctm_chunk_size,
             )
+        _check_forward_stationarity(site_tensors, envs, chi_post, forward_converged)
         return envs, chi_post
+
+    def _check_forward_stationarity(site_tensors, envs, chi_post, forward_converged):
+        """#841 honesty guard: measure ``||gauge_fix(step(env*)) - env*||``.
+
+        The implicit backward linearizes the gauged CTM step around ``envs``
+        under the premise that it is a literal (element-wise) fixed point.
+        Neither convergence criterion certifies that premise: ``"sv"``
+        certifies singular-value spectra only, and ``"elementwise"`` can exit
+        on a coincidental dip of a residual-gauge limit cycle — the phase
+        gauge pins each tensor's global phase but not the Z2^chi bond signs
+        the projector SVD re-draws every sweep, so consecutive-sweep diffs
+        touch 1e-13 on sweeps where the sign pattern happens to realign and
+        jump back to O(0.3) on the next (measured: dips at sweeps 3, 5, 9, 17
+        of a flat 3.3e-01 plateau on a D=2 SU state at chi=4).  So this check
+        applies the loop's own step + gauge fix once more and measures the
+        literal sup-norm residual — the one quantity the premise is about.
+
+        Threshold ``max(100 * conv_tol, 1e-8)``: a genuinely stationary
+        forward reproduces itself to roughly the loop's own convergence
+        metric, so ``conv_tol`` sets the scale; the 100x headroom absorbs
+        one sweep's noise amplification through the projector SVD, and the
+        1e-8 floor keeps a very tight ``conv_tol`` (1e-12 and below) from
+        turning float-level churn into warnings.  The #841 failure signature
+        sits at O(0.5) — seven orders above the floor — so the gap between
+        "healthy" and "warn" is wide, not tuned.
+
+        Warns rather than raises (#839 policy, same as ``ipeps()``): the
+        energy from a non-stationary environment is still gauge-invariant
+        and fine; it is the *gradient* whose magnitude becomes untrustworthy
+        (issue #841 measured slope_fd/|g| = 0.13), and callers evaluating
+        only the energy should not be aborted.
+
+        Cost: one extra jitted sweep + gauge fix per forward, ~1/max_iter of
+        the forward's own cost.
+
+        Warns ONCE per cached vjp-fn build (the lifetime of the warm-start
+        cache): ``optimize_gs_ad`` reuses one build across every optimizer
+        iteration, and the residual embedded in the message drifts, so
+        Python's default warning dedup never collapses repeats -- a
+        per-call warning floods stderr for hundreds of iterations, buries
+        the genuinely discriminative "adjoint solve did not converge"
+        warning, and trains users to blanket-ignore RuntimeWarning (which
+        silences the #841 signal entirely).  The residual is still
+        measured and written to ``get_last_implicit_ad_diagnostics()``
+        on every call.
+        """
+        step_out, _eps, _smin = _stationarity_step(
+            site_tensors,
+            envs,
+            chi=chi_post,
+            projector_method=projector_method,
+            renormalize=renormalize,
+            projector_backward=projector_backward,
+        )
+        gauged = _apply_gauge_fix(step_out, envs)
+        residual = 0.0
+        for c in coords:
+            residual = max(residual, _max_env_leaf_diff(envs[c], gauged[c]))
+        threshold = max(100.0 * conv_tol, 1e-8)
+        _F3_LAST_DIAGNOSTICS["forward_stationarity_residual"] = residual
+        _F3_LAST_DIAGNOSTICS["forward_converged"] = forward_converged
+        # Fails closed: a NaN residual is not <= threshold, so it warns.
+        if not (residual <= threshold) and not _cached["stationarity_warned"]:
+            _cached["stationarity_warned"] = True
+            warnings.warn(
+                f"Implicit-AD CTM: the forward environment is not an "
+                f"element-wise fixed point of the gauged CTM step: one more "
+                f"gauge_fix(step(env)) sweep moved it by {residual:.1e} "
+                f"(sup-norm stationarity residual; threshold {threshold:.1e} "
+                f"= max(100*conv_tol, 1e-8); the convergence loop reported "
+                f"converged={forward_converged}, conv_method={conv_method!r}, "
+                f"forward_gauge={forward_gauge!r}). The implicit fixed-point "
+                f"backward linearizes the step around this environment, so "
+                f"the gradient's DIRECTION may remain a descent direction "
+                f"while its MAGNITUDE is wrong (issue #841 measured "
+                f"slope_fd/|g| = 0.13 at such a point) — line searches then "
+                f"fail silently. A converged=True loop verdict does not imply "
+                f"stationarity: 'sv' certifies spectra only, and the "
+                f"element-wise criterion can exit on a coincidental dip of a "
+                f"bond-sign limit cycle, so raising max_iter alone may not "
+                f"help. The residual is also readable from "
+                f"get_last_implicit_ad_diagnostics()"
+                f"['forward_stationarity_residual'] -- it stays updated on "
+                f"every call, while this warning is emitted once per cached "
+                f"energy function (further occurrences are suppressed to "
+                f"keep optimizer loops readable).",
+                RuntimeWarning,
+                stacklevel=4,
+            )
 
     def _compute_energy(site_tensors, envs):
         """Compute energy using energy_fn or default."""
