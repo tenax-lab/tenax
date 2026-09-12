@@ -367,7 +367,13 @@ def ipeps(
     hamiltonian_gate: Tensor | jax.Array,
     initial_peps: tuple[Tensor, Tensor] | tuple[jax.Array, jax.Array] | None,
     config: iPEPSConfig,
-) -> tuple[float, tuple[Tensor, Tensor], tuple[CTMEnvironment, CTMEnvironment]]:
+    *,
+    compute_energy: bool = True,
+) -> tuple[
+    float | None,
+    tuple[Tensor, Tensor],
+    tuple[CTMEnvironment, CTMEnvironment] | None,
+]:
     """Run 2-site iPEPS simple update + CTM for a 2D quantum lattice model.
 
     Always uses the Tensor-protocol 2-site simple update path.  Raw JAX
@@ -388,9 +394,18 @@ def ipeps(
         initial_peps:     Tuple ``(A, B)`` of site tensors (Tensor or raw
                           JAX arrays), or ``None`` for random initialization.
         config:           iPEPSConfig.
+        compute_energy:   When ``False``, return right after simple update:
+                          ``(None, (A, B), None)``.  The state never depends
+                          on the CTM -- steps 2-3 exist only to measure it --
+                          so callers that want the simple-update state alone
+                          (fixture builders, warm starts) skip the
+                          measurement instead of paying for an environment
+                          they discard and being warned about a number they
+                          never read (#937).
 
     Returns:
-        ``(energy_per_site, (A, B), (env_A, env_B))``
+        ``(energy_per_site, (A, B), (env_A, env_B))``, or
+        ``(None, (A, B), None)`` with ``compute_energy=False``.
     """
     if initial_peps is not None and not isinstance(initial_peps, tuple):
         raise TypeError(
@@ -455,6 +470,10 @@ def ipeps(
     # The sweep keeps the state in Vidal form; the CTM contracts the physical
     # (symmetric-gauge) tensor, with each leg's own sqrt(lambda).
     A, B = _to_physical_pair(A, B, lambdas)
+
+    # The state is complete here; the CTM below exists only to measure it.
+    if not compute_energy:
+        return None, (A, B), None
 
     # CTM environment (uses dense arrays)
     A_dense = A.todense()

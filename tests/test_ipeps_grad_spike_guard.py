@@ -45,7 +45,6 @@ def _tiny_config(grad_spike_ratio):
         unit_cell="1x1",
         gs_c4v=True,
         gs_implicit_ad=True,
-        gs_recipe="1x1",
         gs_optimizer="lbfgs",
         gs_line_search_method="hager_zhang",
         gs_metric_precond=True,
@@ -70,7 +69,19 @@ def test_grad_spike_guard_1site_runs_and_is_physical():
 def test_grad_spike_guard_off_matches_baseline():
     """With no spike in a clean short run, the guard is inert (same energy)."""
     gate = sublattice_rotate_gate(heisenberg_gate())
+    # The module-level implicit-AD warm-start cache leaks between
+    # optimize_gs_ad calls in one process: on this 2x2 config, back-to-back
+    # IDENTICAL runs differ by 8e-5 (filed as its own issue), which is the
+    # same scale as a firing guard and would make this comparison read as a
+    # guard defect.  Clearing the cache before each run restores bit-exact
+    # reproducibility (measured 0.0), so the assertion below isolates the
+    # guard.  The pre-#938 1x1 fixture never noticed: its rank-1 collapsed
+    # boundary (#747) gave the same mean-field number regardless.
+    from tenax.algorithms._ctm_energy_ad import invalidate_implicit_ad_warm_start
+
+    invalidate_implicit_ad_warm_start()
     _A0, _e0, E_off = optimize_gs_ad(gate, None, _tiny_config(grad_spike_ratio=None))
+    invalidate_implicit_ad_warm_start()
     _A1, _e1, E_on = optimize_gs_ad(gate, None, _tiny_config(grad_spike_ratio=5.0))
     # deterministic su_init + optimization → identical when the guard never fires
     assert math.isclose(float(E_off), float(E_on), rel_tol=0, abs_tol=1e-9), (

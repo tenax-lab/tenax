@@ -80,7 +80,7 @@ def _su_state():
         unit_cell="1x1",
         ctm=CTMConfig(chi=8, max_iter=100, conv_tol=1e-10),
     )
-    _E, tensors, _envs = ipeps(gate, None, cfg)
+    _E, tensors, _envs = ipeps(gate, None, cfg, compute_energy=False)
     return tensors[0], heisenberg_gate()
 
 
@@ -210,7 +210,7 @@ def test_single_site_split_honours_the_default_2x2_recipe(gs_num_steps):
     cfg = _split_cfg(gs_num_steps)
     assert cfg.gs_recipe == "2x2", "precondition: 2x2 is the default recipe"
 
-    _E, tensors, _envs = ipeps(gate, None, cfg)
+    _E, tensors, _envs = ipeps(gate, None, cfg, compute_energy=False)
     _A_opt, envs, E = optimize_gs_ad(gate, tensors[0], cfg)
     assert np.isfinite(float(E)), f"split 2x2 optimize returned {E!r}"
 
@@ -237,7 +237,7 @@ def test_single_site_split_still_accepts_1x1_for_bisection():
     cfg = _split_cfg(1)
     cfg = dataclasses.replace(cfg, gs_recipe="1x1")
 
-    _E, tensors, _envs = ipeps(gate, None, cfg)
+    _E, tensors, _envs = ipeps(gate, None, cfg, compute_energy=False)
     _A_opt, envs, E = optimize_gs_ad(gate, tensors[0], cfg)
     assert np.isfinite(float(E))
     env = envs[(0, 0)] if isinstance(envs, dict) else envs

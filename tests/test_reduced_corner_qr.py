@@ -233,7 +233,9 @@ def _build_physical_state_heisenberg_D2():
         dt=0.05,
         ctm=CTMConfig(chi=16, max_iter=80, projector_method="eigh"),
     )
-    _E_su, (A, _B), _envs = ipeps(gate_rot, initial_peps=None, config=config)
+    _E_su, (A, _B), _envs = ipeps(
+        gate_rot, initial_peps=None, config=config, compute_energy=False
+    )
     A = DenseTensor(symmetrize_c4v(A._data), A.indices)
     A = A * (1.0 / float(A.norm()))
     _PHYS_STATE = (A, gate_rot)
@@ -500,7 +502,9 @@ def _build_physical_state_heisenberg_D2_2site():
         dt=0.05,
         ctm=CTMConfig(chi=16, max_iter=80, projector_method="eigh"),
     )
-    _E_su, (A, B), _envs = ipeps(gate, initial_peps=None, config=config)
+    _E_su, (A, B), _envs = ipeps(
+        gate, initial_peps=None, config=config, compute_energy=False
+    )
     A = A * (1.0 / float(A.norm()))
     B = B * (1.0 / float(B.norm()))
     gate_dense = jnp.asarray(gate.todense() if hasattr(gate, "todense") else gate)
@@ -1144,111 +1148,27 @@ def test_implicit_qr_eigh_gradient_gap_shrinks_with_chi():
 
 
 # --------------------------------------------------------------------------- #
-# Phase 2, Task 7 — full optimize_gs_ad GS optimization under implicit AD.      #
+# Phase 2, Task 7 (REMOVED with #938) — full optimize_gs_ad run under QR.       #
 #                                                                              #
-# Tasks 5b/6 proved recipe='1x1' + qr RUNS and DIFFERENTIATES correctly under  #
-# implicit-diff AD.  This validates the *whole* production GS optimizer: a few  #
-# optimize_gs_ad steps with gs_recipe='1x1' + gs_projector_method='qr' must     #
-# decrease the energy, stay finite, and track the eigh result on the same       #
-# physical D=2 Heisenberg state.  The 1-site implicit adjoint uses the          #
-# Neumann-series VJP (``ad_backward_method="vjp"``) with EMA divergence          #
-# detection and a ``lam_norm`` safety truncation; we only require the run to     #
-# complete without NaN / blow-up.                                                #
+# ``test_optimize_gs_ad_qr_1x1_converges`` ran the production optimizer with   #
+# gs_recipe='1x1' + gs_projector_method='qr' and was xfail(strict=True) as a   #
+# tripwire for the #858 adjoint divergence.  Both halves of its premise are    #
+# now gone:                                                                    #
+#                                                                              #
+# 1. The combination is unrepresentable.  QR is consulted only on the '1x1'    #
+#    recipe (the '2x2' plaquette projector is always Fishman SVD — #795/#931), #
+#    and since #938 ``optimize_gs_ad`` refuses '1x1' on every path that        #
+#    reaches this fused engine.  The xfail would have "xfailed" on that        #
+#    ValueError at config validation, testing nothing.                         #
+# 2. The tripwire's subject is resolved.  #858 is closed: the divergence was   #
+#    measured against the rank-1-collapsed 1x1 boundary.  Re-running this      #
+#    exact fixture under the honest default (gs_recipe='2x2', where the        #
+#    projector knob is inert) DESCENDS: e0=-0.65943 -> ef=-0.65998 in 5        #
+#    steps, inside the physical window — the recorded "ascent" was the #938    #
+#    1x1-gradient/2x2-energy mislabel, not an optimizer defect.                #
+#                                                                              #
+# QR forward/AD coverage lives in Tasks 5b/6 above (direct make_ctm_energy_fn  #
+# calls, which the optimizer guard does not gate).  A production-optimizer QR  #
+# test becomes possible again only when QR is wired into the 2x2 projector;    #
+# the stranded-QR-test class is tracked in #931.                               #
 # --------------------------------------------------------------------------- #
-
-
-def _short_optimize(gs_recipe, gs_projector_method, steps=5):
-    """Run a short ``optimize_gs_ad`` (implicit AD) on the physical C4v
-    D=2 Heisenberg state and return ``(initial_energy, final_energy, A_final)``.
-
-    Starts from the C4v-symmetrized simple-update site tensor (near the 2D
-    Heisenberg fixed point, E0 ~ -0.5) on the *sublattice-rotated* gate, so the
-    single-site (1x1) uniform iPEPS is the correct ansatz.  Kept small/fast
-    (``chi=8``, few CTM iters, few optimizer steps) — the point is the
-    convergence *behavior* (decrease + finite + eigh-tracking), not a deep
-    optimization.  ``su_init=False`` so the supplied ``A_init`` is honored
-    (no extra simple-update rebuild).
-    """
-    A0, gate_rot = _build_physical_state_heisenberg_D2()
-    config = iPEPSConfig(
-        max_bond_dim=2,
-        unit_cell="1x1",
-        gs_implicit_ad=True,
-        gs_recipe=gs_recipe,
-        gs_projector_method=gs_projector_method,
-        su_init=False,
-        gs_num_steps=steps,
-        gs_learning_rate=1e-2,
-        ctm=CTMConfig(
-            chi=8,
-            max_iter=40,
-            min_iter=10,
-            conv_tol=1e-10,
-            projector_method=gs_projector_method,
-            qr_warmup_steps=4,
-        ),
-    )
-    # Initial energy: a zero-step run returns the energy of A_init unchanged.
-    cfg0 = replace(config, gs_num_steps=0)
-    _A_i, _env_i, e0 = optimize_gs_ad(gate_rot, A0, cfg0)
-    A_f, _env_f, ef = optimize_gs_ad(gate_rot, A0, config)
-    return float(e0), float(ef), A_f
-
-
-@pytest.mark.algorithm
-@pytest.mark.xfail(
-    reason=(
-        "#858, surfaced here by #844 -- a REAL optimizer failure, not a "
-        "harness artifact, and deliberately left failing rather than retuned. "
-        "The run now STARTS at e0=-0.65943 (essentially the converged answer; "
-        "cf. the 2x2 reference -0.65900) and 5 Adam steps drive it UP to "
-        "ef=-0.52262, an ascent of +0.1368. Before #844 changed the fixture "
-        "state it started at -0.51363 and ended at -0.65949, so the same "
-        "ascent read as a descent purely because the starting point was "
-        "garbage; the assertion passed for the wrong reason for months. The "
-        "cause is visible in the run: 'adjoint solve did not converge "
-        "(relative residual 4.496e-01)' plus non-PSD RDMs at -0.0316 and "
-        "-0.113 -- the C4v D=2 adjoint divergence of #858. The gradient is "
-        "wrong by roughly the residual, so the optimizer is walking uphill on "
-        "a direction that is not the gradient. Fixing this means fixing #858, "
-        "not touching this file. strict=True on purpose: the ascent is 0.1368, "
-        "far outside any BLAS variation, so if this ever passes the adjoint "
-        "has genuinely been repaired and the xfail must come off."
-    ),
-    strict=True,
-)
-def test_optimize_gs_ad_qr_1x1_converges():
-    """A short optimize_gs_ad run with gs_recipe='1x1' + gs_projector_method='qr'
-    decreases the energy, stays finite, and reaches the physical Heisenberg
-    fixed point.
-
-    Core deliverable: the production implicit-diff GS optimizer runs end-to-end
-    with the reduced-corner QR projector, the energy *decreases* (does not
-    increase / NaN / blow up), and the QR-optimized state lands in the physical
-    D=2 Heisenberg energy basin (~-0.66).
-
-    Measured (chi=8, 5 Adam steps, lr=1e-2, deterministic):
-        e0_qr = -0.5136, ef_qr = -0.6590 (decreased ~0.145).
-    The 1-site implicit adjoint uses the Neumann-series VJP with
-    divergence-truncation safeguards; the run stays finite (no NaN) and the
-    energy descends.
-
-    NOTE (#692): an earlier version re-ran a *forward eigh-CTM* oracle on the
-    optimized tensor and asserted ``|ef_qr - e_eigh| < 5e-3``. That was both
-    fragile and redundant. Fragile: eigh is uncertified under implicit AD
-    precisely because it is unstable, and on the post-optimization tensor the
-    eigh forward CTM can diverge (``e_eigh ~ 15`` on some CI BLAS/XLA builds)
-    even though the certified QR result ``ef_qr`` stays physical. Redundant:
-    forward QR-vs-eigh agreement on the base SU state is already covered by
-    ``test_reduced_qr_energy_matches_eigh_heisenberg_D2``. We therefore assert
-    the actual deliverable — ``ef_qr`` reaches the physical energy window —
-    which depends only on the stable QR result.
-    """
-    e0_qr, ef_qr, _A_qr = _short_optimize(
-        gs_recipe="1x1", gs_projector_method="qr", steps=5
-    )
-    assert np.isfinite(ef_qr)
-    assert ef_qr <= e0_qr + 1e-9  # energy does not increase
-    # Reached the physical D=2 Heisenberg basin (~-0.66); the wide window
-    # excludes divergence without over-constraining the 5-step descent depth.
-    assert -0.75 < ef_qr < -0.45, f"ef_qr={ef_qr} outside physical Heisenberg window"

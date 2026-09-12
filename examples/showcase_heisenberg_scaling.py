@@ -31,6 +31,23 @@ from pathlib import Path
 
 REFERENCE_E = -0.669437  # Sandvik QMC, square-lattice spin-1/2 Heisenberg AFM
 
+# CTM recipe every cell runs, stamped into each result JSON and validated on
+# resume. Result files that carry a different value (or none — every file
+# written before the #938 migration off the collapsed "1x1" recipe) are moved
+# aside and the cell is re-run, so a resumed sweep can never mix rank-1-boundary
+# numbers with 2x2 ones in the same table/plot.
+SHOWCASE_RECIPE = "2x2"
+
+
+def result_is_current(res):
+    """True iff a result dict was produced under the current recipe.
+
+    THE validity predicate for showcase result JSONs — shared by the sweep's
+    resume path (`_load_or_run_cell`) and the post-hoc analyzer
+    (`showcase_analyze.load_cells`), so the two loaders cannot drift apart on
+    what counts as reusable (Codex round 3 on #972)."""
+    return res.get("recipe") == SHOWCASE_RECIPE
+
 
 @dataclass(frozen=True)
 class Cell:
@@ -180,7 +197,7 @@ def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
     """
     result = {
         "D": D, "chi": chi, "n_devices": n_devices, "gs_num_steps": gs_num_steps,
-        "is_anchor": is_anchor,
+        "is_anchor": is_anchor, "recipe": SHOWCASE_RECIPE,
         "ms_per_step": None, "step_times": None, "peak_gb": None, "E_site": None,
         "corner_rank": None,
         "converged": False, "jit_compile_time": None, "oom": False, "error": None,
@@ -222,7 +239,12 @@ def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
             max_bond_dim=D,
             ctm=ctm,
             unit_cell="1x1",
-            gs_recipe="1x1",
+            # SHOWCASE_RECIPE ("2x2", the default) since #938: the fused
+            # optimizer now refuses the deprecated "1x1" recipe it used to run
+            # here.  Result files recorded before this change were measured on
+            # the collapsed rank-1 boundary described below; the "recipe" stamp
+            # in each result JSON lets _load_or_run_cell reject them on resume.
+            gs_recipe=SHOWCASE_RECIPE,
             gs_implicit_ad=True,
             gs_num_steps=gs_num_steps,
             su_init=True,
@@ -232,11 +254,12 @@ def run_cell(D, chi, n_devices, gs_num_steps, is_anchor):
         )
         _A_opt, envs, E_gs, history = optimize_gs_ad(gate, None, config)
 
-        # #747: this driver runs gs_recipe="1x1", whose corner-pair projector
-        # collapses the environment to rank-1 corners -- a chi_eff=1 mean-field
-        # boundary whose energy does not respond to chi.  Every energy this
-        # sweep has ever recorded was measured that way.  Record the rank so a
-        # reader can tell, and warn loudly at run time.
+        # #747 (historical): this driver used to run gs_recipe="1x1", whose
+        # corner-pair projector collapsed the environment to rank-1 corners --
+        # a chi_eff=1 mean-field boundary whose energy did not respond to chi.
+        # Every energy recorded before the #938 migration to "2x2" was
+        # measured that way.  Keep recording the rank so a reader can tell
+        # which regime a result file belongs to.
         try:
             from tenax.algorithms._ctm_diagnostics import check_ctm_env
 
@@ -390,14 +413,27 @@ DEFAULT_ANCHOR_TIMEOUT_S = 1800
 
 
 def _load_or_run_cell(cell, results_dir, timeout_s):
-    """Resume: if a result JSON exists, load it; else launch the worker
-    subprocess (bounded by timeout_s) and load what it wrote. Always returns a
-    result dict with is_anchor annotated from the Cell (so the reporter groups
+    """Resume: if a result JSON exists AND carries the current recipe stamp,
+    load it; else launch the worker subprocess (bounded by timeout_s) and load
+    what it wrote. A cached file with a missing or different "recipe" (every
+    file written before the #938 migration off the collapsed "1x1" boundary)
+    is moved aside to <name>.pre938 and its cell re-run — mixing regimes in
+    one table is exactly the failure #747 documented. Always returns a result
+    dict with is_anchor annotated from the Cell (so the reporter groups
     correctly). A timeout is recorded as an error so the row stops."""
     path = Path(cell_result_path(results_dir, cell))
+    res = None
     if path.exists():
-        res = json.loads(path.read_text())
-    else:
+        cached = json.loads(path.read_text())
+        if result_is_current(cached):
+            res = cached
+        else:
+            stale = path.with_name(path.name + ".pre938")
+            path.rename(stale)
+            print(f"[stale] {path.name}: recipe={cached.get('recipe')!r} != "
+                  f"{SHOWCASE_RECIPE!r}; moved to {stale.name}, re-running",
+                  flush=True)
+    if res is None:
         argv, env = cell_to_argv_env(
             cell, results_dir=results_dir, python_exe=sys.executable,
             script_path=str(Path(__file__).resolve()), base_env=dict(os.environ))
@@ -411,8 +447,12 @@ def _load_or_run_cell(cell, results_dir, timeout_s):
             res = json.loads(path.read_text())
         else:
             err = f"timeout after {timeout_s}s" if timed_out else "worker produced no result file"
+            # Stamped with the current recipe: the error is not recipe-scoped,
+            # and the stamp keeps the pre-existing "a failed cell stops its
+            # row permanently across resumes" semantics.
             res = {"D": cell.D, "chi": cell.chi, "n_devices": cell.n_devices,
                    "gs_num_steps": cell.gs_num_steps, "is_anchor": cell.is_anchor,
+                   "recipe": SHOWCASE_RECIPE,
                    "oom": False, "error": err,
                    "ms_per_step": None, "peak_gb": None, "E_site": None,
                    "converged": False}
