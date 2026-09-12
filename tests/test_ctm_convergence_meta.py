@@ -303,3 +303,33 @@ def test_compute_energy_false_skips_the_measurement_and_its_warning():
         "compute_energy=False still ran the measurement CTM and warned about "
         f"it: {[str(w.message)[:80] for w in ctm_warnings]}"
     )
+
+
+@pytest.mark.parametrize("cell", ["1x1", "2site"])
+def test_su_warm_start_never_runs_the_measurement_ctm(monkeypatch, cell):
+    """#937 review P2: optimize_gs_ad's su_init warm start wants only the
+    state, so it must not pay for (or be warned about) ipeps()'s legacy
+    measurement CTM.  The bomb below makes any measurement attempt loud;
+    reverting every warm-start call site fires it on both unit cells."""
+    import tenax.algorithms.ipeps as ipeps_mod
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    def _bomb(*a, **k):
+        raise AssertionError(
+            "su_init warm start invoked the legacy measurement CTM (#937)"
+        )
+
+    monkeypatch.setattr(ipeps_mod, "ctm_2site", _bomb)
+    gate = sublattice_rotate_gate(heisenberg_gate())
+    cfg = iPEPSConfig(
+        max_bond_dim=2,
+        num_imaginary_steps=4,
+        dt=0.1,
+        unit_cell=cell,
+        su_init=True,
+        gs_num_steps=0,
+        gs_c4v=False,
+        ctm=CTMConfig(chi=4, max_iter=5),
+    )
+    out = optimize_gs_ad(gate, None, cfg)
+    assert out is not None

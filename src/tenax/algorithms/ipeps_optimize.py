@@ -805,7 +805,7 @@ def optimize_gs_ad(
         D = config.max_bond_dim
 
         if config.su_init:
-            _, (A_su, _B_su), _ = ipeps(gate, None, config)
+            _, (A_su, _B_su), _ = ipeps(gate, None, config, compute_energy=False)
             A_init = A_su
         elif cg_with_map_fn and config.cg_gates.init_fn is not None:
             key = jax.random.PRNGKey(0)
@@ -870,7 +870,7 @@ def _optimize_gs_ad_tensor_reference_c4v(
         A = _wrap_as_dense_tensor(A_init)
     elif A_init is None:
         if config.su_init:
-            _, (A_su, _), _ = ipeps(gate, None, config)
+            _, (A_su, _), _ = ipeps(gate, None, config, compute_energy=False)
             A = A_su
         else:
             key = jax.random.PRNGKey(0)
@@ -2583,7 +2583,7 @@ def _optimize_gs_ad_2site(
                 ctm=config.ctm,
                 su_independent_bond_lambdas=config.su_independent_bond_lambdas,
             )
-            _, (A_su, B_su), _ = ipeps(gate, None, su_config)
+            _, (A_su, B_su), _ = ipeps(gate, None, su_config, compute_energy=False)
             AB_init = (A_su, B_su)
         else:
             # Random complex128 initialization for 2-site AD (matches variPEPS)
