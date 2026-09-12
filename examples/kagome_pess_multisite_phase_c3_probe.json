@@ -1,12 +1,18 @@
 {
-  "D": 4,
-  "chi": 16,
-  "max_iter": 30,
-  "seed": 0,
-  "e_multisite_su": -0.21251653657021816,
-  "e_multisite_ad": -0.444764370577232,
-  "liao_asymptotic": -0.43752,
-  "delta_to_liao": -0.007244370577231984,
-  "wall_seconds_su": 5.359992193989456,
-  "wall_seconds_ad": 381.90926934964955
+ "D": 4,
+ "chi": 16,
+ "max_iter": 30,
+ "seed": 0,
+ "e_multisite_su": -0.22540003330846212,
+ "e_multisite_ad": -0.3705729607885256,
+ "liao_asymptotic": -0.43752,
+ "delta_to_liao": 0.06694703921147444,
+ "wall_seconds_su": 5.749656131956726,
+ "wall_seconds_ad": 12824.969194164034,
+ "provenance": {
+  "rerun_of": "2026-05-07 breach result (e_multisite_ad=-0.4448, delta=-0.0072)",
+  "rerun_date": "2026-09-12",
+  "main_commit": "9bf90f8",
+  "note": "Identical protocol. The variational invariant PASSES on current main: the breach resolved with the CTM fixed-point fixes landed since May (#780/#781 gauge-dependent convergence criterion, #667-cluster env-init, #702 corner convention; unattributed individually). E_ms=-0.3706 also beats the supersite AD stall (-0.343) and sits in the plan's plausible-target band [-0.42,-0.36]. AD wall grew 34x vs the breach run: the old attractor was cheap because it was degenerate. Not re-verified: the variPEPS fixed-point cross-check (-0.913 vs -0.255) -- the saved AD-optimum state was lost; regenerate before closing M2b."
+ }
 }
