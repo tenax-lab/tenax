@@ -277,3 +277,38 @@ def test_load_or_run_cell_serves_stamped_cache_without_worker(tmp_path, monkeypa
     monkeypatch.setattr(showcase.subprocess, "run", bomb)
     res = showcase._load_or_run_cell(cell, str(tmp_path), timeout_s=1)
     assert res["E_site"] == -0.66
+
+
+def _load_analyzer():
+    p = _PATH.parent / "showcase_analyze.py"
+    spec = importlib.util.spec_from_file_location("showcase_analyze", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_analyzer_load_cells_skips_pre938_results(tmp_path, capsys):
+    """showcase_analyze.load_cells bypasses _load_or_run_cell's cache check,
+    so it must enforce the same recipe predicate: unstamped (pre-#938, 1x1-era)
+    files are skipped, not analyzed (Codex round 3 on #972)."""
+    import json
+
+    analyzer = _load_analyzer()
+    stale = {"D": 2, "chi": 16, "n_devices": 1, "is_anchor": False, "E_site": -0.55}
+    fresh = {**stale, "chi": 24, "recipe": showcase.SHOWCASE_RECIPE, "E_site": -0.66}
+    (tmp_path / "D2_chi16_n1_metrics.json").write_text(json.dumps(stale))
+    (tmp_path / "D2_chi24_n1_metrics.json").write_text(json.dumps(fresh))
+
+    cells = analyzer.load_cells(results_dir=tmp_path, showcase=showcase)
+    assert [c["chi"] for c in cells] == [24], "only the stamped file loads"
+    err = capsys.readouterr().err
+    assert "D2_chi16_n1_metrics.json" in err, "the skip must be reported"
+
+
+def test_the_two_loaders_share_one_validity_predicate():
+    """The resume path and the analyzer must not drift apart on what counts as
+    reusable: both go through showcase.result_is_current."""
+    src_sweep = _PATH.read_text()
+    src_analyze = (_PATH.parent / "showcase_analyze.py").read_text()
+    assert "result_is_current(cached)" in src_sweep.split("def _load_or_run_cell")[1]
+    assert "result_is_current(res)" in src_analyze.split("def load_cells")[1]

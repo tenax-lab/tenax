@@ -39,6 +39,16 @@ REFERENCE_E = -0.669437  # Sandvik QMC, square-lattice spin-1/2 Heisenberg AFM
 SHOWCASE_RECIPE = "2x2"
 
 
+def result_is_current(res):
+    """True iff a result dict was produced under the current recipe.
+
+    THE validity predicate for showcase result JSONs — shared by the sweep's
+    resume path (`_load_or_run_cell`) and the post-hoc analyzer
+    (`showcase_analyze.load_cells`), so the two loaders cannot drift apart on
+    what counts as reusable (Codex round 3 on #972)."""
+    return res.get("recipe") == SHOWCASE_RECIPE
+
+
 @dataclass(frozen=True)
 class Cell:
     """One point of the scaling grid (one benchmark run)."""
@@ -415,7 +425,7 @@ def _load_or_run_cell(cell, results_dir, timeout_s):
     res = None
     if path.exists():
         cached = json.loads(path.read_text())
-        if cached.get("recipe") == SHOWCASE_RECIPE:
+        if result_is_current(cached):
             res = cached
         else:
             stale = path.with_name(path.name + ".pre938")
