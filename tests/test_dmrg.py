@@ -802,6 +802,35 @@ def _ed_ground_state_in_sector(
     return float(eigvals[0])
 
 
+def _z3_heisenberg_mpo(L: int):
+    """Rebuild the U(1) Heisenberg MPO with Z3-graded legs (q = 2*Sz mod 3).
+
+    ``Z_3`` is a subgroup of the U(1) the model conserves, so every
+    U(1)-conserving block is Z3-conserving and the operator is unchanged --
+    only the charge labels move.  For L=4 the only ``2*Sz`` value congruent
+    to 0 mod 3 is 0 itself, so the Z3 sector-0 ground state IS the U(1)
+    Sz=0 ground state and ``_ed_ground_state_in_sector(L, 0)`` is the
+    reference energy.
+    """
+    from tenax.core.symmetry import ZnSymmetry
+
+    sym3 = ZnSymmetry(3)
+    mpo_u1 = _build_symmetric_heisenberg_mpo(L)
+    mpo = TensorNetwork(name="Z3_Heisenberg")
+    for nid in mpo_u1.node_ids():
+        t = mpo_u1.get_tensor(nid)
+        indices = tuple(
+            TensorIndex.from_charges(sym3, idx.charges, idx.flow, label=idx.label)
+            for idx in t.indices
+        )
+        # The dense W is tiny (D_l, 2, 2, D_r); entries outside the Z3 blocks
+        # are zero because they were already zero outside the U(1) blocks.
+        mpo.add_node(nid, SymmetricTensor.from_dense(t.todense(), indices))
+    for i in range(L - 1):
+        mpo.connect(i, f"w{i}_{i + 1}", i + 1, f"w{i}_{i + 1}")
+    return mpo
+
+
 class TestTargetSector:
     """Tests for target_charge sector enforcement in symmetric DMRG."""
 
@@ -866,6 +895,56 @@ class TestTargetSector:
             f"Sz=1 DMRG energy {result.energy:.8f} deviates from "
             f"ED {e_exact:.8f} by {abs(result.energy - e_exact):.4e}"
         )
+
+    def test_zn_target_charge_representatives_are_equivalent(self, numpy_blockwise):
+        """Z3 targets 3, -3 and 0 name one sector; none may raise (#735).
+
+        ``compute_mps_sector`` goes through the symmetry, so it returns the
+        canonical representative (``3 % 3 == 0``), but ``dmrg`` compared it
+        against the raw user-supplied ``target_charge``.  A target of ``3``
+        under ``ZnSymmetry(3)`` therefore raised a phantom sector error even
+        though the state was in exactly the requested sector.  U(1) cannot
+        catch this: every integer is its own canonical representative there.
+        """
+        from tenax.core.symmetry import ZnSymmetry
+
+        L = 4
+        e_exact = _ed_ground_state_in_sector(L, Sz_target=0)
+        mpo = _z3_heisenberg_mpo(L)
+
+        energies = {}
+        for raw_target in (3, -3, 0):
+            mps = FiniteMPS.random(
+                L,
+                d=2,
+                chi=6,
+                key=jax.random.PRNGKey(7),
+                symmetric=True,
+                symmetry=ZnSymmetry(3),
+                target_charge=raw_target,
+            )
+            config = DMRGConfig(
+                max_bond_dim=8,
+                num_sweeps=10,
+                lanczos_max_iter=30,
+                convergence_tol=1e-10,
+                target_charge=raw_target,
+                numpy_blockwise=numpy_blockwise,
+            )
+            result = dmrg(mpo, mps, config)  # must not raise for any spelling
+
+            tensors = [result.mps.get_tensor(i) for i in range(L)]
+            sector = compute_mps_sector(tensors)
+            assert sector == 0, (
+                f"target_charge={raw_target}: final sector {sector}, expected 0"
+            )
+            energies[raw_target] = result.energy
+
+        for raw_target, energy in energies.items():
+            assert abs(energy - e_exact) < 1e-6, (
+                f"target_charge={raw_target}: E={energy:.8f} deviates from "
+                f"ED {e_exact:.8f} by {abs(energy - e_exact):.4e}"
+            )
 
     def test_target_charge_parity_error(self):
         """Odd L + even target_charge should raise ValueError."""
