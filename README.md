@@ -379,7 +379,9 @@ that measurement entirely:
 ```python
 _, (A, B), _ = ipeps(gate, None, config, compute_energy=False)
 # returns (None, (A, B), None): no CTM is run, no energy is computed
-``` Simple update itself was fixed in #667; if
+```
+
+Simple update itself was fixed in #667; if
 you have results from before that, note it converged to the product state and
 that *smaller* `dt` made it worse — see the changelog.
 
