@@ -215,3 +215,65 @@ def test_make_plots_writes_pngs(tmp_path):
     assert len(paths) >= 1
     for p in paths:
         assert showcase.Path(p).exists()
+
+
+def test_load_or_run_cell_evicts_pre938_results(tmp_path, monkeypatch):
+    """A cached result without the current recipe stamp (every file written
+    before the #938 migration off the collapsed 1x1 boundary) must be moved
+    aside and its cell re-run — never served into the table (#747)."""
+    import json
+
+    cell = showcase.Cell(D=2, chi=16, n_devices=1, gs_num_steps=6, is_anchor=False)
+    path = pathlib.Path(showcase.cell_result_path(str(tmp_path), cell))
+    stale = {
+        "D": 2,
+        "chi": 16,
+        "n_devices": 1,
+        "gs_num_steps": 6,
+        "is_anchor": False,
+        "E_site": -0.55,
+        "error": None,
+        "oom": False,
+    }
+    path.write_text(json.dumps(stale))  # note: no "recipe" key
+
+    def fake_worker(argv, env=None, check=False, timeout=None):
+        path.write_text(
+            json.dumps({**stale, "recipe": showcase.SHOWCASE_RECIPE, "E_site": -0.66})
+        )
+
+    monkeypatch.setattr(showcase.subprocess, "run", fake_worker)
+    res = showcase._load_or_run_cell(cell, str(tmp_path), timeout_s=1)
+    assert res["recipe"] == showcase.SHOWCASE_RECIPE
+    assert res["E_site"] == -0.66  # the fresh run, not the stale cache
+    moved = path.with_name(path.name + ".pre938")
+    assert moved.exists(), "the stale file must be preserved, moved aside"
+    assert json.loads(moved.read_text())["E_site"] == -0.55
+
+
+def test_load_or_run_cell_serves_stamped_cache_without_worker(tmp_path, monkeypatch):
+    """A result carrying the current recipe stamp is served from cache; the
+    worker must not be launched (resume stays cheap)."""
+    import json
+
+    cell = showcase.Cell(D=2, chi=16, n_devices=1, gs_num_steps=6, is_anchor=False)
+    path = pathlib.Path(showcase.cell_result_path(str(tmp_path), cell))
+    cached = {
+        "D": 2,
+        "chi": 16,
+        "n_devices": 1,
+        "gs_num_steps": 6,
+        "is_anchor": False,
+        "recipe": showcase.SHOWCASE_RECIPE,
+        "E_site": -0.66,
+        "error": None,
+        "oom": False,
+    }
+    path.write_text(json.dumps(cached))
+
+    def bomb(*a, **k):
+        raise AssertionError("worker launched despite a valid cached result")
+
+    monkeypatch.setattr(showcase.subprocess, "run", bomb)
+    res = showcase._load_or_run_cell(cell, str(tmp_path), timeout_s=1)
+    assert res["E_site"] == -0.66

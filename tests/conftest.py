@@ -243,6 +243,9 @@ _FILE_MARKERS = {
     # suite is real-symmetric, so nothing else can catch a regression.  Exact
     # D=1 product fixtures, seconds.
     "test_rdm_gate_transpose_966.py": "core",
+    # The chi-convergence example's provenance gate (#938 round 2): pre-#938
+    # outdirs must be refused, not resumed. File ops + one path-load, seconds.
+    "test_chi_convergence_provenance.py": "core",
     # The bucket guard itself (#805). Pure filesystem inspection, microseconds,
     # and it must run in the gate it protects or it protects nothing.
     "test_bucket_registry.py": "core",

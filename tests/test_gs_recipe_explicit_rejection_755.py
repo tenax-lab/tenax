@@ -204,3 +204,40 @@ def test_the_938_guard_is_scoped_to_fused():
     )
     out = optimize_gs_ad(_gate_938(), A, cfg)
     assert out is not None
+
+
+@pytest.mark.core
+def test_optimizer_refuses_1x1_on_the_c4v_reference_engine():
+    """c4v_reference reads no recipe, so fuse_virtual_legs=False does NOT make
+    1x1 supported there: without the guard the config dispatches to
+    _optimize_gs_ad_tensor_reference_c4v and '1x1' is silently ignored
+    (Codex round 2 on #972)."""
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A = jax.random.normal(jax.random.PRNGKey(2), (2, 2, 2, 2, 2))
+    cfg = _cfg_938(
+        gs_c4v=True,
+        gs_implicit_ad=True,
+        ctm=CTMConfig(
+            chi=2, max_iter=2, fuse_virtual_legs=False, ctm_ad_mode="c4v_reference"
+        ),
+    )
+    with pytest.raises(ValueError, match="#938"):
+        optimize_gs_ad(_gate_938(), A, cfg)
+
+
+@pytest.mark.core
+def test_optimizer_refuses_1x1_on_the_root_implicit_engine():
+    """Same class as the c4v_reference gap: the root-implicit engine (#715)
+    reads no recipe either, and it dispatches before the split path."""
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A = jax.random.normal(jax.random.PRNGKey(3), (2, 2, 2, 2, 2))
+    cfg = _cfg_938(
+        gs_implicit_ad=True,
+        ctm=CTMConfig(
+            chi=2, max_iter=2, fuse_virtual_legs=False, ctm_ad_mode="root_implicit"
+        ),
+    )
+    with pytest.raises(ValueError, match="#938"):
+        optimize_gs_ad(_gate_938(), A, cfg)
