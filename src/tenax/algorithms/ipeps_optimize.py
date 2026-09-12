@@ -755,24 +755,33 @@ def optimize_gs_ad(
     # The c4v_reference and root-implicit engines are the same class with a
     # different mechanism: they read no recipe at all, so '1x1' would be
     # silently ignored even with fuse_virtual_legs=False (Codex on #972).
+    # So are the non-single-site cells (Codex round 4): the 2-site split
+    # branch rejects '1x1' at loss build but its zero-step _eval_fresh path
+    # measures 2x2 without ever building the loss, and the multisite Lattice
+    # loss threads gs_recipe while its env-cache/forward evals go through
+    # ctm_converge_kwargs, which drops it. Only unit_cell='1x1' threads the
+    # recipe end to end.
     # Refuse rather than thread: threading would make nine forwards
     # genuinely non-convergent, since '1x1' reaches no fixed point (#911).
     if config.gs_recipe == "1x1" and (
         config.ctm.fuse_virtual_legs
+        or config.unit_cell != "1x1"
         or _use_reference_c4v_path(config)
         or use_root_implicit_path(config)
     ):
         raise ValueError(
-            "gs_recipe='1x1' is only supported with fuse_virtual_legs=False "
-            "and no ctm_ad_mode engine override (the single-site split-CTM "
-            "path). On the fused optimizer paths the warm-start, line-search "
-            "probe, and final evaluation run recipe='2x2' regardless (#938), "
-            "so a '1x1' run would descend a 1x1 gradient and report a 2x2 "
-            "energy; the c4v_reference and root-implicit engines read no "
-            "recipe at all. Set gs_recipe='2x2', or use "
-            "fuse_virtual_legs=False without ctm_ad_mode -- and note that "
-            "recipe='1x1' is deprecated and reaches no CTM fixed point for "
-            "D > 1 (#911)."
+            "gs_recipe='1x1' is only supported with fuse_virtual_legs=False, "
+            "unit_cell='1x1', and no ctm_ad_mode engine override (the "
+            "single-site split-CTM path). Every other configuration runs or "
+            "measures on recipe='2x2' somewhere (#938) -- fused warm-starts, "
+            "line-search probes and final evaluations, the 2-site zero-step "
+            "evaluation, and the multisite env cache all drop the recipe, "
+            "while the c4v_reference and root-implicit engines read no "
+            "recipe at all -- so a '1x1' run would mislabel a 2x2 result or "
+            "descend a gradient inconsistent with the energy it reports. Set "
+            "gs_recipe='2x2', or use the single-site split path -- and note "
+            "that recipe='1x1' is deprecated and reaches no CTM fixed point "
+            "for D > 1 (#911)."
         )
 
     # Root implicit AD (#715).  Placed ahead of the unit-cell branches because

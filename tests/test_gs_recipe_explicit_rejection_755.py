@@ -241,3 +241,25 @@ def test_optimizer_refuses_1x1_on_the_root_implicit_engine():
     )
     with pytest.raises(ValueError, match="#938"):
         optimize_gs_ad(_gate_938(), A, cfg)
+
+
+@pytest.mark.core
+def test_optimizer_refuses_1x1_on_the_2site_zero_step_path():
+    """unit_cell='2site' never threads '1x1': the split loss rejects it, but a
+    gs_num_steps=0 run skips loss construction entirely and _eval_fresh_2site
+    measures a 2x2 energy under the 1x1 label (reproduced: returned E with no
+    error before the guard covered non-single-site cells; Codex round 4 on
+    #972)."""
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A = jax.random.normal(jax.random.PRNGKey(4), (2, 2, 2, 2, 2))
+    B = jax.random.normal(jax.random.PRNGKey(5), (2, 2, 2, 2, 2))
+    cfg = _cfg_938(
+        unit_cell="2site",
+        gs_implicit_ad=True,
+        gs_num_steps=0,
+        gs_line_search=False,
+        ctm=CTMConfig(chi=2, max_iter=3, fuse_virtual_legs=False),
+    )
+    with pytest.raises(ValueError, match="#938"):
+        optimize_gs_ad(_gate_938(), (A, B), cfg)
