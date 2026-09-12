@@ -132,9 +132,13 @@ which is exactly how the invalid numbers survived to be published. Reusing it is
 only valid for re-deriving *this page's* record, e.g. the #781 timing
 correction.
 
-To reproduce the page as recorded, or to bisect against it, ask for the old
-recipe explicitly:
+The old recipe can no longer be requested on current code: since #938 the
+optimizer refuses `gs_recipe="1x1"` everywhere it is not threaded end to end,
+and the driver's `--gs-recipe` flag accepts only `2x2`. To reproduce the page
+as recorded, or to bisect against it, run the historical command from a
+pre-#938 checkout:
 
 ```bash
+git checkout <pre-#938 commit>   # e.g. the merge-base with the recorded run
 uv run python examples/heisenberg_d4_chi_scaling.py --gs-recipe 1x1 --outdir runs/d4_1x1_bisect
 ```
