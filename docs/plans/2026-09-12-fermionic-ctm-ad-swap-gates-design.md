@@ -206,8 +206,14 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   it silently converts recompiles into cache hits), `block_until_ready`
   around every timed region, and **compile time and post-warm runtime
   reported as separate numbers** — run ordering must not be able to move
-  the delta. Pin graded-path energies as oracles. Every later claim
-  is judged against these numbers; nothing is frozen from a single run.
+  the delta. Record **iteration counts** (forward sweeps, Neumann/adjoint
+  iterations) with every cell and compare fixed-count or per-iteration
+  timings alongside total wall (Codex round 7): if the fermionic and
+  bosonic controls converge in different numbers of sweeps, the raw
+  wall-time delta measures different amounts of work, not the
+  graded-branch overhead. Pin graded-path energies as oracles. Every
+  later claim is judged against these numbers; nothing is frozen from a
+  single run.
 - **Phase 1 — `swap_gate` primitive.** ~100 lines + tests (involution;
   parity bookkeeping against a hand-computed 2-leg case; a graded-transpose
   cross-check on a random small tensor). Mutation: dropping the sign must
@@ -239,7 +245,10 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   time within ~2× of the *bosonic-symmetric* CTM AD at the same block
   structure — that ratio, not an absolute number, is what option 1 buys.
 - **Phase 5 — switch the fermionic AD paths** behind a flag, gated on
-  both Phase 4 gradient checks (parity-only *and* FermionicU1). The
+  both Phase 4 gradient checks (parity-only *and* FermionicU1). The flag
+  is a named config field — **`iPEPSConfig.gs_fermion_backend`, values
+  `"graded"` (default) and `"swap_gates"`** — documented in the README
+  with a usage example (public-API contract; Codex round 7). The
   dispatch lives in the **shared CTM-energy policy**
   (`ipeps_ad_policy`), not on the `optimize_fpeps_ad` wrapper: that
   wrapper calls only the single-site `_optimize_gs_ad_tensor`, while the
@@ -248,9 +257,20 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   to `_optimize_gs_ad_2site`, and a wrapper-level flag would leave it on
   the legacy builder with the two-site FermionParity tests never
   exercising the new path (Codex round 5). Gates accordingly include a
-  two-site flag-enabled test. The graded path stays until the 26
-  FermionParity test files plus a t-V energy replication pass on the new
-  path. Deprecation is then a decision, not a side effect.
+  two-site flag-enabled test.
+
+  **Scope of the flag** (Codex round 7): the policy has two further
+  branches the new path does not cover — `fuse_virtual_legs=False`
+  routes to the split engines (`ipeps_ad_policy.py:416`), which never
+  build the bosonicized layer, and `gs_implicit_ad=False` routes to
+  `ctm_energy_explicit` (:425). `gs_fermion_backend="swap_gates"`
+  combined with either is **rejected with a clear error** at config
+  validation — the #938 rule: refuse rather than silently run the legacy
+  path under a flag that claims otherwise. Wiring split/explicit onto
+  the builder is follow-up work, not Phase 5. The graded path stays
+  until the 26 FermionParity test files plus a t-V energy replication
+  pass on the new path. Deprecation is then a decision, not a side
+  effect.
 
 ## 5. Risk register
 
@@ -279,7 +299,7 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
 | `core/tensor.py` graded machinery | untouched — legacy path keeps working; `swap_gate` is additive |
 | New code | ~1–1.5k lines: one core method, one network-builder module (incl. the graded→bosonic retyping map), adjoint wiring, `ipeps_ad_policy` validation |
 | Existing algorithm files | convergence + adjoint entry points gain the double-layer builder hook, **builder-owned env initialization**, and a **builder marker in the `_JIT_STEP_CACHE` / `_VJP_CACHE` keys** (mechanical threading, default = current builder/init — Codex rounds 2–4); `_ctm_tensor_init/_moves` special cases audit-only; the builder-vs-legacy flag dispatches in `ipeps_ad_policy` so every optimizer entry (1-site, 2-site, multisite) honors it |
-| Public API / docs | `swap_gate` documented on the exported `SymmetricTensor` class + README example (no `__all__` entry — methods are not module symbols) |
+| Public API / docs | `swap_gate` documented on the exported `SymmetricTensor` class + README example (no `__all__` entry — methods are not module symbols); `iPEPSConfig.gs_fermion_backend` field + README example in Phase 5 |
 | Tests | additive (~500 lines); all 26 FermionParity test files run unchanged as oracles |
 | PRs | ~5, one per phase, each independently green |
 
