@@ -12,6 +12,14 @@
 > D=4 SU supersite state, P1 (no CTM) is bit-identical to the 2026-05-04
 > baseline while P2 (through CTM) moved +5.45e-3.
 >
+> **Line-search confound closed (2026-09-13):** the May run predates the
+> Armijo→Hager-Zhang default flip that landed in the same commit as the
+> probe script, so its line search is unrecorded. An Armijo control on the
+> same commit/seed/warm-start (`..._c3_probe_armijo.json`) also clears the
+> floor (`E = -0.3911`, Δ +4.64e-2, converged at α=0) — both line searches
+> respect the bound on current `main`, so the breach belonged to the
+> pre-fix CTM code, not the line search.
+>
 > **Still open before M2b can be closed:** the variPEPS fixed-point
 > cross-check (Tenax -0.913 vs variPEPS -0.255 on the saved AD-optimum) was
 > never re-run — `logs/d4_ad_optimum.npz` lived in an uncommitted worktree

@@ -1,0 +1,19 @@
+{
+ "D": 4,
+ "chi": 16,
+ "max_iter": 30,
+ "seed": 0,
+ "e_multisite_su": -0.22540003330846212,
+ "e_multisite_ad": -0.39113276473204417,
+ "liao_asymptotic": -0.43752,
+ "delta_to_liao": 0.04638723526795585,
+ "wall_seconds_su": 3.2520573819056153,
+ "wall_seconds_ad": 5204.521501714829,
+ "line_search_method": "armijo",
+ "provenance": {
+  "run_date": "2026-09-13",
+  "main_commit": "9bf90f8",
+  "purpose": "Line-search confound control (Codex P2 on PR #985): the May 2026 breach run predates the Armijo->Hager-Zhang default flip that landed in the same commit (029f4fe) as the probe script, so the May line search is unrecorded and plausibly Armijo, while the 2026-09-12 rerun used the HZ default. This run pins line_search_method='armijo' on the same commit/seed/warm-start as the HZ rerun; everything else is byte-identical (the SU warmstart energy reproduces the HZ run's -0.22540003330846212 exactly).",
+  "verdict": "Floor HOLDS under Armijo: E=-0.39113 vs floor -0.43752 (delta +4.64e-2); optimizer converged (line search alpha=0 at step 22), not budget-truncated. Both line searches clear the floor on current main while the May run breached it, so the breach belonged to the pre-fix CTM code, not the line-search choice. Armijo's deeper-than-HZ energy (-0.3911 vs -0.3706, same 30-step budget) is an optimizer-budget effect within the physical band, not a discrepancy."
+ }
+}
