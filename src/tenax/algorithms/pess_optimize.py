@@ -24,7 +24,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+from tenax.algorithms._ctm_energy_ad import (
+    ctm_energy_implicit,
+    invalidate_implicit_ad_warm_start,
+)
 from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms._pess_multisite_energy import (
@@ -352,6 +355,9 @@ def optimize_pess_ad(
     Returns:
         ``(optimized_state, final_energy_per_site)``.
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     import optax
 
     loss_fn_state = build_pess_loss(cg_gates, config)
@@ -608,6 +614,9 @@ def optimize_pess_3site_multisite_ad(
     Returns:
         ``(optimized_state, final_energy_per_site)``.
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     import optax
 
     # Promote Tensor-valued gates to ndarray once at the optimizer entry

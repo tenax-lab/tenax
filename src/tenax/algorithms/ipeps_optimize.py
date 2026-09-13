@@ -1105,6 +1105,9 @@ def _optimize_gs_ad_tensor(
             ``optimize_gs_ad`` forwards a tuple ``A_init`` (or its own
             init_fn output) here so the user's starting state is honored.
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     config = _normalize_stall_recovery(config, unit_cell="1x1")
     _warn_implicit_ad_variational_caveat(config, path="1-site Tensor-protocol")
     import optax
@@ -2676,6 +2679,9 @@ def _optimize_gs_ad_tensor_2site(
         models, prefer ``gs_c4v=True`` or 1-site optimization with
         ``sublattice_rotate_gate()`` + ``gs_c4v=True``.
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     config = _normalize_stall_recovery(config, unit_cell="2site")
     use_c4v = config.gs_c4v
     if not use_c4v:
@@ -4311,6 +4317,9 @@ def _optimize_gs_ad_multisite(
     Returns ``(site_tensors_dict, envs_dict, E_gs)`` where the dicts are
     keyed by site name (e.g. ``"u"``, ``"v"``, ``"w"``).
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     config = _normalize_stall_recovery(config, unit_cell="multisite")
     _warn_implicit_ad_variational_caveat(config, path="Multisite Lattice")
 

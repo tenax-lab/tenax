@@ -854,6 +854,19 @@ def invalidate_implicit_ad_warm_start() -> int:
     parameter-jump case where shapes still line up but the iterate has
     moved far enough that the cached seed costs more than it saves.
 
+    Since #973 this is also called at the entry of every optimizer run
+    whose gradients go through the cached implicit backward (the three
+    ``_optimize_gs_ad_*`` implementations and both PESS optimizers).
+    ``_VJP_CACHE`` is module-level, so without entry invalidation a run's
+    first adjoint solve starts from the *previous* run's seed: back-to-back
+    ``optimize_gs_ad`` calls with bit-identical configs returned energies
+    differing at ~1e-4 after three steps, breaking every in-process A/B
+    comparison.  Entry invalidation makes runs independent; within-run
+    seed reuse is untouched because each run passes its entry exactly
+    once, before its first gradient.  Only the λ seed is cleared -- the
+    compiled VJP functions stay cached, so the cost is one cold adjoint
+    solve per run, not a recompile.
+
     Returns
     -------
     int
