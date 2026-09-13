@@ -130,11 +130,29 @@ pattern — native vs shim to 1e-10).
 ### 3.3 Forward CTM
 
 Run the existing symmetric 2x2 tensor-CTM with the §3.2 builder threaded
-in as the double-layer hook. The sweep/move/projector machinery itself is
-unchanged, but the convergence and adjoint entry points must grow the
-hook parameter (or dispatch on a marker the builder attaches) — this is
-wiring in existing files, not configuration, and the blast-radius table
-counts it.
+in as the double-layer hook. The convergence and adjoint entry points
+must grow the hook parameter (or dispatch on a marker the builder
+attaches) — this is wiring in existing files, not configuration, and the
+blast-radius table counts it.
+
+**Move-level statistics** (Codex round 8 P1 — the sweep machinery is
+*not* automatically sign-complete for this path): the graded fused edge
+absorption carries Koszul signs from grouping the χ⊕D² edge legs, and
+the unfused path accumulates a *different* sign on the renormalized edge
+(`_env_is_fermionic` and `_apply_proj_unfused` docstrings,
+`_ctm_tensor_moves.py:121–160`; corners are unaffected). Those signs
+involve the *environment* legs, so they cannot be absorbed into the
+fixed site double layer — §3.2 alone is not the whole statistics story.
+They are, however, still **fixed-diagram, per-block parity signs**: the
+move topology is static per move type, and parity remains readable after
+retyping (the Z₂ charge is retained), so whatever edge statistics the
+graded fused move encodes reappears as swap-gate insertions on the
+edge-absorption diagram — the same §3.1 primitive, applied inside a
+move variant selected by the builder marker. Whether the insertions are
+needed at all, and where, is decided **empirically against the graded
+oracle in Phase 3**, on states with odd-parity boundary sectors
+populated — not asserted here. This is the design's highest-risk seam
+after the §3.2 retyping map (risk 4).
 
 The hook must also own **environment initialization** (Codex round 3 P1):
 on the default `env_init is None` path the loop builds every env from the
@@ -230,11 +248,15 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
 - **Phase 3 — forward CTM on the bosonicized layer.** Thread the builder
   hook through the convergence entry points, including env initialization
   from the bosonicized indices, the graded-`env_init` rejection, and the
-  builder marker in `_JIT_STEP_CACHE` / `_VJP_CACHE` keys (§3.3); fixed
-  point + energy vs the graded forward on the same states; an in-process
-  legacy↔swap-gated alternation test that fails on cache conflation;
-  audit (not delete) the FermionParity special cases the new path makes
-  dead.
+  builder marker in `_JIT_STEP_CACHE` / `_VJP_CACHE` keys (§3.3); settle
+  the **move-level swap insertions** against the graded oracle, on
+  fixtures verified to populate odd-parity boundary sectors (a
+  vacuous-regime assertion in the test, per the #884 lesson — an
+  even-sector-only fixture would pass with the signs entirely wrong);
+  fixed point + energy vs the graded forward on the same states; an
+  in-process legacy↔swap-gated alternation test that fails on cache
+  conflation; audit (not delete) the FermionParity special cases the new
+  path makes dead.
 - **Phase 4 — adjoint.** First task: verify phase-gauge availability on the
   block-sparse forward; choose in-iteration phase gauge or post-hoc G∘f
   accordingly. Gates: gradient vs FD at D=2 parity-only; **a directional
@@ -256,8 +278,14 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   implicated in #565 — routes through `optimize_gs_ad(unit_cell="2site")`
   to `_optimize_gs_ad_2site`, and a wrapper-level flag would leave it on
   the legacy builder with the two-site FermionParity tests never
-  exercising the new path (Codex round 5). Gates accordingly include a
-  two-site flag-enabled test.
+  exercising the new path (Codex round 5). And because `"graded"` is the
+  default, *unchanged* test configs keep running the legacy path — so
+  the deprecation gate is not "the 26 files pass as they are" but
+  **every backend-eligible FermionParity test parameterized over
+  `gs_fermion_backend`** (Codex round 8), with the graded run staying
+  the oracle and the `"swap_gates"` run the candidate; tests for
+  configurations the flag rejects (split/explicit) assert the rejection
+  instead.
 
   **Scope of the flag** (Codex round 7): the policy has two further
   branches the new path does not cover — `fuse_virtual_legs=False`
@@ -268,9 +296,8 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   validation — the #938 rule: refuse rather than silently run the legacy
   path under a flag that claims otherwise. Wiring split/explicit onto
   the builder is follow-up work, not Phase 5. The graded path stays
-  until the 26 FermionParity test files plus a t-V energy replication
-  pass on the new path. Deprecation is then a decision, not a side
-  effect.
+  until the parameterized suite plus a t-V energy replication pass on
+  the new path. Deprecation is then a decision, not a side effect.
 
 ## 5. Risk register
 
@@ -291,6 +318,14 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
    (#566's recommendation; `core/stacked_tensor.py` is the seed). That is a
    separate track — this design's success gate is parity with
    bosonic-symmetric, deliberately not an absolute compile time.
+4. **Move-level edge statistics** (Phase 3, §3.3): the graded fused edge
+   absorption encodes Koszul signs on the χ⊕D² grouping that the site
+   double layer cannot carry; the swap-gate path may need sign
+   insertions in the edge-absorption diagram, and getting them wrong is
+   invisible on even-sector fixtures. Guard: the Phase 3 graded-oracle
+   gate runs on states asserted to populate odd-parity boundary
+   sectors; if no placement of fixed-diagram insertions reproduces the
+   oracle, the premise fails and the reform stops at Phase 3.
 
 ## 6. Blast radius
 
@@ -298,9 +333,9 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
 |---|---|
 | `core/tensor.py` graded machinery | untouched — legacy path keeps working; `swap_gate` is additive |
 | New code | ~1–1.5k lines: one core method, one network-builder module (incl. the graded→bosonic retyping map), adjoint wiring, `ipeps_ad_policy` validation |
-| Existing algorithm files | convergence + adjoint entry points gain the double-layer builder hook, **builder-owned env initialization**, and a **builder marker in the `_JIT_STEP_CACHE` / `_VJP_CACHE` keys** (mechanical threading, default = current builder/init — Codex rounds 2–4); `_ctm_tensor_init/_moves` special cases audit-only; the builder-vs-legacy flag dispatches in `ipeps_ad_policy` so every optimizer entry (1-site, 2-site, multisite) honors it |
+| Existing algorithm files | convergence + adjoint entry points gain the double-layer builder hook, **builder-owned env initialization**, and a **builder marker in the `_JIT_STEP_CACHE` / `_VJP_CACHE` keys** (mechanical threading, default = current builder/init — Codex rounds 2–4); `_ctm_tensor_init/_moves` special cases audit-only, but the edge absorption gains a swap-insertion variant behind the builder marker if the Phase 3 oracle demands it (§3.3, risk 4); the builder-vs-legacy flag dispatches in `ipeps_ad_policy` so every optimizer entry (1-site, 2-site, multisite) honors it |
 | Public API / docs | `swap_gate` documented on the exported `SymmetricTensor` class + README example (no `__all__` entry — methods are not module symbols); `iPEPSConfig.gs_fermion_backend` field + README example in Phase 5 |
-| Tests | additive (~500 lines); all 26 FermionParity test files run unchanged as oracles |
+| Tests | additive (~500 lines) through Phase 4; in Phase 5 every backend-eligible FermionParity test is parameterized over `gs_fermion_backend` (graded run = oracle, swap_gates run = candidate) — "unchanged files" would silently keep testing only the legacy default (Codex round 8) |
 | PRs | ~5, one per phase, each independently green |
 
 ## 7. Non-goals
