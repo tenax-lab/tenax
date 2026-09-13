@@ -231,10 +231,19 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   gate in this plan exercises forward values only (Codex P2); and compile
   time within ~2× of the *bosonic-symmetric* CTM AD at the same block
   structure — that ratio, not an absolute number, is what option 1 buys.
-- **Phase 5 — switch `optimize_fpeps_ad`** behind a flag, gated on both
-  Phase 4 gradient checks (parity-only *and* FermionicU1). The graded path
-  stays until the 26 FermionParity test files plus a t-V energy replication
-  pass on the new path. Deprecation is then a decision, not a side effect.
+- **Phase 5 — switch the fermionic AD paths** behind a flag, gated on
+  both Phase 4 gradient checks (parity-only *and* FermionicU1). The
+  dispatch lives in the **shared CTM-energy policy**
+  (`ipeps_ad_policy`), not on the `optimize_fpeps_ad` wrapper: that
+  wrapper calls only the single-site `_optimize_gs_ad_tensor`, while the
+  primary two-site fermionic workload — the finite-V t-V checkerboard
+  implicated in #565 — routes through `optimize_gs_ad(unit_cell="2site")`
+  to `_optimize_gs_ad_2site`, and a wrapper-level flag would leave it on
+  the legacy builder with the two-site FermionParity tests never
+  exercising the new path (Codex round 5). Gates accordingly include a
+  two-site flag-enabled test. The graded path stays until the 26
+  FermionParity test files plus a t-V energy replication pass on the new
+  path. Deprecation is then a decision, not a side effect.
 
 ## 5. Risk register
 
@@ -262,7 +271,7 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
 |---|---|
 | `core/tensor.py` graded machinery | untouched — legacy path keeps working; `swap_gate` is additive |
 | New code | ~1–1.5k lines: one core method, one network-builder module (incl. the graded→bosonic retyping map), adjoint wiring, `ipeps_ad_policy` validation |
-| Existing algorithm files | convergence + adjoint entry points gain the double-layer builder hook, **builder-owned env initialization**, and a **builder marker in the `_JIT_STEP_CACHE` / `_VJP_CACHE` keys** (mechanical threading, default = current builder/init — Codex rounds 2–4); `_ctm_tensor_init/_moves` special cases audit-only; `optimize_fpeps_ad` gains a dispatch flag |
+| Existing algorithm files | convergence + adjoint entry points gain the double-layer builder hook, **builder-owned env initialization**, and a **builder marker in the `_JIT_STEP_CACHE` / `_VJP_CACHE` keys** (mechanical threading, default = current builder/init — Codex rounds 2–4); `_ctm_tensor_init/_moves` special cases audit-only; the builder-vs-legacy flag dispatches in `ipeps_ad_policy` so every optimizer entry (1-site, 2-site, multisite) honors it |
 | Public API / docs | `swap_gate` documented on the exported `SymmetricTensor` class + README example (no `__all__` entry — methods are not module symbols) |
 | Tests | additive (~500 lines); all 26 FermionParity test files run unchanged as oracles |
 | PRs | ~5, one per phase, each independently green |
