@@ -134,10 +134,17 @@ builds:
   unreachable by construction, and the forward traces the same ops as
   bosonic-symmetric.
 - **RDM / gate insertion**: the 2-site RDMs and the Hamiltonian-gate
-  insertion have finitely many crossings plus the parity string between the
-  two physical sites (for hopping terms); both are diagram-determined and
+  insertion have finitely many crossings, all diagram-determined and
   absorbed the same way, into the standard 2-site RDM contraction
-  (`_ctm_tensor_energy` helpers).
+  (`_ctm_tensor_energy` helpers). **No parity string enters the
+  nearest-neighbor energy path** (Codex round 12): adjacent sites have
+  no intermediate sites to string across —
+  `test_fermionic.py::test_jw_insertion_nn_hopping` pins exactly this,
+  and `spinless_fermion_gate` already encodes the local hopping matrix
+  elements, so a mandated string would double-count statistics and
+  break the graded-oracle match. Jordan–Wigner strings appear only for
+  genuinely nonlocal operators (NNN and beyond), which are outside the
+  NN energy path this design ships.
 
 The graded formalism is **not removed**: it keeps serving the existing SU /
 energy paths and is the oracle this design validates against (the #562
