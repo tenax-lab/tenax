@@ -23,9 +23,14 @@
 > protocol *and* pre-fix code (`..._c3_loose_ctm_rerun.json`); (b) an
 > **Armijo control** under the tight protocol also clears the floor
 > (`E = -0.3911`, Δ +4.64e-2; ended by line-search rejection at step
-> 22/30, not a certified convergence) (`..._c3_probe_armijo.json`). Under
-> no protocol/line-search combination does current `main` breach the
-> floor; the fix set remains unbisected.
+> 22/30, not a certified convergence) (`..._c3_probe_armijo.json`); (c)
+> the remaining matrix cell, **loose CTM + Armijo** — the most plausible
+> exact May configuration — also clears (`E = -0.3776`, tight re-eval
+> `-0.3764`) (`..._c3_loose_armijo_rerun.json`). The full 2×2
+> protocol/line-search matrix passes on current `main` (tight-HZ
+> `-0.3706`, tight-Armijo `-0.3911`, loose-HZ `-0.3734`, loose-Armijo
+> `-0.3776`) while May code breached under the loose protocol; the fix
+> set remains unbisected.
 >
 > **Still open before M2b can be closed:** the variPEPS fixed-point
 > cross-check (Tenax -0.913 vs variPEPS -0.255 on the saved AD-optimum) was
