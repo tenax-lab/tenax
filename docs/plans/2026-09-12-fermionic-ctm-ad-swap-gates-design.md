@@ -275,9 +275,15 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   actual signature, kept aligned with the tests; no `__all__` entry, and
   no second top-level function invented just to have one.
 - **Phase 2 — network builder.** Double layer + RDM/gate insertion with
-  swaps absorbed. Gate: end-to-end energy equals the graded forward to
-  ~1e-10 on Phase 0's oracle states. This phase owns the highest risk
-  (see §5) and its oracle test runs per commit.
+  swaps absorbed. Gate: a **builder-level oracle** — the retyped layer
+  and RDM network reproduce the graded formalism on small
+  exactly-contractible cases (brute-force / small-χ contraction), to
+  ~1e-10. The end-to-end energy-vs-graded-forward gate lives in
+  **Phase 3**, not here: Phase 2 has no compatible bosonic environment
+  yet (env initialization is Phase 3 work), and Phase 0's oracle
+  environments are graded — mixing them with the retyped network is
+  exactly the metadata clash §3.3 rejects (Codex round 13). This phase
+  owns the highest risk (see §5) and its oracle test runs per commit.
 - **Phase 3 — forward CTM on the bosonicized layer.** Thread the builder
   hook through the convergence entry points, including env initialization
   from the bosonicized indices, the graded-`env_init` rejection, and the
@@ -305,7 +311,15 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   `"graded"` (default) and `"swap_gates"`** — documented in the README
   with a usage example (public-API contract; Codex round 7). The
   dispatch lives in the **shared CTM-energy policy**
-  (`ipeps_ad_policy`), not on the `optimize_fpeps_ad` wrapper: that
+  (`ipeps_ad_policy`) **and is threaded through every optimizer-side
+  forward CTM call** — the one-/two-/multisite `_update_env_cache`,
+  line-search, and `_eval_fresh` paths call `python_loop_ctm_converge`
+  directly via `ctm_converge_kwargs`, which sees only `CTMConfig` and
+  not the flag (Codex round 13). This is the #938 mechanism verbatim:
+  that issue was nine optimizer forwards silently dropping `gs_recipe`
+  at exactly this seam, and it took five review rounds to close — the
+  backend field must not re-open it. `make_ctm_energy_fn` alone is not
+  the dispatch surface. Not on the `optimize_fpeps_ad` wrapper either: that
   wrapper calls only the single-site `_optimize_gs_ad_tensor`, while the
   primary two-site fermionic workload — the finite-V t-V checkerboard
   implicated in #565 — routes through `optimize_gs_ad(unit_cell="2site")`
