@@ -14,11 +14,16 @@ planar contraction applies **no Koszul signs at all**
 #566 attributes the large traced graph to symmetry-generic per-sector
 packing shared with the *bosonic* symmetric path. What keeps the fermionic
 graph strictly bigger than the bosonic-symmetric one is **metadata-driven
-dispatch onto graded branches**: per-block transpose signs
-(`core/tensor.py:1166` via `_koszul_sign`, :104), bar/super-algebra signs
-(:1105), and the CTM moves' Koszul-correct *fused* paths selected by
-`_env_is_fermionic` (`_ctm_tensor_moves.py:494/:588/:664` — the cheaper
-unfused #605 path is bosonic-only by design). The signs themselves are
+dispatch onto graded branches**, and the executing delta is exactly two
+mechanisms: per-block transpose signs (`core/tensor.py:1166` via
+`_koszul_sign`, :104) and the CTM moves' Koszul-correct *fused* paths
+selected by `_env_is_fermionic` (`_ctm_tensor_moves.py:494/:588/:664` —
+the cheaper unfused #605 path is bosonic-only by design). Nothing else
+contributes: the super-algebra `dagger()` (:1100) carries twist signs but
+is unused on the CTM/iPEPS path (HOTRG only), and `bar()` (:1134) is a
+plain conjugate-plus-flow-flip with no per-block phase (Codex round 2 —
+an earlier draft miscounted bar/super signs in this delta). The signs
+themselves are
 trace-time constants, but the branches they live on trace per-block
 operations the bosonic path never sees, and AD re-traces all of it in the
 VJP. Measured consequences:
@@ -85,7 +90,19 @@ charge arithmetic stays behind the symmetry object, per #734). Properties:
 ### 3.2 Swap-gated fermionic network builder
 
 A new module builds the objects the CTM consumes, resolving the *fixed*
-square-lattice diagram's crossings once, at construction:
+square-lattice diagram's crossings. "At build time" means **per gradient
+evaluation, inside the traced loss** — not once outside the optimizer.
+The CTM step rebuilds the double layer from the site tensor on every
+sweep (`_make_jit_ctm_step` calls `_build_double_layer_tensor(A)`
+unconditionally, `_ctm_python_loop.py:135`, and ~15 modules share the
+pattern), and that is not incidental: dE/dA *needs* the A→layer map in
+the trace. So the deliverable is a **differentiable builder function**
+(graded A → swap-absorbed, retyped bosonic layer) that the fermionic
+path threads into the CTM step and energy helpers as a double-layer
+builder hook, replacing `_build_double_layer_tensor` there (Codex round
+2 P1 — an earlier draft said "prebuilt, configuration only", which the
+existing interfaces cannot consume). Retyping is metadata-only, so the
+builder stays differentiable w.r.t. the block data. What it builds:
 
 - **Double layer**: bra-ket contraction of A with its conjugate has a known,
   layout-determined crossing pattern; apply `swap_gate` at each crossing
@@ -112,12 +129,16 @@ pattern — native vs shim to 1e-10).
 
 ### 3.3 Forward CTM
 
-Run the existing symmetric 2x2 tensor-CTM on the swap-absorbed double layer.
-This should be configuration, not new code. The FermionParity special cases
-in `_ctm_tensor_init` / `_ctm_tensor_moves` are dead on this path **by
-type**: the retyped envs make `_env_is_fermionic` False, so the moves take
-the same unfused #605 path the bosonic tensors take. They stay for the
-legacy path and get an audit note, not a deletion.
+Run the existing symmetric 2x2 tensor-CTM with the §3.2 builder threaded
+in as the double-layer hook. The sweep/move/projector machinery itself is
+unchanged, but the convergence and adjoint entry points must grow the
+hook parameter (or dispatch on a marker the builder attaches) — this is
+wiring in existing files, not configuration, and the blast-radius table
+counts it. Once the hook is in, the FermionParity special cases in
+`_ctm_tensor_init` / `_ctm_tensor_moves` are dead on this path **by
+type**: the retyped layers make `_env_is_fermionic` False, so the moves
+take the same unfused #605 path the bosonic tensors take. They stay for
+the legacy path and get an audit note, not a deletion.
 
 ### 3.4 Fixed-point adjoint
 
@@ -155,12 +176,16 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
 - **Phase 1 — `swap_gate` primitive.** ~100 lines + tests (involution;
   parity bookkeeping against a hand-computed 2-leg case; a graded-transpose
   cross-check on a random small tensor). Mutation: dropping the sign must
-  fail the cross-check.
+  fail the cross-check. Public-API contract: export in
+  `src/tenax/__init__.py` `__all__` and add a README example using the
+  actual signature, kept aligned with the tests (repo rule; Codex round
+  2).
 - **Phase 2 — network builder.** Double layer + RDM/gate insertion with
   swaps absorbed. Gate: end-to-end energy equals the graded forward to
   ~1e-10 on Phase 0's oracle states. This phase owns the highest risk
   (see §5) and its oracle test runs per commit.
-- **Phase 3 — forward CTM on the bosonicized layer.** Fixed point + energy
+- **Phase 3 — forward CTM on the bosonicized layer.** Thread the builder
+  hook through the convergence entry points (§3.3); fixed point + energy
   vs the graded forward on the same states; audit (not delete) the
   FermionParity special cases the new path makes dead.
 - **Phase 4 — adjoint.** First task: verify phase-gauge availability on the
@@ -203,7 +228,8 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
 |---|---|
 | `core/tensor.py` graded machinery | untouched — legacy path keeps working; `swap_gate` is additive |
 | New code | ~1–1.5k lines: one core method, one network-builder module (incl. the graded→bosonic retyping map), adjoint wiring, `ipeps_ad_policy` validation |
-| Existing algorithm files | audit-only (`_ctm_tensor_init/_moves` special cases); `optimize_fpeps_ad` gains a dispatch flag |
+| Existing algorithm files | convergence + adjoint entry points gain the double-layer builder hook (mechanical parameter threading, default = current builder — Codex round 2 P1); `_ctm_tensor_init/_moves` special cases audit-only; `optimize_fpeps_ad` gains a dispatch flag |
+| Public API / docs | `swap_gate` exported in `__all__` + README example (repo rule) |
 | Tests | additive (~500 lines); all 26 FermionParity test files run unchanged as oracles |
 | PRs | ~5, one per phase, each independently green |
 
