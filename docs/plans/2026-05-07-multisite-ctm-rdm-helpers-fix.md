@@ -12,13 +12,20 @@
 > D=4 SU supersite state, P1 (no CTM) is bit-identical to the 2026-05-04
 > baseline while P2 (through CTM) moved +5.45e-3.
 >
-> **Line-search confound closed (2026-09-13):** the May run predates the
-> Armijo→Hager-Zhang default flip that landed in the same commit as the
-> probe script, so its line search is unrecorded. An Armijo control on the
-> same commit/seed/warm-start (`..._c3_probe_armijo.json`) also clears the
-> floor (`E = -0.3911`, Δ +4.64e-2, converged at α=0) — both line searches
-> respect the bound on current `main`, so the breach belonged to the
-> pre-fix CTM code, not the line search.
+> **Protocol confounds closed (2026-09-13, Codex rounds 1–2 on #985):**
+> the May breach ran the **loose** inner CTM (`max_iter=30, conv_tol=1e-7`
+> — the tight-ctm probe reproduces the exact May number under those
+> settings), and its line search predates the Armijo→HZ default flip. Two
+> controls on current `main` close both: (a) the **same loose protocol**
+> gives `E = -0.3734`, no breach, and the loose SU readout moved bit-level
+> across revisions (`-0.21252` → `-0.22540`) — the post-May CTM fixes
+> changed loose-settings behavior, so the breach required *both* the loose
+> protocol *and* pre-fix code (`..._c3_loose_ctm_rerun.json`); (b) an
+> **Armijo control** under the tight protocol also clears the floor
+> (`E = -0.3911`, Δ +4.64e-2; ended by line-search rejection at step
+> 22/30, not a certified convergence) (`..._c3_probe_armijo.json`). Under
+> no protocol/line-search combination does current `main` breach the
+> floor; the fix set remains unbisected.
 >
 > **Still open before M2b can be closed:** the variPEPS fixed-point
 > cross-check (Tenax -0.913 vs variPEPS -0.255 on the saved AD-optimum) was
