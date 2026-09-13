@@ -77,10 +77,19 @@ for it is stronger in JAX than in their stack.
 
 ### 3.1 Swap-gate primitive
 
-`SymmetricTensor.swap_gate(axes=(i, j))`: multiply each block by
-`(-1)^{p_i(block) * p_j(block)}` where `p` is the Z2 parity grading of the
-block's charge on that leg (`BaseSymmetry.parity`, `symmetry.py:192` — all
-charge arithmetic stays behind the symmetry object, per #734). Properties:
+`SymmetricTensor.swap_gate(axes=(i, j), grading=None)`: multiply each
+block by `(-1)^{p_i(block) * p_j(block)}` where `p` is the Z2 parity
+grading of the block's charge on that leg. On graded tensors the default
+grading comes from `BaseSymmetry.parity` (`symmetry.py:192` — all charge
+arithmetic stays behind the symmetry object, per #734). The explicit
+`grading` override (per-leg charge→parity maps) exists because the
+retyped-bosonic pipeline **cannot** read parity through the symmetry
+object: bosonic `parity()` returns all-even *by definition*
+(`symmetry.py:203`), so a post-retyping insertion relying on it would be
+identically +1 exactly on the odd sectors that need the sign (Codex
+round 9). Every insertion made after retyping consumes the grading map
+the builder captured from the fermionic symmetry at retyping time —
+never `symmetry.parity` on the retyped index. Properties:
 
 - Metadata-driven ±1 per block, computed on host, applied as one fused
   multiply — a *constant* under tracing, so its VJP is the same multiply.
@@ -102,7 +111,14 @@ path threads into the CTM step and energy helpers as a double-layer
 builder hook, replacing `_build_double_layer_tensor` there (Codex round
 2 P1 — an earlier draft said "prebuilt, configuration only", which the
 existing interfaces cannot consume). Retyping is metadata-only, so the
-builder stays differentiable w.r.t. the block data. What it builds:
+builder stays differentiable w.r.t. the block data. The retyping map
+**retains an explicit per-leg grading map** (charge→parity, captured
+from the fermionic symmetry before the type is dropped) as builder
+metadata: the retyped indices report all-even parity by definition, so
+this map is the only place the fermionic grading survives, and every
+downstream swap insertion consumes it via §3.1's `grading` parameter,
+never `symmetry.parity` on a retyped index (Codex round 9). What it
+builds:
 
 - **Double layer**: bra-ket contraction of A with its conjugate has a known,
   layout-determined crossing pattern; apply `swap_gate` at each crossing
@@ -135,24 +151,34 @@ must grow the hook parameter (or dispatch on a marker the builder
 attaches) — this is wiring in existing files, not configuration, and the
 blast-radius table counts it.
 
-**Move-level statistics** (Codex round 8 P1 — the sweep machinery is
-*not* automatically sign-complete for this path): the graded fused edge
-absorption carries Koszul signs from grouping the χ⊕D² edge legs, and
-the unfused path accumulates a *different* sign on the renormalized edge
-(`_env_is_fermionic` and `_apply_proj_unfused` docstrings,
-`_ctm_tensor_moves.py:121–160`; corners are unaffected). Those signs
-involve the *environment* legs, so they cannot be absorbed into the
-fixed site double layer — §3.2 alone is not the whole statistics story.
-They are, however, still **fixed-diagram, per-block parity signs**: the
-move topology is static per move type, and parity remains readable after
-retyping (the Z₂ charge is retained), so whatever edge statistics the
-graded fused move encodes reappears as swap-gate insertions on the
-edge-absorption diagram — the same §3.1 primitive, applied inside a
-move variant selected by the builder marker. Whether the insertions are
-needed at all, and where, is decided **empirically against the graded
-oracle in Phase 3**, on states with odd-parity boundary sectors
-populated — not asserted here. This is the design's highest-risk seam
-after the §3.2 retyping map (risk 4).
+**In-sweep statistics** (Codex rounds 8–9 — the sweep machinery is
+*not* automatically sign-complete for this path). The graded formalism
+injects signs at two places *inside* the sweep, and neither can be
+absorbed into the fixed site double layer:
+
+- **Edge absorption**: the graded fused path carries Koszul signs from
+  grouping the χ⊕D² edge legs, and the unfused path accumulates a
+  *different* sign on the renormalized edge (`_env_is_fermionic` and
+  `_apply_proj_unfused` docstrings, `_ctm_tensor_moves.py:121–160`;
+  corners are unaffected). These involve the *environment* legs.
+- **Projector decompositions**: `tenax.linalg` applies `_koszul_sign`
+  whenever a decomposition's left/right grouping is a nonidentity
+  permutation (`linalg.py:384/:848/:1126/:1373`), and
+  `_compute_2x2_projector_symmetric` runs three such SVDs per
+  projector. Retyping silences these signs too — the swap-gated sweep
+  can diverge from the graded oracle *before* absorption even begins.
+
+Both remain **fixed-diagram, per-block parity signs**: the move and
+decomposition topologies are static per call site, and the grading
+survives in the builder's explicit grading map (§3.2) — so whatever
+statistics the graded sweep encodes reappears as §3.1 insertions (with
+explicit `grading`) in a sweep variant selected by the builder marker.
+The design's hypothesis — that a globally consistent, build-time
+assignment of such insertions exists for this planar network, per the
+Corboz swap-gate construction — is exactly what the **Phase 3 graded
+oracle decides, on states with odd-parity boundary sectors populated**;
+it is not asserted here. This is the design's highest-risk seam after
+the §3.2 retyping map (risk 4).
 
 The hook must also own **environment initialization** (Codex round 3 P1):
 on the default `env_init is None` path the loop builds every env from the
@@ -291,8 +317,13 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   branches the new path does not cover — `fuse_virtual_legs=False`
   routes to the split engines (`ipeps_ad_policy.py:416`), which never
   build the bosonicized layer, and `gs_implicit_ad=False` routes to
-  `ctm_energy_explicit` (:425). `gs_fermion_backend="swap_gates"`
-  combined with either is **rejected with a clear error** at config
+  `ctm_energy_explicit` (:425). A third bypass sits *above* the
+  policy: the root-implicit engines dispatch from `optimize_gs_ad`
+  before `make_ctm_energy_fn` ever runs (`ipeps_optimize.py:773`), so a
+  policy-level flag cannot reach them (Codex round 9).
+  `gs_fermion_backend="swap_gates"` combined with any of the three —
+  `fuse_virtual_legs=False`, `gs_implicit_ad=False`, or a root-implicit
+  `ctm_ad_mode` — is **rejected with a clear error** at config
   validation — the #938 rule: refuse rather than silently run the legacy
   path under a flag that claims otherwise. Wiring split/explicit onto
   the builder is follow-up work, not Phase 5. The graded path stays
@@ -318,14 +349,16 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
    (#566's recommendation; `core/stacked_tensor.py` is the seed). That is a
    separate track — this design's success gate is parity with
    bosonic-symmetric, deliberately not an absolute compile time.
-4. **Move-level edge statistics** (Phase 3, §3.3): the graded fused edge
-   absorption encodes Koszul signs on the χ⊕D² grouping that the site
-   double layer cannot carry; the swap-gate path may need sign
-   insertions in the edge-absorption diagram, and getting them wrong is
-   invisible on even-sector fixtures. Guard: the Phase 3 graded-oracle
-   gate runs on states asserted to populate odd-parity boundary
-   sectors; if no placement of fixed-diagram insertions reproduces the
-   oracle, the premise fails and the reform stops at Phase 3.
+4. **In-sweep statistics** (Phase 3, §3.3): the graded sweep injects
+   signs the site double layer cannot carry — the fused edge
+   absorption's χ⊕D² grouping signs AND the `_koszul_sign` reordering
+   signs inside the projector SVDs (`linalg.py:384/:848/:1126/:1373`);
+   getting either wrong is invisible on even-sector fixtures. Guard:
+   the Phase 3 graded-oracle gate runs on states asserted to populate
+   odd-parity boundary sectors and covers the full sweep including
+   projector computation; if no fixed-diagram placement of insertions
+   reproduces the oracle, the premise fails and the reform stops at
+   Phase 3.
 
 ## 6. Blast radius
 
