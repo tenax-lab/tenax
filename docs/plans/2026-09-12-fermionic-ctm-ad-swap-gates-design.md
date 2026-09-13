@@ -316,7 +316,12 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   only `(max_bond_dim, unit_cell, gs_c4v, gs_implicit_ad)`, so a
   backend flip across resume would be a *soft* diff and the restored
   `env_cache` would feed graded environments to the bosonic path or
-  vice versa; a resume test covers both flip directions.
+  vice versa; a resume test covers both flip directions. Checkpoints
+  written before the field existed carry no saved value, and
+  `validate_config` compares the key union via `.get()` — so a missing
+  saved value is **normalized to `"graded"`** before the fatal
+  comparison (legacy graded checkpoints stay resumable), with an
+  upgrade-path test alongside the two flip tests (Codex round 11).
 
   **Scope of the flag** (Codex round 7): the policy has two further
   branches the new path does not cover — `fuse_virtual_legs=False`
