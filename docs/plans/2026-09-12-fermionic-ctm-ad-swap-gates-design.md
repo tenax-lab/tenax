@@ -112,8 +112,8 @@ builder stays differentiable w.r.t. the block data. What it builds:
   Retyping is the load-bearing step, not a convenience (Codex P1 on this
   PR): signs enter the CTM only through metadata-driven *dispatch* — the
   planar contraction path applies none (`contractor.py:495`) — so a
-  swap-absorbed tensor still typed FermionParity would still take every
-  graded branch: per-block transpose signs, bar/super, and the
+  swap-absorbed tensor still typed FermionParity would still take both
+  graded branches from §1: per-block transpose signs and the
   `_env_is_fermionic` fused move paths. With retyping those branches are
   unreachable by construction, and the forward traces the same ops as
   bosonic-symmetric.
@@ -199,7 +199,14 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   matched D, χ and block structure**. The fermionic-minus-bosonic delta is
   the only cost this design can remove (§1); if the delta is a small
   fraction of the wall, the premise fails and the reform stops at this
-  phase, cost zero. Pin graded-path energies as oracles. Every later claim
+  phase, cost zero. Measurement hygiene, since this is the GO/NO-GO gate
+  (Codex round 6): **one fresh process per cell** (no `_JIT_STEP_CACHE` /
+  `_VJP_CACHE` reuse across cells), the persistent JAX compilation cache
+  pointed at an empty per-cell directory (tenax enables it globally, and
+  it silently converts recompiles into cache hits), `block_until_ready`
+  around every timed region, and **compile time and post-warm runtime
+  reported as separate numbers** — run ordering must not be able to move
+  the delta. Pin graded-path energies as oracles. Every later claim
   is judged against these numbers; nothing is frozen from a single run.
 - **Phase 1 — `swap_gate` primitive.** ~100 lines + tests (involution;
   parity bookkeeping against a hand-computed 2-leg case; a graded-transpose
