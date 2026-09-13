@@ -311,7 +311,12 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   `gs_fermion_backend`** (Codex round 8), with the graded run staying
   the oracle and the `"swap_gates"` run the candidate; tests for
   configurations the flag rejects (split/explicit) assert the rejection
-  instead.
+  instead. **Checkpoint resume**: `gs_fermion_backend` joins
+  `_FATAL_CONFIG_FIELDS` (Codex round 10) — the current fatal list is
+  only `(max_bond_dim, unit_cell, gs_c4v, gs_implicit_ad)`, so a
+  backend flip across resume would be a *soft* diff and the restored
+  `env_cache` would feed graded environments to the bosonic path or
+  vice versa; a resume test covers both flip directions.
 
   **Scope of the flag** (Codex round 7): the policy has two further
   branches the new path does not cover — `fuse_virtual_legs=False`
