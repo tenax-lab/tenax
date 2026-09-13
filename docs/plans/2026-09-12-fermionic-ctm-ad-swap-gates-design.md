@@ -150,7 +150,19 @@ path is rejected with a clear error, not silently retyped — retyping
 someone else's environment is exactly the class of silent relabeling
 #938 taught us to refuse.
 
-Once hook + init are in, the FermionParity special cases in
+The hook must also enter **both compile-cache keys** (Codex round 4 P1):
+`_JIT_STEP_CACHE` is keyed only by
+`(id(neighbors), recipe, device_mesh, ctm_chunk_size)`
+(`_ctm_python_loop.py:110`) and `_VJP_CACHE`'s static-config key carries
+no builder field either — so a legacy-vs-swap-gated comparison in one
+process (the Phase 5 flag A/B, or any test doing both) would silently
+reuse whichever closure compiled first, executing the wrong forward and
+adjoint. Both keys gain a static builder-identity marker. This is the
+#938/#973 silent-wrong-result class in cache form, and the Phase 3 tests
+must include an in-process legacy↔swap-gated alternation that fails if
+either cache conflates the paths.
+
+Once hook + init + keying are in, the FermionParity special cases in
 `_ctm_tensor_init` / `_ctm_tensor_moves` are dead on this path **by
 type**: the retyped layers and envs make `_env_is_fermionic` False, so
 the moves take the same unfused #605 path the bosonic tensors take. They
@@ -204,8 +216,10 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
   (see §5) and its oracle test runs per commit.
 - **Phase 3 — forward CTM on the bosonicized layer.** Thread the builder
   hook through the convergence entry points, including env initialization
-  from the bosonicized indices and the graded-`env_init` rejection
-  (§3.3); fixed point + energy vs the graded forward on the same states;
+  from the bosonicized indices, the graded-`env_init` rejection, and the
+  builder marker in `_JIT_STEP_CACHE` / `_VJP_CACHE` keys (§3.3); fixed
+  point + energy vs the graded forward on the same states; an in-process
+  legacy↔swap-gated alternation test that fails on cache conflation;
   audit (not delete) the FermionParity special cases the new path makes
   dead.
 - **Phase 4 — adjoint.** First task: verify phase-gauge availability on the
@@ -248,7 +262,7 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
 |---|---|
 | `core/tensor.py` graded machinery | untouched — legacy path keeps working; `swap_gate` is additive |
 | New code | ~1–1.5k lines: one core method, one network-builder module (incl. the graded→bosonic retyping map), adjoint wiring, `ipeps_ad_policy` validation |
-| Existing algorithm files | convergence + adjoint entry points gain the double-layer builder hook **and builder-owned env initialization** (mechanical parameter threading, default = current builder/init — Codex rounds 2–3); `_ctm_tensor_init/_moves` special cases audit-only; `optimize_fpeps_ad` gains a dispatch flag |
+| Existing algorithm files | convergence + adjoint entry points gain the double-layer builder hook, **builder-owned env initialization**, and a **builder marker in the `_JIT_STEP_CACHE` / `_VJP_CACHE` keys** (mechanical threading, default = current builder/init — Codex rounds 2–4); `_ctm_tensor_init/_moves` special cases audit-only; `optimize_fpeps_ad` gains a dispatch flag |
 | Public API / docs | `swap_gate` documented on the exported `SymmetricTensor` class + README example (no `__all__` entry — methods are not module symbols) |
 | Tests | additive (~500 lines); all 26 FermionParity test files run unchanged as oracles |
 | PRs | ~5, one per phase, each independently green |
