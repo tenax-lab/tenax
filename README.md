@@ -909,6 +909,42 @@ packed = ProductSymmetry.encode_charges(
 q1, q2 = ProductSymmetry.decode_charges(packed)
 ```
 
+### Fermionic swap gates
+
+`SymmetricTensor.swap_gate(axes=(i, j))` multiplies each block by
+`(-1)**(p_i * p_j)` — a minus sign exactly when *both* crossing legs carry
+odd parity. This is the Corboz-style build-time encoding of fermionic
+exchange statistics: place the sign where two fermionic lines cross in the
+(fixed) network diagram, and the rest of the contraction needs no graded
+logic. For an adjacent leg exchange it reproduces the Koszul sign of the
+graded `transpose` exactly. The optional `grading=({charge: parity}, ...)`
+override supplies the parity maps explicitly — needed by pipelines that
+retype graded tensors onto bosonic symmetry objects, where `parity()` is
+all-even by definition (see `docs/plans/2026-09-12-fermionic-ctm-ad-swap-gates-design.md`).
+
+```python
+import jax
+import numpy as np
+from tenax import FermionParity, FlowDirection, SymmetricTensor, TensorIndex
+
+fp = FermionParity()
+charges = np.array([0, 0, 1, 1], dtype=np.int32)  # both parities on each leg
+idx = lambda flow, lbl: TensorIndex.from_charges(fp, charges, flow, label=lbl)
+T = SymmetricTensor.random_normal(
+    indices=(idx(FlowDirection.OUT, "a"), idx(FlowDirection.IN, "b")),
+    key=jax.random.PRNGKey(0),
+)
+
+G = T.swap_gate((0, 1))  # odd-odd blocks flip sign, others unchanged
+
+# involution: applying the same gate twice restores the tensor
+assert np.allclose(np.asarray(G.swap_gate((0, 1))._data), np.asarray(T._data))
+
+# adjacent-exchange identity: the graded transpose's Koszul sign IS the
+# swap gate — transpose(T) block-equals sign-free-permute(swap_gate(T))
+graded = T.transpose((1, 0))
+```
+
 ### Charge arithmetic
 
 `BaseSymmetry` is the sanctioned boundary for every charge operation. Extension
