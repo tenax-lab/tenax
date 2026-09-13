@@ -134,11 +134,27 @@ in as the double-layer hook. The sweep/move/projector machinery itself is
 unchanged, but the convergence and adjoint entry points must grow the
 hook parameter (or dispatch on a marker the builder attaches) — this is
 wiring in existing files, not configuration, and the blast-radius table
-counts it. Once the hook is in, the FermionParity special cases in
+counts it.
+
+The hook must also own **environment initialization** (Codex round 3 P1):
+on the default `env_init is None` path the loop builds every env from the
+*site tensor* (`initialize_ctm_tensor_env(A, chi)`,
+`_ctm_python_loop.py:330`), and `_env_is_fermionic` dispatches off
+`env_src.C1`'s symmetry — so with a graded `A` the corners and edges are
+born graded, the first sweep takes the fused graded path regardless of
+the layer's type, and its metadata clashes with the retyped layer. On the
+builder path the initial env is therefore constructed from the
+**bosonicized layer's indices**, making `_env_is_fermionic` False from
+sweep 0. A caller-supplied `env_init` carrying graded tensors on this
+path is rejected with a clear error, not silently retyped — retyping
+someone else's environment is exactly the class of silent relabeling
+#938 taught us to refuse.
+
+Once hook + init are in, the FermionParity special cases in
 `_ctm_tensor_init` / `_ctm_tensor_moves` are dead on this path **by
-type**: the retyped layers make `_env_is_fermionic` False, so the moves
-take the same unfused #605 path the bosonic tensors take. They stay for
-the legacy path and get an audit note, not a deletion.
+type**: the retyped layers and envs make `_env_is_fermionic` False, so
+the moves take the same unfused #605 path the bosonic tensors take. They
+stay for the legacy path and get an audit note, not a deletion.
 
 ### 3.4 Fixed-point adjoint
 
@@ -176,18 +192,22 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
 - **Phase 1 — `swap_gate` primitive.** ~100 lines + tests (involution;
   parity bookkeeping against a hand-computed 2-leg case; a graded-transpose
   cross-check on a random small tensor). Mutation: dropping the sign must
-  fail the cross-check. Public-API contract: export in
-  `src/tenax/__init__.py` `__all__` and add a README example using the
-  actual signature, kept aligned with the tests (repo rule; Codex round
-  2).
+  fail the cross-check. Public-API contract: `swap_gate` is a method on
+  the already-exported `SymmetricTensor`, and `__all__` holds only
+  module-level symbols (Codex round 3) — so the contract is satisfied by
+  documenting the method on the class plus a README example using the
+  actual signature, kept aligned with the tests; no `__all__` entry, and
+  no second top-level function invented just to have one.
 - **Phase 2 — network builder.** Double layer + RDM/gate insertion with
   swaps absorbed. Gate: end-to-end energy equals the graded forward to
   ~1e-10 on Phase 0's oracle states. This phase owns the highest risk
   (see §5) and its oracle test runs per commit.
 - **Phase 3 — forward CTM on the bosonicized layer.** Thread the builder
-  hook through the convergence entry points (§3.3); fixed point + energy
-  vs the graded forward on the same states; audit (not delete) the
-  FermionParity special cases the new path makes dead.
+  hook through the convergence entry points, including env initialization
+  from the bosonicized indices and the graded-`env_init` rejection
+  (§3.3); fixed point + energy vs the graded forward on the same states;
+  audit (not delete) the FermionParity special cases the new path makes
+  dead.
 - **Phase 4 — adjoint.** First task: verify phase-gauge availability on the
   block-sparse forward; choose in-iteration phase gauge or post-hoc G∘f
   accordingly. Gates: gradient vs FD at D=2 parity-only; **a directional
@@ -228,8 +248,8 @@ Each phase is its own PR; every phase gates on the graded-formalism oracle.
 |---|---|
 | `core/tensor.py` graded machinery | untouched — legacy path keeps working; `swap_gate` is additive |
 | New code | ~1–1.5k lines: one core method, one network-builder module (incl. the graded→bosonic retyping map), adjoint wiring, `ipeps_ad_policy` validation |
-| Existing algorithm files | convergence + adjoint entry points gain the double-layer builder hook (mechanical parameter threading, default = current builder — Codex round 2 P1); `_ctm_tensor_init/_moves` special cases audit-only; `optimize_fpeps_ad` gains a dispatch flag |
-| Public API / docs | `swap_gate` exported in `__all__` + README example (repo rule) |
+| Existing algorithm files | convergence + adjoint entry points gain the double-layer builder hook **and builder-owned env initialization** (mechanical parameter threading, default = current builder/init — Codex rounds 2–3); `_ctm_tensor_init/_moves` special cases audit-only; `optimize_fpeps_ad` gains a dispatch flag |
+| Public API / docs | `swap_gate` documented on the exported `SymmetricTensor` class + README example (no `__all__` entry — methods are not module symbols) |
 | Tests | additive (~500 lines); all 26 FermionParity test files run unchanged as oracles |
 | PRs | ~5, one per phase, each independently green |
 
