@@ -1,12 +1,19 @@
 {
-  "D": 4,
-  "chi": 16,
-  "max_iter": 30,
-  "seed": 0,
-  "e_multisite_su": -0.21251653657021816,
-  "e_multisite_ad": -0.444764370577232,
-  "liao_asymptotic": -0.43752,
-  "delta_to_liao": -0.007244370577231984,
-  "wall_seconds_su": 5.359992193989456,
-  "wall_seconds_ad": 381.90926934964955
+ "D": 4,
+ "chi": 16,
+ "max_iter": 30,
+ "seed": 0,
+ "e_multisite_su": -0.22540003330846212,
+ "e_multisite_ad": -0.3705729607885256,
+ "liao_asymptotic": -0.43752,
+ "delta_to_liao": 0.06694703921147444,
+ "wall_seconds_su": 5.749656131956726,
+ "wall_seconds_ad": 12824.969194164034,
+ "provenance": {
+  "rerun_of": "2026-05-07 breach result (e_multisite_ad=-0.4448, delta=-0.0072)",
+  "rerun_date": "2026-09-12",
+  "main_commit": "9bf90f8",
+  "note": "CORRECTED 2026-09-13 (Codex rounds 1-2 on #985): the May breach run used the LOOSE inner CTM (max_iter=30, conv_tol=1e-7) -- the tight-ctm probe artifact reproduces the exact May number under those settings -- while this rerun uses the script's tight pins (max_iter=100, conv_tol=1e-9), so this rerun alone changed protocol AND code and attributes nothing by itself. Attribution comes from the control set: (a) loose protocol on current main (..._c3_loose_ctm_rerun.json): e_ad=-0.37342, NO breach, and the loose SU readout moved bit-level across revisions -- the post-May CTM fixes (#780/#781 gauge-dependent convergence criterion, #667-cluster env-init, #702 corner convention; unbisected) changed loose-settings behavior; (b) Armijo controls under BOTH CTM settings (..._c3_probe_armijo.json tight: -0.39113; ..._c3_loose_armijo_rerun.json loose: -0.37756): floor holds under the other plausible line search in every cell of the protocol matrix; (c) May's own tight re-eval (-0.2014, above floor) showed the breach state was an unconverged-env artifact even then. Under NO protocol/line-search combination does current main breach the floor. E_ms=-0.3706 beats the supersite AD stall (-0.343) and sits in the plan's plausible-target band [-0.42,-0.36]. Not re-verified: the variPEPS fixed-point cross-check (-0.913 vs -0.255) -- the saved AD-optimum state was lost; regenerate before closing M2b.",
+  "line_search_method": "hager_zhang (optimizer default at run time)"
+ }
 }

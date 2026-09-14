@@ -1,5 +1,47 @@
 # Multisite-CTM RDM Helpers Fix — Implementation Plan
 
+> **ADDENDUM (2026-09-12): the M2b pivot is DE-ESCALATED.** The end-to-end
+> gate this plan pivots on now PASSES on `main` (9bf90f8): the C.3 probe
+> (D=4, χ=16, 30 L-BFGS steps, seed 0) gives `E_ms = -0.3706`, above the
+> Liao asymptotic floor `-0.43752` by +0.067 — where the 2026-05-07 run
+> breached it at `-0.4448`. It also beats the supersite AD stall (-0.343)
+> and lands inside this plan's own plausible-target band [-0.42, -0.36].
+> The fixed point moved under CTM fixes landed since May (#780/#781
+> gauge-dependent convergence criterion, #667-cluster env-init, #702 corner
+> convention — not individually bisected). Corroboration: on the *unchanged*
+> D=4 SU supersite state, P1 (no CTM) is bit-identical to the 2026-05-04
+> baseline while P2 (through CTM) moved +5.45e-3.
+>
+> **Protocol confounds closed (2026-09-13, Codex rounds 1–2 on #985):**
+> the May breach ran the **loose** inner CTM (`max_iter=30, conv_tol=1e-7`
+> — the tight-ctm probe reproduces the exact May number under those
+> settings), and its line search predates the Armijo→HZ default flip. Two
+> controls on current `main` close both: (a) the **same loose protocol**
+> gives `E = -0.3734`, no breach, and the loose SU readout moved bit-level
+> across revisions (`-0.21252` → `-0.22540`) — the post-May CTM fixes
+> changed loose-settings behavior, so the breach required *both* the loose
+> protocol *and* pre-fix code (`..._c3_loose_ctm_rerun.json`); (b) an
+> **Armijo control** under the tight protocol also clears the floor
+> (`E = -0.3911`, Δ +4.64e-2; ended by line-search rejection at step
+> 22/30, not a certified convergence) (`..._c3_probe_armijo.json`); (c)
+> the remaining matrix cell, **loose CTM + Armijo** — the most plausible
+> exact May configuration — also clears (`E = -0.3776`, tight re-eval
+> `-0.3764`) (`..._c3_loose_armijo_rerun.json`). The full 2×2
+> protocol/line-search matrix passes on current `main` (tight-HZ
+> `-0.3706`, tight-Armijo `-0.3911`, loose-HZ `-0.3734`, loose-Armijo
+> `-0.3776`) while May code breached under the loose protocol; the fix
+> set remains unbisected.
+>
+> **Still open before M2b can be closed:** the variPEPS fixed-point
+> cross-check (Tenax -0.913 vs variPEPS -0.255 on the saved AD-optimum) was
+> never re-run — `logs/d4_ad_optimum.npz` lived in an uncommitted worktree
+> and is lost. A clean floor does not prove Tenax lands on variPEPS's fixed
+> point. Next step: regenerate a D=4 AD-optimum on current `main` (Task 0
+> below still describes how) and measure it through both codes. Honeycomb-
+> native CTM (M2b, PR #347 scaffolding) remains the fallback only if that
+> cross-check still disagrees. Updated result:
+> `examples/kagome_pess_multisite_phase_c3_probe.json`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Localise and fix the multisite-CTM RDM bug that causes `c5_smoking_gun_bf_vs_ctm_at_optimum.py` to report a 0.87/site bias gap (E_BF=−0.044, E_CTM=−0.913) at D=4 χ=16 AD-optimum.
