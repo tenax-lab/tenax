@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import warnings
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any
 
 import jax
@@ -1169,6 +1170,100 @@ class SymmetricTensor(Tensor):
                     transposed = -transposed
             new_blocks[new_key] = transposed
         return SymmetricTensor._from_blocks_unchecked(new_blocks, new_indices)
+
+    def swap_gate(
+        self,
+        axes: tuple[int, int],
+        grading: tuple[Mapping[int, int], Mapping[int, int]] | None = None,
+    ) -> SymmetricTensor:
+        """Apply a fermionic swap gate between two legs.
+
+        Multiplies each block by ``(-1)**(p_i * p_j)``, where ``p_i`` and
+        ``p_j`` are the Z2 parities of the block's charges on legs
+        ``axes[0]`` and ``axes[1]``.  This is the Corboz-style swap-gate
+        primitive: a crossing of two fermionic lines in a planar tensor
+        network diagram contributes a minus sign exactly when both lines
+        carry odd parity, and placing that sign as *network data at build
+        time* is what lets a fermionic network be contracted by bosonic
+        machinery afterwards.
+
+        By default the parity grading is read from the legs' symmetry via
+        :meth:`BaseSymmetry.parity` — for bosonic symmetries every charge
+        is even and the gate is the identity.  ``grading`` overrides that
+        lookup with one explicit ``{charge: parity}`` map per leg, in
+        ``axes`` order.  The override exists for pipelines that retype
+        graded tensors onto bosonic symmetry objects (where ``parity()``
+        is all-even *by definition*) but must keep applying the fermionic
+        statistics they captured before the retype: the caller passes the
+        grading it recorded from the original fermionic symmetry.
+
+        The signs depend only on charge metadata, so they are computed on
+        host and applied as a single fused multiply on the block buffer —
+        under ``jax.jit`` tracing the sign vector is a constant, and the
+        VJP of the operation is the same multiply.
+
+        Properties: involution (applying the same gate twice is the
+        identity) and symmetry in the two axes; the input tensor is
+        unchanged.
+
+        Args:
+            axes: The two legs whose crossing this gate resolves. Must be
+                distinct and in range.
+            grading: Optional pair of explicit ``{charge: parity}`` maps
+                for ``axes[0]`` and ``axes[1]`` (parities in {0, 1}).
+                Every charge appearing on the corresponding leg's sectors
+                must be present.
+
+        Returns:
+            New SymmetricTensor with the sign pattern applied.
+        """
+        i, j = axes
+        n = len(self._indices)
+        if i == j:
+            raise ValueError(f"swap_gate axes must be distinct, got {axes}")
+        if not (0 <= i < n and 0 <= j < n):
+            raise ValueError(f"swap_gate axes {axes} out of range for rank {n}")
+
+        if grading is not None:
+            g_i, g_j = grading
+
+            def _parity(axis_pos: int, charge: int) -> int:
+                gmap = g_i if axis_pos == i else g_j
+                try:
+                    return int(gmap[charge]) & 1
+                except KeyError:
+                    raise KeyError(
+                        f"swap_gate grading map for axis {axis_pos} has no "
+                        f"entry for charge {charge}; explicit grading must "
+                        f"cover every sector on the leg"
+                    ) from None
+        else:
+            sym = self._indices[0].symmetry
+
+            def _parity(axis_pos: int, charge: int) -> int:
+                return int(sym.parity(np.array([charge]))[0])
+
+        # Host-computed constant sign per block, applied as one fused
+        # multiply over the flat buffer (block metadata is unchanged).
+        if self.n_blocks == 0:
+            return self
+        signs = np.ones(self._data.shape[0], dtype=self._data.dtype)
+        flip_any = False
+        for k, key in enumerate(self._block_keys):
+            if _parity(i, key[i]) and _parity(j, key[j]):
+                off = self._block_offsets[k]
+                size = int(np.prod(self._block_shapes[k]))
+                signs[off : off + size] = -1
+                flip_any = True
+        if not flip_any:
+            return self
+        return SymmetricTensor._raw(
+            indices=self._indices,
+            data=self._data * jnp.asarray(signs),
+            block_keys=self._block_keys,
+            block_shapes=self._block_shapes,
+            block_offsets=self._block_offsets,
+        )
 
     def norm(self) -> jax.Array:
         """Frobenius norm across all blocks."""
