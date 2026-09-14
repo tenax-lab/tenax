@@ -526,6 +526,7 @@ _FILE_MARKERS = {
     "test_optimize_gs_ad_chi_schedule_shim.py": "core",
     "test_pess_3site_multisite_encoding.py": "core",
     "test_pess_3site_multisite_wavefunction.py": "core",
+    "test_pess_supersite_exact.py": "core",
     "test_regularized_qr.py": "core",
     "test_varipeps_compare_payload.py": "core",
     #

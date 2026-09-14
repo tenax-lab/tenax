@@ -831,6 +831,27 @@ intra-cell + horizontal/vertical/diagonal inter-cell 2-site RDMs; see
 `examples/kagome_spin12_pess_ad_benchmark.py` and
 `examples/kagome_spin1_pess_ad_benchmark.py` for full sweeps.
 
+### Exact supersite (T_d kept — recommended for energy readouts)
+
+`pess_to_kagome_supersite_exact` blocks all five iPESS primitives
+(`R_a, R_b, R_c, T_u, T_d`) into one rank-5 supersite with four real
+virtual legs and no dummy — the same single-PEPS-site mapping variPEPS
+uses for kagome 3-PESS. `build_pess_loss_exact` runs it through the
+single-site CTM (forward + implicit AD); on control states it agrees
+with variPEPS to 1e-9 and with exact cylinder oracles to ~2e-4 at D=2
+and D=4 (issue #991).
+
+```python
+from tenax import (
+    build_pess_loss_exact,
+    kagome_xxz_pess_cg_gates_exact,
+)
+
+loss = build_pess_loss_exact(kagome_xxz_pess_cg_gates_exact(delta=1.0, d=d),
+                             config)
+e_per_site = float(loss(state).real)
+```
+
 ### Multisite path (3-site kagome on a square unit cell)
 
 For the multisite encoding `pess_to_kagome_3site_multisite`, where the
