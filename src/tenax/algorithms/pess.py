@@ -498,15 +498,21 @@ def pess_to_kagome_3site_multisite(
     - iPESS sublattice ``b`` → multisite name ``"v"``.
     - iPESS sublattice ``c`` → multisite name ``"w"``.
 
-    *Gauge convention* (mirrors :func:`pess_to_kagome_supersite` Convention C):
+    *Gauge convention* (issue #990):
 
     - Up-bonds: full ``λ_x_u`` absorbed on the R-side (axis 1 of ``R_x``).
-    - Down-bonds: ``sqrt(λ_x_d)`` on the R-side (axis 0 of ``R_x``); the
-      other ``sqrt`` is on the next-cell's R-site at the inter-cell
-      boundary.
-    - ``T_d`` itself is contracted into ``S_u`` together with ``T_u`` (so
-      it is "absorbed" into the central site rather than dropped — the
-      down-bond ``sqrt(λ)`` gauges still appear on each ``S_x``).
+    - Down-bonds: full ``λ_x_d`` absorbed on the R-side (axis 0 of
+      ``R_x``). This deliberately does NOT mirror
+      :func:`pess_to_kagome_supersite` (Convention C): there ``T_d`` is
+      dropped, every down bond is an R–R contact between neighboring
+      supersites, and each side carries ``sqrt(λ)`` so the tiled bond
+      recovers the full weight. Here ``T_d`` is explicitly contracted
+      into ``S_u`` and carries no bond weight of its own, so every down
+      bond is an R–T_d contact and the R side must carry the *whole*
+      ``λ``. The pre-#990 code copied the supersite's sqrt convention
+      into this topology, leaving every down bond with ``λ^(1/2)`` and
+      encoding a state 0.16/site away from the PESS state at D=2 SU
+      (exact-torus/cylinder oracles in issue #990).
 
     *Encoding asymmetry* (non-bug, but worth knowing): ``T_u`` and ``T_d``
     are 3-leg simplex tensors. Distributing them into 3 separate iPEPS
@@ -516,8 +522,10 @@ def pess_to_kagome_3site_multisite(
     trivial-padded (the v-w iPEPS bond is dim-1; v-w correlations are
     mediated through u via a 2-hop path). This is the same pattern as
     Convention C's "axis-3 dummy" leg in the supersite — a known iPEPS
-    encoding pattern, not a bug. Validated empirically by Task B.3 D=2
-    energy parity.
+    encoding pattern, not a bug. Validated exactly (fidelity 1 to 1e-12
+    against an independent contraction of the raw PESS state with
+    non-trivial lambdas) by
+    ``tests/test_pess_3site_multisite_wavefunction.py``.
 
     Args:
         R_a, R_b, R_c: iPESS site tensors of shape ``(D, D, d)``, axes
@@ -553,19 +561,20 @@ def pess_to_kagome_3site_multisite(
     lam_a_u = lam_a_u.astype(dtype)
     lam_b_u = lam_b_u.astype(dtype)
     lam_c_u = lam_c_u.astype(dtype)
-    # Smooth ``sqrt`` mirrors :func:`pess_to_kagome_supersite` (codex P1
-    # review on PR #387): keeps gradients well-defined near zero.
-    sqrt_lam_a_d = jnp.power(jnp.real(lam_a_d) ** 2 + 1e-28, 0.25).astype(dtype)
-    sqrt_lam_b_d = jnp.power(jnp.real(lam_b_d) ** 2 + 1e-28, 0.25).astype(dtype)
-    sqrt_lam_c_d = jnp.power(jnp.real(lam_c_d) ** 2 + 1e-28, 0.25).astype(dtype)
+    # FULL ``λ_down`` on the R side — every down bond is an R–T_d contact
+    # and T_d carries no weight, so nothing else supplies the other half
+    # (#990; the supersite's sqrt-split is correct only for its R–R down
+    # bonds). Smooth ``|λ|`` form keeps gradients well-defined near zero
+    # (codex P1 review on PR #387).
+    lam_a_d_s = jnp.power(jnp.real(lam_a_d) ** 2 + 1e-28, 0.5).astype(dtype)
+    lam_b_d_s = jnp.power(jnp.real(lam_b_d) ** 2 + 1e-28, 0.5).astype(dtype)
+    lam_c_d_s = jnp.power(jnp.real(lam_c_d) ** 2 + 1e-28, 0.5).astype(dtype)
 
-    # Gauge each R: axis 0 (T_d-leg) gets ``sqrt(λ_down)``, axis 1
-    # (T_u-leg) gets full ``λ_up``. Same as :func:`pess_to_kagome_supersite`
-    # except S_b/S_c here keep the full λ_up (the supersite version uses
-    # full λ_up too — they agree).
-    S_a = jnp.einsum("i,ijp,j->ijp", sqrt_lam_a_d, R_a, lam_a_u)
-    S_b = jnp.einsum("i,ijp,j->ijp", sqrt_lam_b_d, R_b, lam_b_u)
-    S_c = jnp.einsum("i,ijp,j->ijp", sqrt_lam_c_d, R_c, lam_c_u)
+    # Gauge each R: axis 0 (T_d-leg) gets full ``λ_down``, axis 1
+    # (T_u-leg) gets full ``λ_up``.
+    S_a = jnp.einsum("i,ijp,j->ijp", lam_a_d_s, R_a, lam_a_u)
+    S_b = jnp.einsum("i,ijp,j->ijp", lam_b_d_s, R_b, lam_b_u)
+    S_c = jnp.einsum("i,ijp,j->ijp", lam_c_d_s, R_c, lam_c_u)
 
     # Build S_u by absorbing T_u and T_d into S_a's two virtual axes.
     # T_u contracted with S_a's T_u-axis (axis 1 of S_a) along T_u's
