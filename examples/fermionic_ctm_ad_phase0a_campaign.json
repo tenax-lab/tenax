@@ -412,7 +412,12 @@
       ],
       "delta_s": 24.682764776000035,
       "delta_fraction": 0.4229150900221702,
-      "warm_ratio": 3.220878602137047
+      "warm_ratio": 3.220878602137047,
+      "path_matched": false,
+      "vg_n_compiles": [
+        479,
+        435
+      ]
     },
     {
       "key": [
@@ -422,7 +427,12 @@
       ],
       "delta_s": 95.905454648,
       "delta_fraction": 0.4436653597669738,
-      "warm_ratio": 1.0162934882142458
+      "warm_ratio": 1.0162934882142458,
+      "path_matched": false,
+      "vg_n_compiles": [
+        481,
+        437
+      ]
     },
     {
       "key": [
@@ -432,7 +442,12 @@
       ],
       "delta_s": 29.458295800999977,
       "delta_fraction": 0.44210317042795655,
-      "warm_ratio": 9.680092542507584
+      "warm_ratio": 9.680092542507584,
+      "path_matched": false,
+      "vg_n_compiles": [
+        479,
+        435
+      ]
     },
     {
       "key": [
@@ -442,7 +457,12 @@
       ],
       "delta_s": 2.047333951999974,
       "delta_fraction": 0.017029526599130918,
-      "warm_ratio": 0.9839671702079913
+      "warm_ratio": 0.9839671702079913,
+      "path_matched": true,
+      "vg_n_compiles": [
+        437,
+        437
+      ]
     },
     {
       "key": [
@@ -452,7 +472,12 @@
       ],
       "delta_s": 13.748110318000272,
       "delta_fraction": 0.01577505990152635,
-      "warm_ratio": 0.9106817963918922
+      "warm_ratio": 0.9106817963918922,
+      "path_matched": true,
+      "vg_n_compiles": [
+        3966,
+        3966
+      ]
     },
     {
       "key": [
@@ -462,7 +487,12 @@
       ],
       "delta_s": 68.59186627100007,
       "delta_fraction": 0.023291607205045615,
-      "warm_ratio": 1.0161352940330828
+      "warm_ratio": 1.0161352940330828,
+      "path_matched": true,
+      "vg_n_compiles": [
+        3968,
+        3968
+      ]
     },
     {
       "key": [
@@ -472,7 +502,12 @@
       ],
       "delta_s": 7.381633761000103,
       "delta_fraction": 0.010487271293785922,
-      "warm_ratio": 0.9546850869078279
+      "warm_ratio": 0.9546850869078279,
+      "path_matched": true,
+      "vg_n_compiles": [
+        3966,
+        3966
+      ]
     },
     {
       "key": [
@@ -482,7 +517,12 @@
       ],
       "delta_s": 1.5441508289991361,
       "delta_fraction": 0.0005313728704429215,
-      "warm_ratio": 1.143745389761925
+      "warm_ratio": 1.143745389761925,
+      "path_matched": true,
+      "vg_n_compiles": [
+        3968,
+        3968
+      ]
     }
   ],
   "median_delta_fraction": 0.020160566902088266,
@@ -554,5 +594,8 @@
         "warm_ratio": 0.9954678696528341
       }
     ]
-  }
+  },
+  "median_delta_fraction_path_matched": 0.01577505990152635,
+  "n_pairs_excluded_path_mismatch": 3,
+  "path_match_note": "Codex P1 (PR #989): three of four D=2 fermionic arms compiled +44 computations vs their controls (479-481 vs 435-437) \u2014 the production adjoint's eager-GMRES divergence fallback \u2014 so their deltas mix solver-path cost into the graded-overhead signal and are excluded here. All four D=3 pairs and the D=2 seed-43 2site pair are path-matched (identical per-arm compile counts). The matched-pair median CONFIRMS the NO-GO and sharpens the interpretation: the graded delta is ~2% at every D; the apparent 44% at D=2 was fallback contamination, not graded-branch overhead."
 }

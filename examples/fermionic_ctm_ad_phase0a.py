@@ -140,7 +140,10 @@ def main() -> None:
     ferm = {key(r): r for r in rows if r.get("sym") == "fermionic" and "error" not in r}
     bos = {key(r): r for r in rows if r.get("sym") == "z2boson" and "error" not in r}
     pairs, fracs = [], []
-    print("\n#  D seed cell    ferm_cmp  z2b_cmp   delta  delta/ferm  warm f/z2b")
+    print(
+        "\n#  D seed cell    ferm_cmp  z2b_cmp   delta  delta/ferm"
+        "  warm f/z2b  path"
+    )
     for k in sorted(ferm):
         if k not in bos:
             continue
@@ -150,29 +153,44 @@ def main() -> None:
         warm_ratio = (
             f["warm_step_s"] / b["warm_step_s"] if b["warm_step_s"] else float("nan")
         )
-        fracs.append(frac)
+        # Path-match gate (Codex P1 on PR #989): the production adjoint can
+        # fall back from the fused Neumann path to eager GMRES per arm, and
+        # a fallback shows up as extra compiled computations. A pair whose
+        # arms compiled different computation counts measured two DIFFERENT
+        # solver paths, so its delta mixes fallback cost into the
+        # graded-overhead signal and must not enter the verdict.
+        path_matched = f.get("vg_n_compiles") == b.get("vg_n_compiles") and f.get(
+            "fwd_n_compiles"
+        ) == b.get("fwd_n_compiles")
+        if path_matched:
+            fracs.append(frac)
         pairs.append(
             {
                 "key": list(k),
                 "delta_s": delta,
                 "delta_fraction": frac,
                 "warm_ratio": warm_ratio,
+                "path_matched": bool(path_matched),
+                "vg_n_compiles": [f.get("vg_n_compiles"), b.get("vg_n_compiles")],
             }
         )
         print(
             f"  {k[0]:>2} {k[1]:>4} {k[2]:>6} {f['vg_compile_s']:>8.2f} "
             f"{b['vg_compile_s']:>8.2f} {delta:>7.2f} {frac:>10.2%} "
-            f"{warm_ratio:>10.2f}"
+            f"{warm_ratio:>10.2f}  "
+            + ("matched" if path_matched else "MISMATCH-EXCLUDED")
         )
 
+    n_excluded = sum(1 for p_ in pairs if not p_["path_matched"])
     verdict = "NO-DATA"
     med = float("nan")
     if fracs:
         med = statistics.median(fracs)
         verdict = "GO" if med >= args.nogo_fraction else "NO-GO"
     print(
-        f"\n  median delta fraction = {med:.2%}  "
-        f"(threshold {args.nogo_fraction:.0%})  ==> {verdict}"
+        f"\n  median delta fraction over {len(fracs)} path-matched pairs = "
+        f"{med:.2%}  ({n_excluded} pair(s) excluded for solver-path "
+        f"mismatch; threshold {args.nogo_fraction:.0%})  ==> {verdict}"
     )
     (args.outdir / "campaign.json").write_text(
         json.dumps(
@@ -182,6 +200,7 @@ def main() -> None:
                 "rows": rows,
                 "pairs": pairs,
                 "median_delta_fraction": med,
+                "n_pairs_excluded_path_mismatch": n_excluded,
                 "nogo_fraction": args.nogo_fraction,
                 "verdict": verdict,
             },
