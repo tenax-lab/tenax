@@ -474,6 +474,152 @@ def pess_to_kagome_supersite(
     return A
 
 
+def pess_to_kagome_supersite_exact(
+    R_a: jax.Array,
+    R_b: jax.Array,
+    R_c: jax.Array,
+    T_u: jax.Array,
+    T_d: jax.Array,
+    lambdas: tuple[jax.Array, ...] | jax.Array,
+) -> jax.Array:
+    """Build the EXACT square-iPEPS supersite: Convention C with ``T_d`` kept.
+
+    :func:`pess_to_kagome_supersite` (Convention C) drops ``T_d`` and
+    approximates the down simplex by its bond weights — the known
+    Convention-C bias. This function contracts ``T_d`` explicitly, and the
+    leg counting comes out exactly square: after internalising the three
+    up bonds and the a-down bond, the open virtual legs are
+    ``(R_c-down, T_d-c, T_d-b, R_b-down)`` — four REAL legs, no dummy.
+    This is the same single-PEPS-site blocking variPEPS uses for kagome
+    3-PESS (``Kagome_Map_PESS3_To_Single_PEPS_Site``), validated against
+    exact torus/cylinder oracles in issue #991.
+
+    Motivation (#991): the 3-site multisite encoding places dim-1 v-w
+    bonds on the CTM lattice, and the 2x2-plaquette CTM fixed point
+    structurally rank-truncates there (corner ranks cap at ``D**2``; the
+    resulting per-site energy bias is ~2.5e-3 at D=2 and D=4, in the
+    non-variational direction, insensitive to chi/tolerance/init). The
+    exact supersite runs on the single-site CTM with no dim-1 seams: on
+    the #991 control state it reproduces variPEPS to 1e-9 and the exact
+    cylinder extrapolation to ~2e-4.
+
+    *Geometry* (fixes the gate slots in
+    :func:`kagome_xxz_pess_cg_gates_exact`):
+
+    - ``top``    = ``R_c``'s down-leg  (receives ``T_d``-c of the cell above),
+    - ``bottom`` = ``T_d``'s c-leg     (to ``R_c`` of the cell below),
+    - ``left``   = ``T_d``'s b-leg     (to ``R_b`` of the cell to the left),
+    - ``right``  = ``R_b``'s down-leg  (receives ``T_d``-b of the right cell).
+
+    Hence the down triangle of cell ``i`` is ``{a(i), b(i-x), c(i+y)}``
+    and its bonds map to: a-b horizontal ``(b of left cell, a of right)``,
+    a-c vertical ``(a of top, c of bottom)``, b-c diagonal
+    ``(b of top-left, c of bottom-right)`` — the TL-BR diagonal computed
+    by ``_rdm_diagonal_tensor``.
+
+    *Gauge*: identical to the (post-#990) multisite convention — every
+    bond carries its full ``lambda`` exactly once: ``lambda_up`` on each
+    R's axis 1, smooth ``|lambda_down|`` on each R's axis 0; the simplex
+    tensors carry no weight.
+
+    Args:
+        R_a, R_b, R_c: iPESS site tensors ``(D, D, d)``, axes
+            ``(T_d-leg, T_u-leg, phys)``.
+        T_u: up-simplex ``(D, D, D)``, axes ``(R_a-leg, R_b-leg, R_c-leg)``.
+        T_d: down-simplex ``(D, D, D)``, same axis convention.
+        lambdas: 6 bond singular-value vectors, ordered
+            ``(a-up, b-up, c-up, a-down, b-down, c-down)``.
+
+    Returns:
+        Rank-5 array ``(D, D, D, D, d**3)`` with axes
+        ``(top, bottom, left, right, phys)`` and the physical legs fused
+        ``(p_a, p_b, p_c)`` row-major (matches
+        :func:`kagome_triangle_xxz_hamiltonian`).
+    """
+    if isinstance(lambdas, jax.Array):
+        lams = tuple(lambdas[i] for i in range(6))
+    else:
+        lams = tuple(lambdas)
+    dtype = R_a.dtype
+    D = R_a.shape[0]
+    d = R_a.shape[2]
+
+    def _full_lam(x: jax.Array) -> jax.Array:
+        # Smooth ``|lambda|`` — AD-safe near zero, exact for the
+        # non-negative SU lambdas (same form as the multisite blocking).
+        return jnp.power(jnp.real(x) ** 2 + 1e-28, 0.5).astype(dtype)
+
+    S_a = jnp.einsum("i,ijp,j->ijp", _full_lam(lams[3]), R_a, lams[0].astype(dtype))
+    S_b = jnp.einsum("i,ijp,j->ijp", _full_lam(lams[4]), R_b, lams[1].astype(dtype))
+    S_c = jnp.einsum("i,ijp,j->ijp", _full_lam(lams[5]), R_c, lams[2].astype(dtype))
+
+    # theta axes: z = R_c-down (top), C = T_d-c (bottom), B = T_d-b (left),
+    # y = R_b-down (right), then (p_a, p_b, p_c).
+    theta = jnp.einsum(
+        "xap,ybq,zcr,abc,xBC->zCBypqr",
+        S_a,
+        S_b,
+        S_c,
+        T_u.astype(dtype),
+        T_d.astype(dtype),
+    )
+    return theta.reshape(D, D, D, D, d**3)
+
+
+def kagome_xxz_pess_cg_gates_exact(delta: float = 1.0, d: int = D_PHYS_DEFAULT):
+    """CGGates for the EXACT supersite blocking (#991).
+
+    Same intra gate as :func:`kagome_xxz_pess_cg_gates`; the inter-cell
+    sub-site pairings follow :func:`pess_to_kagome_supersite_exact`'s leg
+    geometry (down triangle of cell ``i`` = ``{a(i), b(i-x), c(i+y)}``):
+
+    - ``"h"``:    ``b`` of left  ↔ ``a`` of right         (down-tri a-b)
+    - ``"v"``:    ``a`` of top   ↔ ``c`` of bottom        (down-tri a-c)
+    - ``"diag"``: ``b`` of top-left ↔ ``c`` of bottom-right (down-tri b-c)
+
+    Together with ``h_intra`` (up triangle) this covers all 6 kagome
+    bonds per cell; ``n_sites = 3``.
+
+    Returns:
+        :class:`CGGates` with ``map_fn = pess_to_kagome_supersite_exact``
+        (flat 11-arg form including ``T_d``) and a matching ``init_fn``.
+    """
+    from tenax.algorithms.coarse_grain import CGGates
+
+    h_intra = jnp.asarray(
+        kagome_triangle_xxz_hamiltonian(delta, d), dtype=jnp.complex128
+    )
+    h_inter = {
+        "h": jnp.asarray(_xxz_embed_inter(delta, d, 1, 0), dtype=jnp.complex128),
+        "v": jnp.asarray(_xxz_embed_inter(delta, d, 0, 2), dtype=jnp.complex128),
+        "diag": jnp.asarray(_xxz_embed_inter(delta, d, 1, 2), dtype=jnp.complex128),
+    }
+
+    def _flat_map_fn(R_a, R_b, R_c, T_u, T_d, lam0, lam1, lam2, lam3, lam4, lam5):
+        return pess_to_kagome_supersite_exact(
+            R_a, R_b, R_c, T_u, T_d, (lam0, lam1, lam2, lam3, lam4, lam5)
+        )
+
+    def _flat_init_fn(D: int, key: jax.Array) -> tuple[jax.Array, ...]:
+        state = IPESSState.random(D=D, d=d, key=key)
+        return (
+            state.R_a,
+            state.R_b,
+            state.R_c,
+            state.T_u,
+            state.T_d,
+            *state.lambdas,
+        )
+
+    return CGGates(
+        h_intra=h_intra,
+        h_inter=h_inter,
+        n_sites=3,
+        map_fn=_flat_map_fn,
+        init_fn=_flat_init_fn,
+    )
+
+
 def pess_to_kagome_3site_multisite(
     R_a: jax.Array,
     R_b: jax.Array,
@@ -498,15 +644,21 @@ def pess_to_kagome_3site_multisite(
     - iPESS sublattice ``b`` → multisite name ``"v"``.
     - iPESS sublattice ``c`` → multisite name ``"w"``.
 
-    *Gauge convention* (mirrors :func:`pess_to_kagome_supersite` Convention C):
+    *Gauge convention* (issue #990):
 
     - Up-bonds: full ``λ_x_u`` absorbed on the R-side (axis 1 of ``R_x``).
-    - Down-bonds: ``sqrt(λ_x_d)`` on the R-side (axis 0 of ``R_x``); the
-      other ``sqrt`` is on the next-cell's R-site at the inter-cell
-      boundary.
-    - ``T_d`` itself is contracted into ``S_u`` together with ``T_u`` (so
-      it is "absorbed" into the central site rather than dropped — the
-      down-bond ``sqrt(λ)`` gauges still appear on each ``S_x``).
+    - Down-bonds: full ``λ_x_d`` absorbed on the R-side (axis 0 of
+      ``R_x``). This deliberately does NOT mirror
+      :func:`pess_to_kagome_supersite` (Convention C): there ``T_d`` is
+      dropped, every down bond is an R–R contact between neighboring
+      supersites, and each side carries ``sqrt(λ)`` so the tiled bond
+      recovers the full weight. Here ``T_d`` is explicitly contracted
+      into ``S_u`` and carries no bond weight of its own, so every down
+      bond is an R–T_d contact and the R side must carry the *whole*
+      ``λ``. The pre-#990 code copied the supersite's sqrt convention
+      into this topology, leaving every down bond with ``λ^(1/2)`` and
+      encoding a state 0.16/site away from the PESS state at D=2 SU
+      (exact-torus/cylinder oracles in issue #990).
 
     *Encoding asymmetry* (non-bug, but worth knowing): ``T_u`` and ``T_d``
     are 3-leg simplex tensors. Distributing them into 3 separate iPEPS
@@ -516,8 +668,10 @@ def pess_to_kagome_3site_multisite(
     trivial-padded (the v-w iPEPS bond is dim-1; v-w correlations are
     mediated through u via a 2-hop path). This is the same pattern as
     Convention C's "axis-3 dummy" leg in the supersite — a known iPEPS
-    encoding pattern, not a bug. Validated empirically by Task B.3 D=2
-    energy parity.
+    encoding pattern, not a bug. Validated exactly (fidelity 1 to 1e-12
+    against an independent contraction of the raw PESS state with
+    non-trivial lambdas) by
+    ``tests/test_pess_3site_multisite_wavefunction.py``.
 
     Args:
         R_a, R_b, R_c: iPESS site tensors of shape ``(D, D, d)``, axes
@@ -553,19 +707,20 @@ def pess_to_kagome_3site_multisite(
     lam_a_u = lam_a_u.astype(dtype)
     lam_b_u = lam_b_u.astype(dtype)
     lam_c_u = lam_c_u.astype(dtype)
-    # Smooth ``sqrt`` mirrors :func:`pess_to_kagome_supersite` (codex P1
-    # review on PR #387): keeps gradients well-defined near zero.
-    sqrt_lam_a_d = jnp.power(jnp.real(lam_a_d) ** 2 + 1e-28, 0.25).astype(dtype)
-    sqrt_lam_b_d = jnp.power(jnp.real(lam_b_d) ** 2 + 1e-28, 0.25).astype(dtype)
-    sqrt_lam_c_d = jnp.power(jnp.real(lam_c_d) ** 2 + 1e-28, 0.25).astype(dtype)
+    # FULL ``λ_down`` on the R side — every down bond is an R–T_d contact
+    # and T_d carries no weight, so nothing else supplies the other half
+    # (#990; the supersite's sqrt-split is correct only for its R–R down
+    # bonds). Smooth ``|λ|`` form keeps gradients well-defined near zero
+    # (codex P1 review on PR #387).
+    lam_a_d_s = jnp.power(jnp.real(lam_a_d) ** 2 + 1e-28, 0.5).astype(dtype)
+    lam_b_d_s = jnp.power(jnp.real(lam_b_d) ** 2 + 1e-28, 0.5).astype(dtype)
+    lam_c_d_s = jnp.power(jnp.real(lam_c_d) ** 2 + 1e-28, 0.5).astype(dtype)
 
-    # Gauge each R: axis 0 (T_d-leg) gets ``sqrt(λ_down)``, axis 1
-    # (T_u-leg) gets full ``λ_up``. Same as :func:`pess_to_kagome_supersite`
-    # except S_b/S_c here keep the full λ_up (the supersite version uses
-    # full λ_up too — they agree).
-    S_a = jnp.einsum("i,ijp,j->ijp", sqrt_lam_a_d, R_a, lam_a_u)
-    S_b = jnp.einsum("i,ijp,j->ijp", sqrt_lam_b_d, R_b, lam_b_u)
-    S_c = jnp.einsum("i,ijp,j->ijp", sqrt_lam_c_d, R_c, lam_c_u)
+    # Gauge each R: axis 0 (T_d-leg) gets full ``λ_down``, axis 1
+    # (T_u-leg) gets full ``λ_up``.
+    S_a = jnp.einsum("i,ijp,j->ijp", lam_a_d_s, R_a, lam_a_u)
+    S_b = jnp.einsum("i,ijp,j->ijp", lam_b_d_s, R_b, lam_b_u)
+    S_c = jnp.einsum("i,ijp,j->ijp", lam_c_d_s, R_c, lam_c_u)
 
     # Build S_u by absorbing T_u and T_d into S_a's two virtual axes.
     # T_u contracted with S_a's T_u-axis (axis 1 of S_a) along T_u's

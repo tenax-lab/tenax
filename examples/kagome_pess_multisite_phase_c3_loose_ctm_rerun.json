@@ -1,0 +1,26 @@
+{
+ "D": 4,
+ "chi": 16,
+ "ad_iter": 30,
+ "seed": 0,
+ "loose_max_iter": 30,
+ "loose_conv_tol": 1e-07,
+ "tight_max_iter": 300,
+ "tight_conv_tol": 1e-12,
+ "e_su_loose": -0.22540003330846212,
+ "e_ad_loose": -0.37341935101394697,
+ "e_ad_tight": -0.3657501403139937,
+ "delta_loose_to_tight": 0.007669210699953244,
+ "liao_asymptotic": -0.43752,
+ "delta_tight_to_liao": 0.0717698596860063,
+ "wall_seconds_su": 3.27657002909109,
+ "wall_seconds_ad": 3532.6204402227886,
+ "wall_seconds_tight": 33.91715736873448,
+ "provenance": {
+  "run_date": "2026-09-13",
+  "main_commit": "9bf90f8",
+  "script": "kagome_pess_multisite_phase_c3_tight_ctm_probe.py (unmodified)",
+  "purpose": "Identical-protocol control (Codex round 2 on PR #985): the May breach ran the LOOSE inner CTM (max_iter=30, conv_tol=1e-7) -- the checked-in tight-ctm probe reproduces the exact May number -0.444764370577232 under those settings -- so the tight-CTM September reruns changed protocol, not just code. This run repeats the loose protocol, same seed and deterministic SU state, on current main.",
+  "verdict": "NO breach under the May protocol on current code: e_ad_loose=-0.37342 vs May's -0.44476; tight re-eval -0.36575, floor -0.43752. The loose SU readout also moved bit-level across revisions (-0.21251653657021816 in May vs -0.22540003330846212 here), direct evidence the post-May CTM fixes changed loose-settings behavior. Attribution established by A/B at fixed protocol: the breach required BOTH the loose protocol AND pre-fix code. Loose AD wall grew 384s -> 3533s: the cheap degenerate descent is gone even at loose settings. Fix set still unbisected (#780/#781, #667-cluster, #702)."
+ }
+}
