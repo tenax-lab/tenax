@@ -161,11 +161,23 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "tenax.algorithms.pess",
         "pess_to_kagome_supersite",
     ),
+    "pess_to_kagome_supersite_exact": (
+        "tenax.algorithms.pess",
+        "pess_to_kagome_supersite_exact",
+    ),
+    "kagome_xxz_pess_cg_gates_exact": (
+        "tenax.algorithms.pess",
+        "kagome_xxz_pess_cg_gates_exact",
+    ),
     "pess_to_kagome_3site_multisite": (
         "tenax.algorithms.pess",
         "pess_to_kagome_3site_multisite",
     ),
     "build_pess_loss": ("tenax.algorithms.pess_optimize", "build_pess_loss"),
+    "build_pess_loss_exact": (
+        "tenax.algorithms.pess_optimize",
+        "build_pess_loss_exact",
+    ),
     "build_pess_loss_3site_multisite": (
         "tenax.algorithms.pess_optimize",
         "build_pess_loss_3site_multisite",
@@ -520,7 +532,10 @@ __all__ = [
     "pess_simple_update",
     "pess_local_energy",
     "pess_to_kagome_supersite",
+    "pess_to_kagome_supersite_exact",
+    "kagome_xxz_pess_cg_gates_exact",
     "build_pess_loss",
+    "build_pess_loss_exact",
     "optimize_pess_ad",
     # Honeycomb CTM (native rank-4, 6-corner, 3-direction, 2-sublattice)
     "honeycomb_ctm_energy_implicit",
