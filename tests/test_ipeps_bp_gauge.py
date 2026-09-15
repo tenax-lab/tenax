@@ -1085,3 +1085,79 @@ def test_the_residual_survives_a_bond_whose_sector_count_changes():
         "identical weights no longer read as a zero residual; the padding is "
         "perturbing the comparison it is supposed to leave alone"
     )
+
+
+# --------------------------------------------------------------------------- #
+# #994: the gauge must not depend on the caller's storage order                #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_gauge_is_independent_of_the_callers_storage_order():
+    """The solve's answer is the same whatever axis order the caller stores.
+
+    This is the keystone property behind #994: ``contract`` is sign-free
+    (#555), so leg storage order is bookkeeping, and any code restoring an
+    order after ``contract`` must do so without a Koszul sign.  ``_reorder``
+    used the signed ``transpose`` instead, which stamped a sign that depends
+    on the permutation being undone -- i.e. on which storage order the
+    caller happened to use.  Measured with the signed mutant on this exact
+    fixture: |dA| = 6.5e-01, |dB| = 2.0e+00, while the bond weights agree to
+    1e-15 in both arms -- the SS5.2a signature (messages pair Gamma with
+    conj(Gamma), so the sign cancels in every spectrum while corrupting the
+    tensors).  A weights-only check is therefore vacuous here by
+    construction; the tensors are the assertion that matters.
+
+    Runs at D=3: at D=2 every parity sector on a virtual leg is 1x1 and the
+    defect class is structurally hidden (design SS5.2a).  The fixture is a
+    short (2-step) t-V simple-update state -- long anneals collapse onto
+    E=0 eigenstates of imaginary time (seed-dependent, #869-class), and the
+    regime assert below rejects that.
+    """
+    import jax
+
+    from tenax.algorithms.fermionic_ipeps import (
+        FPEPSConfig,
+        _fpeps_simple_update,
+        _initialize_fpeps,
+        spinless_fermion_gate,
+    )
+
+    D = 3
+    cfg = FPEPSConfig(D=D, dt=0.05, V=1.0)
+    ham = spinless_fermion_gate(cfg)
+    A0 = _initialize_fpeps(cfg, jax.random.PRNGKey(1))
+    A, B, lam = _fpeps_simple_update(A0, ham, D, 0.05, steps=2)
+    min_lam = min(float(jnp.min(getattr(lam, f))) for f in lam._fields)
+    assert min_lam > 1e-3, (
+        f"fixture out of regime: min lambda {min_lam:.3e} -- the state "
+        "collapsed toward an imaginary-time fixed point and no longer "
+        "exercises generic charge structure"
+    )
+
+    sigma = (1, 3, 0, 4, 2)  # a generic scramble of (u, d, l, r, phys)
+    inv = tuple(sigma.index(i) for i in range(5))
+
+    A1, B1, w1, info1 = bp_gauge_checkerboard(A, B, lam)
+    A1s, B1s, w1s, info2 = bp_gauge_checkerboard(
+        A.permute_legs(sigma), B.permute_legs(sigma), lam
+    )
+    assert info1.converged and info2.converged
+
+    # Outputs come back in each caller's storage order; undo the scramble
+    # with the sign-free permute (using the signed transpose here would
+    # cancel the very defect this test exists to catch).
+    for got, want, tag in ((A1s, A1, "A"), (B1s, B1, "B")):
+        got = got.permute_legs(inv)
+        assert got.labels() == want.labels()
+        for k in want.blocks:
+            np.testing.assert_allclose(
+                np.array(got.blocks[k]),
+                np.array(want.blocks[k]),
+                atol=1e-10,
+                err_msg=f"site {tag}: the gauged tensor depends on the "
+                "caller's storage order (#994)",
+            )
+    for f in w1._fields:
+        np.testing.assert_allclose(
+            np.array(getattr(w1s, f)), np.array(getattr(w1, f)), atol=1e-12
+        )
