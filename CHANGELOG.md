@@ -4,6 +4,23 @@
 
 ### Added
 
+- **The implicit-AD CTM forward now measures its own stationarity** (#841):
+  `ctm_energy_implicit` runs one extra gauged sweep after the forward loop and
+  warns (`RuntimeWarning`) when the literal residual
+  `||gauge_fix(step(env*)) - env*||` exceeds `max(100*conv_tol, 1e-8)` — the
+  premise the fixed-point backward linearizes under, which neither
+  `conv_method='sv'` (spectra only) nor `'elementwise'` (can exit on a
+  coincidental dip of a bond-sign limit cycle) certifies.  The residual and
+  the forward loop's own verdict are also exposed as
+  `forward_stationarity_residual` / `forward_converged` in
+  `get_last_implicit_ad_diagnostics()`, and `_sigma_gauged_ctm_converge`
+  returns its convergence flag instead of discarding it.  The warning is
+  emitted once per cached energy-function build — optimizer loops reuse one
+  build across all iterations, and a per-call warning (whose drifting
+  residual defeats Python's warning dedup) would flood stderr and train
+  users to blanket-ignore `RuntimeWarning`; the residual itself stays
+  freshly measured in the diagnostics on every call.
+
 - **The BP gauge solve is compiled for `SymmetricTensor` pairs** (#882
   Phase 3): `bp_gauge_checkerboard` and `gauge_fix` now run a symmetric pair
   through the same `lax.while_loop` driver a dense pair takes, via
@@ -261,6 +278,31 @@
   and a `SymmetricTensor` pair still takes the eager route bit-identically.
 
 ### Fixed
+
+- **The sigma forward gauge is a pure gauge transform again** (#798): the
+  2x2 sweep writes every corner axis-reversed relative to the canonical
+  `_ctm_tensor_init` order, and `_apply_sigma_to_corner` /
+  `_apply_sigma_to_edge` read legs positionally, so every sigma-gauged sweep
+  applied bond gauges to the wrong corner legs — on the 2x2 layout for C1-C3
+  and on the canonical layout for C4 (stored `(c4_r, c4_u)`, the reverse of
+  the ring order the calls assumed).  That is not a gauge transform and
+  corrupted the environment (sigma+2x2 energy off by 2.3e-3 at D=2, ~1e-2 at
+  D=3).  Sigma application is now label-based; sigma+2x2 and phase+2x2 agree
+  to 3e-15 on the #841 D=3 state.  Measured caveat, in the `forward_gauge`
+  docstring: the repaired sigma still does not reach an element-wise fixed
+  point on the 2x2 recipe (the transfer-matrix eigenvector carries no weight
+  on the weak bond directions where the residual Z2 signs live), and its
+  implicit gradient at the #841 state is worse than phase's
+  (slope_fd/|g| = -0.008 vs 0.131) — it is not a repair for #841.
+  The same defect class lived in `ad_utils._sigma_gauge_fix_ctm_tensor` —
+  the sibling sigma implementation on the Tensor-protocol path
+  (`ctm_tensor_converge` and every `CTMConfig(forward_gauge="sigma")`
+  caller) — which read corner legs positionally from `todense()` arrays and
+  hardcoded a C4 bond map contradicting the verified connectivity
+  (sigma_bottom on `c4_r`, sigma_left on `c4_u`).  It now delegates to the
+  same label-based sigma application, keeping its per-tensor global-phase
+  alignment (measured: |dE| = 6.9e-3 per application on an unconverged
+  random D=2 env pair before, ≤ 2e-16 after).
 
 - **The traced CTM chi bond inherits the environment's inventory instead of
   re-guessing it** (#929). #922 fixed the *eager* cut; the AD path could not
