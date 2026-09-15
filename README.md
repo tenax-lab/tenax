@@ -640,8 +640,12 @@ if not info.converged:
 
 Spinless fermions on the square lattice — `H = -t(c†c + h.c.) + V n n` — with
 `FermionParity` block-sparse tensors, so the exchange signs come from the graded
-tensor algebra (Koszul signs in transpose, contraction and SVD) rather than from
-hand-placed swap gates.
+tensor algebra rather than from hand-placed swap gates. The convention (#555,
+#994): the graded `transpose` and the matricization inside `svd`/`qr`/`eigh`
+carry Koszul signs; label-based `contract` is sign-free (correct for the planar
+networks every tenax algorithm uses), and `permute_legs` reorders leg *storage*
+with no sign — it, not `transpose`, is how code restores an axis order after
+`contract`.
 
 ```python
 import jax
