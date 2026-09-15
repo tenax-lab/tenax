@@ -857,7 +857,11 @@ e_per_site = float(loss(state).real)
 For the multisite encoding `pess_to_kagome_3site_multisite`, where the
 kagome unit cell maps to three sites `(u, v, w)` on a square lattice and
 the energy uses 4 NN bonds + 2 marginalised-3-site contributions, use
-`build_pess_loss_3site_multisite` and `optimize_pess_3site_multisite_ad`:
+`build_pess_loss_3site_multisite` and `optimize_pess_3site_multisite_ad`.
+**Caution (#991):** the multisite encoding places dim-1 bonds on the CTM
+lattice, where the plaquette environment's fixed point rank-truncates and
+biases per-site energies by ~2.5e-3 in the non-variational direction —
+prefer `build_pess_loss_exact` above for any quantitative energy readout:
 
 ```python
 from tenax import (

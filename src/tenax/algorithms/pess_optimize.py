@@ -52,6 +52,7 @@ from tenax.core.tensor import DenseTensor, Tensor
 __all__ = [
     "build_pess_loss",
     "build_pess_loss_3site_multisite",
+    "build_pess_loss_exact",
     "optimize_pess_3site_multisite_ad",
     "optimize_pess_ad",
 ]
