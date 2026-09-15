@@ -316,6 +316,30 @@ class Tensor(ABC):
     @abstractmethod
     def transpose(self, axes: tuple[int, ...]) -> Tensor: ...
 
+    def permute_legs(self, axes: tuple[int, ...]) -> Tensor:
+        """Reorder leg *storage* without any Koszul sign.
+
+        Two different operations reorder legs, and on a fermionic tensor they
+        differ by a block-dependent sign:
+
+        - :meth:`transpose` is the **graded braiding**: exchanging two odd
+          legs is a physical fermion exchange and stamps ``-1`` per odd-odd
+          inversion onto each block.
+        - ``permute_legs`` is **bookkeeping**: the same diagram element with
+          its open legs stored in a different axis order.  This is the
+          convention :func:`~tenax.contraction.contract` lives in (#555): the
+          contractor pairs legs by label, applies no signs, and returns its
+          result with legs in an internal order that carries no meaning.  Any
+          code restoring a caller's axis order after ``contract`` must use
+          this method -- restoring with :meth:`transpose` would make the
+          block data depend on the contractor's private ordering choice
+          (#994).
+
+        On a non-graded symmetry, and on any :class:`DenseTensor`, the two
+        coincide; this default forwards to :meth:`transpose`.
+        """
+        return self.transpose(axes)
+
     @abstractmethod
     def norm(self) -> jax.Array: ...
 
@@ -1169,6 +1193,21 @@ class SymmetricTensor(Tensor):
                 if sign < 0:
                     transposed = -transposed
             new_blocks[new_key] = transposed
+        return SymmetricTensor._from_blocks_unchecked(new_blocks, new_indices)
+
+    def permute_legs(self, axes: tuple[int, ...]) -> SymmetricTensor:
+        """Reorder leg storage without any Koszul sign.
+
+        See :meth:`Tensor.permute_legs` for when this -- and not
+        :meth:`transpose` -- is the correct reordering.  On a non-graded
+        symmetry the two are identical; on a fermionic tensor this permutes
+        each block's data and key with no sign.
+        """
+        new_indices = tuple(self._indices[i] for i in axes)
+        new_blocks = {
+            tuple(key[i] for i in axes): jnp.transpose(block, axes)
+            for key, block in self.blocks.items()
+        }
         return SymmetricTensor._from_blocks_unchecked(new_blocks, new_indices)
 
     def swap_gate(
