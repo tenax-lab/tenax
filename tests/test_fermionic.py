@@ -1156,3 +1156,145 @@ class TestFermionicContractionHypothesis:
             np.array(ref),
             atol=1e-10,
         )
+
+
+# ------------------------------------------------------------------ #
+# permute_legs: the sign-free planar reorder (#994)                    #
+# ------------------------------------------------------------------ #
+
+
+class TestPermuteLegs:
+    """#994: two operations reorder legs, and they must not be conflated.
+
+    ``transpose`` is the graded braiding (Koszul sign per odd-odd
+    inversion); ``permute_legs`` is storage bookkeeping (no sign), the
+    convention ``contract`` lives in (#555).  ``_reorder`` -- the helper
+    that restores a caller's axis order after ``contract`` in both
+    ``ipeps_bp_gauge`` and ``ipeps_su`` -- must use ``permute_legs``: a
+    signed restore stamps a sign that depends on the contractor's private
+    output ordering, measured on the BP gauge at 116x its planar witness
+    floor (design SS5.2a).
+
+    All fixtures are D=3 with charges [0, 1, 0]: parity sectors {0: 2,
+    1: 1}.  D=2 hides this entire defect class -- every parity sector is
+    1x1 there, so every parity-preserving gauge is diagonal (SS5.2a).
+    """
+
+    def _site(self, fp, key, d=3):
+        charges = np.array([0, 1, 0][:d], dtype=np.int32)
+        idx = tuple(
+            TensorIndex.from_charges(fp, charges, flow, label=lab)
+            for lab, flow in (
+                ("u", FlowDirection.IN),
+                ("d", FlowDirection.IN),
+                ("l", FlowDirection.IN),
+                ("r", FlowDirection.OUT),
+                ("p", FlowDirection.OUT),
+            )
+        )
+        return SymmetricTensor.random_normal(idx, key)
+
+    def _assert_sign_regime(self, tensor, axes):
+        """The permutation must braid odd past odd in a realized block.
+
+        Without this the tests below pass vacuously on any fixture whose
+        realized blocks make every Koszul sign +1 (#884 pattern).
+        """
+        fp = tensor.indices[0].symmetry
+        signs = []
+        for key in tensor.blocks:
+            parities = tuple(int(fp.parity(np.array([q]))[0]) for q in key)
+            signs.append(_koszul_sign(parities, axes))
+        assert -1 in signs, (
+            "fixture out of regime: no realized block acquires a Koszul "
+            "sign under this permutation, so sign-free and signed reorders "
+            "coincide and the test asserts nothing"
+        )
+
+    def test_permute_legs_is_the_bare_block_permutation(self, fp, rng):
+        A = self._site(fp, rng)
+        axes = (4, 1, 2, 3, 0)  # swap p past u (both carry odd charges)
+        self._assert_sign_regime(A, axes)
+
+        P = A.permute_legs(axes)
+        assert P.labels() == ("p", "d", "l", "r", "u")
+        for key, block in A.blocks.items():
+            new_key = tuple(key[i] for i in axes)
+            np.testing.assert_array_equal(
+                np.array(P.blocks[new_key]),
+                np.array(jnp.transpose(block, axes)),
+                err_msg="permute_legs must not touch block data beyond "
+                "the axis permutation",
+            )
+
+        # ... and transpose is NOT: it differs on exactly the blocks whose
+        # Koszul sign is -1.  This pins that the regime assert above is
+        # measuring the real thing.
+        T = A.transpose(axes)
+        differs = any(
+            not np.array_equal(np.array(T.blocks[k]), np.array(P.blocks[k]))
+            for k in P.blocks
+        )
+        assert differs, "transpose and permute_legs coincide in-regime?"
+
+    def test_permute_legs_matches_transpose_on_nongraded(self, rng):
+        z2 = ZnSymmetry(2)
+        charges = np.array([0, 1, 0], dtype=np.int32)
+        idx = tuple(
+            TensorIndex.from_charges(z2, charges, flow, label=lab)
+            for lab, flow in (
+                ("a", FlowDirection.IN),
+                ("b", FlowDirection.IN),
+                ("c", FlowDirection.OUT),
+            )
+        )
+        A = SymmetricTensor.random_normal(idx, rng)
+        axes = (2, 0, 1)
+        P, T = A.permute_legs(axes), A.transpose(axes)
+        for k in P.blocks:
+            np.testing.assert_array_equal(np.array(P.blocks[k]), np.array(T.blocks[k]))
+
+    def test_reorder_after_contract_is_sign_free(self, fp, rng, rng2):
+        """Both `_reorder` twins restore order with no sign (#994).
+
+        ``contract`` applies no Koszul signs, so the tensor it returns is
+        the same diagram element whatever internal leg order it picked;
+        restoring the caller's order must therefore be the bare block
+        permutation.  A signed restore would make the result depend on the
+        contractor's private ordering choice.
+        """
+        from tenax.algorithms.ipeps_bp_gauge import _reorder as reorder_bp
+        from tenax.algorithms.ipeps_su import _reorder as reorder_su
+
+        A = self._site(fp, rng)
+        # A bond matrix on r: what a gauge absorption contracts in.
+        charges = np.array([0, 1, 0], dtype=np.int32)
+        g_idx = (
+            TensorIndex.from_charges(fp, charges, FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(fp, charges, FlowDirection.OUT, label="rp"),
+        )
+        g = SymmetricTensor.random_normal(g_idx, rng2)
+
+        theta = contract(A, g)
+        target = ("u", "d", "l", "rp", "p")
+        assert theta.labels() != target, (
+            "fixture out of regime: contract already returned the target "
+            "order, so _reorder is the identity and asserts nothing"
+        )
+        axes = tuple(theta.labels().index(lab) for lab in target)
+        self._assert_sign_regime(theta, axes)
+
+        expected = {
+            tuple(k[i] for i in axes): jnp.transpose(v, axes)
+            for k, v in theta.blocks.items()
+        }
+        for reorder, name in ((reorder_bp, "ipeps_bp_gauge"), (reorder_su, "ipeps_su")):
+            out = reorder(theta, target)
+            assert out.labels() == target
+            for k, v in expected.items():
+                np.testing.assert_array_equal(
+                    np.array(out.blocks[k]),
+                    np.array(v),
+                    err_msg=f"{name}._reorder applied a Koszul sign to "
+                    "contract's sign-free output (#994)",
+                )

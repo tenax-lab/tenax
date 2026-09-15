@@ -292,11 +292,18 @@ def _reorder(t: Tensor, labels: tuple[str, ...]) -> Tensor:
     order.  Everything here is label-driven and does not care, but the axis
     order is part of a pytree's structure, so a step that returned a different
     one each time would recompile the traced gauge on every call.
+
+    Via :meth:`~tenax.core.tensor.Tensor.permute_legs`, **not**
+    ``transpose``: ``contract`` applies no Koszul signs (#555), so a signed
+    undo of its internal ordering would stamp a block-dependent sign onto
+    every fermionic tensor passing through -- see #994 and the twin
+    ``_reorder`` in ``ipeps_bp_gauge.py``, where the resulting gauge error
+    was measured at 116x the planar witness floor.
     """
     current = t.labels()
     if current == labels:
         return t
-    return t.transpose(tuple(current.index(lab) for lab in labels))
+    return t.permute_legs(tuple(current.index(lab) for lab in labels))
 
 
 def _align_gate_to_ket(gate: Tensor, site: Tensor) -> Tensor:
