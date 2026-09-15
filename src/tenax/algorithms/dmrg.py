@@ -908,10 +908,12 @@ def dmrg(
         # Validate sector preservation after each sweep
         if config.target_charge is not None and use_symmetric:
             sector = compute_mps_sector(mps_tensors)
-            if sector != config.target_charge:
+            want = _canonical_target_charge(mps_tensors, config.target_charge)
+            if sector != want:
                 raise RuntimeError(
                     f"Sector drift detected after sweep {sweep + 1}: "
-                    f"MPS sector={sector}, expected target_charge={config.target_charge}."
+                    f"MPS sector={sector}, expected target_charge="
+                    f"{config.target_charge} (canonical representative {want})."
                 )
 
         # Check convergence
@@ -3208,6 +3210,35 @@ def compute_mps_sector(mps_tensors: list[Tensor]) -> int | None:
     return identity
 
 
+def _canonical_target_charge(mps_tensors: list[Tensor], target_charge: int) -> int:
+    """Return the canonical representative of a raw user ``target_charge``.
+
+    ``compute_mps_sector`` reads charges that have been through the symmetry,
+    so it always reports canonical representatives; the user-supplied target
+    has not.  Under ``ZnSymmetry(3)`` a target of ``3`` names the same sector
+    as ``0``, and comparing raw against canonical manufactures a phantom
+    sector error even though the state is correct (#735).  Canonicalisation
+    is a no-op for U(1)/FermionicU1, where every integer is its own
+    representative -- which is why the all-U(1) tests never saw this.
+
+    The symmetry is read off the first block-sparse site, mirroring how
+    ``compute_mps_sector`` finds it.  If no such site exists that function
+    returns ``None`` (or the dense identity), so the comparison this feeds
+    cannot spuriously pass; the raw value is returned unchanged.
+    """
+    from tenax.core._block_array import BlockArray
+
+    for site in mps_tensors:
+        if isinstance(site, (SymmetricTensor, BlockArray)) and site.indices:
+            sym = site.indices[0].symmetry
+            return int(
+                sym.canonicalize_charges(
+                    np.array([int(target_charge)], dtype=np.int32)
+                )[0]
+            )
+    return int(target_charge)
+
+
 def validate_mps_sector(mps_tensors: list[Tensor], target_charge: int) -> None:
     """Assert that an MPS is in the specified charge sector.
 
@@ -3224,9 +3255,11 @@ def validate_mps_sector(mps_tensors: list[Tensor], target_charge: int) -> None:
             f"Cannot determine MPS sector (mixed or no SymmetricTensor blocks). "
             f"Expected target_charge={target_charge}."
         )
-    if sector != target_charge:
+    want = _canonical_target_charge(mps_tensors, target_charge)
+    if sector != want:
         raise ValueError(
-            f"MPS sector {sector} does not match target_charge={target_charge}."
+            f"MPS sector {sector} does not match target_charge={target_charge}"
+            f" (canonical representative {want})."
         )
 
 
