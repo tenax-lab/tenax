@@ -432,6 +432,134 @@ def test_assembled_cell_envs_reproduce_the_one_site_observable():
 
 
 @pytest.mark.slow
+def test_two_site_energy_on_a_uniform_2x2_matches_the_1x1_energy():
+    """#894: on a *uniform* 2x2 the multisite two-site energy must equal the
+    validated 1x1 two-site energy (``cell_energy_forward``, correct on uniform
+    cells).  This pins the env-assembly + energy plumbing exactly, before the
+    non-uniform gauge test exercises the inter-cell bond.
+    """
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+
+    A = _site_tensor(seed=1)
+    uniform = {(0, 0): A, (0, 1): A, (1, 0): A, (1, 1): A}
+    gate, chi = _gate(delta=0.7), 4
+    kw = dict(max_iter=300, conv_tol=1e-12)
+
+    e_multisite = float(M.cell_two_site_energy_forward(uniform, gate, chi, 2, 2, **kw))
+    e_1x1 = float(M.cell_energy_forward(uniform, gate, chi, 2, 2, **kw))
+    assert abs(e_multisite - e_1x1) < 1e-8, (
+        f"uniform two-site energy {e_multisite:.10f} != 1x1 energy {e_1x1:.10f} "
+        f"— the multisite assembly/normalisation disagrees on a uniform cell"
+    )
+
+
+@pytest.mark.slow
+def test_two_site_energy_is_smooth_on_a_non_uniform_cell():
+    """#894, the load-bearing gauge check: the multisite two-site energy is a
+    *smooth* function of the sites on a genuinely non-uniform 2x2, because its
+    ring spans both adjacent cells' environments so the inter-cell bond gauge
+    cancels.
+
+    The old one-``A``-on-both-halves energy (``cell_energy_forward``) is NOT
+    smooth there — it glues two chi bonds carrying independent gauges and jumps
+    by ~1e-3 under an arbitrarily small change of ``A`` (measured on this issue).
+    Asserting the old energy is rough is the regime assert: it proves the
+    fixture actually exposes the inter-cell gauge, so a two-site energy that
+    read smooth by accident could not pass.
+    """
+    import jax.numpy as jnp
+
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+    from tenax.core.tensor import DenseTensor
+
+    cell = _cell_2x2()
+    gate, chi = _gate(delta=0.7), 4
+    idx = {rc: A.indices for rc, A in cell.items()}
+    base = {rc: jnp.asarray(A.todense()) for rc, A in cell.items()}
+    rng = np.random.RandomState(0)
+    dirs = {rc: jnp.asarray(rng.standard_normal(v.shape)) for rc, v in base.items()}
+    kw = dict(max_iter=300, conv_tol=1e-12)
+
+    def line(data):
+        return {rc: DenseTensor(data[rc], idx[rc]) for rc in data}
+
+    ts = (-2e-5, -1e-5, 0.0, 1e-5, 2e-5)
+
+    def sample(energy_fn):
+        vals = []
+        for t in ts:
+            c = line({rc: base[rc] + t * dirs[rc] for rc in base})
+            vals.append(float(energy_fn(c, gate, chi, 2, 2, **kw)))
+        second = max(abs(vals[i + 2] - 2 * vals[i + 1] + vals[i]) for i in range(3))
+        spread = max(vals) - min(vals)
+        return second, spread
+
+    two_site_second, two_site_spread = sample(M.cell_two_site_energy_forward)
+    old_second, _old_spread = sample(M.cell_energy_forward)
+
+    # Regime assert: the old (gauge-dependent) energy really is rough on this
+    # fixture, so the smoothness of the new one is meaningful and not vacuous.
+    assert old_second > 1e-5, (
+        f"the one-A-both-halves energy is smooth here (second diff "
+        f"{old_second:.3e}) — the fixture does not expose the inter-cell gauge, "
+        f"so this test cannot distinguish the two energies"
+    )
+    # The new energy is smooth: a C^2 f has second difference f''*h^2 ~ 1e-8
+    # at h=1e-5, orders below the old energy's gauge jump.
+    assert two_site_second < 1e-2 * old_second, (
+        f"the multisite two-site energy is not smooth (second diff "
+        f"{two_site_second:.3e}) against the old energy's {old_second:.3e} — the "
+        f"inter-cell bond gauge is not cancelling"
+    )
+    # And it genuinely varies over the span (not a constant that is trivially
+    # smooth): the directional derivative is resolved.
+    assert two_site_spread > 1e-6, (
+        f"the two-site energy is nearly constant over the span "
+        f"({two_site_spread:.3e}); the smoothness assertion is then vacuous"
+    )
+
+
+@pytest.mark.slow
+def test_two_site_energy_matches_the_production_multisite_energy():
+    """#894: the multisite two-site energy is physically the right number, not
+    merely smooth — it agrees with the production CTM path
+    (``python_loop_ctm_converge`` + ``compute_energy_ctm_tensor_multisite``) on
+    the same non-uniform 2x2 state.
+
+    The two CTMs converge to gauge-equivalent but not bit-identical fixed points
+    (different projector conventions truncate slightly differently at finite
+    chi), so the agreement is at the ~few-e-3 finite-chi level the energy is
+    known to differ across CTM implementations, not to machine precision.
+    """
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+    from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
+    from tenax.algorithms._ctm_tensor_energy import (
+        compute_energy_ctm_tensor_multisite,
+    )
+
+    cell = _cell_2x2()
+    gate, chi = _gate(delta=0.7), 4
+    neighbors = M.cell_neighbors(2, 2)
+
+    e_root = float(
+        M.cell_two_site_energy_forward(
+            cell, gate, chi, 2, 2, max_iter=300, conv_tol=1e-12
+        )
+    )
+
+    prod_envs, _info = python_loop_ctm_converge(
+        cell, neighbors, chi=chi, max_iter=300, conv_tol=1e-12
+    )
+    e_prod = float(
+        compute_energy_ctm_tensor_multisite(cell, prod_envs, neighbors, gate)
+    )
+    assert abs(e_root - e_prod) < 5e-3, (
+        f"multisite two-site energy {e_root:.8f} disagrees with the production "
+        f"CTM energy {e_prod:.8f} beyond the cross-CTM finite-chi tolerance"
+    )
+
+
+@pytest.mark.slow
 def test_the_unit_cell_is_not_secretly_uniform():
     """Guards the guard: if a 2x2 cell of different tensors converged to four
     identical environments, every cell-shift test built on it would be

@@ -58,6 +58,8 @@ __all__ = [
     "absorb_inverse_roots_multisite",
     "cell_energy_forward",
     "cell_observable_forward",
+    "cell_two_site_energy_forward",
+    "cell_neighbors",
     "env_ring_for_cell",
     "assemble_cell_envs",
     "cell_root_implicit_energy_and_grad",
@@ -986,6 +988,76 @@ def cell_energy_forward(
         objective_cell,
         nrows,
         ncols,
+    )
+
+
+def cell_neighbors(nrows: int, ncols: int) -> dict:
+    """The ``{coord: {left/right/top/bottom: coord}}`` map for a periodic cell.
+
+    The topology ``compute_energy_ctm_tensor_multisite`` iterates: ``right`` is
+    ``(r, c+1)`` and ``bottom`` is ``(r+1, c)`` (its horizontal / vertical bond
+    directions), with ``left``/``top`` the reverses used for bond de-duplication.
+    All periodic, matching :func:`converge_multisite`.
+    """
+    return {
+        (r, c): {
+            "right": (r, (c + 1) % ncols),
+            "left": (r, (c - 1) % ncols),
+            "bottom": ((r + 1) % nrows, c),
+            "top": ((r - 1) % nrows, c),
+        }
+        for r in range(nrows)
+        for c in range(ncols)
+    }
+
+
+def _cell_two_site_energy(
+    a_data, corners_reg, edges_reg, templates, indices, gate, nrows, ncols
+):
+    """Physical multisite energy: two-site RDMs whose rings span adjacent cells.
+
+    Unlike :func:`_cell_energy` (which places one ``A`` on both halves of a
+    single ring and is gauge-dependent off a 1x1 cell), this rebuilds a
+    per-coordinate :class:`CTMTensorEnv` from the regular env
+    (:func:`assemble_cell_envs`) and hands the whole dict to the production
+    :func:`~tenax.algorithms._ctm_tensor_energy.compute_energy_ctm_tensor_multisite`,
+    which dispatches every horizontal/vertical bond to
+    ``_rdm2x1_tensor_2site`` / ``_rdm1x2_tensor_2site`` — rings closed by
+    *both* adjacent cells' environments, so the inter-cell bond's gauge cancels
+    and the energy is a smooth function of the sites (#894).
+
+    A function of ``(a_data, corners_reg, edges_reg)`` — the same variables
+    :func:`_cell_observable` is — so it drops straight into the root-implicit
+    adjoint in place of the one-site objective.  No SVD/eigh: pure contractions,
+    differentiable as written.
+    """
+    from tenax.algorithms._ctm_tensor_energy import (
+        compute_energy_ctm_tensor_multisite,
+    )
+    from tenax.core.tensor import DenseTensor
+
+    envs = assemble_cell_envs(corners_reg, edges_reg, templates, nrows, ncols)
+    a_live = {rc: DenseTensor(a_data[rc], indices[rc]) for rc in a_data}
+    return compute_energy_ctm_tensor_multisite(
+        a_live, envs, cell_neighbors(nrows, ncols), gate
+    )
+
+
+def cell_two_site_energy_forward(
+    A_by_cell, gate, chi: int, nrows: int, ncols: int, **kw
+):
+    """Forward-only multisite two-site energy — the FD side of the parity gate.
+
+    Valid on a genuinely non-uniform cell, unlike :func:`cell_energy_forward`.
+    """
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+
+    corners, edges, _meta = converge_multisite(A_by_cell, chi, nrows, ncols, **kw)
+    templates = {co: initialize_ctm_tensor_env(A, chi) for co, A in A_by_cell.items()}
+    indices = {co: A.indices for co, A in A_by_cell.items()}
+    a_data = {co: jnp.asarray(A.todense()) for co, A in A_by_cell.items()}
+    return _cell_two_site_energy(
+        a_data, corners, edges, templates, indices, gate, nrows, ncols
     )
 
 
