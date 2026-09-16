@@ -595,13 +595,14 @@ _FILE_MARKERS = {
     "test_make_neighbors.py": "core",
     "test_tuning_registry.py": "core",
     # ---------------------------------------------------------------- #
-    # #805 drain: the last 41 _UNBUCKETED_LEGACY files, bucketed by     #
+    # #805 drain: the last _UNBUCKETED_LEGACY files, bucketed by        #
     # measured CI/local runtime (durations in comments are the max      #
     # observed across the 3.11/3.12/macOS jobs, or a local CPU time).   #
     # core = cheap and a wrong-number/correctness guard; slow = >150s   #
     # (no self-declared slow marks, so the whole file goes to the slow  #
     # bucket); algorithm = everything else (runs on push-to-main and    #
     # the nightly, never silent). This empties the legacy list.         #
+    # (test_ipeps_ad_adjoint_methods.py was drained separately by #982.)#
     # ---------------------------------------------------------------- #
     # core: cheap correctness guards (all measured under 8s)
     "test_ctm_honeycomb_env.py": "core",  # 0.2s / 7
@@ -635,7 +636,6 @@ _FILE_MARKERS = {
     "test_ctm_projector.py": "algorithm",  # 22.4s / 7
     "test_ctm_sharding_backward.py": "algorithm",
     "test_hotrg_sharding.py": "algorithm",  # 13s / 2
-    "test_ipeps_ad_adjoint_methods.py": "algorithm",  # 120s / 2 (#827 pinned)
     "test_ipeps_ad_conv_criterion.py": "algorithm",  # 27.3s / 15
     "test_ipeps_ad_f3_fused_bwd.py": "algorithm",  # 18.5s / 3
     "test_ipeps_ad_history.py": "algorithm",
@@ -648,6 +648,15 @@ _FILE_MARKERS = {
     "test_sublattice_rotation.py": "algorithm",  # 89s / 24
     "test_varipeps_compare.py": "algorithm",  # external compare, skips if absent
     "test_varipeps_compare_su.py": "algorithm",  # external compare
+    # #827/#824: the adjoint-method (fixed_point vs gmres) equivalence tests.
+    # Drained from ``_UNBUCKETED_LEGACY`` by #982 -- this file running in no
+    # gating job is how its energy assertion sat red on one platform for a
+    # month (#803, then #827).  Both tests already carry an explicit
+    # ``@pytest.mark.algorithm``, so the required ``-m core`` gate is
+    # unchanged; this entry makes the bucket reviewed rather than accidental.
+    # Cost: two D=2 chi=8 CTM gradient evaluations to conv_tol=1e-10 plus two
+    # 1-step optimizations (~40s CPU).
+    "test_ipeps_ad_adjoint_methods.py": "algorithm",
 }
 
 
