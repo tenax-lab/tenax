@@ -425,6 +425,30 @@ def _validate_exact_cg_gates(cg_gates: CGGates) -> None:
         )
 
 
+def _validate_convc_cg_gates(cg_gates: CGGates) -> None:
+    """Reject exact-blocking gates on the Convention-C loss (#1002 review).
+
+    The reverse of :func:`_validate_exact_cg_gates`: exact gates' h/v/diag
+    sub-site pairings encode the exact blocking's leg geometry, so the
+    Convention-C loss would silently measure the wrong Hamiltonian with
+    them.  Same arity marker — the exact ``map_fn`` takes the flat 11-arg
+    T_d-including form, Convention C's takes 10.
+    """
+    import inspect
+
+    map_fn = getattr(cg_gates, "map_fn", None)
+    if map_fn is not None and len(inspect.signature(map_fn).parameters) == 11:
+        raise ValueError(
+            "loss_builder='convc' (the default) requires gates built by "
+            "kagome_xxz_pess_cg_gates (Convention C); got a CGGates whose "
+            "map_fn takes the flat 11-arg T_d-including form — most likely "
+            "from kagome_xxz_pess_cg_gates_exact. The two builders encode "
+            "different inter-cell sub-site pairings, so mixing them "
+            "silently measures the wrong Hamiltonian (#1002). Pass "
+            "loss_builder='exact' to use these gates."
+        )
+
+
 def optimize_pess_ad(
     initial_state: IPESSState,
     cg_gates: CGGates,
@@ -494,6 +518,7 @@ def optimize_pess_ad(
     import optax
 
     if loss_builder == "convc":
+        _validate_convc_cg_gates(cg_gates)
         loss_fn_state = build_pess_loss(cg_gates, config)
         train_T_d = False
     elif loss_builder == "exact":

@@ -150,9 +150,10 @@ def main() -> None:
         "--include-odd-D",
         action="store_true",
         help=(
-            "Include D=3 in the sweep. Odd D is AD-unstable on the iPESS "
-            "supersite path (see pess_to_kagome_supersite docstring); use "
-            "this flag only to deliberately characterise the unstable regime."
+            "Include D=3 in the sweep. The historical odd-D AD instability "
+            "was a Convention-C dummy-leg artifact that does not exist on "
+            "the exact blocking this script now runs; odd D is simply "
+            "uncharacterised there, so it stays opt-in."
         ),
     )
     parser.add_argument("--max-iter", type=int, default=80, help="L-BFGS iterations")

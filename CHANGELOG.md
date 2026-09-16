@@ -273,7 +273,8 @@
 ### Fixed
 
 - **The kagome PESS AD benchmarks measure and optimize the exact blocking**
-  (#1002): `examples/kagome_spin12_pess_ad_benchmark.py` and
+  (#1002): `examples/kagome_spin12_pess_ad_benchmark.py`,
+  `examples/kagome_spin1_xxz_anisotropy_sweep.py`, and
   `examples/kagome_spin1_pess_ad_benchmark.py` now route both the
   `[SU only]` readout and the AD stage through `build_pess_loss_exact` /
   `optimize_pess_ad(..., loss_builder="exact")`. They previously went

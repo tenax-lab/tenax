@@ -734,6 +734,21 @@ def test_optimize_pess_ad_exact_rejects_convc_gates():
         optimize_pess_ad(state0, cg_gates, config, max_iter=1, loss_builder="exact")
 
 
+def test_optimize_pess_ad_rejects_exact_gates_on_convc_loss():
+    """#1002 review: the reverse mispairing — exact gates on the DEFAULT
+    Convention-C loss — must also refuse loudly.  Exact gates' h/v/diag
+    sub-site pairings encode the exact blocking's leg geometry, so the
+    ConvC loss would silently measure the wrong Hamiltonian with them."""
+    from tenax.algorithms.pess import kagome_xxz_pess_cg_gates_exact
+
+    state0 = IPESSState.random(D=2, d=2, key=jax.random.PRNGKey(8))
+    cg_gates = kagome_xxz_pess_cg_gates_exact(delta=1.0, d=2)
+    config = _make_test_config(chi=8)
+
+    with pytest.raises(ValueError, match="kagome_xxz_pess_cg_gates"):
+        optimize_pess_ad(state0, cg_gates, config, max_iter=1)
+
+
 def test_optimize_pess_ad_rejects_unknown_loss_builder():
     state0 = IPESSState.random(D=2, d=2, key=jax.random.PRNGKey(7))
     cg_gates = kagome_xxz_pess_cg_gates(delta=1.0, d=2)
