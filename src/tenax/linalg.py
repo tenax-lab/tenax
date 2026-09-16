@@ -29,7 +29,6 @@ from tenax.core.tensor import (
     DenseTensor,
     SymmetricTensor,
     Tensor,
-    _koszul_sign,
 )
 
 # ---------- Shared helpers ----------
@@ -50,6 +49,17 @@ def _block_in_decomp_order(block, decomp_perm: tuple[int, ...]):
     Uses the array's own ``.transpose`` so numpy-backed and JAX-backed blocks
     each keep their type.  Identity permutations return the block untouched, so
     the common in-order case costs nothing.
+
+    **No Koszul sign, deliberately (#997).**  Matricization is storage
+    bookkeeping in the sign-free planar convention (#555): ``contract``
+    applies no signs, so the factors a decomposition emits must recombine to
+    the input under ``contract`` for *any* storage order of the input.  The
+    signed variant made ``U @ s @ Vh`` equal a sign-corrupted permutation of
+    ``T`` whenever the requested split braided odd charges past odd charges
+    -- an O(1), storage-order-dependent error that destroyed 37-56% of the
+    state per fermionic simple-update phase.  Fermionic exchange enters
+    through operators and explicit ``swap_gate`` insertions, never through
+    how a block happens to be flattened.
     """
     if decomp_perm == tuple(range(len(decomp_perm))):
         return block
@@ -294,7 +304,6 @@ def _truncated_svd_symmetric(
 
     # Check if fermionic signs are needed for leg reordering
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     # The permutation from original leg order to (left_axes, right_axes)
     decomp_perm = tuple(left_axes + right_axes)
 
@@ -370,20 +379,6 @@ def _truncated_svd_symmetric(
             flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            # Apply Koszul sign for leg reordering (original -> left+right)
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix = matrix.at[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -785,7 +780,6 @@ def _truncated_svd_symmetric_traced(
     grouped = _group_blocks_by_bond_charge(tensor, left_axes, right_axes)
 
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     decomp_perm = tuple(left_axes + right_axes)
 
     # Per-sector results: q -> (matrix, left_subkeys, right_subkeys,
@@ -835,19 +829,6 @@ def _truncated_svd_symmetric_traced(
             flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix = matrix.at[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -1048,7 +1029,6 @@ def _truncated_svd_symmetric_np(
 
     # Check if fermionic signs are needed for leg reordering
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     # The permutation from original leg order to (left_axes, right_axes)
     decomp_perm = tuple(left_axes + right_axes)
 
@@ -1112,20 +1092,6 @@ def _truncated_svd_symmetric_np(
             flat_block = _block_in_decomp_order(np.asarray(block), decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            # Apply Koszul sign for leg reordering (original -> left+right)
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -1294,7 +1260,6 @@ def _qr_symmetric_np(
 
     # Check if fermionic signs are needed for leg reordering
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     decomp_perm = tuple(left_axes + right_axes)
 
     # Per-sector QR results
@@ -1359,20 +1324,6 @@ def _qr_symmetric_np(
             flat_block = _block_in_decomp_order(np.asarray(block), decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            # Apply Koszul sign for leg reordering (original -> left+right)
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -1471,7 +1422,6 @@ def _qr_symmetric(
 
     # Check if fermionic signs are needed for leg reordering
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     decomp_perm = tuple(left_axes + right_axes)
 
     # Per-sector QR results
@@ -1538,20 +1488,6 @@ def _qr_symmetric(
             flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            # Apply Koszul sign for leg reordering (original -> left+right)
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix = matrix.at[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -1693,7 +1629,6 @@ def _eigh_symmetric(
 
     # Check if fermionic signs are needed for leg reordering
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     decomp_perm = tuple(left_axes + right_axes)
 
     # Per-sector eigh results: (eigvecs, eigvals, left_subkeys, left_row_sizes)
@@ -1749,20 +1684,6 @@ def _eigh_symmetric(
             flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            # Apply Koszul sign for leg reordering (original -> left+right)
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix = matrix.at[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -2185,7 +2106,6 @@ def _rsvd_symmetric(
     grouped = _group_blocks_by_bond_charge(tensor, left_axes, right_axes)
 
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     decomp_perm = tuple(left_axes + right_axes)
 
     # Per-sector RSVD results
@@ -2246,19 +2166,6 @@ def _rsvd_symmetric(
             flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix = matrix.at[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
