@@ -215,3 +215,100 @@ def test_make_plots_writes_pngs(tmp_path):
     assert len(paths) >= 1
     for p in paths:
         assert showcase.Path(p).exists()
+
+
+def test_load_or_run_cell_evicts_pre938_results(tmp_path, monkeypatch):
+    """A cached result without the current recipe stamp (every file written
+    before the #938 migration off the collapsed 1x1 boundary) must be moved
+    aside and its cell re-run — never served into the table (#747)."""
+    import json
+
+    cell = showcase.Cell(D=2, chi=16, n_devices=1, gs_num_steps=6, is_anchor=False)
+    path = pathlib.Path(showcase.cell_result_path(str(tmp_path), cell))
+    stale = {
+        "D": 2,
+        "chi": 16,
+        "n_devices": 1,
+        "gs_num_steps": 6,
+        "is_anchor": False,
+        "E_site": -0.55,
+        "error": None,
+        "oom": False,
+    }
+    path.write_text(json.dumps(stale))  # note: no "recipe" key
+
+    def fake_worker(argv, env=None, check=False, timeout=None):
+        path.write_text(
+            json.dumps({**stale, "recipe": showcase.SHOWCASE_RECIPE, "E_site": -0.66})
+        )
+
+    monkeypatch.setattr(showcase.subprocess, "run", fake_worker)
+    res = showcase._load_or_run_cell(cell, str(tmp_path), timeout_s=1)
+    assert res["recipe"] == showcase.SHOWCASE_RECIPE
+    assert res["E_site"] == -0.66  # the fresh run, not the stale cache
+    moved = path.with_name(path.name + ".pre938")
+    assert moved.exists(), "the stale file must be preserved, moved aside"
+    assert json.loads(moved.read_text())["E_site"] == -0.55
+
+
+def test_load_or_run_cell_serves_stamped_cache_without_worker(tmp_path, monkeypatch):
+    """A result carrying the current recipe stamp is served from cache; the
+    worker must not be launched (resume stays cheap)."""
+    import json
+
+    cell = showcase.Cell(D=2, chi=16, n_devices=1, gs_num_steps=6, is_anchor=False)
+    path = pathlib.Path(showcase.cell_result_path(str(tmp_path), cell))
+    cached = {
+        "D": 2,
+        "chi": 16,
+        "n_devices": 1,
+        "gs_num_steps": 6,
+        "is_anchor": False,
+        "recipe": showcase.SHOWCASE_RECIPE,
+        "E_site": -0.66,
+        "error": None,
+        "oom": False,
+    }
+    path.write_text(json.dumps(cached))
+
+    def bomb(*a, **k):
+        raise AssertionError("worker launched despite a valid cached result")
+
+    monkeypatch.setattr(showcase.subprocess, "run", bomb)
+    res = showcase._load_or_run_cell(cell, str(tmp_path), timeout_s=1)
+    assert res["E_site"] == -0.66
+
+
+def _load_analyzer():
+    p = _PATH.parent / "showcase_analyze.py"
+    spec = importlib.util.spec_from_file_location("showcase_analyze", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_analyzer_load_cells_skips_pre938_results(tmp_path, capsys):
+    """showcase_analyze.load_cells bypasses _load_or_run_cell's cache check,
+    so it must enforce the same recipe predicate: unstamped (pre-#938, 1x1-era)
+    files are skipped, not analyzed (Codex round 3 on #972)."""
+    import json
+
+    analyzer = _load_analyzer()
+    stale = {"D": 2, "chi": 16, "n_devices": 1, "is_anchor": False, "E_site": -0.55}
+    fresh = {**stale, "chi": 24, "recipe": showcase.SHOWCASE_RECIPE, "E_site": -0.66}
+    (tmp_path / "D2_chi16_n1_metrics.json").write_text(json.dumps(stale))
+    (tmp_path / "D2_chi24_n1_metrics.json").write_text(json.dumps(fresh))
+
+    cells = analyzer.load_cells(results_dir=tmp_path, showcase=showcase)
+    assert [c["chi"] for c in cells] == [24], "only the stamped file loads"
+    err = capsys.readouterr().err
+    assert "D2_chi16_n1_metrics.json" in err, "the skip must be reported"
+
+
+def test_the_two_loaders_share_one_validity_predicate():
+    """The resume path and the analyzer must not drift apart on what counts as
+    reusable: both go through showcase.result_is_current."""
+    src_sweep = _PATH.read_text()
+    src_analyze = (_PATH.parent / "showcase_analyze.py").read_text()
+    assert "result_is_current(cached)" in src_sweep.split("def _load_or_run_cell")[1]
+    assert "result_is_current(res)" in src_analyze.split("def load_cells")[1]

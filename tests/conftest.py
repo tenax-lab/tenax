@@ -17,6 +17,10 @@ _FILE_MARKERS = {
     "test_eps_t_blindness_727.py": "core",
     "test_gs_recipe_explicit_rejection_755.py": "core",
     "test_tensor.py": "core",
+    # PR #986 Phase 1: the swap-gate primitive.  Pure block-metadata sign
+    # tests, no CTM, ~1s; the graded-transpose cross-check is the mutation
+    # anchor for the fermionic CTM-AD reform's build-time statistics.
+    "test_swap_gate.py": "core",
     "test_index.py": "core",
     "test_symmetry.py": "core",
     "test_contraction.py": "core",
@@ -243,6 +247,9 @@ _FILE_MARKERS = {
     # suite is real-symmetric, so nothing else can catch a regression.  Exact
     # D=1 product fixtures, seconds.
     "test_rdm_gate_transpose_966.py": "core",
+    # The chi-convergence example's provenance gate (#938 round 2): pre-#938
+    # outdirs must be refused, not resumed. File ops + one path-load, seconds.
+    "test_chi_convergence_provenance.py": "core",
     # The bucket guard itself (#805). Pure filesystem inspection, microseconds,
     # and it must run in the gate it protects or it protects nothing.
     "test_bucket_registry.py": "core",
@@ -437,6 +444,12 @@ _FILE_MARKERS = {
     "test_ipeps_chi_bump_integration.py": "algorithm",
     "test_ctm_convergence_random_iPEPS.py": "algorithm",
     "test_ipeps_grad_spike_guard.py": "slow",
+    # #973 cross-run warm-start leak: wiring tests are ms-scale (planted
+    # cache entry + junk args); the end-to-end determinism repro runs five
+    # short implicit-AD optimizations and sits with the other multi-run
+    # optimizer integrations in slow.
+    "test_warm_start_entry_invalidation_973.py": "core",
+    "test_optimizer_run_independence_973.py": "slow",
     # Block-sparse stacked-contraction backend seam (#200 / #566): fast,
     # mechanism-level (small even-D fermionic tensors, no CTM convergence).
     "test_harness.py": "core",
@@ -513,6 +526,7 @@ _FILE_MARKERS = {
     "test_optimize_gs_ad_chi_schedule_shim.py": "core",
     "test_pess_3site_multisite_encoding.py": "core",
     "test_pess_3site_multisite_wavefunction.py": "core",
+    "test_pess_supersite_exact.py": "core",
     "test_regularized_qr.py": "core",
     "test_varipeps_compare_payload.py": "core",
     #

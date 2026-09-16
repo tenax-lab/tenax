@@ -304,6 +304,14 @@
   alignment (measured: |dE| = 6.9e-3 per application on an unconverged
   random D=2 env pair before, ≤ 2e-16 after).
 
+- **DMRG canonicalizes `target_charge` before comparing it to the MPS
+  sector** (#735). `compute_mps_sector` reports canonical representatives,
+  but the pre-run validation and the per-sweep drift check compared them to
+  the raw user value, so `ZnSymmetry(3)` with `target_charge=3` raised a
+  phantom "MPS sector 0 does not match target_charge=3" even though the
+  state was in exactly the requested sector. No-op for U(1)/FermionicU1,
+  where every integer is its own representative.
+
 - **The traced CTM chi bond inherits the environment's inventory instead of
   re-guessing it** (#929). #922 fixed the *eager* cut; the AD path could not
   have it, because `jax.jit` bakes the per-sector block shapes at trace time

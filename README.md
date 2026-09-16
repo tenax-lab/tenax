@@ -371,7 +371,17 @@ flag — setting it would silently evolve the uniform model. Per-bond gates are
 The energy `ipeps()` reports comes from the legacy 2-site CTM, which does not
 converge on a genuinely entangled state — it sits ~0.02 above the truth. For an
 accurate number, measure the returned state with `ctm_tensor(recipe="2x2")`
-(D=2 gives −0.65933, χ-converged). Simple update itself was fixed in #667; if
+(D=2 gives −0.65933, χ-converged).
+
+When you want only the simple-update state — as a warm start or fixture — skip
+that measurement entirely:
+
+```python
+_, (A, B), _ = ipeps(gate, None, config, compute_energy=False)
+# returns (None, (A, B), None): no CTM is run, no energy is computed
+```
+
+Simple update itself was fixed in #667; if
 you have results from before that, note it converged to the product state and
 that *smaller* `dt` made it worse — see the changelog.
 
@@ -630,8 +640,12 @@ if not info.converged:
 
 Spinless fermions on the square lattice — `H = -t(c†c + h.c.) + V n n` — with
 `FermionParity` block-sparse tensors, so the exchange signs come from the graded
-tensor algebra (Koszul signs in transpose, contraction and SVD) rather than from
-hand-placed swap gates.
+tensor algebra rather than from hand-placed swap gates. The convention (#555,
+#994): the graded `transpose` and the matricization inside `svd`/`qr`/`eigh`
+carry Koszul signs; label-based `contract` is sign-free (correct for the planar
+networks every tenax algorithm uses), and `permute_legs` reorders leg *storage*
+with no sign — it, not `transpose`, is how code restores an axis order after
+`contract`.
 
 ```python
 import jax
@@ -821,12 +835,37 @@ intra-cell + horizontal/vertical/diagonal inter-cell 2-site RDMs; see
 `examples/kagome_spin12_pess_ad_benchmark.py` and
 `examples/kagome_spin1_pess_ad_benchmark.py` for full sweeps.
 
+### Exact supersite (T_d kept — recommended for energy readouts)
+
+`pess_to_kagome_supersite_exact` blocks all five iPESS primitives
+(`R_a, R_b, R_c, T_u, T_d`) into one rank-5 supersite with four real
+virtual legs and no dummy — the same single-PEPS-site mapping variPEPS
+uses for kagome 3-PESS. `build_pess_loss_exact` runs it through the
+single-site CTM (forward + implicit AD); on control states it agrees
+with variPEPS to 1e-9 and with exact cylinder oracles to ~2e-4 at D=2
+and D=4 (issue #991).
+
+```python
+from tenax import (
+    build_pess_loss_exact,
+    kagome_xxz_pess_cg_gates_exact,
+)
+
+loss = build_pess_loss_exact(kagome_xxz_pess_cg_gates_exact(delta=1.0, d=d),
+                             config)
+e_per_site = float(loss(state).real)
+```
+
 ### Multisite path (3-site kagome on a square unit cell)
 
 For the multisite encoding `pess_to_kagome_3site_multisite`, where the
 kagome unit cell maps to three sites `(u, v, w)` on a square lattice and
 the energy uses 4 NN bonds + 2 marginalised-3-site contributions, use
-`build_pess_loss_3site_multisite` and `optimize_pess_3site_multisite_ad`:
+`build_pess_loss_3site_multisite` and `optimize_pess_3site_multisite_ad`.
+**Caution (#991):** the multisite encoding places dim-1 bonds on the CTM
+lattice, where the plaquette environment's fixed point rank-truncates and
+biases per-site energies by ~2.5e-3 in the non-variational direction —
+prefer `build_pess_loss_exact` above for any quantitative energy readout:
 
 ```python
 from tenax import (
@@ -897,6 +936,42 @@ packed = ProductSymmetry.encode_charges(
     np.array([1, 0, -1], dtype=np.int32),  # S_z
 )
 q1, q2 = ProductSymmetry.decode_charges(packed)
+```
+
+### Fermionic swap gates
+
+`SymmetricTensor.swap_gate(axes=(i, j))` multiplies each block by
+`(-1)**(p_i * p_j)` — a minus sign exactly when *both* crossing legs carry
+odd parity. This is the Corboz-style build-time encoding of fermionic
+exchange statistics: place the sign where two fermionic lines cross in the
+(fixed) network diagram, and the rest of the contraction needs no graded
+logic. For an adjacent leg exchange it reproduces the Koszul sign of the
+graded `transpose` exactly. The optional `grading=({charge: parity}, ...)`
+override supplies the parity maps explicitly — needed by pipelines that
+retype graded tensors onto bosonic symmetry objects, where `parity()` is
+all-even by definition (see `docs/plans/2026-09-12-fermionic-ctm-ad-swap-gates-design.md`).
+
+```python
+import jax
+import numpy as np
+from tenax import FermionParity, FlowDirection, SymmetricTensor, TensorIndex
+
+fp = FermionParity()
+charges = np.array([0, 0, 1, 1], dtype=np.int32)  # both parities on each leg
+idx = lambda flow, lbl: TensorIndex.from_charges(fp, charges, flow, label=lbl)
+T = SymmetricTensor.random_normal(
+    indices=(idx(FlowDirection.OUT, "a"), idx(FlowDirection.IN, "b")),
+    key=jax.random.PRNGKey(0),
+)
+
+G = T.swap_gate((0, 1))  # odd-odd blocks flip sign, others unchanged
+
+# involution: applying the same gate twice restores the tensor
+assert np.allclose(np.asarray(G.swap_gate((0, 1))._data), np.asarray(T._data))
+
+# adjacent-exchange identity: the graded transpose's Koszul sign IS the
+# swap gate — transpose(T) block-equals sign-free-permute(swap_gate(T))
+graded = T.transpose((1, 0))
 ```
 
 ### Charge arithmetic

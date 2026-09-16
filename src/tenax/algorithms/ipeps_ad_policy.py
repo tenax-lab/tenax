@@ -175,6 +175,14 @@ def ctm_converge_kwargs(
     ~10-15 sweeps instead of 30-60 (issue #503).  Either probe override
     may be ``None`` independently — the un-overridden field keeps the
     accepted-step value.
+
+    ``recipe`` is **deliberately not forwarded** — every consumer runs
+    ``python_loop_ctm_converge``'s default ``"2x2"``.  This is safe only
+    because ``optimize_gs_ad`` refuses ``gs_recipe='1x1'`` on every fused
+    path (#938); if a recipe other than ``"2x2"`` ever becomes wired for
+    the fused forwards, it must be threaded here explicitly, or the
+    warm-start/probe/final-evaluation CTMs will silently disagree with
+    the loss (the #938 defect).
     """
     _max_iter = ctm_cfg.max_iter
     _conv_tol = ctm_cfg.conv_tol

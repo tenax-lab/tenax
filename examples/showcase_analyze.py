@@ -51,11 +51,26 @@ def per_step_ms(d):
     return 1000.0 * statistics.median(warm)
 
 
-def load_cells():
-    cells = []
-    for f in sorted(glob.glob(str(RESULTS / "*.json"))):
+def load_cells(results_dir=None, showcase=None):
+    """Load result JSONs that pass the showcase module's validity predicate.
+
+    Pre-#938 files (no ``recipe`` stamp — measured on the collapsed 1x1
+    boundary, #747) are skipped with a warning, never analyzed: this loader
+    bypasses ``_load_or_run_cell``'s cache check, so it must enforce the same
+    predicate or ``--write-outputs`` regenerates tables and plots from stale
+    or mixed-regime data (Codex round 3 on #972)."""
+    showcase = showcase or _load_showcase_module()
+    cells, stale = [], []
+    for f in sorted(glob.glob(str(Path(results_dir or RESULTS) / "*.json"))):
         with open(f) as fh:
-            cells.append(json.load(fh))
+            res = json.load(fh)
+        if showcase.result_is_current(res):
+            cells.append(res)
+        else:
+            stale.append(Path(f).name)
+    if stale:
+        print(f"[stale] skipped {len(stale)} pre-#938 result file(s) "
+              f"(no/mismatched recipe stamp): {', '.join(stale)}", file=sys.stderr)
     return cells
 
 

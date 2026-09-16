@@ -24,7 +24,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+from tenax.algorithms._ctm_energy_ad import (
+    ctm_energy_implicit,
+    invalidate_implicit_ad_warm_start,
+)
 from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms._pess_multisite_energy import (
@@ -49,6 +52,7 @@ from tenax.core.tensor import DenseTensor, Tensor
 __all__ = [
     "build_pess_loss",
     "build_pess_loss_3site_multisite",
+    "build_pess_loss_exact",
     "optimize_pess_3site_multisite_ad",
     "optimize_pess_ad",
 ]
@@ -135,6 +139,86 @@ def build_pess_loss(
             # in CTMConfig keep the bump off, so existing PESS callers see
             # no change; downstream ``ctm_energy_implicit`` validates the
             # combination (chi_max required, step_size > 0, etc.).
+            ctmrg_heuristic_increase_chi=config.ctmrg_heuristic_increase_chi,
+            ctmrg_heuristic_increase_chi_threshold=(
+                config.ctmrg_heuristic_increase_chi_threshold
+            ),
+            ctmrg_heuristic_increase_chi_step_size=(
+                config.ctmrg_heuristic_increase_chi_step_size
+            ),
+            chi_max=config.chi_max,
+        )
+
+    return loss_fn
+
+
+def build_pess_loss_exact(
+    cg_gates: CGGates,
+    config: CTMConfig,
+) -> Callable[[IPESSState], jnp.ndarray]:
+    """AD loss for kagome iPESS via the EXACT supersite (T_d kept; #991).
+
+    Mirror of :func:`build_pess_loss` with two differences: the blocking is
+    :func:`tenax.algorithms.pess.pess_to_kagome_supersite_exact` (all five
+    iPESS primitives enter, no Convention-C ``T_d`` approximation and no
+    dummy leg), and ``cg_gates`` must come from
+    :func:`tenax.algorithms.pess.kagome_xxz_pess_cg_gates_exact` (whose
+    inter-cell sub-site pairings match that blocking's leg geometry).
+
+    Prefer this over the 3-site multisite loss for kagome ENERGY READOUTS:
+    the multisite encoding puts dim-1 bonds on the CTM lattice, where the
+    2x2-plaquette environment fixed point structurally rank-truncates and
+    biases per-site energies by ~2.5e-3 in the non-variational direction
+    (#991). The single-site CTM this loss uses has no such seams; on the
+    #991 control state it matches variPEPS to 1e-9 and the exact cylinder
+    extrapolation to ~2e-4.
+
+    Args:
+        cg_gates: Gates from ``kagome_xxz_pess_cg_gates_exact``.
+        config:   CTM convergence settings.
+
+    Returns:
+        ``loss_fn(state: IPESSState) -> jnp.ndarray`` — real scalar energy
+        per kagome site, differentiable through the implicit-AD square CTM.
+    """
+    from tenax.algorithms.pess import pess_to_kagome_supersite_exact
+
+    d_eff = int(cg_gates.h_intra.shape[0])
+
+    def _energy_fn(site_tensors, envs, _gate):
+        A_norm = site_tensors[(0, 0)]
+        return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, d_eff)
+
+    def loss_fn(state: IPESSState) -> jnp.ndarray:
+        A_super = pess_to_kagome_supersite_exact(
+            state.R_a, state.R_b, state.R_c, state.T_u, state.T_d, state.lambdas
+        )
+        A_super = A_super / (jnp.linalg.norm(A_super) + 1e-12)
+        D = A_super.shape[0]
+        indices = _make_supersite_indices(D, d_eff)
+        A_tensor = DenseTensor(A_super, indices)
+        site_tensors = {(0, 0): A_tensor}
+
+        return ctm_energy_implicit(
+            site_tensors,
+            SINGLE_SITE_NEIGHBORS,
+            gate=None,  # ignored; energy_fn takes over
+            chi=config.chi,
+            max_iter=config.max_iter,
+            conv_tol=config.conv_tol,
+            projector_method=config.projector_method,
+            renormalize=config.renormalize,
+            forward_gauge=config.forward_gauge,
+            conv_method=config.ctm_conv_method,
+            min_iter=config.min_iter,
+            chi_ramp=config.chi_ramp,
+            energy_fn=_energy_fn,
+            gmres_tol=config.gmres_tol,
+            gmres_maxiter=config.gmres_maxiter,
+            gmres_restart=config.gmres_restart,
+            arnoldi_precheck=False,
+            adjoint_method=config.adjoint_method,
+            plateau_patience=config.plateau_patience,
             ctmrg_heuristic_increase_chi=config.ctmrg_heuristic_increase_chi,
             ctmrg_heuristic_increase_chi_threshold=(
                 config.ctmrg_heuristic_increase_chi_threshold
@@ -352,6 +436,9 @@ def optimize_pess_ad(
     Returns:
         ``(optimized_state, final_energy_per_site)``.
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     import optax
 
     loss_fn_state = build_pess_loss(cg_gates, config)
@@ -608,6 +695,9 @@ def optimize_pess_3site_multisite_ad(
     Returns:
         ``(optimized_state, final_energy_per_site)``.
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     import optax
 
     # Promote Tensor-valued gates to ndarray once at the optimizer entry

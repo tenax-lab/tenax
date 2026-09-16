@@ -564,11 +564,17 @@ def _reorder(t: Tensor, labels: tuple[str, ...]) -> Tensor:
     as e.g. ``('phys','r','l','d','u')``.  Everything here is label-driven and
     does not care, but a caller indexing by position would, so the input's
     order is handed back.
+
+    Via :meth:`~tenax.core.tensor.Tensor.permute_legs`, **not**
+    ``transpose``: ``contract`` applies no Koszul signs (#555), so undoing
+    its ordering with a *signed* transpose stamped a block-dependent sign
+    onto every fermionic result -- the gauge measured 116x off its planar
+    witness floor, localised to exactly this call (#994, design SS5.2a).
     """
     current = t.labels()
     if current == labels:
         return t
-    return t.transpose(tuple(current.index(lab) for lab in labels))
+    return t.permute_legs(tuple(current.index(lab) for lab in labels))
 
 
 def _restore_caller_structure(t: Tensor, like: Tensor) -> Tensor:

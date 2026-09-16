@@ -242,7 +242,7 @@ def _initial_tensor(hamiltonian_gate, A_init, config: iPEPSConfig, gate, d_phys)
     if A_init is not None:
         return A_init if isinstance(A_init, Tensor) else _wrap_as_dense_tensor(A_init)
     if config.su_init:
-        _E, tensors, _envs = ipeps(gate, None, config)
+        _E, tensors, _envs = ipeps(gate, None, config, compute_energy=False)
         return tensors[0] if isinstance(tensors, (list, tuple)) else tensors
     D = config.max_bond_dim
     k1, k2 = jax.random.split(jax.random.PRNGKey(0))
