@@ -154,110 +154,138 @@ def midgap_pair():
     return (*_to_physical_pair(A, B, lam), H)
 
 
-#: CTM settings and the bracket the two gauge tests share.  ``BAR_*`` sits
-#: *between* the measured correct-gauge and mispaired-gauge residuals, and both
-#: sides are asserted -- see ``test_a_mispaired_gauge_is_caught``.  Raising a bar
-#: to rescue the invariance test breaks the mutation test and vice versa, which
-#: is the property that makes this a guard rather than a decoration.
+#: CTM settings for the **one** environment pair the gauge tests share, and the
+#: bracket asserted from both sides -- see ``test_a_mispaired_gauge_is_caught``.
+#: Raising a bar to rescue the invariance test breaks the mutation test and vice
+#: versa, which is the property that makes this a guard rather than a
+#: decoration.
 #:
-#: 40 sweeps rather than 12, which buys a wider bracket on the gap: at 12 sweeps
-#: with the constants of the day the separation was 2.06x on the mispaired side
-#: (dgap 2.882e-01 against BAR_GAP 0.14), and here it is 3.6x.  That is what the
-#: extra ~90 s per environment is for.
+#: **The environment is built once, on the ungauged pair, and never
+#: re-converged** (#999).  A previous version re-ran the CTM on the gauged and
+#: mispaired pairs and compared observables across runs.  That asserts a
+#: non-theorem: a finite-chi CTM truncates in a basis the gauge moves, so the
+#: two runs are not algebraically the same calculation, and at this operating
+#: point (which never meets ``conv_tol`` -- the corner spectrum still moves by
+#: ~1e-01 at sweep 40) the residual was non-monotone in sweeps and **chaotic in
+#: the input**: a 2.7e-12 relative perturbation of the pair moved the mispaired
+#: energy from 5.79 to 0.42.  The pass/fail was a property of one binary's
+#: floating-point path; GitHub's heterogeneous runners took the other branch,
+#: bit-stably, and the file was red on main's full suite for weeks
+#: (platform-alternating, values identical on every failure -- issue #999).
 #:
-#: **These constants are calibrated at exactly chi=4 / 40 sweeps and do not
-#: survive a change of either.**  Do not raise ``GAUGE_SWEEPS`` for "better
-#: convergence": the environment does not converge here at all (``conv_tol``
-#: 1e-10 is met at no sweep in any of the three runs -- the corner spectrum is
-#: still moving by ~1e-01 at sweep 40), and the residual is **non-monotone** in
-#: sweeps.  Measured ``dgap`` for the correct gauge: 6.7e-02 (12), 5.4e-02 (20),
-#: 1.2e-01 (30), 5.2e-02 (35), 1.6e-02 (38), 6.1e-02 (39), 1.3e-02 (40).  With
-#: the bars below, the invariance test *fails* at 12, 20, 30, 35 and 39 sweeps
-#: and passes only at 38 and 40.  The separation is a property of this operating
-#: point, not a convergence trend, and an innocent-looking bump to the sweep
-#: count will turn this file red for reasons that read as inexplicable.
-#:
-#: For the same reason the 3.6x below is a *separation*, not a robustness
-#: margin: perturbing the input pair by 2.7e-12 relative moves the
-#: mutation-side margin to 1.73x and ``E_mispaired`` from 5.79 to 0.42 -- an
-#: O(1) response to a 1e-12 input.  Determinism holds within one binary; it
-#: should not be expected to survive a different BLAS.  This file is
-#: ``algorithm``-bucketed (see ``tests/conftest.py``), so it is deselected by
-#: the ``-m core`` required checks and a flake lands on the full suite rather
-#: than on the merge gate.
+#: What *is* a theorem is covariance of the contraction itself: the split
+#: environment carries the site tensors' ket/bra virtual legs explicitly, so a
+#: diagonal bond gauge on the pair is cancelled **exactly** by the inverse
+#: factors on the environment's edge legs (``_counter_gauged_envs``).  Gauged
+#: pair + counter-gauged environment is the same contraction term by term:
+#: measured invariance residual 0.0 for both ``E`` and the gap, and the same
+#: 2.7e-12 input perturbation now moves them by ~8e-13 -- the response is
+#: linear again, so a different BLAS moves it in the last digits, not across a
+#: bar.  One CTM run instead of three also drops ~180 s from the file.
 GAUGE_CHI, GAUGE_SWEEPS = 4, 40
-#: correct 2.357e-02 (12.7x under), mispaired 4.307 (14.4x over).  0.3 rather
-#: than the exact geometric mean 0.3186, so the two sides are comparable but
-#: not equal.
-BAR_E = 0.3
-#: correct 1.295e-02 (3.6x under), mispaired 1.710e-01 (3.6x over).  This one
-#: is the geometric mean to four figures (0.04705).
-BAR_GAP = 0.047
+#: Bracket: invariance measured at 0.0 (bit-exact here; allow ~1e-12-class
+#: reassociation noise on other kernels), mispaired movement measured at
+#: 9.109e-02.  1e-6 sits >5 orders from both sides.
+BAR_E = 1e-6
+#: Invariance 0.0, mispaired 1.889e-01.  Same margin logic as ``BAR_E``.
+BAR_GAP = 1e-6
 
 
-def _observables(A, B, H):
-    """``(E, gap)`` from a freshly converged environment for this pair."""
-    envs = ctm_split_tensor_2site(
-        A, B, GAUGE_CHI, max_iter=GAUGE_SWEEPS, conv_tol=1e-10
-    )
+def _env_observables(A, B, env_A, env_B, H):
+    """``(E, gap)`` for this pair contracted with the **given** environments."""
     d = A.indices[A.labels().index("phys")].dim
-    E = float(compute_energy_split_ctm_tensor_2site(A, B, *envs, H, d=d))
-    return E, sublattice_gap(A, B, *envs)
+    E = float(compute_energy_split_ctm_tensor_2site(A, B, env_A, env_B, H, d=d))
+    return E, sublattice_gap(A, B, env_A, env_B)
+
+
+def _counter_gauged_envs(env_A, env_B):
+    """The environments that make ``_bond_gauge`` cancel exactly.
+
+    ``_bond_gauge`` puts a diagonal factor on every virtual leg of ``A`` and
+    ``B``.  In any contraction those legs meet either the partner site (the
+    patch-internal bond, where ``G`` meets ``G^-1`` directly) or an environment
+    edge's ``*_ket``/``*_bra`` leg.  Scaling each edge leg by the inverse of the
+    factor its site leg received therefore reproduces the ungauged contraction
+    term by term -- for *every* observable, which is what makes this pair valid
+    for the energy and the gap at once.
+
+    The mapping mirrors ``_bond_gauge`` leg for leg (site ``u`` meets ``T1``,
+    ``r`` meets ``T2``, ``d`` meets ``T3``, ``l`` meets ``T4``); the factors are
+    real, so ket and bra halves take the same vector.  Getting any one of the
+    eight wrong un-cancels that leg and the invariance test below fails at
+    O(1e-1) -- that is the guard on this helper itself.
+    """
+    g_hAB, g_hBA, g_vAB, g_vBA = _GAUGE
+
+    def counter(env, u, r, d, left):
+        reps = {}
+        for edge, site_leg, vec in (
+            ("T1", "u", u),
+            ("T2", "r", r),
+            ("T3", "d", d),
+            ("T4", "l", left),
+        ):
+            for half in ("ket", "bra"):
+                name = f"{edge}_{half}"
+                reps[name] = scale_bond_axis(
+                    getattr(env, name), f"{site_leg}_{half}", jax.numpy.asarray(vec)
+                )
+        return env._replace(**reps)
+
+    # Inverses of the site factors: A gets r=g_hAB, l=1/g_hBA, d=g_vAB,
+    # u=1/g_vBA; B gets r=g_hBA, l=1/g_hAB, d=g_vBA, u=1/g_vAB.
+    env_A_cg = counter(env_A, u=g_vBA, r=1.0 / g_hAB, d=1.0 / g_vAB, left=g_hBA)
+    env_B_cg = counter(env_B, u=g_vAB, r=1.0 / g_hBA, d=1.0 / g_vBA, left=g_hAB)
+    return env_A_cg, env_B_cg
 
 
 @pytest.fixture(scope="module")
 def midgap_baseline(midgap_pair):
-    """``(A, B, H, E, gap)`` for the ungauged pair -- computed once, not twice.
+    """``(A, B, H, E, gap, env_A, env_B)`` for the ungauged pair.
 
-    Both gauge tests need the ungauged numbers to compare against, and a CTM at
-    these settings is ~90 s.
+    The one CTM run in the gauge tests (~90 s): both tests contract their
+    transformed pairs against counter-gauged copies of *these* environments
+    rather than re-converging -- see the note on ``GAUGE_CHI`` above.
     """
     A, B, H = midgap_pair
-    E, gap = _observables(A, B, H)
-    return A, B, H, E, gap
+    env_A, env_B = ctm_split_tensor_2site(
+        A, B, GAUGE_CHI, max_iter=GAUGE_SWEEPS, conv_tol=1e-10
+    )
+    E, gap = _env_observables(A, B, env_A, env_B, H)
+    return A, B, H, E, gap, env_A, env_B
 
 
 def test_the_gap_is_invariant_under_a_bond_gauge(midgap_baseline):
-    """The state does not change, so the diagnostic must not either.
+    """The contraction does not change, so the diagnostic must not either.
 
-    The gauge leaves every physical observable alone by construction -- each
-    bond carries a factor and its inverse.  A diagnostic that moves under it is
-    reading the representation, not the state.
+    The gauged pair is contracted against the counter-gauged copy of the
+    *baseline* environments (``_counter_gauged_envs``), which reproduces the
+    ungauged contraction exactly -- a theorem about the algebra, not a hope
+    about CTM insensitivity.  Any residual is therefore floating-point
+    reassociation, measured at 0.0 here, and the bars can sit five orders below
+    the mispaired movement instead of at 3.6x.  (Re-converging the CTM on the
+    gauged pair, as this test once did, asserts a non-theorem at a chaotic
+    operating point and was red on half of CI's runner hardware -- #999; see
+    the note on ``GAUGE_CHI``.)
 
-    "By construction" is checked, not assumed: the energy from the same two
-    environments must agree across the gauge before any claim is made about the
-    diagnostic.  Otherwise a mis-written gauge would move the state, a *correct*
-    diagnostic would move with it, and this test would fail on the fix and pass
-    on the defect.
+    The energy is asserted before the gap for the same reason as ever: a
+    mis-written gauge or counter-gauge would move the contraction itself, a
+    *correct* diagnostic would move with it, and this test would fail on the
+    fix and pass on the defect.  Getting any one of the eight environment legs'
+    counter-factors wrong shows up here at O(1e-1).
 
-    **Why the bars are 3e-1 and 4.7e-2 rather than something tiny.**  The
-    environment is re-converged on the gauged pair, and a CTM at finite chi
-    truncates in a basis the gauge moves, so the two runs are not algebraically
-    the same calculation and the correct gauge leaves a residual of its own:
-    2.357e-02 (energy) and 1.295e-02 (gap) here.
-
-    That residual is an artefact of *this* operating point and not a
-    convergence error being driven down -- the environment never converges at
-    these settings, and the residual is non-monotone in the sweep count.  See
-    the note on ``GAUGE_SWEEPS`` above before changing anything about how the
-    environments are built.
-
-    A saturated fixture reports much smaller numbers -- at V=4 the gap moves by
-    3.779e-04 -- but only because a saturated observable barely moves for
-    anything, including for a state change that is real and large.  That is
-    insensitivity, not precision, and on that fixture the energy witness is
-    *inverted*: the mispaired gauge moves E by 2.080e-03 against the correct
-    gauge's own 3.195e-03, so no bar separates them in the right direction at
-    all.  This is why ``midgap_pair`` exists.
+    A saturated fixture would prove nothing -- at V=4 the gap is 1.000437 and
+    barely moves for a state change that is real and large -- which is why
+    ``midgap_pair`` pins the gap into the responsive part of its range first.
 
     What makes the bar meaningful is not its size but that it is **bracketed**:
     ``test_a_mispaired_gauge_is_caught`` requires the same constants to fail on
     a transformation that is *not* a gauge, so neither bar can be moved in
     either direction without breaking one of the two tests.
     """
-    A, B, H, E, gap = midgap_baseline
+    A, B, H, E, gap, env_A, env_B = midgap_baseline
     A_g, B_g = _bond_gauge(A, B)
-    E_g, gap_g = _observables(A_g, B_g, H)
+    E_g, gap_g = _env_observables(A_g, B_g, *_counter_gauged_envs(env_A, env_B), H)
 
     assert 0.05 < gap < 0.95, (
         f"gap {gap:.4f} is at the edge of its range -- a saturated observable "
@@ -333,23 +361,24 @@ def test_a_mispaired_gauge_is_caught(midgap_baseline):
 
     This is the mutation check, kept in the suite rather than run once by hand.
     ``_bond_gauge(mispair=True)`` applies the identical per-leg factors but puts
-    ``h_AB``'s inverse on ``B.r`` instead of ``B.l``.  Nothing cancels on that
-    bond, so the physical state genuinely moves -- and both witnesses must say
-    so, or they are decorations.  How far it may move is itself pinned, by
-    ``test_the_mispairing_stays_a_single_relocated_inverse``.
+    ``h_AB``'s inverse on ``B.r`` instead of ``B.l``.  It is contracted against
+    the same counter-gauged environments as the invariance test, where nothing
+    cancels on that bond, so the contraction genuinely moves -- and both
+    witnesses must say so, or they are decorations.  How far it may move is
+    itself pinned, by ``test_the_mispairing_stays_a_single_relocated_inverse``.
 
-    Measured on ``midgap_pair`` at chi=4, 40 sweeps: the energy moves 4.307
-    against the correct gauge's 2.357e-02, and the gap 1.710e-01 against
-    1.295e-02.
-    ``BAR_E`` and ``BAR_GAP`` sit between the two, so this test and the one
-    above bracket them from opposite sides.  A previous version of the guard
-    used ``abs(E - E_g) < 2e-2 * max(abs(E), 1.0)`` on the V=4 fixture, where
+    Measured on ``midgap_pair`` at chi=4, 40 sweeps against the fixed
+    counter-gauged environments: the energy moves 9.109e-02 and the gap
+    1.889e-01, against the correct gauge's 0.0 on both.  ``BAR_E`` and
+    ``BAR_GAP`` sit >5 orders from each side, so this test and the one above
+    bracket them from opposite sides.  A previous version of the guard used
+    ``abs(E - E_g) < 2e-2 * max(abs(E), 1.0)`` on the V=4 fixture, where
     ``E ~ 0`` (#392) collapsed the relative bar to an absolute 2e-2 -- ten times
     the whole magnitude of ``E`` -- and this mutation passed it.
     """
-    A, B, H, E, gap = midgap_baseline
+    A, B, H, E, gap, env_A, env_B = midgap_baseline
     A_m, B_m = _bond_gauge(A, B, mispair=True)
-    E_m, gap_m = _observables(A_m, B_m, H)
+    E_m, gap_m = _env_observables(A_m, B_m, *_counter_gauged_envs(env_A, env_B), H)
 
     assert abs(E - E_m) > BAR_E, (
         f"a mispaired gauge moved the energy only {abs(E - E_m):.3e} "
