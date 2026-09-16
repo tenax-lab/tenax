@@ -891,7 +891,7 @@ def dmrg(
                             axes = (bond_pos,) + tuple(
                                 j for j in range(len(q_labels)) if j != bond_pos
                             )
-                            Q = Q.transpose(axes)
+                            Q = Q.permute_legs(axes)
                         mps_tensors[i] = Q
                         absorbed = contract(mps_tensors[i - 1], R)
                         mps_tensors[i - 1] = absorbed.relabel(tmp_bond, left_bond)
