@@ -150,7 +150,15 @@ def _registered_keys() -> set[str]:
 
 def _legacy_keys() -> set[str]:
     src = (TESTS_DIR / "conftest.py").read_text()
-    start = src.index("_UNBUCKETED_LEGACY = {")
+    # Fully drained (#805): the set-literal form is gone, replaced by an empty
+    # ``set()``. Absence of the brace form therefore means zero legacy files.
+    # The brace parse is kept so that *re-introducing* a populated
+    # ``_UNBUCKETED_LEGACY = {...}`` is still read and still caught by
+    # ``test_the_legacy_list_can_only_shrink``.
+    marker = "_UNBUCKETED_LEGACY = {"
+    if marker not in src:
+        return set()
+    start = src.index(marker)
     end = src.index("\n}\n", start)
     return set(re.findall(r'"(test_[A-Za-z0-9_]+\.py)"', src[start:end]))
 
