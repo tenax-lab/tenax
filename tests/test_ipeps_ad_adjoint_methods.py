@@ -15,8 +15,9 @@ import numpy as np
 import pytest
 
 from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
-from tenax.algorithms.ad_utils import CTMRGGradientError
+from tenax.algorithms.ad_utils import CTMRGGradientError, _phase_fix_ctm_tensor
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor, optimize_gs_ad
 
@@ -96,6 +97,53 @@ def test_fixed_point_matches_gmres_gradient():
     """
     H = _heisenberg_gate()
     A = _wrap_as_dense_tensor(_random_peps())
+
+    # Forward-premise gate (#982 review P1).  Every assertion below compares
+    # the two adjoint solvers around the SAME forward environment, so parity
+    # is meaningful only if that environment is a literal element-wise fixed
+    # point of the phase-gauged step ON THIS PLATFORM.  On the reference CPU
+    # env it is (residual 1.3e-14 in 69 sweeps); on a backend where the
+    # projector SVD's degenerate-pair basis choice makes the environment
+    # plateau instead (#824's box class, #841's mechanism), the solvers
+    # still agree with each other while the gradient itself moves by
+    # percents with the forward stopping criterion — and the 5e-4 energy
+    # tolerance below would swallow that silently.  This gate turns the
+    # vacuous-parity case into a loud failure pointing at the forward.
+    # Same knobs as the ctm_energy_implicit calls below (its defaults:
+    # projector_method="svd", renormalize=True, qr_warmup_steps=3,
+    # min_iter=4, recipe="2x2"); python_loop_ctm_converge wraps the
+    # per-tensor gauge fn in the same pair adapter that
+    # _sigma_gauged_ctm_converge uses for forward_gauge="phase".  A plateau
+    # bail returns converged=False (measured: _ctm_loop_core returns the
+    # best env with converged=False), so it cannot pass this gate.
+    _, fwd_info = python_loop_ctm_converge(
+        {(0, 0): A},
+        SINGLE_SITE_NEIGHBORS,
+        chi=8,
+        max_iter=100,
+        min_iter=4,
+        conv_tol=1e-10,
+        conv_method="elementwise",
+        projector_method="svd",
+        renormalize=True,
+        qr_warmup_steps=3,
+        # ctm_energy_implicit's forward (_sigma_gauged_ctm_converge) runs
+        # with plateau_patience=None; python_loop's default 20 would bail
+        # at sweep 43 of this fixture's 69-sweep approach (measured) and
+        # misreport the premise.
+        plateau_patience=None,
+        gauge_fix_fn=_phase_fix_ctm_tensor,
+    )
+    assert fwd_info.converged, (
+        "forward premise fails on this platform: the phase-gauged CTM "
+        "environment is not an element-wise fixed point at "
+        f"(max_iter=100, conv_tol=1e-10) — stopped at iteration "
+        f"{fwd_info.iterations} with residual {fwd_info.sv_diff:.3e}. "
+        "Adjoint parity would be vacuous here (both solvers linearize "
+        "around the same non-fixed environment) and the energy tolerance "
+        "below could mask a percent-level undetermined gradient; see "
+        "#824/#827/#841 before loosening this gate."
+    )
 
     def grad_with(method):
         def loss(A_):
