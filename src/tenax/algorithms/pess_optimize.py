@@ -397,6 +397,34 @@ def _run_line_search(
     )
 
 
+def _validate_exact_cg_gates(cg_gates: CGGates) -> None:
+    """Refuse Convention-C gates on the exact loss (#1002).
+
+    The two ``CGGates`` builders encode DIFFERENT inter-cell sub-site
+    pairings (the exact blocking's down triangle is ``{a(i), b(i-x),
+    c(i+y)}``, so its h/v/diag gates pair ``b-a`` / ``a-c`` / ``b-c``;
+    Convention C pairs ``c-b`` / ``b-a`` / ``c-a``).  Feeding
+    :func:`tenax.algorithms.pess.kagome_xxz_pess_cg_gates`'s gates to the
+    exact loss therefore silently measures the wrong Hamiltonian.  The
+    exact builder's ``map_fn`` is the flat 11-argument
+    ``pess_to_kagome_supersite_exact`` form (it includes ``T_d``);
+    Convention C's takes 10 — use that arity as the marker.
+    """
+    import inspect
+
+    map_fn = getattr(cg_gates, "map_fn", None)
+    if map_fn is None or len(inspect.signature(map_fn).parameters) != 11:
+        raise ValueError(
+            "loss_builder='exact' requires gates built by "
+            "kagome_xxz_pess_cg_gates_exact (its map_fn takes the flat "
+            "11-arg T_d-including form); got a CGGates whose map_fn does "
+            "not — most likely from kagome_xxz_pess_cg_gates (Convention "
+            "C). The two builders encode different inter-cell sub-site "
+            "pairings, so mixing them silently measures the wrong "
+            "Hamiltonian (#1002)."
+        )
+
+
 def optimize_pess_ad(
     initial_state: IPESSState,
     cg_gates: CGGates,
@@ -405,14 +433,34 @@ def optimize_pess_ad(
     max_iter: int = 50,
     verbose: bool = False,
     line_search_method: str = "hager_zhang",
+    loss_builder: str = "convc",
 ) -> tuple[IPESSState, float]:
-    """L-BFGS optimization of kagome iPESS via the CG-iPEPS square path.
+    """L-BFGS optimization of kagome iPESS through a square-CTM loss.
 
-    Variational parameters are the iPESS primitives ``(R_a, R_b, R_c,
-    T_u, lambdas)``. ``T_d`` is held frozen at its input value: in the
-    CG-iPEPS coarse-graining, ``T_d`` is absorbed into the supersite via
-    the down-bond ``sqrt(λ)`` gauges, and the remaining gauge freedom is
-    spanned by the down-bond ``lambdas[3:6]`` themselves.
+    Two loss blockings are available via ``loss_builder``:
+
+    * ``"convc"`` (default, for backward compatibility):
+      :func:`build_pess_loss` — the Convention-C supersite (``T_d``
+      dropped, dummy 4th leg).  Variational parameters are ``(R_a, R_b,
+      R_c, T_u, lambdas)``; ``T_d`` is held frozen at its input value: in
+      this coarse-graining ``T_d`` is absorbed into the supersite via the
+      down-bond ``sqrt(λ)`` gauges, and the remaining gauge freedom is
+      spanned by the down-bond ``lambdas[3:6]`` themselves.  **Known
+      defect (#1002):** on SU-converged states the CTM on this supersite
+      collapses to rank-1 corners and the converged readout is
+      backend-dependent and is not the kagome energy — prefer
+      ``"exact"`` for any physics result.
+
+    * ``"exact"``: :func:`build_pess_loss_exact` — the exact supersite
+      blocking (#991: ``T_d`` contracted explicitly, no dummy leg).
+      ``cg_gates`` must come from
+      :func:`tenax.algorithms.pess.kagome_xxz_pess_cg_gates_exact` (its
+      inter-cell pairings match this blocking; mismatched gates are
+      rejected).  ``T_d`` is a REAL wavefunction tensor in this blocking
+      — freezing it would restrict the variational manifold with no gauge
+      justification — so it is optimized alongside the other primitives,
+      exactly as :func:`optimize_pess_3site_multisite_ad` already does on
+      the multisite encoding.
 
     Inner step uses ``optax.scale_by_lbfgs`` (memory 10) for the
     quasi-Newton direction; line search is a Python-level routine since
@@ -423,15 +471,19 @@ def optimize_pess_ad(
         initial_state: Starting :class:`IPESSState`. Typically the output
             of :func:`tenax.algorithms.pess.pess_simple_update`, but a
             freshly randomized state also works.
-        cg_gates: kagome XXZ CG gates from
-            :func:`kagome_xxz_pess_cg_gates`. Must encode the same
-            ``delta`` and ``d`` as ``initial_state``.
+        cg_gates: kagome XXZ CG gates matching ``loss_builder`` — from
+            :func:`kagome_xxz_pess_cg_gates` for ``"convc"``, from
+            :func:`kagome_xxz_pess_cg_gates_exact` for ``"exact"``. Must
+            encode the same ``delta`` and ``d`` as ``initial_state``.
         config: CTM settings for the inner forward+backward sweeps.
         max_iter: Maximum L-BFGS outer iterations.
         verbose: Print energy at each step.
         line_search_method: ``"hager_zhang"`` (default — approximate
             Wolfe conditions, recommended for L-BFGS) or ``"armijo"``
             (legacy backtracker; kept for opt-out and reproducibility).
+        loss_builder: ``"convc"`` (default — today's Convention-C loss,
+            unchanged behavior) or ``"exact"`` (the #991 exact supersite
+            loss; ``T_d`` becomes a variational parameter).
 
     Returns:
         ``(optimized_state, final_energy_per_site)``.
@@ -441,7 +493,17 @@ def optimize_pess_ad(
     invalidate_implicit_ad_warm_start()
     import optax
 
-    loss_fn_state = build_pess_loss(cg_gates, config)
+    if loss_builder == "convc":
+        loss_fn_state = build_pess_loss(cg_gates, config)
+        train_T_d = False
+    elif loss_builder == "exact":
+        _validate_exact_cg_gates(cg_gates)
+        loss_fn_state = build_pess_loss_exact(cg_gates, config)
+        train_T_d = True
+    else:
+        raise ValueError(
+            f"Unknown loss_builder={loss_builder!r}. Expected 'convc' or 'exact'."
+        )
     T_d_frozen = initial_state.T_d
 
     params = {
@@ -451,6 +513,8 @@ def optimize_pess_ad(
         "T_u": initial_state.T_u,
         "lambdas": tuple(initial_state.lambdas),
     }
+    if train_T_d:
+        params["T_d"] = initial_state.T_d
 
     def _params_to_state(p: dict) -> IPESSState:
         return IPESSState(
@@ -458,7 +522,7 @@ def optimize_pess_ad(
             R_b=p["R_b"],
             R_c=p["R_c"],
             T_u=p["T_u"],
-            T_d=T_d_frozen,
+            T_d=p.get("T_d", T_d_frozen),
             lambdas=tuple(p["lambdas"]),
         )
 

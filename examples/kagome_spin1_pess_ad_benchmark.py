@@ -4,19 +4,28 @@ Spin-1 analog of :mod:`examples.kagome_spin12_pess_ad_benchmark`. d=3
 (``d_eff = 27``), Δ=1 isotropic. Reference: Picot et al., Phys. Rev. B
 93, 060407(R) (2016) — large-D iPESS gives E/site ≈ −1.41.
 
-At small ``D`` (D=2) the iPESS pipeline lands around E/site ≈ −1.0,
-significantly below the classical limit (Néel-like product state energy
-−3/4 for spin-1) but well above the converged large-D value. Going to
-``D=3`` or ``D=4`` is the cheapest meaningful step toward the published
-target.
+Both the ``[SU only]`` readout and the AD stage go through the EXACT
+supersite blocking (#991: ``build_pess_loss_exact`` /
+``optimize_pess_ad(..., loss_builder="exact")``; ``T_d`` contracted
+explicitly and optimized). Until #1002 this script measured and
+optimized the Convention-C loss (``build_pess_loss``), whose CTM
+collapses to rank-1 corners on SU-converged states and reads
+backend-dependent values that are not the kagome energy — the
+"E/site ≈ −1.0 at D=2" claim of the earlier docstring came through that
+broken probe and should be discarded. On the exact path the D=2 SU
+state (seed 0, default schedule) reads E/site = -1.270151,
+consistent with the independent Husimi-tree probe
+(:func:`tenax.algorithms.pess.pess_local_energy`: -1.269909 on the
+same state, agreement 2.4e-4).
 
-The default ``--sweep`` covers ``D ∈ {2, 4}`` (even only): the AD path's
-SVD-projector spectrum is degenerate at odd ``D`` (especially ``D=3``),
-so the converged CTM energy and its gradient are unreliable there — see
-the odd-D warning in :func:`tenax.algorithms.pess.pess_to_kagome_supersite`.
-Pass ``--include-odd-D`` to extend the sweep to ``{2, 3, 4}`` for
-characterising the unstable regime; long-term fix is the split-CTM SVD
-projector tracked in #388.
+The default ``--sweep`` covers ``D ∈ {2, 4}`` (even only). The odd-D AD
+instability documented for the Convention-C supersite came from its
+dummy 4th leg's zero singular values in the CTM projector spectrum (see
+:func:`tenax.algorithms.pess.pess_to_kagome_supersite`); the exact
+blocking has no dummy leg, so that mechanism does not apply, but odd
+``D`` on the exact path has not been characterised — the sweep default
+stays even-D. Pass ``--include-odd-D`` to extend the sweep to
+``{2, 3, 4}``.
 
 Usage:
     python examples/kagome_spin1_pess_ad_benchmark.py --D 2 --chi 8
@@ -38,10 +47,10 @@ from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.algorithms.pess import (
     IPESSState,
     kagome_triangle_xxz_hamiltonian,
-    kagome_xxz_pess_cg_gates,
+    kagome_xxz_pess_cg_gates_exact,
     pess_simple_update,
 )
-from tenax.algorithms.pess_optimize import build_pess_loss, optimize_pess_ad
+from tenax.algorithms.pess_optimize import build_pess_loss_exact, optimize_pess_ad
 
 DELTA = 1.0  # isotropic Heisenberg
 D_PHYS = 3  # spin-1
@@ -77,18 +86,23 @@ def run_kagome_spin1_benchmark(
 ) -> tuple[IPESSState, float, float]:
     """Run SU warm-start + AD optimization. Returns ``(state, e_ad, e_su)``."""
     H = kagome_triangle_xxz_hamiltonian(delta=DELTA, d=D_PHYS)
-    cg_gates = kagome_xxz_pess_cg_gates(delta=DELTA, d=D_PHYS)
+    cg_gates = kagome_xxz_pess_cg_gates_exact(delta=DELTA, d=D_PHYS)
     state = IPESSState.random(D=D, d=D_PHYS, key=jax.random.PRNGKey(seed))
     state = pess_simple_update(state, H, dt_schedule=list(su_steps), D_max=D)
 
     config = _make_ctm_config(chi=chi)
-    loss_fn = build_pess_loss(cg_gates, config)
+    loss_fn = build_pess_loss_exact(cg_gates, config)
     e_su = float(loss_fn(state).real)
     if verbose:
         print(f"  [SU only] E/site = {e_su:.6f}", flush=True)
 
     state, e_ad = optimize_pess_ad(
-        state, cg_gates, config, max_iter=max_iter, verbose=verbose
+        state,
+        cg_gates,
+        config,
+        max_iter=max_iter,
+        verbose=verbose,
+        loss_builder="exact",
     )
     return state, e_ad, e_su
 
