@@ -367,6 +367,71 @@ def test_multisite_forward_runs_on_a_2x2_cell_of_different_tensors():
 
 
 @pytest.mark.slow
+def test_assembled_cell_envs_reproduce_the_one_site_observable():
+    """#894 step 1: ``assemble_cell_envs`` is the env-assembly the two-site
+    energy will hand to ``compute_energy_ctm_tensor_multisite``.
+
+    That function reads ``envs[coord]`` at **every** coordinate, so the per-cell
+    ``CTMTensorEnv`` must be gauge-correct at all of them, not just the
+    objective cell.  This isolates the env-assembly convention (the #718
+    ``swap_env_convention`` boundary and the ``above_left``/``above`` shift)
+    *before* the two-site energy adds an inter-cell bond: at each cell, the
+    one-site RDM taken from the assembled env must reproduce ``_cell_observable``
+    — the gauge-safe objective the Phase-2 parity gate already trusts.
+
+    At a 1x1 cell every shift collapses and this is vacuous (see
+    ``env_ring_for_cell``), so it runs on a genuinely non-uniform 2x2 and
+    asserts the assembled envs really differ — otherwise a wrong coordinate
+    would read an identical env either way and pass for the wrong reason.
+    """
+    import jax.numpy as jnp
+
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+    from tenax.algorithms._ctm_tensor_energy import _rdm_1site_tensor
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+
+    chi = 4
+    cell = {
+        (0, 0): _site_tensor(seed=1),
+        (0, 1): _site_tensor(seed=2),
+        (1, 0): _site_tensor(seed=3),
+        (1, 1): _site_tensor(seed=4),
+    }
+    corners, edges, meta = M.converge_multisite(
+        cell, chi, 2, 2, max_iter=200, conv_tol=1e-12
+    )
+    assert meta["converged"], meta
+
+    templates = {co: initialize_ctm_tensor_env(A, chi) for co, A in cell.items()}
+    envs = M.assemble_cell_envs(corners, edges, templates, 2, 2)
+
+    # Regime assert: the four assembled envs must be genuinely different, or a
+    # wrong per-cell shift would read the same env either way and this check
+    # would pass vacuously (the whole point of env_ring_for_cell's warning).
+    ref_c1 = np.asarray(envs[(0, 0)].C1.todense())
+    spread = max(
+        float(np.linalg.norm(np.asarray(envs[co].C1.todense()) - ref_c1))
+        for co in cell
+        if co != (0, 0)
+    )
+    assert spread > 1e-3, f"assembled envs are effectively identical ({spread:.3e})"
+
+    op = _sz()
+    for co, A in cell.items():
+        rho = _rdm_1site_tensor(A, envs[co])
+        via_assembled = float(jnp.real(jnp.trace(rho @ op)))
+        via_cell_observable = float(
+            M._cell_observable(A, corners, edges, templates[co], op, co, 2, 2)
+        )
+        assert abs(via_assembled - via_cell_observable) < 1e-12, (
+            f"cell {co}: one-site observable from the assembled env "
+            f"({via_assembled:.12f}) disagrees with _cell_observable "
+            f"({via_cell_observable:.12f}) — the env assembly is not the ring "
+            f"_cell_observable closes on"
+        )
+
+
+@pytest.mark.slow
 def test_the_unit_cell_is_not_secretly_uniform():
     """Guards the guard: if a 2x2 cell of different tensors converged to four
     identical environments, every cell-shift test built on it would be

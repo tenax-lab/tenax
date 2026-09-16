@@ -59,6 +59,7 @@ __all__ = [
     "cell_energy_forward",
     "cell_observable_forward",
     "env_ring_for_cell",
+    "assemble_cell_envs",
     "cell_root_implicit_energy_and_grad",
     "rotate_a_times",
 ]
@@ -867,6 +868,40 @@ def env_ring_for_cell(corners, edges, r: int, c: int, nrows: int, ncols: int):
         *[corners[above_left((k, r, c), nrows, ncols)] for k in range(4)],
         *[edges[above((k, r, c), nrows, ncols)] for k in range(4)],
     )
+
+
+def assemble_cell_envs(corners_reg, edges_reg, templates, nrows, ncols):
+    """Per-coordinate :class:`CTMTensorEnv` built from the regular multisite env.
+
+    For each cell ``(r, c)`` this is the very environment :func:`_cell_observable`
+    closes on — :func:`env_ring_for_cell` translated into the production
+    ``CTMTensorEnv`` convention by
+    :func:`~tenax.algorithms._ctm_root_implicit_asym._to_ctm_env`, which applies
+    :func:`~tenax.algorithms._ctm_root_implicit_asym.swap_env_convention` (the
+    #718 boundary — this module stores every tensor in its own direction's
+    frame, the production RDMs do not).
+
+    Building the *whole* dict is what the multisite two-site energy needs (#894):
+    ``compute_energy_ctm_tensor_multisite`` consumes ``envs[coord]`` at every
+    coordinate, not only the objective cell, so the ``above_left``/``above``
+    shift and the convention swap have to be right at all of them — a wrong
+    shift is invisible at 1x1, where every shift collapses, and only shows up on
+    a genuinely non-uniform cell (see :func:`env_ring_for_cell`).
+
+    ``templates`` maps each coordinate to a ``CTMTensorEnv`` supplying that
+    cell's index metadata, e.g.
+    ``{co: initialize_ctm_tensor_env(A_by_cell[co], chi)}``.
+    """
+    from tenax.algorithms._ctm_root_implicit_asym import _to_ctm_env
+
+    return {
+        (r, c): _to_ctm_env(
+            env_ring_for_cell(corners_reg, edges_reg, r, c, nrows, ncols),
+            templates[(r, c)],
+        )
+        for r in range(nrows)
+        for c in range(ncols)
+    }
 
 
 def _cell_energy(A_live, corners_reg, edges_reg, template, gate, cell, nrows, ncols):
