@@ -256,7 +256,7 @@ class FiniteMPS:
                 axes = (bond_pos,) + tuple(
                     j for j in range(len(labels)) if j != bond_pos
                 )
-                Q = Q.transpose(axes)
+                Q = Q.permute_legs(axes)
             tensors[i] = Q
             # R has (tmp_bond, left_bond) — contract on left_bond with
             # prev site, then rename tmp_bond -> left_bond
@@ -506,7 +506,7 @@ class FiniteMPS:
                 axes = (bond_pos,) + tuple(
                     j for j in range(len(labels)) if j != bond_pos
                 )
-                Vh_relabeled = Vh_relabeled.transpose(axes)
+                Vh_relabeled = Vh_relabeled.permute_legs(axes)
             tensors[i] = Vh_relabeled
 
             # Absorb U·diag(s) into site i-1

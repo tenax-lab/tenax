@@ -15,8 +15,9 @@ import numpy as np
 import pytest
 
 from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
-from tenax.algorithms.ad_utils import CTMRGGradientError
+from tenax.algorithms.ad_utils import CTMRGGradientError, _phase_fix_ctm_tensor
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor, optimize_gs_ad
 
@@ -42,16 +43,44 @@ def test_fixed_point_matches_gmres_gradient():
 
     ``adjoint_method`` only selects the *backward* linear solver; both methods
     see the identical forward fixed point and therefore solve the identical
-    system ``(I - J^T) λ = dE/denv``.  Compared at a single gradient evaluation
-    the two agree to well inside ``gmres_tol`` (measured: cos = 1.000000000000,
-    relative L2 difference 1.9e-7), so this is gated tightly.
+    system ``(I - J^T) λ = dE/denv``.
+
+    The first assertion below is a solver SELF-CONSISTENCY check, not a
+    gradient-accuracy check (#827): because the two evaluations share the
+    forward environment, it certifies ~1e-7 agreement for a quantity the
+    forward stopping criterion may determine far more loosely.  On a platform
+    whose LAPACK/cuSOLVER build leaves this fixture's environment without an
+    element-wise fixed point, #827 measured the gmres gradient itself moving
+    2.5e-2..4.5e-2 relative as ``(max_iter, conv_tol)`` went over
+    (40,1e-8)/(100,1e-10)/(300,1e-12) vs a (300,1e-14) reference, while this
+    check still read 1.28e-7.
+
+    Fixture and forward settings (#827):
+
+    * The seed-2026 random tensor is KEPT, with the forward tightened to
+      ``conv_tol=1e-10, max_iter=100``.  On the reference CPU env (jaxlib
+      0.10.1) its phase-gauged CTM reaches a true element-wise fixed point
+      (residual 1.3e-14 in 69 sweeps at chi=8) — the precondition for the
+      implicit adjoint to linearize around an actual fixed point — and the
+      gradient is then *determined*: drift vs a (300,1e-14) reference is
+      8.0e-6 at the old (40,1e-8), 4.5e-11 at (100,1e-10) used here, and
+      2.1e-13 at (300,1e-12).
+    * The SU-relaxed D=2 Heisenberg fixture #827 proposed was measured and
+      REJECTED: physical SU states carry near-degenerate corner multiplets
+      (cut ratio 1.10 at chi=8; SVD-VJP factors 1/(s_i^2 - s_j^2) ~ 3e8),
+      their environment never becomes an element-wise fixed point under the
+      phase or sigma gauge (residual plateaus at 3.9e-2 after 300 sweeps),
+      and their gradient drift plateaus at 1e-1..3.5e-1 — flat in conv_tol,
+      chi (8 or the gap-respecting 10), and under symmetry-breaking
+      perturbation.  Swapping it in would make this test's gradient *less*
+      determined, not more.
 
     Why not compare ``optimize_gs_ad`` end states (issue #740)?  Because that
     measures chaos amplification through the CTM fixed point, not the solver.
     Since #710 restored ket-bra Z2 at the fixed point, the projector singular
     values come in exact degenerate pairs whose LAPACK basis choice is
     platform- and version-dependent, so a sub-solver-tolerance difference at
-    step 1 explodes across subsequent steps.  Measured on the old fixture
+    step 1 explodes across subsequent steps.  Measured on this fixture
     (D=2, chi=8, lr=1e-2, seed 2026):
 
         steps   |dE|       max|dA|
@@ -62,10 +91,59 @@ def test_fixed_point_matches_gmres_gradient():
     ~3 orders of magnitude per step.  The old 2-step assertion passed only
     before #710 (verified: green at 3f25688^, red at 3f25688) because the
     pre-#710 transposed convention broke the degeneracy.  A single step is
-    still stable, so the production path is covered by the second half below.
+    the largest horizon on which the two methods are comparable at all, so
+    the production path is covered by the second half below, with an energy
+    tolerance derived from the measured single-step amplification.
     """
     H = _heisenberg_gate()
     A = _wrap_as_dense_tensor(_random_peps())
+
+    # Forward-premise gate (#982 review P1).  Every assertion below compares
+    # the two adjoint solvers around the SAME forward environment, so parity
+    # is meaningful only if that environment is a literal element-wise fixed
+    # point of the phase-gauged step ON THIS PLATFORM.  On the reference CPU
+    # env it is (residual 1.3e-14 in 69 sweeps); on a backend where the
+    # projector SVD's degenerate-pair basis choice makes the environment
+    # plateau instead (#824's box class, #841's mechanism), the solvers
+    # still agree with each other while the gradient itself moves by
+    # percents with the forward stopping criterion — and the 5e-4 energy
+    # tolerance below would swallow that silently.  This gate turns the
+    # vacuous-parity case into a loud failure pointing at the forward.
+    # Same knobs as the ctm_energy_implicit calls below (its defaults:
+    # projector_method="svd", renormalize=True, qr_warmup_steps=3,
+    # min_iter=4, recipe="2x2"); python_loop_ctm_converge wraps the
+    # per-tensor gauge fn in the same pair adapter that
+    # _sigma_gauged_ctm_converge uses for forward_gauge="phase".  A plateau
+    # bail returns converged=False (measured: _ctm_loop_core returns the
+    # best env with converged=False), so it cannot pass this gate.
+    _, fwd_info = python_loop_ctm_converge(
+        {(0, 0): A},
+        SINGLE_SITE_NEIGHBORS,
+        chi=8,
+        max_iter=100,
+        min_iter=4,
+        conv_tol=1e-10,
+        conv_method="elementwise",
+        projector_method="svd",
+        renormalize=True,
+        qr_warmup_steps=3,
+        # ctm_energy_implicit's forward (_sigma_gauged_ctm_converge) runs
+        # with plateau_patience=None; python_loop's default 20 would bail
+        # at sweep 43 of this fixture's 69-sweep approach (measured) and
+        # misreport the premise.
+        plateau_patience=None,
+        gauge_fix_fn=_phase_fix_ctm_tensor,
+    )
+    assert fwd_info.converged, (
+        "forward premise fails on this platform: the phase-gauged CTM "
+        "environment is not an element-wise fixed point at "
+        f"(max_iter=100, conv_tol=1e-10) — stopped at iteration "
+        f"{fwd_info.iterations} with residual {fwd_info.sv_diff:.3e}. "
+        "Adjoint parity would be vacuous here (both solvers linearize "
+        "around the same non-fixed environment) and the energy tolerance "
+        "below could mask a percent-level undetermined gradient; see "
+        "#824/#827/#841 before loosening this gate."
+    )
 
     def grad_with(method):
         def loss(A_):
@@ -74,8 +152,8 @@ def test_fixed_point_matches_gmres_gradient():
                 SINGLE_SITE_NEIGHBORS,
                 H,
                 chi=8,
-                max_iter=40,
-                conv_tol=1e-8,
+                max_iter=100,
+                conv_tol=1e-10,
                 gmres_tol=1e-6,
                 gmres_maxiter=200,
                 adjoint_method=method,
@@ -90,6 +168,10 @@ def test_fixed_point_matches_gmres_gradient():
     n_fp, n_gmres = np.linalg.norm(g_fp), np.linalg.norm(g_gmres)
     assert n_fp > 1e-8 and n_gmres > 1e-8, "gradient collapsed to zero"
 
+    # Solver self-consistency (see docstring): identical forward, so the two
+    # backward solvers must agree far inside gmres_tol.  Measured healthy:
+    # 9.9e-8; a crippled adjoint (gmres_maxiter=1, gmres_restart=1) lands at
+    # 7.6e-2, 7600x over this gate.
     rel = float(np.linalg.norm(g_fp - g_gmres) / n_fp)
     assert rel < 1e-5, (
         f"adjoint_method changed the gradient beyond the solver tolerance: "
@@ -103,8 +185,8 @@ def test_fixed_point_matches_gmres_gradient():
             max_bond_dim=2,
             ctm=CTMConfig(
                 chi=8,
-                max_iter=40,
-                conv_tol=1e-8,
+                max_iter=100,
+                conv_tol=1e-10,
                 adjoint_method=method,
             ),
             gs_num_steps=1,
@@ -117,7 +199,18 @@ def test_fixed_point_matches_gmres_gradient():
     A_fp, _, E_fp = optimize_gs_ad(H, A_init, make_config("fixed_point"))
     A_gmres, _, E_gmres = optimize_gs_ad(H, A_init, make_config("gmres"))
 
-    assert abs(float(E_fp) - float(E_gmres)) < 1e-6, (
+    # Tolerance derivation (#827).  The step tensors agree to
+    # max|dA| ~ lr * |g| * rel ~ 1e-8 (measured 1.5e-8, and |dE| = 9.0e-9,
+    # CPU jaxlib 0.10.1) — but E_fp and E_gmres each come from a FRESH CTM
+    # run at those two nearby tensors, and the exactly degenerate ket-bra
+    # projector pairs (#710) give that map platform-dependent fault lines: on
+    # the CUDA box's CPU path this same comparison measured |dE| = 1.37e-4
+    # with the gradients still agreeing to 1.28e-7 (#827).  5e-4 sits 3.6x
+    # above that worst measured platform jump and 4.5x below the 2.28e-3 a
+    # genuinely broken adjoint produces (gmres_maxiter=1, gmres_restart=1,
+    # measured); the rel gate above and the element-wise comparison below
+    # catch that same breakage at 7600x and 7900x respectively.
+    assert abs(float(E_fp) - float(E_gmres)) < 5e-4, (
         f"one-step energies should match: fixed_point={float(E_fp)}, "
         f"gmres={float(E_gmres)}, diff={abs(float(E_fp) - float(E_gmres))}"
     )

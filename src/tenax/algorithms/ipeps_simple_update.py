@@ -451,17 +451,20 @@ def _simple_update_2site_horizontal_tensor(
     lam_h_new = _normalise_lambda(sigma)
 
     # 7. Reconstruct A_new from U: labels are (u, d, l, si_out, bond_new)
-    #    Transpose so bond_new is in the r position: (u, d, l, bond_new, si_out)
+    #    Reorder so bond_new is in the r position: (u, d, l, bond_new, si_out).
+    #    permute_legs, not transpose: U is a planar-convention factor (#997)
+    #    and its storage order is bookkeeping -- a Koszul sign here corrupted
+    #    the state on every fermionic bond update (#994 class).
     #    Gamma stays BARE (#667): the shared bond's weight lives in lam_h_new and
     #    is re-absorbed in full by step 1 of the next sweep.  Scaling it in here
     #    as well made the bond carry lambda**1.5, which drove the state to the
     #    product state -- see ``_to_physical_tensor`` for how it comes back.
-    A_new = U.transpose((0, 1, 2, 4, 3))
+    A_new = U.permute_legs((0, 1, 2, 4, 3))
     A_new = A_new.relabels({"bond_new": "r", "si_out": "phys"})
 
     # 8. Reconstruct B_new from Vh: labels are (bond_new, u_B, d_B, r_B, sj_out)
     #    Transpose so bond_new is in the l position: (u_B, d_B, bond_new, r_B, sj_out)
-    B_new = Vh.transpose((1, 2, 0, 3, 4))
+    B_new = Vh.permute_legs((1, 2, 0, 3, 4))
     B_new = B_new.relabels(
         {"bond_new": "l", "u_B": "u", "d_B": "d", "r_B": "r", "sj_out": "phys"}
     )
@@ -574,7 +577,7 @@ def _simple_update_2site_vertical_tensor(
     # 7. Reconstruct A_new from U: labels are (u, l, r, si_out, bond_new)
     #    Transpose so bond_new is in the d position: (u, bond_new, l, r, si_out)
     #    Gamma stays BARE -- see the horizontal counterpart above (#667).
-    A_new = U.transpose((0, 4, 1, 2, 3))
+    A_new = U.permute_legs((0, 4, 1, 2, 3))
     A_new = A_new.relabels({"bond_new": "d", "si_out": "phys"})
 
     # 8. Reconstruct B_new from Vh: labels are (bond_new, d_B, l_B, r_B, sj_out)
