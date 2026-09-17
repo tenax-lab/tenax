@@ -252,6 +252,88 @@ def _initial_tensor(hamiltonian_gate, A_init, config: iPEPSConfig, gate, d_phys)
     return _wrap_as_dense_tensor(data)
 
 
+def _initial_cell_tensors(hamiltonian_gate, A_init, config: iPEPSConfig, gate, d_phys):
+    """Resolve the two starting sublattice tensors for the 2-site cell path.
+
+    Mirrors :func:`_optimize_gs_ad_2site`'s init contract: ``A_init`` is
+    ``None`` or a ``(A, B)`` tuple; a simple-update warm start builds both from
+    :func:`ipeps`; the random fallback draws two independent complex tensors.
+    The ``su_config`` forwards ``su_independent_bond_lambdas`` for the same
+    reason the 2-site path does (#851): without it a caller who opted into four
+    independent spectra silently gets the shared-spectrum initialisation.
+    """
+    from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
+
+    if A_init is not None:
+        if not isinstance(A_init, tuple) or len(A_init) != 2:
+            raise TypeError(
+                "ctm_ad_mode='root_implicit' with unit_cell='2site' takes "
+                "A_init=None or a (A, B) tuple of the two sublattice tensors; "
+                f"got {type(A_init).__name__}."
+            )
+        return tuple(
+            t if isinstance(t, Tensor) else _wrap_as_dense_tensor(t) for t in A_init
+        )
+    if config.su_init:
+        from tenax.algorithms.ipeps import ipeps
+
+        su_config = iPEPSConfig(
+            max_bond_dim=config.max_bond_dim,
+            num_imaginary_steps=config.num_imaginary_steps,
+            dt=config.dt,
+            ctm=config.ctm,
+            su_independent_bond_lambdas=config.su_independent_bond_lambdas,
+        )
+        _E, (A_su, B_su), _envs = ipeps(gate, None, su_config, compute_energy=False)
+        return A_su, B_su
+    D = config.max_bond_dim
+    kA, kB = jax.random.split(jax.random.PRNGKey(0))
+    kA1, kA2 = jax.random.split(kA)
+    kB1, kB2 = jax.random.split(kB)
+    A_data = jax.random.normal(kA1, (D, D, D, D, d_phys)) + 1j * jax.random.normal(
+        kA2, (D, D, D, D, d_phys)
+    )
+    B_data = jax.random.normal(kB1, (D, D, D, D, d_phys)) + 1j * jax.random.normal(
+        kB2, (D, D, D, D, d_phys)
+    )
+    return _wrap_as_dense_tensor(A_data), _wrap_as_dense_tensor(B_data)
+
+
+def _fan_checkerboard(params, indices_a, indices_b):
+    """Place the two variational tensors on a 2x2 bipartite (Neel) cell.
+
+    ``a`` sits on the ``(0, 0)``/``(1, 1)`` sublattice and ``b`` on
+    ``(0, 1)``/``(1, 0)``.  Under ``cell_neighbors(2, 2)`` every neighbour of an
+    ``a`` site is a ``b`` site and vice-versa, so this is the ordinary
+    square-lattice unit cell for antiferromagnetic order.  The two ``a`` entries
+    (and the two ``b`` entries) wrap the *same* array, which is what makes the
+    tie a tie -- see :func:`_tie_checkerboard_grad`.
+    """
+    a, b = params
+    return {
+        (0, 0): DenseTensor(a, indices_a),
+        (1, 1): DenseTensor(a, indices_a),
+        (0, 1): DenseTensor(b, indices_b),
+        (1, 0): DenseTensor(b, indices_b),
+    }
+
+
+def _tie_checkerboard_grad(grad):
+    """Fold the four per-cell cotangents onto the two tied parameters.
+
+    The engine differentiates the four cells as independent inputs, so it
+    returns four cotangents.  With ``a`` shared by ``(0, 0)`` and ``(1, 1)`` the
+    derivative w.r.t. ``a`` is the *sum* of the partials it drives --
+    ``dE/da = dE/dA_(0,0) + dE/dA_(1,1)`` by the chain rule -- and likewise for
+    ``b`` on ``(0, 1)``/``(1, 0)``.  Returning either partial alone would halve
+    the gradient and step off the tied manifold.
+    """
+    return (
+        grad[(0, 0)] + grad[(1, 1)],
+        grad[(0, 1)] + grad[(1, 0)],
+    )
+
+
 def optimize_gs_ad_root_implicit(
     hamiltonian_gate,
     A_init,
@@ -320,32 +402,30 @@ def optimize_gs_ad_root_implicit(
             stacklevel=2,
         )
     variant = root_implicit_variant(config)
-
-    if variant == "cell":
-        raise NotImplementedError(
-            "ctm_ad_mode='root_implicit' wires the 1x1 engines only; got "
-            f"unit_cell={config.unit_cell!r}. This is not plumbing waiting to "
-            "be done: the multisite engine "
-            "(cell_root_implicit_energy_and_grad, #715 Phase 2) differentiates "
-            "a ONE-SITE observable tr(rho_1site . op), not an energy, and a "
-            "two-site Hamiltonian gate cannot be passed as that op. "
-            "_cell_energy exists but is documented valid only on a *uniform* "
-            "cell -- on a cell of different tensors the two RDM halves meet on "
-            "independently gauged chi bonds, so the number is gauge dependent "
-            "and not a differentiable function of A at all (measured: it moves "
-            "over [0.143, 0.171] under |t| <= 2e-5 while every fixed point "
-            "converges to 8.6e-13, and finite differences diverge as h -> 0). "
-            "A ground-state optimizer needs a two-site ring spanning adjacent "
-            "cells and its adjoint, which is separate work -- see #894. Use "
-            "unit_cell='1x1'."
-        )
+    cell = variant == "cell"
     symmetric = variant == "symmetric"
-    _warn_implicit_ad_variational_caveat(
-        config,
-        path="1-site symmetric root-implicit"
-        if symmetric
-        else "1-site dense root-implicit",
-    )
+
+    # #894 closed the gap the old NotImplementedError described: the multisite
+    # engine now differentiates the *physical* two-site energy (gate=), whose
+    # RDMs span adjacent cells so the inter-cell bond gauge cancels and the
+    # number is a smooth function of the sites.  The 2x2 checkerboard tie
+    # a=(0,0)=(1,1), b=(0,1)=(1,0) is the bipartite square lattice -- every
+    # neighbour of a is b and vice-versa under cell_neighbors(2, 2) -- so it is
+    # the natural home for unit_cell='2site'.  A general Lattice (kagome,
+    # honeycomb, ...) is not a rectangular periodic grid, which is the only
+    # topology the cell engine's cell_neighbors expresses, so it is refused in
+    # the cell branch rather than silently optimising the wrong model.
+    if cell:
+        _warn_implicit_ad_variational_caveat(
+            config, path="2-site checkerboard root-implicit"
+        )
+    else:
+        _warn_implicit_ad_variational_caveat(
+            config,
+            path="1-site symmetric root-implicit"
+            if symmetric
+            else "1-site dense root-implicit",
+        )
 
     # Resolved before anything else touches its arguments: on the symmetric
     # variant the caller *must* supply the state, so that is a precondition on
@@ -361,90 +441,156 @@ def optimize_gs_ad_root_implicit(
 
     ctm_cfg = config.ctm
 
-    if symmetric:
-        from tenax.algorithms._ctm_root_implicit_symmetric import (
-            sym_root_implicit_energy_and_grad,
+    if cell:
+        from tenax.algorithms._ctm_root_implicit_multisite import (
+            cell_neighbors,
+            cell_root_implicit_energy_and_grad,
         )
+        from tenax.algorithms._ctm_tensor_energy import (
+            compute_energy_ctm_tensor_multisite,
+        )
+        from tenax.core.lattice import Lattice
 
-        A = A_start
-        indices = A.indices
+        if isinstance(config.unit_cell, Lattice):
+            raise NotImplementedError(
+                "ctm_ad_mode='root_implicit' supports the 2-site checkerboard "
+                f"cell (unit_cell='2site'), not a general Lattice; got "
+                f"{config.unit_cell!r}. The cell engine's neighbour map is a "
+                "rectangular periodic grid (cell_neighbors), so lattices whose "
+                "topology is not that grid -- kagome, honeycomb, triangular -- "
+                "have no root-implicit objective here. Use the default "
+                "(fixed-point implicit) AD path for those."
+            )
 
-        def _tensor_of(params):
-            # The parameter *is* the tensor here.  ``SymmetricTensor`` is a
-            # single-leaf pytree whose leaf is the packed block buffer, and its
-            # L2 norm is the Frobenius norm, so optax's ``clip_by_global_norm``
-            # and ``_normalize_params`` already mean the right thing on it.
-            # Flattening to a dense array instead -- what the dense branch does
-            # -- would discard the block structure, which is the entire point
-            # of Phase 3.
-            return params
+        A0, B0 = _initial_cell_tensors(hamiltonian_gate, A_init, config, gate, d_phys)
+        A0 = A0 * (1.0 / (A0.norm() + 1e-10))
+        B0 = B0 * (1.0 / (B0.norm() + 1e-10))
+        indices_A = A0.indices
+        indices_B = B0.indices
+        _NBRS = cell_neighbors(2, 2)
+
+        def _fan(params):
+            return _fan_checkerboard(params, indices_A, indices_B)
 
         def _energy_and_grad(params):
-            # Three values, always: this engine has no ``return_diagnostics``
-            # flag.  ``collect_backward_jaxpr=False`` skips six
-            # ``jax.make_jaxpr`` traces of ~40k-equation programs, which are
-            # what the tests assert on and pure overhead per optimizer step.
-            energy, grad, _diag = sym_root_implicit_energy_and_grad(
-                params,
-                gate,
+            energy, grad = cell_root_implicit_energy_and_grad(
+                _fan(params),
+                gate=gate,
                 chi=ctm_cfg.chi,
+                nrows=2,
+                ncols=2,
                 max_iter=ctm_cfg.max_iter,
                 conv_tol=ctm_cfg.conv_tol,
                 min_iter=ctm_cfg.min_iter,
-                collect_backward_jaxpr=False,
             )
-            return energy, grad
+            return energy, _tie_checkerboard_grad(grad)
+
+        def _final_env(params):
+            A_by_cell = _fan(params)
+            envs, _info = python_loop_ctm_converge(
+                A_by_cell, _NBRS, **ctm_converge_kwargs(ctm_cfg)
+            )
+            E = float(
+                jnp.real(
+                    compute_energy_ctm_tensor_multisite(A_by_cell, envs, _NBRS, gate)
+                )
+            )
+            # Return the two distinct sublattice tensors and their environments,
+            # matching _optimize_gs_ad_2site's ((A, B), (env_A, env_B), E) shape.
+            return (
+                (A_by_cell[(0, 0)], A_by_cell[(0, 1)]),
+                (envs[(0, 0)], envs[(0, 1)]),
+                E,
+            )
+
+        params = (A0.todense(), B0.todense())
     else:
-        from tenax.algorithms._ctm_root_implicit_asym import (
-            asym_root_implicit_energy_and_grad,
-        )
-
-        A = _initial_tensor(hamiltonian_gate, A_init, config, gate, d_phys)
-        if not isinstance(A, DenseTensor):
-            raise TypeError(
-                "ctm_ad_mode='root_implicit' is dense-only; for a "
-                "SymmetricTensor state use ctm_ad_mode="
-                f"'root_implicit_symmetric' (#715 Phase 3). Got "
-                f"{type(A).__name__}."
-            )
-        indices = A.indices
-
-        def _tensor_of(params):
-            return DenseTensor(params, indices)
-
-        def _energy_and_grad(params):
-            return asym_root_implicit_energy_and_grad(
-                _tensor_of(params),
-                gate,
-                chi=ctm_cfg.chi,
-                max_iter=ctm_cfg.max_iter,
-                conv_tol=ctm_cfg.conv_tol,
-                min_iter=ctm_cfg.min_iter,
-                rel_floor=ctm_cfg.rel_floor,
+        if symmetric:
+            from tenax.algorithms._ctm_root_implicit_symmetric import (
+                sym_root_implicit_energy_and_grad,
             )
 
-    A = A * (1.0 / (A.norm() + 1e-10))
+            A = A_start
+            indices = A.indices
 
-    def _final_env(params):
-        """Converge the reported environment with the ordinary forward CTM.
+            def _tensor_of(params):
+                # The parameter *is* the tensor here.  ``SymmetricTensor`` is a
+                # single-leaf pytree whose leaf is the packed block buffer, and
+                # its L2 norm is the Frobenius norm, so optax's
+                # ``clip_by_global_norm`` and ``_normalize_params`` already mean
+                # the right thing on it.  Flattening to a dense array instead --
+                # what the dense branch does -- would discard the block
+                # structure, which is the entire point of Phase 3.
+                return params
 
-        On the symmetric variant this is not merely a re-convergence, it is a
-        *different truncation*: the engine takes per-sector SVDs and orders the
-        renormalised bond by charge, while the forward CTM takes one global SVD
-        and orders by singular value.  At finite chi those keep different
-        directions, so the energy reported here does not equal the last energy
-        the loop descended -- measured 4.7e-04 apart at D=2, chi=4.  Both are
-        legitimate variational energies of ``A_opt``; this one is the ordinary
-        machinery's, which is what a caller comparing against the rest of the
-        library needs.
-        """
-        A_t = _tensor_of(params)
-        envs, _info = python_loop_ctm_converge(
-            {(0, 0): A_t}, SINGLE_SITE_NEIGHBORS, **ctm_converge_kwargs(ctm_cfg)
-        )
-        return A_t, envs[(0, 0)]
+            def _energy_and_grad(params):
+                # Three values, always: this engine has no ``return_diagnostics``
+                # flag.  ``collect_backward_jaxpr=False`` skips six
+                # ``jax.make_jaxpr`` traces of ~40k-equation programs, which are
+                # what the tests assert on and pure overhead per optimizer step.
+                energy, grad, _diag = sym_root_implicit_energy_and_grad(
+                    params,
+                    gate,
+                    chi=ctm_cfg.chi,
+                    max_iter=ctm_cfg.max_iter,
+                    conv_tol=ctm_cfg.conv_tol,
+                    min_iter=ctm_cfg.min_iter,
+                    collect_backward_jaxpr=False,
+                )
+                return energy, grad
+        else:
+            from tenax.algorithms._ctm_root_implicit_asym import (
+                asym_root_implicit_energy_and_grad,
+            )
 
-    params = A if symmetric else A.todense()
+            A = _initial_tensor(hamiltonian_gate, A_init, config, gate, d_phys)
+            if not isinstance(A, DenseTensor):
+                raise TypeError(
+                    "ctm_ad_mode='root_implicit' is dense-only; for a "
+                    "SymmetricTensor state use ctm_ad_mode="
+                    f"'root_implicit_symmetric' (#715 Phase 3). Got "
+                    f"{type(A).__name__}."
+                )
+            indices = A.indices
+
+            def _tensor_of(params):
+                return DenseTensor(params, indices)
+
+            def _energy_and_grad(params):
+                return asym_root_implicit_energy_and_grad(
+                    _tensor_of(params),
+                    gate,
+                    chi=ctm_cfg.chi,
+                    max_iter=ctm_cfg.max_iter,
+                    conv_tol=ctm_cfg.conv_tol,
+                    min_iter=ctm_cfg.min_iter,
+                    rel_floor=ctm_cfg.rel_floor,
+                )
+
+        A = A * (1.0 / (A.norm() + 1e-10))
+
+        def _final_env(params):
+            """Converge the reported environment with the ordinary forward CTM.
+
+            On the symmetric variant this is not merely a re-convergence, it is
+            a *different truncation*: the engine takes per-sector SVDs and
+            orders the renormalised bond by charge, while the forward CTM takes
+            one global SVD and orders by singular value.  At finite chi those
+            keep different directions, so the energy reported here does not
+            equal the last energy the loop descended -- measured 4.7e-04 apart
+            at D=2, chi=4.  Both are legitimate variational energies of
+            ``A_opt``; this one is the ordinary machinery's, which is what a
+            caller comparing against the rest of the library needs.
+            """
+            A_t = _tensor_of(params)
+            envs, _info = python_loop_ctm_converge(
+                {(0, 0): A_t}, SINGLE_SITE_NEIGHBORS, **ctm_converge_kwargs(ctm_cfg)
+            )
+            env = envs[(0, 0)]
+            E = float(compute_energy_ctm_tensor(A_t, env, gate, d_phys))
+            return A_t, env, E
+
+        params = A if symmetric else A.todense()
 
     # #792: return_history was accepted and dropped, so callers of the
     # documented 1x1 history API got a 3-tuple and lost the trajectory.  The
@@ -472,13 +618,8 @@ def optimize_gs_ad_root_implicit(
         )
 
     if config.gs_num_steps == 0:
-        A_t, env = _final_env(params)
-        return _with_history(
-            A_t,
-            env,
-            float(compute_energy_ctm_tensor(A_t, env, gate, d_phys)),
-            converged=False,
-        )
+        A_t, env, E = _final_env(params)
+        return _with_history(A_t, env, E, converged=False)
 
     optimizer = _build_optimizer(config)
     use_cg = optimizer is None
@@ -650,10 +791,5 @@ def optimize_gs_ad_root_implicit(
             stacklevel=2,
         )
 
-    A_opt, env = _final_env(best_params)
-    return _with_history(
-        A_opt,
-        env,
-        float(compute_energy_ctm_tensor(A_opt, env, gate, d_phys)),
-        converged=converged_flag,
-    )
+    A_opt, env, E = _final_env(best_params)
+    return _with_history(A_opt, env, E, converged=converged_flag)
