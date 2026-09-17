@@ -798,10 +798,11 @@ the Hamiltonian is the intra-triangle 3-spin operator.
 Differentiable iPESS pipeline for kagome XXZ ground states (Liao et al.,
 PRX 9, 031041, 2019). Two simplex tensors `T_u`, `T_d` and three site
 tensors `R_a`, `R_b`, `R_c` define the variational state; triangle
-simple update gives the SU warm start, then L-BFGS through the
-square-coarse-grained CTM (Convention C) refines `(R_a, R_b, R_c, T_u,
-lambdas)`. `T_d` is held frozen during AD — its variational role is
-absorbed by the down-bond gauges.
+simple update gives the SU warm start, then L-BFGS through the exact
+single-supersite CTM (`loss_builder="exact"`, the #991 blocking: `T_d`
+contracted explicitly, no dummy leg) refines all five primitives.
+`T_d` is a real wavefunction tensor in this blocking, so it is
+optimized alongside the rest.
 
 ```python
 import jax
@@ -809,14 +810,14 @@ from tenax import (
     CTMConfig,
     IPESSState,
     kagome_triangle_xxz_hamiltonian,
-    kagome_xxz_pess_cg_gates,
+    kagome_xxz_pess_cg_gates_exact,
     pess_simple_update,
     optimize_pess_ad,
 )
 
 D, d = 2, 3  # spin-1
 H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=d)
-cg_gates = kagome_xxz_pess_cg_gates(delta=1.0, d=d)
+cg_gates = kagome_xxz_pess_cg_gates_exact(delta=1.0, d=d)
 
 state = IPESSState.random(D=D, d=d, key=jax.random.PRNGKey(0))
 state = pess_simple_update(state, H,
@@ -826,9 +827,21 @@ state = pess_simple_update(state, H,
 config = CTMConfig(chi=8, max_iter=30, conv_tol=1e-7,
                    projector_method="svd", forward_gauge="phase",
                    ctm_conv_method="elementwise")
-state, e_per_site = optimize_pess_ad(state, cg_gates, config, max_iter=30)
-print(f"E/site = {e_per_site:.6f}")  # spin-1 D=2 lands around -1.0
+state, e_per_site = optimize_pess_ad(state, cg_gates, config, max_iter=30,
+                                     loss_builder="exact")
+print(f"E/site = {e_per_site:.6f}")  # spin-1 D=2 lands around -1.27
 ```
+
+`loss_builder` defaults to `"convc"` — the legacy Convention-C loss
+(`kagome_xxz_pess_cg_gates` gates, `T_d` frozen) kept only for backward
+compatibility. **Do not use it for physics results (#1002):** on
+SU-converged states its CTM collapses to rank-1 corners, so the
+converged readout is backend-dependent and is not the kagome energy
+(the spin-1 D=2 "around -1.0" quoted here before #1002 came through
+that broken probe; the exact-path value is -1.270). Each
+`loss_builder` requires its matching gate builder, as above —
+mismatched pairings encode different inter-cell sub-site pairings and
+are rejected at entry.
 
 The full kagome Hamiltonian (3 up-triangle bonds + 3 down-triangle
 bonds per unit cell) is reconstructed via `compute_energy_cg`'s
@@ -836,7 +849,7 @@ intra-cell + horizontal/vertical/diagonal inter-cell 2-site RDMs; see
 `examples/kagome_spin12_pess_ad_benchmark.py` and
 `examples/kagome_spin1_pess_ad_benchmark.py` for full sweeps.
 
-### Exact supersite (T_d kept — recommended for energy readouts)
+### Exact supersite loss readout
 
 `pess_to_kagome_supersite_exact` blocks all five iPESS primitives
 (`R_a, R_b, R_c, T_u, T_d`) into one rank-5 supersite with four real
@@ -844,7 +857,9 @@ virtual legs and no dummy — the same single-PEPS-site mapping variPEPS
 uses for kagome 3-PESS. `build_pess_loss_exact` runs it through the
 single-site CTM (forward + implicit AD); on control states it agrees
 with variPEPS to 1e-9 and with exact cylinder oracles to ~2e-4 at D=2
-and D=4 (issue #991).
+and D=4 (issue #991). This is the loss `optimize_pess_ad(...,
+loss_builder="exact")` optimizes; call it directly for a standalone
+energy readout of an existing state:
 
 ```python
 from tenax import (
