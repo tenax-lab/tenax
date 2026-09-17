@@ -1214,6 +1214,24 @@
 
 ### CI / tests
 
+- **The required `-m core` gate now runs under `pytest-xdist`** (`-n 4 --dist
+  loadfile`, ubuntu jobs only).  The gate had grown to 2664 of 4310 tests (62%
+  of the suite) and 101m41s, against the 120-min merge-queue limit that already
+  dropped #936 and grazed #920 at 120.1 — and the usual lever was spent, since
+  coverage is already off on pull requests.  Measured on 8ad83d2 with the full
+  `-m core` set pinned to 4 CPUs: **27m19s**, same outcome as the serial CI run
+  (2655 passed, 9 skipped), peak RSS 6.5 GB of the runner's 16 GB.  A
+  same-hardware A/B on a 241-test subset gives **2.10x** (385.9 s -> 184.0 s)
+  with peak RSS *falling* 4.19 -> 2.81 GB, because `conftest`'s cache-clear hook
+  fires per worker process — the 18 GB snowball that motivated that hook argues
+  for parallelism rather than against it.  `--dist loadfile` keeps a file's
+  tests on one worker so module-scoped fixtures are built once
+  (`test_ctm_charged_sectors_905.py` spends 377 s of its 404 s in one such
+  fixture; `--dist load` measured 475.7 s against loadfile's 440.1 s on that
+  pair).  **No test was removed, reassigned, or skipped** — the gate covers
+  exactly what it covered before.  The macOS job stays serial: 3 vCPU and 7 GB
+  leave no headroom at a 6.5 GB peak, and at 37m it is not the constraint.
+
 - **A network blip no longer reds the documentation build.** `sphinx-build -W`
   in CI and `fail_on_warning: true` on Read the Docs both make every warning
   fatal, and intersphinx fetches `docs.python.org`, `numpy.org` and

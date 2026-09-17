@@ -117,7 +117,22 @@ jobs:
           else
             COV_ARGS="--no-cov"
           fi
+          # Parallelism, not coverage, is what buys the gate its headroom.
+          # ``-n 4`` matches the 4-vCPU ubuntu runner; ``--dist loadfile`` keeps
+          # a file's tests on one worker so module-scoped fixtures are built
+          # once rather than per worker (``test_ctm_charged_sectors_905.py``
+          # spends 377 s of its 404 s in a single module fixture shared by two
+          # tests).  Measured on 8ad83d2, full ``-m core`` pinned to 4 CPUs:
+          # 27m19s at -n 4, with the same outcome as CI's serial run (2655
+          # passed, 9 skipped) and peak RSS 6.5 GB against the runner's 16 GB.
+          # Same-hardware A/B on a 241-test subset: 385.9 s -> 184.0 s (2.10x),
+          # and peak RSS *fell* 4.19 -> 2.81 GB because conftest's cache-clear
+          # hook fires per worker process.
+          # Why this matters: the gate had grown to 2664 of 4310 tests (62% of
+          # the suite) and 101m41s, against the 120-min merge-queue limit that
+          # already dropped #936 and grazed #920 at 120.1.
           uv run pytest tests/ -m "core" $COV_ARGS \
+            -n 4 --dist loadfile \
             --durations=50 \
             -v
 
@@ -351,7 +366,8 @@ jobs:
           JAX_PLATFORMS: cpu
           TENAX_DISABLE_CYTHON_BLAS: "1"
         run: |
-          uv run pytest tests/ -m "core" -v
+          # Same runner shape and rationale as the required ubuntu job above.
+          uv run pytest tests/ -m "core" -n 4 --dist loadfile -v
 
   test-macos:
     name: Tests (macOS, Python 3.12)
