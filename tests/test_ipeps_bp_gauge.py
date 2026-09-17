@@ -1137,9 +1137,12 @@ def test_the_gauge_is_independent_of_the_callers_storage_order():
     sigma = (1, 3, 0, 4, 2)  # a generic scramble of (u, d, l, r, phys)
     inv = tuple(sigma.index(i) for i in range(5))
 
-    A1, B1, w1, info1 = bp_gauge_checkerboard(A, B, lam)
+    # max_iter: the #997-fixed sweep produces genuinely entangled states
+    # (the pre-fix ones were partially sign-drained), and this one needs 253
+    # BP iterations -- identically for the fermionic pair and its Z2 retype.
+    A1, B1, w1, info1 = bp_gauge_checkerboard(A, B, lam, max_iter=500)
     A1s, B1s, w1s, info2 = bp_gauge_checkerboard(
-        A.permute_legs(sigma), B.permute_legs(sigma), lam
+        A.permute_legs(sigma), B.permute_legs(sigma), lam, max_iter=500
     )
     assert info1.converged and info2.converged
 

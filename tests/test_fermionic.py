@@ -1298,3 +1298,92 @@ class TestPermuteLegs:
                     err_msg=f"{name}._reorder applied a Koszul sign to "
                     "contract's sign-free output (#994)",
                 )
+
+
+# ------------------------------------------------------------------ #
+# #997: decompositions are sign-free planar bookkeeping                #
+# ------------------------------------------------------------------ #
+
+
+class TestDecompositionRoundtripUnderBraidingStorage:
+    """#997: U*s*Vh (and Q*R) must equal T under tenax's own contract for
+    ANY storage order of T.
+
+    The matricization inside the block-sparse decompositions applied the
+    Koszul sign of (storage order -> left+right order) to the assembled
+    matrix while emitting bare factors, so the pair recombined to a
+    sign-corrupted permutation of ``T`` whenever that permutation braided
+    odd charges past odd charges.  Storage-order-dependent physics is the
+    #994 keystone violation; measured downstream, a single fermionic
+    simple-update phase destroyed 37-56% of the state.
+
+    The regime assert is load-bearing: with the axes already in split
+    order the permutation carries no sign and the round trip is exact
+    even on the broken code -- the first draft of this reproducer passed
+    for exactly that reason.
+    """
+
+    def _scrambled(self, fp, key):
+        ch3 = np.array([0, 1, 0], dtype=np.int32)
+        ch2 = np.array([0, 1], dtype=np.int32)
+        idx = (
+            TensorIndex.from_charges(fp, ch3, FlowDirection.IN, label="a"),
+            TensorIndex.from_charges(fp, ch2, FlowDirection.IN, label="s1"),
+            TensorIndex.from_charges(fp, ch3, FlowDirection.OUT, label="b"),
+            TensorIndex.from_charges(fp, ch2, FlowDirection.OUT, label="s2"),
+        )
+        T = SymmetricTensor.random_normal(idx, key)
+        # storage (b, s1, a, s2): the split [a, s1 | b, s2] must braid
+        T = T.permute_legs((2, 1, 0, 3))
+        perm = tuple(T.labels().index(lab) for lab in ("a", "s1", "b", "s2"))
+        signs = []
+        for k in T.blocks:
+            par = tuple(int(fp.parity(np.array([q]))[0]) for q in k)
+            signs.append(_koszul_sign(par, perm))
+        assert -1 in signs, (
+            "fixture out of regime: the matricization permutation carries "
+            "no Koszul sign on any realized block, so the round trip is "
+            "trivially exact and asserts nothing (#997)"
+        )
+        return T
+
+    def _dense_aligned(self, X, labels):
+        return np.transpose(
+            np.asarray(X.todense()),
+            tuple(X.labels().index(lab) for lab in labels),
+        )
+
+    def test_svd_factors_recombine_for_braiding_storage(self, fp, rng):
+        from tenax.core._tensor_utils import scale_bond_axis
+
+        T = self._scrambled(fp, rng)
+        U, s, Vh, _ = truncated_svd(
+            T,
+            left_labels=["a", "s1"],
+            right_labels=["b", "s2"],
+            new_bond_label="m",
+            max_singular_values=None,
+        )
+        R = contract(scale_bond_axis(U, "m", s), Vh)
+        np.testing.assert_allclose(
+            self._dense_aligned(R, T.labels()),
+            np.asarray(T.todense()),
+            atol=1e-12,
+            err_msg="U*s*Vh depends on T's storage order (#997)",
+        )
+
+    def test_qr_factors_recombine_for_braiding_storage(self, fp, rng):
+        T = self._scrambled(fp, rng)
+        Q, R = qr_decompose(
+            T,
+            left_labels=["a", "s1"],
+            right_labels=["b", "s2"],
+            new_bond_label="m",
+        )
+        QR = contract(Q, R)
+        np.testing.assert_allclose(
+            self._dense_aligned(QR, T.labels()),
+            np.asarray(T.todense()),
+            atol=1e-12,
+            err_msg="Q*R depends on T's storage order (#997)",
+        )
