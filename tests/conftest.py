@@ -113,6 +113,14 @@ _FILE_MARKERS = {
     # ``@pytest.mark.slow`` (SU evolution + two CTM builds, ~20s), which the
     # rule below honours by withholding ``core`` from it.
     "test_split_ctm_symmetric_empty_projector_907.py": "core",
+    # #890: ``ipeps()`` accepted an ``initial_peps`` whose bond dim disagreed
+    # with ``config.max_bond_dim`` and failed several frames into the SU sweep
+    # with an opaque reshape ``TypeError``.  Warm-starting a larger-D run from a
+    # smaller-D state is the natural way to hit it, so the clear-error guard on
+    # the default public path belongs in the required gate.  Cheap (~11s): the
+    # mismatch case raises before SU; the match and independent-re-dimension
+    # cases run SU only (``compute_energy=False``).
+    "test_ipeps_initial_peps_validation_890.py": "core",
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
