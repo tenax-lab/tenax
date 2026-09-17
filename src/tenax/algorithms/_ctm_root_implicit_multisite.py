@@ -1063,8 +1063,9 @@ def cell_two_site_energy_forward(
 
 def cell_root_implicit_energy_and_grad(
     A_by_cell,
-    op,
+    op=None,
     *,
+    gate=None,
     chi: int = 4,
     nrows: int = 1,
     ncols: int = 1,
@@ -1092,6 +1093,19 @@ def cell_root_implicit_energy_and_grad(
     step is the Eq. 82 absorption and differentiating through it is what gives
     ``S`` an adjoint at all.  Writing ``F`` in the regular variables sets that
     adjoint to zero, which was #718.
+
+    Pass exactly one objective:
+
+    * ``op`` — a one-site observable ``tr(rho_1site . op)``, which closes on a
+      single cell's ring so every bond gauge cancels; the correct objective for
+      the Phase-2 parity gate but *not* a ground-state energy on a non-uniform
+      cell (see :func:`_cell_observable`).
+    * ``gate`` — a two-site Hamiltonian; the physical multisite energy via
+      :func:`_cell_two_site_energy`, whose RDMs span adjacent cells (#894).
+      This is the objective a ground-state optimizer descends.
+
+    The adjoint is identical for both: only the ``energy_of`` body differs, so
+    ``jax.vjp`` produces the right cotangents either way.
     """
     from tenax.algorithms._ad_primitives import (
         _check_root_residual_policy,
@@ -1107,6 +1121,13 @@ def cell_root_implicit_energy_and_grad(
     from tenax.core.tensor import DenseTensor, SymmetricTensor
 
     _check_root_residual_policy(on_root_residual)
+
+    if (op is None) == (gate is None):
+        raise ValueError(
+            "pass exactly one of `op` (a one-site observable, gauge-safe on any "
+            "cell) or `gate` (a two-site Hamiltonian for the physical multisite "
+            "energy, #894)"
+        )
 
     if any(isinstance(A, SymmetricTensor) for A in A_by_cell.values()):
         raise TypeError("Multisite root implicit AD is dense-only (#715 Phase 3).")
@@ -1176,12 +1197,21 @@ def cell_root_implicit_energy_and_grad(
     S_star = root.s
     y_star = (root.corners, root.edges, root.u, S_star, root.v)
     template = initialize_ctm_tensor_env(A_const[objective_cell], chi)
+    templates = {rc: initialize_ctm_tensor_env(A_const[rc], chi) for rc in A_const}
     A_data = {rc: jnp.asarray(A.todense()) for rc, A in A_by_cell.items()}
 
     def energy_of(a_data, corners_t, edges_t, S_all):
         c_reg, e_reg = absorb_inverse_roots_multisite(
             corners_t, edges_t, S_all, nrows, ncols
         )
+        if gate is not None:
+            # Physical multisite energy: two-site RDMs spanning adjacent cells
+            # (#894). The gradient is non-zero on every cell, and jax.vjp
+            # returns the full dict of cotangents; nothing else in the adjoint
+            # changes.
+            return _cell_two_site_energy(
+                a_data, c_reg, e_reg, templates, indices, gate, nrows, ncols
+            )
         A_live = DenseTensor(a_data[objective_cell], indices[objective_cell])
         return _cell_observable(
             A_live, c_reg, e_reg, template, op, objective_cell, nrows, ncols

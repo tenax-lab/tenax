@@ -825,6 +825,81 @@ def test_gradient_matches_finite_differences_on_a_2x2_cell():
     assert rel < 1e-6, f"AD={ad!r} FD={fd!r} rel={rel:.3e}"
 
 
+def _fd_parity_energy(cell, nrows, ncols, chi=4, h=1e-5, seed=0):
+    """(AD directional derivative, FD directional derivative) of the two-site
+    *energy* objective (``gate=``), the ground-state objective the observable
+    path (``_fd_parity``) cannot express off a 1x1 cell (#894)."""
+    import jax.numpy as jnp
+
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+    from tenax.core.tensor import DenseTensor
+
+    gate = _gate(delta=0.7)
+    idx = {rc: A.indices for rc, A in cell.items()}
+    _value, grad = M.cell_root_implicit_energy_and_grad(
+        cell, gate=gate, chi=chi, nrows=nrows, ncols=ncols
+    )
+    base = {rc: jnp.asarray(A.todense()) for rc, A in cell.items()}
+    rng = np.random.RandomState(seed)
+    dirs = {rc: jnp.asarray(rng.standard_normal(v.shape)) for rc, v in base.items()}
+
+    def f(data):
+        c = {rc: DenseTensor(v, idx[rc]) for rc, v in data.items()}
+        return float(
+            M.cell_two_site_energy_forward(
+                c, gate, chi, nrows, ncols, max_iter=300, conv_tol=1e-12
+            )
+        )
+
+    ad = float(sum(jnp.real(jnp.sum(grad[rc] * dirs[rc])) for rc in grad))
+    fd = (
+        f({rc: base[rc] + h * dirs[rc] for rc in base})
+        - f({rc: base[rc] - h * dirs[rc] for rc in base})
+    ) / (2 * h)
+    return ad, fd
+
+
+def test_op_and_gate_are_mutually_exclusive():
+    """The objective is exactly one of a one-site ``op`` or a two-site ``gate``;
+    passing both or neither is a caller error, not a silent default."""
+    import tenax.algorithms._ctm_root_implicit_multisite as M
+
+    cell = {(0, 0): _site_tensor()}
+    with pytest.raises(ValueError):
+        M.cell_root_implicit_energy_and_grad(cell, None, gate=None)
+    with pytest.raises(ValueError):
+        M.cell_root_implicit_energy_and_grad(cell, _sz(), gate=_gate())
+
+
+@pytest.mark.slow
+def test_two_site_energy_gradient_matches_fd_at_1x1():
+    """#894: the two-site *energy* gradient through the adjoint FD-matches at
+    1x1, where the objective reduces to the validated uniform two-site energy.
+    Measured h-scan: rel 2.6e-7 / 2.5e-9 / 1.5e-10 at h=1e-4/1e-5/1e-6 — the
+    |ad-fd| shrinks with h (FD-truncation-limited), so the AD gradient is exact.
+    """
+    ad, fd = _fd_parity_energy({(0, 0): _site_tensor(seed=42)}, 1, 1)
+    rel = abs(ad - fd) / max(abs(fd), 1e-30)
+    assert rel < 1e-7, f"AD={ad!r} FD={fd!r} rel={rel:.3e}"
+
+
+@pytest.mark.slow
+def test_two_site_energy_gradient_matches_fd_on_a_non_uniform_2x2():
+    """#894, the ground-state gradient gate: ``dE/dA`` of the physical two-site
+    energy FD-matches on a genuinely non-uniform 2x2 cell — the configuration
+    the one-A-both-halves energy is gauge-dependent (non-differentiable) on, and
+    the reason multisite root-implicit AD could not be wired before.  Four
+    different tensors, so every inter-cell bond and Appendix F cell shift is
+    live.  ~8.5 min: one 2x2 adjoint gradient plus two forward CTM converges.
+
+    Measured: rel 3.5e-8 at h=1e-5 (E=0.0187, |g.v|=2.118) — the bar sits ~300x
+    above it, robust to a different BLAS.
+    """
+    ad, fd = _fd_parity_energy(_cell_2x2(), 2, 2)
+    rel = abs(ad - fd) / max(abs(fd), 1e-30)
+    assert rel < 1e-5, f"AD={ad!r} FD={fd!r} rel={rel:.3e}"
+
+
 def test_an_unconverged_root_raises_by_default(monkeypatch):
     """A non-vanishing ``‖F(y*)‖`` must be a hard failure, not a warning.
 
