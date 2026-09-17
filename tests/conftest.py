@@ -104,6 +104,15 @@ _FILE_MARKERS = {
     # chi<=16 dense, ~50s each.
     "test_ctm_723_single_site_collapse.py": "core",
     "test_split_ctm_746_single_site_collapse.py": "core",
+    # #907: a confined symmetric CTM environment made the split 2x2 projector
+    # raise a bare ``StopIteration`` (empty SVD, ``next(iter)``) then an
+    # ``IndexError`` (``S[0]`` on a size-0 spectrum), four frames from the
+    # cause -- the same silent/opaque-failure class as the collapse guards
+    # above.  The three unit anchors are cheap (empty-SVD passthrough + guard
+    # raise/no-op, ~2s); the end-to-end confined-state repro carries its own
+    # ``@pytest.mark.slow`` (SU evolution + two CTM builds, ~20s), which the
+    # rule below honours by withholding ``core`` from it.
+    "test_split_ctm_symmetric_empty_projector_907.py": "core",
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
