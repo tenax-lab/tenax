@@ -58,7 +58,10 @@ __all__ = [
     "absorb_inverse_roots_multisite",
     "cell_energy_forward",
     "cell_observable_forward",
+    "cell_two_site_energy_forward",
+    "cell_neighbors",
     "env_ring_for_cell",
+    "assemble_cell_envs",
     "cell_root_implicit_energy_and_grad",
     "rotate_a_times",
 ]
@@ -869,6 +872,40 @@ def env_ring_for_cell(corners, edges, r: int, c: int, nrows: int, ncols: int):
     )
 
 
+def assemble_cell_envs(corners_reg, edges_reg, templates, nrows, ncols):
+    """Per-coordinate :class:`CTMTensorEnv` built from the regular multisite env.
+
+    For each cell ``(r, c)`` this is the very environment :func:`_cell_observable`
+    closes on — :func:`env_ring_for_cell` translated into the production
+    ``CTMTensorEnv`` convention by
+    :func:`~tenax.algorithms._ctm_root_implicit_asym._to_ctm_env`, which applies
+    :func:`~tenax.algorithms._ctm_root_implicit_asym.swap_env_convention` (the
+    #718 boundary — this module stores every tensor in its own direction's
+    frame, the production RDMs do not).
+
+    Building the *whole* dict is what the multisite two-site energy needs (#894):
+    ``compute_energy_ctm_tensor_multisite`` consumes ``envs[coord]`` at every
+    coordinate, not only the objective cell, so the ``above_left``/``above``
+    shift and the convention swap have to be right at all of them — a wrong
+    shift is invisible at 1x1, where every shift collapses, and only shows up on
+    a genuinely non-uniform cell (see :func:`env_ring_for_cell`).
+
+    ``templates`` maps each coordinate to a ``CTMTensorEnv`` supplying that
+    cell's index metadata, e.g.
+    ``{co: initialize_ctm_tensor_env(A_by_cell[co], chi)}``.
+    """
+    from tenax.algorithms._ctm_root_implicit_asym import _to_ctm_env
+
+    return {
+        (r, c): _to_ctm_env(
+            env_ring_for_cell(corners_reg, edges_reg, r, c, nrows, ncols),
+            templates[(r, c)],
+        )
+        for r in range(nrows)
+        for c in range(ncols)
+    }
+
+
 def _cell_energy(A_live, corners_reg, edges_reg, template, gate, cell, nrows, ncols):
     """Single-site CTM energy on the ring closing around ``cell``."""
     from tenax.algorithms._ctm_root_implicit_asym import asym_energy
@@ -954,10 +991,81 @@ def cell_energy_forward(
     )
 
 
+def cell_neighbors(nrows: int, ncols: int) -> dict:
+    """The ``{coord: {left/right/top/bottom: coord}}`` map for a periodic cell.
+
+    The topology ``compute_energy_ctm_tensor_multisite`` iterates: ``right`` is
+    ``(r, c+1)`` and ``bottom`` is ``(r+1, c)`` (its horizontal / vertical bond
+    directions), with ``left``/``top`` the reverses used for bond de-duplication.
+    All periodic, matching :func:`converge_multisite`.
+    """
+    return {
+        (r, c): {
+            "right": (r, (c + 1) % ncols),
+            "left": (r, (c - 1) % ncols),
+            "bottom": ((r + 1) % nrows, c),
+            "top": ((r - 1) % nrows, c),
+        }
+        for r in range(nrows)
+        for c in range(ncols)
+    }
+
+
+def _cell_two_site_energy(
+    a_data, corners_reg, edges_reg, templates, indices, gate, nrows, ncols
+):
+    """Physical multisite energy: two-site RDMs whose rings span adjacent cells.
+
+    Unlike :func:`_cell_energy` (which places one ``A`` on both halves of a
+    single ring and is gauge-dependent off a 1x1 cell), this rebuilds a
+    per-coordinate :class:`CTMTensorEnv` from the regular env
+    (:func:`assemble_cell_envs`) and hands the whole dict to the production
+    :func:`~tenax.algorithms._ctm_tensor_energy.compute_energy_ctm_tensor_multisite`,
+    which dispatches every horizontal/vertical bond to
+    ``_rdm2x1_tensor_2site`` / ``_rdm1x2_tensor_2site`` — rings closed by
+    *both* adjacent cells' environments, so the inter-cell bond's gauge cancels
+    and the energy is a smooth function of the sites (#894).
+
+    A function of ``(a_data, corners_reg, edges_reg)`` — the same variables
+    :func:`_cell_observable` is — so it drops straight into the root-implicit
+    adjoint in place of the one-site objective.  No SVD/eigh: pure contractions,
+    differentiable as written.
+    """
+    from tenax.algorithms._ctm_tensor_energy import (
+        compute_energy_ctm_tensor_multisite,
+    )
+    from tenax.core.tensor import DenseTensor
+
+    envs = assemble_cell_envs(corners_reg, edges_reg, templates, nrows, ncols)
+    a_live = {rc: DenseTensor(a_data[rc], indices[rc]) for rc in a_data}
+    return compute_energy_ctm_tensor_multisite(
+        a_live, envs, cell_neighbors(nrows, ncols), gate
+    )
+
+
+def cell_two_site_energy_forward(
+    A_by_cell, gate, chi: int, nrows: int, ncols: int, **kw
+):
+    """Forward-only multisite two-site energy — the FD side of the parity gate.
+
+    Valid on a genuinely non-uniform cell, unlike :func:`cell_energy_forward`.
+    """
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+
+    corners, edges, _meta = converge_multisite(A_by_cell, chi, nrows, ncols, **kw)
+    templates = {co: initialize_ctm_tensor_env(A, chi) for co, A in A_by_cell.items()}
+    indices = {co: A.indices for co, A in A_by_cell.items()}
+    a_data = {co: jnp.asarray(A.todense()) for co, A in A_by_cell.items()}
+    return _cell_two_site_energy(
+        a_data, corners, edges, templates, indices, gate, nrows, ncols
+    )
+
+
 def cell_root_implicit_energy_and_grad(
     A_by_cell,
-    op,
+    op=None,
     *,
+    gate=None,
     chi: int = 4,
     nrows: int = 1,
     ncols: int = 1,
@@ -985,6 +1093,19 @@ def cell_root_implicit_energy_and_grad(
     step is the Eq. 82 absorption and differentiating through it is what gives
     ``S`` an adjoint at all.  Writing ``F`` in the regular variables sets that
     adjoint to zero, which was #718.
+
+    Pass exactly one objective:
+
+    * ``op`` — a one-site observable ``tr(rho_1site . op)``, which closes on a
+      single cell's ring so every bond gauge cancels; the correct objective for
+      the Phase-2 parity gate but *not* a ground-state energy on a non-uniform
+      cell (see :func:`_cell_observable`).
+    * ``gate`` — a two-site Hamiltonian; the physical multisite energy via
+      :func:`_cell_two_site_energy`, whose RDMs span adjacent cells (#894).
+      This is the objective a ground-state optimizer descends.
+
+    The adjoint is identical for both: only the ``energy_of`` body differs, so
+    ``jax.vjp`` produces the right cotangents either way.
     """
     from tenax.algorithms._ad_primitives import (
         _check_root_residual_policy,
@@ -1000,6 +1121,13 @@ def cell_root_implicit_energy_and_grad(
     from tenax.core.tensor import DenseTensor, SymmetricTensor
 
     _check_root_residual_policy(on_root_residual)
+
+    if (op is None) == (gate is None):
+        raise ValueError(
+            "pass exactly one of `op` (a one-site observable, gauge-safe on any "
+            "cell) or `gate` (a two-site Hamiltonian for the physical multisite "
+            "energy, #894)"
+        )
 
     if any(isinstance(A, SymmetricTensor) for A in A_by_cell.values()):
         raise TypeError("Multisite root implicit AD is dense-only (#715 Phase 3).")
@@ -1069,12 +1197,21 @@ def cell_root_implicit_energy_and_grad(
     S_star = root.s
     y_star = (root.corners, root.edges, root.u, S_star, root.v)
     template = initialize_ctm_tensor_env(A_const[objective_cell], chi)
+    templates = {rc: initialize_ctm_tensor_env(A_const[rc], chi) for rc in A_const}
     A_data = {rc: jnp.asarray(A.todense()) for rc, A in A_by_cell.items()}
 
     def energy_of(a_data, corners_t, edges_t, S_all):
         c_reg, e_reg = absorb_inverse_roots_multisite(
             corners_t, edges_t, S_all, nrows, ncols
         )
+        if gate is not None:
+            # Physical multisite energy: two-site RDMs spanning adjacent cells
+            # (#894). The gradient is non-zero on every cell, and jax.vjp
+            # returns the full dict of cotangents; nothing else in the adjoint
+            # changes.
+            return _cell_two_site_energy(
+                a_data, c_reg, e_reg, templates, indices, gate, nrows, ncols
+            )
         A_live = DenseTensor(a_data[objective_cell], indices[objective_cell])
         return _cell_observable(
             A_live, c_reg, e_reg, template, op, objective_cell, nrows, ncols
