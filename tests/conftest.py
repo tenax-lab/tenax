@@ -104,6 +104,13 @@ _FILE_MARKERS = {
     # chi<=16 dense, ~50s each.
     "test_ctm_723_single_site_collapse.py": "core",
     "test_split_ctm_746_single_site_collapse.py": "core",
+    # #925/#976: the legacy ``ctm`` / ``ctm_2site`` / ``ctm_split`` ignored
+    # ``CTMConfig.min_iter`` (could certify convergence at 2 sweeps against a
+    # ``min_iter=30``) and ``ctm`` excluded QR warm-up sweeps from ``n_iter``.
+    # These are the mechanism guards for the stopping rule -- a silent contract
+    # violation on public entry points, so they belong in the required gate.
+    # Cheap (~8s): a 1x1 product state, no real convergence run.
+    "test_ctm_min_iter_contract_925_976.py": "core",
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
