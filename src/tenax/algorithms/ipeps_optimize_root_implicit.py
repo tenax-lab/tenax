@@ -463,6 +463,21 @@ def optimize_gs_ad_root_implicit(
             )
 
         A0, B0 = _initial_cell_tensors(hamiltonian_gate, A_init, config, gate, d_phys)
+        # The multisite engine is dense-only (#715 Phase 3) and its own
+        # SymmetricTensor rejection sits behind ``.todense()`` here, so a
+        # symmetric ``(A, B)`` would be silently densified to full D^4 d arrays,
+        # discarding the block sparsity the caller asked for. Refuse it at the
+        # boundary, exactly as the 1x1 dense branch refuses a SymmetricTensor.
+        for t in (A0, B0):
+            if not isinstance(t, DenseTensor):
+                raise TypeError(
+                    "ctm_ad_mode='root_implicit' with a multisite unit cell is "
+                    "dense-only: there is no block-sparse multisite engine, so a "
+                    f"{type(t).__name__} (A, B) pair would be densified to full "
+                    "D^4 d arrays and lose its charge structure. Pass dense "
+                    "tensors, or use unit_cell='1x1' with "
+                    "ctm_ad_mode='root_implicit_symmetric' for a symmetric state."
+                )
         A0 = A0 * (1.0 / (A0.norm() + 1e-10))
         B0 = B0 * (1.0 / (B0.norm() + 1e-10))
         indices_A = A0.indices

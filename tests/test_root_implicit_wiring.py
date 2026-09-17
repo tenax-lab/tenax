@@ -522,6 +522,56 @@ def test_2site_a_init_must_be_a_pair():
         optimize_gs_ad_root_implicit(gate, lone, cfg)
 
 
+def test_2site_rejects_symmetric_inputs_before_densifying():
+    """A symmetric ``(A, B)`` must be refused, not silently densified.
+
+    ``_initial_cell_tensors`` preserves the ``SymmetricTensor``s, but
+    ``params = (A.todense(), B.todense())`` would densify them to full ``D^4 d``
+    arrays before the engine's own dense-only guard ever runs -- so the wrapper
+    refuses at the boundary, exactly as the 1x1 dense branch refuses a
+    ``SymmetricTensor``. Without the guard this call silently allocates dense
+    tensors and optimises a dense lift of the state the caller meant.
+    """
+    import numpy as np
+
+    from tenax.algorithms.ipeps_optimize_root_implicit import (
+        optimize_gs_ad_root_implicit,
+    )
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import ZnSymmetry
+    from tenax.core.tensor import SymmetricTensor
+
+    sym = ZnSymmetry(2)
+
+    def _leg(flow, lbl):
+        return TensorIndex(
+            symmetry=sym,
+            sectors=np.array([0, 1]),
+            multiplicities=np.array([1, 1]),
+            flow=flow,
+            label=lbl,
+        )
+
+    def _sym_site(seed):
+        return SymmetricTensor.random_normal_np(
+            (
+                _leg(FlowDirection.IN, "u"),
+                _leg(FlowDirection.OUT, "d"),
+                _leg(FlowDirection.IN, "l"),
+                _leg(FlowDirection.OUT, "r"),
+                _leg(FlowDirection.OUT, "phys"),
+            ),
+            np.random.RandomState(seed),
+        )
+
+    cfg = dataclasses.replace(
+        _cfg(), unit_cell="2site", gs_metric_precond=False, gs_line_search=False
+    )
+    gate = jnp.eye(4, dtype=jnp.float64).reshape(2, 2, 2, 2)
+    with pytest.raises(TypeError, match="dense-only"):
+        optimize_gs_ad_root_implicit(gate, (_sym_site(1), _sym_site(2)), cfg)
+
+
 @pytest.mark.slow
 def test_2site_checkerboard_run_through_optimize_gs_ad():
     """A real 2-site Heisenberg state optimised through the root-implicit cell
