@@ -665,3 +665,94 @@ def test_build_pess_loss_3site_multisite_forwards_projector_backward():
         loss_fn(state)
 
     assert seen.get("projector_backward") == "standard"
+
+
+# ---------------------------------------------------------------------------
+# Exact-loss optimizer knob (#1002)
+# ---------------------------------------------------------------------------
+
+
+def test_optimize_pess_ad_exact_runs_and_is_self_consistent():
+    """#1002: ``loss_builder="exact"`` runs a few L-BFGS steps on the exact
+    supersite loss, and the energy it reports IS ``build_pess_loss_exact``
+    evaluated on the state it returns."""
+    from tenax.algorithms.pess import kagome_xxz_pess_cg_gates_exact
+    from tenax.algorithms.pess_optimize import build_pess_loss_exact
+
+    state0 = IPESSState.random(D=2, d=2, key=jax.random.PRNGKey(4))
+    cg_gates = kagome_xxz_pess_cg_gates_exact(delta=1.0, d=2)
+    config = _make_test_config(chi=8)
+
+    e0 = float(build_pess_loss_exact(cg_gates, config)(state0).real)
+    state_opt, e_opt = optimize_pess_ad(
+        state0, cg_gates, config, max_iter=3, loss_builder="exact"
+    )
+
+    assert jnp.isfinite(e_opt)
+    assert e_opt <= e0, f"exact-loss L-BFGS raised the energy: {e0} -> {e_opt}"
+    e_check = float(build_pess_loss_exact(cg_gates, config)(state_opt).real)
+    np.testing.assert_allclose(e_opt, e_check, rtol=1e-8, atol=1e-10)
+
+
+def test_optimize_pess_ad_exact_optimizes_T_d():
+    """#1002: on the exact blocking ``T_d`` is a real wavefunction tensor
+    (it enters ``pess_to_kagome_supersite_exact`` explicitly), so the exact
+    arm treats it as a variational parameter: the gradient flows through it
+    and an accepted step moves it."""
+    from tenax.algorithms.pess import kagome_xxz_pess_cg_gates_exact
+    from tenax.algorithms.pess_optimize import build_pess_loss_exact
+
+    state0 = IPESSState.random(D=2, d=2, key=jax.random.PRNGKey(5))
+    cg_gates = kagome_xxz_pess_cg_gates_exact(delta=1.0, d=2)
+    config = _make_test_config(chi=8)
+
+    loss_fn = build_pess_loss_exact(cg_gates, config)
+    g = jax.grad(loss_fn)(state0)
+    assert float(jnp.max(jnp.abs(g.T_d))) > 0.0, (
+        "the exact loss must differentiate through T_d"
+    )
+
+    e0 = float(loss_fn(state0).real)
+    state_opt, e_opt = optimize_pess_ad(
+        state0, cg_gates, config, max_iter=2, loss_builder="exact"
+    )
+    assert e_opt < e0, f"no step accepted from random init: e0={e0}, e_opt={e_opt}"
+    assert not jnp.array_equal(state_opt.T_d, state0.T_d), (
+        "T_d must be updated by the exact-loss optimizer"
+    )
+
+
+def test_optimize_pess_ad_exact_rejects_convc_gates():
+    """#1002: pairing the exact loss with Convention-C gates (whose h/v/diag
+    sub-site pairings encode the OTHER blocking's leg geometry) is silently
+    wrong physics — the optimizer must refuse it loudly."""
+    state0 = IPESSState.random(D=2, d=2, key=jax.random.PRNGKey(6))
+    cg_gates = kagome_xxz_pess_cg_gates(delta=1.0, d=2)
+    config = _make_test_config(chi=8)
+
+    with pytest.raises(ValueError, match="kagome_xxz_pess_cg_gates_exact"):
+        optimize_pess_ad(state0, cg_gates, config, max_iter=1, loss_builder="exact")
+
+
+def test_optimize_pess_ad_rejects_exact_gates_on_convc_loss():
+    """#1002 review: the reverse mispairing — exact gates on the DEFAULT
+    Convention-C loss — must also refuse loudly.  Exact gates' h/v/diag
+    sub-site pairings encode the exact blocking's leg geometry, so the
+    ConvC loss would silently measure the wrong Hamiltonian with them."""
+    from tenax.algorithms.pess import kagome_xxz_pess_cg_gates_exact
+
+    state0 = IPESSState.random(D=2, d=2, key=jax.random.PRNGKey(8))
+    cg_gates = kagome_xxz_pess_cg_gates_exact(delta=1.0, d=2)
+    config = _make_test_config(chi=8)
+
+    with pytest.raises(ValueError, match="kagome_xxz_pess_cg_gates"):
+        optimize_pess_ad(state0, cg_gates, config, max_iter=1)
+
+
+def test_optimize_pess_ad_rejects_unknown_loss_builder():
+    state0 = IPESSState.random(D=2, d=2, key=jax.random.PRNGKey(7))
+    cg_gates = kagome_xxz_pess_cg_gates(delta=1.0, d=2)
+    config = _make_test_config(chi=8)
+
+    with pytest.raises(ValueError, match="loss_builder"):
+        optimize_pess_ad(state0, cg_gates, config, max_iter=1, loss_builder="bogus")
