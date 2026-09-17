@@ -4,6 +4,16 @@
 
 ### Added
 
+- **`optimize_pess_ad(..., loss_builder="exact")`** (#1002): the kagome
+  iPESS L-BFGS optimizer can now minimize the exact supersite loss
+  (`build_pess_loss_exact`, #991) instead of the Convention-C one. On the
+  exact blocking `T_d` is a real wavefunction tensor (it is contracted
+  explicitly, not gauge-absorbed), so the exact arm optimizes it alongside
+  the other primitives — the same choice `optimize_pess_3site_multisite_ad`
+  already makes. Convention-C gates are rejected on the exact arm (the two
+  builders encode different inter-cell sub-site pairings). Default
+  `loss_builder="convc"` is byte-identical to the old behavior.
+
 - **The BP gauge solve is compiled for `SymmetricTensor` pairs** (#882
   Phase 3): `bp_gauge_checkerboard` and `gauge_fix` now run a symmetric pair
   through the same `lax.while_loop` driver a dense pair takes, via
@@ -261,6 +271,22 @@
   and a `SymmetricTensor` pair still takes the eager route bit-identically.
 
 ### Fixed
+
+- **The kagome PESS AD benchmarks measure and optimize the exact blocking**
+  (#1002): `examples/kagome_spin12_pess_ad_benchmark.py`,
+  `examples/kagome_spin1_xxz_anisotropy_sweep.py`, and
+  `examples/kagome_spin1_pess_ad_benchmark.py` now route both the
+  `[SU only]` readout and the AD stage through `build_pess_loss_exact` /
+  `optimize_pess_ad(..., loss_builder="exact")`. They previously went
+  through `build_pess_loss` (Convention-C dummy-leg supersite), whose CTM
+  collapses to exactly rank-1 corners on SU-converged states — the reported
+  energy was backend-dependent garbage (same D=4 spin-½ SU state: CPU
+  -0.341731, GPU -0.208799, vs the backend-identical exact -0.423235; at
+  D=2, -0.2357 vs the exact -0.386195). Numbers produced by these two
+  scripts before this fix should be discarded. CLI unchanged. The two
+  `test_pess_validation` smoke windows were re-pointed from the collapsed
+  readouts they encoded (spin-½ "-0.25 classical fixed point" → -0.386,
+  window [-0.42, -0.35]; spin-1 "-1.13" → -1.270, window [-1.35, -1.20]).
 
 - **DMRG canonicalizes `target_charge` before comparing it to the MPS
   sector** (#735). `compute_mps_sector` reports canonical representatives,

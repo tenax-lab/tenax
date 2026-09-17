@@ -34,12 +34,18 @@ def _import_from_examples(module_name: str):
 
 @pytest.mark.slow
 def test_kagome_spin12_d2_smoke():
-    """Spin-½ kagome AFM at D=2, χ=8: per-site energy in ``[-0.30, -0.20]``.
+    """Spin-½ kagome AFM at D=2, χ=8: per-site energy in ``[-0.42, -0.35]``.
 
-    At ``D=2`` the iPESS pipeline saturates on the classical 120° AFM
-    state with ``E/site = -0.25`` (unable to break free of this
-    fixed point at ``D=2``). The window catches both this and any
-    pipeline regression that pushes the value outside.
+    Re-pointed for #1002: the old window ``[-0.30, -0.20]`` encoded the
+    Convention-C readout (rank-1-collapsed CTM; its "classical 120° AFM
+    fixed point at ``E/site = -0.25``" was an artifact of the broken
+    probe, not a property of the state). Through the exact blocking the
+    same short-schedule pipeline reads ``E/site = -0.386`` (measured
+    -0.386135 on CPU; the full-schedule SU state reads -0.386195,
+    backend-identical, matching variPEPS to 1e-9 — see
+    test_pess_supersite_exact). The window excludes the collapsed
+    readouts (≈ -0.24..-0.25) above and unphysical drift below Liao
+    2017's large-D limit -0.43752(6).
     """
     mod = _import_from_examples("kagome_spin12_pess_ad_benchmark")
     _, e_ad, _ = mod.run_kagome_spin12_benchmark(
@@ -48,21 +54,22 @@ def test_kagome_spin12_d2_smoke():
         max_iter=10,
         su_steps=((0.05, 100), (0.005, 50)),
     )
-    assert -0.30 < e_ad < -0.20, f"E/site={e_ad:.6f} outside [-0.30, -0.20]"
+    assert -0.42 < e_ad < -0.35, f"E/site={e_ad:.6f} outside [-0.42, -0.35]"
 
 
 @pytest.mark.slow
 def test_kagome_spin1_d2_smoke():
-    """Spin-1 kagome Heisenberg at D=2, χ=8: per-site energy in ``[-1.20, -1.00]``.
+    """Spin-1 kagome Heisenberg at D=2, χ=8: per-site energy in ``[-1.35, -1.20]``.
 
-    Picot 2016 large-``D`` target is ``E/site ≈ -1.41``. With the fixed
-    ``hosvd_truncate`` (no SU lambda double-counting) ``D=2`` lands
-    around ``-1.13``, well below the classical Néel limit ``-3/4`` for
-    spin-1 but still above the converged value because the iPESS bond
-    dimension is too small. The window allows for sweep-to-sweep noise
-    from random init and short SU schedules while excluding any
-    pipeline regression. Pre-fix the SU collapsed to a near-classical
-    state and the same call landed near ``-1.0``.
+    Re-pointed for #1002: the old window ``[-1.20, -1.00]`` (and its
+    "``D=2`` lands around ``-1.13``" calibration) encoded the
+    Convention-C readout of the rank-1-collapsed CTM. Through the exact
+    blocking the same short-schedule pipeline reads ``E/site = -1.270``
+    (measured -1.270160 on CPU; the full-schedule SU state reads
+    -1.270151 on GPU and agrees with the independent Husimi-tree probe
+    ``pess_local_energy`` to 2.4e-4). The window excludes the old
+    collapsed readouts (≈ -1.0..-1.13) above and unphysical drift below
+    Picot 2016's large-D target ``≈ -1.41``.
     """
     mod = _import_from_examples("kagome_spin1_pess_ad_benchmark")
     _, e_ad, _ = mod.run_kagome_spin1_benchmark(
@@ -71,4 +78,4 @@ def test_kagome_spin1_d2_smoke():
         max_iter=5,
         su_steps=((0.1, 100), (0.01, 50)),
     )
-    assert -1.20 < e_ad < -1.00, f"E/site={e_ad:.6f} outside [-1.20, -1.00]"
+    assert -1.35 < e_ad < -1.20, f"E/site={e_ad:.6f} outside [-1.35, -1.20]"
