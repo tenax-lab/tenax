@@ -472,7 +472,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1", "2", "3", "4"]
+        # TWO shards here, four on ubuntu.  macOS runners are the scarce
+        # resource on this plan, and four of them per run starved the merge
+        # queue: #1011's own group build ran every shard green but left
+        # ``Core shard 3 (macOS)`` unscheduled for over two hours -- the other
+        # three macOS shards finished in 5/10/11 min and that same shard took
+        # 17m48s in the PR run, so it starved rather than hung -- which pushed
+        # the group past the ~2 h drop limit and evicted the PR (silently
+        # disarming auto-merge with it).
+        #
+        # ``h % 2`` nests inside ``h % 4``: macOS shard 1 is exactly the union
+        # of ubuntu shards 1 and 3, shard 2 the union of 2 and 4.  So the
+        # cross-platform comparability survives, one level coarser -- a
+        # macOS-only failure still lands in a known pair of ubuntu shards.
+        #
+        # Sizing: macOS ran 27-52 min unsharded (median ~44), so two shards put
+        # it near the ubuntu bound of ~24 min.  Four bought ~6 more minutes and
+        # cost the merge.
+        shard: ["1", "2"]
 
     steps:
       - uses: actions/checkout@v6
@@ -515,10 +532,10 @@ jobs:
           # terminal report it always had.
           WITH_COV: ${{ contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && '1' || '0' }}
           SHARD: ${{ matrix.shard }}
-          # Must equal the number of entries in the matrix ``shard`` list, and
-          # must match the ubuntu gate's NSHARDS to keep the two partitions
-          # identical.
-          NSHARDS: 4
+          # Must equal the number of entries in the matrix ``shard`` list.
+          # Deliberately 2 while the ubuntu gate uses 4 -- see the matrix
+          # comment above for why, and why the partitions still nest.
+          NSHARDS: 2
         run: |
           if [ "$WITH_COV" = "1" ]; then
             COV_ARGS="--cov=tenax --cov-report=term-missing"

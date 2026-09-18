@@ -1217,8 +1217,13 @@
 - **The required `-m core` gate is sharded across runners** (`core-shard`, 4
   shards x 2 Python versions, plus `core-shard-macos`), using the same
   stable-`cksum` rule the non-core buckets adopted in #960.  All three
-  branch-protected contexts are sharded on the *same* partition, so shard N
-  holds the same files everywhere: leaving macOS serial would have capped the
+  branch-protected contexts are sharded, ubuntu into four and macOS into two
+  (`h % 2` nests inside `h % 4`, so a macOS shard is exactly the union of two
+  ubuntu shards and a macOS-only failure still lands in a known pair).  macOS
+  takes two rather than four because its runners are the scarce resource here:
+  four of them starved the merge queue, leaving one shard unscheduled for over
+  two hours and evicting the PR past the ~2 h drop limit, for about six minutes
+  of wall-clock.  Leaving macOS serial was not an option either: leaving macOS serial would have capped the
   change, since the gate is bounded by its slowest required job and macOS
   measured 27-52 min (median ~44) against ubuntu shards that finish inside
   that.  The Cython-fallback run is sharded on the same partition
