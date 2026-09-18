@@ -123,6 +123,17 @@ where, pad, astype, zeros, ...`) plus the decomposition entry points. Two
 implementations: `JaxBackend` (thin wrappers over today's `jnp`, behavior
 identical) and `TorchBackend`.
 
+**Functional indexed updates are part of the surface (Codex #1010 P2).** Tenax
+uses JAX's `x.at[idx].set/add/multiply(...)` **137 times across 25 files** —
+including `SymmetricTensor.todense()` (`core/tensor.py:1111`) and the dense DMRG
+kernels — and a torch tensor has *no* `.at` API (in-place assignment there also
+breaks leaf-autograd and `torch.func` transform constraints). So `ArrayOps`
+exposes functional scatter/indexed-update ops (`index_set/index_add/index_mul`,
+mapping to `.at[...]` under JAX and out-of-place `index_add`/`scatter`/masked
+`where` under torch), and migrating those 137 sites is an explicit part of the
+Phase-0/1 mechanical work — without it, importing `B` for `jnp` cannot make even
+`todense()` backend-neutral.
+
 Rationale over the Array-API standard: Tenax leans on ops the standard doesn't
 cover portably — `einsum` with explicit contraction paths, `segment_sum`,
 algorithm-selected SVD, and complex dtypes where array-api support is uneven. We
@@ -160,11 +171,21 @@ def _svd_bwd(res, dU, dS, dVh):     # pure B-ops (F-matrix / gauge-fixed formula
 ```
 Then wrap:
 - **JAX:** `custom_vjp` over `_svd_fwd`/`_svd_bwd` (mechanical move of today's code).
-- **Torch:** a `torch.autograd.Function` whose `forward` calls `_svd_fwd` and
-  `save_for_backward`s the residuals, and whose `backward` calls `_svd_bwd`.
+- **Torch:** a `torch.autograd.Function` wrapping `_svd_fwd`/`_svd_bwd`.
 
 A single `backend.ad.custom_vjp(fwd, bwd)` factory hides which wrapper is used, so
 the 6 primitives are written once.
+
+**The torch wrapper must be `torch.func`-compatible, not a plain Function (Codex
+#1010 P1).** A bare `autograd.Function` with only `forward`/`backward` +
+`save_for_backward` works under eager `.backward()` but **raises** the moment one
+of these primitives is reached through a `backend.ad.grad`/`vjp`/`vmap` transform
+(§5.5) — exactly the through-torch AD path. `torch.func` requires the split
+`forward` + `setup_context(ctx, inputs, output)` form (no side-effecting saves in
+`forward`), and `vmap` additionally needs `generate_vmap_rule = True` or an
+explicit `vmap` staticmethod. So the wrapper contract mandates the
+`setup_context` form and a vmap rule for all six primitives, and the parity suite
+(§10) transforms a composed objective through *each* primitive to prove it.
 
 ### 5.3 ⚠️ Complex-cotangent convention — the highest-risk item
 JAX and PyTorch use **different conjugation conventions** for complex gradients.
@@ -179,6 +200,16 @@ crash, just a bad optimizer direction.
 grads at the torch boundary so `_bwd` always sees JAX-convention inputs. This is
 codified once, and **guarded by a complex-input gradient-parity test** (§10) that
 would catch a convention regression. This item alone justifies a dedicated phase.
+
+**The parity test cannot compare raw `jax.grad` vs `torch.func.grad` (Codex #1010
+P1).** Even with a *correct* wrapper, the externally visible gradients of a real
+objective stay **conjugated relative to each other** — that is the two frameworks'
+convention, not a bug — so a naive `allclose(jax_grad, torch_grad)` would reject
+the correct implementation and reward one that returns the wrong (conjugated)
+direction to a torch optimizer. The test therefore compares **directional
+derivatives** `Re⟨g, v⟩` against a finite-difference reference (backend-agnostic),
+or `allclose` only *after* an explicit convention conversion at the boundary. The
+descent-direction sign is what an optimizer consumes, so that is what is asserted.
 
 ### 5.4 Fixed-point AD for CTM — and threading the parameters
 Torch eager would, by default, build the full unrolled tape through a CTM
@@ -230,21 +261,31 @@ deliverable of Phase 3**, not something the `custom_vjp` factory covers for free
 
 ---
 
-## 6. Pytrees → eager flatten/unflatten
+## 6. Trees: a backend tree protocol, not just tensor flatten
 
-The `@register_pytree_node_class` on the tensor classes exists to cross JAX
-`jit`/`grad`/`vmap` boundaries. Torch eager has no tracing, so registration is inert
-there — but the *flatten/unflatten* methods stay useful as plain
-serialization/reconstruction helpers.
+Instance `flatten()/unflatten()` on the tensor classes is **necessary but not
+sufficient (Codex #1010 P1)**. The algorithms call the JAX *tree* API directly —
+**186 `tree_map`/`tree_leaves`/`tree_structure`/`tree_unflatten` uses** (e.g.
+`_ctm_energy_ad.py:1212-1331` reconstructs the fixed-point residual and does
+optimizer tree arithmetic this way) — and several **standalone registered
+containers are not tensor instances**: `IPESSState` (`pess.py:197`),
+`StackedTensor` (`stacked_tensor.py:41`), `PaddedBlockArray`
+(`_padded_block_array.py:229`). Exposing methods only on the two tensor classes
+leaves all of that either JAX-bound or treating whole tensor objects as opaque
+leaves.
 
-- Keep the pytree registration **active only under the JAX backend**.
-- Expose `flatten()/unflatten()` as backend-neutral instance methods (the torch path
-  calls them directly where JAX would rely on `tree_util`).
-- `DenseTensor.tree_unflatten`'s validation bypass for JAX's `object()` probes
-  (`tensor.py:491-493`) is JAX-specific and simply doesn't run under torch.
-- `torch.autograd` differentiates w.r.t. the `_data` leaf natively once it's a
-  `requires_grad` tensor, so no pytree is needed to carry gradients — the eager tape
-  does it.
+So the seam defines a **`backend.tree` protocol** — `map`, `leaves`, `structure`,
+`flatten`, `unflatten` — with:
+- **JAX:** `jax.tree_util.*` (unchanged).
+- **Torch:** `torch.utils._pytree` (torch's own registry), or a small in-house
+  registry. **Every custom container** (`SymmetricTensor`, `DenseTensor`,
+  `IPESSState`, `StackedTensor`, `PaddedBlockArray`) is registered with *both*
+  systems, flattening to its array leaves + static aux; the 186 call sites migrate
+  to `backend.tree.*` in Phase 3.
+- The pytree registration and `DenseTensor.tree_unflatten`'s `object()`-probe
+  bypass (`tensor.py:491-493`) stay **JAX-only**; under torch, `torch.autograd`
+  differentiates w.r.t. the `_data` leaves natively (the eager tape carries the
+  gradient), and `torch.func` transforms consume the torch pytree registration.
 
 ---
 
@@ -288,6 +329,18 @@ breaks under both `lax.while_loop` and `torch.while_loop` (data-dependent struct
 In practice CTM/DMRG carries hold χ (and thus block structure) fixed within a run, so
 this is a non-issue — and where it isn't, it's a non-issue *identically* on both
 backends, so no torch-specific handling is needed.
+
+**`jit` and `checkpoint` are backend ops too, not only `lax` loops (Codex #1010
+P1).** DMRG/iDMRG/TDVP flow through *unconditional* `jax.jit` wrappers —
+`_matvec_jit = jax.jit(...)` (`dmrg.py:1202`), and the same pattern at
+`idmrg.py:418`, `tdvp.py:103` — and the implicit-AD paths carry `jax.checkpoint`
+decorators (3 files). Migrating only the `lax` loops leaves torch tensors flowing
+into a live `jax.jit`, which fails before the control combinators are even
+reached. So `backend.control` (or `backend.compile`) also exposes **`jit`** and
+**`checkpoint`**: under JAX they are today's `jax.jit`/`jax.checkpoint`; under
+torch `jit` is an **identity/eager** wrapper (no trace) and `checkpoint` maps to
+`torch.utils.checkpoint` (eager rematerialization). Their call sites are named in
+Phase 3 — without them the DMRG parity path breaks before reaching §7's loops.
 
 **Eager payoff (v1):** under the *eager* lowering, dynamic block shapes across sweeps
 cost nothing (no trace, no recompile), so the "static block keys" machinery that
@@ -390,10 +443,10 @@ GPU-gated parity skips cleanly when no CUDA device is present.
 
 | Phase | Deliverable | Conceptual risk | Bulk |
 |---|---|---|---|
-| **0. Seam** | `tenax.backend` package, `ArrayOps` Protocol, `JaxBackend` pass-through; migrate `core/tensor.py` + `linalg.py` dense kernels behind `B`; **export `set_backend`/`get_backend` in `src/tenax/__init__.py` `__all__`** (see acceptance note). Suite green, zero behavior change. | Low | **High** (mechanical, 80-file surface — but staged) |
+| **0. Seam** | `tenax.backend` package, `ArrayOps` Protocol **incl. functional indexed-updates** (§4.2; migrate the 137 `.at[...]` sites across 25 files), `JaxBackend` pass-through; migrate `core/tensor.py` + `linalg.py` dense kernels behind `B`; **export `set_backend`/`get_backend` in `__all__`**. Suite green, zero behavior change. | Low | **High** (mechanical, 80-file surface — but staged) |
 | **1. Torch forward** | `TorchBackend` array ops + dense/symmetric linalg forward + contraction (`torch.einsum`/opt_einsum + segment-sum equiv). Op-parity suite green. | Low–Med | Med |
-| **2. Torch AD** | Refactor 6 primitives to `_fwd/_bwd`; `autograd.Function` wrappers; **complex-cotangent boundary + parity test**. Gradient-parity green. | **High** (§5.3) | Med |
-| **3. Control flow + algorithms** | `backend.control` combinators; **`backend.ad` transforms (`vjp`/`grad`/`value_and_grad`/`vmap`, §5.5) + `fixed_point(step, params, …)` (§5.4)**; migrate CTM/DMRG/GMRES loops and the ~76 direct `jax.*` transform call sites. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
+| **2. Torch AD** | Refactor 6 primitives to `_fwd/_bwd`; **`torch.func`-compatible `autograd.Function` (`setup_context` + vmap rule, §5.2)**; **complex-cotangent boundary + directional-derivative parity test (§5.3)**. Gradient-parity green. | **High** (§5.3) | Med |
+| **3. Control flow + algorithms** | `backend.control` combinators + **`jit`/`checkpoint` wrappers (§7)**; **`backend.tree` protocol + register all custom containers (§6; migrate the 186 `jax.tree` sites)**; **`backend.ad` transforms (§5.5) + `fixed_point(step, params, …)` (§5.4)**; migrate CTM/DMRG/GMRES loops and the ~76 direct `jax.*` transform sites. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
 | **4. Polish** | RNG/dtype policy, drop GPU-only workarounds on torch path, docs, `capabilities.md` update, **`README.md` documents the `set_backend` signature**, example, CI torch job. | Low | Low–Med |
 
 Phase 0 is the tedious-but-safe backbone; Phase 2 is the small-but-dangerous core.
