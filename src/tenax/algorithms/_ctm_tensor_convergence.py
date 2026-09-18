@@ -913,20 +913,20 @@ class CTMConvergenceInfo(NamedTuple):
         converged: True when the sweep met ``conv_tol`` and stopped early.
                    False means it ran out of iterations -- the value is
                    whatever the last sweep produced.
-        n_iter:    Sweeps actually performed.  Equal to ``max_iter`` exactly
-                   when ``converged`` is False.
-
-                   **The two producers differ under a QR warm-up, and only one
-                   of them satisfies the invariant above.**  :func:`ctm_tensor`
-                   counts the warm-up sweeps, so ``n_iter`` is the caller's
-                   ``max_iter`` when the budget is exhausted (#920 review).
-                   :func:`ctm` counts the post-warm-up loop only, matching the
-                   budget *that loop* was given rather than the one the caller
-                   passed -- so with ``qr_warmup_steps=6, max_iter=10`` it
-                   reports 4 against a ``max_iter`` of 10.  That is the same
-                   defect #910 fixed in the multisite warning and it is left
-                   alone here only because changing :func:`ctm` is out of scope
-                   for the PR that noticed it.
+        n_iter:    Sweeps actually performed, **including any QR warm-up
+                   sweeps**.  Equal to ``max_iter`` exactly when ``converged``
+                   is False.  Every producer -- :func:`ctm_tensor` (#920),
+                   :func:`ctm`, :func:`ctm_2site` and :func:`ctm_split` (#925)
+                   -- counts the warm-up, so the invariant holds regardless of
+                   which one built the info.  The three ``CTMConfig``-based
+                   entry points (:func:`ctm`, :func:`ctm_2site`,
+                   :func:`ctm_split`) additionally gate convergence on
+                   ``min(min_iter, max_iter)`` -- the warm-up counts toward it
+                   and the cap keeps a small ``max_iter`` convergeable, so for
+                   those three ``n_iter >= min(min_iter, max_iter)`` whenever
+                   ``converged`` is True (#976).  :func:`ctm_tensor` takes no
+                   ``min_iter``: it early-exits on ``conv_tol`` alone, so this
+                   lower bound does not apply to an info it produced.
         diff:      Final value of the convergence criterion -- the max
                    absolute difference between successive normalized corner
                    singular-value vectors.  ``inf`` if no comparison was ever

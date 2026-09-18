@@ -145,10 +145,20 @@ def ctm(
 
     max_iter = config.max_iter
     conv_tol = config.conv_tol
+    # Honor ``min_iter``, but never require more sweeps than the budget allows:
+    # ``min(min_iter, max_iter)`` keeps a small-``max_iter`` config convergeable
+    # rather than silently forcing ``converged=False`` (#976).
+    min_iter = min(config.min_iter, max_iter)
     renormalize = config.renormalize
     projector_method = config.projector_method
 
-    # QR warm-up: run a few eigh iterations before switching to QR
+    # QR warm-up: run a few eigh iterations before switching to QR.  These
+    # sweeps count toward both ``n_iter`` (#925) and ``min_iter`` (#976): they
+    # really run and really move the returned environment, so excluding them
+    # reported a budget the caller never passed and stopped short of the
+    # requested minimum.  ``ctm_tensor`` already counts them (#920); this is the
+    # third and last legacy producer to match the shared invariant.
+    warmup_steps = 0
     if projector_method == "qr" and config.qr_warmup_steps > 0:
         warmup_steps = min(config.qr_warmup_steps, max_iter)
         for _ in range(warmup_steps):
@@ -198,12 +208,21 @@ def ctm(
         env_i = _ctm_sweep(env_i, a, chi, renormalize, projector_method)
         current_sv = _dense_svd(env_i.C1, compute_uv=False)
         diff = _ctm_sv_diff(current_sv, prev_sv_i, max_rank=max_rank)
-        converged = diff < conv_tol
+        # Honor ``min_iter`` before certifying convergence (#976); the warm-up
+        # sweeps already run count toward it, matching the shared Tensor path.
+        # ``prev_sv`` keeps updating through the minimum window because the body
+        # always runs -- only ``converged`` is gated.
+        total_sweeps = iteration + 1 + warmup_steps
+        converged = (diff < conv_tol) & (total_sweeps >= min_iter)
         return (env_i, current_sv, iteration + 1, converged, diff)
 
     env, _, n_iter, converged, diff = jax.lax.while_loop(cond_fn, body_fn, init_carry)
     if return_meta:
-        return env, CTMConvergenceInfo(converged=converged, n_iter=n_iter, diff=diff)
+        # ``n_iter`` counts the warm-up sweeps too, so the field's invariant
+        # (``n_iter == max_iter`` exactly when not converged) holds (#925).
+        return env, CTMConvergenceInfo(
+            converged=converged, n_iter=n_iter + warmup_steps, diff=diff
+        )
     return env
 
 
@@ -313,6 +332,9 @@ def ctm_2site(
 
     max_iter = config.max_iter
     conv_tol = config.conv_tol
+    # See ``ctm`` above: cap ``min_iter`` at the budget so a small ``max_iter``
+    # stays convergeable (#976).
+    min_iter = min(config.min_iter, max_iter)
     renormalize = config.renormalize
 
     # Initial singular values (zeros — first iteration never converges).
@@ -363,7 +385,9 @@ def ctm_2site(
         diff_A = _ctm_sv_diff(sv_A, psA, max_rank=max_rank_A)
         diff_B = _ctm_sv_diff(sv_B, psB, max_rank=max_rank_B)
         diff = jnp.maximum(diff_A, diff_B)
-        converged = diff < conv_tol
+        # Honor ``min_iter`` before certifying convergence (#976).  No warm-up
+        # on this path, so the loop count is the total sweep count.
+        converged = (diff < conv_tol) & ((iteration + 1) >= min_iter)
         return (eA, eB, sv_A, sv_B, iteration + 1, converged, diff)
 
     env_A, env_B, _, _, n_iter, converged, diff = jax.lax.while_loop(
@@ -492,6 +516,8 @@ def ctm_split(
     """
     chi = config.chi
     chi_I = config.chi_I if config.chi_I is not None else chi
+    # See ``ctm`` above: cap ``min_iter`` at the budget (#976).
+    min_iter = min(config.min_iter, config.max_iter)
 
     env = _initialize_split_ctm_env(A, chi, chi_I)
 
@@ -512,7 +538,9 @@ def ctm_split(
                     max_rank=_forced_corner_rank(_max_virtual_bond_dim(A) ** 2),
                 )
             )
-            if diff_val < config.conv_tol:
+            # Honor ``min_iter`` before breaking on convergence (#976); keep
+            # updating ``prev_sv`` through the minimum window (no warm-up here).
+            if diff_val < config.conv_tol and n_iter >= min_iter:
                 converged = True
                 break
         prev_sv = current_sv
