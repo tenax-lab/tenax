@@ -291,6 +291,21 @@ backward/adjoint returns *their* cotangents; `step`/`adjoint` are static config,
 gradient sources. `control.fixed_point(...)` (§7) owns this on both backends so
 algorithms don't special-case it.
 
+**Torch requires the leaves *splatted* as individual `.apply` arguments, not a
+tuple (Codex #1010 P1).** PyTorch autograd only registers **top-level tensor
+positional arguments** to a custom `Function` as differentiable inputs — tensors
+nested inside a tuple/list/dict passed as one argument are treated as a non-tensor
+constant, so `backward` returns *no* cotangents for them and the fixed-point path
+would still yield zero parameter gradients. So the torch `fixed_point` wrapper
+**flattens `params` to its leaves and calls `Function.apply(leaf0, leaf1, …)` with
+one positional tensor per leaf** (the pytree `treedef` from `backend.tree` travels
+as static aux and is rebuilt inside `forward`); `backward` then returns exactly one
+cotangent per leaf argument, which the wrapper re-assembles into the parameter tree.
+This splat/reassemble lives inside `control.fixed_point` so algorithms still pass a
+single `params` tree. (JAX has no such constraint — `custom_vjp` differentiates the
+whole pytree argument — so this is a torch-side wrapper detail, invisible above the
+seam.)
+
 **The fixed-point `Function` must satisfy the *same* `torch.func` contract as the
 leaf primitives (Codex #1010 P1).** §5.2's `setup_context` + vmap-rule requirement
 was written for the six decomposition primitives, but the iPEPS loss is evaluated
@@ -352,14 +367,31 @@ returns `optax.adam` / `optax.scale_by_lbfgs` / `optax.clip_by_global_norm` chai
 and the loop calls `optimizer.update(...)` (`ipeps_optimize.py:1053`) +
 `optax.apply_updates`. None of the array/tree/AD/control abstractions replace optax;
 `optax.update` cannot step a torch parameter tree. So the seam adds a **backend
-optimizer** — under JAX today's optax chains; under torch either `torch.optim`
-(Adam/LBFGS) or a small functional reimplementation of the same update math over the
-`backend.tree` leaves (the clip-by-global-norm and metric/CG steps are already
-partly hand-rolled, §7 of the AD-defaults). Acceptance requires **at least one
-complete parameter-update step** run through torch in the parity suite (§10), not
-just an energy+grad comparison — otherwise "full parity" stops at gradient
-evaluation and no torch optimization ever actually runs. This is a Phase-3/4
-deliverable.
+optimizer** — under JAX today's optax chains; under torch a functional
+reimplementation of the same update math over the `backend.tree` leaves.
+
+**The seam's contract is `update(grads, state, params) → (direction, state)`, and
+the default L-BFGS must be *functional* — `torch.optim.LBFGS` is not a drop-in
+(Codex #1010 P1).** Tenax does *not* let the optimizer own the step: the loop takes
+the returned `updates` as a **search direction** (`ipeps_optimize.py:2154`,
+`direction = updates`), runs its **own** line search (Hager-Zhang / Armijo
+backtracking) on it, and applies it **functionally**
+(`_normalize_params(_tree_add(params, _tree_scale(direction, alpha)))`) — plus a
+tangent-space projection (#328) and metric/CG variants. `torch.optim.LBFGS` breaks
+every part of that: it *owns and mutates* the parameters in place and drives its own
+line search through a loss-recomputing `closure` passed to `.step()`, with no way to
+return a bare direction for Tenax's line search. So the default `gs_optimizer="lbfgs"`
+maps to a **functional L-BFGS** (the two-loop recursion — Tenax already hand-rolls
+one at `ipeps_optimize.py:2148` for the metric-preconditioned path) that returns a
+direction matching the optax `scale_by_lbfgs` contract, *not* `torch.optim.LBFGS`.
+Adam can use `torch.optim` or a functional form, but the direction-return contract
+is the seam's interface either way.
+
+Acceptance requires **at least one complete parameter-update step in the *default*
+(L-BFGS) mode** run through torch in the parity suite (§10) — not just an energy+grad
+comparison, and not only an unspecified optimizer — otherwise "full parity" stops at
+gradient evaluation and the default torch optimization path could be silently
+unusable. This is a Phase-3b deliverable.
 
 ---
 
@@ -532,10 +564,13 @@ The acceptance criterion for "parity" is a **cross-backend parity suite**:
    energy+grad, run end-to-end on torch, compared to the JAX reference values the
    existing benchmarks already pin.
 4. **Optimizer-step parity (§5.6)** — at least **one complete `optimize_gs_ad`
-   parameter-update step** run through the torch optimizer seam (build optimizer →
-   `update` → apply), asserting the updated parameters track the JAX/optax step
-   within tolerance. Without this the suite would certify gradients but never a real
-   torch optimization move.
+   parameter-update step in the *default* L-BFGS mode** run through the torch
+   optimizer seam (build optimizer → `update` returns a **direction** → Tenax line
+   search → functional apply), asserting the updated parameters track the JAX/optax
+   step within tolerance. The default-mode requirement is explicit: a test of only
+   Adam would leave the functional-L-BFGS direction contract (§5.6) unexercised.
+   Without this the suite would certify gradients but never a real torch
+   optimization move.
 5. **Mutation discipline** — new parity tests must kill a seeded mutant (e.g. a
    dropped conjugation in the torch AD boundary must make the complex-grad parity
    test fail), per the repo's testing rules.
@@ -558,7 +593,7 @@ GPU-gated parity skips cleanly when no CUDA device is present.
 | **1. Torch forward** | `TorchBackend` array ops + dense/symmetric linalg forward + contraction (`torch.einsum`/opt_einsum + segment-sum equiv). Op-parity suite green. | Low–Med | Med |
 | **2. Torch AD** | Refactor the **6 leaf primitives across `_ad_primitives.py` (5) + `_lorentzian_eigh.py` (1, §5.1)** to `_fwd/_bwd`; **`torch.func`-compatible `autograd.Function` (`setup_context` + vmap rule, §5.2)**; **complex-cotangent boundary + directional-derivative parity test (§5.3)**. Gradient-parity green. | **High** (§5.3) | Med |
 | **3. Control flow + algorithms** | `backend.control` combinators + **`jit`/`checkpoint` wrappers (§7)**; **`backend.tree` protocol + register all custom containers (§6; migrate the 186 `jax.tree` sites)**; **`backend.ad` transforms (§5.5) + `fixed_point(step, params, …)` on the `setup_context` contract, incl. the C4v-reference primitive (§5.4)**; **`backend.linalg.gmres`/`solve_triangular` for the adjoint solve (§5.4; `_gmres_lax.py`, `_metric_precond.py`)**; **migrate the ~18 `jax.core.Tracer` checks to `is_tracing_or_requires_grad` (§4.2)**; migrate CTM/DMRG/GMRES loops and the ~76 direct `jax.*` transform sites. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
-| **3b. Optimizer seam** | **backend optimizer (§5.6)** — optax under JAX, `torch.optim`/functional under torch; migrate `_build_optimizer`/`optimizer.update`/`apply_updates`. **One full `optimize_gs_ad` update step runs through torch** (§10 item 4). | Med | Med |
+| **3b. Optimizer seam** | **backend optimizer (§5.6)** — optax under JAX; under torch a **functional L-BFGS** returning a direction (default mode), Adam via `torch.optim`/functional; migrate `_build_optimizer`/`optimizer.update` to the `(direction, state)` contract feeding Tenax's line search + functional apply. **One full `optimize_gs_ad` update step in default L-BFGS mode runs through torch** (§10 item 4). | Med | Med |
 | **4. Polish** | RNG/dtype policy, drop GPU-only workarounds on torch path, docs, `capabilities.md` update, **`README.md` documents the `set_backend` signature**, example, CI torch job. | Low | Low–Med |
 
 Phase 0 is the tedious-but-safe backbone; Phase 2 is the small-but-dangerous core.
