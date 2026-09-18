@@ -289,6 +289,26 @@
 
 ### Fixed
 
+- **The final energy `optimize_gs_ad` returns is now an evaluation of the
+  tensor it returns** (#899): the three optimizer paths (1-site, 2-site, and
+  `_optimize_gs_ad_multisite`) each re-evaluated the final and best tensors
+  with `env_init=_env_cache["envs"]`, directly under a block comment
+  promising a "fully converged fresh CTM ... so we compare fresh evaluations
+  only".  With a line search enabled (`gs_optimizer` `lbfgs`/`cg`, or an
+  explicit `gs_line_search`) `_restore_env_cache_after_line_search` has just
+  reverted that cache to the environment converged at the *previous*
+  parameters, so the seed belonged to a different state: the reported energy
+  was a partially-converged restart from a stale environment, not a property
+  of the returned tensor, and the `E_final <= E_best` comparison that decides
+  *which* tensor to return weighed one seeded number against another.  At
+  D=2/chi=6 the returned energy sat 1.3e-3 below a cold re-evaluation of the
+  same tensor.  Both evaluations are now seeded from scratch on all three
+  paths.  The #469 chi-padding of the best-environment snapshot existed
+  solely to make it shape-compatible *as a seed* and is removed with it;
+  `optimize_gs_ad` is unchanged when no line search is active, where the
+  cache was never reverted and the seed was already the current state's own
+  environment.
+
 - **The sigma forward gauge is a pure gauge transform again** (#798): the
   2x2 sweep writes every corner axis-reversed relative to the canonical
   `_ctm_tensor_init` order, and `_apply_sigma_to_corner` /
