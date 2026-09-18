@@ -913,20 +913,20 @@ class CTMConvergenceInfo(NamedTuple):
         converged: True when the sweep met ``conv_tol`` and stopped early.
                    False means it ran out of iterations -- the value is
                    whatever the last sweep produced.
-        n_iter:    Sweeps actually performed.  Equal to ``max_iter`` exactly
-                   when ``converged`` is False.
-
-                   **The two producers differ under a QR warm-up, and only one
-                   of them satisfies the invariant above.**  :func:`ctm_tensor`
-                   counts the warm-up sweeps, so ``n_iter`` is the caller's
-                   ``max_iter`` when the budget is exhausted (#920 review).
-                   :func:`ctm` counts the post-warm-up loop only, matching the
-                   budget *that loop* was given rather than the one the caller
-                   passed -- so with ``qr_warmup_steps=6, max_iter=10`` it
-                   reports 4 against a ``max_iter`` of 10.  That is the same
-                   defect #910 fixed in the multisite warning and it is left
-                   alone here only because changing :func:`ctm` is out of scope
-                   for the PR that noticed it.
+        n_iter:    Sweeps actually performed, **including any QR warm-up
+                   sweeps**.  Equal to ``max_iter`` exactly when ``converged``
+                   is False.  Every producer -- :func:`ctm_tensor` (#920),
+                   :func:`ctm`, :func:`ctm_2site` and :func:`ctm_split` (#925)
+                   -- counts the warm-up, so the invariant holds regardless of
+                   which one built the info.  The three ``CTMConfig``-based
+                   entry points (:func:`ctm`, :func:`ctm_2site`,
+                   :func:`ctm_split`) additionally gate convergence on
+                   ``min(min_iter, max_iter)`` -- the warm-up counts toward it
+                   and the cap keeps a small ``max_iter`` convergeable, so for
+                   those three ``n_iter >= min(min_iter, max_iter)`` whenever
+                   ``converged`` is True (#976).  :func:`ctm_tensor` takes no
+                   ``min_iter``: it early-exits on ``conv_tol`` alone, so this
+                   lower bound does not apply to an info it produced.
         diff:      Final value of the convergence criterion -- the max
                    absolute difference between successive normalized corner
                    singular-value vectors.  ``inf`` if no comparison was ever
@@ -1340,17 +1340,35 @@ def _ctm_tensor_multisite(
 
     prev_svs: dict[Coord, jax.Array] = {}
     blind_coords: set[Coord] = set()
-    # Per coordinate, not per cell (#903 review).  A cell-wide aggregate is
-    # wrong in both directions: `min` lets one trivial site exempt every
-    # corner (fails open), and `max` makes a legitimate D=1 coordinate blind
-    # on every sweep so the loop can never certify it (fails closed, but
-    # wrongly).  The reachable rank is a property of the site sitting at that
-    # coordinate, so it is computed there.  Built before the loop and outside
-    # every branch.
-    max_ranks = {
-        c: _forced_corner_rank(_max_virtual_bond_dim(dl))
-        for c, dl in double_layers.items()
-    }
+
+    # Keyed to every site that can CONTRIBUTE to a corner, not to the
+    # coordinate the corner is stored under (#903 review, P1).  In the 2x2
+    # recipe `_ctm_tensor_sweep_multisite` builds a destination's C1 from a
+    # *neighbour's* double layer (`s_src = neighbors[s_dst]["top"]`), so
+    # `envs[c].C1` is not necessarily produced by the site at `c`.  Keying on
+    # `c` alone gives a D=1 destination fed by a rich source `max_rank=1` --
+    # accepting a collapsed corner -- and the reverse mismatch leaves a
+    # legitimate comparison blind forever.
+    #
+    # ONE bound for the whole cell: the max over every site (#898, #916).
+    #
+    # Six successive derivations of a per-corner bound were each a correct fix
+    # to the previous one and each still under-covered: `indices[0]`, then
+    # `min` across sites, then `max` across sites, then per coordinate, then
+    # `{c} | neighbours(c)` -- which still misses the DIAGONAL sites of the
+    # four-site plaquettes the 2x2 projectors are built from.  Every miss
+    # failed OPEN: too small a bound certifies a collapsed corner, and nothing
+    # downstream can tell.
+    #
+    # A global max cannot under-cover, by construction, in any recipe.  The
+    # price is that a legitimate D=1 coordinate in a heterogeneous cell is no
+    # longer exempt and will spend its budget -- the safe direction, and the
+    # exemption only ever mattered for uniformly trivial states, where the
+    # global max still equals 1.
+    max_rank = _forced_corner_rank(
+        max(_max_virtual_bond_dim(dl) for dl in double_layers.values())
+    )
+
     # #901: assigned before the loop, not inside it.  Everything below the
     # loop reads them, and a zero-iteration budget would otherwise raise
     # ``UnboundLocalError`` from the reporting path rather than return.
@@ -1408,7 +1426,7 @@ def _ctm_tensor_multisite(
             # knows the budget ran out rather than the criterion being
             # satisfied.  Mirror the ``or`` in the criterion exactly: reading
             # one side would leave the other silently uncertified.
-            _mr_c = max_ranks[c]
+            _mr_c = max_rank
             sv_blind = not _spectrum_can_show_change(sv, max_rank=_mr_c)
             if sv_blind:
                 # Still blind *now*: the environment being returned is the
