@@ -404,9 +404,20 @@ jobs:
           fi
           exit $rc
 
-  test-no-cython:
-    name: Tests without Cython (Python 3.12)
+  # The Cython-fallback run, sharded on the same partition as the gate.  It is
+  # NOT a branch-protection context, so it gets no aggregator and the old
+  # "Tests without Cython (Python 3.12)" name is retired rather than preserved
+  # -- nothing depends on it reporting.  Sharded anyway because at 2h09m it was
+  # the longest job in the run and held a runner for two hours on every PR,
+  # which is the contention that had #984 queued 73 min behind three
+  # in-progress jobs.
+  no-cython-shard:
+    name: No-Cython shard ${{ matrix.shard }} (Python 3.12)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1", "2", "3", "4"]
 
     steps:
       - uses: actions/checkout@v6
@@ -426,8 +437,26 @@ jobs:
         env:
           JAX_PLATFORMS: cpu
           TENAX_DISABLE_CYTHON_BLAS: "1"
+          SHARD: ${{ matrix.shard }}
+          # Same partition as the gate; see the core-shard job.
+          NSHARDS: 4
         run: |
-          uv run pytest tests/ -m "core" -v
+          FILES=""
+          for f in $(find tests -name 'test_*.py' | LC_ALL=C sort); do
+            h=$(printf '%s' "$f" | cksum | cut -d' ' -f1)
+            if [ $(( h % NSHARDS )) -eq $(( SHARD - 1 )) ]; then
+              FILES="$FILES $f"
+            fi
+          done
+          set +e
+          uv run pytest $FILES -m "core" -v
+          rc=$?
+          set -e
+          if [ "$rc" -eq 5 ]; then
+            echo "Shard collected no core tests; OK."
+            rc=0
+          fi
+          exit $rc
 
   # Sharded on the same rule as the ubuntu gate, and with the same NSHARDS, so
   # shard N holds the SAME files on both platforms -- a macOS-only failure in

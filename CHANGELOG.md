@@ -1221,7 +1221,17 @@
   holds the same files everywhere: leaving macOS serial would have capped the
   change, since the gate is bounded by its slowest required job and macOS
   measured 27-52 min (median ~44) against ubuntu shards that finish inside
-  that.  The gate had grown to 2664 of 4310 tests (62% of
+  that.  The Cython-fallback run is sharded on the same partition
+  (`no-cython-shard`): at 2h09m it was the longest job in every run and held a
+  runner for two hours per PR, which is the contention that left #984 queued
+  73 min behind three in-progress jobs.  It is not a branch-protection
+  context, so it gets no aggregator and its old single-job name is retired.
+
+  Measured on the sharded run, all twelve core shards green: shard 1
+  4m6s / 4m20s / 4m19s (mac), shard 2 23m18s / 18m6s / 10m53s, shard 3
+  16m35s / 17m6s / 15m55s, shard 4 10m15s / 10m42s / 10m40s — so the gate is
+  bounded by a 23m18s shard against 101m41s serial, a **4.4x** reduction with
+  no test removed.  The gate had grown to 2664 of 4310 tests (62% of
   the suite) and 101m41s, against the 120-min merge-queue limit that already
   dropped #936 and grazed #920 at 120.1 — and the usual lever was spent, since
   coverage is already off on pull requests.  Measured per-file cost splits
