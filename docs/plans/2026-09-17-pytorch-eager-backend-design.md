@@ -333,6 +333,19 @@ single `params` tree. (JAX has no such constraint — `custom_vjp` differentiate
 whole pytree argument — so this is a torch-side wrapper detail, invisible above the
 seam.)
 
+**The same flatten/reassemble applies to the *outputs*, not just the inputs (Codex
+#1010 P1).** `torch.autograd.Function` can expose differentiable **outputs** only as
+top-level torch tensors, too — a `Function` that returns Tenax `Tensor` objects
+cannot receive their output cotangents in `backward`. The C4v-reference fixed point
+returns `(C, T)` as `Tensor` objects (`_ctm_tensor_c4v_reference_ad.py:304-334`,
+`-> tuple[Tensor, Tensor]`), and `backward` needs `g_c`/`g_t` to flow in. So the
+torch wrapper's `forward` returns the **flattened environment buffer leaves** (with
+the output `treedef` as static aux), and `control.fixed_point` **reconstructs the
+public `(C, T)` / env tensor tree outside `.apply()`**; `backward` then receives one
+output cotangent per returned leaf. The rule is symmetric — *both* the parameter
+inputs and the environment outputs cross the `.apply()` boundary as bare tensor
+leaves, and the Tenax tensor trees are (dis)assembled on the Python side of it.
+
 **The fixed-point `Function` must satisfy the *same* `torch.func` contract as the
 leaf primitives (Codex #1010 P1).** §5.2's `setup_context` + vmap-rule requirement
 was written for the six decomposition primitives, but the iPEPS loss is evaluated
@@ -488,7 +501,7 @@ selects with no change to any algorithm.
 | `scan(f, init, xs)` | `lax.scan` | Python `for`, stack outputs | `torch.while_loop` with an index carry (or the `scan`/`associative_scan` HOP where available) |
 | `fori_loop(lo, hi, body, init)` | `lax.fori_loop` | Python `for` | `torch.while_loop` with a counter carry |
 | `cond(p, t, f, x)` | `lax.cond` | Python `if` | `torch.cond(p, t, f, x)` |
-| `stop_gradient(x)` | `lax.stop_gradient` | `x.detach()` | `x.detach()` (unchanged) |
+| `stop_gradient(x)` | `lax.stop_gradient` | `tree.map(detach, x)` (tree-aware) | same (unchanged) |
 | `fixed_point(step, params, init, adjoint)` | `custom_vjp` on `params` + GMRES adjoint | `autograd.Function` (`params` = `.apply` inputs, §5.4) + GMRES adjoint | same `autograd.Function` (opaque to Dynamo — §12) |
 
 The CTM/DMRG/GMRES loops (already written in functional-carry style for `lax`) are
@@ -531,6 +544,25 @@ Note the identity-`jit` is necessary but not *sufficient* for DMRG: the default
 / `jax.nn.one_hot` directly (`_padded_linalg.py:128/142`), so those must also be
 `ArrayOps` ops (§4.2) — an identity `jit` alone would still hand torch tensors to a
 JAX API inside the sweep.
+
+**`stop_gradient` and `checkpoint` must be container-aware, not tensor-only (Codex
+#1010 P1).** Two lowerings above look trivial but break on Tenax's containers:
+- **`stop_gradient` takes whole tensor objects / trees, not raw arrays.**
+  `_ctm_root_implicit_symmetric.py:1944` passes a `SymmetricTensor` and
+  `_ctm_energy_ad.py` passes the nested CTM environment to `stop_gradient` — neither
+  has a `.detach()` method, so a bare `x.detach()` lowering raises. The torch
+  lowering is therefore **`backend.tree.map(lambda t: t.detach(), x)`**, detaching
+  the array *leaves* through the tree protocol (§6); the symmetric root-implicit and
+  truncated-backprop CTM paths depend on it.
+- **`checkpoint` must be non-reentrant.** `_ctm_energy_ad.py:346` checkpoints
+  `_step_envs_only(site_tensors, envs)` — a dict of tensors and a CTM-environment
+  container whose differentiable torch buffers are **nested inside** Tenax tensor
+  objects. PyTorch's default **reentrant** `torch.utils.checkpoint` does *not* treat
+  tensors nested in structures as participating inputs, so rematerialized sweeps
+  would silently lose their parameter gradients. The seam pins
+  **`torch.utils.checkpoint.checkpoint(..., use_reentrant=False)`** (records the
+  inner graph, supports nested structures) — or flattens the container args to
+  leaves first — for this through-torch AD path.
 
 **Eager payoff (v1):** under the *eager* lowering, dynamic block shapes across sweeps
 cost nothing (no trace, no recompile), so the "static block keys" machinery that
