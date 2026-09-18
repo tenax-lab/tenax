@@ -66,6 +66,8 @@ From a full sweep of `src/tenax` (120 files):
 | **AD primitives** | 6 leaf `custom_vjp`: `_ad_primitives.py:229-719` (5) + `_lorentzian_eigh.py:81` (1), +`blocksparse_backend.py:149-177`, ~60 sites/16 files | **Yes — redesign.** |
 | **Differentiation-state checks** | `isinstance(x, jax.core.Tracer)` ×~18 across 9 files (`core/tensor.py:1043`, `linalg.py:274/2045`, `_ctm_projector.py`×7, …) | **Yes — backend predicate** (§4.2). |
 | **Control flow** | `lax` `while_loop`×29, `scan`×22, `fori_loop`×10, `stop_gradient`×58 across 31 files | **Yes — redesign.** |
+| **Krylov / triangular solvers** | `_gmres_lax.py:171` (`solve_triangular`), `:299-336`; `_metric_precond.py:164`, `ad_utils.py:915` (`jax.scipy … gmres`) | **Yes — backend solvers** (§5.4). |
+| **Optimizer** | `optax` chains in `_ipeps_optimize_shared.py:112-136`; `optimizer.update`/`apply_updates` (`ipeps_optimize.py:1053`) | **Yes — optimizer seam** (§5.6). |
 | **Pytree registration** | `core/tensor.py:441,624`; `stacked_tensor.py:41`; `_padded_block_array.py:229`; `pess.py:252` | **Yes — reinterpret** (§6). |
 | PRNG | `jax.random`/PRNGKey in 17 files | Yes; key-threading → generator. |
 | Global x64 | `__init__.py:45`; `jnp.float64` literals in factories | Yes; small but global. |
@@ -231,8 +233,10 @@ of these primitives is reached through a `backend.ad.grad`/`vjp`/`vmap` transfor
 `forward` + `setup_context(ctx, inputs, output)` form (no side-effecting saves in
 `forward`), and `vmap` additionally needs `generate_vmap_rule = True` or an
 explicit `vmap` staticmethod. So the wrapper contract mandates the
-`setup_context` form and a vmap rule for all six primitives, and the parity suite
-(§10) transforms a composed objective through *each* primitive to prove it.
+`setup_context` form and a vmap rule for all six primitives **and the fixed-point
+combinator of §5.4** (which is likewise reached through `backend.ad.value_and_grad`),
+and the parity suite (§10) transforms a composed objective through *each* of them to
+prove it.
 
 ### 5.3 ⚠️ Complex-cotangent convention — the highest-risk item
 JAX and PyTorch use **different conjugation conventions** for complex gradients.
@@ -287,6 +291,40 @@ backward/adjoint returns *their* cotangents; `step`/`adjoint` are static config,
 gradient sources. `control.fixed_point(...)` (§7) owns this on both backends so
 algorithms don't special-case it.
 
+**The fixed-point `Function` must satisfy the *same* `torch.func` contract as the
+leaf primitives (Codex #1010 P1).** §5.2's `setup_context` + vmap-rule requirement
+was written for the six decomposition primitives, but the iPEPS loss is evaluated
+through `backend.ad.value_and_grad` (→ `torch.func.grad_and_value`, §5.5), so this
+fixed-point `autograd.Function` is *itself* reached by a `torch.func` transform — a
+plain `forward`/`backward` wrapper would raise there before the adjoint ever runs.
+So the `setup_context` form (and a vmap rule) is mandatory for the fixed-point
+combinator too, and §10 transforms an iPEPS objective *through* it — not only
+through the leaf primitives — to prove the through-torch CTM gradient path.
+
+**The fixed-point family is more than the `_ctm_energy_ad` set (Codex #1010 P1).**
+The supported `ctm_ad_mode="c4v_reference"` optimization path calls a *standalone*
+`custom_vjp`, `ctm_tensor_c4v_reference_converge_reduced`
+(`_ctm_tensor_c4v_reference_ad.py:304-334`), from `ipeps_optimize.py:981` inside
+`jax.value_and_grad`. Migrating only the enumerated `_ctm_energy_ad.py` /
+`_split_ctm_energy_ad.py` / `ad_utils.py` (`ctm_tensor_converge`) /
+`_ctm_honeycomb_ad.py` fixed points would leave the C4v-reference mode JAX-bound
+even after the generic work lands. So this primitive routes through
+`control.fixed_point` on the same contract, and the reference-mode path gets its
+own torch gradient test.
+
+**The adjoint solve needs backend Krylov + triangular solvers (Codex #1010 P1).**
+"backward solves the adjoint linear system (GMRES)" is not free under torch: the
+solver itself calls JAX directly — `_gmres_lax.py:171`
+`jax.scipy.linalg.solve_triangular`, and `jax.scipy.sparse.linalg.gmres` at
+`_metric_precond.py:164` (metric preconditioner) plus the Arnoldi/GMRES machinery
+in `_gmres_lax.py:299-336` and `ad_utils.py:915`. Migrating loop *combinators* (§7)
+does not touch these — they would still receive torch tensors in a JAX API. So the
+seam adds **`backend.linalg.gmres`** and **`backend.linalg.solve_triangular`** (JAX:
+today's `jax.scipy.*`; torch: `torch.linalg.solve_triangular` + a torch GMRES, or
+`torch.func`-compatible reimplementations of the existing `lax` GMRES), and their
+call sites are named in Phase 3 — without them the fixed-point primitive is not
+actually backend-neutral.
+
 ### 5.5 Reverse-mode transforms belong in the seam too
 The `custom_vjp` factory (§5.2) is necessary but **not sufficient**: the algorithms
 call the JAX transform APIs *directly* — `jax.vjp` (44 sites, e.g.
@@ -305,6 +343,23 @@ impossible. So `backend.ad` must expose the transforms, not just `custom_vjp`:
 `torch.func` (functorch) gives functional, composable transforms that map closely
 onto the existing JAX call sites. Migrating these ~76 uses is an **explicit
 deliverable of Phase 3**, not something the `custom_vjp` factory covers for free.
+
+### 5.6 The optimizer step is backend-specific too (Codex #1010 P1)
+Gradient parity is necessary but **not the end of "full algorithm parity."** After
+the gradient, a real `optimize_gs_ad` run continues into the *update* step, which is
+built on **optax** — JAX-only: `_build_optimizer` (`_ipeps_optimize_shared.py:112`)
+returns `optax.adam` / `optax.scale_by_lbfgs` / `optax.clip_by_global_norm` chains,
+and the loop calls `optimizer.update(...)` (`ipeps_optimize.py:1053`) +
+`optax.apply_updates`. None of the array/tree/AD/control abstractions replace optax;
+`optax.update` cannot step a torch parameter tree. So the seam adds a **backend
+optimizer** — under JAX today's optax chains; under torch either `torch.optim`
+(Adam/LBFGS) or a small functional reimplementation of the same update math over the
+`backend.tree` leaves (the clip-by-global-norm and metric/CG steps are already
+partly hand-rolled, §7 of the AD-defaults). Acceptance requires **at least one
+complete parameter-update step** run through torch in the parity suite (§10), not
+just an energy+grad comparison — otherwise "full parity" stops at gradient
+evaluation and no torch optimization ever actually runs. This is a Phase-3/4
+deliverable.
 
 ---
 
@@ -466,13 +521,22 @@ The acceptance criterion for "parity" is a **cross-backend parity suite**:
 1. **Op parity** — for each `ArrayOps` method and each block-sparse op (contract,
    svd/qr/eigh, permute, fuse/split), run identical inputs under both backends,
    assert `allclose` (f64/c128 tolerances).
-2. **Gradient parity** — for the 6 AD primitives and for composed objectives
-   (DMRG energy, iPEPS energy), compare `torch.autograd.grad` vs `jax.grad` on the
-   same inputs. **Includes a complex-input case** targeting §5.3.
+2. **Gradient parity** — for the 6 leaf AD primitives (§5.1) **and the fixed-point
+   family** (`_ctm_energy_ad`, split, honeycomb, and the C4v-reference primitive of
+   §5.4), and for composed objectives (DMRG energy, iPEPS energy), compare
+   `torch.autograd.grad` vs `jax.grad` on the same inputs. **Includes a complex-input
+   case** targeting §5.3, and a case that evaluates the objective **through
+   `backend.ad.value_and_grad`** so the fixed-point `Function` is exercised under a
+   `torch.func` transform (§5.2/§5.4), not just eager `.backward()`.
 3. **Algorithm parity** — DMRG (→ −0.4431 Heisenberg), iDMRG, a small iPEPS
    energy+grad, run end-to-end on torch, compared to the JAX reference values the
    existing benchmarks already pin.
-4. **Mutation discipline** — new parity tests must kill a seeded mutant (e.g. a
+4. **Optimizer-step parity (§5.6)** — at least **one complete `optimize_gs_ad`
+   parameter-update step** run through the torch optimizer seam (build optimizer →
+   `update` → apply), asserting the updated parameters track the JAX/optax step
+   within tolerance. Without this the suite would certify gradients but never a real
+   torch optimization move.
+5. **Mutation discipline** — new parity tests must kill a seeded mutant (e.g. a
    dropped conjugation in the torch AD boundary must make the complex-grad parity
    test fail), per the repo's testing rules.
 
@@ -493,7 +557,8 @@ GPU-gated parity skips cleanly when no CUDA device is present.
 | **0. Seam** | `tenax.backend` package, `ArrayOps` Protocol **incl. functional indexed-updates** (§4.2; migrate the 137 `.at[...]` sites across 25 files), `JaxBackend` pass-through; migrate `core/tensor.py` + `linalg.py` dense kernels behind `B`; **export `set_backend`/`get_backend` in `__all__`**. Suite green, zero behavior change. | Low | **High** (mechanical, 80-file surface — but staged) |
 | **1. Torch forward** | `TorchBackend` array ops + dense/symmetric linalg forward + contraction (`torch.einsum`/opt_einsum + segment-sum equiv). Op-parity suite green. | Low–Med | Med |
 | **2. Torch AD** | Refactor the **6 leaf primitives across `_ad_primitives.py` (5) + `_lorentzian_eigh.py` (1, §5.1)** to `_fwd/_bwd`; **`torch.func`-compatible `autograd.Function` (`setup_context` + vmap rule, §5.2)**; **complex-cotangent boundary + directional-derivative parity test (§5.3)**. Gradient-parity green. | **High** (§5.3) | Med |
-| **3. Control flow + algorithms** | `backend.control` combinators + **`jit`/`checkpoint` wrappers (§7)**; **`backend.tree` protocol + register all custom containers (§6; migrate the 186 `jax.tree` sites)**; **`backend.ad` transforms (§5.5) + `fixed_point(step, params, …)` (§5.4)**; **migrate the ~18 `jax.core.Tracer` checks to `is_tracing_or_requires_grad` (§4.2)**; migrate CTM/DMRG/GMRES loops and the ~76 direct `jax.*` transform sites. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
+| **3. Control flow + algorithms** | `backend.control` combinators + **`jit`/`checkpoint` wrappers (§7)**; **`backend.tree` protocol + register all custom containers (§6; migrate the 186 `jax.tree` sites)**; **`backend.ad` transforms (§5.5) + `fixed_point(step, params, …)` on the `setup_context` contract, incl. the C4v-reference primitive (§5.4)**; **`backend.linalg.gmres`/`solve_triangular` for the adjoint solve (§5.4; `_gmres_lax.py`, `_metric_precond.py`)**; **migrate the ~18 `jax.core.Tracer` checks to `is_tracing_or_requires_grad` (§4.2)**; migrate CTM/DMRG/GMRES loops and the ~76 direct `jax.*` transform sites. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
+| **3b. Optimizer seam** | **backend optimizer (§5.6)** — optax under JAX, `torch.optim`/functional under torch; migrate `_build_optimizer`/`optimizer.update`/`apply_updates`. **One full `optimize_gs_ad` update step runs through torch** (§10 item 4). | Med | Med |
 | **4. Polish** | RNG/dtype policy, drop GPU-only workarounds on torch path, docs, `capabilities.md` update, **`README.md` documents the `set_backend` signature**, example, CI torch job. | Low | Low–Med |
 
 Phase 0 is the tedious-but-safe backbone; Phase 2 is the small-but-dangerous core.
