@@ -27,6 +27,7 @@ from tenax.algorithms._ctm_tensor_convergence import (
     _get_base_charges,
     _max_env_leaf_diff,
     _max_virtual_bond_dim,
+    _nan_safe_max,
 )
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
@@ -253,7 +254,9 @@ def _run_ctm_loop_with_bump(
                 continue
             max_diff = 0.0
             for c in sorted(envs):
-                max_diff = max(max_diff, _max_env_leaf_diff(prev_envs[c], envs[c]))
+                max_diff = _nan_safe_max(
+                    max_diff, _max_env_leaf_diff(prev_envs[c], envs[c])
+                )
             converged = max_diff < conv_tol
             final_diff = max_diff
             prev_envs = {c: envs[c] for c in envs}
@@ -277,7 +280,7 @@ def _run_ctm_loop_with_bump(
                 sv = _corner_singular_values(envs[c].C1)
                 if c in prev_svs:
                     diff = float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr[c]))
-                    max_diff = max(max_diff, diff)
+                    max_diff = _nan_safe_max(max_diff, diff)
                     if diff >= conv_tol:
                         converged = False
                 else:
