@@ -63,7 +63,8 @@ From a full sweep of `src/tenax` (120 files):
 | Dense linalg kernels | `linalg.py:59-100` (svd), `:1573/1781/2537/2670` (qr/eigh) | Yes; isolatable behind ~3 functions. |
 | Block-sparse decomps | `linalg.py` `_truncated_svd_symmetric` (:243), `_qr_symmetric` (:1452), `_eigh_symmetric` (:1663) | Yes; per-sector loops over dense kernels. |
 | Contraction execution | `contractor.py:234,356,1124-1135`; `blocksparse_plan.py:373` (`jnp.einsum`+`segment_sum`, `backend="jax"`) | Yes; opt_einsum *path* portable, execution not. |
-| **AD primitives** | `_ad_primitives.py:229-792` (6 `custom_vjp`), +`blocksparse_backend.py:149-177`, ~60 sites/16 files | **Yes — redesign.** |
+| **AD primitives** | 6 leaf `custom_vjp`: `_ad_primitives.py:229-719` (5) + `_lorentzian_eigh.py:81` (1), +`blocksparse_backend.py:149-177`, ~60 sites/16 files | **Yes — redesign.** |
+| **Differentiation-state checks** | `isinstance(x, jax.core.Tracer)` ×~18 across 9 files (`core/tensor.py:1043`, `linalg.py:274/2045`, `_ctm_projector.py`×7, …) | **Yes — backend predicate** (§4.2). |
 | **Control flow** | `lax` `while_loop`×29, `scan`×22, `fori_loop`×10, `stop_gradient`×58 across 31 files | **Yes — redesign.** |
 | **Pytree registration** | `core/tensor.py:441,624`; `stacked_tensor.py:41`; `_padded_block_array.py:229`; `pess.py:252` | **Yes — reinterpret** (§6). |
 | PRNG | `jax.random`/PRNGKey in 17 files | Yes; key-threading → generator. |
@@ -94,6 +95,22 @@ Backend resolution is process-global and explicit:
 import tenax
 tenax.set_backend("torch")   # or "jax" (default); reads TENAX_BACKEND env as fallback
 ```
+
+**`B` must be a live dispatch proxy, not a rebindable name (Codex #1010 P1).**
+`import tenax` eagerly pulls in the numeric modules — `tenax/__init__.py:61-92`
+imports `contraction.contractor`, `core.tensor`, `linalg`, `network.*` at package
+load — so by the time a user calls `set_backend("torch")`, every one of those
+modules has *already* executed `from tenax.backend import B` and bound the
+JAX target. If the setter merely **rebinds** `tenax.backend.B`, those modules keep
+their original reference and silently stay on JAX — the public switch would be a
+no-op for exactly the already-imported operations. So the contract is: **`B` is a
+stable proxy object whose *target* `set_backend` mutates in place** (the imported
+name keeps pointing at the same proxy, which now dispatches to torch). The
+alternative — forcing every call site to dereference `tenax.backend.B.<op>`
+dynamically on each use — is rejected as both a per-op indirection cost and an
+easy-to-violate rule across the 80-file surface. `set_backend` is therefore only
+valid **before any tensor is allocated**; switching mid-process with live tensors
+of the old backend is out of scope (documented, and guarded with a clear error).
 
 ### 4.1 Layered design
 
@@ -134,6 +151,24 @@ mapping to `.at[...]` under JAX and out-of-place `index_add`/`scatter`/masked
 Phase-0/1 mechanical work — without it, importing `B` for `jnp` cannot make even
 `todense()` backend-neutral.
 
+**Differentiation-state detection is a backend predicate (Codex #1010 P1).** The
+code branches on `isinstance(x, jax.core.Tracer)` in **~18 sites across 9 files**
+to select between a concrete/validating path and an AD-safe one — e.g.
+`core/tensor.py:1043` skips `np.asarray(data)` (which *raises* on a grad-requiring
+tensor) when the data is a tracer; `linalg.py:274`/`2045`, `_ctm_projector.py`
+(seven sites: 899/946/1020/1028/1087/1126), `_ctm_tensor_projector_2x2.py:1001`,
+`_ctm_tensor_energy.py:130`, `contraction/contractor.py:897`,
+`cutensornet_backend.py:64` use the same predicate to pick the AD-safe
+decomposition/contraction branch. **A torch tensor with `requires_grad=True` is
+never a JAX tracer**, so every one of these checks reads `False` under torch and
+sends a differentiable tensor down the concrete branch — either raising (the
+`np.asarray` case) or silently taking the numerically-unstable eager path. So
+`ArrayOps` exposes a predicate `is_tracing_or_requires_grad(x)` (JAX:
+`isinstance(x, jax.core.Tracer)`; torch: `torch.is_grad_enabled() and
+x.requires_grad`, plus a `torch.func` functorch-tracer check), and all ~18 sites
+migrate to it — this is Phase-3 work called out alongside the transform-site
+migration.
+
 Rationale over the Array-API standard: Tenax leans on ops the standard doesn't
 cover portably — `einsum` with explicit contraction paths, `segment_sum`,
 algorithm-selected SVD, and complex dtypes where array-api support is uneven. We
@@ -158,7 +193,19 @@ This is where parity + through-torch-AD is won or lost. The design principle:
 Everything composed from `B` ops is differentiable *automatically* — by XLA tracing
 under JAX, by the eager tape under torch. **Only the linalg primitives need custom
 gradients**, because SVD/QR/eigh backward has degenerate-spectrum and truncation
-subtleties. That's the same 6 primitives in `_ad_primitives.py` today.
+subtleties. That is **6 leaf decomposition primitives across two files, not one
+(Codex #1010 P1)**: `truncated_svd_ad`, `truncated_svd_ad_vh_only`,
+`regularized_svd`, `regularized_qr`, `regularized_eigh` in `_ad_primitives.py`
+(5), **plus `truncated_eigh_regularized` in `_lorentzian_eigh.py:81`** — a separate
+`custom_vjp` that `_ctm_projector.py:1146` invokes whenever an AD iPEPS run selects
+`projector_backward="lorentzian"` (a supported projector-backward mode). Scoping
+the refactor to `_ad_primitives.py` alone would leave that path unable to run
+through torch and absent from the parity suite, so the Lorentzian eigh primitive
+goes through the *same* `_fwd/_bwd` + `backend.ad.custom_vjp` treatment (§5.2) and
+into the §10 transform tests. (The `*_converge`/`f(params_data_tuple)` `custom_vjp`s
+in `ad_utils.py`, `_ctm_energy_ad.py`, `_split_ctm_energy_ad.py`,
+`_ctm_honeycomb_ad.py` are a different tier — the CTM **fixed-point adjoint** family
+that §5.4's `fixed_point` combinator owns, not leaf decomposition math.)
 
 ### 5.2 Refactor each primitive to backend-neutral fwd/bwd
 ```python
@@ -445,8 +492,8 @@ GPU-gated parity skips cleanly when no CUDA device is present.
 |---|---|---|---|
 | **0. Seam** | `tenax.backend` package, `ArrayOps` Protocol **incl. functional indexed-updates** (§4.2; migrate the 137 `.at[...]` sites across 25 files), `JaxBackend` pass-through; migrate `core/tensor.py` + `linalg.py` dense kernels behind `B`; **export `set_backend`/`get_backend` in `__all__`**. Suite green, zero behavior change. | Low | **High** (mechanical, 80-file surface — but staged) |
 | **1. Torch forward** | `TorchBackend` array ops + dense/symmetric linalg forward + contraction (`torch.einsum`/opt_einsum + segment-sum equiv). Op-parity suite green. | Low–Med | Med |
-| **2. Torch AD** | Refactor 6 primitives to `_fwd/_bwd`; **`torch.func`-compatible `autograd.Function` (`setup_context` + vmap rule, §5.2)**; **complex-cotangent boundary + directional-derivative parity test (§5.3)**. Gradient-parity green. | **High** (§5.3) | Med |
-| **3. Control flow + algorithms** | `backend.control` combinators + **`jit`/`checkpoint` wrappers (§7)**; **`backend.tree` protocol + register all custom containers (§6; migrate the 186 `jax.tree` sites)**; **`backend.ad` transforms (§5.5) + `fixed_point(step, params, …)` (§5.4)**; migrate CTM/DMRG/GMRES loops and the ~76 direct `jax.*` transform sites. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
+| **2. Torch AD** | Refactor the **6 leaf primitives across `_ad_primitives.py` (5) + `_lorentzian_eigh.py` (1, §5.1)** to `_fwd/_bwd`; **`torch.func`-compatible `autograd.Function` (`setup_context` + vmap rule, §5.2)**; **complex-cotangent boundary + directional-derivative parity test (§5.3)**. Gradient-parity green. | **High** (§5.3) | Med |
+| **3. Control flow + algorithms** | `backend.control` combinators + **`jit`/`checkpoint` wrappers (§7)**; **`backend.tree` protocol + register all custom containers (§6; migrate the 186 `jax.tree` sites)**; **`backend.ad` transforms (§5.5) + `fixed_point(step, params, …)` (§5.4)**; **migrate the ~18 `jax.core.Tracer` checks to `is_tracing_or_requires_grad` (§4.2)**; migrate CTM/DMRG/GMRES loops and the ~76 direct `jax.*` transform sites. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
 | **4. Polish** | RNG/dtype policy, drop GPU-only workarounds on torch path, docs, `capabilities.md` update, **`README.md` documents the `set_backend` signature**, example, CI torch job. | Low | Low–Med |
 
 Phase 0 is the tedious-but-safe backbone; Phase 2 is the small-but-dangerous core.
