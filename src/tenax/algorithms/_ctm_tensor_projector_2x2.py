@@ -96,8 +96,12 @@ def _gauge_fix_symmetric_svd(
     new_vh_blocks: dict[tuple[int, ...], jax.Array] = dict(Vh_T.blocks)
 
     # Detect dtype statically so we don't promote real blocks to complex.
-    sample_block = next(iter(U_T.blocks.values()))
-    is_complex = jnp.issubdtype(sample_block.dtype, jnp.complexfloating)
+    # Read it off the tensor rather than a sample block: an empty ``U_T``
+    # (no charge sectors -- a confined environment, #905/#907) has no block to
+    # sample, and the per-sector loop below is already a no-op on it, so the
+    # gauge fix must pass an empty tensor through unchanged rather than raise a
+    # ``StopIteration`` four frames down.
+    is_complex = jnp.issubdtype(U_T.dtype, jnp.complexfloating)
 
     for q in np.unique(bond_charges):
         q_int = int(q)
@@ -139,6 +143,58 @@ def _gauge_fix_symmetric_svd(
     U_out = SymmetricTensor._from_blocks_unchecked(new_u_blocks, U_T.indices)
     Vh_out = SymmetricTensor._from_blocks_unchecked(new_vh_blocks, Vh_T.indices)
     return U_out, Vh_out
+
+
+def _require_svd_connected(
+    M_T: SymmetricTensor,
+    U_T: SymmetricTensor,
+    *,
+    left_labels: tuple[str, ...],
+    right_labels: tuple[str, ...],
+    direction: str,
+    matrix_name: str,
+) -> None:
+    """Raise a diagnosis if a projector SVD produced an empty (rank-0) bond.
+
+    ``M_T`` is a double-layer corner contraction; the SVD splits its left and
+    right label groups over a shared bond.  When ``M_T`` carries no charge
+    blocks -- the corners it was contracted from share no sector on their
+    internal bond -- the SVD bond has dimension zero: ``U_T`` has no blocks and
+    the singular-value vector is length zero.  Left unguarded this surfaces far
+    from its cause -- a ``StopIteration`` in :func:`_gauge_fix_symmetric_svd`
+    (``next(iter(U_T.blocks))`` on an empty tensor) or an ``IndexError`` in
+    :func:`_fishman_truncate_S` (``S[0]`` on a size-0 array).
+
+    On the symmetric CTM path this is the confined-environment limitation of
+    #905 -- the corners occupy a charge sector that cannot connect the two
+    halves of the double-layer plaquette, so no 2x2 projector exists.  The dense
+    path densifies and never sees an absent sector, which is why it runs on the
+    same state.  Raise a named diagnosis rather than let an empty projector flow
+    into the sweep and certify a wrong environment (#907).
+    """
+    if U_T.blocks:
+        return
+
+    def _sectors(labels: tuple[str, ...]) -> dict[str, list[int]]:
+        out: dict[str, list[int]] = {}
+        m_labels = M_T.labels()
+        for lbl in labels:
+            charges = M_T.indices[m_labels.index(lbl)].charges
+            out[lbl] = sorted({int(c) for c in charges})
+        return out
+
+    raise ValueError(
+        f"symmetric 2x2 projector: {matrix_name} (direction={direction!r}) has "
+        f"a rank-0 SVD bond -- the contracted double-corner tensor has "
+        f"{len(M_T.blocks)} charge blocks, so the SVD produces an empty bond and "
+        f"no projector can be built. This is the confined symmetric CTM "
+        f"environment of #905: the corners occupy a charge sector that does not "
+        f"connect the plaquette halves (their leg sectors are left="
+        f"{_sectors(left_labels)}, right={_sectors(right_labels)}, but no fused "
+        f"block survives the contraction). The dense path densifies and does "
+        f"not hit this -- pass DenseTensor inputs, or use ctm_tensor_c4v for a "
+        f"C4v-symmetric state. See #907."
+    )
 
 
 def _scale_bond_by_diag(
@@ -345,9 +401,10 @@ def _compute_2x2_projector(
             - ``"right"`` truncates the RIGHT-column chi seam (T2's chi),
             - ``"top"``   truncates the TOP-row chi seam (T1's chi),
             - ``"bottom"`` truncates the BOTTOM-row chi seam (T3's chi).
-        base_charges: Optional 1-D ``np.ndarray`` of bond charges driving
-            per-sector ``chi_new`` allocation via ``_derive_charges`` in the
-            symmetric branch.  Ignored on the dense path (no charge sectors).
+        base_charges: Optional 1-D ``np.ndarray`` of bond charges.  In the
+            symmetric branch each named charge is floored at one ``chi_new``
+            slot; the rest of the budget follows the singular values (#922).
+            Ignored on the dense path (no charge sectors).
 
     Returns:
         Triple ``(P_top, P_bot, eps_T)`` of rank-3 :class:`DenseTensor`
@@ -715,7 +772,7 @@ def _compute_2x2_projector(
     )
 
 
-def _retruncate_by_base_charges(
+def _retruncate_chi_bond(
     U_T: SymmetricTensor,
     S: jax.Array,
     Vh_T: SymmetricTensor,
@@ -723,47 +780,36 @@ def _retruncate_by_base_charges(
     base_charges: np.ndarray,
     chi: int,
 ) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor]:
-    """Re-truncate a full SymmetricTensor SVD to ``chi`` entries with per-sector allocation.
+    """Cut a full SymmetricTensor SVD down to ``chi`` bond slots.
 
-    Allocates target counts via ``_derive_charges(base_charges, chi)``; greedy
-    top-k fills any remaining budget across sectors.  Mirrors the per-sector
-    allocation logic in ``_svd_projector_symmetric`` (``_ctm_projector.py``).
+    Global top-``chi`` by singular value, with :func:`_select_chi_slots`
+    reserving one slot per charge in ``base_charges`` so no sector can be
+    deleted from the bond outright.
+
+    Until #922 this pinned the per-sector counts to
+    ``_derive_charges(base_charges, chi)``, which capped every sector at its
+    tiled share and allocated *nothing* to charges outside ``base_charges``.
+    On a D=2 U(1)-Sz pair that left the ``|q| = 4`` sectors permanently empty
+    and the converged energy short of the dense reference by 2.6e-3 at chi=24,
+    a gap that grew with chi instead of shrinking.
 
     The returned U/S/Vh are gauge-consistent with the input (same U/Vh slot
     values, just a subset of bond columns/rows).
     """
-    from tenax.algorithms._ctm_utils import _derive_charges
+    from tenax.algorithms._ctm_utils import _select_chi_slots
 
     bond_charges_full = np.asarray(U_T.indices[-1].charges, dtype=np.int32)
-    target_charges = _derive_charges(base_charges, chi)
-    target_count: dict[int, int] = {}
-    for q in target_charges:
-        target_count[int(q)] = target_count.get(int(q), 0) + 1
 
     in_sector_idx_of: dict[int, list[int]] = {}
     for j, q in enumerate(bond_charges_full):
-        q_int = int(q)
-        in_sector_idx_of.setdefault(q_int, []).append(j)
+        in_sector_idx_of.setdefault(int(q), []).append(j)
 
-    keep_global: list[int] = []
-    for q, want in sorted(target_count.items()):
-        slots = in_sector_idx_of.get(q, [])
-        take = min(want, len(slots))
-        keep_global.extend(slots[:take])
-
-    # Fill any remaining budget greedily from any unused entry (global SV order).
-    remaining = chi - len(keep_global)
-    if remaining > 0:
-        used_set = set(keep_global)
-        for j in range(len(bond_charges_full)):
-            if remaining <= 0:
-                break
-            if j not in used_set:
-                keep_global.append(j)
-                used_set.add(j)
-                remaining -= 1
-
-    keep_global.sort()  # ascending order makes downstream rebuilds simpler
+    keep_global = _select_chi_slots(
+        np.asarray(S, dtype=float),
+        bond_charges_full,
+        base_charges=base_charges,
+        chi=chi,
+    )
 
     new_bond_charges = bond_charges_full[np.asarray(keep_global, dtype=np.int32)]
     S_new = jnp.asarray(S)[jnp.asarray(keep_global)]
@@ -810,6 +856,51 @@ def _retruncate_by_base_charges(
     )
 
 
+def _incoming_chi_charges(
+    Q_TL: SymmetricTensor,
+    Q_TR: SymmetricTensor,
+    Q_BL: SymmetricTensor,
+    Q_BR: SymmetricTensor,
+    direction: str,
+    chi: int,
+) -> np.ndarray | None:
+    """Charges of the chi leg whose bond ``chi_new`` is about to replace.
+
+    Under ``jax.jit`` the per-sector block shapes are baked at trace time, so
+    the traced SVD cannot choose its chi inventory from the singular values the
+    way :func:`_retruncate_chi_bond` does eagerly (#922).  Its fallback was the
+    double-layer ``u2`` charge list tiled to ``chi``, which is a guess about the
+    environment made from the *state*; the environment's own chi leg is a much
+    better one, and it is static metadata even under tracing.
+
+    At a CTM fixed point the two are the same bond, so inheriting the incoming
+    leg's multiset reproduces whatever inventory the environment converged to.
+    Measured on a D=3 U(1)-Sz pair at chi=16: the tiled guess keeps
+    ``{-2: 3, 0: 9, 2: 4}`` and lands 1.8e-07 off the dense reference, while
+    inheriting keeps ``{-4: 1, -2: 4, 0: 6, 2: 4, 4: 1}`` and reproduces the
+    eager environment *exactly* (#929).
+
+    Returns ``None`` when the leg is missing or is not ``chi`` wide -- during a
+    chi ramp the environment is still at the old width, and a stale inventory
+    is worse than the tiled guess.
+    """
+    corner, label = {
+        "left": (Q_TL, "chi_B"),
+        "right": (Q_TR, "chi_B"),
+        "top": (Q_TL, "chi_R"),
+        "bottom": (Q_BL, "chi_R"),
+    }[direction]
+    if not isinstance(corner, SymmetricTensor):
+        return None
+    labels = corner.labels()
+    if label not in labels:
+        return None
+    idx = corner.indices[labels.index(label)]
+    if idx.dim != chi:
+        return None
+    return np.asarray(idx.charges, dtype=np.int32)
+
+
 def _compute_2x2_projector_symmetric(
     Q_TL: SymmetricTensor,
     Q_TR: SymmetricTensor,
@@ -834,7 +925,8 @@ def _compute_2x2_projector_symmetric(
         chi: Target bond dimension of the new chi_new leg.
         direction: One of ``"left"``, ``"right"``, ``"top"``, ``"bottom"``.
         base_charges: Optional 1-D ``np.ndarray`` of charges. When supplied,
-            chi_new is allocated per sector (added in Task 5; ignored in Task 2).
+            each named charge keeps at least one ``chi_new`` slot; the rest
+            of the budget is the global top-chi (#922).
 
     Returns:
         ``(P_top, P_bot, eps_T)`` SymmetricTensor projectors with the same
@@ -892,6 +984,14 @@ def _compute_2x2_projector_symmetric(
         new_bond_label="m1_bond",
         max_singular_values=None,
     )
+    _require_svd_connected(
+        M1_T,
+        U_M1_T,
+        left_labels=m1_left_labels,
+        right_labels=m1_right_labels,
+        direction=direction,
+        matrix_name="M1 (upper double-corner)",
+    )
     U_M1_T, Vh_M1_T = _gauge_fix_symmetric_svd(U_M1_T, Vh_M1_T)
     M1_S = _fishman_truncate_S(M1_S, eps=1e-12)
 
@@ -901,6 +1001,14 @@ def _compute_2x2_projector_symmetric(
         right_labels=m2_right_labels,
         new_bond_label="m2_bond",
         max_singular_values=None,
+    )
+    _require_svd_connected(
+        M2_T,
+        U_M2_T,
+        left_labels=m2_left_labels,
+        right_labels=m2_right_labels,
+        direction=direction,
+        matrix_name="M2 (lower double-corner)",
     )
     U_M2_T, Vh_M2_T = _gauge_fix_symmetric_svd(U_M2_T, Vh_M2_T)
     M2_S = _fishman_truncate_S(M2_S, eps=1e-12)
@@ -958,7 +1066,7 @@ def _compute_2x2_projector_symmetric(
         )
     else:
         # Eager path: full-spectrum SVD then per-sector re-truncation honoring
-        # base_charges (mirrors _retruncate_by_base_charges).  Under tracing,
+        # base_charges (mirrors _retruncate_chi_bond).  Under tracing,
         # the dispatcher in _truncated_svd_symmetric routes to the traced
         # variant which consumes base_charges directly.
         is_traced_inputs = any(
@@ -968,13 +1076,20 @@ def _compute_2x2_projector_symmetric(
             for b in q.blocks.values()
         )
         if is_traced_inputs:
+            # The traced allocation is static, so it cannot read the singular
+            # values.  Give it the environment's own chi inventory rather than
+            # the double-layer charges tiled to chi -- see
+            # :func:`_incoming_chi_charges` (#929).
+            traced_base = _incoming_chi_charges(Q_TL, Q_TR, Q_BL, Q_BR, direction, chi)
+            if traced_base is None:
+                traced_base = base_charges
             U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
                 M_prime_T,
                 left_labels=mp_left_labels,
                 right_labels=mp_right_labels,
                 new_bond_label="chi_new",
                 max_singular_values=chi,
-                base_charges=base_charges,
+                base_charges=traced_base,
             )
         else:
             U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
@@ -984,9 +1099,17 @@ def _compute_2x2_projector_symmetric(
                 new_bond_label="chi_new",
                 max_singular_values=None,
             )
-            U_Mp_T, S_Mp, Vh_Mp_T = _retruncate_by_base_charges(
+            U_Mp_T, S_Mp, Vh_Mp_T = _retruncate_chi_bond(
                 U_Mp_T, S_Mp, Vh_Mp_T, base_charges=base_charges, chi=chi
             )
+    _require_svd_connected(
+        M_prime_T,
+        U_Mp_T,
+        left_labels=mp_left_labels,
+        right_labels=mp_right_labels,
+        direction=direction,
+        matrix_name="M_prime (combined projector)",
+    )
     U_Mp_T, Vh_Mp_T = _gauge_fix_symmetric_svd(U_Mp_T, Vh_Mp_T)
 
     # ε_T via the Frobenius identity (Issue #474).  Block-sparse SVD

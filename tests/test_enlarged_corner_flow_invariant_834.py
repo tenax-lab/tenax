@@ -1,34 +1,25 @@
-"""What actually keeps the 2x2 enlarged corner contraction-correct (#834, #762).
+"""What keeps the 2x2 enlarged corner contraction-correct (#834, #762, #905).
 
-``_build_enlarged_corner`` contracts environment legs that are **not** duals of
-each other.  ``C1.c1_d`` meets ``T4.t4_d`` with both legs flowing IN, and each
-edge's D^2 leg meets the double layer's matching face with both flows equal.
 ``_contract_symmetric`` pairs blocks by charge *value* and drops products that
-land outside the output legs' conservation law, so on a same-flow bond it can
-silently discard weight -- the #834 mechanism.
+land outside the output legs' conservation law.  A bond whose two ends carry the
+**same** flow therefore adds the two flow-weighted charges instead of cancelling
+them, and every product with a non-zero charge on that bond falls outside the
+valid set and is discarded -- silently.  That is the #834 mechanism, and it is
+what annihilated every charged environment sector in #905.
 
-It does not discard any here, and the reason is worth pinning, because it is
-not the reason one would guess:
+Before #905 this file recorded a *sweep invariant*: the initial environment
+shipped four same-flow chi bonds (plus a same-flow D^2 bond on every edge), and
+what saved the enlarged corner was that renormalisation dualized the corners, so
+from the first move onward the chi bonds were proper duals.  That was true of
+the chi ring only; the D^2 bonds stayed same-flow for the whole run, and the
+charged sectors of the environment were being deleted at every T.a contraction.
 
-* It is **not** that the contraction is convention-correct.  Feed the same call
-  full-support random tensors carrying the *identical* indices and it is ~100%
-  wrong (``test_the_agreement_is_a_property_of_the_swept_environment``).
-* It is that the CTM sweep's renormalisation **dualizes the corners**, so from
-  the first move onward every chi bond in the environment is a proper dual and
-  no same-flow contraction happens at all
-  (``test_the_swept_environment_has_no_same_flow_chi_bonds``).  Only the
-  ``_STD_EDGE_SPECS`` *initial* environment carries same-flow chi bonds, and
-  there the rank-1 corners have no weight in the sectors that would be dropped.
-
-That is an invariant of the sweep, not of the type system, and nothing else
-enforces it -- which is exactly why it is tested.  ``_ctm_tensor_c4v`` is the
-same code path with that invariant broken: ``_c4v_to_full_env`` hands consumers
-the *initial* convention rather than the swept one, its C1 x T4 bond drops 68%
-of its weight, and that is #762.
-
-If a future change makes the flow convention consistent up front, the negative
-test below will start failing.  That failure is good news, not a regression:
-delete it and keep the positive ones.
+#905 made the convention consistent up front instead, so the guards below are
+now stated as a *type-level* invariant that holds at initialisation as well as
+after sweeping: for every bond, the two ends carry identical charge lists and
+opposite flows.  ``_ctm_tensor_c4v`` is the same code path with that invariant
+broken -- ``_c4v_to_full_env`` still hands consumers the pre-#905 convention,
+and that is #762/#760.
 """
 
 from __future__ import annotations
@@ -190,16 +181,74 @@ def test_the_swept_environment_has_no_same_flow_chi_bonds(swept_env_d2):
     )
 
 
-def test_the_agreement_is_a_property_of_the_swept_environment(monkeypatch):
-    """Same indices, full support -> the same call is ~100% wrong.
+def test_the_initial_environment_has_no_same_flow_chi_bonds():
+    """#905: the invariant now holds at initialisation, not just after sweeping.
 
-    This is the discriminator.  Without it, the tests above read as "the
-    symmetric contraction is convention-correct", which is false: swap in
-    tensors that populate every conservation-allowed block of the *initial*
-    (same-flow) convention and the enlarged corner loses most of its weight.
+    Pre-#905 four of the eight chi bonds shipped same-flow and the sweep had to
+    repair them.  This is the up-front guard: if a spec edit re-breaks the ring,
+    it fails here rather than as a wrong energy ten sweeps later.
+    """
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+    from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
 
-    If this ever starts failing, the flow convention was made consistent up
-    front.  Delete this test -- do not loosen it.
+    A, _B = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
+    env = initialize_ctm_tensor_env(A, chi=8)
+
+    offenders = []
+    for corner, corner_leg, edge, edge_leg in _CHI_BONDS:
+        a, b = _leg(env, corner, corner_leg), _leg(env, edge, edge_leg)
+        if a.flow == b.flow:
+            offenders.append(
+                f"{corner}.{corner_leg} ~ {edge}.{edge_leg} (both {a.flow.name})"
+            )
+        elif not np.array_equal(np.asarray(a.charges), np.asarray(b.charges)):
+            offenders.append(
+                f"{corner}.{corner_leg} ~ {edge}.{edge_leg} (charges differ)"
+            )
+    assert not offenders, "initial environment has non-dual chi bonds: " + "; ".join(
+        offenders
+    )
+
+
+def test_the_initial_environment_has_no_same_flow_d2_bonds():
+    """Each edge's D^2 leg must be the dual of the double layer's matching face.
+
+    This is the bond that #905 was actually losing: it was same-flow on all four
+    edges, at initialisation *and* after every sweep, so the charged sectors
+    were deleted at the very first ``T . a`` contraction and never came back.
+    """
+    from tenax.algorithms._ctm_tensor_init import (
+        _build_double_layer_tensor,
+        initialize_ctm_tensor_env,
+    )
+    from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
+
+    A, _B = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
+    env = initialize_ctm_tensor_env(A, chi=8)
+    a = _build_double_layer_tensor(A)
+    a_leg = {i.label: i for i in a.indices}
+
+    offenders = []
+    for edge, label in (("T1", "u2"), ("T2", "r2"), ("T3", "d2"), ("T4", "l2")):
+        e, s_ = _leg(env, edge, label), a_leg[label]
+        if e.flow == s_.flow:
+            offenders.append(f"{edge}.{label} ~ a.{label} (both {e.flow.name})")
+        elif not np.array_equal(np.asarray(e.charges), np.asarray(s_.charges)):
+            offenders.append(f"{edge}.{label} ~ a.{label} (charges differ)")
+    assert not offenders, "initial environment has non-dual D^2 bonds: " + "; ".join(
+        offenders
+    )
+
+
+def test_full_support_operands_now_agree_with_dense():
+    """The discriminator, inverted by #905.
+
+    Pre-#905 this same call was ~100% wrong on full-support operands: the
+    agreement seen in the sweep tests above was a property of *which sectors the
+    rank-1 seed happened to populate*, not of the contraction.  With the
+    convention consistent the contraction is correct for any operands carrying
+    the environment's indices, which is the only version of this guard that
+    cannot be satisfied by an accident of the seed.
     """
     from tenax.algorithms._ctm_tensor_init import (
         _build_double_layer_tensor,
@@ -220,6 +269,7 @@ def test_the_agreement_is_a_property_of_the_swept_environment(monkeypatch):
         for i, name in enumerate(("C1", "T1", "T4"))
     }
     C, T_h, T_v = full_support["C1"], full_support["T1"], full_support["T4"]
+    assert sum(len(t.blocks) for t in (C, T_h, T_v)) > 6, "degenerate fixture"
 
     gap = _rel_gap(
         _build_enlarged_corner(C, T_h, T_v, a, position="top_left"),
@@ -227,8 +277,7 @@ def test_the_agreement_is_a_property_of_the_swept_environment(monkeypatch):
             _densify(C), _densify(T_h), _densify(T_v), _densify(a), position="top_left"
         ),
     )
-    assert gap > 1e-2, (
-        f"expected the initial same-flow convention to lose weight on "
-        f"full-support operands, got rel={gap:.3e}. If the flow convention was "
-        "fixed, delete this test and tighten the docstring above it."
+    assert gap < 1e-12, (
+        f"enlarged corner drops weight on full-support operands (rel={gap:.3e}) "
+        "-- a bond of the initial environment is not a proper dual (#834/#905)."
     )

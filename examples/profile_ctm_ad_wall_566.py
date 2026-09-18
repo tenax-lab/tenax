@@ -158,6 +158,33 @@ def make_dense_site(D: int, seed: int):
     )
 
 
+def _retype_symmetric_to_bosonic_z2(A):
+    """Rebuild a FermionParity SymmetricTensor on bosonic ZnSymmetry(2).
+
+    Block-for-block identical: same charges ({0,1} in both groups, fusion
+    is addition mod 2 in both), same flows, same labels, same data.  The
+    ONLY change is the symmetry object, i.e. ``is_fermionic`` flips off, so
+    every graded branch (transpose Koszul signs, the ``_env_is_fermionic``
+    fused moves, the ``tenax.linalg`` decomposition negations) goes dark
+    while the traced block structure stays exactly matched.  This is the
+    PR #986 Phase 0a control: the fermionic-minus-z2boson delta is the
+    cost the swap-gate reform can remove, measured with zero new physics.
+    (It is NOT the §3.2 retyping map -- no swap gates are absorbed; the
+    energies this control produces are physically meaningless, which is
+    fine for a compile/runtime measurement and why ``grad_finite`` is the
+    only correctness column that applies to it.)
+    """
+    from tenax.core.symmetry import ZnSymmetry
+    from tenax.core.tensor import SymmetricTensor, TensorIndex
+
+    z2 = ZnSymmetry(2)
+    new_indices = tuple(
+        TensorIndex.from_charges(z2, idx.charges, idx.flow, label=idx.label)
+        for idx in A.indices
+    )
+    return SymmetricTensor(dict(A.blocks), new_indices)
+
+
 def make_site_and_gate(sym: str, D: int, seed: int):
     """Return (site_tensor, gate) for the requested symmetry at bond dim D."""
     if sym == "fermionic":
@@ -165,6 +192,11 @@ def make_site_and_gate(sym: str, D: int, seed: int):
         A = _build_initial_fpeps_tensor(cfg, jax.random.PRNGKey(seed))
         gate = spinless_fermion_gate(cfg).todense().reshape(2, 2, 2, 2)
         return A, gate
+    if sym == "z2boson":
+        cfg = FPEPSConfig(D=D, t=1.0, V=0.0)
+        A = _build_initial_fpeps_tensor(cfg, jax.random.PRNGKey(seed))
+        gate = spinless_fermion_gate(cfg).todense().reshape(2, 2, 2, 2)
+        return _retype_symmetric_to_bosonic_z2(A), gate
     if sym == "dense":
         return make_dense_site(D, seed), heisenberg_gate()
     if sym == "u1sz":
@@ -172,6 +204,7 @@ def make_site_and_gate(sym: str, D: int, seed: int):
             heisenberg_gate_u1sz,
             heisenberg_u1sz_init_pair,
         )
+
         A, _B = heisenberg_u1sz_init_pair(D=D, key=jax.random.PRNGKey(seed))
         return A, heisenberg_gate_u1sz()
     raise ValueError(f"unknown sym {sym!r}")
@@ -181,7 +214,15 @@ def make_site_and_gate(sym: str, D: int, seed: int):
 # Loss closure: the real production dispatcher
 # --------------------------------------------------------------------------- #
 def build_loss(
-    gate, chi: int, depth: int, *, explicit: bool, warmup: int, backward_steps=None
+    gate,
+    chi: int,
+    depth: int,
+    *,
+    explicit: bool,
+    warmup: int,
+    backward_steps=None,
+    neighbors=None,
+    conv_tol: float = 1e-4,
 ):
     """``A -> energy`` via make_ctm_energy_fn (implicit fixed_point default).
 
@@ -192,11 +233,11 @@ def build_loss(
     ctm_cfg = CTMConfig(
         chi=chi,
         max_iter=depth,
-        conv_tol=1e-4,
+        conv_tol=conv_tol,
         # production defaults: adjoint_method="fixed_point", ad backward jitted.
     )
     energy_fn = make_ctm_energy_fn(
-        neighbors=SINGLE_SITE_NEIGHBORS,
+        neighbors=SINGLE_SITE_NEIGHBORS if neighbors is None else neighbors,
         gate=gate,
         get_ctm_cfg=lambda: ctm_cfg,
         env_cache={},
@@ -206,9 +247,11 @@ def build_loss(
         explicit_backward_steps=backward_steps,
     )
 
-    def loss_fn(A_param):
-        A_norm = A_param * (1.0 / (A_param.norm() + 1e-10))
-        return energy_fn({(0, 0): A_norm})
+    def loss_fn(sites):
+        if not isinstance(sites, dict):
+            sites = {(0, 0): sites}
+        normed = {c: t * (1.0 / (t.norm() + 1e-10)) for c, t in sites.items()}
+        return energy_fn(normed)
 
     return loss_fn
 
@@ -253,10 +296,35 @@ def _cold(fn, A, cap: _CompileCapture):
 
 
 def profile_config(
-    sym, D, chi, depth, *, explicit, warmup, reps, cap, backward_steps=None
+    sym,
+    D,
+    chi,
+    depth,
+    *,
+    explicit,
+    warmup,
+    reps,
+    cap,
+    backward_steps=None,
+    seed=42,
+    unit_cell="1site",
+    conv_tol=1e-4,
 ):
-    """One (sym,D,chi,depth,path) cell: cold fwd + cold v&g + warm steps."""
-    A, gate = make_site_and_gate(sym, D, seed=42)
+    """One (sym,D,chi,depth,path,seed,unit_cell) cell: cold fwd/v&g + warm."""
+    A, gate = make_site_and_gate(sym, D, seed=seed)
+    if unit_cell == "2site":
+        from tenax.algorithms._ctm_tensor_convergence import (
+            CHECKERBOARD_NEIGHBORS,
+        )
+
+        B, _ = make_site_and_gate(sym, D, seed=seed + 1000)
+        sites0 = {(0, 0): A, (1, 0): B}
+        neighbors = CHECKERBOARD_NEIGHBORS
+    elif unit_cell == "1site":
+        sites0 = A
+        neighbors = None
+    else:
+        raise ValueError(f"unknown unit_cell {unit_cell!r}")
     n_blocks = getattr(A, "n_blocks", 1)
     loss_fn = build_loss(
         gate,
@@ -265,15 +333,17 @@ def profile_config(
         explicit=explicit,
         warmup=warmup,
         backward_steps=backward_steps,
+        neighbors=neighbors,
+        conv_tol=conv_tol,
     )
     vg = jax.value_and_grad(loss_fn)
 
     # (4a) cold forward-only: forward-step compile + run, NO backward graph.
-    fwd_wall, fwd_events, E_fwd = _cold(loss_fn, A, cap)
+    fwd_wall, fwd_events, E_fwd = _cold(loss_fn, sites0, cap)
     fwd_compile = sum(t for _, t in fwd_events)
 
     # (4b) cold value_and_grad: forward + implicit-diff backward compile + run.
-    vg_wall, vg_events, (E, g) = _cold(vg, A, cap)
+    vg_wall, vg_events, (E, g) = _cold(vg, sites0, cap)
     vg_compile = sum(t for _, t in vg_events)
     # biggest single compilation (name truncated) -> which jitted unit dominates
     top = max(vg_events, key=lambda e: e[1], default=("-", 0.0))
@@ -282,16 +352,20 @@ def profile_config(
     steps = []
     for _ in range(reps):
         t0 = time.perf_counter()
-        out = vg(A)
+        out = vg(sites0)
         jax.block_until_ready(out)
         steps.append(time.perf_counter() - t0)
 
-    grad_finite = bool(jnp.all(jnp.isfinite(g._data)))
+    grads = g.values() if isinstance(g, dict) else [g]
+    grad_finite = all(bool(jnp.all(jnp.isfinite(gi._data))) for gi in grads)
     return {
         "sym": sym,
         "D": D,
         "chi": chi,
         "depth": depth,
+        "seed": seed,
+        "unit_cell": unit_cell,
+        "conv_tol": conv_tol,
         "path": "explicit" if explicit else "implicit",
         "backward_steps": backward_steps,
         "n_blocks": int(n_blocks),
@@ -331,8 +405,29 @@ def main() -> None:
         help="Sweep these chi values at the first D (axis 3). Overrides --chi.",
     )
     ap.add_argument("--depth", type=int, nargs="+", default=[4, 8, 16])
-    ap.add_argument("--sym", nargs="+", default=["fermionic", "dense"],
-                    help="arms: fermionic | dense | u1sz")
+    ap.add_argument(
+        "--sym",
+        nargs="+",
+        default=["fermionic", "dense"],
+        help="arms: fermionic | dense | u1sz | z2boson "
+        "(z2boson = the fermionic tensor retyped onto bosonic "
+        "ZnSymmetry(2): the matched-block-structure control of "
+        "PR #986 Phase 0a)",
+    )
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--unit-cell",
+        choices=["1site", "2site"],
+        default="1site",
+        help="2site = checkerboard {A, B(seed+1000)} on CHECKERBOARD_NEIGHBORS",
+    )
+    ap.add_argument(
+        "--conv-tol",
+        type=float,
+        default=1e-4,
+        help="Inner CTM conv_tol. Phase 0a uses 1e-30 so every arm runs "
+        "exactly --depth sweeps (fixed-count timing; PR #986 round 7).",
+    )
     ap.add_argument(
         "--explicit",
         action="store_true",
@@ -375,6 +470,9 @@ def main() -> None:
         "depths": args.depth,
         "explicit": args.explicit,
         "backward_steps": args.backward_steps,
+        "seed": args.seed,
+        "unit_cell": args.unit_cell,
+        "conv_tol": args.conv_tol,
     }
 
     # Build the (sym, D, chi, depth, path) grid.
@@ -414,6 +512,9 @@ def main() -> None:
                 reps=args.reps,
                 cap=cap,
                 backward_steps=args.backward_steps if explicit else None,
+                seed=args.seed,
+                unit_cell=args.unit_cell,
+                conv_tol=args.conv_tol,
             )
         except Exception as exc:  # noqa: BLE001 - record + continue the sweep
             print(

@@ -575,8 +575,9 @@ def regularized_qr(M: jax.Array) -> tuple[jax.Array, jax.Array]:
     Raw ``jnp.linalg.qr``'s VJP divides by ``diag(R)`` and produces NaN when a
     bond is fully truncated.
 
-    This is the *real* branch only: CTM projector matrices are real, so the
-    complex diagonal correction in JAX's thin-QR JVP is intentionally omitted.
+    Valid for real **and complex** input, and for square, tall **and wide**
+    ``M`` -- because the rule is not hand-derived (#917).  See
+    :func:`_regularized_qr_bwd`.
 
     Returns:
         ``(Q, R)`` as in ``jnp.linalg.qr(M)``.  Returned as a plain ``tuple``
@@ -593,34 +594,61 @@ def _regularized_qr_fwd(M):
 
 
 def _regularized_qr_bwd(residuals, g):
-    # Reverse-mode VJP of the thin QR M = Q R (m >= n), obtained by transposing
-    # JAX's own thin-QR JVP rule (real branch). Verified to machine precision
-    # (5e-16) against jax.vjp(jnp.linalg.qr, .) for square AND tall real
-    # matrices in the Task 1 spike (#570).
-    #
-    #   P     = R̄ Rᴴ
-    #   S     = Qᴴ Q̄
-    #   under = S − P
-    #   B̄     = (P − S) + tril(under − underᴴ, −1)
-    #   Ā     = Q̄ + Q B̄
-    #   M̄     = Ā R⁻ᴴ          ← regularized triangular solve (floor diag R)
-    #
-    # The R⁻ᴴ solve is the only place diag(R)→0 bites; flooring diag(R) there
-    # keeps M̄ finite near rank-deficiency without changing the well-conditioned
-    # answer (floor only activates when |diag(R)| < _R_FLOOR).
+    """VJP of the thin QR: JAX's own rule, evaluated at a floored factorization.
+
+    This used to be a hand-transposed copy of JAX's thin-QR JVP, and every
+    limitation it had came from being hand-written:
+
+    * it assumed ``m >= n``, so the wide ``M`` the QR projector actually builds
+      crashed with a broadcasting ``TypeError`` (#912);
+    * it was the *real* branch -- it omitted the complex diagonal correction --
+      so complex input got a finite, plausible gradient wrong by 115%-191%
+      relative at **every** shape (#917).
+
+    Rather than hand-derive the missing pieces, note what ``regularized_qr``
+    actually adds over ``jnp.linalg.qr``: **only** the ``diag(R)`` floor, which
+    keeps the backward finite when a bond is rank-deficient.  Everything else
+    is supposed to be JAX's rule.  So apply the floor and then *ask JAX*:
+
+        R_reg = floor(diag(R));  M_reg = Q R_reg;  return vjp(qr at M_reg)
+
+    Correctness splits cleanly along whether the floor engages:
+
+    * **Well-conditioned** -- ``R_reg == R``, so ``M_reg == M`` and this is
+      literally ``jax.vjp(jnp.linalg.qr, M)``.  Parity is by construction, not
+      by derivation, for real and complex alike.
+    * **Rank-deficient** -- the true derivative does not exist (that is why a
+      floor is needed at all), and this evaluates JAX's rule at a nearby
+      non-singular factorization.  That *is* the regularization, stated
+      directly instead of smuggled into a triangular solve.
+
+    Hand-deriving the complex branch was tried first and abandoned: the
+    textbook copyltu form (real part on the diagonal) disagrees with
+    ``jax.vjp`` by 1.17-1.59 relative, because JAX pairs complex cotangents
+    unconjugated while the published derivations assume the conjugated
+    Wirtinger pairing.  A rule transcribed from a paper lands O(1) off while
+    still returning finite, plausible numbers -- so deferring to JAX is not
+    merely shorter here, it removes the entire class of error.
+
+    Cost: one extra QR of ``M_reg`` in the backward, replacing a triangular
+    solve.  Measured parity vs ``jax.vjp(jnp.linalg.qr, .)`` is ~1e-15
+    relative across square/tall/wide x real/complex.
+    """
     Q, R = residuals
     dQ, dR = g
-    P = dR @ _qr_H(R)
-    S = _qr_H(Q) @ dQ
-    under = S - P
-    Bbar = (P - S) + jnp.tril(under - _qr_H(under), -1)
-    Abar = dQ + Q @ Bbar
-    d = jnp.diag(R)
+
+    k = min(R.shape[-2], R.shape[-1])
+    d = jnp.diagonal(R)[:k]
     safe = jnp.where(jnp.abs(d) > _R_FLOOR, d, _R_FLOOR)
-    R_reg = R - jnp.diag(d) + jnp.diag(safe)
-    # M̄ = Ā R⁻ᴴ  ⟺  M̄ Rᴴ = Ā  ⟺  R M̄ᴴ = Āᴴ  (upper-tri solve in R).
-    dM = _qr_H(jax.scipy.linalg.solve_triangular(R_reg, _qr_H(Abar), lower=False))
-    return (dM,)
+    idx = jnp.arange(k)
+    R_reg = R.at[idx, idx].set(safe)
+
+    def _qr_tuple(A):
+        q, r = jnp.linalg.qr(A)
+        return (q, r)
+
+    _, vjp_qr = jax.vjp(_qr_tuple, Q @ R_reg)
+    return vjp_qr((dQ, dR))
 
 
 regularized_qr.defvjp(_regularized_qr_fwd, _regularized_qr_bwd)

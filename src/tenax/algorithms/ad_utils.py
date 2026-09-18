@@ -67,6 +67,7 @@ from tenax.algorithms._split_ctm_tensor import (
     ctm_split_tensor,
 )
 from tenax.algorithms.ipeps_config import CTMConfig
+from tenax.contraction.contractor import contract
 from tenax.linalg import _dense_svd
 
 _logger = logging.getLogger(__name__)
@@ -166,35 +167,203 @@ def _wrap_tensor(data, original):
     return type(original)(data, original.indices)
 
 
-def _transfer_matrix_leading_eigvec(T_dense: jax.Array, n_iter: int = 30) -> jax.Array:
+def _transfer_matrix_leading_eigvec(T_dense, n_iter=30):
     """Compute leading right eigenvector of the double-layer transfer matrix.
 
-    For a 3-leg edge tensor T of shape ``(chi, D2, chi)`` (left, phys, right),
-    the double-layer transfer matrix acts on rho(chi, chi) as::
-
-        rho' = sum_k T[:, k, :] @ rho @ T[:, k, :]^H
-
-    Uses power iteration (matrix-free) which is fully JAX-differentiable,
-    enabling sigma gauge to work with explicit AD backprop.
-
-    Returns: leading eigenvector reshaped to (chi, chi).
+    T_dense has shape (chi, D2, chi).  The transfer matrix is
+    T_{(a,c),(b,d)} = T_{a,D2,b} * conj(T_{c,D2,d}) summed over D2.
     """
     chi = T_dense.shape[0]
-
-    def _apply_tm(v_flat):
-        """Apply transfer matrix TM @ v without building the full matrix."""
-        rho = v_flat.reshape(chi, chi)
-        # rho'[a,c] = sum_{k,b,d} T[a,k,b] * rho[b,d] * conj(T[c,k,d])
-        rho_new = jnp.einsum("akb,bd,ckd->ac", T_dense, rho, T_dense.conj())
-        return rho_new.reshape(-1)
-
-    # Power iteration: start from uniform vector, converge to leading eigvec
-    v = jnp.ones(chi * chi, dtype=T_dense.dtype) / chi
+    rho = jnp.eye(chi, dtype=T_dense.dtype)
     for _ in range(n_iter):
-        v = _apply_tm(v)
-        v = v / (jnp.linalg.norm(v) + 1e-30)
+        # rho_new = sum_D2 T^* . rho . T^T
+        rho = jnp.einsum("aib,cd,cid->ab", T_dense.conj(), rho, T_dense)
+        rho = rho / (jnp.linalg.norm(rho) + 1e-30)
+    return rho
 
-    return v.real.reshape(chi, chi)
+
+def _wrap_sigma(sigma_data, contract_idx, output_idx, env_tensor):
+    """Wrap a dense sigma matrix as a Tensor matching *env_tensor*'s type.
+
+    The sigma is a chi x chi gauge transform.  ``contract_idx`` is the
+    TensorIndex of the env leg that sigma contracts with; ``output_idx`` is
+    the TensorIndex for the resulting (free) leg.
+
+    For DenseTensor envs this creates a DenseTensor.
+    For SymmetricTensor envs this creates a SymmetricTensor via from_dense,
+    preserving block-sparse structure (sigma is block-diagonal when the
+    transfer matrix respects the symmetry, which it does by construction).
+    """
+    from tenax.core.tensor import DenseTensor, SymmetricTensor
+
+    indices = (output_idx, contract_idx)
+    if isinstance(env_tensor, SymmetricTensor):
+        return SymmetricTensor.from_dense(sigma_data, indices, tol=float("inf"))
+    return DenseTensor(sigma_data, indices)
+
+
+def _index_by_label(tensor, label):
+    """Return the TensorIndex of ``tensor`` carrying ``label``.
+
+    #798: the sigma-gauge path used to identify corner legs positionally
+    (``idx0, idx1 = corner.indices``), but the environment is a label-based
+    structure whose axis order is recipe-dependent — the 2x2 sweep writes
+    every corner axis-reversed relative to the canonical
+    ``_ctm_tensor_init`` order, and C4's canonical storage order
+    ``(c4_r, c4_u)`` is itself reversed relative to the ring order the
+    sigma calls assumed.  Positional reads therefore applied bond gauges
+    to the wrong legs on *both* layouts.  All sigma application is now
+    label-based through this helper.
+    """
+    for idx in tensor.indices:
+        if idx.label == label:
+            return idx
+    raise ValueError(
+        f"sigma gauge: expected a leg labeled {label!r}, tensor has "
+        f"{tuple(i.label for i in tensor.indices)}"
+    )
+
+
+def _apply_sigma_to_corner(corner, s_left_data, s_right_data, left_label, right_label):
+    """Apply sigma gauge to a corner: s_left^H @ corner @ s_right.
+
+    ``s_left^H`` contracts with the leg labeled ``left_label``; ``s_right``
+    contracts with the leg labeled ``right_label``.  Legs are found by
+    label, not position (#798) — the 2x2 sweep leaves corners axis-reversed
+    and label-based `contract` is indifferent to that, so this function
+    must be too.
+    """
+    idx0 = _index_by_label(corner, left_label)
+    idx1 = _index_by_label(corner, right_label)
+    # Temporary output labels — must not collide with existing labels
+    tmp0 = ("_sigma_out", idx0.label)
+    tmp1 = ("_sigma_out", idx1.label)
+
+    # s_left^H: conjugate transpose. Row index = output (tmp0), col = idx0 (contracts).
+    s_left_dag = _wrap_sigma(s_left_data.conj().T, idx0, idx0.relabel(tmp0), corner)
+    # s_right: row index = idx1 (contracts), col = output (tmp1).
+    # Sigma has shape (chi, chi) with layout (output, contract) — but here
+    # we need (contract, output) so transpose the data.
+    s_right = _wrap_sigma(s_right_data.T, idx1, idx1.relabel(tmp1), corner)
+    # Contract: s_left_dag @ corner @ s_right
+    # s_left_dag has labels (tmp0, idx0.label), corner has (idx0.label, idx1.label)
+    # -> intermediate has (tmp0, idx1.label)
+    # s_right has labels (tmp1, idx1.label) -> result has (tmp0, tmp1)
+    result = contract(s_left_dag, corner, s_right)
+    return result.relabel(tmp0, idx0.label).relabel(tmp1, idx1.label)
+
+
+def _apply_sigma_to_edge(edge, s_data, bra_label, ket_label):
+    """Apply sigma gauge to an edge: s^H on ``bra_label``, s on ``ket_label``.
+
+    The same sigma acts on both chi legs (they live on the same bond
+    family).  Legs are found by label, not position (#798): T3 and T4 are
+    *stored* axis-reversed relative to the ring order (``(t3_r, d2, t3_l)``
+    and ``(t4_d, l2, t4_u)``), so a positional read puts the conjugated
+    factor on the wrong side of those edges.  Invisible for real
+    environments (s^H = s^T), wrong for complex ones — and either way the
+    read should not depend on storage order.
+    """
+    idx_l = _index_by_label(edge, bra_label)
+    idx_r = _index_by_label(edge, ket_label)
+    tmp_l = ("_sigma_out", idx_l.label)
+    tmp_r = ("_sigma_out", idx_r.label)
+
+    # s^H on the left chi leg: (tmp_l, idx_l.label)
+    s_dag = _wrap_sigma(s_data.conj().T, idx_l, idx_l.relabel(tmp_l), edge)
+    # s on the right chi leg: (tmp_r, idx_r.label) with transposed data
+    s_right = _wrap_sigma(s_data.T, idx_r, idx_r.relabel(tmp_r), edge)
+    result = contract(s_dag, edge, s_right)
+    return result.relabel(tmp_l, idx_l.label).relabel(tmp_r, idx_r.label)
+
+
+def _sigma_gauge_fix_env(env_new, env_old):
+    """Fix gauge via transfer-matrix eigenvector alignment (sigma gauge).
+
+    Aligns env_new to env_old so that the environment converges element-wise
+    (not just spectrally). Based on arxiv:2311.11894.
+
+    Sigma computation densifies edge tensors (chi x D^2 x chi) for the
+    power-method transfer-matrix eigenvector — this is acceptable because
+    the edge tensor size is at most chi x D^2 x chi (e.g. 16 x 9 x 16 =
+    2304 elements at chi=16, D=3), which is always small.
+
+    Sigma application uses label-based Tensor contractions, preserving
+    SymmetricTensor type when the environment carries one.  The sigma
+    matrix itself is chi x chi (small), wrapped as the same Tensor type
+    as the environment.
+    """
+    # Densify edge tensors for sigma computation (small: chi x D^2 x chi).
+    T1_n_d = env_new.T1.todense()
+    T2_n_d = env_new.T2.todense()
+    T3_n_d = env_new.T3.todense()
+    T4_n_d = env_new.T4.todense()
+    T1_o_d = env_old.T1.todense()
+    T2_o_d = env_old.T2.todense()
+    T3_o_d = env_old.T3.todense()
+    T4_o_d = env_old.T4.todense()
+
+    def _compute_sigma(T_new, T_old):
+        """Compute sigma = Q_new @ Q_old^H from transfer matrix eigenvectors."""
+        rho_new = _transfer_matrix_leading_eigvec(T_new)
+        rho_old = _transfer_matrix_leading_eigvec(T_old)
+        Q_new, R_new = jnp.linalg.qr(rho_new)
+        Q_old, R_old = jnp.linalg.qr(rho_old)
+        signs_new = jnp.sign(jnp.diag(R_new))
+        signs_old = jnp.sign(jnp.diag(R_old))
+        signs_new = jnp.where(signs_new == 0, 1.0, signs_new)
+        signs_old = jnp.where(signs_old == 0, 1.0, signs_old)
+        Q_new = Q_new * signs_new[None, :]
+        Q_old = Q_old * signs_old[None, :]
+        return Q_new @ Q_old.conj().T
+
+    # stop_gradient on the sigmas: at the converged fixed point sigma = I,
+    # so its derivative w.r.t. the environment is not needed for implicit
+    # differentiation — only the CTM step Jacobian matters.  Without this,
+    # the QR inside _compute_sigma produces NaN VJPs when the transfer-matrix
+    # eigenvector density matrix is rank-deficient (chi > D^2).
+    s1 = jax.lax.stop_gradient(_compute_sigma(T1_n_d, T1_o_d))
+    s2 = jax.lax.stop_gradient(_compute_sigma(T2_n_d, T2_o_d))
+    s3 = jax.lax.stop_gradient(_compute_sigma(T3_n_d, T3_o_d))
+    s4 = jax.lax.stop_gradient(_compute_sigma(T4_n_d, T4_o_d))
+
+    # Apply sigma to corners and edges, identifying legs BY LABEL (#798).
+    # Bond map (verified connectivity, see _ctm_tensor_energy.py):
+    #   top row (s1):    c1_r <-> t1_l,  t1_r <-> c2_l
+    #   right col (s2):  c2_d <-> t2_u,  t2_d <-> c3_u
+    #   bottom row (s3): c3_l <-> t3_l,  t3_r <-> c4_u
+    #   left col (s4):   c4_r <-> t4_u,  t4_d <-> c1_d
+    # Around the ring each bond gets its sigma once conjugated (bra, the
+    # in-leg) and once plain (ket, the out-leg), so contracting any bond
+    # yields s s^H = 1: the transform is a pure gauge and gauge-invariant
+    # content is exactly preserved.  The old positional read applied bond
+    # gauges to the wrong legs — on the 2x2 layout for C1-C3 (the sweep
+    # writes corners axis-reversed) and on the canonical layout for C4
+    # (stored (c4_r, c4_u), reverse of the ring order assumed here) — which
+    # is not a gauge transform at all and corrupted the environment on
+    # every sigma-gauged sweep (energy off by O(1e-3) at D=2, O(1e-2) at
+    # D=3).  Preserves SymmetricTensor type via label-based contraction.
+    C1_f = _apply_sigma_to_corner(env_new.C1, s4, s1, "c1_d", "c1_r")
+    C2_f = _apply_sigma_to_corner(env_new.C2, s1, s2, "c2_l", "c2_d")
+    C3_f = _apply_sigma_to_corner(env_new.C3, s2, s3, "c3_u", "c3_l")
+    C4_f = _apply_sigma_to_corner(env_new.C4, s3, s4, "c4_u", "c4_r")
+
+    # Edges: s^H on the ring in-leg, s on the ring out-leg.
+    T1_f = _apply_sigma_to_edge(env_new.T1, s1, "t1_l", "t1_r")
+    T2_f = _apply_sigma_to_edge(env_new.T2, s2, "t2_u", "t2_d")
+    T3_f = _apply_sigma_to_edge(env_new.T3, s3, "t3_l", "t3_r")
+    T4_f = _apply_sigma_to_edge(env_new.T4, s4, "t4_u", "t4_d")
+
+    return CTMTensorEnv(
+        C1=C1_f,
+        C2=C2_f,
+        C3=C3_f,
+        C4=C4_f,
+        T1=T1_f,
+        T2=T2_f,
+        T3=T3_f,
+        T4=T4_f,
+    )
 
 
 def _sigma_gauge_fix_ctm_tensor(env_new, env_old):
@@ -207,118 +376,56 @@ def _sigma_gauge_fix_ctm_tensor(env_new, env_old):
     This is the gauge-fixing approach from arxiv:2311.11894, used by YASTN
     to make the VJP backward Neumann series converge.
 
-    For each edge direction, computes:
-        rho_old = leading eigvec of TM(T_old)   ->  Q_old via QR
-        rho_new = leading eigvec of TM(T_new)   ->  Q_new via QR
-        sigma = Q_new @ Q_old^dagger
+    Sigma application is label-based (#798): it delegates to
+    ``_sigma_gauge_fix_env`` (this module), which identifies every corner
+    and edge leg by label against the verified bond connectivity of
+    ``_ctm_tensor_energy`` (top s1: c1_r<->t1_l, t1_r<->c2_l; right s2:
+    c2_d<->t2_u, t2_d<->c3_u; bottom s3: c3_l<->t3_l, t3_r<->c4_u; left
+    s4: c4_r<->t4_u, t4_d<->c1_d).  The previous implementation here read
+    corner legs positionally from ``todense()`` arrays and hardcoded a C4
+    map that contradicted that connectivity (sigma_bottom on c4_r,
+    sigma_left on c4_u), so a bond gauge could land on the wrong leg --
+    on the 2x2 sweep's axis-reversed corner layout for C1-C3 and on the
+    canonical layout for C4 -- which is not a gauge transform at all
+    (measured: |dE| = 6.9e-03 per application on a random D=2 state at
+    chi=6; invisible only when lattice symmetry makes all four sigmas
+    coincide).
 
-    Then applies sigma to corners and edges so that the gauge aligns
-    between iterations.
+    After the sigma alignment, the residual global U(1) phase per tensor
+    is removed by aligning with ``env_old`` (kept from the original
+    implementation: sigma pins the bond gauges only up to a per-tensor
+    phase, which is itself a pure gauge for the energy but shows up in
+    element-wise convergence checks).
     """
+    fixed = _sigma_gauge_fix_env(env_new, env_old)
 
-    C1_n, C2_n, C3_n, C4_n = (
-        c.todense() for c in (env_new.C1, env_new.C2, env_new.C3, env_new.C4)
-    )
-    T1_n, T2_n, T3_n, T4_n = (
-        t.todense() for t in (env_new.T1, env_new.T2, env_new.T3, env_new.T4)
-    )
-    T1_o, T2_o, T3_o, T4_o = (
-        t.todense() for t in (env_old.T1, env_old.T2, env_old.T3, env_old.T4)
-    )
+    def _fix_phase(fixed_t, old_t):
+        """Remove residual global U(1) phase by aligning with the old tensor.
 
-    def _compute_sigma(T_new, T_old):
-        """Compute sigma = Q_new @ Q_old^H from transfer matrix eigenvectors."""
-        rho_new = _transfer_matrix_leading_eigvec(T_new)
-        rho_old = _transfer_matrix_leading_eigvec(T_old)
-
-        # QR with sign convention (positive diagonal on R)
-        Q_new, R_new = jnp.linalg.qr(rho_new)
-        Q_old, R_old = jnp.linalg.qr(rho_old)
-
-        # Fix sign: make diagonal of R positive
-        signs_new = jnp.sign(jnp.diag(R_new))
-        signs_old = jnp.sign(jnp.diag(R_old))
-        Q_new = Q_new * signs_new[None, :]
-        Q_old = Q_old * signs_old[None, :]
-
-        return Q_new @ Q_old.conj().T
-
-    # Compute sigma for each edge direction
-    # Convention: sigma_X acts on the chi bond on the X side
-    # T1 connects c1_r <-> c2_l (top bond)
-    # T2 connects c2_d <-> c3_u (right bond)
-    # T3 connects c4_r <-> c3_l (bottom bond)
-    # T4 connects c1_d <-> c4_u (left bond)
-    sigma_top = jax.lax.stop_gradient(_compute_sigma(T1_n, T1_o))
-    sigma_right = jax.lax.stop_gradient(_compute_sigma(T2_n, T2_o))
-    sigma_bottom = jax.lax.stop_gradient(_compute_sigma(T3_n, T3_o))
-    sigma_left = jax.lax.stop_gradient(_compute_sigma(T4_n, T4_o))
-
-    # Apply sigma to env_new:
-    # Corner: C(row_bond, col_bond) -> sigma_row^H @ C @ sigma_col
-    # Edge: T(left_bond, phys, right_bond) -> sigma_left^H @ T @ sigma_right
-    #
-    # CTM geometry (single-site, periodic):
-    # C1(c1_d, c1_r)    connects to T4(left) and T1(top)
-    # C2(c2_l, c2_d)    connects to T1(top) and T2(right)
-    # C3(c3_u, c3_l)    connects to T2(right) and T3(bottom)
-    # C4(c4_r, c4_u)    connects to T3(bottom) and T4(left)
-    #
-    # T1(t1_l, u2, t1_r) connects c1_r(left) and c2_l(right) via top bond
-    # T2(t2_u, r2, t2_d) connects c2_d(top) and c3_u(bottom) via right bond
-    # T3(t3_r, d2, t3_l) connects c4_r(left) and c3_l(right) via bottom bond
-    # T4(t4_d, l2, t4_u) connects c1_d(top) and c4_u(bottom) via left bond
-
-    sH_top = sigma_top.conj().T
-    sH_right = sigma_right.conj().T
-    sH_bottom = sigma_bottom.conj().T
-    sH_left = sigma_left.conj().T
-
-    # Corners: each corner sits at an intersection of two bonds
-    C1_fixed = sH_left @ C1_n @ sigma_top  # c1_d(left bond), c1_r(top bond)
-    C2_fixed = sH_top @ C2_n @ sigma_right  # c2_l(top bond), c2_d(right bond)
-    C3_fixed = sH_right @ C3_n @ sigma_bottom  # c3_u(right bond), c3_l(bottom bond)
-    C4_fixed = sH_bottom @ C4_n @ sigma_left  # c4_r(bottom bond), c4_u(left bond)
-
-    # Edges: each edge has chi bonds on both sides + D^2 physical bond
-    # T1(t1_l, u2, t1_r): left=top bond, right=top bond (same bond, wraps around)
-    T1_fixed = jnp.einsum("ab,bdc,ce->ade", sH_top, T1_n, sigma_top)
-    # T2(t2_u, r2, t2_d): top=right bond, bottom=right bond
-    T2_fixed = jnp.einsum("ab,bdc,ce->ade", sH_right, T2_n, sigma_right)
-    # T3(t3_r, d2, t3_l): left=bottom bond, right=bottom bond
-    T3_fixed = jnp.einsum("ab,bdc,ce->ade", sH_bottom, T3_n, sigma_bottom)
-    # T4(t4_d, l2, t4_u): top=left bond, bottom=left bond
-    T4_fixed = jnp.einsum("ab,bdc,ce->ade", sH_left, T4_n, sigma_left)
-
-    # Extract global U(1) phase per tensor from old env
-    C1_o, C2_o, C3_o, C4_o = (
-        c.todense() for c in (env_old.C1, env_old.C2, env_old.C3, env_old.C4)
-    )
-
-    def _fix_phase(fixed, old):
-        """Remove residual U(1) phase by aligning with old tensor."""
-        dot = jnp.sum(old.ravel().conj() * fixed.ravel())
+        The label-based contraction in ``_sigma_gauge_fix_env`` does not
+        guarantee the output axis order matches ``old_t``'s storage order,
+        so the overlap is computed after permuting to ``old_t``'s label
+        order -- an element-wise dot across mismatched axes would compute
+        a meaningless (though still unit-modulus, hence harmless-to-energy)
+        phase.
+        """
+        old_labels = tuple(i.label for i in old_t.indices)
+        fixed_labels = tuple(i.label for i in fixed_t.indices)
+        perm = tuple(fixed_labels.index(lab) for lab in old_labels)
+        fixed_aligned = jnp.transpose(fixed_t.todense(), perm)
+        dot = jnp.sum(old_t.todense().ravel().conj() * fixed_aligned.ravel())
         phase = dot / (jnp.abs(dot) + 1e-30)
-        return fixed * jnp.conj(phase)
-
-    C1_fixed = _fix_phase(C1_fixed, C1_o)
-    C2_fixed = _fix_phase(C2_fixed, C2_o)
-    C3_fixed = _fix_phase(C3_fixed, C3_o)
-    C4_fixed = _fix_phase(C4_fixed, C4_o)
-    T1_fixed = _fix_phase(T1_fixed, T1_o)
-    T2_fixed = _fix_phase(T2_fixed, T2_o)
-    T3_fixed = _fix_phase(T3_fixed, T3_o)
-    T4_fixed = _fix_phase(T4_fixed, T4_o)
+        return fixed_t * jnp.conj(phase)
 
     return CTMTensorEnv(
-        C1=_wrap_tensor(C1_fixed, env_new.C1),
-        C2=_wrap_tensor(C2_fixed, env_new.C2),
-        C3=_wrap_tensor(C3_fixed, env_new.C3),
-        C4=_wrap_tensor(C4_fixed, env_new.C4),
-        T1=_wrap_tensor(T1_fixed, env_new.T1),
-        T2=_wrap_tensor(T2_fixed, env_new.T2),
-        T3=_wrap_tensor(T3_fixed, env_new.T3),
-        T4=_wrap_tensor(T4_fixed, env_new.T4),
+        C1=_fix_phase(fixed.C1, env_old.C1),
+        C2=_fix_phase(fixed.C2, env_old.C2),
+        C3=_fix_phase(fixed.C3, env_old.C3),
+        C4=_fix_phase(fixed.C4, env_old.C4),
+        T1=_fix_phase(fixed.T1, env_old.T1),
+        T2=_fix_phase(fixed.T2, env_old.T2),
+        T3=_fix_phase(fixed.T3, env_old.T3),
+        T4=_fix_phase(fixed.T4, env_old.T4),
     )
 
 
@@ -695,80 +802,6 @@ def _ctm_tensor_converge_fwd(site_tensors, env_init_leaves, neighbors, config_tu
     out = _flatten_envs(envs)
     residuals = (site_tensors, envs, env_init_leaves)
     return out, residuals
-
-
-def _precompute_sigma_matrices(envs):
-    """Precompute sigma Q matrices from converged environment (constants).
-
-    For each edge direction, compute the leading eigenvector of the
-    double-layer transfer matrix and return its QR factor Q.
-
-    Returns: ``{coord: (Q_T1, Q_T2, Q_T3, Q_T4)}`` where each Q is chi×chi.
-    """
-    result = {}
-    for c in sorted(envs):
-        env = envs[c]
-        Qs = []
-        for T in (env.T1, env.T2, env.T3, env.T4):
-            rho = _transfer_matrix_leading_eigvec(T.todense())
-            Q, R = jnp.linalg.qr(rho)
-            signs = jnp.sign(jnp.diag(R))
-            signs = jnp.where(signs == 0, 1.0, signs)
-            Q = Q * signs[None, :]
-            Qs.append(Q)
-        result[c] = tuple(Qs)
-    return result
-
-
-def _apply_sigma_to_env_leaves(
-    env_leaves, sigma_Qs, env_treedef, n_env_per_site, coords
-):
-    """Apply precomputed sigma gauge to env leaves (differentiable).
-
-    The sigma Q matrices are stop_gradient constants; the application
-    (matrix multiplications) is fully JAX-differentiable.
-    """
-    new_leaves = []
-    offset = 0
-    for c in coords:
-        env = jax.tree.unflatten(
-            env_treedef, list(env_leaves[offset : offset + n_env_per_site])
-        )
-        Q_T1, Q_T2, Q_T3, Q_T4 = sigma_Qs[c]
-        Q_T1 = jax.lax.stop_gradient(Q_T1)
-        Q_T2 = jax.lax.stop_gradient(Q_T2)
-        Q_T3 = jax.lax.stop_gradient(Q_T3)
-        Q_T4 = jax.lax.stop_gradient(Q_T4)
-
-        C1, C2, C3, C4 = (x.todense() for x in (env.C1, env.C2, env.C3, env.C4))
-        T1, T2, T3, T4 = (x.todense() for x in (env.T1, env.T2, env.T3, env.T4))
-
-        # Corners: Q_row† @ C @ Q_col
-        C1_f = Q_T4.conj().T @ C1 @ Q_T1
-        C2_f = Q_T1.conj().T @ C2 @ Q_T2
-        C3_f = Q_T2.conj().T @ C3 @ Q_T3
-        C4_f = Q_T3.conj().T @ C4 @ Q_T4
-
-        # Edges: Q† @ T @ Q (same bond on both sides for single-site)
-        T1_f = jnp.einsum("ab,bdc,ce->ade", Q_T1.conj().T, T1, Q_T1)
-        T2_f = jnp.einsum("ab,bdc,ce->ade", Q_T2.conj().T, T2, Q_T2)
-        T3_f = jnp.einsum("ab,bdc,ce->ade", Q_T3.conj().T, T3, Q_T3)
-        T4_f = jnp.einsum("ab,bdc,ce->ade", Q_T4.conj().T, T4, Q_T4)
-
-        env_fixed = CTMTensorEnv(
-            C1=_wrap_tensor(C1_f, env.C1),
-            C2=_wrap_tensor(C2_f, env.C2),
-            C3=_wrap_tensor(C3_f, env.C3),
-            C4=_wrap_tensor(C4_f, env.C4),
-            T1=_wrap_tensor(T1_f, env.T1),
-            T2=_wrap_tensor(T2_f, env.T2),
-            T3=_wrap_tensor(T3_f, env.T3),
-            T4=_wrap_tensor(T4_f, env.T4),
-        )
-        new_leaves.extend(jax.tree.leaves(env_fixed))
-        offset += n_env_per_site
-
-    return tuple(new_leaves)
 
 
 def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
@@ -1349,6 +1382,7 @@ def ctm_split_tensor_converge_explicit(
     num_steps: int | None = None,
     warmup_steps: int = 0,
     recipe: str = "2x2",
+    _recipe_warning_emitted: bool = False,
 ):
     """Split-CTM with explicit (unrolled) autodiff.
 
@@ -1372,10 +1406,22 @@ def ctm_split_tensor_converge_explicit(
     Returns:
         Converged SplitCTMTensorEnv.
     """
-    from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+    from tenax.algorithms._ctm_tensor_convergence import (
+        SINGLE_SITE_NEIGHBORS,
+        _warn_recipe_1x1_deprecated,
+    )
     from tenax.algorithms._split_ctm_tensor_convergence import (
         _split_ctm_sweep_multisite,
     )
+
+    # #911: once per convergence call, at the boundary the caller reaches.
+    # ``_recipe_warning_emitted`` is private, for the one internal caller
+    # that already warned with a stacklevel pointing at the user's line:
+    # ``ctm_energy_split_explicit`` warns and then delegates here, so
+    # without it one operation emitted two full deprecations, the second
+    # attributed to the internal delegation (#921 review r4).
+    if recipe == "1x1" and not _recipe_warning_emitted:
+        _warn_recipe_1x1_deprecated("ctm_split_tensor_converge_explicit")
     from tenax.algorithms._split_ctm_tensor_init import (
         initialize_split_ctm_tensor_env,
     )

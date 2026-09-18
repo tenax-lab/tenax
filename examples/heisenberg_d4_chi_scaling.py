@@ -323,7 +323,9 @@ def optimize_once(outdir, chi_opt, opt_steps, n_devices, probe_max_iter=15,
     err vs QMC = +5.50e-3, superseding +6.04e-3.  That figure is itself an
     upper bound -- its optimization was stopped at step 14, not converged.
 
-    ``"1x1"`` reproduces the old (invalid) behaviour for bisection.  See #747."""
+    ``"1x1"`` used to reproduce the old (invalid) behaviour for bisection;
+    since #938 the optimizer refuses it outright, so that workflow needs a
+    pre-#938 checkout.  See #747."""
     import jax
 
     jax.config.update("jax_enable_x64", True)
@@ -547,10 +549,12 @@ def _build_argparser():
     p.add_argument("--opt-steps", dest="opt_steps", type=int, default=100)
     p.add_argument("--probe-max-iter", dest="probe_max_iter", type=int, default=15)
     p.add_argument("--gs-recipe", dest="gs_recipe", default="2x2",
-                   choices=["2x2", "1x1"],
-                   help="optimizer CTM recipe. 2x2 is correct; 1x1 collapses "
-                        "the environment to rank-1 corners and only exists "
-                        "to reproduce the pre-#747 runs (#723/#726/#747).")
+                   choices=["2x2"],
+                   help="optimizer CTM recipe. Only 2x2: the 1x1 choice that "
+                        "reproduced the pre-#747 collapsed-environment runs "
+                        "is refused by the optimizer since #938 -- to bisect "
+                        "against the historical record, check out a pre-#938 "
+                        "commit (#723/#726/#747).")
     p.add_argument("--allow-non-a100", dest="allow_non_a100", action="store_true",
                    help="skip the >=40 GB device guard. For porting the run to "
                         "other hardware; the guard exists to stop a run "

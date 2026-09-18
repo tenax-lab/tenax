@@ -390,3 +390,187 @@ def test_fpeps_importable_from_tenax():
     assert FPEPSConfig is not None
     assert fpeps is not None
     assert spinless_fermion_gate is not None
+
+
+# --------------------------------------------------------------------------- #
+# #997: a single sweep phase is exact at full rank, fermionic == bosonic       #
+# --------------------------------------------------------------------------- #
+
+
+def test_single_phase_full_rank_identity_matches_bosonic_control():
+    """One bond update at max_D = D*d must reconstruct gate*theta, and the
+    fermionic arm must do so exactly as well as the block-identical bosonic
+    Z2 control (#997).
+
+    Pre-fix, linalg's matricization Koszul signs (640 of 2560 fired in a
+    5-step sweep) plus the factor transposes made a single production phase
+    destroy the state to fidelity 0.634 (H) / 0.437 (V) while the Z2 retype
+    of the same blocks scored 0.9999 -- the shared gate-rank truncation
+    floor.  Asserting FP == Z2 to 1e-9 makes the test self-calibrating: the
+    floor moves with the fixture, the equality does not.
+
+    The mean-field symptom this pins down was an unphysical vacuum drain
+    (<n>: 0.44 -> 1e-4 in 40 steps against a gate that is exact to 2e-16
+    and amplifies occupation), which had been misread as seed-dependent
+    state-model fragility (#878/#881, #882 SS5.3).
+    """
+    import tenax.algorithms.ipeps_simple_update as isu
+    from tenax.algorithms.ipeps_simple_update import (
+        _simple_update_2site_horizontal_tensor,
+        _simple_update_2site_vertical_tensor,
+    )
+    from tenax.contraction.contractor import contract
+    from tenax.core._tensor_utils import scale_bond_axis
+    from tenax.core.symmetry import ZnSymmetry
+    from tenax.core.tensor import _koszul_sign
+
+    D = 3
+    cfg = FPEPSConfig(D=D, dt=0.05, V=1.0)
+    gate = _trotter_gate(spinless_fermion_gate(cfg), cfg.dt)
+    A0 = _initialize_fpeps(cfg, jax.random.PRNGKey(1))
+    B0 = _initialize_fpeps(cfg, jax.random.PRNGKey(5))
+    rng = np.random.default_rng(3)
+    lh, lv, lhf, lvo = (jnp.array(rng.uniform(0.3, 1, D)) for _ in range(4))
+
+    def retype_z2(T):
+        z2 = ZnSymmetry(2)
+        idx = tuple(
+            TensorIndex.from_charges(z2, i.charges, i.flow, label=i.label)
+            for i in T.indices
+        )
+        return SymmetricTensor(dict(T.blocks), idx)
+
+    def theta_h(A, B):
+        Aa = scale_bond_axis(A, "u", lvo)
+        Aa = scale_bond_axis(Aa, "d", lv)
+        Aa = scale_bond_axis(Aa, "l", lhf)
+        Aa = scale_bond_axis(Aa, "r", lh)
+        Ba = scale_bond_axis(B, "u", lv)
+        Ba = scale_bond_axis(Ba, "d", lvo)
+        Ba = scale_bond_axis(Ba, "r", lhf)
+        return contract(
+            Aa.relabel("r", "shared"),
+            Ba.relabels(
+                {"u": "u_B", "d": "d_B", "l": "shared", "r": "r_B", "phys": "phys_B"}
+            ),
+        )
+
+    def rebuild_h(A, B, ln):
+        Aa = scale_bond_axis(A, "u", lvo)
+        Aa = scale_bond_axis(Aa, "d", lv)
+        Aa = scale_bond_axis(Aa, "l", lhf)
+        Aa = scale_bond_axis(Aa, "r", ln)
+        Ba = scale_bond_axis(B, "u", lv)
+        Ba = scale_bond_axis(Ba, "d", lvo)
+        Ba = scale_bond_axis(Ba, "r", lhf)
+        return contract(
+            Aa.relabel("r", "shared"),
+            Ba.relabels(
+                {"u": "u_B", "d": "d_B", "l": "shared", "r": "r_B", "phys": "phys_B"}
+            ),
+        )
+
+    def fid(X, Y):
+        ylab = [
+            "si_out" if lab == "phys" else "sj_out" if lab == "phys_B" else lab
+            for lab in Y.labels()
+        ]
+        xd = np.asarray(X.todense())
+        yd = np.transpose(
+            np.asarray(Y.todense()), tuple(ylab.index(lab) for lab in X.labels())
+        )
+        x, y = xd.ravel(), yd.ravel()
+        return abs(np.vdot(x, y)) / (np.linalg.norm(x) * np.linalg.norm(y))
+
+    # The base_charges pin is fermionic-only, so with it active the two
+    # arms run DIFFERENT truncations (per-sector keep counts vs global
+    # top-k) and their fidelities differ at the pin's expense, not the
+    # signs'.  Disable it so the arms are code-identical (SS5.1 already
+    # established the pin is a regularizer, not a structural need).
+    orig_pin = isu._truncation_base_charges
+    isu._truncation_base_charges = lambda A, leg: None
+    try:
+        results = {}
+        for name, A, B, G in (
+            ("FP", A0, B0, gate),
+            ("Z2", retype_z2(A0), retype_z2(B0), retype_z2(gate)),
+        ):
+            theta = theta_h(A, B)
+            gated = contract(theta.relabel("phys", "si").relabel("phys_B", "sj"), G)
+            if name == "FP":
+                # Regime: the SVD split of THIS theta must braid odd past
+                # odd, or the decomposition applies no sign and the
+                # arm-equality asserts nothing (#997's first reproducer
+                # passed that way).
+                split = ("u", "d", "l", "si_out", "u_B", "d_B", "r_B", "sj_out")
+                perm = tuple(gated.labels().index(lab) for lab in split)
+                fp = gated.indices[0].symmetry
+                signs = [
+                    _koszul_sign(
+                        tuple(int(fp.parity(np.array([q]))[0]) for q in k), perm
+                    )
+                    for k in gated.blocks
+                ]
+                assert -1 in signs, "fixture out of regime: never braids"
+            An, Bn, ln = _simple_update_2site_horizontal_tensor(
+                A, B, G, lh, lv, 6, lam_h_far=lhf, lam_v_other=lvo
+            )
+            results[name] = fid(gated, rebuild_h(An, Bn, ln))
+
+        assert results["FP"] > 0.999, f"fermionic phase not exact: {results['FP']}"
+        np.testing.assert_allclose(
+            results["FP"],
+            results["Z2"],
+            atol=1e-9,
+            err_msg="fermionic single-phase fidelity differs from the "
+            "block-identical bosonic control (#997)",
+        )
+
+        # Vertical phase, same contract: kills a factor-transpose regression
+        # on the path the horizontal test does not touch (U at (0,4,1,2,3)).
+        # Full reconstruction fidelity, NOT a spectra comparison -- Koszul
+        # signs cancel in every spectrum (SS5.2a), so spectra are blind to
+        # exactly the defect class this test exists for.
+        def theta_v(A, B, lv_shared):
+            Aa = scale_bond_axis(A, "u", lvo)
+            Aa = scale_bond_axis(Aa, "l", lhf)
+            Aa = scale_bond_axis(Aa, "r", lh)
+            Aa = scale_bond_axis(Aa, "d", lv_shared)
+            Ba = scale_bond_axis(B, "d", lvo)
+            Ba = scale_bond_axis(Ba, "l", lh)
+            Ba = scale_bond_axis(Ba, "r", lhf)
+            return contract(
+                Aa.relabel("d", "shared"),
+                Ba.relabels(
+                    {
+                        "u": "shared",
+                        "d": "d_B",
+                        "l": "l_B",
+                        "r": "r_B",
+                        "phys": "phys_B",
+                    }
+                ),
+            )
+
+        vres = {}
+        for name, A, B, G in (
+            ("FP", A0, B0, gate),
+            ("Z2", retype_z2(A0), retype_z2(B0), retype_z2(gate)),
+        ):
+            gated = contract(
+                theta_v(A, B, lv).relabel("phys", "si").relabel("phys_B", "sj"), G
+            )
+            An, Bn, lnv = _simple_update_2site_vertical_tensor(
+                A, B, G, lh, lv, 6, lam_v_far=lvo, lam_h_other=lhf
+            )
+            vres[name] = fid(gated, theta_v(An, Bn, lnv))
+        assert vres["FP"] > 0.999, f"vertical phase not exact: {vres['FP']}"
+        np.testing.assert_allclose(
+            vres["FP"],
+            vres["Z2"],
+            atol=1e-9,
+            err_msg="vertical single-phase fidelity differs from the "
+            "block-identical bosonic control (#997)",
+        )
+    finally:
+        isu._truncation_base_charges = orig_pin

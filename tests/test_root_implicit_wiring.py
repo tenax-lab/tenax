@@ -176,23 +176,28 @@ def test_the_error_names_every_offending_knob_at_once():
 # ------------------------------------------------------------------ #
 
 
-def test_multisite_variant_is_refused_with_a_reason():
-    """And the reason has to be the real one (#894).
+def test_a_general_lattice_is_refused_with_the_grid_reason():
+    """#894 wired the 2-site cell; a general Lattice stays refused, and for the
+    real reason.
 
-    It used to read "built and tested but not yet wired here", which describes
-    plumbing.  It is not plumbing: the multisite engine differentiates a
-    one-site observable rather than an energy, and there is no multisite energy
-    functional to differentiate -- ``_cell_energy`` is gauge-dependent on a
-    non-uniform cell.  A refusal that misdescribes its own blocker sends the
-    next reader to write the wrong patch.
+    The multisite engine's neighbour map is ``cell_neighbors`` -- a rectangular
+    periodic grid.  ``unit_cell='2site'`` is that grid (a 2x2 bipartite cell),
+    so it now runs.  A ``Lattice`` whose topology is *not* a rectangular grid --
+    kagome, honeycomb, triangular -- has no root-implicit objective here, and
+    the refusal must say so rather than silently optimising the wrong model on a
+    grid it does not have.
     """
     from tenax.algorithms.ipeps_optimize_root_implicit import (
         optimize_gs_ad_root_implicit,
     )
+    from tenax.core.lattice import kagome
 
-    cfg = dataclasses.replace(_cfg(), unit_cell="2site")
-    with pytest.raises(NotImplementedError, match="ONE-SITE observable"):
-        optimize_gs_ad_root_implicit(None, None, cfg)
+    cfg = dataclasses.replace(
+        _cfg(), unit_cell=kagome(), gs_metric_precond=False, gs_line_search=False
+    )
+    gate = jnp.eye(4, dtype=jnp.float64).reshape(2, 2, 2, 2)
+    with pytest.raises(NotImplementedError, match="rectangular periodic grid"):
+        optimize_gs_ad_root_implicit(gate, None, cfg)
 
 
 def test_the_symmetric_variant_is_no_longer_refused():
@@ -427,3 +432,197 @@ def test_the_root_implicit_gradient_descends_the_energy():
         f"energy did not decrease monotonically: {energies}"
     )
     assert energies[-1] > -0.669437, f"below the exact ground state: {energies}"
+
+
+# ------------------------------------------------------------------ #
+# The 2-site checkerboard cell path (#894)                            #
+# ------------------------------------------------------------------ #
+
+
+def _site_indices(D=2, d=2):
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+
+    sym = U1Symmetry()
+    z = [0] * D
+    zp = [0] * d
+    return (
+        TensorIndex.from_charges(sym, list(z), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, list(z), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, list(z), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, list(z), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, list(zp), FlowDirection.IN, label="phys"),
+    )
+
+
+def test_fan_checkerboard_places_the_two_sublattices_on_the_neel_diagonals():
+    """``a`` on (0,0)/(1,1), ``b`` on (0,1)/(1,0) -- the bipartite (Neel)
+    placement, not stripe.
+
+    Under ``cell_neighbors(2, 2)`` this is exactly what makes every neighbour of
+    an ``a`` site a ``b`` site.  A stripe placement -- ``a`` on a whole row --
+    would put like on like along one axis and silently optimise a different
+    model on the same grid, so the diagonal pairing is a correctness property,
+    not a cosmetic choice.
+    """
+    from tenax.algorithms.ipeps_optimize_root_implicit import _fan_checkerboard
+
+    idx = _site_indices()
+    a = jnp.ones((2, 2, 2, 2, 2))
+    b = 2.0 * jnp.ones((2, 2, 2, 2, 2))
+    cell = _fan_checkerboard((a, b), idx, idx)
+
+    assert set(cell) == {(0, 0), (1, 1), (0, 1), (1, 0)}
+    # a-sublattice: the two main-diagonal cells carry the same tensor ...
+    assert jnp.array_equal(cell[(0, 0)].todense(), cell[(1, 1)].todense())
+    assert float(cell[(0, 0)].todense().reshape(-1)[0]) == 1.0
+    # ... b-sublattice the anti-diagonal, and the two sublattices differ.
+    assert jnp.array_equal(cell[(0, 1)].todense(), cell[(1, 0)].todense())
+    assert float(cell[(0, 1)].todense().reshape(-1)[0]) == 2.0
+    assert not jnp.array_equal(cell[(0, 0)].todense(), cell[(0, 1)].todense())
+
+
+def test_tie_checkerboard_sums_each_sublattices_two_partials():
+    """``dE/da = dE/dA_(0,0) + dE/dA_(1,1)``; ``dE/db = dE/dA_(0,1) + dE/dA_(1,0)``.
+
+    The engine sees four independent cells and returns four cotangents; the tie
+    makes each parameter's gradient the sum of the two partials it drives.
+    Powers of ten make every key's contribution uniquely identifiable, so 11 and
+    1100 are reachable *only* by the correct pairing -- any wrong pair, or a
+    dropped partial, lands on a different number.
+    """
+    from tenax.algorithms.ipeps_optimize_root_implicit import _tie_checkerboard_grad
+
+    grad = {
+        (0, 0): jnp.array([1.0]),
+        (1, 1): jnp.array([10.0]),
+        (0, 1): jnp.array([100.0]),
+        (1, 0): jnp.array([1000.0]),
+    }
+    ga, gb = _tie_checkerboard_grad(grad)
+    assert float(ga.reshape(-1)[0]) == 11.0
+    assert float(gb.reshape(-1)[0]) == 1100.0
+
+
+def test_2site_a_init_must_be_a_pair():
+    """The cell path optimises two sublattice tensors, so ``A_init`` is ``None``
+    or a ``(A, B)`` tuple; a bare tensor is an ambiguous single-site start and
+    is refused rather than silently placed on both sublattices.
+    """
+    from tenax.algorithms.ipeps_optimize_root_implicit import (
+        optimize_gs_ad_root_implicit,
+    )
+
+    cfg = dataclasses.replace(
+        _cfg(), unit_cell="2site", gs_metric_precond=False, gs_line_search=False
+    )
+    gate = jnp.eye(4, dtype=jnp.float64).reshape(2, 2, 2, 2)
+    lone = jnp.ones((2, 2, 2, 2, 2))
+    with pytest.raises(TypeError, match="tuple of the two"):
+        optimize_gs_ad_root_implicit(gate, lone, cfg)
+
+
+def test_2site_rejects_symmetric_inputs_before_densifying():
+    """A symmetric ``(A, B)`` must be refused, not silently densified.
+
+    ``_initial_cell_tensors`` preserves the ``SymmetricTensor``s, but
+    ``params = (A.todense(), B.todense())`` would densify them to full ``D^4 d``
+    arrays before the engine's own dense-only guard ever runs -- so the wrapper
+    refuses at the boundary, exactly as the 1x1 dense branch refuses a
+    ``SymmetricTensor``. Without the guard this call silently allocates dense
+    tensors and optimises a dense lift of the state the caller meant.
+    """
+    import numpy as np
+
+    from tenax.algorithms.ipeps_optimize_root_implicit import (
+        optimize_gs_ad_root_implicit,
+    )
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import ZnSymmetry
+    from tenax.core.tensor import SymmetricTensor
+
+    sym = ZnSymmetry(2)
+
+    def _leg(flow, lbl):
+        return TensorIndex(
+            symmetry=sym,
+            sectors=np.array([0, 1]),
+            multiplicities=np.array([1, 1]),
+            flow=flow,
+            label=lbl,
+        )
+
+    def _sym_site(seed):
+        return SymmetricTensor.random_normal_np(
+            (
+                _leg(FlowDirection.IN, "u"),
+                _leg(FlowDirection.OUT, "d"),
+                _leg(FlowDirection.IN, "l"),
+                _leg(FlowDirection.OUT, "r"),
+                _leg(FlowDirection.OUT, "phys"),
+            ),
+            np.random.RandomState(seed),
+        )
+
+    cfg = dataclasses.replace(
+        _cfg(), unit_cell="2site", gs_metric_precond=False, gs_line_search=False
+    )
+    gate = jnp.eye(4, dtype=jnp.float64).reshape(2, 2, 2, 2)
+    with pytest.raises(TypeError, match="dense-only"):
+        optimize_gs_ad_root_implicit(gate, (_sym_site(1), _sym_site(2)), cfg)
+
+
+@pytest.mark.slow
+def test_2site_checkerboard_run_through_optimize_gs_ad():
+    """A real 2-site Heisenberg state optimised through the root-implicit cell
+    path (#894).
+
+    The single-site slow test above is the 1x1 analogue; this is the gate #894
+    had to clear -- that an optimizer *descends* a genuine two-site energy whose
+    RDMs span adjacent cells, with an SVD-free backward.  As on the 1x1 path the
+    assertions are physical, not a pinned number: this path runs no line search
+    (documented), so the trajectory can rise on a step while best-so-far falls,
+    and the returned energy is the best state reached.  It must improve on the
+    random start and must stay above the exact ground state; a value below it
+    would be non-variational, the failure a hard-coded ``approx`` would hide.
+
+    The return shape is pinned too: ``((A, B), (env_A, env_B), E)`` matching
+    ``_optimize_gs_ad_2site``, so a caller can drop the cell path in for the
+    fixed-point 2-site optimizer.
+    """
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    from tenax.algorithms.ipeps import heisenberg_gate
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+    from tenax.core.tensor import DenseTensor
+
+    gate = heisenberg_gate()  # plain AFM: the ground state is Neel, A != B
+    cfg = iPEPSConfig(
+        max_bond_dim=2,
+        unit_cell="2site",
+        su_init=False,  # deterministic random start (PRNGKey(0))
+        gs_num_steps=4,
+        gs_optimizer="lbfgs",
+        gs_line_search=False,
+        gs_metric_precond=False,
+        return_history=True,
+        ctm=CTMConfig(chi=4, max_iter=30, conv_tol=1e-9, ctm_ad_mode="root_implicit"),
+    )
+
+    (A, B), envs, E, hist = optimize_gs_ad(gate, None, cfg)
+
+    energies = hist["energies"]
+    assert all(math.isfinite(e) for e in energies), energies
+    assert math.isfinite(E), E
+    # Descended: the best state reached beats the random start.  (Not
+    # monotonic -- no line search on this path.)
+    assert min(energies) < energies[0], f"no descent: {energies}"
+    assert E < energies[0], f"returned energy did not improve on the start: {E}"
+    # Square-lattice spin-1/2 Heisenberg AFM, Sandvik QMC.  A D=2 chi=4 state
+    # cannot legitimately go below this.
+    assert E > -0.669437, f"non-variational energy below the ground state: {E}"
+    # Two distinct sublattice tensors and their two environments, per
+    # _optimize_gs_ad_2site's contract.
+    assert isinstance(A, DenseTensor) and isinstance(B, DenseTensor)
+    assert isinstance(envs, tuple) and len(envs) == 2

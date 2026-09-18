@@ -279,9 +279,11 @@ def _eigh_projector_symmetric(
     is the sector's dense block of C_ig, then eigendecomposes :math:`\rho_q`.
     Eigenvalues are merged across sectors and globally truncated to *chi*.
 
-    When ``base_charges`` is provided, the chi budget is distributed
-    per sector to match ``_derive_charges(base_charges, chi)`` — this
-    prevents cascading charge-sector loss across CTM sweeps.
+    When ``base_charges`` is provided it reserves one slot per named charge
+    so a sector cannot be dropped from the bond outright; the rest of the chi
+    budget still goes to the globally largest eigenvalues.  It used to pin the
+    per-sector counts, which capped the bond's sector structure and left the
+    environment short of the dense reference (#922).
 
 
     The projector is constructed directly as a SymmetricTensor with
@@ -296,8 +298,8 @@ def _eigh_projector_symmetric(
             corners' charge sectors.  When ``None``, uses C1g's fused
             index (safe when both corners have matching fused indices).
         base_charges: Bond charges from the iPEPS tensor A.  When provided,
-            per-sector allocation via ``_derive_charges`` is used instead
-            of purely global eigenvalue truncation.
+            each named charge is floored at one slot on top of the global
+            eigenvalue truncation (#922).
 
     Returns:
         ``(P, eps_T)`` where ``P`` has labels ``(fused, chi_new)``, flows
@@ -381,62 +383,41 @@ def _eigh_projector_symmetric(
     sector_keep: dict[int, list[int]] = {}
 
     if base_charges is not None:
-        # Per-sector allocation matching _derive_charges distribution.
-        # This prevents cascading charge-sector loss across CTM sweeps
-        # by ensuring every charge from A's bond is represented.
-        from tenax.algorithms._ctm_utils import _derive_charges
-
-        target_charges = _derive_charges(base_charges, n_keep)
-        target_count: dict[int, int] = {}
-        for q in target_charges:
-            target_count[int(q)] = target_count.get(int(q), 0) + 1
-
-        # Allocate per sector: take top eigenvalues within each sector.
-        # For sectors absent from the data, create identity-like seed
-        # eigenvectors to preserve charge structure (matching dense eigh
-        # behavior where zero-eigenvalue sectors still get eigenvectors).
-        for fq in sorted(target_count.keys()):
-            n_want = target_count[fq]
+        # A charge that ``base_charges`` names but the data does not supply
+        # gets a seed eigenvector (an identity column, eigenvalue 0) so its
+        # floor slot has something to hold.  Dense eigh does the same: a
+        # zero-eigenvalue sector still comes back with eigenvectors.
+        for fq in sorted({int(q) for q in np.asarray(base_charges)}):
             if fq in sector_results:
-                eigvals_arr = np.array(sector_results[fq][1])
-                n_avail = len(eigvals_arr)
-                n_take = min(n_want, n_avail)
-                top_indices = list(np.argsort(eigvals_arr)[-n_take:][::-1])
-                sector_keep[fq] = top_indices
-            else:
-                # Sector absent from data — create seed eigenvectors
-                # (identity columns) so the charge sector is preserved.
-                fused_dim = charge_dim.get(fq, 0)
-                if fused_dim > 0:
-                    n_take = min(n_want, fused_dim)
-                    seed_vecs = jnp.eye(fused_dim, dtype=C1g.dtype)[:, :n_take]
-                    seed_vals = jnp.zeros(n_take, dtype=jnp.float64)
-                    sector_results[fq] = (seed_vecs, seed_vals, fused_dim)
-                    sector_keep[fq] = list(range(n_take))
-
-        # If some target sectors had no data AND no fused_dim,
-        # redistribute budget to existing sectors via global ranking
+                continue
+            fused_dim = charge_dim.get(fq, 0)
+            if fused_dim > 0:
+                sector_results[fq] = (
+                    jnp.eye(fused_dim, dtype=C1g.dtype)[:, :1],
+                    jnp.zeros(1, dtype=jnp.float64),
+                    fused_dim,
+                )
         all_eig_pairs = []
         for fq, (_, eigvals, _) in sector_results.items():
             for i, val in enumerate(np.array(eigvals)):
                 all_eig_pairs.append((float(val), fq, i))
         all_eig_pairs.sort(key=lambda x: (-x[0], -x[2]))
+        n_keep = min(chi, len(all_eig_pairs))
 
-        used = sum(len(v) for v in sector_keep.values())
-        remaining = n_keep - used
-        if remaining > 0:
-            reserved = {(fq, idx) for fq, idxs in sector_keep.items() for idx in idxs}
-            for _, fq, idx in all_eig_pairs:
-                if remaining <= 0:
-                    break
-                if (fq, idx) not in reserved:
-                    sector_keep.setdefault(fq, []).append(idx)
-                    reserved.add((fq, idx))
-                    remaining -= 1
-    else:
-        # Pure global truncation (no base_charges)
-        for _, fq, idx in all_eig_pairs[:n_keep]:
-            sector_keep.setdefault(fq, []).append(idx)
+    # Global top-n_keep, with one slot floored per charge in base_charges
+    # (#922).  ``all_eig_pairs`` is already in the descending-eigenvalue,
+    # descending-index order the dense path uses, and _select_chi_slots
+    # sorts stably, so degenerate eigenvalues keep that tie-break.
+    from tenax.algorithms._ctm_utils import _select_chi_slots
+
+    for slot in _select_chi_slots(
+        np.array([v for v, _, _ in all_eig_pairs], dtype=float),
+        np.array([q for _, q, _ in all_eig_pairs], dtype=np.int32),
+        base_charges=base_charges,
+        chi=n_keep,
+    ):
+        _, fq, idx = all_eig_pairs[slot]
+        sector_keep.setdefault(fq, []).append(idx)
 
     # variPEPS §2.8.2 ε_T from the merged per-sector spectrum, computed
     # against the COMPLEMENT of the actually kept (fused_charge, index)
@@ -720,39 +701,29 @@ def _svd_projector_symmetric(
     all_sv_pairs.sort(key=lambda x: (-x[0], -x[2]))
     n_keep = min(chi, len(all_sv_pairs))
 
+    # Global top-n_keep, with one slot floored per charge in base_charges
+    # (#922); with base_charges None the floor is empty and this is the plain
+    # global cut.
+    #
+    # Unlike the eigh path this does *not* seed named sectors the data omits.
+    # A charge whose grown corners give ``M_q.size == 0`` never reaches
+    # ``sector_results``, contributes no singular value, and so has nothing for
+    # the floor to reserve -- the projector here is built from the corner data
+    # (``C4g @ V S^-1/2``), and with no data there is no column to build.
+    # Pre-existing: the ``_derive_charges`` quota this replaced skipped those
+    # sectors too (it had no ``else`` branch).  Tracked in #929; the default
+    # 2x2 recipe does not come through here.
+    from tenax.algorithms._ctm_utils import _select_chi_slots
+
     sector_keep: dict[int, list[int]] = {}
-
-    if base_charges is not None:
-        from tenax.algorithms._ctm_utils import _derive_charges
-
-        target_charges = _derive_charges(base_charges, n_keep)
-        target_count: dict[int, int] = {}
-        for q in target_charges:
-            target_count[int(q)] = target_count.get(int(q), 0) + 1
-
-        for fq in sorted(target_count.keys()):
-            n_want = target_count[fq]
-            if fq in sector_results:
-                sv_arr = np.array(sector_results[fq][1])
-                n_avail = len(sv_arr)
-                n_take = min(n_want, n_avail)
-                top_indices = list(np.argsort(sv_arr)[-n_take:][::-1])
-                sector_keep[fq] = top_indices
-
-        used = sum(len(v) for v in sector_keep.values())
-        remaining = n_keep - used
-        if remaining > 0:
-            reserved = {(fq, idx) for fq, idxs in sector_keep.items() for idx in idxs}
-            for _, fq, idx in all_sv_pairs:
-                if remaining <= 0:
-                    break
-                if (fq, idx) not in reserved:
-                    sector_keep.setdefault(fq, []).append(idx)
-                    reserved.add((fq, idx))
-                    remaining -= 1
-    else:
-        for _, fq, idx in all_sv_pairs[:n_keep]:
-            sector_keep.setdefault(fq, []).append(idx)
+    for slot in _select_chi_slots(
+        np.array([v for v, _, _ in all_sv_pairs], dtype=float),
+        np.array([q for _, q, _ in all_sv_pairs], dtype=np.int32),
+        base_charges=base_charges,
+        chi=n_keep,
+    ):
+        _, fq, idx = all_sv_pairs[slot]
+        sector_keep.setdefault(fq, []).append(idx)
 
     # variPEPS §2.8.2 ε_T from the merged per-sector singular-value
     # spectrum, computed against the COMPLEMENT of the actually kept

@@ -116,11 +116,62 @@ def test_enlarged_corners_build_after_left_absorption_multicharge():
             assert Q is not None, f"{pos} failed to build at {s_dst}"
 
 
+#: The dense 2x2 energy of ``_su_direction_dependent_pair()``.
+#:
+#: **Regenerate with**::
+#:
+#:     A, B = _su_direction_dependent_pair()
+#:     Ad, Bd = (DenseTensor(np.array(t.todense()), t.indices) for t in (A, B))
+#:     eA, eB = ctm_tensor_2site(Ad, Bd, chi=12, max_iter=60, conv_tol=1e-9,
+#:                               recipe="2x2")
+#:     print(compute_energy_ctm_tensor_2site(Ad, Bd, eA, eB, heisenberg_gate()))
+#:
+#: Measured bit-identical at ``max_iter`` 60 / 120 / 240 and ``chi`` 8 / 12 /
+#: 16 / 24.  (``max_iter=30`` gives -0.4332902670293, 1.0e-09 away, so the
+#: 1e-6 tolerance below is ~3 orders above the only budget sensitivity there
+#: is.)
+#:
+#: The previous value here was ``-0.5421160718``, frozen on 2026-07-02 by
+#: ``7b8e5ad`` and never revisited.  It was **never recoverable**: it was
+#: measured through the pre-#898 convergence criterion, which certified this
+#: environment on sweep ~3, so it recorded a sweep index rather than an
+#: energy.  Post-#898 the same call reaches the actual fixed point of the
+#: loop.  This is what a literal frozen without checking the state it came
+#: from costs -- see also #836, and the "scan the budget before freezing"
+#: rule that came out of it.
+_E_DENSE_2X2 = -0.4332902680574
+
+
 def test_dense_2x2_energy_unchanged_by_fix():
-    """The direction-dependent DENSE 2x2 energy is a no-op invariant of the
-    #670 fix (the corrected leg pairing is a benign gauge choice on the
-    single-block dense path). Locks it at the measured -0.5421160718."""
+    """#670's leg-pairing correction is a no-op on the single-block dense path.
+
+    This is a **determinism guard, not a physics check**, and the distinction
+    is load-bearing.  The fixture's corner is rank 1 -- the environment is
+    mean-field and its energy will not respond to ``chi`` -- so ``_E_DENSE_2X2``
+    is emphatically *not* an approximation to the Heisenberg ground state.  What
+    it is, is exactly reproducible: the same number at every ``chi`` from 8 to
+    24 and every ``max_iter`` from 60 to 240.  That is all this test needs,
+    because the question it asks is "did the leg pairing change the dense
+    result", and a bit-stable number answers that.
+
+    The regime is asserted rather than assumed (the previous version assumed it
+    and went stale for 8 weeks without anyone noticing):
+
+    * the loop **says** it cannot certify this environment -- if that warning
+      ever stops, the state is no longer the collapsed one this constant was
+      measured on and the constant must be re-derived;
+    * the value is budget-independent, which is what makes freezing it legal.
+
+    The fixture is deliberately left collapsed.  ``test_ctm_criterion_rank_
+    blind_898.py`` imports this same pair as ``_collapsing_pair()`` and needs
+    the collapse; "repairing" it here would silently gut those tests.  Seed 2
+    was evaluated as a replacement and is worse -- its simple update is still
+    moving 1.7e-02 at 320 steps and its CTM never converges at any budget.
+    """
+    import warnings
+
     from tenax import compute_energy_ctm_tensor_2site, ctm_tensor_2site
+    from tenax.algorithms._ctm_diagnostics import ctm_corner_rank
     from tenax.algorithms.ipeps import heisenberg_gate
     from tenax.core.tensor import DenseTensor
     from tests.test_ctm_direction_dependent_bonds import _su_direction_dependent_pair
@@ -128,6 +179,35 @@ def test_dense_2x2_energy_unchanged_by_fix():
     A, B = _su_direction_dependent_pair()
     Ad = DenseTensor(np.array(A.todense()), A.indices)
     Bd = DenseTensor(np.array(B.todense()), B.indices)
-    eA, eB = ctm_tensor_2site(Ad, Bd, chi=12, max_iter=60, conv_tol=1e-9, recipe="2x2")
-    E = float(compute_energy_ctm_tensor_2site(Ad, Bd, eA, eB, heisenberg_gate()))
-    assert abs(E - (-0.5421160718)) < 1e-6, f"dense 2x2 energy drifted: {E}"
+
+    def run(max_iter, chi=12):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            eA, eB = ctm_tensor_2site(
+                Ad, Bd, chi=chi, max_iter=max_iter, conv_tol=1e-9, recipe="2x2"
+            )
+        E = float(compute_energy_ctm_tensor_2site(Ad, Bd, eA, eB, heisenberg_gate()))
+        return E, eA, [str(c.message) for c in caught]
+
+    E, eA, msgs = run(60)
+
+    # Regime, part 1: still the collapsed environment the constant came from.
+    assert ctm_corner_rank(eA) == 1, (
+        f"corner rank is {ctm_corner_rank(eA)}, not 1: the fixture is no longer "
+        f"collapsed, so _E_DENSE_2X2 describes a different state and must be "
+        f"re-derived (and check test_ctm_criterion_rank_blind_898.py, which "
+        f"needs this pair collapsed)."
+    )
+    assert any("could not be certified" in m for m in msgs), (
+        "the loop no longer reports this environment as uncertifiable; the "
+        "regime this constant was measured in has changed."
+    )
+
+    # Regime, part 2: budget-independent, which is what licenses a literal.
+    E_long, _, _ = run(240)
+    assert abs(E - E_long) < 1e-12, (
+        f"energy moved with max_iter ({E} at 60 vs {E_long} at 240): it is a "
+        f"sweep snapshot, not a reproducible number, and must not be frozen."
+    )
+
+    assert abs(E - _E_DENSE_2X2) < 1e-6, f"dense 2x2 energy drifted: {E}"

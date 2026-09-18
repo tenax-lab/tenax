@@ -29,7 +29,6 @@ from tenax.core.tensor import (
     DenseTensor,
     SymmetricTensor,
     Tensor,
-    _koszul_sign,
 )
 
 # ---------- Shared helpers ----------
@@ -50,6 +49,17 @@ def _block_in_decomp_order(block, decomp_perm: tuple[int, ...]):
     Uses the array's own ``.transpose`` so numpy-backed and JAX-backed blocks
     each keep their type.  Identity permutations return the block untouched, so
     the common in-order case costs nothing.
+
+    **No Koszul sign, deliberately (#997).**  Matricization is storage
+    bookkeeping in the sign-free planar convention (#555): ``contract``
+    applies no signs, so the factors a decomposition emits must recombine to
+    the input under ``contract`` for *any* storage order of the input.  The
+    signed variant made ``U @ s @ Vh`` equal a sign-corrupted permutation of
+    ``T`` whenever the requested split braided odd charges past odd charges
+    -- an O(1), storage-order-dependent error that destroyed 37-56% of the
+    state per fermionic simple-update phase.  Fermionic exchange enters
+    through operators and explicit ``swap_gate`` insertions, never through
+    how a block happens to be flattened.
     """
     if decomp_perm == tuple(range(len(decomp_perm))):
         return block
@@ -249,6 +259,7 @@ def _truncated_svd_symmetric(
     new_bond_label: Label,
     normalize: bool,
     base_charges: np.ndarray | None = None,
+    bond_order: str = "descending",
 ) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor, jax.Array]:
     """Block-diagonal SVD for SymmetricTensor.
 
@@ -256,13 +267,22 @@ def _truncated_svd_symmetric(
     are merged and truncated globally.
 
     Returns ``(U, s_truncated, Vh, s_full)`` where *s_full* contains all
-    singular values (sorted descending) before truncation.
+    singular values (sorted descending) before truncation.  With
+    ``bond_order="sector"`` (never truncating -- the caller has already
+    rejected the combination) the bond is charge-grouped instead and
+    ``s_full`` *is* the returned spectrum; that layout needs no host read,
+    so it is the one mode of this function that runs under a tracer without
+    being rerouted.
     """
     # Tracer-aware dispatch: if any block carries a JAX tracer (AD backward),
-    # the Python-level global SV sort at lines 230-243 cannot run.  Route to
-    # the traced variant that does per-sector static allocation.
+    # the Python-level global SV sort below cannot run.  Route to the traced
+    # variant that does per-sector static allocation -- except in sector
+    # mode, whose layout never reads a value: it stays on THIS body, eager
+    # and traced alike, so the two cannot disagree (the traced variant's
+    # ``truncated_svd_ad`` floor and sign gauge are exactly such a
+    # disagreement -- see tests/test_svd_bond_order.py).
     is_traced = any(isinstance(b, jax.core.Tracer) for b in tensor.blocks.values())
-    if is_traced and tensor.blocks:
+    if is_traced and tensor.blocks and bond_order != "sector":
         return _truncated_svd_symmetric_traced(
             tensor,
             left_labels,
@@ -284,7 +304,6 @@ def _truncated_svd_symmetric(
 
     # Check if fermionic signs are needed for leg reordering
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     # The permutation from original leg order to (left_axes, right_axes)
     decomp_perm = tuple(left_axes + right_axes)
 
@@ -360,20 +379,6 @@ def _truncated_svd_symmetric(
             flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            # Apply Koszul sign for leg reordering (original -> left+right)
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix = matrix.at[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -409,166 +414,232 @@ def _truncated_svd_symmetric(
             right_col_sizes,
         )
 
-    # Global ("democratic") truncation: merge singular values from all charge
-    # sectors and sort globally descending.  The largest singular values are
-    # kept regardless of which sector they belong to.  This is the standard
-    # choice for ground-state DMRG — it minimises the total truncation error
-    # in the 2-norm (Frobenius norm of the discarded weight).
-    #
-    # Alternative: per-sector truncation preserves sector weight ratios but
-    # can waste bond dimension on sectors with small total weight.  It may be
-    # preferable for finite-temperature (purification) or time-evolution
-    # applications where sector balance matters physically.
-    all_sv_pairs: list[
-        tuple[float, int, int]
-    ] = []  # (value, sector_q, index_in_sector)
-    for q, (_, s_q, _, _, _, _, _) in sector_results.items():
-        s_np = np.array(s_q)
-        for i, val in enumerate(s_np):
-            all_sv_pairs.append((float(val), q, i))
-
-    # Sort descending by singular value
-    all_sv_pairs.sort(key=lambda x: -x[0])
-
-    # Preserve the full singular-value spectrum before truncation
-    s_full = jnp.array([v for v, _, _ in all_sv_pairs])
-
-    # Determine global keep count
-    n_total = len(all_sv_pairs)
-    n_keep = n_total
-
-    if max_truncation_err is not None and n_total > 0:
-        total_sq = sum(x[0] ** 2 for x in all_sv_pairs)
-        if total_sq > 0:
-            trunc_sq = 0.0
-            for i in range(n_total - 1, 0, -1):
-                trunc_sq += all_sv_pairs[i][0] ** 2
-                if trunc_sq / total_sq > max_truncation_err**2:
-                    n_keep = i + 1
-                    break
-            else:
-                n_keep = n_total
-
-    if max_singular_values is not None:
-        n_keep = min(n_keep, max_singular_values)
-
-    n_keep = max(1, min(n_keep, n_total))
-
-    # Select which singular values to keep.
-    # When ``base_charges`` is supplied with ``max_singular_values``, allocate
-    # keep counts per sector to match the canonical layout, mirroring the
-    # traced-path behavior in ``_truncated_svd_symmetric_traced``. This is the
-    # right policy whenever the caller needs a fixed bond charge structure
-    # (e.g. fPEPS simple update — #558 — where ``A.l`` and ``A.r`` are the
-    # same physical bond and the next step crashes if the SVD lets one drift).
-    # Without ``base_charges`` the historical global "democratic" truncation is
-    # retained — it minimises 2-norm truncation error and is the standard
-    # choice for DMRG.
-    if base_charges is not None and max_singular_values is not None:
-        from tenax.algorithms._ctm_utils import _derive_charges
-
-        available = {q: len(sector_results[q][1]) for q in sector_results}
-        # Pre-build per-sector lists of (value, q, idx_in_sector). all_sv_pairs
-        # is globally descending, so per-sector slices preserve within-sector
-        # descending order.
-        per_sector_pool: dict[int, list[tuple[float, int, int]]] = {}
-        for p in all_sv_pairs:
-            per_sector_pool.setdefault(p[1], []).append(p)
-
-        def _canonical_select(target_n: int):
-            """Allocate per-sector keep matching ``_derive_charges(base, n)``,
-            with greedy fill for over-allocated sectors. Returns
-            ``(k_per_sector, target_charges, kept_pairs_set)``.
-            """
-            t_charges = _derive_charges(base_charges, target_n)
-            t_count: dict[int, int] = {}
-            for tq in t_charges:
-                t_count[int(tq)] = t_count.get(int(tq), 0) + 1
-            k_per: dict[int, int] = {
-                q: min(t_count.get(q, 0), available[q]) for q in available
-            }
-            remaining = target_n - sum(k_per.values())
-            if remaining > 0:
-                for q in sorted(
-                    available.keys(),
-                    key=lambda qq: (-(available[qq] - k_per.get(qq, 0)), qq),
-                ):
-                    if remaining <= 0:
-                        break
-                    capacity_left = available[q] - k_per.get(q, 0)
-                    take = min(remaining, capacity_left)
-                    if take > 0:
-                        k_per[q] = k_per.get(q, 0) + take
-                        remaining -= take
-            pair_set = {(q, i) for q, k in k_per.items() if k > 0 for i in range(k)}
-            return k_per, t_charges, pair_set
-
-        # Iteratively expand ``n_keep`` whenever the canonical-prefix kept set
-        # for the current ``n_keep`` discards weight in excess of
-        # ``max_truncation_err``. The global-cumulative err computed earlier
-        # assumed global top-n selection; under base_charges the canonical
-        # prefix may keep weaker SVs from required sectors and discard larger
-        # ones from over-represented sectors, so the actual err can exceed
-        # the budget. Expand up to ``max_singular_values``; if the budget
-        # still cannot be met we return what we have at the cap. (PR #561
-        # codex P2 review.)
-        if max_truncation_err is not None and n_total > 0:
-            total_sq = sum(p[0] ** 2 for p in all_sv_pairs)
-            err_sq_budget = max_truncation_err**2 * total_sq
-            cap = max_singular_values
-            while n_keep < cap:
-                _, _, pair_set = _canonical_select(n_keep)
-                discarded_sq = sum(
-                    p[0] ** 2 for p in all_sv_pairs if (p[1], p[2]) not in pair_set
-                )
-                if discarded_sq <= err_sq_budget:
-                    break
-                n_keep += 1
-
-        k_per_sector, target_charges, _ = _canonical_select(n_keep)
-
-        # Emit ``kept`` (and therefore ``bond_charges``/``s_final``) in the
-        # caller's canonical position order, *not* in global SV-magnitude
-        # order. This matters because downstream code (fPEPS SU, traced path
-        # consumers) applies the returned ``sigma``/``lam`` to the opposite
-        # bond axis -- whose ``idx.charges`` is the canonical pattern -- via
-        # ``scale_bond_axis``, which slices the scale vector by position
-        # under ``np.where(idx.charges == q)``.  Mismatched ordering would
-        # multiply the wrong charge sectors and silently corrupt the state
-        # without crashing (PR #560 codex review).
-        kept = []
-        used = {q: 0 for q in k_per_sector}
-        # Phase 1: fill in canonical-position order until target_charges is
-        # exhausted *or* a sector runs out of its k_per_sector quota.
-        for tq in target_charges:
-            q = int(tq)
-            if used.get(q, 0) < k_per_sector.get(q, 0):
-                kept.append(per_sector_pool[q][used[q]])
-                used[q] += 1
-        # Phase 2: append any remaining quota for sectors that got more from
-        # greedy fill than target_count requested. These tail entries don't
-        # have a canonical position in ``base_charges`` -- placing them at
-        # the end preserves sector-grouped contiguity for the overflow.
-        for q in sorted(k_per_sector.keys()):
-            while used[q] < k_per_sector[q]:
-                kept.append(per_sector_pool[q][used[q]])
-                used[q] += 1
+    if bond_order == "sector":
+        # Charge-grouped, and no singular value is read on the host: the
+        # bond's layout follows the sector structure, which is static, so
+        # this branch runs under a tracer -- and it is the SAME branch
+        # eager, so there is no second implementation to drift from this
+        # one (the tracer reroute above applies ``truncated_svd_ad``'s
+        # subrank floor, whose ``+1e-30`` arm zeroes real ~1e-43 singular
+        # values on 1x1 sectors -- see
+        # tests/test_svd_bond_order.py::test_no_floor_is_applied_under_trace).
+        # Sectors are visited in sorted charge order so the layout is
+        # reproducible rather than dict-insertion dependent; within a
+        # sector the values keep ``_dense_svd``'s own descending order.
+        order = sorted(sector_results)
+        kept = [
+            (0.0, q, i)  # value placeholder; never read in this mode
+            for q in order
+            for i in range(sector_results[q][1].shape[0])
+        ]
+        s_final = (
+            jnp.concatenate([sector_results[q][1] for q in order])
+            if order
+            else jnp.zeros((0,), dtype=jnp.finfo(tensor.dtype).dtype)
+        )
+        if normalize:
+            # The descending branch's ``jnp.sum(s_final) > 0`` is a host
+            # read; fence the zero case with ``where`` instead.
+            denom = jnp.sum(s_final)
+            s_final = s_final / jnp.where(denom > 0, denom, 1.0)
+        # Nothing was truncated, so the spectrum *is* the full spectrum --
+        # the traced convention, which normalizes before returning the pair,
+        # adopted whole: captured *after* the rescale, so the documented
+        # identity ``s_full is s`` survives ``normalize=True`` instead of
+        # silently handing back one raw and one rescaled copy.
+        s_full = s_final
     else:
-        kept = all_sv_pairs[:n_keep]
+        # Global ("democratic") truncation: merge singular values from all charge
+        # sectors and sort globally descending.  The largest singular values are
+        # kept regardless of which sector they belong to.  This is the standard
+        # choice for ground-state DMRG — it minimises the total truncation error
+        # in the 2-norm (Frobenius norm of the discarded weight).
+        #
+        # Alternative: per-sector truncation preserves sector weight ratios but
+        # can waste bond dimension on sectors with small total weight.  It may be
+        # preferable for finite-temperature (purification) or time-evolution
+        # applications where sector balance matters physically.
+        all_sv_pairs: list[
+            tuple[float, int, int]
+        ] = []  # (value, sector_q, index_in_sector)
+        for q, (_, s_q, _, _, _, _, _) in sector_results.items():
+            s_np = np.array(s_q)
+            for i, val in enumerate(s_np):
+                all_sv_pairs.append((float(val), q, i))
 
-    # Build bond charges and singular values in global descending order
-    # so that s_final[k] pairs with U[:,k] and Vh[k,:].
+        # Sort descending by singular value
+        all_sv_pairs.sort(key=lambda x: -x[0])
+
+        # Preserve the full singular-value spectrum before truncation
+        s_full = jnp.array([v for v, _, _ in all_sv_pairs])
+
+        # Determine global keep count
+        n_total = len(all_sv_pairs)
+        n_keep = n_total
+
+        if max_truncation_err is not None and n_total > 0:
+            leading = all_sv_pairs[0][0]
+            if leading > 0:
+                # Rescale by the leading value before squaring.  The kept/discarded
+                # ratio is scale-invariant, and squaring an unscaled spectrum
+                # halves the exponent range: float64 values around 1e-200 square
+                # to exactly 0.0, and an unscaled ``total_sq == 0`` would misread
+                # a small-but-nonzero spectrum as a zero tensor and truncate it
+                # to rank 1 (#949 review).
+                scaled = [x[0] / leading for x in all_sv_pairs]
+                total_sq = sum(v * v for v in scaled)
+                trunc_sq = 0.0
+                for i in range(n_total - 1, 0, -1):
+                    trunc_sq += scaled[i] * scaled[i]
+                    if trunc_sq / total_sq > max_truncation_err**2:
+                        n_keep = i + 1
+                        break
+                else:
+                    # The loop never reaches index 0, so exhausting it means
+                    # every value behind the leading one fits inside the error
+                    # budget -- keep only the leading value.  This used to reset
+                    # to ``n_total``, silently retaining negligible/zero sectors
+                    # that dense SVD at the same tolerance discards (#946).
+                    n_keep = 1
+            else:
+                # Identically zero spectrum: any rank satisfies the budget, so
+                # keep the minimum the API guarantees, matching the dense path's
+                # zero-tensor policy (#946/#947).
+                n_keep = 1
+
+        if max_singular_values is not None:
+            n_keep = min(n_keep, max_singular_values)
+
+        n_keep = max(1, min(n_keep, n_total))
+
+        # Select which singular values to keep.
+        # When ``base_charges`` is supplied with ``max_singular_values``, allocate
+        # keep counts per sector to match the canonical layout, mirroring the
+        # traced-path behavior in ``_truncated_svd_symmetric_traced``. This is the
+        # right policy whenever the caller needs a fixed bond charge structure
+        # (e.g. fPEPS simple update — #558 — where ``A.l`` and ``A.r`` are the
+        # same physical bond and the next step crashes if the SVD lets one drift).
+        # Without ``base_charges`` the historical global "democratic" truncation is
+        # retained — it minimises 2-norm truncation error and is the standard
+        # choice for DMRG.
+        if base_charges is not None and max_singular_values is not None:
+            from tenax.algorithms._ctm_utils import _derive_charges
+
+            available = {q: len(sector_results[q][1]) for q in sector_results}
+            # Pre-build per-sector lists of (value, q, idx_in_sector). all_sv_pairs
+            # is globally descending, so per-sector slices preserve within-sector
+            # descending order.
+            per_sector_pool: dict[int, list[tuple[float, int, int]]] = {}
+            for p in all_sv_pairs:
+                per_sector_pool.setdefault(p[1], []).append(p)
+
+            def _canonical_select(target_n: int):
+                """Allocate per-sector keep matching ``_derive_charges(base, n)``,
+                with greedy fill for over-allocated sectors. Returns
+                ``(k_per_sector, target_charges, kept_pairs_set)``.
+                """
+                t_charges = _derive_charges(base_charges, target_n)
+                t_count: dict[int, int] = {}
+                for tq in t_charges:
+                    t_count[int(tq)] = t_count.get(int(tq), 0) + 1
+                k_per: dict[int, int] = {
+                    q: min(t_count.get(q, 0), available[q]) for q in available
+                }
+                remaining = target_n - sum(k_per.values())
+                if remaining > 0:
+                    for q in sorted(
+                        available.keys(),
+                        key=lambda qq: (-(available[qq] - k_per.get(qq, 0)), qq),
+                    ):
+                        if remaining <= 0:
+                            break
+                        capacity_left = available[q] - k_per.get(q, 0)
+                        take = min(remaining, capacity_left)
+                        if take > 0:
+                            k_per[q] = k_per.get(q, 0) + take
+                            remaining -= take
+                pair_set = {(q, i) for q, k in k_per.items() if k > 0 for i in range(k)}
+                return k_per, t_charges, pair_set
+
+            # Iteratively expand ``n_keep`` whenever the canonical-prefix kept set
+            # for the current ``n_keep`` discards weight in excess of
+            # ``max_truncation_err``. The global-cumulative err computed earlier
+            # assumed global top-n selection; under base_charges the canonical
+            # prefix may keep weaker SVs from required sectors and discard larger
+            # ones from over-represented sectors, so the actual err can exceed
+            # the budget. Expand up to ``max_singular_values``; if the budget
+            # still cannot be met we return what we have at the cap. (PR #561
+            # codex P2 review.)
+            if (
+                max_truncation_err is not None
+                and n_total > 0
+                and all_sv_pairs[0][0] > 0
+            ):
+                # Rescale by the leading value here too: this is a SECOND squaring
+                # of the raw spectrum, independent of the global cutoff above, and
+                # at ~1e-200 scales the unscaled ``total_sq`` and ``discarded_sq``
+                # both underflow to exactly 0.0 — the loop then breaks on
+                # ``0 <= 0`` while the canonical prefix discards macroscopic
+                # relative weight (0.669 measured vs a 0.05 budget in the #949
+                # round-2 review).  The budget comparison is scale-invariant.
+                leading = all_sv_pairs[0][0]
+                total_sq = sum((p[0] / leading) ** 2 for p in all_sv_pairs)
+                err_sq_budget = max_truncation_err**2 * total_sq
+                cap = max_singular_values
+                while n_keep < cap:
+                    _, _, pair_set = _canonical_select(n_keep)
+                    discarded_sq = sum(
+                        (p[0] / leading) ** 2
+                        for p in all_sv_pairs
+                        if (p[1], p[2]) not in pair_set
+                    )
+                    if discarded_sq <= err_sq_budget:
+                        break
+                    n_keep += 1
+
+            k_per_sector, target_charges, _ = _canonical_select(n_keep)
+
+            # Emit ``kept`` (and therefore ``bond_charges``/``s_final``) in the
+            # caller's canonical position order, *not* in global SV-magnitude
+            # order. This matters because downstream code (fPEPS SU, traced path
+            # consumers) applies the returned ``sigma``/``lam`` to the opposite
+            # bond axis -- whose ``idx.charges`` is the canonical pattern -- via
+            # ``scale_bond_axis``, which slices the scale vector by position
+            # under ``np.where(idx.charges == q)``.  Mismatched ordering would
+            # multiply the wrong charge sectors and silently corrupt the state
+            # without crashing (PR #560 codex review).
+            kept = []
+            used = {q: 0 for q in k_per_sector}
+            # Phase 1: fill in canonical-position order until target_charges is
+            # exhausted *or* a sector runs out of its k_per_sector quota.
+            for tq in target_charges:
+                q = int(tq)
+                if used.get(q, 0) < k_per_sector.get(q, 0):
+                    kept.append(per_sector_pool[q][used[q]])
+                    used[q] += 1
+            # Phase 2: append any remaining quota for sectors that got more from
+            # greedy fill than target_count requested. These tail entries don't
+            # have a canonical position in ``base_charges`` -- placing them at
+            # the end preserves sector-grouped contiguity for the overflow.
+            for q in sorted(k_per_sector.keys()):
+                while used[q] < k_per_sector[q]:
+                    kept.append(per_sector_pool[q][used[q]])
+                    used[q] += 1
+        else:
+            kept = all_sv_pairs[:n_keep]
+        s_final = jnp.array([v for v, _, _ in kept])
+        if normalize and jnp.sum(s_final) > 0:
+            s_final = s_final / jnp.sum(s_final)
+
+    # Bond charges in the kept order, so that s_final[k] pairs with U[:,k]
+    # and Vh[k,:] whichever layout was chosen.
     bond_charges = np.array([q for _, q, _ in kept], dtype=np.int32)
-    s_final = jnp.array([v for v, _, _ in kept])
 
     # Per-sector: map each kept singular value to its global position
     # sector_cols[q] = list of (global_col, index_in_sector)
     sector_cols: dict[int, list[tuple[int, int]]] = {}
     for global_col, (_, q, idx_in_sector) in enumerate(kept):
         sector_cols.setdefault(q, []).append((global_col, idx_in_sector))
-
-    if normalize and jnp.sum(s_final) > 0:
-        s_final = s_final / jnp.sum(s_final)
 
     sym = tensor.indices[0].symmetry
 
@@ -661,6 +732,14 @@ def _truncated_svd_symmetric_traced(
     charge sector is SVD'd independently via :func:`truncated_svd_ad`, which
     applies Francuz et al. Lorentzian regularization per block.
 
+    ``bond_order="sector"`` requests never reach this function: that mode's
+    layout reads no values, so the eager body itself is tracer-safe and the
+    dispatch keeps sector-mode tracers there -- deliberately, because
+    :func:`truncated_svd_ad`'s subrank floor (exact zeros below
+    ``1e-12 * (s_max + 1e-30)``) is a truncation-semantics guard, not a
+    property of the decomposition, and sector mode promises the eager
+    numbers.
+
     Allocation rule (static, no global SV sort):
       * If both ``base_charges`` and ``max_singular_values`` are provided:
         ``k_q = min(target_count[q], available_q)`` where
@@ -701,7 +780,6 @@ def _truncated_svd_symmetric_traced(
     grouped = _group_blocks_by_bond_charge(tensor, left_axes, right_axes)
 
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     decomp_perm = tuple(left_axes + right_axes)
 
     # Per-sector results: q -> (matrix, left_subkeys, right_subkeys,
@@ -751,19 +829,6 @@ def _truncated_svd_symmetric_traced(
             flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix = matrix.at[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -964,7 +1029,6 @@ def _truncated_svd_symmetric_np(
 
     # Check if fermionic signs are needed for leg reordering
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     # The permutation from original leg order to (left_axes, right_axes)
     decomp_perm = tuple(left_axes + right_axes)
 
@@ -1028,20 +1092,6 @@ def _truncated_svd_symmetric_np(
             flat_block = _block_in_decomp_order(np.asarray(block), decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            # Apply Koszul sign for leg reordering (original -> left+right)
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -1078,16 +1128,34 @@ def _truncated_svd_symmetric_np(
     n_keep = n_total
 
     if max_truncation_err is not None and n_total > 0:
-        total_sq = sum(x[0] ** 2 for x in all_sv_pairs)
-        if total_sq > 0:
+        leading = all_sv_pairs[0][0]
+        if leading > 0:
+            # Rescale by the leading value before squaring.  The kept/discarded
+            # ratio is scale-invariant, and squaring an unscaled spectrum
+            # halves the exponent range: float64 values around 1e-200 square
+            # to exactly 0.0, and an unscaled ``total_sq == 0`` would misread
+            # a small-but-nonzero spectrum as a zero tensor and truncate it
+            # to rank 1 (#949 review).
+            scaled = [x[0] / leading for x in all_sv_pairs]
+            total_sq = sum(v * v for v in scaled)
             trunc_sq = 0.0
             for i in range(n_total - 1, 0, -1):
-                trunc_sq += all_sv_pairs[i][0] ** 2
+                trunc_sq += scaled[i] * scaled[i]
                 if trunc_sq / total_sq > max_truncation_err**2:
                     n_keep = i + 1
                     break
             else:
-                n_keep = n_total
+                # The loop never reaches index 0, so exhausting it means
+                # every value behind the leading one fits inside the error
+                # budget -- keep only the leading value.  This used to reset
+                # to ``n_total``, silently retaining negligible/zero sectors
+                # that dense SVD at the same tolerance discards (#946).
+                n_keep = 1
+        else:
+            # Identically zero spectrum: any rank satisfies the budget, so
+            # keep the minimum the API guarantees, matching the dense path's
+            # zero-tensor policy (#946/#947).
+            n_keep = 1
 
     if max_singular_values is not None:
         n_keep = min(n_keep, max_singular_values)
@@ -1192,7 +1260,6 @@ def _qr_symmetric_np(
 
     # Check if fermionic signs are needed for leg reordering
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     decomp_perm = tuple(left_axes + right_axes)
 
     # Per-sector QR results
@@ -1257,20 +1324,6 @@ def _qr_symmetric_np(
             flat_block = _block_in_decomp_order(np.asarray(block), decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            # Apply Koszul sign for leg reordering (original -> left+right)
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -1369,7 +1422,6 @@ def _qr_symmetric(
 
     # Check if fermionic signs are needed for leg reordering
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     decomp_perm = tuple(left_axes + right_axes)
 
     # Per-sector QR results
@@ -1436,20 +1488,6 @@ def _qr_symmetric(
             flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            # Apply Koszul sign for leg reordering (original -> left+right)
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix = matrix.at[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -1564,11 +1602,22 @@ def _eigh_symmetric(
     right_labels: Sequence[Label],
     new_bond_label: Label,
     max_eigenvalues: int | None,
+    bond_order: str = "descending",
 ) -> tuple[SymmetricTensor, jax.Array]:
     """Block-diagonal Hermitian eigendecomposition for SymmetricTensor.
 
     Each charge sector is eigendecomposed independently, then eigenvalues
     are merged and truncated globally (keeping the largest).
+
+    ``bond_order="sector"`` emits the output bond charge-grouped instead, which
+    is what makes this **traceable**: ranking the sectors against each other
+    means reading the eigenvalues on the host, and ``np.array`` on a tracer
+    raises.  The result is not value-ordered -- sectors ascend by charge and
+    each sector keeps ``jnp.linalg.eigh``'s own ascending order.  Without a truncation there is nothing to rank *for* -- every
+    eigenvalue is kept either way and the order is a convention -- so the two
+    modes differ only by a permutation of the bond, with ``V`` and
+    ``eigenvalues`` permuted together.  It is rejected with
+    ``max_eigenvalues``, where the ranking is load-bearing.
     """
     all_labels = tensor.labels()
     label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}
@@ -1580,7 +1629,6 @@ def _eigh_symmetric(
 
     # Check if fermionic signs are needed for leg reordering
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     decomp_perm = tuple(left_axes + right_axes)
 
     # Per-sector eigh results: (eigvecs, eigvals, left_subkeys, left_row_sizes)
@@ -1636,20 +1684,6 @@ def _eigh_symmetric(
             flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            # Apply Koszul sign for leg reordering (original -> left+right)
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix = matrix.at[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -1675,27 +1709,42 @@ def _eigh_symmetric(
         left_subkeys, left_row_sizes = _eigh_meta_by_q[q]
         sector_results[q] = (eigvecs_q, eigvals_q, left_subkeys, left_row_sizes)
 
-    # Global truncation: merge eigenvalues across sectors, keep top-k
-    all_eig_pairs: list[tuple[float, int, int]] = []
-    for q, (_, eigvals_q, _, _) in sector_results.items():
-        ev_np = np.array(eigvals_q)
-        for i, val in enumerate(ev_np):
-            all_eig_pairs.append((float(val), q, i))
+    if bond_order == "sector":
+        # Charge-grouped, and no eigenvalue is read on the host: the bond's
+        # layout follows the sector structure, which is static.  Sectors are
+        # visited in sorted charge order so the layout is reproducible rather
+        # than dict-insertion dependent.
+        order = sorted(sector_results)
+        kept = [
+            (0.0, q, i) for q in order for i in range(sector_results[q][1].shape[0])
+        ]
+        eigenvalues = (
+            jnp.concatenate([sector_results[q][1] for q in order])
+            if order
+            else jnp.zeros((0,), dtype=tensor.dtype)
+        )
+    else:
+        # Global truncation: merge eigenvalues across sectors, keep top-k
+        all_eig_pairs: list[tuple[float, int, int]] = []
+        for q, (_, eigvals_q, _, _) in sector_results.items():
+            ev_np = np.array(eigvals_q)
+            for i, val in enumerate(ev_np):
+                all_eig_pairs.append((float(val), q, i))
 
-    # Sort descending by eigenvalue, then descending by index to match
-    # the dense convention of taking eigvecs[:, -k:] for degenerate eigenvalues.
-    all_eig_pairs.sort(key=lambda x: (-x[0], -x[2]))
+        # Sort descending by eigenvalue, then descending by index to match the
+        # dense convention of taking eigvecs[:, -k:] for degenerate eigenvalues.
+        all_eig_pairs.sort(key=lambda x: (-x[0], -x[2]))
 
-    n_total = len(all_eig_pairs)
-    n_keep = n_total
-    if max_eigenvalues is not None:
-        n_keep = min(n_keep, max_eigenvalues)
-    n_keep = max(1, min(n_keep, n_total))
+        n_total = len(all_eig_pairs)
+        n_keep = n_total
+        if max_eigenvalues is not None:
+            n_keep = min(n_keep, max_eigenvalues)
+        n_keep = max(1, min(n_keep, n_total))
 
-    kept = all_eig_pairs[:n_keep]
+        kept = all_eig_pairs[:n_keep]
 
-    # Eigenvalues in descending order
-    eigenvalues = jnp.array([v for v, _, _ in kept])
+        # Eigenvalues in descending order
+        eigenvalues = jnp.array([v for v, _, _ in kept])
 
     # Build bond charges in global descending eigenvalue order (matching
     # the eigenvalues array) so that V[:,k] pairs with eigenvalues[k].
@@ -1753,6 +1802,7 @@ def svd(
     max_truncation_err: float | None = None,
     normalize: bool = False,
     base_charges: np.ndarray | None = None,
+    bond_order: str = "descending",
 ) -> tuple[Tensor, jax.Array, Tensor, jax.Array]:
     """Reshape tensor into matrix, compute SVD, truncate, reshape back.
 
@@ -1786,7 +1836,30 @@ def svd(
                               supplied, traced inputs use
                               ``_derive_charges(base_charges, max_singular_values)``
                               for static per-sector keep allocation.  Ignored on
-                              the dense path.
+                              the dense path, and inert with
+                              ``bond_order="sector"`` (it only shapes a
+                              truncation, which sector mode refuses).
+        bond_order:           ``"descending"`` (default) ranks the whole
+                              spectrum by value across charge sectors;
+                              ``"sector"`` emits the bond charge-grouped
+                              instead -- sectors ascending by charge, values
+                              descending *within* each sector -- so the
+                              returned array is not globally monotone.  On a
+                              ``SymmetricTensor`` the ranking reads every
+                              singular value on the host, so only
+                              ``"sector"`` can run under ``jax.jit`` as the
+                              same code path it runs eagerly; it is available
+                              untruncated only (with no ranking there is
+                              nothing for the layout to decide) and is
+                              rejected with ``max_singular_values`` or
+                              ``max_truncation_err``.  The two modes differ
+                              by a permutation of the bond, with ``U``,
+                              ``Vh`` and the spectrum permuted together.
+                              Ignored on the dense path, which has no
+                              sectors to group.  Reverse-mode AD through
+                              sector mode uses the default SVD JVP rather
+                              than :func:`truncated_svd_ad`'s guarded one --
+                              do not differentiate it at degenerate spectra.
 
     Returns:
         ``(U_tensor, singular_values, Vh_tensor, singular_values_full)``
@@ -1795,11 +1868,23 @@ def svd(
         singular_values is a 1-D JAX float array (truncated).
         singular_values_full is a 1-D JAX float array containing **all**
         singular values before truncation (length = min(left_dim, right_dim)),
-        useful for computing truncation error without a second SVD.
+        useful for computing truncation error without a second SVD.  With
+        ``bond_order="sector"`` nothing is truncated and
+        ``singular_values_full`` *is* ``singular_values``, in the same
+        charge-grouped order -- including under ``normalize``, where both
+        are the normalized spectrum.
 
     Raises:
-        ValueError: If left_labels + right_labels don't cover all tensor labels.
+        ValueError: If left_labels + right_labels don't cover all tensor
+            labels, if ``bond_order`` is not a known mode, or if
+            ``bond_order="sector"`` is combined with either truncation knob
+            on a ``SymmetricTensor``.
     """
+    if bond_order not in ("descending", "sector"):
+        raise ValueError(
+            f"bond_order must be 'descending' or 'sector', got {bond_order!r}"
+        )
+
     all_labels = tensor.labels()
     all_labels_set = set(all_labels)
     left_set = set(left_labels)
@@ -1818,6 +1903,27 @@ def svd(
 
     # Dispatch to block-sparse path for SymmetricTensor
     if isinstance(tensor, SymmetricTensor):
+        # The incompatibility check lives inside this branch, not ahead of
+        # the dispatch: the dense path documents ``bond_order`` as ignored,
+        # so refusing the combination there would reject a truncation dense
+        # performs fine on the strength of an argument that did nothing
+        # (the same placement ``eigh`` settled on -- Codex P2 on #939).
+        # ``svd`` has two ranking knobs where ``eigh`` had one; both rank
+        # sectors against each other on the host, so both refuse.
+        if bond_order == "sector" and max_singular_values is not None:
+            raise ValueError(
+                "bond_order='sector' cannot be combined with "
+                "max_singular_values: truncation ranks charge sectors "
+                "against each other, which is exactly the host-side "
+                "ordering that mode exists to avoid"
+            )
+        if bond_order == "sector" and max_truncation_err is not None:
+            raise ValueError(
+                "bond_order='sector' cannot be combined with "
+                "max_truncation_err: the error budget is spent in global "
+                "value order, which is exactly the host-side ordering that "
+                "mode exists to avoid"
+            )
         return _truncated_svd_symmetric(
             tensor,
             left_labels,
@@ -1827,6 +1933,7 @@ def svd(
             new_bond_label,
             normalize,
             base_charges=base_charges,
+            bond_order=bond_order,
         )
 
     # Build axis ordering: left labels first, then right labels
@@ -1866,15 +1973,34 @@ def svd(
 
         if max_truncation_err is not None:
             # Keep singular values until truncation error <= max_truncation_err
-            total_sq = float(np.sum(s_np**2))
-            trunc_sq = 0.0
-            for i in range(len(s_np) - 1, -1, -1):
-                trunc_sq += float(s_np[i] ** 2)
-                if trunc_sq / total_sq > max_truncation_err**2:
-                    n_keep = i + 1
-                    break
+            leading = float(s_np[0]) if len(s_np) else 0.0
+            if leading > 0.0:
+                # Rescaled by the leading value, like the symmetric paths:
+                # the ratio is scale-invariant, and squaring an unscaled
+                # spectrum halves the exponent range, so ~1e-200 values would
+                # underflow to ``total_sq == 0`` and be misread as a zero
+                # tensor (#949 review).
+                scaled = s_np / leading
+                total_sq = float(np.sum(scaled**2))
+                trunc_sq = 0.0
+                for i in range(len(s_np) - 1, -1, -1):
+                    trunc_sq += float(scaled[i] ** 2)
+                    if trunc_sq / total_sq > max_truncation_err**2:
+                        n_keep = i + 1
+                        break
+                else:
+                    # This loop DOES reach index 0, so it only exhausts when
+                    # the whole spectrum fits the budget (err >= 1).  Keep
+                    # the minimum rank, matching the symmetric paths' policy
+                    # -- this used to keep everything (#949 review).
+                    n_keep = 1
             else:
-                n_keep = len(s_np)
+                # Identically zero spectrum: dividing by ``total_sq`` raised
+                # ZeroDivisionError, so a zero tensor could be decomposed
+                # without a tolerance but crashed with one (#947).  Any rank
+                # reconstructs a zero tensor exactly; keep the minimum the
+                # API guarantees.
+                n_keep = 1
 
         if max_singular_values is not None:
             n_keep = min(n_keep, max_singular_values)
@@ -1887,7 +2013,15 @@ def svd(
     Vh = Vh[:n_keep, :]
 
     if normalize:
-        s = s / jnp.sum(s)
+        # The zero-spectrum guard matters since #947 (0/0 would hand back NaN
+        # factors for a tensor that reconstructs exactly), but it must stay
+        # traceable: a Python ``if`` on ``jnp.sum(s) > 0`` raised
+        # TracerBoolConversionError under jit/vmap even for nonzero matrices
+        # (#949 round 3).  Fence the DENOMINATOR, not the quotient — a
+        # ``jnp.where`` on the result would fix the value and still send 0/0
+        # through the backward pass (the #789 lesson).
+        denom = jnp.sum(s)
+        s = s / jnp.where(denom > 0, denom, 1.0)
 
     # Reshape back and build output tensors
     left_shape = tuple(idx.dim for idx in left_indices)
@@ -1972,7 +2106,6 @@ def _rsvd_symmetric(
     grouped = _group_blocks_by_bond_charge(tensor, left_axes, right_axes)
 
     sym = tensor.indices[0].symmetry
-    is_fermionic = sym.is_fermionic
     decomp_perm = tuple(left_axes + right_axes)
 
     # Per-sector RSVD results
@@ -2033,19 +2166,6 @@ def _rsvd_symmetric(
             flat_block = _block_in_decomp_order(block, decomp_perm).reshape(
                 left_row_sizes[li], right_col_sizes[ri]
             )
-            if is_fermionic:
-                full_key = [0] * len(tensor.indices)
-                for ax, ch in zip(left_axes, lk):
-                    full_key[ax] = ch
-                for ax, ch in zip(right_axes, rk):
-                    full_key[ax] = ch
-                parities = tuple(
-                    int(sym.parity(np.array([full_key[i]]))[0])
-                    for i in range(len(full_key))
-                )
-                ksign = _koszul_sign(parities, decomp_perm)
-                if ksign < 0:
-                    flat_block = -flat_block
             matrix = matrix.at[
                 row_start : row_start + left_row_sizes[li],
                 col_start : col_start + right_col_sizes[ri],
@@ -2360,15 +2480,18 @@ def eigh(
     right_labels: Sequence[Label],
     new_bond_label: Label = "bond",
     max_eigenvalues: int | None = None,
+    bond_order: str = "descending",
 ) -> tuple[Tensor, jax.Array]:
     """Eigendecompose a Hermitian tensor.
 
     Reshapes the tensor into a square matrix (left_labels vs right_labels),
     computes the eigendecomposition, and returns eigenvectors as a Tensor.
 
-    Eigenvalues are sorted in descending order. If ``max_eigenvalues`` is
-    given, only the top-k eigenvalues (and corresponding eigenvectors) are
-    kept.
+    Eigenvalues are sorted **algebraically** descending -- largest first, so a
+    negative eigenvalue sorts below every positive one regardless of magnitude.
+    If ``max_eigenvalues`` is given, only the top-k (and their eigenvectors) are
+    kept, by that same algebraic ranking.  ``bond_order="sector"`` orders the
+    output differently; see below.
 
     Output labels::
 
@@ -2380,15 +2503,58 @@ def eigh(
         right_labels:     Labels forming the column side of the matrix.
         new_bond_label:   Label for the eigenvector bond index.
         max_eigenvalues:  Keep only the top-k eigenvalues.
+        bond_order:       ``"descending"`` (default) ranks the whole spectrum
+                          algebraically, across sectors.  ``"sector"`` emits a
+                          ``SymmetricTensor``'s bond **charge-grouped** instead
+                          -- sectors in ascending charge order, and within each
+                          sector whatever order ``jnp.linalg.eigh`` returns,
+                          which is ascending.  So it is *not* sorted by value at
+                          all, and ``eigenvalues[0]`` is not the largest.  It is
+                          the **traceable** option: ranking sectors against each
+                          other reads eigenvalues on the host, and that raises on
+                          a tracer.  The two differ only by a permutation of the
+                          bond -- ``V`` and ``eigenvalues`` are permuted together,
+                          so ``V diag(w) V^dag`` is unchanged -- which is why it
+                          is only available untruncated, where the ranking
+                          decides nothing.  Ignored on the dense path, which has
+                          no sectors to group by and is already traceable.
+
+    Raises:
+        ValueError: if ``bond_order`` is not one of the two, or -- on a
+            ``SymmetricTensor`` only -- if ``bond_order="sector"`` is combined
+            with ``max_eigenvalues``.  The dense path ignores ``bond_order``
+            and truncates as usual.
 
     Returns:
-        ``(V, eigenvalues)`` where V has labels ``(left_labels..., new_bond_label)``
-        and eigenvalues is a 1-D JAX array sorted descending.
+        ``(V, eigenvalues)`` where V has labels ``(left_labels...,
+        new_bond_label)``.  ``eigenvalues`` is a 1-D JAX array, algebraically
+        descending under the default ``bond_order``; under ``"sector"`` it is
+        charge-grouped and ascending within each sector, and pairs with ``V``
+        column by column either way.
     """
+    if bond_order not in ("descending", "sector"):
+        raise ValueError(
+            f"bond_order must be 'descending' or 'sector', got {bond_order!r}"
+        )
     # Dispatch to block-sparse path for SymmetricTensor
     if isinstance(tensor, SymmetricTensor):
+        # Only here: on the dense path ``bond_order`` is documented as ignored
+        # -- there are no sectors to group by -- so refusing the combination
+        # there would reject a truncation the dense code performs perfectly
+        # well, on the strength of an argument that did nothing.
+        if bond_order == "sector" and max_eigenvalues is not None:
+            raise ValueError(
+                "bond_order='sector' cannot be combined with max_eigenvalues: "
+                "truncation has to rank the sectors against each other, which "
+                "is exactly the host read that makes 'descending' untraceable"
+            )
         return _eigh_symmetric(
-            tensor, left_labels, right_labels, new_bond_label, max_eigenvalues
+            tensor,
+            left_labels,
+            right_labels,
+            new_bond_label,
+            max_eigenvalues,
+            bond_order=bond_order,
         )
 
     # Dense path

@@ -15,11 +15,18 @@ __all__ = [
     "ctm_split",
 ]
 
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 
+# Defined in ``_ctm_tensor_convergence`` rather than here, and re-exported so
+# every existing import path keeps working.  It lives in the lower module
+# because ``ctm_tensor`` returns it too (#919) and this module already imports
+# *from* that one -- defining it here forced ``ctm_tensor``'s annotation to be
+# TYPE_CHECKING-only, which broke ``typing.get_type_hints`` on public API.
+from tenax.algorithms._ctm_tensor_convergence import (  # noqa: F401
+    CTMConvergenceInfo as CTMConvergenceInfo,
+)
 from tenax.algorithms._ctm_tensor_convergence import (
     _ctm_sv_diff,
     _forced_corner_rank,
@@ -85,45 +92,6 @@ def _ctm_sweep(
 # re-acquiring the bug".  This is that inheritance, and it also picks up the
 # #670 zero-padding, which is a no-op on the dense path where the spectrum
 # length is fixed by ``chi``.
-
-
-class CTMConvergenceInfo(NamedTuple):
-    """Whether a dense CTM sweep converged, and what it did (#839).
-
-    These entry points used to compute ``converged`` and the iteration count
-    inside their loop and then discard both, so a caller could not tell a
-    converged environment from one that silently exhausted ``max_iter`` --
-    the forward-side twin of #801/#824.  ``ipeps()`` in particular returned an
-    energy with no channel to report the environment's status.
-
-    Obtained by passing ``return_meta=True`` to :func:`ctm`, :func:`ctm_2site`
-    or :func:`ctm_split`.  Opt-in because all three are public API and their
-    return arity cannot change.
-
-    ``converged`` and ``n_iter`` come straight out of a ``lax.while_loop``
-    carry for :func:`ctm` / :func:`ctm_2site`, so they are **JAX arrays**, not
-    Python scalars.  That keeps the entry points jittable; call ``bool(...)``
-    / ``int(...)`` at the point of use.  :func:`ctm_split` runs a Python loop
-    and returns Python scalars.
-
-    Attributes:
-        converged: True when the sweep met ``conv_tol`` and stopped early.
-                   False means it ran out of iterations -- the value is
-                   whatever the last sweep produced.
-        n_iter:    Sweeps actually performed.  Equal to ``max_iter`` exactly
-                   when ``converged`` is False.  For :func:`ctm` with a QR
-                   warm-up this counts the post-warm-up loop only, matching
-                   the budget that loop was given.
-        diff:      Final value of the convergence criterion -- the max
-                   absolute difference between successive normalized corner
-                   singular-value vectors.  ``inf`` if no comparison was ever
-                   made (fewer than two sweeps).  Note this watches the corner
-                   spectrum, not the energy.
-    """
-
-    converged: jax.Array | bool
-    n_iter: jax.Array | int
-    diff: jax.Array | float
 
 
 def ctm(

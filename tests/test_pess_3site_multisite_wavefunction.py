@@ -43,9 +43,14 @@ def _contract_ipess_one_cell_pbc(state: IPESSState) -> jnp.ndarray:
     """Contract the iPESS state on a 1-unit-cell PBC kagome torus.
 
     All 6 bonds (3 R-T_u up-triangle + 3 R-T_d down-triangle) close inside
-    the cell.  Gauge convention matches :func:`pess_to_kagome_3site_multisite`:
-    sqrt(λ) on each R's T_d-side (axis 0) and full λ on each R's T_u-side
-    (axis 1).  T_u and T_d carry no extra gauges.
+    the cell.  Gauge is the PHYSICAL iPESS gauge — each bond carries its
+    full ``λ`` exactly once (up bonds ``λ_up``, down bonds ``λ_down``,
+    smooth ``|λ|`` form); ``T_u`` and ``T_d`` carry no weight.  This is
+    deliberately written from the state definition, NOT by mirroring
+    :func:`pess_to_kagome_3site_multisite`'s internals: mirroring is how
+    the pre-#990 sqrt(λ_down) bug passed this very test (the reference
+    reproduced the bug, and ``IPESSState.random``'s unit lambdas hid it
+    a second way).
 
     Returns:
         Rank-3 array ``(d, d, d)`` indexed by ``(p_u, p_v, p_w)`` (sublattice
@@ -58,13 +63,14 @@ def _contract_ipess_one_cell_pbc(state: IPESSState) -> jnp.ndarray:
 
     dtype = R_a.dtype
 
-    def sqrt_lam(x):
-        # Smooth ``sqrt`` mirrors :func:`pess_to_kagome_3site_multisite`.
-        return jnp.power(jnp.real(x) ** 2 + 1e-28, 0.25).astype(dtype)
+    def full_lam(x):
+        # Smooth ``|λ|`` (matches the fixed blocking's AD-safe form; for
+        # the non-negative SU lambdas this is just λ).
+        return jnp.power(jnp.real(x) ** 2 + 1e-28, 0.5).astype(dtype)
 
-    sda = sqrt_lam(lam_ad)
-    sdb = sqrt_lam(lam_bd)
-    sdc = sqrt_lam(lam_cd)
+    sda = full_lam(lam_ad)
+    sdb = full_lam(lam_bd)
+    sdc = full_lam(lam_cd)
     lau = lam_au.astype(dtype)
     lbu = lam_bu.astype(dtype)
     lcu = lam_cu.astype(dtype)
@@ -126,9 +132,27 @@ def test_3site_multisite_wavefunction_matches_ipess_on_1cell_torus(D):
 
     A failure at D≥2 with success at D=1 would localise a leg-axis bug to
     the encoding of the non-trivial bond legs (which are dim 1 at D=1).
+
+    The lambdas are deliberately non-uniform and far from 1: with
+    ``IPESSState.random``'s unit lambdas every power of λ is the identity
+    and the encoding's λ-absorption is invisible to this test — that is
+    exactly how the #990 sqrt(λ_down) bug survived it.
     """
     d = 2
     state = IPESSState.random(D=D, d=d, key=jax.random.PRNGKey(0))
+    lam_vals = [0.4, 0.75, 1.3, 0.55, 0.9, 1.6]
+    state = IPESSState(
+        R_a=state.R_a,
+        R_b=state.R_b,
+        R_c=state.R_c,
+        T_u=state.T_u,
+        T_d=state.T_d,
+        lambdas=tuple(v * jnp.linspace(1.0, 0.5, D) for v in jnp.asarray(lam_vals)),
+    )
+    # Regime assertion (#884): the down-bond lambdas must deviate from 1
+    # substantially, else the λ_down absorption (the #990 bug surface)
+    # cannot affect the fidelity at all.
+    assert max(float(jnp.max(jnp.abs(lam - 1.0))) for lam in state.lambdas[3:6]) > 0.3
 
     psi_ipess = _contract_ipess_one_cell_pbc(state)
     sites = pess_to_kagome_3site_multisite(

@@ -161,11 +161,23 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "tenax.algorithms.pess",
         "pess_to_kagome_supersite",
     ),
+    "pess_to_kagome_supersite_exact": (
+        "tenax.algorithms.pess",
+        "pess_to_kagome_supersite_exact",
+    ),
+    "kagome_xxz_pess_cg_gates_exact": (
+        "tenax.algorithms.pess",
+        "kagome_xxz_pess_cg_gates_exact",
+    ),
     "pess_to_kagome_3site_multisite": (
         "tenax.algorithms.pess",
         "pess_to_kagome_3site_multisite",
     ),
     "build_pess_loss": ("tenax.algorithms.pess_optimize", "build_pess_loss"),
+    "build_pess_loss_exact": (
+        "tenax.algorithms.pess_optimize",
+        "build_pess_loss_exact",
+    ),
     "build_pess_loss_3site_multisite": (
         "tenax.algorithms.pess_optimize",
         "build_pess_loss_3site_multisite",
@@ -202,6 +214,12 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "spinless_fermion_gate",
     ),
     "sublattice_gap": ("tenax.algorithms.fermionic_ipeps", "sublattice_gap"),
+    # gilt
+    "GiltConfig": ("tenax.algorithms.gilt", "GiltConfig"),
+    "GiltTNRConfig": ("tenax.algorithms.gilt", "GiltTNRConfig"),
+    "gilt_plaquette": ("tenax.algorithms.gilt", "gilt_plaquette"),
+    "gilt_tnr": ("tenax.algorithms.gilt", "gilt_tnr"),
+    "gilt_tnr_step": ("tenax.algorithms.gilt", "gilt_tnr_step"),
     # hotrg
     "HOTRGConfig": ("tenax.algorithms.hotrg", "HOTRGConfig"),
     "hotrg": ("tenax.algorithms.hotrg", "hotrg"),
@@ -446,6 +464,12 @@ __all__ = [
     "ising_free_energy_exact",
     "potts_critical_beta",
     "wilson_fermion_free_energy_exact",
+    # GILT
+    "GiltConfig",
+    "GiltTNRConfig",
+    "gilt_plaquette",
+    "gilt_tnr",
+    "gilt_tnr_step",
     # HOTRG
     "HOTRGConfig",
     "hotrg",
@@ -508,7 +532,10 @@ __all__ = [
     "pess_simple_update",
     "pess_local_energy",
     "pess_to_kagome_supersite",
+    "pess_to_kagome_supersite_exact",
+    "kagome_xxz_pess_cg_gates_exact",
     "build_pess_loss",
+    "build_pess_loss_exact",
     "optimize_pess_ad",
     # Honeycomb CTM (native rank-4, 6-corner, 3-direction, 2-sublattice)
     "honeycomb_ctm_energy_implicit",

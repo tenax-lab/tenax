@@ -105,13 +105,18 @@ def _apply_proj_unfused(
     renormalised corner/edge chi bonds keep the projector-pair's mutually
     opposite flows without any flow-flip.
 
-    The projector is first flow-flipped (as in the fuse-then-contract path)
-    so the renormalised bond ``chi_new`` keeps the projector-pair's flow
-    convention; the fused leg's data layout is unchanged by the flip, and
-    ``split_index`` inverts the fusion using the flow recorded in ``fuse_info``
-    (so the split is correct despite the flipped leg flow).  The split sub-legs
-    then carry the constituents' original (opposite-to-env) flows and contract
-    the env legs directly.
+    No flow flip is applied (#905).  ``_flow_flip_no_conj`` preserves the
+    conservation law only while *every* leg is flipped together, but
+    ``split_index`` restores the parent legs with the flows recorded in
+    ``fuse_info`` — so the flip survived on ``chi_new`` alone and left
+    ``net(P_un) = 2 * q_chi_new``.  Only the ``q_chi_new = 0`` column was
+    self-consistent; :func:`contract` then correctly refused every charged
+    block product (the #834 guard), which is what annihilated the charged
+    environment sectors.  The projector's ``chi_outer`` / ``fused_D2`` legs
+    are inherited verbatim from the enlarged corner, i.e. from the env
+    tensors on the *other* side of the seam being cut, so they are already
+    the exact duals of the env legs they contract against; nothing needs
+    flipping.
 
     ``env_first`` selects the contraction operand order: ``contract(P_un, env_T)``
     by default, or ``contract(env_T, P_un)`` when ``env_first=True``.  This must
@@ -122,12 +127,16 @@ def _apply_proj_unfused(
     Matching the order also yields the canonical output leg layout directly, so
     no Koszul-bearing ``transpose`` is needed afterwards.
 
-    For DenseTensor / self-dual charge sets this reproduces the previous
-    fuse-then-contract byte-for-byte (fusion is invertible; the constituents
-    pair the same elements the fused leg did), so dense / D=2 / fermionic paths
-    are unchanged.
+    The *unfusing* itself is value-preserving (fusion is invertible; the
+    constituents pair the same elements the fused leg did), so on
+    ``DenseTensor`` — whose contraction ignores flow entirely — this whole
+    function is byte-for-byte what fuse-then-contract was, before and after
+    #905 (measured: the dense D=2 energy is bit-identical at chi=8 and chi=16).
+    Dropping the flip is what changes the *symmetric* result, at every D: the
+    self-duality of D=2's ``{0, ±2}`` Sz seam masks a conjugated charge *list*,
+    not a broken conservation law, and it was the latter that annihilated the
+    charged sectors.
     """
-    P = _flow_flip_no_conj(P)
     P_un = split_index(P, P.labels().index("fused"))
     relabel = {"chi_outer": chi_label, "fused_D2": d2_label}
     if chi_new != "chi_new":
@@ -520,7 +529,10 @@ def _ctm_tensor_absorb_left_2plaq(
         P_bot_curr, step, "t4_u", "d2", chi_new="chi_new_r", env_first=True
     )  # (chi_new, r2, chi_new_r)
     T4_new = T4_new.relabels({"chi_new": "t4_d", "chi_new_r": "t4_u", "r2": "l2"})
-    T4_new = _flip_leg_flow(T4_new, "l2")  # r2(OUT) -> l2 needs IN
+    # 'r2'->'l2' is a pure relabel (#905): the leg already carries the
+    # same charge list and the opposite flow to the next cell's a.l2, so
+    # dualing it here made that pair same-flow and deleted every
+    # charged sector at the T*a contraction.
 
     # ---- phase-fix + normalize (matches variPEPS) ----
     C1_new = _phase_fix_normalize_tensor(C1_new)
@@ -605,7 +617,10 @@ def _ctm_tensor_absorb_right_2plaq(
         P_top_curr, step, "t2_d", "d2", chi_new="chi_new_r", env_first=True
     )
     T2_new = T2_new.relabels({"chi_new": "t2_u", "chi_new_r": "t2_d", "l2": "r2"})
-    T2_new = _flip_leg_flow(T2_new, "r2")  # l2(IN) -> r2 needs OUT
+    # 'l2'->'r2' is a pure relabel (#905): the leg already carries the
+    # same charge list and the opposite flow to the next cell's a.r2, so
+    # dualing it here made that pair same-flow and deleted every
+    # charged sector at the T*a contraction.
 
     C2_new = _phase_fix_normalize_tensor(C2_new)
     C3_new = _phase_fix_normalize_tensor(C3_new)
@@ -678,7 +693,10 @@ def _ctm_tensor_absorb_top_2plaq(
         P_top_curr, step, "t1_r", "r2", chi_new="chi_new_r", env_first=True
     )
     T1_new = T1_new.relabels({"chi_new": "t1_l", "chi_new_r": "t1_r", "d2": "u2"})
-    T1_new = _flip_leg_flow(T1_new, "u2")  # d2(OUT) -> u2 needs IN
+    # 'd2'->'u2' is a pure relabel (#905): the leg already carries the
+    # same charge list and the opposite flow to the next cell's a.u2, so
+    # dualing it here made that pair same-flow and deleted every
+    # charged sector at the T*a contraction.
 
     C1_new = _phase_fix_normalize_tensor(C1_new)
     C2_new = _phase_fix_normalize_tensor(C2_new)
@@ -732,7 +750,10 @@ def _ctm_tensor_absorb_bottom_2plaq(
         P_bot_curr, step, "t3_l", "r2", chi_new="chi_new_r", env_first=True
     )
     T3_new = T3_new.relabels({"chi_new": "t3_r", "chi_new_r": "t3_l", "u2": "d2"})
-    T3_new = _flip_leg_flow(T3_new, "d2")  # u2(IN) -> d2 needs OUT
+    # 'u2'->'d2' is a pure relabel (#905): the leg already carries the
+    # same charge list and the opposite flow to the next cell's a.d2, so
+    # dualing it here made that pair same-flow and deleted every
+    # charged sector at the T*a contraction.
 
     C4_new = _phase_fix_normalize_tensor(C4_new)
     C3_new = _phase_fix_normalize_tensor(C3_new)
@@ -1149,7 +1170,10 @@ def _ctm_tensor_move_left(
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t1_r": "c1_r"})
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t3_l": "c4_u"})
     T4_new = T4_new.relabels({"chi_new": "t4_d", "chi_new_r": "t4_u", "r2": "l2"})
-    T4_new = _flip_leg_flow(T4_new, "l2")  # r2(OUT) -> l2 needs IN
+    # 'r2'->'l2' is a pure relabel (#905): the leg already carries the
+    # same charge list and the opposite flow to the next cell's a.l2, so
+    # dualing it here made that pair same-flow and deleted every
+    # charged sector at the T*a contraction.
 
     # Per-absorption normalization + phase fix (matches variPEPS, stabilizes J^T)
     C1_new = _phase_fix_normalize_tensor(C1_new)
@@ -1235,7 +1259,10 @@ def _ctm_tensor_move_right(
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t3_r": "c3_l"})
     T2_new = T2_new.relabels({"chi_new": "t2_u", "chi_new_r": "t2_d", "l2": "r2"})
-    T2_new = _flip_leg_flow(T2_new, "r2")  # l2(IN) -> r2 needs OUT
+    # 'l2'->'r2' is a pure relabel (#905): the leg already carries the
+    # same charge list and the opposite flow to the next cell's a.r2, so
+    # dualing it here made that pair same-flow and deleted every
+    # charged sector at the T*a contraction.
 
     C2_new = _phase_fix_normalize_tensor(C2_new)
     C3_new = _phase_fix_normalize_tensor(C3_new)
@@ -1320,7 +1347,10 @@ def _ctm_tensor_move_top(
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t2_d": "c2_d"})
     T1_new = T1_new.relabels({"chi_new": "t1_l", "chi_new_r": "t1_r", "d2": "u2"})
-    T1_new = _flip_leg_flow(T1_new, "u2")  # d2(OUT) -> u2 needs IN
+    # 'd2'->'u2' is a pure relabel (#905): the leg already carries the
+    # same charge list and the opposite flow to the next cell's a.u2, so
+    # dualing it here made that pair same-flow and deleted every
+    # charged sector at the T*a contraction.
 
     C1_new = _phase_fix_normalize_tensor(C1_new)
     C2_new = _phase_fix_normalize_tensor(C2_new)
@@ -1405,7 +1435,10 @@ def _ctm_tensor_move_bottom(
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
     T3_new = T3_new.relabels({"chi_new": "t3_r", "chi_new_r": "t3_l", "u2": "d2"})
-    T3_new = _flip_leg_flow(T3_new, "d2")  # u2(IN) -> d2 needs OUT
+    # 'u2'->'d2' is a pure relabel (#905): the leg already carries the
+    # same charge list and the opposite flow to the next cell's a.d2, so
+    # dualing it here made that pair same-flow and deleted every
+    # charged sector at the T*a contraction.
 
     C4_new = _phase_fix_normalize_tensor(C4_new)
     C3_new = _phase_fix_normalize_tensor(C3_new)
@@ -1518,7 +1551,10 @@ def _ctm_tensor_move_left_2x2(
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t1_r": "c1_r"})
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t3_l": "c4_u"})
     T4_new = T4_new.relabels({"chi_new": "t4_d", "chi_new_r": "t4_u", "r2": "l2"})
-    T4_new = _flip_leg_flow(T4_new, "l2")  # r2(OUT) -> l2 needs IN
+    # 'r2'->'l2' is a pure relabel (#905): the leg already carries the
+    # same charge list and the opposite flow to the next cell's a.l2, so
+    # dualing it here made that pair same-flow and deleted every
+    # charged sector at the T*a contraction.
 
     # ---- Step 7: phase-fix + normalize (matches variPEPS / 1x1 path). ----
     C1_new = _phase_fix_normalize_tensor(C1_new)
@@ -1614,7 +1650,10 @@ def _ctm_tensor_move_right_2x2(
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t1_l": "c2_d"})
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t3_r": "c3_l"})
     T2_new = T2_new.relabels({"chi_new": "t2_u", "chi_new_r": "t2_d", "l2": "r2"})
-    T2_new = _flip_leg_flow(T2_new, "r2")  # l2(IN) -> r2 needs OUT
+    # 'l2'->'r2' is a pure relabel (#905): the leg already carries the
+    # same charge list and the opposite flow to the next cell's a.r2, so
+    # dualing it here made that pair same-flow and deleted every
+    # charged sector at the T*a contraction.
 
     # ---- Step 7: phase-fix + normalize. ----
     C2_new = _phase_fix_normalize_tensor(C2_new)
@@ -1703,7 +1742,10 @@ def _ctm_tensor_move_top_2x2(
     C1_new = C1_new.relabels({"chi_new": "c1_d", "t4_u": "c1_r"})
     C2_new = C2_new.relabels({"chi_new": "c2_l", "t2_d": "c2_d"})
     T1_new = T1_new.relabels({"chi_new": "t1_l", "chi_new_r": "t1_r", "d2": "u2"})
-    T1_new = _flip_leg_flow(T1_new, "u2")  # d2(OUT) -> u2 needs IN
+    # 'd2'->'u2' is a pure relabel (#905): the leg already carries the
+    # same charge list and the opposite flow to the next cell's a.u2, so
+    # dualing it here made that pair same-flow and deleted every
+    # charged sector at the T*a contraction.
 
     # ---- Step 7: phase-fix + normalize. ----
     C1_new = _phase_fix_normalize_tensor(C1_new)
@@ -1792,7 +1834,10 @@ def _ctm_tensor_move_bottom_2x2(
     C4_new = C4_new.relabels({"chi_new": "c4_r", "t4_d": "c4_u"})
     C3_new = C3_new.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
     T3_new = T3_new.relabels({"chi_new": "t3_r", "chi_new_r": "t3_l", "u2": "d2"})
-    T3_new = _flip_leg_flow(T3_new, "d2")  # u2(IN) -> d2 needs OUT
+    # 'u2'->'d2' is a pure relabel (#905): the leg already carries the
+    # same charge list and the opposite flow to the next cell's a.d2, so
+    # dualing it here made that pair same-flow and deleted every
+    # charged sector at the T*a contraction.
 
     # ---- Step 7: phase-fix + normalize. ----
     C4_new = _phase_fix_normalize_tensor(C4_new)

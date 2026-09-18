@@ -4,6 +4,89 @@
 
 ### Added
 
+- **The implicit-AD CTM forward now measures its own stationarity** (#841):
+  `ctm_energy_implicit` runs one extra gauged sweep after the forward loop and
+  warns (`RuntimeWarning`) when the literal residual
+  `||gauge_fix(step(env*)) - env*||` exceeds `max(100*conv_tol, 1e-8)` — the
+  premise the fixed-point backward linearizes under, which neither
+  `conv_method='sv'` (spectra only) nor `'elementwise'` (can exit on a
+  coincidental dip of a bond-sign limit cycle) certifies.  The residual and
+  the forward loop's own verdict are also exposed as
+  `forward_stationarity_residual` / `forward_converged` in
+  `get_last_implicit_ad_diagnostics()`, and `_sigma_gauged_ctm_converge`
+  returns its convergence flag instead of discarding it.  The warning is
+  emitted once per cached energy-function build — optimizer loops reuse one
+  build across all iterations, and a per-call warning (whose drifting
+  residual defeats Python's warning dedup) would flood stderr and train
+  users to blanket-ignore `RuntimeWarning`; the residual itself stays
+  freshly measured in the diagnostics on every call.
+
+- **`optimize_pess_ad(..., loss_builder="exact")`** (#1002): the kagome
+  iPESS L-BFGS optimizer can now minimize the exact supersite loss
+  (`build_pess_loss_exact`, #991) instead of the Convention-C one. On the
+  exact blocking `T_d` is a real wavefunction tensor (it is contracted
+  explicitly, not gauge-absorbed), so the exact arm optimizes it alongside
+  the other primitives — the same choice `optimize_pess_3site_multisite_ad`
+  already makes. Convention-C gates are rejected on the exact arm (the two
+  builders encode different inter-cell sub-site pairings). Default
+  `loss_builder="convc"` is byte-identical to the old behavior.
+
+- **The BP gauge solve is compiled for `SymmetricTensor` pairs** (#882
+  Phase 3): `bp_gauge_checkerboard` and `gauge_fix` now run a symmetric pair
+  through the same `lax.while_loop` driver a dense pair takes, via
+  `svd(bond_order="sector")` in `_gauge_bond` and a carry that holds block
+  buffers behind a trace-time canonical relayout (charge-grouped legs, this
+  module's flows, dead charge slots dropped, block set closed with zero
+  blocks). Measured on the D=3 fixture whose jitted sweep used to die at
+  sweep 108: eager and traced now converge on the identical 167-sweep
+  trajectory (state drift 1.6e-15), at 11.9 ms warm against ~150 s eager —
+  and a 1600-step symmetric simple-update run drops from 5768 s to ~12 min
+  at D=3 and from 22091 s to ~53 min at D=4, which promotes the symmetric
+  arm into the D=3/D=4 acceptance sweep (`kind` axis of
+  `test_su_evolve_reaches_the_simple_update_reference_energy`). A pair whose
+  block structure cannot hold the static carry falls back to the eager loop
+  at trace time.
+
+- **`svd(..., bond_order="sector")`** (`tenax.linalg.svd`): the traceable
+  ordering of a block-sparse SVD, twin to `eigh`'s (#939). The bond comes
+  back charge-grouped (values descending within each sector), `s_full` is
+  the returned spectrum, and — the point — sector mode takes the *same*
+  code path eager and traced instead of the tracer reroute to
+  `_truncated_svd_symmetric_traced`, so no subrank floor is applied: the
+  reroute's `1e-12 · (s_max + 1e-30)` floor zeroes real ~1e-43 singular
+  values on 1×1 sectors, which is what made a jitted BP-gauge sweep stop
+  being a gauge (3.0e-01 state drift). Rejected with `max_singular_values`
+  and `max_truncation_err`; ignored on the dense path.
+
+- **GILT and Gilt-TNR** (`tenax.algorithms.gilt`): graph-independent local
+  truncation (Hauru-Delcamp-Mizera PRB 97, 045111) with the iterative cascade
+  of Ebel-Kennedy-Rychkov (PRX 15, 031047, App. C), and a `gilt_tnr` driver
+  that is a drop-in counterpart of `trg` with the plaquette filter applied
+  before every TRG step. Works on `DenseTensor` and `SymmetricTensor`; the
+  environment gram is built with label-based contractions (block-sparse for
+  symmetric tensors) and the cascade is sector-resolved — per
+  charge-difference-sector eigendecompositions with the spectrum
+  sum-normalized over all sectors, and per-charge-block Q splits — so the
+  inserted bond matrices are charge-conserving by construction (a dense
+  eigendecomposition mixes accidentally near-degenerate eigenvectors across
+  sectors, and the weight function's steep eps-shoulder amplifies that into
+  charge-violating leakage; measured at O(1e-6) before the fix). Exports:
+  `GiltConfig`, `GiltTNRConfig`, `gilt_plaquette`, `gilt_tnr_step`,
+  `gilt_tnr`. Measured at the Ising critical point (error in log Z per site
+  vs Onsager): chi=8 gilt 5.5e-5 vs plain TRG 2.1e-3; chi=12 gilt 4.8e-6 vs
+  plain TRG 2.1e-3 — plain TRG's plateau is the corner-double-line
+  accumulation GILT removes, and a pure-CDL tensor collapses to bond
+  dimension 2 exactly (guarded in `tests/test_gilt.py`, along with a
+  negative control: diagonally-crossed line correlations are non-local and
+  must NOT be truncated). Cross-validated against Hauru et al.'s reference
+  implementation semantics: on an identical chi=8 critical-Ising gram both
+  produce identical cascade structure (43 refinement iterations) and
+  environment-metric insertion errors agreeing to 3e-6 at gilt_eps=1e-4.
+  Fermionic symmetries are rejected with `NotImplementedError` — the gram
+  densify-and-transpose and the `bar()` double layer are bosonic-only, and
+  a silent wrong answer on `compute_free_wilson_fermion_tensor()` input is
+  worse than no answer (Codex P1 on #924).
+
 - **`ctm_ad_mode="root_implicit_symmetric"` is wired to `optimize_gs_ad`**
   (#715 Phase 3). The block-sparse engine has existed and been tested since
   #729; what was missing was the optimizer contract, and it was blocked on
@@ -205,6 +288,211 @@
   and a `SymmetricTensor` pair still takes the eager route bit-identically.
 
 ### Fixed
+
+- **The sigma forward gauge is a pure gauge transform again** (#798): the
+  2x2 sweep writes every corner axis-reversed relative to the canonical
+  `_ctm_tensor_init` order, and `_apply_sigma_to_corner` /
+  `_apply_sigma_to_edge` read legs positionally, so every sigma-gauged sweep
+  applied bond gauges to the wrong corner legs — on the 2x2 layout for C1-C3
+  and on the canonical layout for C4 (stored `(c4_r, c4_u)`, the reverse of
+  the ring order the calls assumed).  That is not a gauge transform and
+  corrupted the environment (sigma+2x2 energy off by 2.3e-3 at D=2, ~1e-2 at
+  D=3).  Sigma application is now label-based; sigma+2x2 and phase+2x2 agree
+  to 3e-15 on the #841 D=3 state.  Measured caveat, in the `forward_gauge`
+  docstring: the repaired sigma still does not reach an element-wise fixed
+  point on the 2x2 recipe (the transfer-matrix eigenvector carries no weight
+  on the weak bond directions where the residual Z2 signs live), and its
+  implicit gradient at the #841 state is worse than phase's
+  (slope_fd/|g| = -0.008 vs 0.131) — it is not a repair for #841.
+  The same defect class lived in `ad_utils._sigma_gauge_fix_ctm_tensor` —
+  the sibling sigma implementation on the Tensor-protocol path
+  (`ctm_tensor_converge` and every `CTMConfig(forward_gauge="sigma")`
+  caller) — which read corner legs positionally from `todense()` arrays and
+  hardcoded a C4 bond map contradicting the verified connectivity
+  (sigma_bottom on `c4_r`, sigma_left on `c4_u`).  It now delegates to the
+  same label-based sigma application, keeping its per-tensor global-phase
+  alignment (measured: |dE| = 6.9e-3 per application on an unconverged
+  random D=2 env pair before, ≤ 2e-16 after).
+
+- **The kagome PESS AD benchmarks measure and optimize the exact blocking**
+  (#1002): `examples/kagome_spin12_pess_ad_benchmark.py`,
+  `examples/kagome_spin1_xxz_anisotropy_sweep.py`, and
+  `examples/kagome_spin1_pess_ad_benchmark.py` now route both the
+  `[SU only]` readout and the AD stage through `build_pess_loss_exact` /
+  `optimize_pess_ad(..., loss_builder="exact")`. They previously went
+  through `build_pess_loss` (Convention-C dummy-leg supersite), whose CTM
+  collapses to exactly rank-1 corners on SU-converged states — the reported
+  energy was backend-dependent garbage (same D=4 spin-½ SU state: CPU
+  -0.341731, GPU -0.208799, vs the backend-identical exact -0.423235; at
+  D=2, -0.2357 vs the exact -0.386195). Numbers produced by these two
+  scripts before this fix should be discarded. CLI unchanged. The two
+  `test_pess_validation` smoke windows were re-pointed from the collapsed
+  readouts they encoded (spin-½ "-0.25 classical fixed point" → -0.386,
+  window [-0.42, -0.35]; spin-1 "-1.13" → -1.270, window [-1.35, -1.20]).
+
+- **DMRG canonicalizes `target_charge` before comparing it to the MPS
+  sector** (#735). `compute_mps_sector` reports canonical representatives,
+  but the pre-run validation and the per-sweep drift check compared them to
+  the raw user value, so `ZnSymmetry(3)` with `target_charge=3` raised a
+  phantom "MPS sector 0 does not match target_charge=3" even though the
+  state was in exactly the requested sector. No-op for U(1)/FermionicU1,
+  where every integer is its own representative.
+
+- **The traced CTM chi bond inherits the environment's inventory instead of
+  re-guessing it** (#929). #922 fixed the *eager* cut; the AD path could not
+  have it, because `jax.jit` bakes the per-sector block shapes at trace time
+  and the sector owning each chi slot must be fixed before the SVD runs. Its
+  fallback was the double-layer `u2` charge list tiled to chi — a guess about
+  the environment made from the *state* — and it is measurably wrong against
+  the same-state dense reference:
+
+  | D | chi | eager (#922) | traced, tiled guess |
+  |---|-----|--------------|---------------------|
+  | 2 | 8   | 1.540e-04    | 9.924e-04 |
+  | 3 | 16  | 4.441e-16    | 1.839e-07 |
+
+  The environment's own chi leg is a far better guess and is static metadata
+  even under tracing: at a fixed point it *is* the bond `chi_new` replaces.
+  Seeding the static rule with the eager inventory and re-converging reproduces
+  the eager environment exactly — `|E_eager - E_seeded| = 0.0` at both D=2
+  chi=8 and D=3 chi=16 — and gets there faster than the eager cut (168s vs
+  279s at D=3 chi=16), because a fixed inventory does not churn block shapes
+  between sweeps. The leg is refused when it is not exactly `chi` wide, so a
+  chi ramp falls back rather than sizing the new bond by the old chi.
+
+  **Correction to #929 as filed:** it said `optimize_gs_ad` still carries #922's
+  truncation. That is wrong for the documented symmetric optimiser.
+  `ctm_ad_mode="root_implicit_symmetric"` does not use the 2x2 projector at all
+  — measured, zero calls through a full `sym_root_implicit_energy_and_grad` —
+  and its own `_ctm_root_implicit_sym_sectors.sector_svd` decomposes each
+  sector and then takes **one global top-chi** over the union of the spectra,
+  recording it in a `BondLayout` frozen for the adjoint. That path was never
+  affected, and a guard now pins it so it cannot regress into a quota the way
+  the other one did.
+
+  What this fixes is the traced 2x2 projector, which is reachable: symmetric
+  site tensors through `ctm_energy_explicit` / `ctm_energy_implicit` under
+  `jax.grad` take it 8 times in a 2-sweep warmup, eagerly zero. There the cold
+  environment's inventory still comes from `initialize_ctm_tensor_env`, and
+  inheritance perpetuates it — so a cold run of *those* entry points is
+  unchanged. What changes is that a good inventory now survives: before this,
+  handing them a converged environment did not help, because the first traced
+  sweep re-imposed the guess.
+
+- **The CTM chi bond follows its own spectrum; `base_charges` is now only a
+  floor** (#922). With #905's flow faults gone the symmetric CTM still
+  saturated below the dense reference, and the gap *grew* with chi instead of
+  shrinking — 9.9e-4 at chi=8, 2.55e-3 at chi=16, 2.58e-3 at chi=24 on a D=2
+  U(1)-Sz pair, while the dense arm kept improving. Flat-or-growing
+  disagreement in chi is this project's defect signature (#898), and the cause
+  was the truncation policy rather than the contraction.
+
+  `base_charges` (the double-layer `u2` charge list) was tiled by
+  `_derive_charges` into a per-sector **quota**: each sector was capped at its
+  tiled share, and any charge *absent* from `base_charges` was allocated a
+  share of zero. On that pair the full bond offered
+  `{-4: 4, -2: 16, 0: 24, 2: 16, 4: 4}` and the quota kept `{-2: 4, 0: 8, 2: 4}`
+  — the `|q| = 4` sectors could not be given a slot at any chi, however much
+  weight they carried.
+
+  The cut is now the global top-chi with `base_charges` reserving one slot per
+  charge it names. Measured against the same-state dense reference:
+
+  | D | chi | before | after |
+  |---|-----|--------|-------|
+  | 2 | 8   | 9.92e-04 | 1.54e-04 |
+  | 2 | 16  | 2.55e-03 | 4.23e-14 |
+  | 2 | 24  | 2.58e-03 | 2.22e-16 |
+  | 3 | 16  | 1.84e-07 | 4.44e-16 |
+
+  The floor is kept on principle, not on measurement: it never bound on any
+  fixture measured here, and it exists because `contract()` pairs blocks by
+  charge value, so a charge that leaves a bond index cannot be recreated
+  through it. It is unit-tested directly rather than claimed as a physics gain.
+  The policy now lives in one place, `_ctm_utils._select_chi_slots`, replacing
+  three hand-rolled copies (the 2x2 re-truncation and both `_ctm_projector`
+  projectors).
+
+  **This does not reach the AD path, and `optimize_gs_ad` still truncates the
+  old way.** `jax.jit` bakes the per-sector block shapes at trace time, so
+  under tracing which sector owns each chi slot must be decided before the SVD
+  runs and the quota stays. Two static replacements were built and measured,
+  and each is worse somewhere — the quota misses by 2.6e-3 at D=2 chi=24, and a
+  capacity-proportional inventory (which fixes that) misses by 1.1e-5 at D=3
+  chi=8 where the quota is exact — so neither was shipped and `linalg.svd` is
+  untouched, which also leaves fPEPS simple update's pinned bond layout alone
+  (#558). The divergence is pinned by
+  `test_the_traced_path_pins_the_chi_new_inventory` and tracked separately.
+  The gradient itself is unaffected: differentiating the traced forward matches
+  finite differences of that same forward to 1.5e-12.
+
+- **The symmetric CTM no longer annihilates its charged environment sectors**
+  (#905). A block-sparse U(1)-Sz CTM converged to an environment in which every
+  corner and edge block carrying a non-zero charge was *allocated but exactly
+  `0.0`*. The tell was that the symmetric energy was **flat in chi to ten
+  digits** (chi=8 and chi=16 agreed) while the dense energy kept moving, and
+  `rank(C1)` equalled the number of charge-0 slots on its legs, nothing more.
+
+  `_contract_symmetric` pairs blocks by charge **value** and drops any product
+  whose output key falls outside the output legs' conservation law. A bond whose
+  two ends carry the *same* flow therefore *adds* the two flow-weighted charges
+  instead of cancelling them, so only the `q = 0` product survives. Three such
+  faults were live at once, each sufficient on its own:
+
+  1. `_apply_proj_unfused` flow-flipped the whole projector before splitting its
+     fused leg — but `split_index` restores the parents with the flows recorded
+     in `fuse_info`, so the flip survived on `chi_new` **alone** and left
+     `net(P_un) = 2 * q_chi_new`.
+  2. Every edge's D² leg was declared with the **same** flow as the double-layer
+     tensor's matching face rather than the opposite one, so charge died at each
+     `T · a` contraction. `_flip_leg_flow` on the renormalised edge made it
+     worse: the leg it dualed was already the correct dual of the next cell's
+     face, so dualing it produced same-flow *and* conjugated charges.
+  3. Four of the initial environment's eight chi bonds were same-flow
+     (`_STD_EDGE_SPECS` / `_CORNER_SPECS`). The chi ring now alternates via
+     `_STD_CORNER_SPECS`, which is `_CORNER_SPECS` with C3 flipped; the
+     split-CTM path keeps the shared table.
+
+  Making the ring alternate exposed a fourth defect in the same family. A chi
+  charge *list* belongs to the bond, not to either end: `contract` pairs blocks
+  by charge value while dense einsum pairs by position, so the two ends must
+  enumerate the same charge per dense slot. `_fused_chi_charges` derived the
+  list with the leg's own flow, which negates it on one end, and
+  `_tile_fused_to_chi` truncates to `chi` *before* sorting — so for
+  `chi < D**2` the truncated multiset is not closed under negation and the two
+  ends disagreed (D=3, `chi=4`: `[-1, 0, 1, 1]` against `[-1, -1, 0, 1]` on four
+  of the eight bonds). Same-flow ends had hidden this by agreeing trivially. The
+  derivation is now pinned to `IN` and only the declared flow varies; measured
+  after, every chi and D² bond is a proper dual and the enlarged corner is exact
+  on full-support operands (rel < 1.5e-16) at D=2 and D=3 for `chi` in
+  4/8/9/12 — including `chi < D**2`, where it was ~82% wrong.
+
+  Measured on a D=2 U(1)-Sz pair at chi=8, `recipe="2x2"`, against the
+  flow-insensitive dense path:
+
+  | | before | after | dense |
+  |---|---|---|---|
+  | `E` (chi=8)  | −0.4138113307 | **−0.5748913759** | −0.5758837997 |
+  | `E` (chi=16) | −0.4138113307 | **−0.5757558561** | −0.5783088110 |
+  | `rank(C1)` (chi=8) | 4 | **8** | — |
+  | `‖C1[±2,±2]‖` (chi=8) | 0.0 | **0.580** | — |
+
+  The energy is no longer flat in chi, and the residual 1e-3 gap to dense is the
+  expected per-sector-vs-global truncation difference, not a lost sector.
+
+  Every contraction is now exact: wrapping `_contract_symmetric` and scoring
+  every call of a charged run against the same einsum on densified operands gives
+  **zero** lossy sites — 386 calls over two sweeps for the CTM, and 52 more for
+  the RDM/energy path. Before, a three-sweep run had exactly one lossy site,
+  `_apply_proj_unfused`, discarding **16.8 of 30.2** in summed result norm over
+  its 48 lossy calls. `TENAX_STRICT_CONTRACT=1` now runs the sweep without
+  refusing anything, so it is asserted positively rather than as a pinned
+  defect.
+
+  Not ported: `_ctm_tensor_c4v._c4v_to_full_env` still emits the pre-#905
+  convention (that is #762/#760), and the fermionic 2-plaquette path keeps its
+  `_flip_leg_flow` calls — harmless for `FermionParity`, where charges are
+  self-dual and `2q ≡ 0`, but the same defect is latent for `FermionicU1`.
 
 - **The CTM convergence criterion no longer certifies a collapsed
   environment** (#898). `_ctm_sv_diff` compares the corner spectrum

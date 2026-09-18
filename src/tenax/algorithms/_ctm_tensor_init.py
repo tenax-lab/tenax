@@ -6,6 +6,7 @@ __all__ = [
     "CTMTensorEnv",
     "IN",
     "OUT",
+    "_STD_CORNER_SPECS",
     "_STD_EDGE_SPECS",
     "_build_double_layer_open_tensor",
     "_build_double_layer_tensor",
@@ -23,9 +24,6 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms._ctm_utils import (
-    _CORNER_SPECS,
-)
 from tenax.algorithms._tensor_utils import fuse_indices
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, Label, TensorIndex
@@ -42,17 +40,24 @@ class CTMTensorEnv(NamedTuple):
     Corners are 2-leg tensors ``(chi, chi)``.
     Edges are 3-leg tensors ``(chi, D², chi)`` carrying the fused double-layer.
 
-    Corner label/flow conventions match ``_ctm_utils._CORNER_SPECS``.
+    Corner label/flow conventions follow ``_STD_CORNER_SPECS`` (below), which is
+    ``_ctm_utils._CORNER_SPECS`` with C3 flipped so the eight chi bonds
+    alternate IN/OUT around the ring (#905).  The flows listed per field hold at
+    initialisation *and* after sweeping — the 2x2 absorb reproduces them exactly.
+
+    Each edge's D² leg is the **dual** of the double-layer tensor's matching
+    face: the same charge list, the opposite flow.  ``a`` is built with
+    ``(u2 IN, d2 OUT, l2 IN, r2 OUT)``, hence the edges below.
     """
 
-    C1: Tensor  # (c1_d, c1_r)    flows: (IN, OUT)
-    C2: Tensor  # (c2_l, c2_d)    flows: (IN, OUT)
-    C3: Tensor  # (c3_u, c3_l)    flows: (OUT, IN)
-    C4: Tensor  # (c4_r, c4_u)    flows: (OUT, IN)
-    T1: Tensor  # (t1_l, u2, t1_r)  flows: (IN, ?, OUT) at init; SWEPT: (OUT, ?, IN) (#612)
-    T2: Tensor  # (t2_u, r2, t2_d)  flows: (OUT, ?, IN)
-    T3: Tensor  # (t3_r, d2, t3_l)  flows: (OUT, ?, IN) at init; SWEPT: (IN, ?, OUT) (#612)
-    T4: Tensor  # (t4_d, l2, t4_u)  flows: (IN, ?, OUT)
+    C1: Tensor  # (c1_d, c1_r)      flows: (IN, OUT)
+    C2: Tensor  # (c2_l, c2_d)      flows: (IN, OUT)
+    C3: Tensor  # (c3_u, c3_l)      flows: (IN, OUT)   -- flipped in #905
+    C4: Tensor  # (c4_r, c4_u)      flows: (OUT, IN)
+    T1: Tensor  # (t1_l, u2, t1_r)  flows: (IN, OUT, OUT)
+    T2: Tensor  # (t2_u, r2, t2_d)  flows: (IN, IN, OUT)
+    T3: Tensor  # (t3_r, d2, t3_l)  flows: (OUT, IN, IN)
+    T4: Tensor  # (t4_d, l2, t4_u)  flows: (OUT, OUT, IN)
 
 
 # ------------------------------------------------------------------ #
@@ -136,17 +141,30 @@ def _build_double_layer_open_tensor(A: Tensor) -> Tensor:
 # (matching the connecting corners' ref axes for charge compatibility).
 # ref_axis_Da/Db are A's axes that get fused into the D² leg.
 #
-# RUNTIME-CONVENTION NOTE (#612): these specs build the *initial* env
-# (``initialize_ctm_tensor_env``).  The #605 2-plaquette absorb
-# (``_apply_proj_unfused``) flow-flips the projector unconditionally, so the
-# *renormalised* T1/T3 emerge with their chi legs DUALED relative to the specs
-# below — a swept env has ``T1 = (t1_l OUT, u2 IN, t1_r IN)`` and
-# ``T3 = (t3_r IN, d2 OUT, t3_l OUT)``, NOT the (IN,IN,OUT)/(OUT,OUT,IN) here.
-# T2/T4 keep the spec convention.  This is self-consistent and energy-correct
-# (the sweep both produces and consumes the dualed convention; E_sym == E_dense
-# at D=3, see ``tests/test_ipeps_u1sz.py::TestU1SzSymmetricCTMD3`` and PR #611) —
-# it is NOT a bug.  A consumer contracting the *swept* env's T1/T3 against an
-# externally built tensor must use the dualed flows above, not the init specs.
+# RUNTIME-CONVENTION NOTE (#612, resolved by #905): these specs build the
+# *initial* env (``initialize_ctm_tensor_env``).  Until #905 the 2-plaquette
+# absorb (``_apply_proj_unfused``) flow-flipped the projector unconditionally,
+# so the *renormalised* T1/T3 emerged with their chi legs DUALED relative to the
+# table below and a consumer of a swept env had to know which of the two
+# conventions it held.  The flip is gone, and the 2x2 sweep now reproduces this
+# table exactly — measured on a D=2 U(1)-Sz pair, all eight swept tensors match
+# the flows here leg for leg, and every chi and D² bond is a proper dual.
+#
+# CHI-RING NOTE (#905): the eight chi bonds of the initial env form a ring
+# C1-T1-C2-T2-C3-T3-C4-T4-C1, and every bond must carry OPPOSITE flows on its
+# two ends.  Same-flow ends make the two flow-weighted charges *add* instead of
+# cancel, so the only block product that lands inside the output's valid set is
+# the one with charge 0 — the contraction silently deletes every charged sector.
+# The pre-#905 table left four of the eight bonds same-flow; T2, C3 and T4 are
+# flipped relative to it (see ``_STD_CORNER_SPECS``) so the ring alternates.
+# The flip is content-neutral: ``_fused_chi_charges`` derives a charge multiset
+# that is closed under negation and ``_grouped_chi_perm`` sorts it, so the leg's
+# charge *list* is identical under either flow and the rank-1 seed still lands
+# on a charge-0 slot.
+#
+# The D² entry is the flow of the DOUBLE-LAYER tensor's matching leg, used to
+# derive the charge list; ``_init_symmetric_standard_edge`` declares the edge's
+# own leg with the opposite flow so the two ends of that bond are duals too.
 _STD_EDGE_SPECS = {
     # T1: top edge. chi1(t1_l) connects to C1.c1_r (C1 ref=1=d),
     #               chi2(t1_r) connects to C2.c2_l (C2 ref=0=u).
@@ -154,13 +172,23 @@ _STD_EDGE_SPECS = {
     "T1": ("t1_l", "u2", "t1_r", IN, IN, OUT, 1, 0, 0, 0),
     # T2: right edge. chi1(t2_u) connects to C2.c2_d (C2 ref=0=u),
     #                 chi2(t2_d) connects to C3.c3_u (C3 ref=1=d).
-    "T2": ("t2_u", "r2", "t2_d", OUT, OUT, IN, 0, 1, 3, 3),
+    "T2": ("t2_u", "r2", "t2_d", IN, OUT, OUT, 0, 1, 3, 3),
     # T3: bottom edge. chi1(t3_r) connects to C4.c4_u (C4 ref=0=u),  # note: C4.c4_u
     #                  chi2(t3_l) connects to C3.c3_l (C3 ref=1=d).
     "T3": ("t3_r", "d2", "t3_l", OUT, OUT, IN, 0, 1, 1, 1),
     # T4: left edge. chi1(t4_d) connects to C1.c1_d (C1 ref=1=d),
     #                chi2(t4_u) connects to C4.c4_r (C4 ref=0=u).
-    "T4": ("t4_d", "l2", "t4_u", IN, IN, OUT, 1, 0, 2, 2),
+    "T4": ("t4_d", "l2", "t4_u", OUT, IN, IN, 1, 0, 2, 2),
+}
+
+# Corner flows for the STANDARD CTM initial env.  Identical to
+# ``_ctm_utils._CORNER_SPECS`` except for C3, whose two chi legs are flipped so
+# the ring above alternates (#905).  The split-CTM path keeps the shared table.
+_STD_CORNER_SPECS = {
+    "C1": ("c1_d", "c1_r", IN, OUT, 1),  # ref_axis=d(1)
+    "C2": ("c2_l", "c2_d", IN, OUT, 0),  # ref_axis=u(0)
+    "C3": ("c3_u", "c3_l", IN, OUT, 1),  # ref_axis=d(1)  -- flipped, #905
+    "C4": ("c4_r", "c4_u", OUT, IN, 0),  # ref_axis=u(0)
 }
 
 
@@ -340,20 +368,44 @@ def _init_symmetric_standard_edge(
     sym = A.indices[0].symmetry
     D2 = D * D
 
-    def _fused_chi_charges(ref_axis: int, flow: FlowDirection) -> np.ndarray:
-        """Derive chi charges from D²-fused charges of the given ref axis."""
+    def _fused_chi_charges(ref_axis: int) -> np.ndarray:
+        """Derive chi charges from D²-fused charges of the given ref axis.
+
+        The fusion flow is pinned to IN rather than taken from the leg (#905).
+        A chi charge *list* belongs to the bond, not to either end of it: the
+        two ends must enumerate the same charge per dense slot, because
+        ``contract`` pairs blocks by charge value while the dense contraction
+        pairs by position.  Deriving with the leg's own flow negates the list on
+        one end, and ``_tile_fused_to_chi`` truncates to ``chi`` *before* the
+        sort, so for ``chi < D**2`` the truncated multiset is not closed under
+        negation and the two ends disagree (measured at D=3, chi=4:
+        ``[-1, 0, 1, 1]`` against ``[-1, -1, 0, 1]`` on four of the eight
+        bonds).  The flow the leg is declared with is chosen by the caller and
+        applied below; only the charge derivation is canonicalised.
+        """
         ref_idx = A.indices[ref_axis]
         ref_bra = ref_idx.flip_flow()
-        fused = _compute_fused_charges(ref_idx, ref_bra, flow, sym)
+        fused = _compute_fused_charges(ref_idx, ref_bra, FlowDirection.IN, sym)
         return _tile_fused_to_chi(fused, chi)
 
-    chi1_charges = _fused_chi_charges(ref_axis_chi1, flow_chi1)
-    chi2_charges = _fused_chi_charges(ref_axis_chi2, flow_chi2)
+    chi1_charges = _fused_chi_charges(ref_axis_chi1)
+    chi2_charges = _fused_chi_charges(ref_axis_chi2)
 
     # D² charges: fuse the ket virtual axis with the bar'd (flipped-flow) copy
+    # under the DOUBLE-LAYER tensor's own fusion flow (``flow_D2`` in the spec),
+    # so the charge list is element-for-element the one on ``a``'s matching leg.
     idx_ket = A.indices[ref_axis_Da]
     idx_bra = idx_ket.flip_flow()  # bar() flips flow
     D2_charges = _compute_fused_charges(idx_ket, idx_bra, flow_D2, sym)
+    # ...but DECLARE the leg with the opposite flow (#905).  The edge's D² leg
+    # is the partner of ``a``'s leg across the same bond, so it must be that
+    # leg's dual: identical charge *list* (contract pairs blocks by charge
+    # value, and the two ends describe the same dense basis) and OPPOSITE flow.
+    # Declaring the same flow as ``a`` makes the flow-weighted charges add
+    # instead of cancel, so every product with q_D2 != 0 lands outside the
+    # output's valid set and is dropped — the charged sectors of the whole
+    # environment are annihilated at the very first T·a contraction.
+    flow_D2_leg = FlowDirection.OUT if flow_D2 == FlowDirection.IN else FlowDirection.IN
 
     # Canonicalize chi-bond order to match the block-sparse SVD's grouped
     # bond order (#602); the D² leg is left as-is (it is matched against the
@@ -364,7 +416,7 @@ def _init_symmetric_standard_edge(
     chi2_charges = np.asarray(chi2_charges)[perm2]
 
     idx_chi1 = TensorIndex.from_charges(sym, chi1_charges, flow_chi1, label=label_chi1)
-    idx_D2 = TensorIndex.from_charges(sym, D2_charges, flow_D2, label=label_D2)
+    idx_D2 = TensorIndex.from_charges(sym, D2_charges, flow_D2_leg, label=label_D2)
     idx_chi2 = TensorIndex.from_charges(sym, chi2_charges, flow_chi2, label=label_chi2)
 
     # variPEPS chi_init=1: write the δ_{ket=bra} pattern only on the
@@ -400,9 +452,12 @@ def _init_symmetric_standard_corner(
     ref_idx = A.indices[ref_axis]
     sym = ref_idx.symmetry
 
-    # The chi bonds carry D²-derived charges: fuse ref_idx with bar'd copy
+    # The chi bonds carry D²-derived charges: fuse ref_idx with bar'd copy.
+    # The fusion flow is pinned to IN, not taken from ``flow_a`` (#905) — see
+    # ``_init_symmetric_standard_edge._fused_chi_charges`` for why a chi charge
+    # list has to be a property of the bond rather than of either end.
     idx_bra = ref_idx.flip_flow()
-    fused_charges = _compute_fused_charges(ref_idx, idx_bra, flow_a, sym)
+    fused_charges = _compute_fused_charges(ref_idx, idx_bra, FlowDirection.IN, sym)
     # Tile the size-D² fused charges to chi with the canonical (sorted-padding)
     # scheme so the corner's chi legs agree with the edge chi legs they contract
     # against (which route through the same helper since #667 Phase 0).  Both
@@ -452,7 +507,7 @@ def initialize_ctm_tensor_env(
 
     if isinstance(A, SymmetricTensor):
         corners = {}
-        for name, (la, lb, fa, fb, ref) in _CORNER_SPECS.items():
+        for name, (la, lb, fa, fb, ref) in _STD_CORNER_SPECS.items():
             corners[name] = _init_symmetric_standard_corner(A, chi, la, lb, fa, fb, ref)
 
         edges = {}
@@ -473,7 +528,7 @@ def initialize_ctm_tensor_env(
             )
     else:
         corners = {}
-        for name, (la, lb, fa, fb, _ref) in _CORNER_SPECS.items():
+        for name, (la, lb, fa, fb, _ref) in _STD_CORNER_SPECS.items():
             corners[name] = _make_rank1_dense_corner(chi, la, lb, fa, fb, dtype)
 
         edges = {}

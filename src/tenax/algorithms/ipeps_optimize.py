@@ -20,6 +20,7 @@ from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms._ipeps_optimize_shared import (  # noqa: F401
     _build_optimizer,
     _converged_outer,
+    _euclidean_grads,
     _grad_l2_norm,
     _log_ad_converged,
     _normalize_params,
@@ -743,6 +744,27 @@ def optimize_gs_ad(
             "Multisite / C4v-reference checkpoint wiring is a follow-up (#497)."
         )
 
+    # gs_recipe='1x1' is wired end-to-end only on the single-site split-CTM
+    # path (fuse_virtual_legs=False), whose forwards all thread the recipe.
+    # Every fused path packs its warm-start, line-search probe, and final
+    # evaluation through ctm_converge_kwargs, which deliberately does not
+    # forward recipe (#938): accepting '1x1' there descends a 1x1 gradient
+    # and then reports an energy measured on a 2x2 environment -- an
+    # internally inconsistent, mislabelled experiment (the same
+    # accept-then-silently-run-2x2 class #755 closed for one branch).
+    # The c4v_reference and root-implicit engines are the same class with a
+    # different mechanism: they read no recipe at all, so '1x1' would be
+    # silently ignored even with fuse_virtual_legs=False (Codex on #972).
+    # So are the non-single-site cells (Codex round 4): the 2-site split
+    # branch rejects '1x1' at loss build but its zero-step _eval_fresh path
+    # measures 2x2 without ever building the loss, and the multisite Lattice
+    # loss threads gs_recipe while its env-cache/forward evals go through
+    # ctm_converge_kwargs, which drops it. Only unit_cell='1x1' threads the
+    # recipe end to end.
+    # Refuse rather than thread: threading would make nine forwards
+    # genuinely non-convergent, since '1x1' reaches no fixed point (#911).
+    _reject_mislabelled_1x1(config)
+
     # Root implicit AD (#715).  Placed ahead of the unit-cell branches because
     # the variant (dense 1x1 vs dense cell vs symmetric) is selected from the
     # unit cell *inside* that dispatcher, and its own validator decides what it
@@ -804,7 +826,7 @@ def optimize_gs_ad(
         D = config.max_bond_dim
 
         if config.su_init:
-            _, (A_su, _B_su), _ = ipeps(gate, None, config)
+            _, (A_su, _B_su), _ = ipeps(gate, None, config, compute_energy=False)
             A_init = A_su
         elif cg_with_map_fn and config.cg_gates.init_fn is not None:
             key = jax.random.PRNGKey(0)
@@ -827,6 +849,36 @@ def optimize_gs_ad(
 def _use_reference_c4v_path(config: iPEPSConfig) -> bool:
     """Compatibility wrapper around the shared AD policy helper."""
     return use_reference_c4v_path(config)
+
+
+def _reject_mislabelled_1x1(config: iPEPSConfig) -> None:
+    """Refuse gs_recipe='1x1' everywhere it is not threaded end to end (#938).
+
+    Shared by every public optimizer entry point -- ``optimize_gs_ad`` and
+    ``optimize_fpeps_ad`` (which dispatches straight to
+    ``_optimize_gs_ad_tensor`` and would otherwise bypass the check, Codex
+    round 5 on #972). See the call site in ``optimize_gs_ad`` for the
+    per-path inventory of where the recipe gets dropped."""
+    if config.gs_recipe == "1x1" and (
+        config.ctm.fuse_virtual_legs
+        or config.unit_cell != "1x1"
+        or _use_reference_c4v_path(config)
+        or use_root_implicit_path(config)
+    ):
+        raise ValueError(
+            "gs_recipe='1x1' is only supported with fuse_virtual_legs=False, "
+            "unit_cell='1x1', and no ctm_ad_mode engine override (the "
+            "single-site split-CTM path). Every other configuration runs or "
+            "measures on recipe='2x2' somewhere (#938) -- fused warm-starts, "
+            "line-search probes and final evaluations, the 2-site zero-step "
+            "evaluation, and the multisite env cache all drop the recipe, "
+            "while the c4v_reference and root-implicit engines read no "
+            "recipe at all -- so a '1x1' run would mislabel a 2x2 result or "
+            "descend a gradient inconsistent with the energy it reports. Set "
+            "gs_recipe='2x2', or use the single-site split path -- and note "
+            "that recipe='1x1' is deprecated and reaches no CTM fixed point "
+            "for D > 1 (#911)."
+        )
 
 
 def _optimize_gs_ad_tensor_reference_c4v(
@@ -869,7 +921,7 @@ def _optimize_gs_ad_tensor_reference_c4v(
         A = _wrap_as_dense_tensor(A_init)
     elif A_init is None:
         if config.su_init:
-            _, (A_su, _), _ = ipeps(gate, None, config)
+            _, (A_su, _), _ = ipeps(gate, None, config, compute_energy=False)
             A = A_su
         else:
             key = jax.random.PRNGKey(0)
@@ -951,6 +1003,7 @@ def _optimize_gs_ad_tensor_reference_c4v(
                 )
             continue
         grads = jnp.where(jnp.isfinite(grads), grads, 0.0)
+        grads = _euclidean_grads(grads)
         E = float(energy_val)
 
         # Score / convergence-check on the *pre-step* params.  ``energy_val``
@@ -1052,6 +1105,9 @@ def _optimize_gs_ad_tensor(
             ``optimize_gs_ad`` forwards a tuple ``A_init`` (or its own
             init_fn output) here so the user's starting state is honored.
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     config = _normalize_stall_recovery(config, unit_cell="1x1")
     _warn_implicit_ad_variational_caveat(config, path="1-site Tensor-protocol")
     import optax
@@ -1619,14 +1675,22 @@ def _optimize_gs_ad_tensor(
                 flush=True,
             )
 
+    # Last step each checkpoint file was written for.  Every exit path pairs
+    # a save with the post-loop force flush (#958): cadence-aligned normal
+    # completion pairs it with the end-of-step save, and the in-body break
+    # sites pair it with their own force_last call.  No state mutates between
+    # a same-step pair, so the second serialization of the large
+    # params/env bundle is pure I/O waste — skip it (codex P2 on #963).
+    _ckpt_written_1s = {"last": None, "best": None}
+
     def _maybe_save_1s_checkpoint(step, chi_before, e_prev, *, force_last=False):
         if config.gs_checkpoint_path is None:
             return
         chi_changed = ctm_cfg.chi != chi_before
-        is_new_best = best_energy < e_prev
+        is_new_best = best_energy < e_prev and _ckpt_written_1s["best"] != step
         should_save_last = (
             force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
-        )
+        ) and _ckpt_written_1s["last"] != step
         if not (should_save_last or is_new_best):
             return
         _ckpt_state = {
@@ -1656,10 +1720,15 @@ def _optimize_gs_ad_tensor(
         }
         if should_save_last:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path)
+            _ckpt_written_1s["last"] = step
         if is_new_best:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path, is_best=True)
+            _ckpt_written_1s["best"] = step
 
     _log_ad_compile_notice(config)
+    # Sentinel for the post-loop checkpoint flush: stays None only if the
+    # loop body never ran (nothing new to save).
+    _chi_at_step_start = None
     for step in range(start_step, config.gs_num_steps):
         # Snapshots for checkpoint "did chi change / new best" detection.
         # ``best_energy`` only decreases, so a strict < comparison after the
@@ -1690,6 +1759,7 @@ def _optimize_gs_ad_tensor(
             _step_t0 = _time.perf_counter()
         try:
             energy_val, grads = jax.value_and_grad(loss_fn)(params)
+            grads = _euclidean_grads(grads)
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -2115,7 +2185,7 @@ def _optimize_gs_ad_tensor(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
                     _, g = jax.value_and_grad(loss_fn)(trial)
-                    return _tree_dot(g, direction)
+                    return _tree_dot(_euclidean_grads(g), direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                 param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -2412,6 +2482,17 @@ def _optimize_gs_ad_tensor(
         # End-of-step save: cadence-based + new-best detection.
         _maybe_save_1s_checkpoint(step, _chi_at_step_start, _best_energy_at_step_start)
 
+    # Every ``break`` above (convergence, stall budgets) exits before the
+    # end-of-step save, so a run that converged at its first evaluation wrote
+    # NO checkpoint at all even with gs_checkpoint_every=1, and gs_resume
+    # then raised FileNotFoundError (#958).  One forced flush covers every
+    # exit path — break or normal exhaustion — and runs before the final
+    # fresh-CTM re-evaluation below, so a crash there cannot lose the run.
+    if _chi_at_step_start is not None:
+        _maybe_save_1s_checkpoint(
+            step, _chi_at_step_start, _best_energy_at_step_start, force_last=True
+        )
+
     # Re-evaluate both final A and best_A with fully converged fresh CTM.
     # In-loop energies use warm-started CTM that can produce unphysical values
     # (non-variational at finite chi), so we compare fresh evaluations only.
@@ -2556,7 +2637,7 @@ def _optimize_gs_ad_2site(
                 ctm=config.ctm,
                 su_independent_bond_lambdas=config.su_independent_bond_lambdas,
             )
-            _, (A_su, B_su), _ = ipeps(gate, None, su_config)
+            _, (A_su, B_su), _ = ipeps(gate, None, su_config, compute_energy=False)
             AB_init = (A_su, B_su)
         else:
             # Random complex128 initialization for 2-site AD (matches variPEPS)
@@ -2598,6 +2679,9 @@ def _optimize_gs_ad_tensor_2site(
         models, prefer ``gs_c4v=True`` or 1-site optimization with
         ``sublattice_rotate_gate()`` + ``gs_c4v=True``.
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     config = _normalize_stall_recovery(config, unit_cell="2site")
     use_c4v = config.gs_c4v
     if not use_c4v:
@@ -3150,6 +3234,9 @@ def _optimize_gs_ad_tensor_2site(
     # closure; step-local snapshots (``chi_before``, ``e_prev``) are
     # passed explicitly so the caller controls the "did chi change /
     # did we accept a new best this step" detection.
+    # Same-step rewrite guard — see ``_ckpt_written_1s`` in the 1-site path.
+    _ckpt_written_2s = {"last": None, "best": None}
+
     def _maybe_save_2s_checkpoint(
         step: int,
         chi_before: int,
@@ -3160,10 +3247,10 @@ def _optimize_gs_ad_tensor_2site(
         if config.gs_checkpoint_path is None:
             return
         chi_changed = ctm_cfg_2s.chi != chi_before
-        is_new_best = best_energy < e_prev
+        is_new_best = best_energy < e_prev and _ckpt_written_2s["best"] != step
         should_save_last = (
             force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
-        )
+        ) and _ckpt_written_2s["last"] != step
         if not (should_save_last or is_new_best):
             return
         _ckpt_state = {
@@ -3192,8 +3279,10 @@ def _optimize_gs_ad_tensor_2site(
         }
         if should_save_last:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path)
+            _ckpt_written_2s["last"] = step
         if is_new_best:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path, is_best=True)
+            _ckpt_written_2s["best"] = step
 
     # Enable per-backward ``||lam||`` extraction in the implicit-AD F3 path
     # only when a consumer is reading them (verbose logging in this loop).
@@ -3213,6 +3302,8 @@ def _optimize_gs_ad_tensor_2site(
 
     try:
         _log_ad_compile_notice(config)
+        # Sentinel for the post-loop checkpoint flush, as in the 1-site path.
+        _chi_at_step_start = None
         for step in range(start_step, config.gs_num_steps):
             # Snapshots for checkpoint "did chi change / new best" detection.
             # ``best_energy`` only decreases, so a strict < comparison after
@@ -3246,6 +3337,7 @@ def _optimize_gs_ad_tensor_2site(
                 _step_t0 = _time.perf_counter()
             try:
                 energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                grads = _euclidean_grads(grads)
             except CTMRGGradientError as exc:
                 _logger.warning(
                     "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -3755,7 +3847,7 @@ def _optimize_gs_ad_tensor_2site(
                             _tree_add(params, _tree_scale(direction, alpha))
                         )
                         _, g = jax.value_and_grad(loss_fn)(trial)
-                        return _tree_dot(g, direction)
+                        return _tree_dot(_euclidean_grads(g), direction)
 
                     dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                     param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -4102,6 +4194,15 @@ def _optimize_gs_ad_tensor_2site(
             # End-of-step save: cadence-based + new-best detection.
             _maybe_save_2s_checkpoint(step, chi_before, _best_energy_at_step_start)
 
+        # Same #958 flush as the 1-site path.  ``_chi_at_step_start`` (top of
+        # the iteration), not ``chi_before``: the latter is assigned after the
+        # convergence/stall breaks, so it can be undefined on a first-step
+        # convergence exit.
+        if _chi_at_step_start is not None:
+            _maybe_save_2s_checkpoint(
+                step, _chi_at_step_start, _best_energy_at_step_start, force_last=True
+            )
+
         # Re-evaluate both final params and best_params with fully converged
         # fresh CTM.  In-loop energies use warm-started CTM that can produce
         # unphysical values, so we compare fresh evaluations only.
@@ -4216,6 +4317,9 @@ def _optimize_gs_ad_multisite(
     Returns ``(site_tensors_dict, envs_dict, E_gs)`` where the dicts are
     keyed by site name (e.g. ``"u"``, ``"v"``, ``"w"``).
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     config = _normalize_stall_recovery(config, unit_cell="multisite")
     _warn_implicit_ad_variational_caveat(config, path="Multisite Lattice")
 
@@ -4468,6 +4572,7 @@ def _optimize_gs_ad_multisite(
             _step_t0 = _time.perf_counter()
         try:
             energy_val, grads = jax.value_and_grad(loss_fn)(params)
+            grads = _euclidean_grads(grads)
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -4831,7 +4936,7 @@ def _optimize_gs_ad_multisite(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
                     _, g = jax.value_and_grad(loss_fn)(trial)
-                    return _tree_dot(g, direction)
+                    return _tree_dot(_euclidean_grads(g), direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                 param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -5244,4 +5349,8 @@ def optimize_fpeps_ad(
 
         A_init = _build_initial_fpeps_tensor(fpeps_config)
 
+    # Dispatches straight to the private optimizer, so it must run the #938
+    # recipe guard itself -- _optimize_gs_ad_tensor threads gs_recipe into
+    # the implicit loss while its warm-start and final evaluations drop it.
+    _reject_mislabelled_1x1(config)
     return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
