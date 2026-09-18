@@ -121,6 +121,13 @@ _FILE_MARKERS = {
     # mismatch case raises before SU; the match and independent-re-dimension
     # cases run SU only (``compute_energy=False``).
     "test_ipeps_initial_peps_validation_890.py": "core",
+    # #925/#976: the legacy ``ctm`` / ``ctm_2site`` / ``ctm_split`` ignored
+    # ``CTMConfig.min_iter`` (could certify convergence at 2 sweeps against a
+    # ``min_iter=30``) and ``ctm`` excluded QR warm-up sweeps from ``n_iter``.
+    # These are the mechanism guards for the stopping rule -- a silent contract
+    # violation on public entry points, so they belong in the required gate.
+    # Cheap (~8s): a 1x1 product state, no real convergence run.
+    "test_ctm_min_iter_contract_925_976.py": "core",
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
@@ -620,6 +627,10 @@ _FILE_MARKERS = {
     # Cost: two D=2 chi=8 CTM gradient evaluations to conv_tol=1e-10 plus two
     # 1-step optimizations (~40s CPU).
     "test_ipeps_ad_adjoint_methods.py": "algorithm",
+    # #974: the non-finite-environment convergence guard.  ``core``: a NaN
+    # env certifying as converged is a silently-wrong-answer bug in the
+    # required path, and the file is pure aggregation logic -- 3.96s CPU.
+    "test_ctm_nonfinite_convergence_974.py": "core",
 }
 
 

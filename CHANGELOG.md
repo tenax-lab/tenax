@@ -1234,6 +1234,49 @@
 
 ### CI / tests
 
+- **The required `-m core` gate is sharded across runners** (`core-shard`, 4
+  shards x 2 Python versions, plus `core-shard-macos`), using the same
+  stable-`cksum` rule the non-core buckets adopted in #960.  All three
+  branch-protected contexts are sharded, ubuntu into four and macOS into two
+  (`h % 2` nests inside `h % 4`, so a macOS shard is exactly the union of two
+  ubuntu shards and a macOS-only failure still lands in a known pair).  macOS
+  takes two rather than four because its runners are the scarce resource here:
+  four of them starved the merge queue, leaving one shard unscheduled for over
+  two hours and evicting the PR past the ~2 h drop limit, for about six minutes
+  of wall-clock.  Leaving macOS serial was not an option either: leaving macOS serial would have capped the
+  change, since the gate is bounded by its slowest required job and macOS
+  measured 27-52 min (median ~44) against ubuntu shards that finish inside
+  that.  The Cython-fallback run is sharded on the same partition
+  (`no-cython-shard`): at 2h09m it was the longest job in every run and held a
+  runner for two hours per PR, which is the contention that left #984 queued
+  73 min behind three in-progress jobs.  It is not a branch-protection
+  context, so it gets no aggregator and its old single-job name is retired.
+
+  Measured on the sharded run, all twelve core shards green: shard 1
+  4m6s / 4m20s / 4m19s (mac), shard 2 23m18s / 18m6s / 10m53s, shard 3
+  16m35s / 17m6s / 15m55s, shard 4 10m15s / 10m42s / 10m40s — so the gate is
+  bounded by a 23m18s shard against 101m41s serial, a **4.4x** reduction with
+  no test removed.  The gate had grown to 2664 of 4310 tests (62% of
+  the suite) and 101m41s, against the 120-min merge-queue limit that already
+  dropped #936 and grazed #920 at 120.1 — and the usual lever was spent, since
+  coverage is already off on pull requests.  Measured per-file cost splits
+  13.8 / 37.4 / 24.1 / 26.2 min across the four shards, so the gate is bounded
+  by its slowest shard rather than their sum.  **No test is removed,
+  reassigned, or skipped**: every test file maps to exactly one shard
+  (verified — 242 files, each assigned once) and the four shards collect
+  2664 tests, exactly matching the serial gate.
+
+  `pytest-xdist` was tried first and **rejected on memory** (#1009).  The
+  gate's `conftest` cache-clear hook measures `RUSAGE_SELF`, so its threshold
+  applies per worker, not in aggregate; with the suite's ~5 GB single-test
+  working set and a 4.78 GB largest fixture, N in-process workers want N times
+  that against ~7 GB Linux runners.  `-n 4` killed all three ubuntu jobs with
+  "the runner has received a shutdown signal" at 79-81%, after 12m18s /
+  20m50s / 36m58s.  A shard is its own runner running serially, so each keeps
+  today's exact memory profile.  Branch protection's `Tests (Python 3.11)` /
+  `Tests (Python 3.12)` contexts are preserved by aggregator jobs that gate on
+  the shard matrix, so the required check names keep reporting.
+
 - **A network blip no longer reds the documentation build.** `sphinx-build -W`
   in CI and `fail_on_warning: true` on Read the Docs both make every warning
   fatal, and intersphinx fetches `docs.python.org`, `numpy.org` and
