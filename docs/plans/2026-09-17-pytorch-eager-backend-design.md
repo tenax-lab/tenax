@@ -180,7 +180,7 @@ grads at the torch boundary so `_bwd` always sees JAX-convention inputs. This is
 codified once, and **guarded by a complex-input gradient-parity test** (§10) that
 would catch a convention regression. This item alone justifies a dedicated phase.
 
-### 5.4 Fixed-point AD for CTM (parity, not naive unroll)
+### 5.4 Fixed-point AD for CTM — and threading the parameters
 Torch eager would, by default, build the full unrolled tape through a CTM
 convergence loop → memory blowup at the D/χ we care about. Parity requires the
 torch path to use the **same implicit/fixed-point adjoint** the JAX path already
@@ -188,8 +188,45 @@ uses (`_ctm_energy_ad.py`, root-implicit modules): backward solves the adjoint
 linear system (GMRES) at the converged environment instead of differentiating every
 sweep. Under torch this is again an `autograd.Function` whose `backward` runs the
 adjoint solve — structurally identical to the JAX `custom_vjp` on the fixed point,
-re-expressed. The `control.fixed_point(...)` combinator (§7) owns this so algorithms
-don't special-case the backend.
+re-expressed.
+
+**The parameters must be explicit inputs, not closed over.** A
+`torch.autograd.Function` returns gradients *only for the tensors passed to
+`.apply()`*; anything a `step` closure captures runs outside that contract and
+receives **no gradient** — which would silently break through-torch CTM AD for
+exactly the iPEPS tensors being optimized. This is why the JAX side already makes
+the flattened parameters the explicit custom-VJP primal
+(`_ctm_energy_ad.py:1213`, `@jax.custom_vjp def f(params_data_tuple)`), not a
+closed-over constant. The torch primitive must do the same, so the combinator
+threads the parameters through its signature:
+
+```
+fixed_point(step, params, init, adjoint)   # params = flattened tensors, differentiable
+```
+
+`params` (the flat parameter buffers) are passed to `Function.apply`, and the
+backward/adjoint returns *their* cotangents; `step`/`adjoint` are static config, not
+gradient sources. `control.fixed_point(...)` (§7) owns this on both backends so
+algorithms don't special-case it.
+
+### 5.5 Reverse-mode transforms belong in the seam too
+The `custom_vjp` factory (§5.2) is necessary but **not sufficient**: the algorithms
+call the JAX transform APIs *directly* — `jax.vjp` (44 sites, e.g.
+`_ctm_energy_ad.py:1269/1323`, `_ctm_root_implicit_asym.py:1462`),
+`jax.value_and_grad` (10, e.g. `ipeps_optimize.py:1761`), `jax.grad` (11),
+`jax.vmap` (11). Autodiff of `B` ops does **not** subsume these; leaving them
+un-abstracted means the torch path feeds torch tensors into `jax.vjp` and parity is
+impossible. So `backend.ad` must expose the transforms, not just `custom_vjp`:
+
+| transform | JAX | Torch |
+|---|---|---|
+| `vjp(f, *primals)` | `jax.vjp` | `torch.func.vjp` (or `autograd.grad` over a taped forward) |
+| `grad(f)` / `value_and_grad(f)` | `jax.grad` / `jax.value_and_grad` | `torch.func.grad` / `grad_and_value` (or `.backward()` + `.grad`) |
+| `vmap(f)` | `jax.vmap` | `torch.func.vmap` |
+
+`torch.func` (functorch) gives functional, composable transforms that map closely
+onto the existing JAX call sites. Migrating these ~76 uses is an **explicit
+deliverable of Phase 3**, not something the `custom_vjp` factory covers for free.
 
 ---
 
@@ -226,7 +263,7 @@ selects with no change to any algorithm.
 | `fori_loop(lo, hi, body, init)` | `lax.fori_loop` | Python `for` | `torch.while_loop` with a counter carry |
 | `cond(p, t, f, x)` | `lax.cond` | Python `if` | `torch.cond(p, t, f, x)` |
 | `stop_gradient(x)` | `lax.stop_gradient` | `x.detach()` | `x.detach()` (unchanged) |
-| `fixed_point(step, init, adjoint)` | `custom_vjp` + GMRES adjoint | `autograd.Function` + GMRES adjoint | same `autograd.Function` (opaque to Dynamo — §12) |
+| `fixed_point(step, params, init, adjoint)` | `custom_vjp` on `params` + GMRES adjoint | `autograd.Function` (`params` = `.apply` inputs, §5.4) + GMRES adjoint | same `autograd.Function` (opaque to Dynamo — §12) |
 
 The CTM/DMRG/GMRES loops (already written in functional-carry style for `lax`) are
 migrated to call these combinators. Functional style runs correctly under all three
@@ -353,15 +390,21 @@ GPU-gated parity skips cleanly when no CUDA device is present.
 
 | Phase | Deliverable | Conceptual risk | Bulk |
 |---|---|---|---|
-| **0. Seam** | `tenax.backend` package, `ArrayOps` Protocol, `JaxBackend` pass-through; migrate `core/tensor.py` + `linalg.py` dense kernels behind `B`. Suite green, zero behavior change. | Low | **High** (mechanical, 80-file surface — but staged) |
+| **0. Seam** | `tenax.backend` package, `ArrayOps` Protocol, `JaxBackend` pass-through; migrate `core/tensor.py` + `linalg.py` dense kernels behind `B`; **export `set_backend`/`get_backend` in `src/tenax/__init__.py` `__all__`** (see acceptance note). Suite green, zero behavior change. | Low | **High** (mechanical, 80-file surface — but staged) |
 | **1. Torch forward** | `TorchBackend` array ops + dense/symmetric linalg forward + contraction (`torch.einsum`/opt_einsum + segment-sum equiv). Op-parity suite green. | Low–Med | Med |
 | **2. Torch AD** | Refactor 6 primitives to `_fwd/_bwd`; `autograd.Function` wrappers; **complex-cotangent boundary + parity test**. Gradient-parity green. | **High** (§5.3) | Med |
-| **3. Control flow + algorithms** | `backend.control` combinators; migrate CTM/DMRG/GMRES loops; `fixed_point` adjoint on torch. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
-| **4. Polish** | RNG/dtype policy, drop GPU-only workarounds on torch path, docs, `capabilities.md` update, example, CI torch job. | Low | Low–Med |
+| **3. Control flow + algorithms** | `backend.control` combinators; **`backend.ad` transforms (`vjp`/`grad`/`value_and_grad`/`vmap`, §5.5) + `fixed_point(step, params, …)` (§5.4)**; migrate CTM/DMRG/GMRES loops and the ~76 direct `jax.*` transform call sites. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
+| **4. Polish** | RNG/dtype policy, drop GPU-only workarounds on torch path, docs, `capabilities.md` update, **`README.md` documents the `set_backend` signature**, example, CI torch job. | Low | Low–Med |
 
 Phase 0 is the tedious-but-safe backbone; Phase 2 is the small-but-dangerous core.
 Phases can land as independent PRs; the torch path stays behind `set_backend` and
 opt-in until Phase 3 makes an algorithm end-to-end usable.
+
+**Public-API acceptance (repo rule, CLAUDE.md/AGENTS.md):** `set_backend` /
+`get_backend` are new public API, so it is a *merge-blocking acceptance item* — not
+an afterthought — that Phase 0 adds them to `src/tenax/__init__.py`'s `__all__` and
+Phase 4 documents their actual signature in `README.md`. Following the phase
+deliverables must not leave the advertised entry point unexported or undocumented.
 
 ---
 
