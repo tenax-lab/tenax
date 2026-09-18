@@ -66,7 +66,8 @@ From a full sweep of `src/tenax` (120 files):
 | **AD primitives** | 6 leaf `custom_vjp`: `_ad_primitives.py:229-719` (5) + `_lorentzian_eigh.py:81` (1), +`blocksparse_backend.py:149-177`, ~60 sites/16 files | **Yes — redesign.** |
 | **Differentiation-state checks** | `isinstance(x, jax.core.Tracer)` ×~18 across 9 files (`core/tensor.py:1043`, `linalg.py:274/2045`, `_ctm_projector.py`×7, …) | **Yes — backend predicate** (§4.2). |
 | **Control flow** | `lax` `while_loop`×29, `scan`×22, `fori_loop`×10, `stop_gradient`×58 across 31 files | **Yes — redesign.** |
-| **Krylov / triangular solvers** | `_gmres_lax.py:171` (`solve_triangular`), `:299-336`; `_metric_precond.py:164`, `ad_utils.py:915` (`jax.scipy … gmres`) | **Yes — backend solvers** (§5.4). |
+| **Krylov / triangular solvers** | `_gmres_lax.py:171` (`solve_triangular`), `:299-336`; `_metric_precond.py:164`, `ad_utils.py:915` (`jax.scipy … gmres`); **`_krylov_bicgstab` (default `adjoint_solver`), `_ctm_tensor_c4v_reference_ad.py:165`** | **Yes — backend solvers, incl. bicgstab** (§5.4). |
+| **DMRG truncation ops** | `jax.lax.top_k`/`jax.nn.one_hot` (`_padded_linalg.py:128/142`), reached by `accelerator="auto"` → `_jit_sweep` | **Yes — `ArrayOps.top_k`/`one_hot`** (§4.2). |
 | **Optimizer** | `optax` chains in `_ipeps_optimize_shared.py:112-136`; `optimizer.update`/`apply_updates` (`ipeps_optimize.py:1053`) | **Yes — optimizer seam** (§5.6). |
 | **Pytree registration** | `core/tensor.py:441,624`; `stacked_tensor.py:41`; `_padded_block_array.py:229`; `pess.py:252` | **Yes — reinterpret** (§6). |
 | PRNG | `jax.random`/PRNGKey in 17 files | Yes; key-threading → generator. |
@@ -138,9 +139,20 @@ of the old backend is out of scope (documented, and guarded with a clear error).
 
 A **custom, explicit Protocol** enumerating the ~40 array ops Tenax actually uses
 (`concatenate, reshape, transpose, conj, einsum, tensordot, stack, segment_sum,
-where, pad, astype, zeros, ...`) plus the decomposition entry points. Two
-implementations: `JaxBackend` (thin wrappers over today's `jnp`, behavior
-identical) and `TorchBackend`.
+where, pad, astype, zeros, top_k, one_hot, ...`) plus the decomposition entry
+points. Two implementations: `JaxBackend` (thin wrappers over today's `jnp`,
+behavior identical) and `TorchBackend`.
+
+`top_k` and `one_hot` are called out because they are load-bearing on the **default
+DMRG path**, not exotic (Codex #1010 P1): `accelerator="auto"` (`dmrg.py:176`) routes
+dense-CPU and *all* GPU/TPU runs through `_jit_sweep`, and its truncation uses
+`jax.lax.top_k` (`_padded_linalg.py:128`) and `jax.nn.one_hot` (`:142`) for
+static-shape global truncation. Neither is a `lax` loop or a `custom_vjp`, so
+replacing `jax.jit` with an identity wrapper (§7) still feeds torch tensors straight
+into these JAX APIs. They map to `torch.topk` / `torch.nn.functional.one_hot`; the
+alternative is to route torch DMRG to a backend-neutral executor instead of
+`_jit_sweep`, but adding the two ops keeps the existing padded-truncation code
+shared.
 
 **Functional indexed updates are part of the surface (Codex #1010 P2).** Tenax
 uses JAX's `x.at[idx].set/add/multiply(...)` **137 times across 25 files** —
@@ -224,6 +236,21 @@ Then wrap:
 
 A single `backend.ad.custom_vjp(fwd, bwd)` factory hides which wrapper is used, so
 the 6 primitives are written once.
+
+**The factory must carry static/nondifferentiable argument positions (Codex #1010
+P1).** Three of the six primitives — `truncated_svd_ad`, `truncated_svd_ad_vh_only`
+(`_ad_primitives.py:229,470`) and `truncated_eigh_regularized`
+(`_lorentzian_eigh.py:81`) — are declared `@partial(jax.custom_vjp,
+nondiff_argnums=(1,))` because the truncation rank `chi` controls slicing and output
+*shapes*; JAX passes it separately into the backward, and it must **never** become a
+traced differentiable argument. A bare `custom_vjp(fwd, bwd)` that ignores this
+would either change the backward arity or let `chi` be traced — breaking the
+existing jitted JAX calls. So the factory signature is
+`custom_vjp(fwd, bwd, nondiff_argnums=())`: under JAX it forwards to
+`jax.custom_vjp(..., nondiff_argnums=...)` unchanged; under torch those positions are
+**bound as static config** (closed over / passed as non-tensor `.apply` args that
+`setup_context` stashes on `ctx`), never as differentiable leaves — so `chi` stays a
+Python int on both backends and the backward sees the same argument split.
 
 **The torch wrapper must be `torch.func`-compatible, not a plain Function (Codex
 #1010 P1).** A bare `autograd.Function` with only `forward`/`backward` +
@@ -334,11 +361,22 @@ solver itself calls JAX directly — `_gmres_lax.py:171`
 `_metric_precond.py:164` (metric preconditioner) plus the Arnoldi/GMRES machinery
 in `_gmres_lax.py:299-336` and `ad_utils.py:915`. Migrating loop *combinators* (§7)
 does not touch these — they would still receive torch tensors in a JAX API. So the
-seam adds **`backend.linalg.gmres`** and **`backend.linalg.solve_triangular`** (JAX:
-today's `jax.scipy.*`; torch: `torch.linalg.solve_triangular` + a torch GMRES, or
-`torch.func`-compatible reimplementations of the existing `lax` GMRES), and their
-call sites are named in Phase 3 — without them the fixed-point primitive is not
-actually backend-neutral.
+seam adds **`backend.linalg.gmres`**, **`backend.linalg.solve_triangular`**, and
+**`backend.linalg.bicgstab`** (JAX: today's `jax.scipy.*` / `_krylov_bicgstab`;
+torch: `torch.linalg.solve_triangular` + torch or `torch.func`-compatible
+reimplementations of the existing `lax` Krylov solvers), and their call sites are
+named in Phase 3 — without them the fixed-point primitive is not actually
+backend-neutral.
+
+**BiCGSTAB is the default adjoint solver, not GMRES (Codex #1010 P1).**
+`CTMConfig.adjoint_solver` defaults to `"bicgstab"` (`ipeps_config.py:152`), and the
+C4v-reference backward calls `_krylov_bicgstab` *directly*
+(`_ctm_tensor_c4v_reference_ad.py:165`) before any GMRES fallback — so a solver seam
+covering only GMRES would break on the **default** adjoint path with torch leaves,
+before fallback selection even runs. `bicgstab` is therefore a first-class member of
+the solver seam (matching the JAX default so torch and JAX solve the same system),
+not an afterthought; the alternative — remapping the torch default to `gmres` — would
+require its own explicit test and is rejected as diverging from the JAX path.
 
 ### 5.5 Reverse-mode transforms belong in the seam too
 The `custom_vjp` factory (§5.2) is necessary but **not sufficient**: the algorithms
@@ -352,7 +390,20 @@ impossible. So `backend.ad` must expose the transforms, not just `custom_vjp`:
 | transform | JAX | Torch |
 |---|---|---|
 | `vjp(f, *primals)` | `jax.vjp` | `torch.func.vjp` (or `autograd.grad` over a taped forward) |
-| `grad(f)` / `value_and_grad(f)` | `jax.grad` / `jax.value_and_grad` | `torch.func.grad` / `grad_and_value` (or `.backward()` + `.grad`) |
+| `grad(f)` / `value_and_grad(f)` | `jax.grad` / `jax.value_and_grad` | `torch.func.grad` / `grad_and_value` (or `.backward()` + `.grad`) — **return order re-normalized, see below** |
+
+**`value_and_grad` return order and `has_aux` must be re-normalized (Codex #1010
+P1).** `jax.value_and_grad(f)` returns `(value, grads)`, but
+`torch.func.grad_and_value(f)` returns them **swapped** — `(grads, value)` — and the
+`has_aux` nesting differs too (`jax` gives `(value, aux), grads`; `torch.func` gives
+`grads, (value, aux)`). Exposing the torch transform *raw* at a call site like
+`energy_val, grads = value_and_grad(...)(params)` (`ipeps_optimize.py:1761`) would
+bind the **gradient tree to `energy_val`** and hand the scalar energy to the
+optimizer — a silent, catastrophic swap. So `backend.ad.value_and_grad` is an
+**adapter, not an alias**: under torch it calls `grad_and_value` and re-orders to
+JAX's `(value, grads)` (and un-nests `aux` to JAX's layout), so every migrated call
+site keeps the JAX return contract unchanged. A parity test asserts the tuple
+order/aux structure, not just the values.
 | `vmap(f)` | `jax.vmap` | `torch.func.vmap` |
 
 `torch.func` (functorch) gives functional, composable transforms that map closely
@@ -475,6 +526,11 @@ reached. So `backend.control` (or `backend.compile`) also exposes **`jit`** and
 torch `jit` is an **identity/eager** wrapper (no trace) and `checkpoint` maps to
 `torch.utils.checkpoint` (eager rematerialization). Their call sites are named in
 Phase 3 — without them the DMRG parity path breaks before reaching §7's loops.
+Note the identity-`jit` is necessary but not *sufficient* for DMRG: the default
+`accelerator="auto"` route runs `_jit_sweep`, whose truncation calls `jax.lax.top_k`
+/ `jax.nn.one_hot` directly (`_padded_linalg.py:128/142`), so those must also be
+`ArrayOps` ops (§4.2) — an identity `jit` alone would still hand torch tensors to a
+JAX API inside the sweep.
 
 **Eager payoff (v1):** under the *eager* lowering, dynamic block shapes across sweeps
 cost nothing (no trace, no recompile), so the "static block keys" machinery that
@@ -592,7 +648,7 @@ GPU-gated parity skips cleanly when no CUDA device is present.
 | **0. Seam** | `tenax.backend` package, `ArrayOps` Protocol **incl. functional indexed-updates** (§4.2; migrate the 137 `.at[...]` sites across 25 files), `JaxBackend` pass-through; migrate `core/tensor.py` + `linalg.py` dense kernels behind `B`; **export `set_backend`/`get_backend` in `__all__`**. Suite green, zero behavior change. | Low | **High** (mechanical, 80-file surface — but staged) |
 | **1. Torch forward** | `TorchBackend` array ops + dense/symmetric linalg forward + contraction (`torch.einsum`/opt_einsum + segment-sum equiv). Op-parity suite green. | Low–Med | Med |
 | **2. Torch AD** | Refactor the **6 leaf primitives across `_ad_primitives.py` (5) + `_lorentzian_eigh.py` (1, §5.1)** to `_fwd/_bwd`; **`torch.func`-compatible `autograd.Function` (`setup_context` + vmap rule, §5.2)**; **complex-cotangent boundary + directional-derivative parity test (§5.3)**. Gradient-parity green. | **High** (§5.3) | Med |
-| **3. Control flow + algorithms** | `backend.control` combinators + **`jit`/`checkpoint` wrappers (§7)**; **`backend.tree` protocol + register all custom containers (§6; migrate the 186 `jax.tree` sites)**; **`backend.ad` transforms (§5.5) + `fixed_point(step, params, …)` on the `setup_context` contract, incl. the C4v-reference primitive (§5.4)**; **`backend.linalg.gmres`/`solve_triangular` for the adjoint solve (§5.4; `_gmres_lax.py`, `_metric_precond.py`)**; **migrate the ~18 `jax.core.Tracer` checks to `is_tracing_or_requires_grad` (§4.2)**; migrate CTM/DMRG/GMRES loops and the ~76 direct `jax.*` transform sites. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
+| **3. Control flow + algorithms** | `backend.control` combinators + **`jit`/`checkpoint` wrappers (§7)**; **`backend.tree` protocol + register all custom containers (§6; migrate the 186 `jax.tree` sites)**; **`backend.ad` transforms (§5.5) + `fixed_point(step, params, …)` on the `setup_context` contract, incl. the C4v-reference primitive (§5.4)**; **`backend.linalg.gmres`/`solve_triangular`/`bicgstab` for the adjoint solve (§5.4; bicgstab is the default, `_ctm_tensor_c4v_reference_ad.py:165`)**; **`ArrayOps.top_k`/`one_hot` for the default `_jit_sweep` DMRG truncation (§4.2; `_padded_linalg.py`)**; **`value_and_grad` return-order adapter + `custom_vjp` `nondiff_argnums` (§5.5/§5.2)**; **migrate the ~18 `jax.core.Tracer` checks to `is_tracing_or_requires_grad` (§4.2)**; migrate CTM/DMRG/GMRES loops and the ~76 direct `jax.*` transform sites. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
 | **3b. Optimizer seam** | **backend optimizer (§5.6)** — optax under JAX; under torch a **functional L-BFGS** returning a direction (default mode), Adam via `torch.optim`/functional; migrate `_build_optimizer`/`optimizer.update` to the `(direction, state)` contract feeding Tenax's line search + functional apply. **One full `optimize_gs_ad` update step in default L-BFGS mode runs through torch** (§10 item 4). | Med | Med |
 | **4. Polish** | RNG/dtype policy, drop GPU-only workarounds on torch path, docs, `capabilities.md` update, **`README.md` documents the `set_backend` signature**, example, CI torch job. | Low | Low–Med |
 
