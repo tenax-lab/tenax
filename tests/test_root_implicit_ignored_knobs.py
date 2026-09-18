@@ -124,12 +124,18 @@ def test_an_effective_line_search_warns_that_steps_are_unconditional():
     energy-increasing ones.  The pre-existing in-code comment reads as though
     a line search is running; it is not.
     """
-    cfg = _cfg(
-        unit_cell="2site"
-    )  # "cell" variant: refused after the warning is emitted
+    # A general Lattice is refused *after* the warning is emitted -- a cheap
+    # early stop that observes the warning without running an optimization.
+    # (unit_cell="2site" no longer works for this: #894 wired the 2-site cell,
+    # so it runs instead of raising.)  A real gate is needed because gate
+    # densification precedes the cell branch's Lattice check.
+    from tenax.core.lattice import kagome
+
+    H, _A = _tiny_state()
+    cfg = _cfg(unit_cell=kagome())
     with pytest.warns(UserWarning, match="line search"):
         with pytest.raises(NotImplementedError):
-            optimize_gs_ad_root_implicit(None, None, cfg)
+            optimize_gs_ad_root_implicit(H, None, cfg)
 
 
 def test_disabling_the_line_search_is_silent():
@@ -138,11 +144,14 @@ def test_disabling_the_line_search_is_silent():
     The documented Path 5 example sets ``gs_line_search=False``, so that
     configuration in particular must stay quiet.
     """
-    cfg = _cfg(unit_cell="2site", gs_line_search=False)
+    from tenax.core.lattice import kagome
+
+    H, _A = _tiny_state()
+    cfg = _cfg(unit_cell=kagome(), gs_line_search=False)
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
         with pytest.raises(NotImplementedError):
-            optimize_gs_ad_root_implicit(None, None, cfg)
+            optimize_gs_ad_root_implicit(H, None, cfg)
     bad = [str(w.message) for w in rec if "line search" in str(w.message)]
     assert not bad, bad
 
