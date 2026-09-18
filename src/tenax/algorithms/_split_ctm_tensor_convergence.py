@@ -686,6 +686,7 @@ def _split_ctm_multisite(
     bars = {c: A.bar() for c, A in site_tensors.items()}
     envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
     prev_svs: dict[Coord, jax.Array] = {}
+
     # #903 P1: rank 1 is a collapse only if more was reachable.
     # Per coordinate, not per cell (#903 review).  A cell-wide aggregate is
     # wrong in both directions: `min` lets one trivial site exempt every
@@ -694,10 +695,37 @@ def _split_ctm_multisite(
     # wrongly).  The reachable rank is a property of the site sitting at that
     # coordinate, so it is computed there.  Built before the loop and outside
     # every branch.
-    _mr2 = {
-        c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2)
-        for c, A in site_tensors.items()
-    }
+    # Keyed to every site that can CONTRIBUTE to a corner, not to the
+    # coordinate the corner is stored under (#903 review, P1).  In the 2x2
+    # recipe `_ctm_tensor_sweep_multisite` builds a destination's C1 from a
+    # *neighbour's* double layer (`s_src = neighbors[s_dst]["top"]`), so
+    # `envs[c].C1` is not necessarily produced by the site at `c`.  Keying on
+    # `c` alone gives a D=1 destination fed by a rich source `max_rank=1` --
+    # accepting a collapsed corner -- and the reverse mismatch leaves a
+    # legitimate comparison blind forever.
+    #
+    # Taking the max over the contributing set is the conservative reading:
+    # a larger bound can only make the exemption harder to obtain, so a
+    # mis-attribution fails closed rather than certifying.
+    # ONE bound for the whole cell: the max over every site (#898, #916).
+    #
+    # Six successive derivations of a per-corner bound were each a correct fix
+    # to the previous one and each still under-covered: `indices[0]`, then
+    # `min` across sites, then `max` across sites, then per coordinate, then
+    # `{c} | neighbours(c)` -- which still misses the DIAGONAL sites of the
+    # four-site plaquettes the 2x2 projectors are built from.  Every miss
+    # failed OPEN: too small a bound certifies a collapsed corner, and nothing
+    # downstream can tell.
+    #
+    # A global max cannot under-cover, by construction, in any recipe.  The
+    # price is that a legitimate D=1 coordinate in a heterogeneous cell is no
+    # longer exempt and will spend its budget -- the safe direction, and the
+    # exemption only ever mattered for uniformly trivial states, where the
+    # global max still equals 1.
+    _mr2 = _forced_corner_rank(
+        max(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
+    )
+
     for _ in range(max_iter):
         envs = _split_ctm_sweep_multisite(
             envs, site_tensors, bars, neighbors, chi, chi_I, renormalize, recipe
@@ -706,7 +734,7 @@ def _split_ctm_multisite(
         for c in sorted(envs):
             sv = _corner_singular_values(envs[c].C1)
             if c in prev_svs:
-                if float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr2[c])) >= conv_tol:
+                if float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr2)) >= conv_tol:
                     converged = False
             else:
                 converged = False
