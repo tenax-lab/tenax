@@ -363,6 +363,42 @@ def _wrap_as_dense_tensor(arr: jax.Array) -> DenseTensor:
     return DenseTensor(arr, indices)
 
 
+def _validate_initial_bond_dim(t: Tensor, name: str, D: int) -> None:
+    """Reject an ``initial_peps`` site whose virtual bonds disagree with
+    ``config.max_bond_dim`` on the default simple-update path.
+
+    The default sweep writes a ``max_bond_dim``-sized bond into the tensor it is
+    handed, so a site built for a different D fails several frames down at the
+    first bond it touches -- ``cannot reshape array of shape (D0,) into shape
+    [...]`` -- in both directions (growing 2->4 and shrinking 4->2), #890.  The
+    signature and docstring gave no hint the two had to agree; raise a clear
+    error at the boundary instead.
+
+    ``su_independent_bond_lambdas=True`` is exempt: it re-dimensions over a full
+    four-bond cycle and is validated by the caller only when it is off.
+    """
+    labels = t.labels()
+    virt = {
+        lbl: int(t.indices[labels.index(lbl)].dim)
+        for lbl in ("u", "d", "l", "r")
+        if lbl in labels
+    }
+    if any(v != D for v in virt.values()):
+        distinct = sorted(set(virt.values()))
+        hint = (
+            f"set config.max_bond_dim={distinct[0]} to match"
+            if len(distinct) == 1
+            else "give the site uniform virtual bonds equal to max_bond_dim"
+        )
+        raise ValueError(
+            f"ipeps(): initial_peps site {name} has virtual bond dimensions "
+            f"{virt}, which disagree with config.max_bond_dim={D}. The default "
+            f"simple-update path cannot re-dimension a supplied state (#890) -- "
+            f"{hint}, or pass su_independent_bond_lambdas=True, which "
+            f"re-dimensions over a full bond cycle."
+        )
+
+
 def ipeps(
     hamiltonian_gate: Tensor | jax.Array,
     initial_peps: tuple[Tensor, Tensor] | tuple[jax.Array, jax.Array] | None,
@@ -427,6 +463,11 @@ def ipeps(
         A_raw, B_raw = initial_peps
         A = A_raw if isinstance(A_raw, Tensor) else _wrap_as_dense_tensor(A_raw)
         B = B_raw if isinstance(B_raw, Tensor) else _wrap_as_dense_tensor(B_raw)
+        # The default SU path cannot re-dimension a supplied state; validate
+        # the bonds up front rather than fail deep in the sweep (#890).
+        if not config.su_independent_bond_lambdas:
+            _validate_initial_bond_dim(A, "A", D)
+            _validate_initial_bond_dim(B, "B", D)
     else:
         key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
         A_data = jax.random.normal(key_A, (D, D, D, D, d))
