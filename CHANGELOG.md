@@ -1214,6 +1214,29 @@
 
 ### CI / tests
 
+- **The required `-m core` gate is sharded across runners** (`core-shard`, 4
+  shards x 2 Python versions), using the same stable-`cksum` rule the non-core
+  buckets adopted in #960.  The gate had grown to 2664 of 4310 tests (62% of
+  the suite) and 101m41s, against the 120-min merge-queue limit that already
+  dropped #936 and grazed #920 at 120.1 — and the usual lever was spent, since
+  coverage is already off on pull requests.  Measured per-file cost splits
+  13.8 / 37.4 / 24.1 / 26.2 min across the four shards, so the gate is bounded
+  by its slowest shard rather than their sum.  **No test is removed,
+  reassigned, or skipped**: every test file maps to exactly one shard
+  (verified — 242 files, each assigned once) and the four shards collect
+  2664 tests, exactly matching the serial gate.
+
+  `pytest-xdist` was tried first and **rejected on memory** (#1009).  The
+  gate's `conftest` cache-clear hook measures `RUSAGE_SELF`, so its threshold
+  applies per worker, not in aggregate; with the suite's ~5 GB single-test
+  working set and a 4.78 GB largest fixture, N in-process workers want N times
+  that against ~7 GB Linux runners.  `-n 4` killed all three ubuntu jobs with
+  "the runner has received a shutdown signal" at 79-81%, after 12m18s /
+  20m50s / 36m58s.  A shard is its own runner running serially, so each keeps
+  today's exact memory profile.  Branch protection's `Tests (Python 3.11)` /
+  `Tests (Python 3.12)` contexts are preserved by aggregator jobs that gate on
+  the shard matrix, so the required check names keep reporting.
+
 - **A network blip no longer reds the documentation build.** `sphinx-build -W`
   in CI and `fail_on_warning: true` on Read the Docs both make every warning
   fatal, and intersphinx fetches `docs.python.org`, `numpy.org` and

@@ -44,13 +44,30 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
-    name: Tests (Python ${{ matrix.python-version }})
+  # The required gate, sharded across runners by the same stable-hash rule the
+  # non-core buckets use (#960).  Sharding and NOT pytest-xdist: the gate's
+  # memory profile forbids in-process workers.  conftest's cache-clear hook
+  # bounds peak RSS to ONE test's working set (~5 GB) and the largest fixture
+  # in the suite is 4.78 GB, against ~7 GB Linux runners, so N workers want
+  # N x that.  Measured on #1009: ``-n 4`` killed all three ubuntu jobs with
+  # "the runner has received a shutdown signal" at 79-81%, after 12m18s /
+  # 20m50s / 36m58s.  A shard is its own runner running serially, so it keeps
+  # today's exact memory profile.
+  #
+  # NSHARDS=4, not 3: measured against real per-file cost (run 35198352577),
+  # the cksum split lands 13.8 / 37.4 / 24.1 / 26.2 min at 4 versus
+  # 22.2 / 53.3 / 26.0 at 3 -- the hash is cost-blind and this suite is
+  # long-tailed (one file is 14.4 min), so 3 shards leave a 53-min straggler
+  # that beats only half the serial gate.  Raise NSHARDS (and the matrix list)
+  # if the max shard drifts back up.
+  core-shard:
+    name: Core shard ${{ matrix.shard }} (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+        shard: ["1", "2", "3", "4"]
 
     steps:
       - uses: actions/checkout@v6
@@ -88,11 +105,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/jax
-          key: jax-xla-${{ runner.os }}-py${{ matrix.python-version }}-${{ github.run_id }}
+          # Shard in the save key so the shards do not clobber one another; the
+          # restore-key prefix stays per-python so any shard warms from the
+          # most recent cache of any other.
+          key: jax-xla-${{ runner.os }}-py${{ matrix.python-version }}-s${{ matrix.shard }}-${{ github.run_id }}
           restore-keys: |
             jax-xla-${{ runner.os }}-py${{ matrix.python-version }}-
 
       - name: Run linter
+        # Once per run, not once per shard -- it lints the whole tree anyway.
+        if: matrix.shard == '1' && matrix.python-version == '3.11'
         run: uv run ruff check src/ tests/
 
       - name: Run core tests
@@ -111,15 +133,41 @@ jobs:
           # given up is per-PR patch coverage -- the accepted trade (see the
           # PR that introduced this toggle, git blame on this line).
           WITH_COV: ${{ contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && '1' || '0' }}
+          SHARD: ${{ matrix.shard }}
+          # Must equal the number of entries in the matrix ``shard`` list.
+          NSHARDS: 4
         run: |
           if [ "$WITH_COV" = "1" ]; then
             COV_ARGS="--cov=tenax --cov-report=xml --cov-report=term-missing"
           else
             COV_ARGS="--no-cov"
           fi
-          uv run pytest tests/ -m "core" $COV_ARGS \
+          # Same rule as the non-core buckets: ``find`` (not a top-level glob)
+          # because tests/stacked/ holds test files too, and ``cksum`` is POSIX
+          # CRC-32 keyed on the file NAME, so editing a file's contents never
+          # shuffles it to a different shard.  Every test file maps to exactly
+          # one shard, so the four shards are a partition of the gate -- a
+          # newly added core file is picked up automatically and can never be
+          # silently dropped from the required check.
+          FILES=""
+          for f in $(find tests -name 'test_*.py' | LC_ALL=C sort); do
+            h=$(printf '%s' "$f" | cksum | cut -d' ' -f1)
+            if [ $(( h % NSHARDS )) -eq $(( SHARD - 1 )) ]; then
+              FILES="$FILES $f"
+            fi
+          done
+          set +e
+          uv run pytest $FILES -m "core" $COV_ARGS \
             --durations=50 \
             -v
+          rc=$?
+          set -e
+          # Exit 5 = this shard's files hold no ``core`` tests.
+          if [ "$rc" -eq 5 ]; then
+            echo "Shard collected no core tests; OK."
+            rc=0
+          fi
+          exit $rc
 
       - name: Upload coverage to Codecov
         # Only the contexts that produced coverage.xml (see WITH_COV above).
@@ -129,6 +177,34 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.xml
           fail_ci_if_error: false
+
+  # Branch protection requires the literal names "Tests (Python 3.11)" and
+  # "Tests (Python 3.12)".  The work now happens in ``core-shard``, so these
+  # two jobs carry those names and go green only when every shard is green.
+  # Renaming the required contexts instead would leave the old names never
+  # reporting, which blocks every PR indefinitely.
+  #
+  # ``needs.core-shard.result`` is the aggregate over the WHOLE matrix, so a
+  # 3.12 shard failure also reds "Tests (Python 3.11)".  That is deliberate:
+  # it fails closed, and the gate's job is to stop the merge, not to attribute
+  # blame -- the per-shard jobs show which one broke.
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    needs: [core-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Gate on the core shards
+        run: |
+          echo "core-shard matrix result: ${{ needs.core-shard.result }}"
+          if [ "${{ needs.core-shard.result }}" != "success" ]; then
+            echo "::error::A core shard did not pass - see the 'Core shard *' jobs."
+            exit 1
+          fi
+          echo "All core shards passed."
 
   changes:
     name: Detect code changes
