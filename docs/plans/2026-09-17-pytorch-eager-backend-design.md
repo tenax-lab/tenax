@@ -68,7 +68,7 @@ From a full sweep of `src/tenax` (120 files):
 | **Control flow** | `lax` `while_loop`×29, `scan`×22, `fori_loop`×10, `stop_gradient`×58 across 31 files | **Yes — redesign.** |
 | **Krylov / triangular solvers** | `_gmres_lax.py:171` (`solve_triangular`), `:299-336`; `_metric_precond.py:164`, `ad_utils.py:915` (`jax.scipy … gmres`); **`_krylov_bicgstab` (default `adjoint_solver`), `_ctm_tensor_c4v_reference_ad.py:165`** | **Yes — backend solvers, incl. bicgstab** (§5.4). |
 | **DMRG truncation ops** | `jax.lax.top_k`/`jax.nn.one_hot` (`_padded_linalg.py:128/142`), reached by `accelerator="auto"` → `_jit_sweep` | **Yes — `ArrayOps.top_k`/`one_hot`** (§4.2). |
-| **Optimizer** | `optax` chains in `_ipeps_optimize_shared.py:112-136`; `optimizer.update`/`apply_updates` (`ipeps_optimize.py:1053`) | **Yes — optimizer seam** (§5.6). |
+| **Optimizer** | `optax` chains in `_ipeps_optimize_shared.py:112-136` + **`pess_optimize.py:468/775` and `ipeps_optimize_root_implicit.py:637`**; `optimizer.update`/`apply_updates` | **Yes — optimizer seam, all Optax users** (§5.6). |
 | **Pytree registration** | `core/tensor.py:441,624`; `stacked_tensor.py:41`; `_padded_block_array.py:229`; `pess.py:252` | **Yes — reinterpret** (§6). |
 | PRNG | `jax.random`/PRNGKey in 17 files | Yes; key-threading → generator. |
 | Global x64 | `__init__.py:45`; `jnp.float64` literals in factories | Yes; small but global. |
@@ -183,6 +183,20 @@ x.requires_grad`, plus a `torch.func` functorch-tracer check), and all ~18 sites
 migrate to it — this is Phase-3 work called out alongside the transform-site
 migration.
 
+**Host-convertibility is a *separate* concern from AD-state — do not conflate them
+(Codex #1010 P1).** `is_tracing_or_requires_grad` answers "take the AD-safe branch?",
+**not** "can I `np.asarray` this?". The eager decomposition path host-reads the data
+directly — `np.array(s_q)` (`linalg.py:471`), `np.asarray(block)` (`:1112/:1359`),
+`np.asarray(data)` (`core/tensor.py:1044`) — and torch rejects a direct NumPy
+conversion on **two** axes the AD predicate misses: (a) an *ordinary non-grad CUDA
+tensor* (predicate `False`, but `.numpy()` still raises — needs `.cpu()` first), and
+(b) a CPU `requires_grad=True` tensor read *inside* `torch.no_grad()` (predicate
+`False`, but NumPy still rejects it — needs `.detach()`). So the seam exposes a
+distinct **`to_numpy(x)`** (torch: `x.detach().cpu().numpy()`; JAX: `np.asarray`) —
+or, better on the block-sparse path, a **backend-native truncation** that never
+leaves the device — and the host-read sites use *that*, not the AD predicate. Without
+this, CUDA HOTRG / public `truncated_svd` fail despite GPU parity being a v1 aim (D6).
+
 Rationale over the Array-API standard: Tenax leans on ops the standard doesn't
 cover portably — `einsum` with explicit contraction paths, `segment_sum`,
 algorithm-selected SVD, and complex dtypes where array-api support is uneven. We
@@ -264,6 +278,23 @@ explicit `vmap` staticmethod. So the wrapper contract mandates the
 combinator of §5.4** (which is likewise reached through `backend.ad.value_and_grad`),
 and the parity suite (§10) transforms a composed objective through *each* of them to
 prove it.
+
+**`setup_context` only sees inputs + *returned* outputs — hidden residuals must be
+returned, not stashed (Codex #1010 P1).** Today's `_fwd` rules save residuals that
+are **not in their public outputs**: `_truncated_svd_ad_vh_only_fwd` returns only the
+truncated `(s, Vh)` but saves `(U_full, s_full, Vh_full, M, k)`
+(`_ad_primitives.py:489`), and `_truncated_eigh_regularized_fwd` returns `(w[:k],
+v[:,:k])` but saves the *full* eigensystem `(w, v, k)` (`_lorentzian_eigh.py:92`).
+JAX `custom_vjp` allows this (fwd returns `(output, residuals)`), but the torch
+`setup_context(ctx, inputs, output)` form receives only inputs and the returned
+outputs — it **cannot** recover `U_full`/full-`w`/full-`v` from a single `forward`.
+So the wrapper contract requires each such primitive to return those residuals as
+**hidden auxiliary outputs** of `forward` (marked non-differentiable via
+`ctx.mark_non_differentiable`, so no cotangent is expected for them) which
+`setup_context` then stashes on `ctx`, or to **recompute** them in `setup_context`.
+The backend-neutral `_fwd` therefore declares its residual tuple explicitly so both
+wrappers consume the same data; a transform test (§10) exercises exactly these two
+truncating primitives through `grad`.
 
 ### 5.3 ⚠️ Complex-cotangent convention — the highest-risk item
 JAX and PyTorch use **different conjugation conventions** for complex gradients.
@@ -456,6 +487,17 @@ Acceptance requires **at least one complete parameter-update step in the *defaul
 comparison, and not only an unspecified optimizer — otherwise "full parity" stops at
 gradient evaluation and the default torch optimization path could be silently
 unusable. This is a Phase-3b deliverable.
+
+**The seam must cover *every* direct Optax user, not just the shared iPEPS builder
+(Codex #1010 P1).** `_build_optimizer` is not the only Optax call site: the public
+PESS optimizers `optimize_pess_ad` / `optimize_pess_3site_multisite_ad` construct
+their own `optax.chain(...)` and call `optimizer.update` (`pess_optimize.py:468/479`
+and `:775/789`), and the root-implicit optimizer calls `optax.apply_updates`
+(`ipeps_optimize_root_implicit.py:637`). Under the locked full-parity scope, all of
+these must route through the backend optimizer seam — a test of only `optimize_gs_ad`
+would leave the PESS and root-implicit paths silently on Optax with torch trees. So
+Phase 3b migrates **every** direct Optax user and the parity suite (§10) exercises
+**at least one PESS optimization step** in addition to the iPEPS one.
 
 ---
 
@@ -680,8 +722,8 @@ GPU-gated parity skips cleanly when no CUDA device is present.
 | **0. Seam** | `tenax.backend` package, `ArrayOps` Protocol **incl. functional indexed-updates** (§4.2; migrate the 137 `.at[...]` sites across 25 files), `JaxBackend` pass-through; migrate `core/tensor.py` + `linalg.py` dense kernels behind `B`; **export `set_backend`/`get_backend` in `__all__`**. Suite green, zero behavior change. | Low | **High** (mechanical, 80-file surface — but staged) |
 | **1. Torch forward** | `TorchBackend` array ops + dense/symmetric linalg forward + contraction (`torch.einsum`/opt_einsum + segment-sum equiv). Op-parity suite green. | Low–Med | Med |
 | **2. Torch AD** | Refactor the **6 leaf primitives across `_ad_primitives.py` (5) + `_lorentzian_eigh.py` (1, §5.1)** to `_fwd/_bwd`; **`torch.func`-compatible `autograd.Function` (`setup_context` + vmap rule, §5.2)**; **complex-cotangent boundary + directional-derivative parity test (§5.3)**. Gradient-parity green. | **High** (§5.3) | Med |
-| **3. Control flow + algorithms** | `backend.control` combinators + **`jit`/`checkpoint` wrappers (§7)**; **`backend.tree` protocol + register all custom containers (§6; migrate the 186 `jax.tree` sites)**; **`backend.ad` transforms (§5.5) + `fixed_point(step, params, …)` on the `setup_context` contract, incl. the C4v-reference primitive (§5.4)**; **`backend.linalg.gmres`/`solve_triangular`/`bicgstab` for the adjoint solve (§5.4; bicgstab is the default, `_ctm_tensor_c4v_reference_ad.py:165`)**; **`ArrayOps.top_k`/`one_hot` for the default `_jit_sweep` DMRG truncation (§4.2; `_padded_linalg.py`)**; **`value_and_grad` return-order adapter + `custom_vjp` `nondiff_argnums` (§5.5/§5.2)**; **migrate the ~18 `jax.core.Tracer` checks to `is_tracing_or_requires_grad` (§4.2)**; migrate CTM/DMRG/GMRES loops and the ~76 direct `jax.*` transform sites. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
-| **3b. Optimizer seam** | **backend optimizer (§5.6)** — optax under JAX; under torch a **functional L-BFGS** returning a direction (default mode), Adam via `torch.optim`/functional; migrate `_build_optimizer`/`optimizer.update` to the `(direction, state)` contract feeding Tenax's line search + functional apply. **One full `optimize_gs_ad` update step in default L-BFGS mode runs through torch** (§10 item 4). | Med | Med |
+| **3. Control flow + algorithms** | `backend.control` combinators + **`jit`/`checkpoint` wrappers (§7)**; **`backend.tree` protocol + register all custom containers (§6; migrate the 186 `jax.tree` sites)**; **`backend.ad` transforms (§5.5) + `fixed_point(step, params, …)` on the `setup_context` contract, incl. the C4v-reference primitive (§5.4)**; **`backend.linalg.gmres`/`solve_triangular`/`bicgstab` for the adjoint solve (§5.4; bicgstab is the default, `_ctm_tensor_c4v_reference_ad.py:165`)**; **`ArrayOps.top_k`/`one_hot` for the default `_jit_sweep` DMRG truncation (§4.2; `_padded_linalg.py`)**; **`value_and_grad` return-order adapter + `custom_vjp` `nondiff_argnums` (§5.5/§5.2)**; **migrate the ~18 `jax.core.Tracer` checks to `is_tracing_or_requires_grad`, and the host-read sites (`np.array`/`np.asarray`) to `to_numpy` / backend-native truncation (§4.2)**; migrate CTM/DMRG/GMRES loops and the ~76 direct `jax.*` transform sites. DMRG + small iPEPS energy&grad parity green. | Med–High | High |
+| **3b. Optimizer seam** | **backend optimizer (§5.6)** — optax under JAX; under torch a **functional L-BFGS** returning a direction (default mode), Adam via `torch.optim`/functional; migrate **every** direct Optax user (`_build_optimizer` + `pess_optimize.py` + `ipeps_optimize_root_implicit.py`) to the `(direction, state)` contract feeding Tenax's line search + functional apply. **One full `optimize_gs_ad` *and* one PESS update step in default L-BFGS mode run through torch** (§10 item 4). | Med | Med |
 | **4. Polish** | RNG/dtype policy, drop GPU-only workarounds on torch path, docs, `capabilities.md` update, **`README.md` documents the `set_backend` signature**, example, CI torch job. | Low | Low–Med |
 
 Phase 0 is the tedious-but-safe backbone; Phase 2 is the small-but-dangerous core.
