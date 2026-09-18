@@ -1214,6 +1214,23 @@
 
 ### CI / tests
 
+- **`test_regularized_qr_backward_finite_at_rank_deficiency` now fails when the
+  `diag(R)` floor is removed** (#927).  It previously did not: the input was
+  built by zeroing singular values and reconstructing
+  (`s.at[8:].set(0.0); M = (U * s) @ Vh`), which leaves `min|diag(R)|` at
+  ~5e-17 rather than at zero — so raw `jnp.linalg.qr`'s VJP is finite too, the
+  floor never engages, and asserting "our gradient is finite" passes for free.
+  #913's mutation run had measured exactly this and disclosed it rather than
+  fixing it: delete the floor and three *other* tests failed while this one
+  passed.  A **structurally** zero column is what makes the real square case
+  genuinely singular — measured on real 12x12: svd-zeroed 4.974e-17 (raw
+  finite), duplicated column 2.640e-16 (raw finite), zero column **0.000e+00**
+  (raw non-finite).  The test now uses a zero column, parametrised over first /
+  middle / last position, asserts the exactly-zero precondition, and asserts
+  non-vacuity the way #913/#917 do for the wide and complex branches — that raw
+  JAX really does go non-finite, so the floor is demonstrably doing work.
+  Verified by re-running the mutation: **6 failures now, against 3 before.**
+
 - **A network blip no longer reds the documentation build.** `sphinx-build -W`
   in CI and `fail_on_warning: true` on Read the Docs both make every warning
   fatal, and intersphinx fetches `docs.python.org`, `numpy.org` and
