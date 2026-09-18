@@ -1215,8 +1215,13 @@
 ### CI / tests
 
 - **The required `-m core` gate is sharded across runners** (`core-shard`, 4
-  shards x 2 Python versions), using the same stable-`cksum` rule the non-core
-  buckets adopted in #960.  The gate had grown to 2664 of 4310 tests (62% of
+  shards x 2 Python versions, plus `core-shard-macos`), using the same
+  stable-`cksum` rule the non-core buckets adopted in #960.  All three
+  branch-protected contexts are sharded on the *same* partition, so shard N
+  holds the same files everywhere: leaving macOS serial would have capped the
+  change, since the gate is bounded by its slowest required job and macOS
+  measured 27-52 min (median ~44) against ubuntu shards that finish inside
+  that.  The gate had grown to 2664 of 4310 tests (62% of
   the suite) and 101m41s, against the 120-min merge-queue limit that already
   dropped #936 and grazed #920 at 120.1 — and the usual lever was spent, since
   coverage is already off on pull requests.  Measured per-file cost splits

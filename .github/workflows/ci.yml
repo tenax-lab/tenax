@@ -429,9 +429,21 @@ jobs:
         run: |
           uv run pytest tests/ -m "core" -v
 
-  test-macos:
-    name: Tests (macOS, Python 3.12)
+  # Sharded on the same rule as the ubuntu gate, and with the same NSHARDS, so
+  # shard N holds the SAME files on both platforms -- a macOS-only failure in
+  # shard 2 is directly comparable to ubuntu shard 2.  macOS is a required
+  # context too, so leaving it serial would have capped this change: measured
+  # 27/35/39/44/45/46/47/52 min over recent runs (median ~44), against ubuntu
+  # shards that finish well inside that.  The gate is bounded by its slowest
+  # required job, so the serial macOS run -- not the ubuntu shards -- would
+  # have set the floor.
+  core-shard-macos:
+    name: Core shard ${{ matrix.shard }} (macOS, Python 3.12)
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1", "2", "3", "4"]
 
     steps:
       - uses: actions/checkout@v6
@@ -457,11 +469,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/jax
-          key: jax-xla-${{ runner.os }}-py3.12-${{ github.run_id }}
+          key: jax-xla-${{ runner.os }}-py3.12-s${{ matrix.shard }}-${{ github.run_id }}
           restore-keys: |
             jax-xla-${{ runner.os }}-py3.12-
 
       - name: Run linter
+        # Once per run, not once per shard; the ubuntu gate lints too.
+        if: matrix.shard == '1'
         run: uv run ruff check src/ tests/
 
       - name: Run core tests
@@ -471,15 +485,52 @@ jobs:
           # uploaded to Codecov, so in the coverage contexts it keeps only the
           # terminal report it always had.
           WITH_COV: ${{ contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && '1' || '0' }}
+          SHARD: ${{ matrix.shard }}
+          # Must equal the number of entries in the matrix ``shard`` list, and
+          # must match the ubuntu gate's NSHARDS to keep the two partitions
+          # identical.
+          NSHARDS: 4
         run: |
           if [ "$WITH_COV" = "1" ]; then
             COV_ARGS="--cov=tenax --cov-report=term-missing"
           else
             COV_ARGS="--no-cov"
           fi
-          uv run pytest tests/ -m "core" $COV_ARGS \
+          FILES=""
+          for f in $(find tests -name 'test_*.py' | LC_ALL=C sort); do
+            h=$(printf '%s' "$f" | cksum | cut -d' ' -f1)
+            if [ $(( h % NSHARDS )) -eq $(( SHARD - 1 )) ]; then
+              FILES="$FILES $f"
+            fi
+          done
+          set +e
+          uv run pytest $FILES -m "core" $COV_ARGS \
             --durations=50 \
             -v
+          rc=$?
+          set -e
+          if [ "$rc" -eq 5 ]; then
+            echo "Shard collected no core tests; OK."
+            rc=0
+          fi
+          exit $rc
+
+  # Carries the branch-protected "Tests (macOS, Python 3.12)" context; see the
+  # ubuntu aggregator above for why the name has to survive verbatim.
+  test-macos:
+    name: Tests (macOS, Python 3.12)
+    needs: [core-shard-macos]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate on the macOS core shards
+        run: |
+          echo "core-shard-macos result: ${{ needs.core-shard-macos.result }}"
+          if [ "${{ needs.core-shard-macos.result }}" != "success" ]; then
+            echo "::error::A macOS core shard did not pass - see the 'Core shard * (macOS' jobs."
+            exit 1
+          fi
+          echo "All macOS core shards passed."
 
   docs:
     name: Build documentation
