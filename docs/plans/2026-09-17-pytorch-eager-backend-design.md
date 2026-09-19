@@ -244,12 +244,23 @@ that blast radius and make the migration safe to land incrementally:
 
 A **custom, explicit Protocol** enumerating the ~40 array ops Tenax actually uses
 (`concatenate, reshape, transpose, conj, einsum, tensordot, stack, segment_sum,
-where, pad, astype, zeros, top_k, one_hot, kron, ...`) plus the decomposition entry
-points, the dtype/tracing predicates below, and functional indexed-updates. Two
-implementations: `JaxBackend` (thin wrappers over today's `jnp`) and `TorchBackend`.
-We reuse `array-api-compat` for the trivial elementwise subset, but the Protocol is
-the contract — the standard doesn't cover `einsum`-with-paths, `segment_sum`,
-algorithm-selected SVD, or complex dtypes portably.
+where, pad, astype, zeros, top_k, one_hot, kron, split, take, ...`) plus the
+decomposition entry points, the dtype/tracing predicates below, and functional
+indexed-updates. Two implementations: `JaxBackend` (thin wrappers over today's `jnp`)
+and `TorchBackend`. We reuse `array-api-compat` for the trivial elementwise subset,
+but the Protocol is the contract — the standard doesn't cover `einsum`-with-paths,
+`segment_sum`, algorithm-selected SVD, or complex dtypes portably.
+
+**`split` and `take` are semantic traps, not thin wrappers.** `_arnoldi.py:106`
+(the **default** eigensolver) calls `jnp.split(vec, jnp.cumsum(sizes[:-1]))` — a 1-D
+array of **boundary indices** — but `torch.split` reads a sequence as **chunk sizes**
+and rejects a tensor argument; the boundary-index semantics are `torch.tensor_split`.
+`blocksparse_plan.py:368/384` (the block-sparse contraction) calls
+`jnp.take(stack, rows, axis=0)`, but `torch.take` **flattens** the input and has **no
+`axis`**; the axis-aware gather is `torch.index_select` (or `gather`). So both are on
+the explicit protocol with these non-mechanical lowerings — a naive `torch.split`/
+`torch.take` mapping fails the fixed-point and block-sparse paths silently (wrong
+partition) or loudly (rejected argument), even with every other op implemented.
 
 **Functional indexed updates.** Tenax uses `x.at[idx].set/add/multiply(...)` **137
 times across 25 files** (only `.set`/`.add`/`.multiply` — no exotic `.at` variants),
@@ -1174,7 +1185,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (25 rounds) and a
+The specific requirements above were hardened across a Codex review (26 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1348,3 +1359,10 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   AD. Each helper branches on its argument: dtype objects use the `torch.dtype` properties
   `.is_complex`/`.is_floating_point` + `torch.promote_types`; tensors use the `torch.is_*`/
   `result_type` functions.
+- **R26** — **P1**, `split`/`take` need non-mechanical lowerings (§4.3): `_arnoldi.py:106`
+  (the default eigensolver) calls `jnp.split(vec, cumsum(sizes))` with **boundary
+  indices**, but `torch.split` reads a sequence as **chunk sizes** and rejects a tensor
+  arg — the match is `torch.tensor_split`; `blocksparse_plan.py:368/384` calls
+  `jnp.take(..., axis=0)`, but `torch.take` flattens and has no `axis` — the match is
+  `torch.index_select`. Both are now explicit protocol entries, since a naive mapping
+  fails the fixed-point and block-sparse paths even with every other op implemented.
