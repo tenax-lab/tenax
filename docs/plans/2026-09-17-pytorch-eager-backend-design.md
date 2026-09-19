@@ -44,7 +44,7 @@ complex-cotangent convention, and PRNG threading. Sections 5–8 handle each.
   `torch.einsum`/`opt_einsum`. Also a feature excluded from "parity".
 
 "Full single-device feature parity" therefore means: every algorithm
-(DMRG/iDMRG/TDVP/TRG/HOTRG/iPEPS/fPEPS/PESS, forward **and** AD) produces
+(DMRG/iDMRG/TDVP/TRG/HOTRG/GILT-TNR/iPEPS/fPEPS/PESS, forward **and** AD) produces
 tolerance-equal results on one device under torch; it does **not** promise the
 multi-GPU or specialized-kernel paths above.
 
@@ -95,6 +95,7 @@ From a full sweep of `src/tenax` (120 files); counts re-verified at head `756f9e
 | PRNG | `jax.random`/PRNGKey in 17 files; **plus** transform-time randomness (§8) | Yes; key-threading → generator. |
 | Global x64 | `__init__.py:45`; `jnp.float64` literals in factories | Yes; small but global. |
 | Multi-GPU sharding | `_jit_sweep.py:769-806` (mesh/`device_put`), `ctm_sharding.py`, `_ctm_tensor_convergence.py:337` | **JAX-only** (non-goal) — but embedded in the default sweep, so the torch path must branch around it, not just skip a module. |
+| GILT-TNR | exported `gilt_tnr`/`gilt_plaquette`/`gilt_tnr_step` (`__init__.py`), direct `jnp.linalg.eigh/eigvalsh/svd` (`algorithms/gilt.py:218/221/255`) | **Yes — public family, must go through the seam** (§10.3). |
 | GPU workarounds | `linalg.py:59-100` (cuSOLVER), `_einsum_compat.py` (cuBLASLt) | JAX-only; **drop** for torch. |
 
 Note the existing `contraction/blocksparse_backend.py` seam selects **contraction
@@ -299,15 +300,23 @@ wrapper. But the wrapper carries **four** non-trivial contracts, each of which a
    `forward` + `setup_context(ctx, inputs, output)` form, and `vmap` needs
    `generate_vmap_rule=True` or an explicit `vmap` staticmethod. Mandatory for all six
    primitives **and the fixed-point combinator** (§5.4).
-3. **Hidden residuals must be *returned*, not stashed.** `setup_context(ctx, inputs,
-   output)` sees only inputs and the *returned* outputs. But
+3. **Hidden residuals — recompute from saved *inputs*, do not `mark_non_differentiable`.**
+   `setup_context(ctx, inputs, output)` sees only inputs and the *returned* outputs,
+   but the fwd rules save residuals absent from the public output:
    `_truncated_svd_ad_vh_only_fwd` returns only `(s, Vh)` while saving
    `(U_full, s_full, Vh_full, M, k)` (`_ad_primitives.py:489`), and
    `_truncated_eigh_regularized_fwd` returns `(w[:k], v[:,:k])` while saving the full
-   eigensystem (`_lorentzian_eigh.py:92`). So these must return the extra residuals as
-   **hidden auxiliary outputs** of `forward` (via `ctx.mark_non_differentiable`, which
-   still delivers a `None` grad-slot the `backward` must accept/return), or recompute
-   them in `setup_context`.
+   eigensystem (`_lorentzian_eigh.py:92`). The tempting fix — return them as extra
+   outputs tagged `ctx.mark_non_differentiable` — is **wrong for double-backward**:
+   marking `U_full`/`s_full`/`Vh_full` non-differentiable makes the *first* backward
+   treat their dependence on the input as constant, so the Hessian terms through
+   SVD/eigh vanish — which silently breaks `compute_excitations`/HVP, the very
+   second-order path §5.4 requires. So the contract is: **`setup_context` saves the
+   raw *inputs* on `ctx`, and `backward` recomputes the decomposition from them**
+   inside the recorded (differentiable) graph — or the primitive supplies a dedicated
+   double-backward rule. A `gradgrad`/`torch.autograd.gradcheck(...,
+   check_double_backward=True)` test (§10) guards it; `mark_non_differentiable` is
+   only acceptable for residuals that are genuinely constant w.r.t. the input.
 4. **Convention** (§5.3) and **double-differentiability** (§5.4) — below.
 
 ### 5.3 ⚠️ Complex-cotangent convention — the highest-risk item
@@ -600,15 +609,26 @@ Acceptance = a **cross-backend parity suite**:
    compare gauge-invariants, not raw factors** — `U`/`V` columns, `R` diagonal signs,
    eigenvectors carry gauge/phase freedom resolved differently by `torch.linalg.*` vs
    JAX, so `allclose(U_torch, U_jax)` fails on correct outputs. Assert singular/eigen
-   values, `U diag(S) Vh` reconstruction, and subspace projectors `|Vᴴ_a V_b|`.
+   values, `U diag(S) Vh` reconstruction, and — for a **degenerate** singular/eigen
+   subspace — the **clustered projector** `V_a V_aᴴ` vs `V_b V_bᴴ` (invariant under a
+   within-subspace unitary rotation), **not** the cross-overlap magnitude `|Vᴴ_a V_b|`
+   (which two correct backends can make non-identity by rotating a degenerate block —
+   it would reject valid decompositions in exactly the degenerate case).
 2. **Gradient parity** — the 6 leaf primitives (§5.1) **and the fixed-point family**
    (incl. C4v-reference), plus composed objectives (DMRG/iPEPS energy). Compare via
    **directional derivatives with per-backend pairing** (§5.3), not raw grad `allclose`.
    Includes a **complex-parameter** case and a case run **through
    `backend.ad.value_and_grad`** so the fixed-point `Function` is exercised under a
    `torch.func` transform, not just eager `.backward()`.
-3. **Algorithm parity** — DMRG (→ −0.4431 Heisenberg), iDMRG, small iPEPS energy+grad,
-   end-to-end on torch vs the pinned JAX references.
+3. **Algorithm parity — one representative case per *promised family*, not a sample.**
+   Under the locked full-single-device-parity scope, the suite must exercise **every**
+   family the design claims, or the checklist can pass while a supported entry point
+   stays JAX-bound: DMRG (→ −0.4431 Heisenberg), iDMRG, **TDVP**, **TRG/HOTRG**, a
+   small iPEPS energy+grad, **fPEPS**, **PESS**, and the exported **`gilt_tnr` /
+   `gilt_plaquette`** path (`algorithms/gilt.py` still uses direct `jnp.linalg`
+   eigh/eigvalsh/svd — a public JAX-coupled algorithm that must go through the seam),
+   each end-to-end on torch vs the pinned JAX references. Any family YJ chooses to
+   exclude must move to §1 non-goals, not be silently dropped from the suite.
 4. **Optimizer-step parity** — one full `optimize_gs_ad` **and** one PESS update step
    **in the default L-BFGS mode** (build → `update` returns a direction → line search →
    functional apply), asserting parameters track the JAX/optax step. **Must use complex
@@ -653,11 +673,14 @@ until 3b/3c make an algorithm end-to-end usable.
 0) + documented in `README.md` (Phase 4) are merge-blocking.
 
 ### 11.1 Definition of Done (v1 exit checklist)
-- [ ] `set_backend("torch")` runs DMRG, iDMRG, TDVP, TRG/HOTRG, iPEPS, fPEPS, PESS
+- [ ] `set_backend("torch")` runs **every promised family** — DMRG, iDMRG, TDVP,
+  TRG/HOTRG, iPEPS, fPEPS, PESS, **and the exported `gilt_tnr`/`gilt_plaquette`** —
   forward **and** AD to tolerance-equal results vs JAX on **one device** (CPU and, if a
-  CUDA runner exists, GPU).
+  CUDA runner exists, GPU). Each has a **representative end-to-end parity test** (§10.3);
+  any family excluded is listed in §1 non-goals, not merely absent.
 - [ ] Op/grad parity `core`-green; algorithm + optimizer parity `slow`-green; at least
-  one **complex-parameter** optimizer step through torch (§10.4).
+  one **complex-parameter** optimizer step through torch (§10.4); a **double-backward
+  (`gradgrad`)** test through the SVD/eigh primitives (§5.2) green.
 - [ ] Seam-boundary CI gate green (no raw `jnp`/`lax` outside `backend/`).
 - [ ] `set_backend`/`get_backend` exported + documented; torch version floor pinned.
 - [ ] Named owner for GPU-parity + cross-backend flake triage.
