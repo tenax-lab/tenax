@@ -681,6 +681,11 @@ _FILE_MARKERS = {
     # Cost: two D=2 chi=8 CTM gradient evaluations to conv_tol=1e-10 plus two
     # 1-step optimizations (~40s CPU).
     "test_ipeps_ad_adjoint_methods.py": "algorithm",
+    # #899: the returned-energy-is-fresh guard.  ``core``: it is the
+    # regression test for a wrong number coming out of ``optimize_gs_ad``,
+    # which is exactly what should gate a merge, and it is cheap -- D=2
+    # chi=6, 4 L-BFGS steps with a line search, 21.6s CPU for the file.
+    "test_ipeps_final_energy_is_fresh_899.py": "core",
 }
 
 
