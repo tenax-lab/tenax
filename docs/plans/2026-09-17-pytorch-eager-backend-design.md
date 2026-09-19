@@ -244,7 +244,7 @@ that blast radius and make the migration safe to land incrementally:
 
 A **custom, explicit Protocol** enumerating the ~40 array ops Tenax actually uses
 (`concatenate, reshape, transpose, conj, einsum, tensordot, stack, segment_sum,
-where, pad, astype, zeros, top_k, one_hot, kron, split, take, ...`) plus the
+where, pad, astype, zeros, top_k, one_hot, kron, split, take, vdot, ...`) plus the
 decomposition entry points, the dtype/tracing predicates below, and functional
 indexed-updates. Two implementations: `JaxBackend` (thin wrappers over today's `jnp`)
 and `TorchBackend`. We reuse `array-api-compat` for the trivial elementwise subset,
@@ -261,6 +261,12 @@ and rejects a tensor argument; the boundary-index semantics are `torch.tensor_sp
 the explicit protocol with these non-mechanical lowerings — a naive `torch.split`/
 `torch.take` mapping fails the fixed-point and block-sparse paths silently (wrong
 partition) or loudly (rejected argument), even with every other op implemented.
+`vdot` is a third: `jnp.vdot` **flattens** its operands, but `torch.vdot` accepts only
+**1-D** tensors, and the live sites feed it multidimensional ones —
+`_ctm_c4v_root_implicit.py:187-188` (rank-2 `C`, rank-3 `E`) and
+`_ctm_root_implicit_multisite.py:734/741/750` (env tensors), plus the §5.6 L-BFGS
+curvature pairs — so the lowering is `torch.vdot(a.reshape(-1), b.reshape(-1))`, with a
+multidimensional parity case.
 
 **Functional indexed updates.** Tenax uses `x.at[idx].set/add/multiply(...)` **137
 times across 25 files** (only `.set`/`.add`/`.multiply` — no exotic `.at` variants),
@@ -741,8 +747,9 @@ tangent projection and metric/CG variants. `torch.optim.LBFGS` breaks all of tha
 `gs_optimizer="lbfgs"` maps to a **functional two-loop L-BFGS** (Tenax already
 hand-rolls one at `ipeps_optimize.py:2148` for the metric path). It is **not a verbatim
 port**: it must (a) consume the Euclidean `∇E`, *not* re-conjugate (per §5.3), (b) use
-`torch.vdot`/`Re(·)` for the Hermitian `s·y`, `y·r` curvature pairs
-(`lbfgs_two_loop` uses `jnp.vdot`, `_metric_precond.py:236/246`), and (c) replicate the
+`B.vdot`/`Re(·)` for the Hermitian `s·y`, `y·r` curvature pairs
+(`lbfgs_two_loop` uses `jnp.vdot`, `_metric_precond.py:236/246`) — **`B.vdot`, not bare
+`torch.vdot`, because the lowering must flatten first (§4.3)** — and (c) replicate the
 `optax.scale_by_lbfgs` specifics that set the §10 tolerance — initial scaling
 `γ=⟨s,y⟩/⟨y,y⟩`, the `s·y≤0` curvature-pair skip, and the sign convention Tenax's line
 search consumes.
@@ -1185,7 +1192,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (26 rounds) and a
+The specific requirements above were hardened across a Codex review (27 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1366,3 +1373,9 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   `jnp.take(..., axis=0)`, but `torch.take` flattens and has no `axis` — the match is
   `torch.index_select`. Both are now explicit protocol entries, since a naive mapping
   fails the fixed-point and block-sparse paths even with every other op implemented.
+- **R27** — **P1**, `vdot` must flatten (§4.3/§5.6): `jnp.vdot` flattens its operands but
+  `torch.vdot` takes only 1-D, and the live sites feed it multidimensional tensors —
+  `_ctm_c4v_root_implicit.py:187-188` (rank-2 `C`, rank-3 `E`),
+  `_ctm_root_implicit_multisite.py:734/741/750` (env tensors), and the §5.6 L-BFGS
+  curvature pairs — so `B.vdot` lowers to `torch.vdot(a.reshape(-1), b.reshape(-1))`
+  (bare `torch.vdot` would raise on the root-implicit paths), with a multidim parity case.
