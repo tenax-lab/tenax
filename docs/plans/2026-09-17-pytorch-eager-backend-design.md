@@ -205,9 +205,9 @@ that blast radius and make the migration safe to land incrementally:
   layer.
 - **A CI grep-gate enforces the seam boundary**: no `import jax.numpy` / bare `jnp.`
   / `lax.` outside `src/tenax/backend/` (allow-list the few genuinely JAX-only
-  modules), and no bare backend-array **method** calls torch lacks — `.at[`,
-  `.astype(`, `.size`, `.copy(`, multi-arg `.transpose(` (§4.3). This both prevents a
-  *half-migrated* state
+  modules), and no bare backend-array **method** calls or indexing torch lacks —
+  `.at[`, `.astype(`, `.size`, `.copy(`, multi-arg `.transpose(`, negative-step
+  `[::-1]` (§4.3). This both prevents a *half-migrated* state
   where a not-yet-ported file calls raw `jnp` (or a JAX-only tensor method) on a
   torch tensor, and defines "migrated" mechanically.
 - **Opt-out**: the whole effort is behind `set_backend`; reverting to raw `jnp` is a
@@ -293,6 +293,13 @@ the Phase-0 gate blocks the **entire** enumerated class (present members *and* t
 currently-unused ones, preventively), and "migrated" for array methods is defined by
 that gate passing — closing the whack-a-mole rather than absorbing one method per
 review round.
+
+**Negative-step slicing is the one *indexing* form in the same class.** Torch tensor
+slices do **not** support a negative step, so the eigenvector-reversal idiom
+`eigvecs[:, ::-1]` (and `eigvals[::-1]`) breaks even after `jnp.linalg.eigh`→`B.eigh`:
+`_ctm_honeycomb_projector.py:342-343`, `_ctm_projector.py:1156/1160/1247`, and
+`linalg.py:2580-2581`. These rewrite through `B.flip` (`torch.flip` / `jnp` slice),
+and the Phase-0 gate flags bare `[::-1]` / `[..., ::-1]` alongside the methods above.
 
 **`top_k` / `one_hot` are load-bearing on the default DMRG path.**
 `accelerator="auto"` (`dmrg.py:176`) routes dense-CPU and all GPU/TPU runs through
@@ -611,7 +618,17 @@ the transforms:
 |---|---|---|
 | `vjp(f, *primals)` | `jax.vjp` | `torch.func.vjp` (or `autograd.grad` over a taped forward) |
 | `grad(f)` / `value_and_grad(f)` | `jax.grad` / `jax.value_and_grad` | `torch.func.grad` / `grad_and_value` (with the return-order adapter below) |
-| `vmap(f)` | `jax.vmap` | `torch.func.vmap` |
+| `vmap(f, in_axes, out_axes)` | `jax.vmap` | `torch.func.vmap` (axis kwargs renamed — adapter below) |
+
+**`vmap` is an adapter too — the axis kwargs are renamed.** `jax.vmap` takes
+`in_axes`/`out_axes`; `torch.func.vmap` names them `in_dims`/`out_dims`. The live
+calls pass them positionally-by-keyword: `linalg.py:229` `in_axes=0` and `:232`
+`in_axes=(0, None)` (the block-sparse grouped-decomposition batching), and
+`ipeps_excitations.py:633` `in_axes=(0, None)` (the excitation transform). A bare
+`vmap(f)` alias with no contract either raises on `in_axes` or forces backend-specific
+call sites, so `backend.ad.vmap` keeps the **JAX-shaped signature** (`in_axes`/
+`out_axes`) and translates to `in_dims`/`out_dims` under torch — including the
+**tuple-axis** form `(0, None)`, which the parity test must cover.
 
 **`value_and_grad` is an adapter, not an alias.** `jax.value_and_grad(f)` returns
 `(value, grads)`; `torch.func.grad_and_value(f)` returns them **swapped**
@@ -721,17 +738,20 @@ torch: `torch.utils.checkpoint`). Two subtleties:
   allocated" guard does **not** catch it. So `backend.control.jit` /
   `checkpoint` / `custom_vjp` must return a thin wrapper that resolves the
   lowering **on each call** (cache it per-backend-generation, so the JAX hot
-  path still pays one dict lookup, not a re-trace). Because the wrapper resolves
-  per call, a `set_backend` switch is handled by **bumping the backend
-  generation** — which invalidates every cached lowering so the next call
-  re-resolves — **not** by refusing the switch: the module-scope wrappers exist
-  from import (before any tensor or any call), so a "refuse once a wrapper
-  exists" guard would wrongly reject the very first `set_backend("torch")` after
-  `import tenax.algorithms.dmrg`. The switch is refused only in the one case
-  where it is genuinely incoherent: **inside an active differentiation/trace**
-  (a wrapper already materialized under the current generation on the live tape),
-  not merely because a wrapper object exists. A decorator that closes over the
-  backend live at import is the same class of bug as rebinding `B` instead of
+  path still pays one dict lookup, not a re-trace). The two guards are **distinct
+  and both hold**: (i) §4.1's **allocation guard** stands — `set_backend` is valid
+  **only before any tensor is allocated**, because a live JAX array cannot be
+  reinterpreted by `TorchBackend` and a generation bump invalidates *wrapper
+  caches* but cannot convert or invalidate *live tensors*; (ii) a **wrapper merely
+  existing** is *not* a blocker — the module-scope `jax.jit` wrappers are
+  constructed at import before any tensor, allocate nothing, and a switch simply
+  **bumps the backend generation** so the next call re-resolves them (so "refuse
+  once a wrapper exists" was too strict — it would reject the first
+  `set_backend("torch")` after `import tenax.algorithms.dmrg`). In short: generation
+  bumps handle wrappers built-before-first-invocation; the allocation guard (of
+  which an active trace is the strongest case) refuses the switch the moment any
+  live tensor exists. A decorator that closes over the backend live at import is
+  the same class of bug as rebinding `B` instead of
   mutating the proxy.
 - **`stop_gradient` and `checkpoint` are container-aware.** `stop_gradient` receives
   whole tensor objects/trees (`_ctm_root_implicit_symmetric.py:1944` a `SymmetricTensor`;
@@ -1001,7 +1021,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (15 rounds) and a
+The specific requirements above were hardened across a Codex review (16 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1088,3 +1108,12 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   `:192-224`), so the C4v gradient fails under `torch.func` before returning →
   tensor-predicate solver-select / validation outside the transformed backward, and
   §10 exercises **both** the fallback and non-fallback C4v solves (§5.4).
+- **R16** — three more torch-incompat sites a token gate misses: **negative-step
+  slicing** `eigvecs[:, ::-1]` (`_ctm_projector.py:1156/1160/1247`,
+  `_ctm_honeycomb_projector.py:342-343`, `linalg.py:2580-2581`) → `B.flip` + gate
+  (§4.3); **`vmap` axis kwargs** `in_axes`/`out_axes` vs torch `in_dims`/`out_dims`
+  (`linalg.py:229/232`, `ipeps_excitations.py:633`) → JAX-shaped adapter + tuple-axis
+  test (§5.5); and a **correction to the R12 `set_backend` fix** — dropping the
+  allocation guard for "active-trace-only" was an over-correction (a live JAX tensor
+  can't be reinterpreted by `TorchBackend`), so §4.1's allocation guard is preserved
+  and generation bumps apply only to wrappers built-before-first-invocation (§7).
