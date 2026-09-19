@@ -462,6 +462,12 @@ _FILE_MARKERS = {
     "test_ipeps_config.py": "core",
     "test_pess.py": "algorithm",
     "test_pess_ad.py": "algorithm",
+    # #957 complex-gradient guard for BOTH PESS optimizers: two full
+    # phase-gauge optimizations per case (supersite + multisite), ~90s CPU.
+    # Not core -- it runs full CTM optimizations -- but the euclidean-grads
+    # convention it guards is a live #957-class defect, so it must be a
+    # reviewed bucket rather than accidentally unmarked.
+    "test_pess_optimize_complex_grads_957.py": "algorithm",
     "test_pess_validation.py": "slow",
     "test_chi_auto_bump.py": "core",
     "test_ctm_env_pad.py": "core",
