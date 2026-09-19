@@ -833,7 +833,15 @@ torch eager still materializes the full tape, so long DMRG/TDVP sweeps need
      `einsum`/`matmul`) additionally requires **`CUBLAS_WORKSPACE_CONFIG=:4096:8`** in
      the environment, or it **raises at the first cuBLAS op**; and the switch is
      process-global and throws where no deterministic kernel exists. Both belong in the
-     design, not "documented perf cost."
+     design, not "documented perf cost." **And `CUBLAS_WORKSPACE_CONFIG` does not cover
+     scatter** — under `use_deterministic_algorithms(True)` the pinned torch may have
+     no deterministic CUDA `scatter_add_`/`index_add_` and would *raise* on
+     `segment_sum` itself (which is in the mandatory CUDA op matrix, §10). So the
+     `segment_sum` lowering must carry a **runnable deterministic fallback**: a
+     **sort-by-segment-id + segmented reduce** (deterministic on CUDA, no reliance on
+     the nondeterministic scatter kernel), selected when strict determinism is on.
+     Merely `CUBLAS_WORKSPACE_CONFIG` + a tolerance note is not enough — without the
+     fallback the CUDA `segment_sum` case cannot run in deterministic mode at all.
   2. **Torch's own GPU numerics** (`torch.linalg.svd` gesvdj vs gesvd, complex GEMM)
      are validated by *running the parity suite on CUDA* (§10), not assumed from
      CPU-green. Note determinism ≠ *same accumulation order as JAX's `segment_sum`*, so
@@ -919,7 +927,11 @@ benchmark** (the §2 driver — item 7):
    so a generic fPEPS run never reaches the explicit/implicit two-site split losses or
    the `.item()` RDM-select guards (`_split_ctm_tensor_energy.py:824/974`, §5.4); a
    two-site split case is required or the suite passes while that torch-transform path
-   stays broken.
+   stays broken. **And an explicit `ctm_ad_mode="root_implicit_symmetric"` case** —
+   `optimize_gs_ad` routes root-implicit configs to the separate
+   `optimize_gs_ad_root_implicit` (`ipeps_optimize.py:773`) with its own gradient,
+   Krylov, and optimizer flow (a §5.6 direct-Optax migration target), so a generic
+   iPEPS step on the default fixed-point path leaves it untested.
    **No-AD-wall families (oracle-level, per D7):** MPS — DMRG (→ −0.4431 Heisenberg),
    iDMRG, TDVP — *and* the forward-only RG algorithms **TRG/HOTRG/GILT** (exported
    `gilt_tnr`/`gilt_plaquette`; no AD, no jit, `0.000` compile — JAX eager is already
@@ -981,7 +993,7 @@ Risk × Bulk; rough person-weeks are indicative, not a commitment.
 
 | Phase | Deliverable | Risk | Bulk | ~pw |
 |---|---|---|---|---|
-| **0. Seam + invariant** | `tenax.backend` package; `ArrayOps` Protocol incl. functional indexed-updates (137 `.at[]` / 25 files) **and dtype-introspection predicates**; `JaxBackend` pass-through + op-parity-vs-`jnp` test; **seam-boundary CI grep-gate** (§4.1); migrate `core/tensor.py` + `linalg.py` dense kernels behind `B`; export `set_backend`/`get_backend` in `__all__`. Suite green, zero behavior change. | Low | High | 3–5 |
+| **0. Seam + invariant** | `tenax.backend` package; `ArrayOps` Protocol incl. functional indexed-updates (137 `.at[]` / 25 files) **and dtype-introspection predicates**; `JaxBackend` pass-through + op-parity-vs-`jnp` test; **seam-boundary CI grep-gate** (§4.1); migrate `core/tensor.py` + `linalg.py` dense kernels behind `B`; export `set_backend`/`get_backend` in `__all__` **and document them in `README.md` in the same PR** (repo rule: a public API in `__all__` must be in `README.md` — since phases land as independent PRs, deferring the doc to Phase 4 would ship an undocumented public API for several releases). Suite green, zero behavior change. | Low | High | 3–5 |
 | **1. Torch forward** | `TorchBackend` array ops + dense/symmetric linalg forward + contraction (`torch.einsum`/opt_einsum replay + segment-sum equiv); **RNG + default-dtype/promotion policy (§8)**; **`to_numpy` + device-native truncation, dtype predicates (§4.3)** — both are forward prerequisites, not polish. Op-parity green (gauge-invariant, §10). | Low–Med | Med | 3–4 |
 | **2. Torch AD (leaf)** | Refactor the 6 leaf primitives to `_fwd/_bwd`; `torch.func`-compatible `Function` (`setup_context` + vmap rule) **incl. `nondiff_argnums` and hidden-residual returns (§5.2)** — intrinsic to these primitives; **`regularized_qr` needs a hand-written backend-neutral backward or `backend.ad.vjp` pulled forward from 3a (§5.2#4)** — its current bwd calls `jax.vjp`; complex-cotangent boundary + `_euclidean_grads` convention-guard + directional-derivative parity test (§5.3). Gradient-parity green (complex case). | **High** (§5.3) | Med | 3–5 |
 | **3a. Control + trees + transforms** | `backend.control` combinators (incl. `map`) + `jit`/`checkpoint` (container-aware, §7); `backend.tree` protocol + register all containers (186 sites); `backend.ad` transforms + `value_and_grad` adapter (~76 sites); migrate the ~18 tracer checks to the functorch-aware predicate (per-site review). DMRG parity green. | Med | High | 4–6 |
@@ -995,8 +1007,10 @@ reviewable and 3b carries the CTM-adjoint + Krylov risk that a single "Med–Hig
 hid. Phases land as independent PRs; the torch path stays opt-in behind `set_backend`
 until 3b/3c make an algorithm end-to-end usable.
 
-**Public-API acceptance (repo rule):** `set_backend`/`get_backend` in `__all__` (Phase
-0) + documented in `README.md` (Phase 4) are merge-blocking.
+**Public-API acceptance (repo rule):** `set_backend`/`get_backend` in `__all__` **and
+documented in `README.md`** land together in the **Phase-0** PR (a public API in
+`__all__` must be reflected in `README.md` in the same PR) — Phase 4 only *expands* the
+docs (examples, `capabilities.md`). Both are merge-blocking.
 
 ### 11.1 Definition of Done (v1 exit checklist)
 - [ ] **AD-wall broken (the point, §2/§10.7):** the block-sparse VJP through a
@@ -1058,7 +1072,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (18 rounds) and a
+The specific requirements above were hardened across a Codex review (19 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1169,3 +1183,11 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   `_euclidean_grads` on **JAX** (identity on torch) so both consume the correct `∇E`;
   reproducing raw JAX would enshrine the error (§5.3). Flags a **latent shipped-PESS
   complex-gradient bug** worth its own tracking issue.
+- **R19** — coverage + CUDA/process gaps: an explicit `ctm_ad_mode=
+  "root_implicit_symmetric"` acceptance case (dispatches to the separate
+  `optimize_gs_ad_root_implicit`, `ipeps_optimize.py:773`, §10.3); **P2** the
+  `set_backend`/`get_backend` `README.md` doc lands in the **Phase-0** PR with the
+  `__all__` export, not Phase 4 (repo rule; independent PRs would ship it undocumented
+  for releases); **P2** `segment_sum` needs a runnable **deterministic sort-based
+  fallback** under `use_deterministic_algorithms(True)` (`CUBLAS_WORKSPACE_CONFIG`
+  covers cuBLAS, not scatter) — §8.
