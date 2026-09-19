@@ -709,10 +709,11 @@ port**: it must (a) consume the Euclidean `∇E`, *not* re-conjugate (per §5.3)
 search consumes.
 
 **Every direct Optax user routes through the seam**, not just `_build_optimizer`: the
-PESS optimizers `optimize_pess_ad` / `optimize_pess_3site_multisite_ad`
-(`pess_optimize.py:468/775`) and the root-implicit optimizer
-(`ipeps_optimize_root_implicit.py:637`). §10 exercises one iPEPS **and** one PESS
-default-mode update step.
+**two independent** PESS optimizers `optimize_pess_ad` / `optimize_pess_3site_multisite_ad`
+(`pess_optimize.py:400/669`, each with its own optax chain + `value_and_grad` +
+`optimizer.update`) and the root-implicit optimizer
+(`ipeps_optimize_root_implicit.py:637`). §10 exercises one iPEPS **and a step through
+each PESS optimizer** (one PESS test would leave the other JAX-bound).
 
 ---
 
@@ -976,12 +977,22 @@ and optimizer legs alike, and to the §10.7 benchmark's cold-cache leg.
    iDMRG CUDA case must not be satisfied by a symmetric-only representative,
    which would leave the dense path above untested while reporting green.
 
-4. **Optimizer-step parity** — one full `optimize_gs_ad` **and** one PESS update step
-   **in the default L-BFGS mode** (build → `update` returns a direction → line search →
+4. **Optimizer-step parity** — one full `optimize_gs_ad` **and a step through *each*
+   independent PESS optimizer** (`optimize_pess_ad` *and*
+   `optimize_pess_3site_multisite_ad`, `pess_optimize.py:400/669` — each builds its own
+   optax chain + `value_and_grad` + `optimizer.update` at `:479`/`:789`, so one PESS
+   test leaves the other JAX-bound and the grep gate cannot see it), all **in the
+   default L-BFGS mode** (build → `update` returns a direction → line search →
    functional apply), asserting parameters track the JAX/optax step. **Must use complex
    parameters** so the `_euclidean_grads` convention (§5.3) is actually exercised; an
    Adam-only or real-only test would leave both the direction contract and the
    double-conjugation trap invisible.
+4b. **Second-order (double-backward) parity — not only the leaf primitives.** §5.4
+   requires `control.fixed_point`'s backward to be `create_graph`-safe (not
+   `@once_differentiable`) for `compute_excitations`/HVP, but a `gradgrad` test on
+   SVD/eigh alone would pass with a once-differentiable or detached *fixed-point*
+   backward. So acceptance includes an **HVP/`gradgrad` through `control.fixed_point`
+   and its adjoint solve**, not just the leaf decompositions.
 5. **Mutation discipline** — new parity tests must kill a seeded mutant (a dropped
    boundary conjugation must fail the complex-grad test).
 6. **GPU parity (D6)** — the op/grad/algorithm/optimizer runs are **CUDA-gated
@@ -1024,7 +1035,7 @@ Risk × Bulk; rough person-weeks are indicative, not a commitment.
 | **2. Torch AD (leaf)** | Refactor the 6 leaf primitives to `_fwd/_bwd`; `torch.func`-compatible `Function` (`setup_context` + vmap rule) **incl. `nondiff_argnums` and hidden-residual returns (§5.2)** — intrinsic to these primitives; **`regularized_qr` needs a hand-written backend-neutral backward or `backend.ad.vjp` pulled forward from 3a (§5.2#4)** — its current bwd calls `jax.vjp`; complex-cotangent boundary + `_euclidean_grads` convention-guard + directional-derivative parity test (§5.3). Gradient-parity green (complex case). | **High** (§5.3) | Med | 3–5 |
 | **3a. Control + trees + transforms** | `backend.control` combinators (incl. `map`) + `jit`/`checkpoint` (container-aware, §7); `backend.tree` protocol + register all containers (186 sites); `backend.ad` transforms + `value_and_grad` adapter (~76 sites); migrate the ~18 tracer checks to the functorch-aware predicate (per-site review). DMRG parity green. | Med | High | 4–6 |
 | **3b. Fixed-point + solvers (the target)** | `fixed_point(step, params, …)` on the boundary-leaf + `setup_context` + double-differentiable contract (§5.4), incl. C4v-reference; `backend.linalg.gmres`/`solve_triangular`/`bicgstab` (bicgstab is the default). Small iPEPS energy+grad parity green **and the §10.7 AD-wall benchmark on a fermionic iPEPS/CTM AD step** — this is the deliverable the whole backend exists for (§2). | **High** | Med–High | 4–6 |
-| **3c. Optimizer** | Backend optimizer (§5.6): functional default L-BFGS returning a direction; migrate **every** Optax user (`_build_optimizer` + PESS + root-implicit) to the `(direction, state)` contract. One iPEPS + one PESS default-mode step through torch (§10.4). | Med | Med | 2–3 |
+| **3c. Optimizer** | Backend optimizer (§5.6): functional default L-BFGS returning a direction; migrate **every** Optax user (`_build_optimizer` + **both** PESS optimizers + root-implicit) to the `(direction, state)` contract. One iPEPS + a step through **each** PESS optimizer default-mode through torch (§10.4). | Med | Med | 2–3 |
 | **4. Polish** | Drop GPU-only workarounds on torch path; docs + `capabilities.md`; `README.md` documents `set_backend`; example; CI torch job (**and, for D6, a CUDA runner or an explicit out-of-band owner**). | Low | Low–Med | 1–2 |
 
 Phase 0 is the tedious-but-safe backbone; Phase 2 is the small-but-dangerous core;
@@ -1050,8 +1061,10 @@ docs (examples, `capabilities.md`). Both are merge-blocking.
   **oracle-level** torch sanity check, not a production/throughput gate. Any family
   dropped entirely is listed in §1 non-goals, not merely absent.
 - [ ] Op/grad parity `core`-green; algorithm + optimizer parity `slow`-green; at least
-  one **complex-parameter** optimizer step through torch (§10.4); a **double-backward
-  (`gradgrad`)** test through the SVD/eigh primitives (§5.2) green.
+  one **complex-parameter** optimizer step through torch for `optimize_gs_ad` **and
+  each PESS optimizer** (§10.4); a **double-backward (`gradgrad`)** test through the
+  SVD/eigh primitives (§5.2) **and through `control.fixed_point` + its adjoint** (§5.4)
+  green.
 - [ ] Seam-boundary CI gate green (no raw `jnp`/`lax` outside `backend/`).
 - [ ] `set_backend`/`get_backend` exported + documented; torch version floor pinned.
 - [ ] Named owner for GPU-parity + cross-backend flake triage.
@@ -1098,7 +1111,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (20 rounds) and a
+The specific requirements above were hardened across a Codex review (21 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1226,3 +1239,9 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   (`__init__.py:50-55`) would load the block-sparse VJP from disk and fake the wall
   disappearing (§10.7); **P2** the parity suite runs **one backend per subprocess**
   (the R16 allocation guard rejects a same-process JAX→torch switch) — §10.
+- **R21** — two more acceptance-coverage gaps: the required `gradgrad` covered only
+  SVD/eigh, so a once-differentiable/detached **fixed-point** backward would pass —
+  added an HVP/`gradgrad` through `control.fixed_point` + adjoint (§10.4b); and "one
+  PESS step" left the *second* independent PESS optimizer
+  (`optimize_pess_3site_multisite_ad`, `pess_optimize.py:669`) untested — now a step
+  through **each** PESS optimizer (§10.4, §5.6, Phase 3c).
