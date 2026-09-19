@@ -139,7 +139,7 @@ From a full sweep of `src/tenax` (120 files); counts re-verified at head `756f9e
 | **AD primitives** | 6 leaf `custom_vjp`: `_ad_primitives.py:229-719` (5) + `_lorentzian_eigh.py:81` (1), +`blocksparse_backend.py:149-177` | **Yes — redesign** (§5). |
 | **dtype introspection** | `jnp.iscomplexobj/issubdtype/result_type/finfo/complexfloating` (~18 sites) — incl. default Arnoldi `_arnoldi.py:37`, 2×2 projector, adjoint GMRES `_gmres_eager.py:117` | **Yes — backend predicates** (§4.2/§8). |
 | **Differentiation-state checks** | `isinstance(x, jax.core.Tracer)` ×~18 across **7 files** (`core/tensor.py:1043`, `linalg.py:274/2045`, `_ctm_projector.py` ×6, `_ctm_tensor_projector_2x2.py:1001`, `_ctm_tensor_energy.py:130`, `contractor.py:897`, `cutensornet_backend.py:64`) | **Yes — backend predicate** (§4.2). |
-| **Host reads** | `np.array(s_q)`/`np.asarray(block)` (`linalg.py:471/1112/1359`, `core/tensor.py:1044`) | **Yes — `to_numpy` / device-native truncation** (§4.2). |
+| **Host reads** | `np.array(s_q)`/`np.asarray(block)` (`linalg.py:471/1112/1359`, `core/tensor.py:1044`); **oracle-only families**: dense iDMRG `idmrg.py:976-977` + `:1071-1085`, GILT `gilt.py:209/222/256/265/267/274/284/318` | **Yes — `to_numpy` / device-native truncation** (§4.2); the oracle-only sites are **CPU-only by design** (§10.3), not migrated for v1. |
 | **Control flow** | `lax` `while_loop`×29, `scan`×22, `fori_loop`×11, `cond`×0, `stop_gradient`×58; `lax.map` (`_ctm_chunked_absorb.py`); union across 27 files | **Yes — redesign** (§7). |
 | **Krylov / triangular solvers** | `_gmres_lax.py:171` (`solve_triangular`), `:299-336`; `_metric_precond.py:164`, `ad_utils.py:882` (`jax.scipy … gmres`); **`_krylov_bicgstab` (default `adjoint_solver`), `_ctm_tensor_c4v_reference_ad.py:166`** | **Yes — backend solvers incl. bicgstab** (§5.4). |
 | **DMRG truncation ops** | `jax.lax.top_k`/`jax.nn.one_hot` (`_padded_linalg.py:128/142`), reached by `accelerator="auto"` → `_jit_sweep` | **Yes — `ArrayOps.top_k`/`one_hot`** (§4.2). |
@@ -569,6 +569,20 @@ torch: `torch.utils.checkpoint`). Two subtleties:
 - **The identity-`jit` is necessary but not sufficient for DMRG**: the default
   `_jit_sweep` route calls `jax.lax.top_k`/`jax.nn.one_hot` directly, which must be
   `ArrayOps` ops (§4.3).
+- **The wrappers must bind at CALL time, not import time.** `_matvec_jit =
+  jax.jit(...)` runs at **module scope** (`dmrg.py:1202`, `idmrg.py:418`,
+  `tdvp.py:126`), i.e. when the module is first imported. A user who does
+  `import tenax.algorithms.dmrg` before `set_backend("torch")` therefore has a
+  JAX-bound wrapper already installed, and `_ad_primitives`' `custom_vjp`
+  factories can be captured the same way -- permanently. That sequence
+  allocates **no tensors**, so §4.1's "valid only before any tensor is
+  allocated" guard does **not** catch it. So `backend.control.jit` /
+  `checkpoint` / `custom_vjp` must return a thin wrapper that resolves the
+  lowering **on each call** (cache it per-backend-generation, so the JAX hot
+  path still pays one dict lookup, not a re-trace), and `set_backend` must
+  additionally refuse to switch once any backend-bound wrapper has been
+  created. A decorator that closes over the backend live at import is the same
+  class of bug as rebinding `B` instead of mutating the proxy.
 - **`stop_gradient` and `checkpoint` are container-aware.** `stop_gradient` receives
   whole tensor objects/trees (`_ctm_root_implicit_symmetric.py:1944` a `SymmetricTensor`;
   `_ctm_energy_ad.py:348` the CTM env) — neither has `.detach()`, so the lowering is
@@ -699,6 +713,26 @@ benchmark** (the §2 driver — item 7):
    their fast path). These run only a small cross-backend **correctness oracle**, not a
    throughput or production gate; their production path stays JAX/CPython (D7). Any
    family YJ chooses to drop entirely must move to §1 non-goals, not be silently absent.
+   **Oracle scope is CPU-only, and that is load-bearing, not incidental.** The
+   oracle-only families still reach `np.array()`/`np.asarray()` on **tensors**,
+   not just on index metadata, and those calls are unconditional -- they are not
+   behind an `accelerator` switch:
+
+   | Family | Host-read sites on the public path |
+   |---|---|
+   | dense iDMRG | `idmrg.py:976-977` (`np.array(A_L)`, `np.array(W)` feeding the fixed-point env solves) and `:1071-1085` (periodic re-orthogonalization: `np.array(A_L)`, `np.array(A_R)`, `np.array(s_center)`) |
+   | GILT | `gilt.py:222` (`float(jnp.sum(...))`), `:256` (`np.asarray(s >= cut)`), `:318` (`float(jnp.max(...))`) -- plus `:209/265/267/274/284`, **ten sites, not three** |
+
+   A torch **CPU** tensor converts through `__array__` and these all pass. A torch
+   **CUDA** tensor does not, and `float(...)` on a functorch-wrapped tensor either
+   raises or silently detaches a value the gradient needed. So: the cross-backend
+   oracle for these families runs on **CPU torch only**, and the D6 CUDA matrix
+   deliberately does **not** include them. Extending CUDA coverage to dense iDMRG
+   or GILT is gated on first routing the sites above through `B.to_numpy` /
+   device-native predicates -- it is not a test-matrix edit. In particular the
+   iDMRG CUDA case must not be satisfied by a symmetric-only representative,
+   which would leave the dense path above untested while reporting green.
+
 4. **Optimizer-step parity** — one full `optimize_gs_ad` **and** one PESS update step
    **in the default L-BFGS mode** (build → `update` returns a direction → line search →
    functional apply), asserting parameters track the JAX/optax step. **Must use complex
