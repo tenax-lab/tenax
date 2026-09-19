@@ -139,7 +139,7 @@ From a full sweep of `src/tenax` (120 files); counts re-verified at head `756f9e
 | **AD primitives** | 6 leaf `custom_vjp`: `_ad_primitives.py:229-719` (5) + `_lorentzian_eigh.py:81` (1), +`blocksparse_backend.py:149-177` | **Yes — redesign** (§5). |
 | **dtype introspection** | `jnp.iscomplexobj/issubdtype/result_type/finfo/complexfloating` (~18 sites) — incl. default Arnoldi `_arnoldi.py:37`, 2×2 projector, adjoint GMRES `_gmres_eager.py:117` | **Yes — backend predicates** (§4.2/§8). |
 | **Differentiation-state checks** | `isinstance(x, jax.core.Tracer)` ×~18 across **7 files** (`core/tensor.py:1043`, `linalg.py:274/2045`, `_ctm_projector.py` ×6, `_ctm_tensor_projector_2x2.py:1001`, `_ctm_tensor_energy.py:130`, `contractor.py:897`, `cutensornet_backend.py:64`) | **Yes — backend predicate** (§4.2). |
-| **Host reads** | truncation: `np.array(s_q)`/`np.asarray(block)` (`linalg.py:471/1112/1359`, `core/tensor.py:1044`); **AD-target diagnostics**: `fixed_point` backward `jax.device_get` (`_ctm_energy_ad.py:1694-1699`, gated `:1711/1714`, `:99`); **AD-target convergence control**: `float(...)` loop-exit/divergence in fixed-point backwards (`_split_ctm_energy_ad.py:252/256/565/569`, `ad_utils.py:913/941/1097/1111`); **oracle-only families**: dense iDMRG `idmrg.py:976-977` + `:1071-1085`, GILT `gilt.py:209/222/256/265/267/274/284/318` | **Yes** — truncation → device-native (§4.3); AD-target diagnostics → `to_numpy`, **skipped under `torch.func`** (§4.3); AD-target convergence control → **fixed-iteration / tensor-predicate** (not skippable, §5.4); oracle-only sites **CPU-only by design** (§10.3), not migrated for v1. |
+| **Host reads** | truncation: `np.array(s_q)`/`np.asarray(block)` (`linalg.py:471/1112/1359`, `core/tensor.py:1044`); **AD-target diagnostics**: `fixed_point` backward `jax.device_get` (`_ctm_energy_ad.py:1694-1699`, gated `:1711/1714`, `:99`); **AD-target convergence control**: `float(...)`/`.item()` loop-exit/divergence/RDM-select determining the result — fixed-point backwards (`_split_ctm_energy_ad.py:252/256/565/569`, `ad_utils.py:913/941/1097/1111`), split-CTM energy loss (`_split_ctm_tensor_energy.py:824/974`), and the default-on Arnoldi precheck `np.linalg.eigvals` (`_arnoldi.py:70`, `ad_utils.py:856`); **oracle-only families**: dense iDMRG `idmrg.py:976-977` + `:1071-1085`, GILT `gilt.py:209/222/256/265/267/274/284/318` | **Yes** — truncation → device-native (§4.3); AD-target diagnostics → `to_numpy`, **skipped under `torch.func`** (§4.3); AD-target convergence control → **fixed-iteration / tensor-predicate + backend-native `eigvals`** (not skippable, §5.4); oracle-only sites **CPU-only by design** (§10.3), not migrated for v1. |
 | **Control flow** | `lax` `while_loop`×29, `scan`×22, `fori_loop`×11, `cond`×0, `stop_gradient`×58; `lax.map` (`_ctm_chunked_absorb.py`); union across 27 files | **Yes — redesign** (§7). |
 | **Krylov / triangular solvers** | `_gmres_lax.py:171` (`solve_triangular`), `:299-336`; `_metric_precond.py:164`, `ad_utils.py:882` (`jax.scipy … gmres`); **`_krylov_bicgstab` (default `adjoint_solver`), `_ctm_tensor_c4v_reference_ad.py:166`** | **Yes — backend solvers incl. bicgstab** (§5.4). |
 | **DMRG truncation ops** | `jax.lax.top_k`/`jax.nn.one_hot` (`_padded_linalg.py:128/142`), reached by `accelerator="auto"` → `_jit_sweep` | **Yes — `ArrayOps.top_k`/`one_hot`** (§4.2). |
@@ -205,10 +205,10 @@ that blast radius and make the migration safe to land incrementally:
   layer.
 - **A CI grep-gate enforces the seam boundary**: no `import jax.numpy` / bare `jnp.`
   / `lax.` outside `src/tenax/backend/` (allow-list the few genuinely JAX-only
-  modules), and no bare backend-array **method** calls torch lacks — `.at[` and
-  `.astype(` (§4.3). This both prevents a *half-migrated* state where a
-  not-yet-ported file calls raw `jnp` (or a JAX-only tensor method) on a torch
-  tensor, and defines "migrated" mechanically.
+  modules), and no bare backend-array **method** calls torch lacks — `.at[`,
+  `.astype(`, `.size`, `.copy(` (§4.3). This both prevents a *half-migrated* state
+  where a not-yet-ported file calls raw `jnp` (or a JAX-only tensor method) on a
+  torch tensor, and defines "migrated" mechanically.
 - **Opt-out**: the whole effort is behind `set_backend`; reverting to raw `jnp` is a
   one-line default, and any phase can be shipped with the torch path dormant.
 
@@ -254,18 +254,26 @@ functional `index_set/index_add/index_mul` (`.at[...]` under JAX; out-of-place
 path must stay mutation-free of saved tensors — migrating `.at[]` out-of-place is
 necessary but not on its own sufficient.
 
-**`.astype(dtype)` is a method the migration must not miss.** `astype` is in the op
-list above, but the codebase overwhelmingly calls it as a **method on a backend
-array** — `lambdas[i].astype(dtype)`, `T_u.astype(dtype)` (**31 sites in
-`pess.py`**, e.g. `:438-440/563-564/707-717`), plus `_ad_primitives.py:371` and
-`_ctm_energy_ad.py:1477/1485/1498`. Native torch tensors have **no `.astype`** (they
-spell it `.to(dtype)`), so exposing `B.astype(x, dtype)` as a *function* does not
-cover these method calls, and the §4.1 grep-gate — which keys on `jnp`/`lax` tokens
-— will not flag `x.astype(`. So the migration must **audit and rewrite
-backend-array `.astype(...)` sites to `B.astype(...)`**, and the seam-boundary gate
-must additionally flag bare `.astype(`. (NumPy-array `.astype` — e.g. on a host gate
-before `jnp.asarray`, `pess.py:80/970` — is out of scope; the audit is per-site and
-distinguishes the two.)
+**Array *methods* torch does not share are a migration class of their own, not just
+`.astype`.** Several tensor methods Tenax calls have `jnp`/`np` semantics that native
+torch tensors do not match, and none are caught by a `jnp`/`lax`-token gate:
+- **`.astype(dtype)`** — called as a **method** `lambdas[i].astype(dtype)`,
+  `T_u.astype(dtype)` (**31 sites in `pess.py`**, e.g. `:438-440/563-564/707-717`),
+  plus `_ad_primitives.py:371` and `_ctm_energy_ad.py:1477/1485/1498`. Torch spells it
+  `.to(dtype)`; a `B.astype(x, dtype)` *function* does not cover the method call.
+- **`.size`** — `SymmetricTensor.dtype` tests `self._data.size > 0`
+  (`core/tensor.py:1067`). On `jnp`/`np` `.size` is an **int property**; on torch it is
+  a **method** (`.size()` → `torch.Size`), so `self._data.size > 0` compares a bound
+  method to `0` and even basic block-sparse **dtype access** breaks. Maps to `numel()`.
+- **`.copy()`** — the adjoint solve uses `grad.copy()` (`_metric_precond.py:231`) and
+  `H[:j+2, j].copy()` (`_gmres_eager.py:189`); torch has no `.copy()`, only `.clone()`.
+
+So the seam exposes portable equivalents (`B.astype`/`.to`, `B.size`→`numel`,
+`B.copy`→`clone`), the migration **audits and rewrites** these method sites, and the
+§4.1 grep-gate flags bare `.astype(` / `.size` / `.copy(` (as well as `.at[`) for
+per-site review. NumPy-array uses on genuinely host-only, non-backend arrays — e.g.
+`.astype` on a host gate before `jnp.asarray` (`pess.py:80/970`) — are out of scope;
+the audit is per-site and distinguishes the two.
 
 **`top_k` / `one_hot` are load-bearing on the default DMRG path.**
 `accelerator="auto"` (`dmrg.py:176`) routes dense-CPU and all GPU/TPU runs through
@@ -500,6 +508,17 @@ before any GMRES fallback. So the seam adds `backend.linalg.gmres`,
 `solve_triangular`, **and `bicgstab`** (matching the JAX default so both backends
 solve the same system); a GMRES-only seam would fail the default adjoint path.
 
+**The default adjoint path also runs an Arnoldi spectral-radius precheck on
+NumPy.** `CTMConfig.adjoint_arnoldi_precheck` **defaults to `True`**
+(`ipeps_config.py:197`), so the backward computes `ρ(Jᵀ)` at `ad_utils.py:856` via
+`_arnoldi.py:70-71` — `np.asarray(H[:n_iter,:n_iter])` then `np.linalg.eigvals` — and
+then **branches** on the result. A torch **CUDA** Hessenberg rejects `np.asarray`, and
+under `torch.func` the wrapped tensor cannot go to NumPy at all, so the fixed-point
+backward fails *before* it chooses the adjoint result — on the default config. So the
+seam needs a **backend-native `eigvals`/spectral-radius** op (`torch.linalg.eigvals`)
+**and** the Python decision it feeds must be migrated (transform-compatible), not just
+Arnoldi's dtype predicate.
+
 **The adjoint loop's convergence control host-reads tensors — and unlike the
 diagnostics it is *not* skippable.** Distinct from the §4.3 *diagnostic* host-reads
 (which no-op under `torch.func`), several fixed-point backwards decide **when to
@@ -516,6 +535,16 @@ cannot be `float()`-ed *and* a Python data-dependent `break` cannot be traced. S
 break) or a tensor-predicate mask that keeps the loop body pure — chosen per site and
 matched to JAX for parity. All these sites join the migration inventory; they are the
 fixed-point **family's**, not `_ctm_energy_ad`'s diagnostics.
+
+The same not-skippable pattern also sits in the **forward** two-site split-CTM
+**loss**: `_split_ctm_tensor_energy.py:824` and `:974` run
+`if float(jnp.abs(trace_val).item()) < _MIXED_ENV_RDM_TRACE_FLOOR:` — reached inside
+`value_and_grad` from both `ctm_energy_split_explicit_2site` and
+`ctm_energy_split_implicit_2site` (via `compute_energy_split_ctm_tensor_multisite`).
+The branch **selects which RDM implementation supplies the energy**, so it is not a
+diagnostic, and `.item()` cannot extract a functorch-wrapped scalar. It needs a
+transform-compatible **tensor predicate** (`where`-select both RDM paths, or a
+redesigned fallback) — with a **split two-site gradient** case in §10 to exercise it.
 
 **The fixed-point family is more than `_ctm_energy_ad`.** The supported
 `ctm_ad_mode="c4v_reference"` path calls the standalone
@@ -917,7 +946,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (12 rounds) and a
+The specific requirements above were hardened across a Codex review (13 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -983,3 +1012,12 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   reads (`_split_ctm_energy_ad.py:252/256/565/569`, `ad_utils.py:913/941/1097/1111`)
   that determine the result and **cannot** be skipped → transform-compatible
   fixed-iteration / tensor-predicate convergence policy (§5.4, §3 table).
+- **R13** — the torch-incompatible surface is wider than `.astype`: **array methods**
+  `.size` (`core/tensor.py:1067`, torch `.size` is a method → `numel`) and `.copy()`
+  (`_metric_precond.py:231`, `_gmres_eager.py:189` → `clone`) break basic dtype access
+  and the adjoint solve (§4.3 + gate); the **split-CTM energy loss** branches on
+  `float(jnp.abs(trace_val).item())` (`_split_ctm_tensor_energy.py:824/974`) to select
+  the RDM impl (not skippable, §5.4); and the **default-on Arnoldi precheck**
+  (`adjoint_arnoldi_precheck=True`) runs `np.asarray`+`np.linalg.eigvals`
+  (`_arnoldi.py:70`, `ad_utils.py:856`) in the backward → needs backend-native
+  `eigvals`/spectral-radius (§5.4).
