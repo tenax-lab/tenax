@@ -44,31 +44,6 @@ _logger = logging.getLogger(__name__)
 Coord = tuple[int, int]
 
 
-def _env_dict_chi(envs) -> int | None:
-    """Extract chi from a ``coord -> CTMTensorEnv`` mapping.
-
-    Returns ``None`` if the input is falsy or malformed (missing
-    ``C1.indices[0].dim``).  Used by the finalize-pad sites to derive
-    the *actual* chi an env carries — the in-CTM χ-bump
-    (``ctmrg_heuristic_increase_chi=True``, #492/#514) grows chi inside
-    ``python_loop_ctm_converge`` without updating the optimizer's local
-    ``ctm_cfg.chi``.
-
-    Accepts the bare env dict (``{coord: CTMTensorEnv}``), not an
-    env_cache wrapper — callers should index ``env_cache["envs"]``
-    themselves so both live cache and snapshot dicts can be queried
-    with the same helper (Codex P2 on PR #542: a cleared live cache
-    must not mask a bumped best-env snapshot).
-    """
-    if not envs:
-        return None
-    try:
-        sample = next(iter(envs.values()))
-        return int(sample.C1.indices[0].dim)
-    except (AttributeError, IndexError, StopIteration):
-        return None
-
-
 def _restore_env_cache_after_line_search(env_cache: dict, snapshot: tuple) -> None:
     """Revert ``env_cache["envs"]`` to the pre-line-search snapshot.
 
@@ -2520,47 +2495,31 @@ def _optimize_gs_ad_tensor(
             E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
         return A_t, env_, E_
 
-    A_final, env_final, E_final = _eval_fresh(params, _env_cache.get("envs", None))
-
-    # Pad best_env_cache envs to the current ctm_cfg.chi before use.
-    # best_env_cache is a snapshot taken when best_energy was recorded, so its
-    # env tensors may be at a smaller chi if the reactive auto-bump or the chi
-    # schedule fired after that snapshot.  pad_dense_env_chi is a no-op when
-    # chi_new == chi_old, so this is safe to call unconditionally.  Fixes #469.
-    # NOTE: if a new _eval_fresh(best_params, best_env_cache["envs"]) call site
-    # is added later, it must reapply this padding — there's no producer-side
-    # guarantee that the snapshot is at ctm_cfg.chi.
-    _best_env_init = best_env_cache.get("envs", None)
-    if _best_env_init:
-        # Issue #514: ``ctm_cfg.chi`` may be stale if the in-CTM χ-bump fired
-        # during a gradient evaluation.  Pad to the larger of the static
-        # config chi and the env_cache's actual chi so we never try to
-        # shrink a bumped env.
-        # Consult both the live cache *and* the best-env snapshot:
-        # rollback paths may have cleared ``_env_cache`` after the
-        # snapshot was taken, leaving the bumped chi reachable only via
-        # ``_best_env_init`` itself (Codex P2 on PR #542).
-        _target_chi = max(
-            ctm_cfg.chi,
-            _env_dict_chi(_env_cache.get("envs")) or 0,
-            _env_dict_chi(_best_env_init) or 0,
-        )
-        _best_env_init = {
-            c: pad_dense_env_chi(
-                _best_env_init[c], _target_chi, base_charges=_bump_base_charges
-            )
-            for c in _best_env_init
-        }
+    # #899: NO env_init.  The block comment above says these evaluations are
+    # fresh, and the code then seeded them from ``_env_cache["envs"]`` -- which
+    # ``_restore_env_cache_after_line_search`` has just reverted to the
+    # environment converged at the PREVIOUS parameters.  The returned number
+    # was therefore ``_eval_fresh(params_final, env(previous params))``: not an
+    # evaluation of the tensor handed back, and not washed out by a bigger
+    # budget (measured bit-identical at max_iter 40/100/300, conv_tol to
+    # 1e-12).  ``best_params`` is evaluated cold for the same reason -- the
+    # ``E_final <= E_best_fresh`` comparison below only means something if both
+    # sides are the same kind of quantity.
+    #
+    # This also retires the #469 chi-padding of the best-env snapshot: it
+    # existed solely to make that snapshot shape-compatible as a SEED, and
+    # nothing is seeded now.
+    A_final, env_final, E_final = _eval_fresh(params)
 
     if best_params is not params:
-        _, env_best, E_best_fresh = _eval_fresh(best_params, _best_env_init)
+        _, env_best, E_best_fresh = _eval_fresh(best_params)
     else:
         E_best_fresh = E_final
 
     if E_final <= E_best_fresh:
         env, E_gs = env_final, E_final
     else:
-        A_final, _, _ = _eval_fresh(best_params, _best_env_init)
+        A_final, _, _ = _eval_fresh(best_params)
         env, E_gs = env_best, E_best_fresh
     if config.gs_verbose:
         print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
@@ -4233,46 +4192,15 @@ def _optimize_gs_ad_tensor_2site(
             )
             return A_t, B_t, envs, E_
 
-        A_last, B_last, envs_last, E_last = _eval_fresh_2site(
-            params, _env_cache_2s.get("envs", None)
-        )
+        # #899: NO env_init -- see the 1-site path for the full reasoning.
+        # The seed was the line-search-reverted cache, i.e. a different
+        # state's environment, and ``best_params`` is evaluated cold for the
+        # same reason so the comparison below compares like with like.
+        A_last, B_last, envs_last, E_last = _eval_fresh_2site(params)
         env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
 
-        # Pad best_env_cache_2s envs to the current ctm_cfg_2s.chi before use.
-        # Mirrors the same fix on the 1-site path — see comment there.  Fixes #469.
-        # NOTE: if a new _eval_fresh_2site(best_params, best_env_cache_2s["envs"])
-        # call site is added later, it must reapply this padding — there's no
-        # producer-side guarantee that the snapshot is at ctm_cfg_2s.chi.
-        _best_env_init_2s = best_env_cache_2s.get("envs", None)
-        if _best_env_init_2s:
-            # On the split path this padding is a safe no-op: split chi is fixed
-            # (schedules/bump rejected up front), so _target_chi_2s == the env's
-            # chi and pad_dense_env_chi short-circuits before any fused-only
-            # access.  If split chi ever becomes mutable, guard this with
-            # ``not use_split_2s``.
-            # Issue #514: see 1-site finalize.  Pad to the larger of the
-            # static ``ctm_cfg_2s.chi`` and the env_cache's actual chi
-            # so a bumped env is never asked to shrink.
-            # See 1-site finalize: consult both live cache and the
-            # best-env snapshot (Codex P2 on PR #542).
-            _target_chi_2s = max(
-                ctm_cfg_2s.chi,
-                _env_dict_chi(_env_cache_2s.get("envs")) or 0,
-                _env_dict_chi(_best_env_init_2s) or 0,
-            )
-            _best_env_init_2s = {
-                c: pad_dense_env_chi(
-                    _best_env_init_2s[c],
-                    _target_chi_2s,
-                    base_charges=_bump_base_charges_2s,
-                )
-                for c in _best_env_init_2s
-            }
-
         if best_params is not params:
-            A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(
-                best_params, _best_env_init_2s
-            )
+            A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(best_params)
             env_A_best = envs_best[(0, 0)]
             env_B_best = envs_best[(1, 0)]
         else:
@@ -4467,7 +4395,6 @@ def _optimize_gs_ad_multisite(
 
     best_energy = float("inf")
     best_params = params
-    best_env_cache: dict[str, dict] = {}
     prev_energy = float("inf")
     prev_grad = None
     cg_direction = None
@@ -4662,7 +4589,6 @@ def _optimize_gs_ad_multisite(
         ):
             best_energy = energy_float
             best_params = params
-            best_env_cache = dict(_env_cache)
 
         delta_energy = abs(energy_float - prev_energy)
         grad_norm_val = _grad_l2_norm(grads)
@@ -5243,38 +5169,14 @@ def _optimize_gs_ad_multisite(
         )
         return site_tensors, envs, E_
 
-    sites_last, envs_last, E_last = _eval_fresh(params, _env_cache.get("envs", None))
-
-    # Pad best_env_cache envs to the current ctm_cfg.chi before use.
-    # Mirrors the same fix on the 1-site and 2-site paths — see comment there.
-    # Fixes #469.
-    # NOTE: if a new _eval_fresh(best_params, best_env_cache["envs"]) call site
-    # is added later, it must reapply this padding — there's no producer-side
-    # guarantee that the snapshot is at ctm_cfg.chi.
-    _best_env_init_multi = best_env_cache.get("envs", None)
-    if _best_env_init_multi:
-        # Issue #514: see 1-site finalize.  Pad to the larger of the
-        # static ``ctm_cfg.chi`` and the env_cache's actual chi.
-        # See 1-site finalize: consult both live cache and the
-        # best-env snapshot (Codex P2 on PR #542).
-        _target_chi_multi = max(
-            ctm_cfg.chi,
-            _env_dict_chi(_env_cache.get("envs")) or 0,
-            _env_dict_chi(_best_env_init_multi) or 0,
-        )
-        _best_env_init_multi = {
-            c: pad_dense_env_chi(
-                _best_env_init_multi[c],
-                _target_chi_multi,
-                base_charges=_bump_base_charges_multi,
-            )
-            for c in _best_env_init_multi
-        }
+    # #899: NO env_init -- see the 1-site path for the full reasoning.
+    # The seed was the line-search-reverted cache, i.e. a different
+    # state's environment, and ``best_params`` is evaluated cold for the
+    # same reason so the comparison below compares like with like.
+    sites_last, envs_last, E_last = _eval_fresh(params)
 
     if best_params is not params:
-        sites_best, envs_best, E_best_fresh = _eval_fresh(
-            best_params, _best_env_init_multi
-        )
+        sites_best, envs_best, E_best_fresh = _eval_fresh(best_params)
     else:
         E_best_fresh = E_last
 

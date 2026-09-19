@@ -308,6 +308,25 @@
   `math.isfinite` rejects it). The trap is order-dependent, which is how it
   survived review: `max(nan, 0.0)` *is* `nan`, so only an accumulator seeded
   from `0.0` loses it.
+- **The final energy `optimize_gs_ad` returns is now an evaluation of the
+  tensor it returns** (#899): the three optimizer paths (1-site, 2-site, and
+  `_optimize_gs_ad_multisite`) each re-evaluated the final and best tensors
+  with `env_init=_env_cache["envs"]`, directly under a block comment
+  promising a "fully converged fresh CTM ... so we compare fresh evaluations
+  only".  With a line search enabled (`gs_optimizer` `lbfgs`/`cg`, or an
+  explicit `gs_line_search`) `_restore_env_cache_after_line_search` has just
+  reverted that cache to the environment converged at the *previous*
+  parameters, so the seed belonged to a different state: the reported energy
+  was a partially-converged restart from a stale environment, not a property
+  of the returned tensor, and the `E_final <= E_best` comparison that decides
+  *which* tensor to return weighed one seeded number against another.  At
+  D=2/chi=6 the returned energy sat 1.3e-3 below a cold re-evaluation of the
+  same tensor.  Both evaluations are now seeded from scratch on all three
+  paths.  The #469 chi-padding of the best-environment snapshot existed
+  solely to make it shape-compatible *as a seed* and is removed with it;
+  `optimize_gs_ad` is unchanged when no line search is active, where the
+  cache was never reverted and the seed was already the current state's own
+  environment.
 
 - **The sigma forward gauge is a pure gauge transform again** (#798): the
   2x2 sweep writes every corner axis-reversed relative to the canonical
@@ -1233,6 +1252,25 @@
   `xfail`, not by a loosened threshold.
 
 ### CI / tests
+
+- **The merge queue runs only the required jobs** (`no-cython-shard`, `docs`
+  and `build` now carry `if: github.event_name != 'merge_group'`).  The
+  queue's 120-minute limit is a *scheduling* budget, not a compute one: after
+  #1011 a queue run asks for ~19 job slots from a pool that serves 2-4 at a
+  time, so required jobs sit behind non-required ones and the PR is dropped
+  with every shard green.  This blocked `main` outright -- #1015 was evicted
+  74s after its last shard passed with the three aggregators still queued,
+  and #1014 was evicted **with the queue otherwise empty**.  Only the three
+  `Tests (...)` aggregators are branch-protected; the skipped jobs still run
+  on every `pull_request` and on push to `main`, so nothing goes unchecked --
+  they simply do not re-run against the merge commit.
+
+  Measured caveat, not addressed here: the **macOS** path is the binding
+  constraint and this does not touch it.  The two macOS shards never overlap
+  in either eviction (in #1014's run shard 1 started 14s after shard 2
+  ended), so `core-shard-macos: NSHARDS=2` buys no parallelism while paying
+  two runner waits and two macOS setups; `Tests (macOS)` waited 45 min for a
+  runner to do 4 seconds of work.  Unsharding macOS is the follow-up.
 
 - **The required `-m core` gate is sharded across runners** (`core-shard`, 4
   shards x 2 Python versions, plus `core-shard-macos`), using the same

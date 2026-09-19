@@ -414,6 +414,19 @@ jobs:
   no-cython-shard:
     name: No-Cython shard ${{ matrix.shard }} (Python 3.12)
     runs-on: ubuntu-latest
+    # Not a branch-protection context, so on ``merge_group`` it gates nothing
+    # while still occupying a runner.  The merge queue's 120-minute wait limit
+    # is a SCHEDULING budget, not a compute one: after #1011 a queue run asks
+    # for ~19 job slots from a pool that serves 2-4 at a time, so the required
+    # jobs sit behind non-required ones and the PR is dropped with every shard
+    # green.  Measured on the two evictions this caused: #1015 dropped 74s
+    # after its last shard passed, with the three aggregators still waiting for
+    # a runner; #1014 dropped with the QUEUE OTHERWISE EMPTY, its macOS shard 1
+    # not starting until 109 minutes in and one aggregator running for 4
+    # SECONDS after an hour of queueing.  These still run on every
+    # ``pull_request`` and on push to ``main``, so nothing goes unchecked --
+    # they simply do not re-run against the merge commit.
+    if: github.event_name != 'merge_group'
     strategy:
       fail-fast: false
       matrix:
@@ -581,6 +594,19 @@ jobs:
   docs:
     name: Build documentation
     runs-on: ubuntu-latest
+    # Not a branch-protection context, so on ``merge_group`` it gates nothing
+    # while still occupying a runner.  The merge queue's 120-minute wait limit
+    # is a SCHEDULING budget, not a compute one: after #1011 a queue run asks
+    # for ~19 job slots from a pool that serves 2-4 at a time, so the required
+    # jobs sit behind non-required ones and the PR is dropped with every shard
+    # green.  Measured on the two evictions this caused: #1015 dropped 74s
+    # after its last shard passed, with the three aggregators still waiting for
+    # a runner; #1014 dropped with the QUEUE OTHERWISE EMPTY, its macOS shard 1
+    # not starting until 109 minutes in and one aggregator running for 4
+    # SECONDS after an hour of queueing.  These still run on every
+    # ``pull_request`` and on push to ``main``, so nothing goes unchecked --
+    # they simply do not re-run against the merge commit.
+    if: github.event_name != 'merge_group'
 
     steps:
       - uses: actions/checkout@v6
@@ -603,6 +629,19 @@ jobs:
     name: Build distribution
     runs-on: ubuntu-latest
     needs: test
+    # Not a branch-protection context, so on ``merge_group`` it gates nothing
+    # while still occupying a runner.  The merge queue's 120-minute wait limit
+    # is a SCHEDULING budget, not a compute one: after #1011 a queue run asks
+    # for ~19 job slots from a pool that serves 2-4 at a time, so the required
+    # jobs sit behind non-required ones and the PR is dropped with every shard
+    # green.  Measured on the two evictions this caused: #1015 dropped 74s
+    # after its last shard passed, with the three aggregators still waiting for
+    # a runner; #1014 dropped with the QUEUE OTHERWISE EMPTY, its macOS shard 1
+    # not starting until 109 minutes in and one aggregator running for 4
+    # SECONDS after an hour of queueing.  These still run on every
+    # ``pull_request`` and on push to ``main``, so nothing goes unchecked --
+    # they simply do not re-run against the merge commit.
+    if: github.event_name != 'merge_group'
 
     steps:
       - uses: actions/checkout@v6
