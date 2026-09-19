@@ -63,26 +63,34 @@ complex-cotangent convention, and PRNG threading. Sections 5–8 handle each.
    dense kernels per sector), the forward CTM/PEPS paths AD runs on, and the shared
    array/linalg/control/tree seam. Dense is a *dependency* of block-sparse AD, not a
    separate deliverable.
-3. **Supporting parity:** TRG/HOTRG, GILT-TNR forward+AD (block-sparse families that
-   ride the same seam).
-4. **MPS (DMRG/iDMRG/TDVP):** CPython default (D7); torch is an oracle-only sanity
-   check, not a v1 target.
+3. **Oracle-only families — no AD wall (D7):** MPS (DMRG/iDMRG/TDVP) *and* the
+   forward-only RG algorithms TRG/HOTRG/GILT. These have **no `SymmetricTensor` AD, and
+   no jit compile either** — they already run **eager** under JAX with a measured
+   `0.000` compile cost (§2 / benchmarks), so torch has no wall to break for them.
+   JAX/CPython stays their path; torch carries only an optional correctness oracle,
+   never a v1 parity or performance target.
 
 *Full* single-device parity across *every* algorithm is the eventual direction the
 seam is built toward — not a v1 gate. v1 does **not** promise the multi-GPU or
 specialized-kernel paths in the non-goals above, and does not gate on MPS throughput.
 
-**MPS algorithms default to the CPython path, not torch (Decision D7).** For the MPS
-families (DMRG/iDMRG/TDVP), the **fastest path is the existing NumPy/Cython
-accelerator** — `accelerator="auto"` already routes CPU-symmetric DMRG to the
-`numpy_blockwise` sweep with Cython-BLAS hot loops (#226: 2.7–5.3× vs TeNPy),
-*bypassing both JAX-jit and torch*. The torch backend's value is the block-sparse /
-CTM / iPEPS / fPEPS / PESS **AD** workloads (eager AD, GPU, dynamic shapes), not MPS
-throughput. So torch is **not** the default for MPS: those keep defaulting to CPython,
-and MPS torch support exists only as a **correctness oracle** (the shared block-sparse
-MPS ops still run under `B`, so a small DMRG/iDMRG check is a cheap cross-backend
-sanity test), never a performance or production path. Parity for MPS is therefore
-oracle-level (§10.3), not a throughput commitment.
+**No-AD-wall families default to JAX/CPython, not torch (Decision D7).** Two groups do
+not hit the block-sparse AD wall and so are *not* torch targets:
+- **MPS (DMRG/iDMRG/TDVP).** The fastest path is the existing NumPy/Cython accelerator —
+  `accelerator="auto"` already routes CPU-symmetric DMRG to the `numpy_blockwise` sweep
+  with Cython-BLAS hot loops (#226: 2.7–5.3× vs TeNPy), *bypassing both JAX-jit and
+  torch*.
+- **Forward-only RG (TRG/HOTRG/GILT).** These have **no AD** (no `custom_vjp`/`grad`)
+  *and* **no `jax.jit`** — they run eager (`hotrg.py`: *"Runs eager … not [jittable]"*),
+  so the measured compile cost is **`0.000`** and JAX already runs them fast on CPU and
+  GPU (e.g. HOTRG χ=8 ≈0.45 s CPU / 0.08 s GPU; χ=20 ≈8 s CPU / 3.5 s GPU). There is
+  no VJP compile and no forward compile — nothing for eager torch to improve.
+
+For both groups the torch backend offers **only an optional correctness oracle** (the
+shared block-sparse ops still run under `B`, so a small check is a cheap cross-backend
+sanity test), never a performance or production path. The torch backend's value is
+strictly the block-sparse / CTM / iPEPS / fPEPS / PESS **AD** workloads. Parity for the
+no-wall families is therefore oracle-level (§10.3), not a throughput commitment.
 
 ---
 
@@ -144,7 +152,7 @@ From a full sweep of `src/tenax` (120 files); counts re-verified at head `756f9e
 | PRNG | `jax.random`/PRNGKey in 17 files; **plus** transform-time randomness (§8) | Yes; key-threading → generator. |
 | Global x64 | `__init__.py:45`; `jnp.float64` literals in factories | Yes; small but global. |
 | Multi-GPU sharding | `_jit_sweep.py:769-806` (mesh/`device_put`), `ctm_sharding.py`, `_ctm_tensor_convergence.py:337` | **JAX-only** (non-goal) — but embedded in the default sweep, so the torch path must branch around it, not just skip a module. |
-| GILT-TNR | exported `gilt_tnr`/`gilt_plaquette`/`gilt_tnr_step` (`__init__.py`), direct `jnp.linalg.eigh/eigvalsh/svd` (`algorithms/gilt.py:218/221/255`) | **Yes — public family, must go through the seam** (§10.3). |
+| TRG/HOTRG/GILT (forward-only RG) | `trg.py`/`hotrg.py`/`gilt.py` — **no AD, no `jax.jit`** (eager; `0.000` compile); `gilt.py:218/221/255` `jnp.linalg` | **No AD wall — JAX/CPython stays; torch oracle-only** (D7, §10.3). |
 | GPU workarounds | `linalg.py:59-100` (cuSOLVER), `_einsum_compat.py` (cuBLASLt) | JAX-only; **drop** for torch. |
 
 Note the existing `contraction/blocksparse_backend.py` seam selects **contraction
@@ -647,13 +655,14 @@ CPU-green has repeatedly ≠ GPU-green here (§8). **Caveat:** the aim is only *
 if CI has a CUDA runner; without one the D6 parity runs only out-of-band (see §10/M
 note). Owner for GPU parity + cross-backend flake triage must be named.
 
-**D7 — MPS algorithms default to the CPython/NumPy/Cython path (§1).** _Recommend:_
-DMRG/iDMRG/TDVP keep defaulting to the existing `numpy_blockwise`/Cython-BLAS
-accelerator (fastest MPS path on CPU); torch is offered for MPS only as a correctness
-oracle, and the torch backend is *aimed* at the block-sparse/PEPS AD workloads.
-_Alternative (rejected):_ make torch a first-class MPS execution path — rejected
-because it would be slower than the CPython accelerator for exactly the workload MPS
-users care about (CPU throughput), buying nothing over the oracle.
+**D7 — no-AD-wall families (MPS + forward-only RG) stay on JAX/CPython (§1).**
+_Recommend:_ DMRG/iDMRG/TDVP keep the `numpy_blockwise`/Cython-BLAS accelerator, and
+TRG/HOTRG/GILT keep the JAX eager path (no AD, no jit → `0.000` compile); torch offers
+these only a correctness oracle. The torch backend is aimed strictly at the
+block-sparse/PEPS **AD** workloads. _Alternative (rejected):_ make torch a first-class
+execution path for these — rejected because there is no wall to break (MPS: CPython is
+faster on CPU; RG: JAX already runs eager with zero compile), so it buys nothing over
+the oracle.
 
 ---
 
@@ -681,16 +690,15 @@ benchmark** (the §2 driver — item 7):
 3. **Algorithm parity — one representative case per *targeted* family, not a sample.**
    Per the v1 focus (§1), the parity target is the block-sparse/PEPS **AD** families;
    the suite must exercise **every** one the design commits to, or the checklist can
-   pass while a targeted entry point stays JAX-bound. **Block-sparse / PEPS families
-   (full parity, the torch target):**
-   **TRG/HOTRG**, **GILT-TNR** (exported `gilt_tnr`/`gilt_plaquette`; `algorithms/gilt.py`
-   uses direct `jnp.linalg` eigh/eigvalsh/svd — a public JAX-coupled path that must go
-   through the seam), a small iPEPS energy+grad, **fPEPS**, **PESS**, each end-to-end on
-   torch vs the pinned JAX references. **MPS families (oracle-level, per D7):** DMRG
-   (→ −0.4431 Heisenberg) and iDMRG run as a small cross-backend **correctness oracle**
-   — TDVP likewise — since their default/production path is the CPython accelerator, not
-   torch; these need a sanity-level check, not a throughput or production gate. Any
-   family YJ chooses to exclude must move to §1 non-goals, not be silently dropped.
+   pass while a targeted entry point stays JAX-bound. **Block-sparse/PEPS *AD* families
+   (full parity, the torch target):** a small iPEPS energy+grad, **fPEPS**, **PESS** —
+   each forward **and** AD end-to-end on torch vs the pinned JAX references.
+   **No-AD-wall families (oracle-level, per D7):** MPS — DMRG (→ −0.4431 Heisenberg),
+   iDMRG, TDVP — *and* the forward-only RG algorithms **TRG/HOTRG/GILT** (exported
+   `gilt_tnr`/`gilt_plaquette`; no AD, no jit, `0.000` compile — JAX eager is already
+   their fast path). These run only a small cross-backend **correctness oracle**, not a
+   throughput or production gate; their production path stays JAX/CPython (D7). Any
+   family YJ chooses to drop entirely must move to §1 non-goals, not be silently absent.
 4. **Optimizer-step parity** — one full `optimize_gs_ad` **and** one PESS update step
    **in the default L-BFGS mode** (build → `update` returns a direction → line search →
    functional apply), asserting parameters track the JAX/optax step. **Must use complex
@@ -747,13 +755,13 @@ until 3b/3c make an algorithm end-to-end usable.
 - [ ] **AD-wall broken (the point, §2/§10.7):** the block-sparse VJP through a
   fermionic iPEPS/CTM AD step runs under torch eager with **no XLA backward compile**
   and competitive steady-state per-step time vs JAX, captured as a benchmark artifact.
-- [ ] **Block-sparse/PEPS families** — TRG/HOTRG, GILT-TNR (`gilt_tnr`/`gilt_plaquette`),
-  iPEPS, fPEPS, PESS — run under `set_backend("torch")` forward **and** AD to
-  tolerance-equal results vs JAX on **one device** (CPU and, if a CUDA runner exists,
-  GPU), each with a representative end-to-end parity test (§10.3). **MPS families**
-  (DMRG/iDMRG/TDVP) default to the CPython accelerator (D7) and carry only an
+- [ ] **Block-sparse/PEPS AD families** — iPEPS, fPEPS, PESS — run under
+  `set_backend("torch")` forward **and** AD to tolerance-equal results vs JAX on **one
+  device** (CPU and, if a CUDA runner exists, GPU), each with a representative
+  end-to-end parity test (§10.3). **No-AD-wall families** (MPS DMRG/iDMRG/TDVP and the
+  forward-only RG TRG/HOTRG/GILT) default to JAX/CPython (D7) and carry only an
   **oracle-level** torch sanity check, not a production/throughput gate. Any family
-  excluded is listed in §1 non-goals, not merely absent.
+  dropped entirely is listed in §1 non-goals, not merely absent.
 - [ ] Op/grad parity `core`-green; algorithm + optimizer parity `slow`-green; at least
   one **complex-parameter** optimizer step through torch (§10.4); a **double-backward
   (`gradgrad`)** test through the SVD/eigh primitives (§5.2) green.
