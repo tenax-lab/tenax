@@ -136,7 +136,7 @@ From a full sweep of `src/tenax` (120 files); counts re-verified at head `756f9e
 | Dense linalg kernels | `linalg.py:59-100` (svd), `:1573/1781/2537/2670` (qr/eigh) | Yes; isolatable behind ~3 functions. |
 | Block-sparse decomps | `linalg.py` `_truncated_svd_symmetric` (:243), `_qr_symmetric` (:1452), `_eigh_symmetric` (:1663) | Yes; per-sector loops over dense kernels. |
 | Contraction execution | `contractor.py:234,356,1124-1135`; `blocksparse_plan.py:373` (`jnp.einsum`+`segment_sum`) | Yes; opt_einsum *path* portable, execution not (`torch.einsum` cannot consume a precomputed path — replay as tensordot/matmul). |
-| **AD primitives** | 6 leaf `custom_vjp`: `_ad_primitives.py:229-719` (5) + `_lorentzian_eigh.py:81` (1), +`blocksparse_backend.py:149-177` | **Yes — redesign** (§5). |
+| **AD primitives** | 6 leaf `custom_vjp`: `_ad_primitives.py:229-719` (5) + `_lorentzian_eigh.py:81` (1). (`blocksparse_backend.py:149-177` is a **JAX-only contraction selector — not ported**, §1 non-goal; torch uses `torch.einsum`/opt_einsum, see the §3 contraction-execution row.) | **Yes — redesign the 6 leaf primitives** (§5). |
 | **dtype introspection** | `jnp.iscomplexobj/issubdtype/result_type/finfo/complexfloating` (~18 sites) — incl. default Arnoldi `_arnoldi.py:37`, 2×2 projector, adjoint GMRES `_gmres_eager.py:117` | **Yes — backend predicates** (§4.2/§8). |
 | **Differentiation-state checks** | `isinstance(x, jax.core.Tracer)` ×~18 across **7 files** (`core/tensor.py:1043`, `linalg.py:274/2045`, `_ctm_projector.py` ×6, `_ctm_tensor_projector_2x2.py:1001`, `_ctm_tensor_energy.py:130`, `contractor.py:897`, `cutensornet_backend.py:64`) | **Yes — backend predicate** (§4.2). |
 | **Host reads** | truncation: `np.array(s_q)`/`np.asarray(block)` (`linalg.py:471/1112/1359`, `core/tensor.py:1044`); **AD-target diagnostics**: `fixed_point` backward `jax.device_get` (`_ctm_energy_ad.py:1694-1699`, gated `:1711/1714`, `:99`); **AD-target convergence control**: `float(...)`/`.item()` loop-exit/divergence/RDM-select determining the result — fixed-point backwards (`_split_ctm_energy_ad.py:252/256/565/569`, `ad_utils.py:913/941/1097/1111`), split-CTM energy loss (`_split_ctm_tensor_energy.py:824/974`), the C4v adjoint fallback/validation `float`/`bool`/`int(info)` (`_ctm_tensor_c4v_reference_ad.py:66-76/192-224`), and the default-on Arnoldi precheck `np.linalg.eigvals` (`_arnoldi.py:70`, `ad_utils.py:856`); **oracle-only families**: dense iDMRG `idmrg.py:976-977` + `:1071-1085`, GILT `gilt.py:209/222/256/265/267/274/284/318` | **Yes** — truncation → device-native (§4.3); AD-target diagnostics → `to_numpy`, **skipped under `torch.func`** (§4.3); AD-target convergence control → **fixed-iteration / tensor-predicate + backend-native `eigvals`** (not skippable, §5.4); oracle-only sites **CPU-only by design** (§10.3), not migrated for v1. |
@@ -144,7 +144,7 @@ From a full sweep of `src/tenax` (120 files); counts re-verified at head `756f9e
 | **Krylov / triangular solvers** | `_gmres_lax.py:171` (`solve_triangular`), `:299-336`; `_metric_precond.py:164`, `ad_utils.py:882` (`jax.scipy … gmres`); **`_krylov_bicgstab` (default `adjoint_solver`), `_ctm_tensor_c4v_reference_ad.py:166`** | **Yes — backend solvers incl. bicgstab** (§5.4). |
 | **DMRG truncation ops** | `jax.lax.top_k`/`jax.nn.one_hot` (`_padded_linalg.py:128/142`), reached by `accelerator="auto"` → `_jit_sweep` | **Yes — `ArrayOps.top_k`/`one_hot`** (§4.2). |
 | **Optimizer** | `optax` chains in `_ipeps_optimize_shared.py:112-136` + `pess_optimize.py:468/775` + `ipeps_optimize_root_implicit.py:637`; `optimizer.update`/`apply_updates` | **Yes — optimizer seam, all Optax users** (§5.6). |
-| **Euclidean-grad conjugation** | `jax.tree.map(jnp.conj, grads)` (`_ipeps_optimize_shared.py:265`), applied at 6 sites (#957) | **Yes — convention-guard, identity under torch** (§5.3). |
+| **Euclidean-grad conjugation** | `jax.tree.map(jnp.conj, grads)` (`_ipeps_optimize_shared.py:265`), applied at **8 sites** (7 in `ipeps_optimize.py` + 1 in `ipeps_optimize_root_implicit.py`; +PESS once #957-fixed = 9) (#957) | **Yes — convention-guard, identity under torch** (§5.3). |
 | `jnp.linalg.inv` | root-implicit CTM AD (`_ctm_root_implicit_asym.py:240/241/1006`, `_ctm_root_implicit_multisite.py:648`) | Yes — `B.linalg.inv` (trivial, unenumerated). |
 | `jnp.kron` (18) | default iDMRG + iPEPS + root-implicit | Yes — `B.kron` (trivial). |
 | `static_argnums`/`static_argnames` on plain `jax.jit` (17) | `tdvp.py:103/126`, `ipeps_bp_gauge.py:1112`, `_ctm_energy_ad.py:1272/1308/1346/1531`, … | Yes — the identity-`jit` shim must **accept and ignore** these kwargs (§7). |
@@ -515,14 +515,31 @@ wrapper. But the wrapper carries **four** non-trivial contracts, each of which a
    *comments*; `:650` is the **live call** — an earlier review round wrongly
    dismissed this finding as comment-only, corrected here. So this primitive's
    backward depends on `backend.ad.vjp` (VJP of a user function), which §5.5
-   otherwise defers to Phase 3a. Two resolutions, either acceptable: **(a)** make
-   `backend.ad.vjp` available for this primitive in **Phase 2** (a scoped
-   exception — the primitive's *internal* vjp is a Phase-2 dependency even though
-   the ~76 *algorithm-level* vjp sites migrate in 3a), or **(b, preferred)** give
-   `regularized_qr` a hand-written backend-neutral QR backward (the standard
-   `Q̄`/`R̄` triangular-solve formula) so it needs no `jax.vjp` at all and stays
-   self-contained like the other five. Either way the §10 six-primitive gradient
-   suite cannot go green in Phase 2 until this is closed.
+   otherwise defers to Phase 3a. Two resolutions, **each with a complex-cotangent
+   trap that neither is "preferred" without**:
+   - **(a)** make `backend.ad.vjp` available for this primitive in **Phase 2** (a
+     scoped exception — the primitive's *internal* vjp is a Phase-2 dependency even
+     though the ~76 *algorithm-level* vjp sites migrate in 3a). Caveat: QR is the
+     one primitive whose backward *is* a `vjp`, so a bare `torch.func.vjp` here would
+     **double-conjugate** — the primitive-internal vjp must be JAX-convention-
+     normalized (unconjugated pairing), a *different* contract from the §5.5
+     algorithm-level vjp sites that take user cotangents as-is.
+   - **(b)** give `regularized_qr` a hand-written backend-neutral QR backward (the
+     `Q̄`/`R̄` triangular-solve / `copyltu` formula). **This is *not* free of the
+     convention problem, and is *not* "self-contained like the other five":** that
+     triangular-solve form is exactly what the code documents as **tried and
+     abandoned** — it disagrees with `jax.vjp` by 115–191% relative on **complex**
+     input (`_ad_primitives.py` QR docstring, #912/#917) because JAX pairs complex
+     cotangents *unconjugated* while the textbook `Q̄`/`R̄` derivation assumes the
+     conjugated Wirtinger pairing. The other five leaf backwards are complex-correct
+     *only because they carry the #751 unconjugated↔Wirtinger conj-bridge* (see the
+     SVD/eigh conj-normalisation in their backwards); a hand-written QR backward is
+     acceptable **only if it carries the same explicit bridge**, or it reproduces the
+     #917 O(1) error.
+
+   Either way the §10 six-primitive gradient suite cannot go green in Phase 2 until
+   this is closed — and **the QR gradient test must use complex input**, since a
+   real-only test passes on the #917-broken form (the bridge is a no-op on reals).
 5. **Convention** (§5.3) and **double-differentiability** (§5.4) — below.
 
 ### 5.3 ⚠️ Complex-cotangent convention — the highest-risk item
@@ -573,8 +590,11 @@ the benchmarked PESS runs are effectively **real** (for real `g`, `-g=-conj(g)` 
 raw-JAX behavior on torch instead (an earlier draft of this note) would make the
 complex-PESS parity test **enshrine the #957 error**. The §10.4 complex-parameter PESS
 step must exercise this — a real-parameter case is a `conj` no-op that hides it. *(This
-also means shipped JAX PESS carries a latent complex-gradient bug worth its own
-tracking issue, separate from the port.)* (Count note: `_euclidean_grads` is at **7**
+also means shipped JAX PESS carries a latent complex-gradient bug, now fixed on branch
+`fix/pess-euclidean-grads` / **PR #1020**, separate from the port. Once that merges the
+PESS "special case" collapses into the standard `_euclidean_grads` guard — a **9th**
+application site — and the port should treat both PESS optimizers uniformly with the
+iPEPS sites, not as an exception.)* (Count note: `_euclidean_grads` is at **7**
 `ipeps_optimize.py` sites — `1006/1762/2188/3340/3850/4575/4939` — plus
 `ipeps_optimize_root_implicit.py:540`, not the "6" an earlier draft stated; PESS joins
 this guard as a **9th** site once fixed.)
@@ -1030,7 +1050,14 @@ and optimizer legs alike, and to the §10.7 benchmark's cold-cache leg.
    **directional derivatives with per-backend pairing** (§5.3), not raw grad `allclose`.
    Includes a **complex-parameter** case and a case run **through
    `backend.ad.value_and_grad`** so the fixed-point `Function` is exercised under a
-   `torch.func` transform, not just eager `.backward()`.
+   `torch.func` transform, not just eager `.backward()`. **And — required by §7 — an
+   explicit-CTM (`gs_implicit_ad=False`) `value_and_grad` case:** that path
+   backprops through the checkpointed explicit sweep (`_ctm_energy_ad.py:346-350`),
+   and `backend.control.checkpoint` must **no-op under an active `torch.func`
+   transform** (neither `use_reentrant` variant survives it, §7); without this case
+   the checkpoint no-op contract ships untested and the explicit-AD path raises in
+   production. This is *distinct* from the implicit-AD default the fixed-point case
+   above covers — both `gs_implicit_ad` branches must be differentiated in CI.
 3. **Algorithm parity — one representative case per *targeted* family, not a sample.**
    Per the v1 focus (§1), the parity target is the block-sparse/PEPS **AD** families;
    the suite must exercise **every** one the design commits to, or the checklist can
@@ -1061,7 +1088,7 @@ and optimizer legs alike, and to the §10.7 benchmark's cold-cache leg.
    | Family | Host-read sites on the public path |
    |---|---|
    | dense iDMRG | `idmrg.py:976-977` (`np.array(A_L)`, `np.array(W)` feeding the fixed-point env solves) and `:1071-1085` (periodic re-orthogonalization: `np.array(A_L)`, `np.array(A_R)`, `np.array(s_center)`) |
-   | GILT | `gilt.py:222` (`float(jnp.sum(...))`), `:256` (`np.asarray(s >= cut)`), `:318` (`float(jnp.max(...))`) -- plus `:209/265/267/274/284`, **ten sites, not three** |
+   | GILT | `gilt.py:222` (`float(jnp.sum(...))`), `:256` (`np.asarray(s >= cut)`), `:318` (`float(jnp.max(...))`) -- plus `:209/265/267/274/284`, **eight sites, not three** (matching the §3 host-reads enumeration) |
 
    A torch **CPU** tensor converts through `__array__` and these all pass. A torch
    **CUDA** tensor does not, and `float(...)` on a functorch-wrapped tensor either
@@ -1133,10 +1160,10 @@ Risk × Bulk; rough person-weeks are indicative, not a commitment.
 |---|---|---|---|---|
 | **0. Seam + invariant** | `tenax.backend` package; `ArrayOps` Protocol incl. functional indexed-updates (137 `.at[]` / 25 files) **and dtype-introspection predicates**; `JaxBackend` pass-through + op-parity-vs-`jnp` test; **seam-boundary CI grep-gate** (§4.1); migrate `core/tensor.py` + `linalg.py` dense kernels behind `B`; export `set_backend`/`get_backend` in `__all__` **and document them in `README.md` in the same PR** (repo rule: a public API in `__all__` must be in `README.md` — since phases land as independent PRs, deferring the doc to Phase 4 would ship an undocumented public API for several releases). Suite green, zero behavior change. | Low | High | 3–5 |
 | **1. Torch forward** | `TorchBackend` array ops + dense/symmetric linalg forward + contraction (`torch.einsum`/opt_einsum replay + segment-sum equiv); **RNG + default-dtype/promotion policy (§8)**; **`to_numpy` + device-native truncation, dtype predicates (§4.3)** — both are forward prerequisites, not polish. Op-parity green (gauge-invariant, §10). | Low–Med | Med | 3–4 |
-| **2. Torch AD (leaf)** | Refactor the 6 leaf primitives to `_fwd/_bwd`; `torch.func`-compatible `Function` (`setup_context` + vmap rule) **incl. `nondiff_argnums` and hidden-residual returns (§5.2)** — intrinsic to these primitives; **`regularized_qr` needs a hand-written backend-neutral backward or `backend.ad.vjp` pulled forward from 3a (§5.2#4)** — its current bwd calls `jax.vjp`; complex-cotangent boundary + `_euclidean_grads` convention-guard + directional-derivative parity test (§5.3). Gradient-parity green (complex case). | **High** (§5.3) | Med | 3–5 |
-| **3a. Control + trees + transforms** | `backend.control` combinators (incl. `map`) + `jit`/`checkpoint` (container-aware, §7); `backend.tree` protocol + register all containers (186 sites); `backend.ad` transforms + `value_and_grad` adapter (~76 sites); migrate the ~18 tracer checks to the functorch-aware predicate (per-site review). DMRG parity green. | Med | High | 4–6 |
+| **2. Torch AD (leaf)** | Refactor the 6 leaf primitives to `_fwd/_bwd`; `torch.func`-compatible `Function` (`setup_context` + vmap rule) **incl. `nondiff_argnums` and hidden-residual returns (§5.2)** — intrinsic to these primitives; **`regularized_qr` needs a hand-written backend-neutral backward or `backend.ad.vjp` pulled forward from 3a (§5.2#4)** — its current bwd calls `jax.vjp`; **per-primitive complex-cotangent boundary conjugation** + directional-derivative parity test (§5.3). Gradient-parity green (complex case). *(The `_euclidean_grads` convention-guard is optimizer-path-only — it can only be exercised through a full optimizer step, so it lands in Phase 3c, not here; a Phase-2 leaf test never traverses it.)* | **High** (§5.3) | Med | 3–5 |
+| **3a. Control + trees + transforms** | `backend.control` combinators (incl. `map`) + `jit`/`checkpoint` (container-aware, §7); `backend.tree` protocol + register all containers (186 sites); `backend.ad` transforms + `value_and_grad` adapter (~76 sites); migrate the ~18 tracer checks to the functorch-aware predicate (per-site review). DMRG parity green **and the explicit-CTM (`gs_implicit_ad=False`) `value_and_grad` case (§10 item 2) — this phase ships `checkpoint`, so its no-op-under-`torch.func` contract must be gated here, not left to prose**. | Med | High | 4–6 |
 | **3b. Fixed-point + solvers (the target)** | `fixed_point(step, params, …)` on the boundary-leaf + `setup_context` + double-differentiable contract (§5.4), incl. C4v-reference; `backend.linalg.gmres`/`solve_triangular`/`bicgstab` (bicgstab is the default). Small iPEPS energy+grad parity green **and the §10.7 AD-wall benchmark on a fermionic iPEPS/CTM AD step** — this is the deliverable the whole backend exists for (§2). | **High** | Med–High | 4–6 |
-| **3c. Optimizer** | Backend optimizer (§5.6): functional default L-BFGS returning a direction; migrate **every** Optax user (`_build_optimizer` + **both** PESS optimizers + root-implicit) to the `(direction, state)` contract. One iPEPS + a step through **each** PESS optimizer through torch — **and, explicitly, `optimize_pess_ad`'s non-default `loss_builder="exact"` branch (trains `T_d`, §5.6), not only the `"convc"` default** (§10.4): because phases land as independent PRs and 3c is what makes the optimizer path usable, testing only the default mode lets 3c be declared complete with the exact branch silently broken until final integration. | Med | Med | 2–3 |
+| **3c. Optimizer** | Backend optimizer (§5.6): functional default L-BFGS returning a direction; migrate **every** Optax user (`_build_optimizer` + **both** PESS optimizers + root-implicit) to the `(direction, state)` contract. One iPEPS + a step through **each** PESS optimizer through torch — **and, explicitly, `optimize_pess_ad`'s non-default `loss_builder="exact"` branch (trains `T_d`, §5.6), not only the `"convc"` default** (§10.4): because phases land as independent PRs and 3c is what makes the optimizer path usable, testing only the default mode lets 3c be declared complete with the exact branch silently broken until final integration. **Also owns the `_euclidean_grads` convention-guard (moved here from Phase 2 — it is optimizer-path-only): its complex full-optimizer-step test (§10.4/§5.3) is the only thing that exercises the double-conjugation, and it can't run before this phase.** | Med | Med | 2–3 |
 | **4. Polish** | Drop GPU-only workarounds on torch path; docs + `capabilities.md`; `README.md` documents `set_backend`; example; CI torch job (**and, for D6, a CUDA runner or an explicit out-of-band owner**). | Low | Low–Med | 1–2 |
 
 Phase 0 is the tedious-but-safe backbone; Phase 2 is the small-but-dangerous core;
@@ -1166,7 +1193,10 @@ docs (examples, `capabilities.md`). Both are merge-blocking.
   PESS optimizer, and PESS `loss_builder="exact"`** (§10.4); a **double-backward
   (`gradgrad`)** test through the
   SVD/eigh primitives (§5.2) **and through `control.fixed_point` + its adjoint** (§5.4)
-  green.
+  green. **Both `gs_implicit_ad` branches are differentiated under `torch.func`: the
+  implicit fixed-point path *and* the explicit-CTM (`gs_implicit_ad=False`)
+  `value_and_grad` path — the latter gates `checkpoint`'s no-op-under-transform
+  contract (§7/§10 item 2), which no other case exercises.**
 - [ ] Seam-boundary CI gate green (no raw `jnp`/`lax` outside `backend/`).
 - [ ] `set_backend`/`get_backend` exported + documented; torch version floor pinned.
 - [ ] Named owner for GPU-parity + cross-backend flake triage.
@@ -1213,10 +1243,11 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (29 rounds) and a
+The specific requirements above were hardened across a Codex review (29 rounds), a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
-design/consistency). Rather than tag each paragraph inline, the load-bearing findings
-are listed here.
+design/consistency), and a **multi-agent internal review (5 code-verified dimensions,
+2026-09-19)** that caught issues the line-by-line rounds missed. Rather than tag each
+paragraph inline, the load-bearing findings are listed here.
 
 **Codex rounds (torch-boundary correctness):** explicit fixed-point params + splat
 inputs/outputs; `torch.func` `setup_context` + vmap rule (leaf primitives *and*
@@ -1250,7 +1281,7 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
 - **§7** `lax.map` combinator; `torch.while_loop` has no backward (fixed_point-only);
   identity-`jit` must accept/ignore `static_argnums`; eager tape ≠ free memory.
 - **Citations corrected:** `ad_utils.py:915`→`:882`; "9 files"→7; "80/120"→~86;
-  "stop_gradient 31 files"→17/27; "seven sites"→6; `:2154`→`:2155`; `:165`→`:166`;
+  "stop_gradient 31 files"→17/27; "seven sites"→8 (`_euclidean_grads`; §5.3/§3 settled on 8, not 6); `:2154`→`:2155`; `:165`→`:166`;
   "fori_loop 10"→11.
 
 **Codex rounds 9–12 (post-consolidation, torch-boundary correctness):**
@@ -1412,3 +1443,25 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   per-site inventory is regenerated at implementation with a host-vs-backend split, and
   "migrated" is defined by the **grep-gate passing on backend-array sites**, never by
   matching a count.
+
+**Internal multi-agent review (2026-09-19, 5 code-verified dimensions).** Caught what the
+line-by-line rounds structurally missed. **Folded now (correctness + contradictions):**
+(1) the `regularized_qr` "(b) preferred" label re-introduced the #917-broken complex QR
+backward — dropped, and the unconjugated↔Wirtinger conj-bridge requirement + a
+complex-input QR test are now stated (§5.2#4); (2) the explicit-CTM
+(`gs_implicit_ad=False`) `value_and_grad` case that §7 mandated but §10/§11/DoD omitted
+is now in §10 item 2, the Phase-3a row, and the DoD — the one un-backstopped hole;
+(3) §3 `_euclidean_grads` "6"→**8** sites (matching §5.3); (4) the `_euclidean_grads`
+guard moved from the Phase-2 row to Phase-3c (optimizer-path-only, unexercisable at
+Phase 2); (5) `blocksparse_backend.py` reclassified in the §3 AD-primitives row as a
+JAX-only selector, not ported (matching the §1 non-goal); (6) the GILT "ten"→**eight**
+and Appendix `_euclidean_grads` "→6"→**→8** self-contradictions; (7) a forward-note that
+the latent PESS #957 bug is fixed on PR #1020 (a 9th guard site once merged).
+**Deferred to a citation-regeneration batch:** the provenance banner's false "verified
+against 756f9e0" claim and the broad set of stale line-anchors/counts (the numbers are
+wrong at that exact commit, not drifted); the backwards Appendix `915→:882` correction;
+and the op-parity enumeration gaps that would crash or silently diverge on live/default/
+AD-leaf paths — `one_hot` (torch raises on the `-1` sentinel), `maximum`/`minimum`
+(torch raises on a Python-float floor), `max`/`min` (namedtuple, use `amax`/`amin`),
+`flip`/`pad`/`argmax`/`take_along_axis` — each to be added to the §4.3 non-mechanical
+list with op-parity cases.
