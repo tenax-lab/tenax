@@ -289,6 +289,25 @@
 
 ### Fixed
 
+- **A non-finite CTM environment can no longer certify as converged** (#974).
+  `max(0.0, float("nan"))` is `0.0` — every comparison against NaN is False, so
+  Python's `max` returns its *first* argument, and the sibling idiom
+  `if diff > worst` never fires either. Both appear in the convergence
+  reducers, so a NaN leaf difference vanished from the aggregate and
+  `python_loop_ctm_converge` returned `converged=True, sv_diff=0.0` over an
+  environment whose every tensor was NaN. `ctm_conv_method` defaults to
+  `"elementwise"`, which is the affected path; the spectral `"sv"` method was
+  already correct and is pinned by a test so a future refactor cannot trade one
+  for the other. Four aggregation sites are fixed behind one `_nan_safe_max`
+  helper: `_max_env_leaf_diff`, both of `_ctm_loop_core`'s per-coordinate
+  aggregations (whose comment already *assumed* a NaN leaf would propagate),
+  and both honeycomb reducers — an SVD of a NaN corner yields NaN singular
+  values rather than raising, so `"svd"` had the same hole. Any non-finite
+  input now collapses the aggregate to `inf`, which fails closed on both
+  downstream tests (`inf < conv_tol` is False, and the plateau guard's
+  `math.isfinite` rejects it). The trap is order-dependent, which is how it
+  survived review: `max(nan, 0.0)` *is* `nan`, so only an accumulator seeded
+  from `0.0` loses it.
 - **The final energy `optimize_gs_ad` returns is now an evaluation of the
   tensor it returns** (#899): the three optimizer paths (1-site, 2-site, and
   `_optimize_gs_ad_multisite`) each re-evaluated the final and best tensors
