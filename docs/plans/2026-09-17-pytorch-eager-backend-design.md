@@ -578,6 +578,23 @@ diagnostic, and `.item()` cannot extract a functorch-wrapped scalar. It needs a
 transform-compatible **tensor predicate** (`where`-select both RDM paths, or a
 redesigned fallback) — with a **split two-site gradient** case in §10 to exercise it.
 
+**This host-read-control class is a bounded, per-site *audit*, not a mechanical
+sweep.** Unlike the array-method class (§4.3, closable by a grep-gate), a
+`float`/`bool`/`int`/`.item()` read is only a problem when it sits **on the
+differentiated tape** — so each must be reviewed for tape-reachability, not renamed.
+A grep of the AD-target backward/loss modules bounds the surface to ~18 scalar
+extractions: `_split_ctm_energy_ad.py` (5), `_split_ctm_tensor_energy.py` (3),
+`_ctm_tensor_c4v_reference_ad.py` (2), `ad_utils.py` (4), and
+`_ctm_root_implicit_symmetric.py` (4). The first four modules are on the backward /
+`value_and_grad` path (cited above) and must become transform-compatible. The
+root-implicit ones are the subtle case: they are **forward convergence criteria**
+(e.g. the phase-aligned change `if float(jnp.abs(lam)) < 1e-12`,
+`_ctm_root_implicit_symmetric.py:889`), and **implicit AD runs the forward solve
+without grad tracking** — so they may sit *off* the differentiated tape and need no
+change. The audit resolves each by reachability rather than assuming breakage; the
+Phase-3b DoD is "every tape-reachable scalar read in the AD-target backwards is
+transform-compatible," verified by the family running under `torch.func`.
+
 **The fixed-point family is more than `_ctm_energy_ad`.** The supported
 `ctm_ad_mode="c4v_reference"` path calls the standalone
 `ctm_tensor_c4v_reference_converge_reduced` (`_ctm_tensor_c4v_reference_ad.py:304`)
