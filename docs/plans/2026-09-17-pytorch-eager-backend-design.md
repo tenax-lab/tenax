@@ -206,7 +206,8 @@ that blast radius and make the migration safe to land incrementally:
 - **A CI grep-gate enforces the seam boundary**: no `import jax.numpy` / bare `jnp.`
   / `lax.` outside `src/tenax/backend/` (allow-list the few genuinely JAX-only
   modules), and no bare backend-array **method** calls torch lacks — `.at[`,
-  `.astype(`, `.size`, `.copy(` (§4.3). This both prevents a *half-migrated* state
+  `.astype(`, `.size`, `.copy(`, multi-arg `.transpose(` (§4.3). This both prevents a
+  *half-migrated* state
   where a not-yet-ported file calls raw `jnp` (or a JAX-only tensor method) on a
   torch tensor, and defines "migrated" mechanically.
 - **Opt-out**: the whole effort is behind `set_backend`; reverting to raw `jnp` is a
@@ -267,11 +268,17 @@ torch tensors do not match, and none are caught by a `jnp`/`lax`-token gate:
   method to `0` and even basic block-sparse **dtype access** breaks. Maps to `numel()`.
 - **`.copy()`** — the adjoint solve uses `grad.copy()` (`_metric_precond.py:231`) and
   `H[:j+2, j].copy()` (`_gmres_eager.py:189`); torch has no `.copy()`, only `.clone()`.
+- **`.transpose(...)` with a full permutation** — `theta.transpose(0,3,1,4,2,5)`
+  (`pess.py:110`) and `T4g.transpose(0,1,4,2,3)` (`ipeps_ctm_moves.py:147`) — **33
+  multi-arg calls** across those two files. `jnp`/`np` `.transpose(*perm)` takes an
+  arbitrary permutation; torch's `Tensor.transpose(d0,d1)` swaps **exactly two** dims,
+  and the permutation spelling is `.permute(*dims)`. So a verbatim port silently
+  mis-permutes or errors. Maps to `B.transpose`/`permute`.
 
 So the seam exposes portable equivalents (`B.astype`/`.to`, `B.size`→`numel`,
-`B.copy`→`clone`), the migration **audits and rewrites** these method sites, and the
-§4.1 grep-gate flags bare `.astype(` / `.size` / `.copy(` (as well as `.at[`) for
-per-site review. NumPy-array uses on genuinely host-only, non-backend arrays — e.g.
+`B.copy`→`clone`, `B.transpose`→`permute`), the migration **audits and rewrites**
+these method sites, and the §4.1 grep-gate flags bare `.astype(` / `.size` / `.copy(`
+/ multi-arg `.transpose(` (as well as `.at[`) for per-site review. NumPy-array uses on genuinely host-only, non-backend arrays — e.g.
 `.astype` on a host gate before `jnp.asarray` (`pess.py:80/970`) — are out of scope;
 the audit is per-site and distinguishes the two.
 
@@ -807,7 +814,13 @@ benchmark** (the §2 driver — item 7):
    the suite must exercise **every** one the design commits to, or the checklist can
    pass while a targeted entry point stays JAX-bound. **Block-sparse/PEPS *AD* families
    (full parity, the torch target):** a small iPEPS energy+grad, **fPEPS**, **PESS** —
-   each forward **and** AD end-to-end on torch vs the pinned JAX references.
+   each forward **and** AD end-to-end on torch vs the pinned JAX references. **Plus an
+   explicit split-CTM two-site `value_and_grad` case** — `optimize_fpeps_ad`
+   (`ipeps_optimize.py:5306`) dispatches to the **one-site** `_optimize_gs_ad_tensor`,
+   so a generic fPEPS run never reaches the explicit/implicit two-site split losses or
+   the `.item()` RDM-select guards (`_split_ctm_tensor_energy.py:824/974`, §5.4); a
+   two-site split case is required or the suite passes while that torch-transform path
+   stays broken.
    **No-AD-wall families (oracle-level, per D7):** MPS — DMRG (→ −0.4431 Heisenberg),
    iDMRG, TDVP — *and* the forward-only RG algorithms **TRG/HOTRG/GILT** (exported
    `gilt_tnr`/`gilt_plaquette`; no AD, no jit, `0.000` compile — JAX eager is already
@@ -946,7 +959,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (13 rounds) and a
+The specific requirements above were hardened across a Codex review (14 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1021,3 +1034,9 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   (`adjoint_arnoldi_precheck=True`) runs `np.asarray`+`np.linalg.eigvals`
   (`_arnoldi.py:70`, `ad_utils.py:856`) in the backward → needs backend-native
   `eigvals`/spectral-radius (§5.4).
+- **R14** — `.transpose(*perm)` is a full permutation on `jnp`/`np` but a **two-dim
+  swap** on torch (permutation is `.permute`): `pess.py:110`, `ipeps_ctm_moves.py:147`
+  (33 multi-arg calls) → added to the §4.3 method class + gate; and the §5.4 split
+  two-site promise had no §10 case because `optimize_fpeps_ad` (`ipeps_optimize.py:
+  5306`) dispatches to the **one-site** path — added an explicit split-CTM two-site
+  `value_and_grad` acceptance case (§10.3).
