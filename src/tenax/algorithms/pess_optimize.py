@@ -30,6 +30,7 @@ from tenax.algorithms._ctm_energy_ad import (
 )
 from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+from tenax.algorithms._ipeps_optimize_shared import _euclidean_grads
 from tenax.algorithms._pess_multisite_energy import (
     compute_energy_pess_3site_multisite,
 )
@@ -351,7 +352,10 @@ def _hager_zhang_line_search_step(
     def _dphi(a: float) -> float:
         trial = jax.tree.map(lambda p, d: p + a * d, params, direction)
         _, g = grad_fn(trial)
-        return _tree_real_dot(g, direction)
+        # Euclidean-convert the trial cotangent before pairing with the
+        # descent direction: JAX pairs complex cotangents unconjugated, so the
+        # Wolfe slope must use conj(g) (#957).  Identity on real leaves.
+        return _tree_real_dot(_euclidean_grads(g), direction)
 
     alpha, f_alpha, _ = hager_zhang_line_search(
         _phi,
@@ -565,6 +569,15 @@ def optimize_pess_ad(
     for step in range(max_iter):
         e_val, grads = grad_fn(params)
         last_energy = float(e_val)
+        # #957: JAX pairs complex cotangents unconjugated, so the descent
+        # vector every Euclidean consumer here expects (Optax update below, the
+        # ``_tree_real_dot`` line-search slope, the L-BFGS curvature pairs) is
+        # ``-conj(g)``.  Both PESS optimizers were missed by the original #957
+        # pass; without this the update ascends the imaginary coordinates and
+        # the result depends on the global phase of the initial state.
+        # ``conj`` is the identity on real leaves, so real-valued runs are
+        # bit-for-bit unchanged.
+        grads = _euclidean_grads(grads)
         direction, opt_state = optimizer.update(grads, opt_state, params)
         params, last_energy, alpha = _run_line_search(
             line_search_method, params, direction, grads, last_energy, loss, grad_fn
@@ -875,6 +888,15 @@ def optimize_pess_3site_multisite_ad(
     for step in range(max_iter):
         e_val, grads = grad_fn(params)
         last_energy = float(e_val)
+        # #957: JAX pairs complex cotangents unconjugated, so the descent
+        # vector every Euclidean consumer here expects (Optax update below, the
+        # ``_tree_real_dot`` line-search slope, the L-BFGS curvature pairs) is
+        # ``-conj(g)``.  Both PESS optimizers were missed by the original #957
+        # pass; without this the update ascends the imaginary coordinates and
+        # the result depends on the global phase of the initial state.
+        # ``conj`` is the identity on real leaves, so real-valued runs are
+        # bit-for-bit unchanged.
+        grads = _euclidean_grads(grads)
         direction, opt_state = optimizer.update(grads, opt_state, params)
         params, last_energy, alpha = _run_line_search(
             line_search_method, params, direction, grads, last_energy, loss, grad_fn
