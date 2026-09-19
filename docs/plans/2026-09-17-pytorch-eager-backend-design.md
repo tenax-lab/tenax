@@ -824,6 +824,21 @@ torch: `torch.utils.checkpoint`). Two subtleties:
   `use_reentrant=False`: `_ctm_energy_ad.py:346` checkpoints `(site_tensors, envs)`
   (tensors nested in containers), which the default **reentrant** variant does not
   treat as participating inputs — it would silently drop those gradients.
+  **But under a `torch.func` gradient transform, *neither* checkpoint variant
+  works, so the lowering must no-op there.** When `gs_implicit_ad=False`,
+  `_ctm_energy_ad.py:346-350` checkpoints every differentiated explicit-CTM sweep,
+  and the §5.6 `value_and_grad` adapter runs that path through
+  `torch.func.grad_and_value`. `use_reentrant=False` relies on saved-tensor hooks
+  that `torch.func` gradient transforms **disable**, and `use_reentrant=True` is
+  itself an incompatible `autograd.Function` — so `torch.utils.checkpoint` **raises**
+  under the transform instead of differentiating the promised explicit-AD path.
+  `backend.control.checkpoint` therefore must detect an active `torch.func` transform
+  and degrade to a **plain passthrough** (full tape, forgoing only the memory win —
+  the eager-tape caveat below), or supply a transform-compatible recomputation
+  primitive; on the eager `.backward()` path it stays the real `use_reentrant=False`
+  checkpoint. §10 must carry an **explicit-CTM (`gs_implicit_ad=False`)
+  `value_and_grad` acceptance case** so this path is differentiated in CI, not only
+  the implicit-AD default.
 
 **Eager tape caveat.** The "dynamic block shapes are free" payoff is about *retracing*,
 not tape memory. A differentiated non-fixed-point loop (`scan` → Python `for`) under
@@ -843,7 +858,18 @@ torch eager still materializes the full tape, so long DMRG/TDVP sweeps need
   randomness-mode-aware path.
 - **dtype/x64:** JAX needs global `jax_enable_x64`; torch is per-tensor
   `float64`/`complex128`. The `jnp.float64` literals in factories route through
-  `B.default_real/complex`. **Promotion diverges**: torch **raises** on mixed
+  `B.default_real/complex` — but **resolved in the function body at call time, never
+  as a signature default.** A signature default is evaluated once when the `def`
+  executes (at import), so `def zeros(..., dtype=B.default_real)` captures whatever
+  backend was live at import — the JAX dtype in the documented
+  `import tenax; set_backend("torch")` flow, since `SymmetricTensor.zeros`
+  (`core/tensor.py:887-910`) and `heisenberg_gate` (`ipeps.py:43-52`) were already
+  evaluated with `dtype=jnp.float64` before the switch — and a torch creation API
+  will not accept a `jnp` dtype. So each factory takes a backend-neutral sentinel
+  (`dtype=None`) and selects `B.default_real/complex` **inside the body**, exactly
+  the call-time-not-import-time binding §7 requires of the `jit`/`checkpoint`/
+  `custom_vjp` wrappers. Parity tests must cover the **omitted-`dtype`** call, or the
+  import-time capture goes unseen. **Promotion diverges**: torch **raises** on mixed
   real×complex `matmul`/`einsum`, whereas JAX-with-x64 promotes implicitly — so the
   seam needs an explicit real→complex promotion policy at contraction/linalg
   boundaries (the JAX code relies on implicit promotion the torch path won't provide).
@@ -1135,7 +1161,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (23 rounds) and a
+The specific requirements above were hardened across a Codex review (24 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1286,3 +1312,16 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   the #879 `nan_on_invalid_rdm` energy gate is a *result-determining* (not-skippable)
   host-read, safe only because it is default-off and set solely on `fpeps()`'s concrete
   eval; on any differentiated path it must be a `where`-predicate, never `float()`.
+- **R24** — two torch-AD-correctness gaps, both **P1**. (1) *dtype defaults bind at
+  import* (§8): the factory `jnp.float64` literals cannot become `B.default_real` as a
+  **signature default** — that captures the JAX dtype at import, before
+  `set_backend("torch")`, and a torch creation API rejects a `jnp` dtype; each factory
+  must take a `None` sentinel and resolve `B.default_real/complex` in the body at call
+  time (the same import-vs-call binding §7 already requires of the wrappers), with an
+  omitted-`dtype` parity case. (2) *checkpoint raises under `torch.func`* (§7): with
+  `gs_implicit_ad=False`, `_ctm_energy_ad.py:346-350` checkpoints every differentiated
+  explicit-CTM sweep, and `torch.utils.checkpoint` fails under `torch.func.grad_and_value`
+  either way (`use_reentrant=False` needs the saved-tensor hooks the transform disables;
+  reentrant is an incompatible `autograd.Function`) — so `backend.control.checkpoint`
+  must no-op to a plain passthrough under an active transform, plus an explicit-CTM
+  `value_and_grad` acceptance case so the path is exercised in CI.
