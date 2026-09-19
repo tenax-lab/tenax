@@ -1214,6 +1214,25 @@
 
 ### CI / tests
 
+- **The merge queue runs only the required jobs** (`no-cython-shard`, `docs`
+  and `build` now carry `if: github.event_name != 'merge_group'`).  The
+  queue's 120-minute limit is a *scheduling* budget, not a compute one: after
+  #1011 a queue run asks for ~19 job slots from a pool that serves 2-4 at a
+  time, so required jobs sit behind non-required ones and the PR is dropped
+  with every shard green.  This blocked `main` outright -- #1015 was evicted
+  74s after its last shard passed with the three aggregators still queued,
+  and #1014 was evicted **with the queue otherwise empty**.  Only the three
+  `Tests (...)` aggregators are branch-protected; the skipped jobs still run
+  on every `pull_request` and on push to `main`, so nothing goes unchecked --
+  they simply do not re-run against the merge commit.
+
+  Measured caveat, not addressed here: the **macOS** path is the binding
+  constraint and this does not touch it.  The two macOS shards never overlap
+  in either eviction (in #1014's run shard 1 started 14s after shard 2
+  ended), so `core-shard-macos: NSHARDS=2` buys no parallelism while paying
+  two runner waits and two macOS setups; `Tests (macOS)` waited 45 min for a
+  runner to do 4 seconds of work.  Unsharding macOS is the follow-up.
+
 - **The required `-m core` gate is sharded across runners** (`core-shard`, 4
   shards x 2 Python versions, plus `core-shard-macos`), using the same
   stable-`cksum` rule the non-core buckets adopted in #960.  All three
