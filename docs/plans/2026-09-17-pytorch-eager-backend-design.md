@@ -139,7 +139,7 @@ From a full sweep of `src/tenax` (120 files); counts re-verified at head `756f9e
 | **AD primitives** | 6 leaf `custom_vjp`: `_ad_primitives.py:229-719` (5) + `_lorentzian_eigh.py:81` (1), +`blocksparse_backend.py:149-177` | **Yes — redesign** (§5). |
 | **dtype introspection** | `jnp.iscomplexobj/issubdtype/result_type/finfo/complexfloating` (~18 sites) — incl. default Arnoldi `_arnoldi.py:37`, 2×2 projector, adjoint GMRES `_gmres_eager.py:117` | **Yes — backend predicates** (§4.2/§8). |
 | **Differentiation-state checks** | `isinstance(x, jax.core.Tracer)` ×~18 across **7 files** (`core/tensor.py:1043`, `linalg.py:274/2045`, `_ctm_projector.py` ×6, `_ctm_tensor_projector_2x2.py:1001`, `_ctm_tensor_energy.py:130`, `contractor.py:897`, `cutensornet_backend.py:64`) | **Yes — backend predicate** (§4.2). |
-| **Host reads** | truncation: `np.array(s_q)`/`np.asarray(block)` (`linalg.py:471/1112/1359`, `core/tensor.py:1044`); **AD-target diagnostics**: `fixed_point` backward `jax.device_get` (`_ctm_energy_ad.py:1694-1699`, gated `:1711/1714`, `:99`); **oracle-only families**: dense iDMRG `idmrg.py:976-977` + `:1071-1085`, GILT `gilt.py:209/222/256/265/267/274/284/318` | **Yes** — truncation → device-native (§4.3); AD-target diagnostics → `to_numpy`, **skipped under `torch.func`** (§4.3); oracle-only sites **CPU-only by design** (§10.3), not migrated for v1. |
+| **Host reads** | truncation: `np.array(s_q)`/`np.asarray(block)` (`linalg.py:471/1112/1359`, `core/tensor.py:1044`); **AD-target diagnostics**: `fixed_point` backward `jax.device_get` (`_ctm_energy_ad.py:1694-1699`, gated `:1711/1714`, `:99`); **AD-target convergence control**: `float(...)` loop-exit/divergence in fixed-point backwards (`_split_ctm_energy_ad.py:252/256/565/569`, `ad_utils.py:913/941/1097/1111`); **oracle-only families**: dense iDMRG `idmrg.py:976-977` + `:1071-1085`, GILT `gilt.py:209/222/256/265/267/274/284/318` | **Yes** — truncation → device-native (§4.3); AD-target diagnostics → `to_numpy`, **skipped under `torch.func`** (§4.3); AD-target convergence control → **fixed-iteration / tensor-predicate** (not skippable, §5.4); oracle-only sites **CPU-only by design** (§10.3), not migrated for v1. |
 | **Control flow** | `lax` `while_loop`×29, `scan`×22, `fori_loop`×11, `cond`×0, `stop_gradient`×58; `lax.map` (`_ctm_chunked_absorb.py`); union across 27 files | **Yes — redesign** (§7). |
 | **Krylov / triangular solvers** | `_gmres_lax.py:171` (`solve_triangular`), `:299-336`; `_metric_precond.py:164`, `ad_utils.py:882` (`jax.scipy … gmres`); **`_krylov_bicgstab` (default `adjoint_solver`), `_ctm_tensor_c4v_reference_ad.py:166`** | **Yes — backend solvers incl. bicgstab** (§5.4). |
 | **DMRG truncation ops** | `jax.lax.top_k`/`jax.nn.one_hot` (`_padded_linalg.py:128/142`), reached by `accelerator="auto"` → `_jit_sweep` | **Yes — `ArrayOps.top_k`/`one_hot`** (§4.2). |
@@ -500,6 +500,23 @@ before any GMRES fallback. So the seam adds `backend.linalg.gmres`,
 `solve_triangular`, **and `bicgstab`** (matching the JAX default so both backends
 solve the same system); a GMRES-only seam would fail the default adjoint path.
 
+**The adjoint loop's convergence control host-reads tensors — and unlike the
+diagnostics it is *not* skippable.** Distinct from the §4.3 *diagnostic* host-reads
+(which no-op under `torch.func`), several fixed-point backwards decide **when to
+stop** by converting tensors to Python inside `if` branches:
+`_split_ctm_energy_ad.py:252/256` and `:565/569` run
+`grads_inf = max(float(jnp.max(jnp.abs(x))) …); if grads_inf < conv_tol: break`
+plus a `float(...)` divergence guard (`lam_norm > 1e15`), and `ad_utils.py:913/927/
+941` and the CTM-SV convergence check at `:1097/1111` do the same. These `float(...)`
+reads **determine the adjoint result** (iteration count, early exit), so they cannot
+be skipped like a diagnostic — but under `torch.func` a functorch-wrapped scalar
+cannot be `float()`-ed *and* a Python data-dependent `break` cannot be traced. Since
+`torch.while_loop` has no backward (§7), the transform-compatible policy for the
+*backward* is **fixed-iteration** control (a static `max_fp_iter`, no data-dependent
+break) or a tensor-predicate mask that keeps the loop body pure — chosen per site and
+matched to JAX for parity. All these sites join the migration inventory; they are the
+fixed-point **family's**, not `_ctm_energy_ad`'s diagnostics.
+
 **The fixed-point family is more than `_ctm_energy_ad`.** The supported
 `ctm_ad_mode="c4v_reference"` path calls the standalone
 `ctm_tensor_c4v_reference_converge_reduced` (`_ctm_tensor_c4v_reference_ad.py:304`)
@@ -626,10 +643,18 @@ torch: `torch.utils.checkpoint`). Two subtleties:
   allocated" guard does **not** catch it. So `backend.control.jit` /
   `checkpoint` / `custom_vjp` must return a thin wrapper that resolves the
   lowering **on each call** (cache it per-backend-generation, so the JAX hot
-  path still pays one dict lookup, not a re-trace), and `set_backend` must
-  additionally refuse to switch once any backend-bound wrapper has been
-  created. A decorator that closes over the backend live at import is the same
-  class of bug as rebinding `B` instead of mutating the proxy.
+  path still pays one dict lookup, not a re-trace). Because the wrapper resolves
+  per call, a `set_backend` switch is handled by **bumping the backend
+  generation** — which invalidates every cached lowering so the next call
+  re-resolves — **not** by refusing the switch: the module-scope wrappers exist
+  from import (before any tensor or any call), so a "refuse once a wrapper
+  exists" guard would wrongly reject the very first `set_backend("torch")` after
+  `import tenax.algorithms.dmrg`. The switch is refused only in the one case
+  where it is genuinely incoherent: **inside an active differentiation/trace**
+  (a wrapper already materialized under the current generation on the live tape),
+  not merely because a wrapper object exists. A decorator that closes over the
+  backend live at import is the same class of bug as rebinding `B` instead of
+  mutating the proxy.
 - **`stop_gradient` and `checkpoint` are container-aware.** `stop_gradient` receives
   whole tensor objects/trees (`_ctm_root_implicit_symmetric.py:1944` a `SymmetricTensor`;
   `_ctm_energy_ad.py:348` the CTM env) — neither has `.detach()`, so the lowering is
@@ -892,7 +917,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (11 rounds) and a
+The specific requirements above were hardened across a Codex review (12 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -932,7 +957,7 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   "stop_gradient 31 files"→17/27; "seven sites"→6; `:2154`→`:2155`; `:165`→`:166`;
   "fori_loop 10"→11.
 
-**Codex rounds 9–11 (post-consolidation, torch-boundary correctness):**
+**Codex rounds 9–12 (post-consolidation, torch-boundary correctness):**
 - **R9** — double-backward residuals (recompute-from-inputs, not
   `mark_non_differentiable`, §5.2#3); degenerate-block gauge-invariant projector
   parity (§10.1); per-promised-family end-to-end coverage (§10.3).
@@ -949,3 +974,12 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   **`fixed_point` backward `jax.device_get` diagnostics** (`_ctm_energy_ad.py:1694-
   1699`) crash torch-CUDA host conversion — an AD-target host-read, skippable under
   `torch.func` (§4.3, §3 table).
+- **R12** — two self-consistency fixes on the R10/R11 additions: the §7 `set_backend`
+  guard was over-strict ("refuse once a wrapper exists" would reject the first
+  `set_backend` after importing `dmrg`/`idmrg`/`tdvp`, since those wrappers exist from
+  import) → a switch **bumps the backend generation**, refused only inside an active
+  trace (§7); and the R11 host-read treatment covered only skippable *diagnostics*,
+  but the fixed-point backwards also **control the adjoint loop** via `float(...)`
+  reads (`_split_ctm_energy_ad.py:252/256/565/569`, `ad_utils.py:913/941/1097/1111`)
+  that determine the result and **cannot** be skipped → transform-compatible
+  fixed-iteration / tensor-predicate convergence policy (§5.4, §3 table).
