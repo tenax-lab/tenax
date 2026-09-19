@@ -139,7 +139,7 @@ From a full sweep of `src/tenax` (120 files); counts re-verified at head `756f9e
 | **AD primitives** | 6 leaf `custom_vjp`: `_ad_primitives.py:229-719` (5) + `_lorentzian_eigh.py:81` (1), +`blocksparse_backend.py:149-177` | **Yes — redesign** (§5). |
 | **dtype introspection** | `jnp.iscomplexobj/issubdtype/result_type/finfo/complexfloating` (~18 sites) — incl. default Arnoldi `_arnoldi.py:37`, 2×2 projector, adjoint GMRES `_gmres_eager.py:117` | **Yes — backend predicates** (§4.2/§8). |
 | **Differentiation-state checks** | `isinstance(x, jax.core.Tracer)` ×~18 across **7 files** (`core/tensor.py:1043`, `linalg.py:274/2045`, `_ctm_projector.py` ×6, `_ctm_tensor_projector_2x2.py:1001`, `_ctm_tensor_energy.py:130`, `contractor.py:897`, `cutensornet_backend.py:64`) | **Yes — backend predicate** (§4.2). |
-| **Host reads** | `np.array(s_q)`/`np.asarray(block)` (`linalg.py:471/1112/1359`, `core/tensor.py:1044`); **oracle-only families**: dense iDMRG `idmrg.py:976-977` + `:1071-1085`, GILT `gilt.py:209/222/256/265/267/274/284/318` | **Yes — `to_numpy` / device-native truncation** (§4.2); the oracle-only sites are **CPU-only by design** (§10.3), not migrated for v1. |
+| **Host reads** | truncation: `np.array(s_q)`/`np.asarray(block)` (`linalg.py:471/1112/1359`, `core/tensor.py:1044`); **AD-target diagnostics**: `fixed_point` backward `jax.device_get` (`_ctm_energy_ad.py:1694-1699`, gated `:1711/1714`, `:99`); **oracle-only families**: dense iDMRG `idmrg.py:976-977` + `:1071-1085`, GILT `gilt.py:209/222/256/265/267/274/284/318` | **Yes** — truncation → device-native (§4.3); AD-target diagnostics → `to_numpy`, **skipped under `torch.func`** (§4.3); oracle-only sites **CPU-only by design** (§10.3), not migrated for v1. |
 | **Control flow** | `lax` `while_loop`×29, `scan`×22, `fori_loop`×11, `cond`×0, `stop_gradient`×58; `lax.map` (`_ctm_chunked_absorb.py`); union across 27 files | **Yes — redesign** (§7). |
 | **Krylov / triangular solvers** | `_gmres_lax.py:171` (`solve_triangular`), `:299-336`; `_metric_precond.py:164`, `ad_utils.py:882` (`jax.scipy … gmres`); **`_krylov_bicgstab` (default `adjoint_solver`), `_ctm_tensor_c4v_reference_ad.py:166`** | **Yes — backend solvers incl. bicgstab** (§5.4). |
 | **DMRG truncation ops** | `jax.lax.top_k`/`jax.nn.one_hot` (`_padded_linalg.py:128/142`), reached by `accelerator="auto"` → `_jit_sweep` | **Yes — `ArrayOps.top_k`/`one_hot`** (§4.2). |
@@ -205,8 +205,10 @@ that blast radius and make the migration safe to land incrementally:
   layer.
 - **A CI grep-gate enforces the seam boundary**: no `import jax.numpy` / bare `jnp.`
   / `lax.` outside `src/tenax/backend/` (allow-list the few genuinely JAX-only
-  modules). This both prevents a *half-migrated* state where a not-yet-ported file
-  calls raw `jnp` on a torch tensor, and defines "migrated" mechanically.
+  modules), and no bare backend-array **method** calls torch lacks — `.at[` and
+  `.astype(` (§4.3). This both prevents a *half-migrated* state where a
+  not-yet-ported file calls raw `jnp` (or a JAX-only tensor method) on a torch
+  tensor, and defines "migrated" mechanically.
 - **Opt-out**: the whole effort is behind `set_backend`; reverting to raw `jnp` is a
   one-line default, and any phase can be shipped with the torch path dormant.
 
@@ -252,6 +254,19 @@ functional `index_set/index_add/index_mul` (`.at[...]` under JAX; out-of-place
 path must stay mutation-free of saved tensors — migrating `.at[]` out-of-place is
 necessary but not on its own sufficient.
 
+**`.astype(dtype)` is a method the migration must not miss.** `astype` is in the op
+list above, but the codebase overwhelmingly calls it as a **method on a backend
+array** — `lambdas[i].astype(dtype)`, `T_u.astype(dtype)` (**31 sites in
+`pess.py`**, e.g. `:438-440/563-564/707-717`), plus `_ad_primitives.py:371` and
+`_ctm_energy_ad.py:1477/1485/1498`. Native torch tensors have **no `.astype`** (they
+spell it `.to(dtype)`), so exposing `B.astype(x, dtype)` as a *function* does not
+cover these method calls, and the §4.1 grep-gate — which keys on `jnp`/`lax` tokens
+— will not flag `x.astype(`. So the migration must **audit and rewrite
+backend-array `.astype(...)` sites to `B.astype(...)`**, and the seam-boundary gate
+must additionally flag bare `.astype(`. (NumPy-array `.astype` — e.g. on a host gate
+before `jnp.asarray`, `pess.py:80/970` — is out of scope; the audit is per-site and
+distinguishes the two.)
+
 **`top_k` / `one_hot` are load-bearing on the default DMRG path.**
 `accelerator="auto"` (`dmrg.py:176`) routes dense-CPU and all GPU/TPU runs through
 `_jit_sweep`, whose truncation uses `jax.lax.top_k` (`_padded_linalg.py:128`) and
@@ -289,6 +304,22 @@ functorch-wrapped tensor. So for every host-read that sits inside a
 **device-native truncation** (on-device `topk`/`sort`, no host transfer) is
 **required**, not merely preferred. `to_numpy` remains for genuinely host-only,
 non-transformed sites (e.g. final diagnostics).
+
+**Diagnostic host-reads on the AD path are a third case — skip, don't just
+convert.** The default `adjoint_method="fixed_point"` iPEPS backward host-syncs
+convergence/residual scalars **unconditionally** via `jax.device_get(...)` —
+`diverged`/`converged`/`n_iter`/`abs_resid`/`b_norm` at
+`_ctm_energy_ad.py:1694-1699` (plus the `_F3_DIAG_COMPUTE_NORMS`-gated per-leaf
+norms at `:1711/1714`, and `:99`). `jax.device_get` on a non-JAX value invokes
+`__array__`, which a torch **CUDA** tensor rejects — so the CUDA iPEPS gradient path
+crashes *after* a correct solve, on a value that never enters the gradient. Because
+these are diagnostics written to a module global (`_F3_LAST_DIAGNOSTICS`), not the
+returned cotangent, the fix is **not** device-native computation but routing through
+a `backend` scalar host-read that is **skippable under a `torch.func`-transformed
+backward** (where `to_numpy` itself raises on the functorch-wrapped scalar): compute
+the diagnostic on the eager `.backward()` path, no-op it under transform. This site
+is on an **AD-target** family (not oracle-only), so it is in scope for v1 — unlike
+the iDMRG/GILT host-reads (§10.3).
 
 **dtype-introspection predicates.** Branching on dtype —
 `jnp.iscomplexobj/issubdtype/result_type/finfo/complexfloating` (~18 sites) — sits at
@@ -374,7 +405,23 @@ wrapper. But the wrapper carries **four** non-trivial contracts, each of which a
    double-backward rule. A `gradgrad`/`torch.autograd.gradcheck(...,
    check_double_backward=True)` test (§10) guards it; `mark_non_differentiable` is
    only acceptable for residuals that are genuinely constant w.r.t. the input.
-4. **Convention** (§5.3) and **double-differentiability** (§5.4) — below.
+4. **`regularized_qr`'s backward is not pure `B`-ops — it calls `jax.vjp`.** Unlike
+   the SVD/eigh backwards (hand-written F-matrix / gauge-fixed formulas),
+   `_regularized_qr_bwd` delegates to JAX: it floors the diagonal to build
+   `R_reg`, then returns `jax.vjp(_qr_tuple, Q @ R_reg)((dQ, dR))`
+   (`_ad_primitives.py:650`). The `jax.vjp` mentions at `:618/627/634` are parity
+   *comments*; `:650` is the **live call** — an earlier review round wrongly
+   dismissed this finding as comment-only, corrected here. So this primitive's
+   backward depends on `backend.ad.vjp` (VJP of a user function), which §5.5
+   otherwise defers to Phase 3a. Two resolutions, either acceptable: **(a)** make
+   `backend.ad.vjp` available for this primitive in **Phase 2** (a scoped
+   exception — the primitive's *internal* vjp is a Phase-2 dependency even though
+   the ~76 *algorithm-level* vjp sites migrate in 3a), or **(b, preferred)** give
+   `regularized_qr` a hand-written backend-neutral QR backward (the standard
+   `Q̄`/`R̄` triangular-solve formula) so it needs no `jax.vjp` at all and stays
+   self-contained like the other five. Either way the §10 six-primitive gradient
+   suite cannot go green in Phase 2 until this is closed.
+5. **Convention** (§5.3) and **double-differentiability** (§5.4) — below.
 
 ### 5.3 ⚠️ Complex-cotangent convention — the highest-risk item
 JAX and PyTorch use **different conjugation conventions** for complex gradients.
@@ -770,7 +817,7 @@ Risk × Bulk; rough person-weeks are indicative, not a commitment.
 |---|---|---|---|---|
 | **0. Seam + invariant** | `tenax.backend` package; `ArrayOps` Protocol incl. functional indexed-updates (137 `.at[]` / 25 files) **and dtype-introspection predicates**; `JaxBackend` pass-through + op-parity-vs-`jnp` test; **seam-boundary CI grep-gate** (§4.1); migrate `core/tensor.py` + `linalg.py` dense kernels behind `B`; export `set_backend`/`get_backend` in `__all__`. Suite green, zero behavior change. | Low | High | 3–5 |
 | **1. Torch forward** | `TorchBackend` array ops + dense/symmetric linalg forward + contraction (`torch.einsum`/opt_einsum replay + segment-sum equiv); **RNG + default-dtype/promotion policy (§8)**; **`to_numpy` + device-native truncation, dtype predicates (§4.3)** — both are forward prerequisites, not polish. Op-parity green (gauge-invariant, §10). | Low–Med | Med | 3–4 |
-| **2. Torch AD (leaf)** | Refactor the 6 leaf primitives to `_fwd/_bwd`; `torch.func`-compatible `Function` (`setup_context` + vmap rule) **incl. `nondiff_argnums` and hidden-residual returns (§5.2)** — intrinsic to these primitives; complex-cotangent boundary + `_euclidean_grads` convention-guard + directional-derivative parity test (§5.3). Gradient-parity green (complex case). | **High** (§5.3) | Med | 3–5 |
+| **2. Torch AD (leaf)** | Refactor the 6 leaf primitives to `_fwd/_bwd`; `torch.func`-compatible `Function` (`setup_context` + vmap rule) **incl. `nondiff_argnums` and hidden-residual returns (§5.2)** — intrinsic to these primitives; **`regularized_qr` needs a hand-written backend-neutral backward or `backend.ad.vjp` pulled forward from 3a (§5.2#4)** — its current bwd calls `jax.vjp`; complex-cotangent boundary + `_euclidean_grads` convention-guard + directional-derivative parity test (§5.3). Gradient-parity green (complex case). | **High** (§5.3) | Med | 3–5 |
 | **3a. Control + trees + transforms** | `backend.control` combinators (incl. `map`) + `jit`/`checkpoint` (container-aware, §7); `backend.tree` protocol + register all containers (186 sites); `backend.ad` transforms + `value_and_grad` adapter (~76 sites); migrate the ~18 tracer checks to the functorch-aware predicate (per-site review). DMRG parity green. | Med | High | 4–6 |
 | **3b. Fixed-point + solvers (the target)** | `fixed_point(step, params, …)` on the boundary-leaf + `setup_context` + double-differentiable contract (§5.4), incl. C4v-reference; `backend.linalg.gmres`/`solve_triangular`/`bicgstab` (bicgstab is the default). Small iPEPS energy+grad parity green **and the §10.7 AD-wall benchmark on a fermionic iPEPS/CTM AD step** — this is the deliverable the whole backend exists for (§2). | **High** | Med–High | 4–6 |
 | **3c. Optimizer** | Backend optimizer (§5.6): functional default L-BFGS returning a direction; migrate **every** Optax user (`_build_optimizer` + PESS + root-implicit) to the `(direction, state)` contract. One iPEPS + one PESS default-mode step through torch (§10.4). | Med | Med | 2–3 |
@@ -845,7 +892,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (8 rounds) and a
+The specific requirements above were hardened across a Codex review (11 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -884,3 +931,21 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
 - **Citations corrected:** `ad_utils.py:915`→`:882`; "9 files"→7; "80/120"→~86;
   "stop_gradient 31 files"→17/27; "seven sites"→6; `:2154`→`:2155`; `:165`→`:166`;
   "fori_loop 10"→11.
+
+**Codex rounds 9–11 (post-consolidation, torch-boundary correctness):**
+- **R9** — double-backward residuals (recompute-from-inputs, not
+  `mark_non_differentiable`, §5.2#3); degenerate-block gauge-invariant projector
+  parity (§10.1); per-promised-family end-to-end coverage (§10.3).
+- **R10** — call-time backend binding: module-scope `jax.jit` at `dmrg.py:1202`/
+  `idmrg.py:418`/`tdvp.py:126` resolves at import under the §4.1 "no tensor yet"
+  guard → `control.jit`/`checkpoint`/`custom_vjp` bind **per call**, cached per
+  backend generation (§7); GILT & dense-iDMRG host-reads reclassified oracle-only
+  (§10.3, D7).
+- **R11** — **`regularized_qr`'s backward calls `jax.vjp`** (`_ad_primitives.py:650`,
+  not comment-only — a **prior refutation reversed here**), so the QR primitive needs
+  `backend.ad.vjp` in Phase 2 or a hand-written backward (§5.2#4); **`.astype`
+  method calls** (31 in `pess.py` + `_ad_primitives.py:371` + `_ctm_energy_ad.py:1477/
+  1485/1498`) are uncovered by a `B.astype` *function* and the grep-gate (§4.3);
+  **`fixed_point` backward `jax.device_get` diagnostics** (`_ctm_energy_ad.py:1694-
+  1699`) crash torch-CUDA host conversion — an AD-target host-read, skippable under
+  `torch.func` (§4.3, §3 table).
