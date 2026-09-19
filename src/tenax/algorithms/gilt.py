@@ -25,12 +25,16 @@ Conventions:
     - Site tensors use the library leg convention ``(up, down, left,
       right)`` with flows (IN, OUT, IN, OUT), matching ``trg.py``.
 
-The plaquette environment gram is built with label-based ``contract`` calls
-(block-sparse for ``SymmetricTensor``), while the cascade itself runs on the
-dense gram — a ``(chi^2, chi^2)`` object, small compared to the chi^6
-contraction that produces it. The composed ``Q`` is charge-conserving
-whenever the input tensor is, and is re-wrapped into the input's tensor type
-before absorption.
+The GILT stage (environment grams, the cascade, the bond absorptions) runs
+on the host in numpy/LAPACK on dense copies of the checkerboard pair, and
+the pair is re-wrapped into the input's tensor type (block-sparse for
+``SymmetricTensor``) once at the end. Every absorbed bond changes the
+shapes downstream, so under eager jax each contraction, eigenproblem and
+SVD of the stage was compiled afresh by XLA at every call — measured at
+6-18x the wall time of the reference numpy implementation (Hauru et al.)
+at chi 10-30, all of it compilation. Charge conservation is kept exactly:
+``Q`` is built in the identity sector and split per charge block, so the
+absorbed pair is block-sparse to the last bit.
 """
 
 from __future__ import annotations
@@ -46,7 +50,14 @@ from tenax.algorithms._tensor_utils import (
     max_abs_normalize,
 )
 from tenax.contraction.contractor import contract, truncated_svd
-from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.core.index import TensorIndex
+from tenax.core.tensor import (
+    DenseTensor,
+    SymmetricTensor,
+    Tensor,
+    _block_slices,
+    _compute_valid_blocks,
+)
 
 _LEG_LABELS = ("up", "down", "left", "right")
 
@@ -128,25 +139,75 @@ def _index_of(T: Tensor, label: str):
     raise ValueError(f"tensor has no leg labeled {label!r}: {T.labels()}")
 
 
-def _double_layer(T: Tensor, relabel_map: dict[str, str]) -> Tensor:
-    """Contract T with its bra copy over the legs NOT in relabel_map.
+_LEG_AXIS = {lbl: k for k, lbl in enumerate(_LEG_LABELS)}
 
-    The legs named in ``relabel_map`` stay open: the ket copy's leg gets the
-    mapped name, the bra copy's gets the mapped name uppercased. All other
-    legs keep their labels on both copies and therefore contract.
+
+def _to_host(T: Tensor) -> np.ndarray:
+    """Dense host copy of a site tensor, axes in ``_LEG_LABELS`` order.
+
+    Blocks are scattered in numpy rather than through ``todense()`` so that
+    no jax op is dispatched for the (data-dependent) block shapes.
     """
-    ket = T.relabels(relabel_map)
-    bra = T.bar().relabels({k: v.upper() for k, v in relabel_map.items()})
-    return contract(ket, bra)
+    if isinstance(T, SymmetricTensor):
+        indices = T.indices
+        A = np.zeros(tuple(idx.dim for idx in indices), dtype=T.dtype)
+        for key, block in T.blocks.items():
+            masks, _ = _block_slices(indices, key)
+            A[np.ix_(*[np.flatnonzero(m) for m in masks])] = np.asarray(block)
+    else:
+        A = np.asarray(T.todense())
+    perm = [T.labels().index(lbl) for lbl in _LEG_LABELS]
+    return np.transpose(A, perm)
 
 
-def _bond_gram(corners: tuple[Tensor, ...], bond: str) -> jax.Array:
+def _from_host(A: np.ndarray, indices: tuple[TensorIndex, ...], like: Tensor) -> Tensor:
+    """Wrap a host array (axes in ``_LEG_LABELS`` order) as ``like``'s type."""
+    if isinstance(like, SymmetricTensor):
+        blocks = {}
+        for key in _compute_valid_blocks(indices):
+            masks, shape = _block_slices(indices, key)
+            if not all(s > 0 for s in shape):
+                continue
+            blocks[key] = jnp.asarray(A[np.ix_(*[np.flatnonzero(m) for m in masks])])
+        return SymmetricTensor(blocks, indices)
+    return DenseTensor(jnp.asarray(A), indices)
+
+
+def _double_layer(
+    A: np.ndarray, wiring: dict[str, str]
+) -> tuple[np.ndarray, list[str]]:
+    """Contract A with its conjugate over the legs NOT in ``wiring``.
+
+    The legs named in ``wiring`` stay open: the ket copy's leg gets the
+    mapped name, the bra copy's gets the mapped name uppercased. Returns
+    the array and its leg names, ket names first.
+    """
+    open_legs = [lbl for lbl in _LEG_LABELS if lbl in wiring]
+    closed = [_LEG_AXIS[lbl] for lbl in _LEG_LABELS if lbl not in wiring]
+    E = np.tensordot(A, A.conj(), axes=(closed, closed))
+    names = [wiring[lbl] for lbl in open_legs]
+    return E, names + [n.upper() for n in names]
+
+
+def _contract_named(
+    a: np.ndarray, la: list[str], b: np.ndarray, lb: list[str]
+) -> tuple[np.ndarray, list[str]]:
+    """``tensordot`` over every leg name the two operands share."""
+    shared = [x for x in la if x in lb]
+    out = np.tensordot(
+        a, b, axes=([la.index(x) for x in shared], [lb.index(x) for x in shared])
+    )
+    return out, [x for x in la if x not in shared] + [x for x in lb if x not in shared]
+
+
+def _bond_gram(corners: tuple[np.ndarray, ...], bond: str) -> np.ndarray:
     """Dense environment gram M[i, j, I, J] = (E E^dagger) for one bond.
 
     ``i`` is the cut end at corner_i, ``j`` the end at corner_j; capitals
     are the bra copies. Built by chaining the four double-layer corners
-    around the plaquette (chi^6 cost, block-sparse for SymmetricTensor),
-    then densified — a (r, r, r, r) object with r the cut bond dimension.
+    around the plaquette (chi^6 cost) — a (r, r, r, r) object with r the
+    cut bond dimension. Host numpy: the corner shapes change after every
+    absorbed bond, and the chain is four BLAS contractions either way.
 
     For ``bond="top"`` the ket layer of E is the plaquette with the top
     bond cut open (ends i, j); the bra copy closes every outer leg::
@@ -179,17 +240,15 @@ def _bond_gram(corners: tuple[Tensor, ...], bond: str) -> jax.Array:
             wiring[leg_j] = "j"
         layers[c] = _double_layer(corners[c], wiring)
     chain = _BONDS[bond]["chain"]
-    M = layers[chain[0]]
+    M, labels = layers[chain[0]]
     for c in chain[1:]:
-        M = contract(M, layers[c])
-    dense = M.todense()
-    perm = [M.labels().index(lbl) for lbl in ("i", "j", "I", "J")]
-    return jnp.transpose(dense, perm)
+        M, labels = _contract_named(M, labels, *layers[c])
+    return np.transpose(M, [labels.index(x) for x in ("i", "j", "I", "J")])
 
 
 def _optimal_q(
-    M: jax.Array, ca: np.ndarray, cb: np.ndarray, sym, eps: float
-) -> jax.Array:
+    M: np.ndarray, ca: np.ndarray, cb: np.ndarray, sym, eps: float
+) -> np.ndarray:
     """The optimal bond matrix Q from the environment gram, sector-resolved.
 
     The gram (as an operator on bond matrices) exactly conserves the
@@ -201,6 +260,9 @@ def _optimal_q(
     only the identity sector effectively rescales gilt_eps), while the
     trace vector t — and hence Q itself — lives purely in the identity
     sector, so Q is charge-conserving by construction.
+
+    Runs on the host (numpy/LAPACK): the sector blocks are small and their
+    shapes change at every cascade step, see ``_gilt_cascade``.
     """
     ra, rb = M.shape[0], M.shape[1]
     mat = M.reshape(ra * rb, ra * rb)
@@ -209,32 +271,33 @@ def _optimal_q(
     dq_flat = np.asarray(dq).ravel()
     dq_id = int(sym.identity())
 
-    sector_eigs = {}
+    id_sector = None
     total = 0.0
     for val in np.unique(dq_flat):
         fidx = np.flatnonzero(dq_flat == val)
-        sub = mat[fidx[:, None], fidx[None, :]]
+        sub = mat[np.ix_(fidx, fidx)]
         if int(val) == dq_id:
-            w, U = jnp.linalg.eigh(sub)
-            sector_eigs[int(val)] = (fidx, w, U)
+            w, U = np.linalg.eigh(sub)
+            id_sector = (fidx, w, U)
         else:
-            w = jnp.linalg.eigvalsh(sub)
-        total += float(jnp.sum(jnp.sqrt(jnp.clip(w, 0.0, None))))
+            w = np.linalg.eigvalsh(sub)
+        total += float(np.sum(np.sqrt(np.clip(w, 0.0, None))))
 
-    if dq_id not in sector_eigs or total <= 0.0:
-        return jnp.zeros((ra, rb), dtype=M.dtype)
-    fidx0, w0, U0 = sector_eigs[dq_id]
-    sh = jnp.sqrt(jnp.clip(w0, 0.0, None)) / total
-    eye_flat = jnp.eye(ra, rb, dtype=M.dtype).reshape(ra * rb)
+    if id_sector is None or total <= 0.0:
+        return np.zeros((ra, rb), dtype=M.dtype)
+    fidx0, w0, U0 = id_sector
+    sh = np.sqrt(np.clip(w0, 0.0, None)) / total
+    eye_flat = np.eye(ra, rb, dtype=M.dtype).reshape(ra * rb)
     tvec = U0.conj().T @ eye_flat[fidx0]
     tp = tvec * sh**2 / (sh**2 + eps**2)
-    q_flat = jnp.zeros(ra * rb, dtype=M.dtype).at[fidx0].set(U0 @ tp)
+    q_flat = np.zeros(ra * rb, dtype=M.dtype)
+    q_flat[fidx0] = U0 @ tp
     return q_flat.reshape(ra, rb)
 
 
 def _blockwise_svd_split(
-    Q: jax.Array, ca: np.ndarray, cb: np.ndarray, cut: float
-) -> tuple[jax.Array, jax.Array, jax.Array, np.ndarray]:
+    Q: np.ndarray, ca: np.ndarray, cb: np.ndarray, cut: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Per-charge-block truncated SVD split of a charge-conserving Q.
 
     Singular values below ``cut`` are dropped individually per block
@@ -243,6 +306,7 @@ def _blockwise_svd_split(
     ``R = sqrt(s) vh`` (k, rb), s the kept singular values, and the kept
     bond charges. Blockwise SVD keeps the split exactly charge-conserving
     — a dense SVD would rotate degenerate singular pairs across sectors.
+    Host numpy, like ``_optimal_q``.
     """
     ra, rb = Q.shape
     pieces = []
@@ -251,9 +315,9 @@ def _blockwise_svd_split(
         jb = np.flatnonzero(cb == q)
         if len(ia) == 0 or len(jb) == 0:
             continue
-        block = Q[ia[:, None], jb[None, :]]
-        u, s, vt = jnp.linalg.svd(block, full_matrices=False)
-        keep = np.asarray(s >= cut)
+        block = Q[np.ix_(ia, jb)]
+        u, s, vt = np.linalg.svd(block, full_matrices=False)
+        keep = s >= cut
         pieces.append((q, ia, jb, u, s, vt, keep))
     if not pieces:
         raise ValueError(
@@ -265,8 +329,8 @@ def _blockwise_svd_split(
         best = max(pieces, key=lambda p: float(p[4][0]) if p[4].size else -1.0)
         best[6][0] = True
     k_total = sum(int(p[6].sum()) for p in pieces)
-    L = jnp.zeros((ra, k_total), dtype=Q.dtype)
-    R = jnp.zeros((k_total, rb), dtype=Q.dtype)
+    L = np.zeros((ra, k_total), dtype=Q.dtype)
+    R = np.zeros((k_total, rb), dtype=Q.dtype)
     s_all = []
     charges = []
     off = 0
@@ -275,18 +339,30 @@ def _blockwise_svd_split(
         if kq == 0:
             continue
         u, s, vt = u[:, keep], s[keep], vt[keep]
-        sq = jnp.sqrt(s)
-        L = L.at[ia[:, None], np.arange(off, off + kq)[None, :]].set(u * sq)
-        R = R.at[np.arange(off, off + kq)[:, None], jb[None, :]].set(sq[:, None] * vt)
+        sq = np.sqrt(s)
+        new = np.arange(off, off + kq)
+        L[np.ix_(ia, new)] = u * sq
+        R[np.ix_(new, jb)] = sq[:, None] * vt
         s_all.append(s)
         charges.extend([q] * kq)
         off += kq
-    return L, jnp.concatenate(s_all), R, np.asarray(charges, dtype=ca.dtype)
+    return L, np.concatenate(s_all), R, np.asarray(charges, dtype=ca.dtype)
+
+
+def _project_gram(M: np.ndarray, L: np.ndarray, R: np.ndarray) -> np.ndarray:
+    """Absorb a split bond matrix into the gram: the environment of the
+    NEW bond, ``M'[a, b, A, B] = L[i, a] R[b, j] M[i, j, I, J]
+    conj(L[I, A]) conj(R[B, J])`` — four matrix products, no einsum
+    path search."""
+    M = np.tensordot(L, M, axes=(0, 0))  # [a, j, I, J]
+    M = np.tensordot(M, R, axes=(1, 1))  # [a, I, J, b]
+    M = np.tensordot(M, L.conj(), axes=(1, 0))  # [a, J, b, A]
+    return np.tensordot(M, R.conj(), axes=(1, 1))  # [a, b, A, B]
 
 
 def _gilt_cascade(
-    M: jax.Array, ca: np.ndarray, cb: np.ndarray, sym, config: GiltConfig
-) -> tuple[jax.Array, int, int]:
+    M: np.ndarray, ca: np.ndarray, cb: np.ndarray, sym, config: GiltConfig
+) -> tuple[np.ndarray, int, int]:
     """Recursive optimization of the bond matrix Q (Hauru et al.'s scheme).
 
     Given the dense gram M[i, j, I, J] and the charge arrays of the two
@@ -301,6 +377,11 @@ def _gilt_cascade(
     (e.g. on a pure corner-double-line tensor), and dropping it would
     skip exactly the truncation GILT exists to make.
 
+    The whole recursion runs on the host in numpy: every iteration cuts
+    the bond to a data-dependent rank, so no shape is static enough to
+    jit, and a (chi^2, chi^2) eigenproblem per sector is far below the
+    size where XLA dispatch and per-shape compilation pay off.
+
     Returns ``(Q_total, k, rank)``: the composed bond matrix in the
     original bond basis, the number of refinement iterations (k == 0
     means the environment was flat on the first pass), and the retained
@@ -308,14 +389,14 @@ def _gilt_cascade(
     """
     eps = config.gilt_eps
     cut = config.split_factor * eps
-    left_factors: list[jax.Array] = []
-    right_factors: list[jax.Array] = []
+    left_factors: list[np.ndarray] = []
+    right_factors: list[np.ndarray] = []
     k = 0
     while True:
         Qn = _optimal_q(M, ca, cb, sym, eps)
         L, s, R, kept_charges = _blockwise_svd_split(Qn, ca, cb, cut)
         if (
-            float(jnp.max(jnp.abs(s - 1.0))) < config.convergence_eps
+            float(np.max(np.abs(s - 1.0))) < config.convergence_eps
             or k >= config.max_cascade_iterations
         ):
             core = L @ R
@@ -323,7 +404,7 @@ def _gilt_cascade(
             break
         left_factors.append(L)
         right_factors.append(R)
-        M = jnp.einsum("ia,bj,ijIJ,IA,BJ->abAB", L, R, M, L.conj(), R.conj())
+        M = _project_gram(M, L, R)
         ca = cb = kept_charges
         k += 1
     Q = core
@@ -334,44 +415,38 @@ def _gilt_cascade(
     return Q, k, rank
 
 
-def _split_and_absorb(
-    corners_pair: tuple[Tensor, Tensor],
+# Which of (B1, B2) sits at each plaquette corner (TL, TR, BL, BR).
+_CORNER_TENSOR = (0, 1, 1, 0)
+
+
+def _absorb(
+    corners: dict[int, np.ndarray],
+    charges: dict[int, dict[str, np.ndarray]],
     bond: str,
-    Q: jax.Array,
+    Q: np.ndarray,
     cut: float,
-) -> tuple[Tensor, Tensor]:
-    """Split Q by truncated SVD and absorb the halves into (B1, B2).
+) -> None:
+    """Split Q by blockwise truncated SVD and absorb the halves in place.
 
     Rows of Q live on corner_i's cut leg, columns on corner_j's. The split
     drops singular values below ``cut`` individually and absorbs
-    ``u sqrt(s)`` into corner_i's leg and ``sqrt(s) vh`` into corner_j's.
+    ``u sqrt(s)`` into corner_i's leg and ``sqrt(s) vh`` into corner_j's;
+    both legs get the kept bond charges (in charge-block order).
     """
-    B1, B2 = corners_pair
     ci, leg_i, cj, leg_j = _BONDS[bond]["ends"]
-    corner_of = (B1, B2, B2, B1)
-    Ti, Tj = corner_of[ci], corner_of[cj]
-
-    qi = _index_of(Ti, leg_i).flip_flow().relabel("qi")
-    qj = _index_of(Tj, leg_j).flip_flow().relabel("qj")
-    if isinstance(Ti, SymmetricTensor):
-        Q_t: Tensor = SymmetricTensor.from_dense(Q, (qi, qj), tol=1e-8)
-    else:
-        Q_t = DenseTensor(Q, (qi, qj))
-
-    _, s_full, _, _ = truncated_svd(Q_t, ["qi"], ["qj"], new_bond_label="qk")
-    n_keep = max(1, int(jnp.sum(s_full >= cut)))
-    U, s, Vh, _ = truncated_svd(
-        Q_t, ["qi"], ["qj"], new_bond_label="qk", max_singular_values=n_keep
-    )
-    g1, g2 = absorb_sqrt_singular_values(U, s, Vh, "qk")
-
-    Ti_new = contract(Ti, g1.relabel("qi", leg_i)).relabel("qk", leg_i)
-    Tj_new = contract(g2.relabel("qj", leg_j), Tj).relabel("qk", leg_j)
-
-    new_pair = {ci: Ti_new, cj: Tj_new}
-    B1_new = new_pair.get(0, new_pair.get(3, B1))
-    B2_new = new_pair.get(1, new_pair.get(2, B2))
-    return B1_new, B2_new
+    ni, nj = _CORNER_TENSOR[ci], _CORNER_TENSOR[cj]
+    ca, cb = charges[ni][leg_i], charges[nj][leg_j]
+    leak = float(np.max(np.abs(np.where(ca[:, None] == cb[None, :], 0.0, Q))))
+    if leak > 1e-8:
+        raise ValueError(
+            f"GILT bond matrix has weight {leak:.3e} outside its charge blocks"
+        )
+    L, _, R, kept = _blockwise_svd_split(Q, ca, cb, cut)
+    ai, aj = _LEG_AXIS[leg_i], _LEG_AXIS[leg_j]
+    corners[ni] = np.moveaxis(np.tensordot(corners[ni], L, axes=(ai, 0)), -1, ai)
+    corners[nj] = np.moveaxis(np.tensordot(R, corners[nj], axes=(1, aj)), 0, aj)
+    charges[ni][leg_i] = kept
+    charges[nj][leg_j] = kept
 
 
 def gilt_plaquette(T: Tensor, config: GiltConfig) -> tuple[Tensor, Tensor, dict]:
@@ -382,6 +457,13 @@ def gilt_plaquette(T: Tensor, config: GiltConfig) -> tuple[Tensor, Tensor, dict]
     cascade and absorbing the resulting bond matrices, for up to
     ``max_laps`` laps; a lap in which every bond converges in at most one
     refinement ends the stage (Ebel et al. Eq. C4).
+
+    The whole stage runs on the host in numpy: every absorbed bond changes
+    the corner shapes, so the environment contractions, the cascade and
+    the absorptions would each be compiled afresh by XLA at every call
+    (measured: ~1100 compilations per two chi = 30 rounds, an order of
+    magnitude above the arithmetic). The pair is re-wrapped into ``T``'s
+    tensor type once at the end, block-sparse when ``T`` is.
 
     The plaquette and its four named bonds (arrows = charge flow, in on
     up/left, out on down/right)::
@@ -410,46 +492,59 @@ def gilt_plaquette(T: Tensor, config: GiltConfig) -> tuple[Tensor, Tensor, dict]
 
     Returns:
         ``(B1, B2, info)`` — the filtered checkerboard pair (B1 on the
-        TL/BR sublattice, B2 on TR/BL) and an info dict with the
-        per-lap cascade iteration counts (``"laps"``) and the final leg
-        dimensions of B1 (``"bond_dims"``).
+        TL/BR sublattice, B2 on TR/BL), legs in (up, down, left, right)
+        order, and an info dict with the per-lap cascade iteration counts
+        (``"laps"``) and the final leg dimensions of B1 (``"bond_dims"``).
     """
     if not isinstance(T, Tensor):
         raise TypeError(f"gilt_plaquette() requires a Tensor, got {type(T).__name__}")
     if any(idx.symmetry.is_fermionic for idx in T.indices):
         # The gram is densified and its legs reordered with a plain
-        # transpose (no Koszul signs), and the double layer uses ``bar()``
-        # (no fermionic twists) — both are only correct for bosonic
-        # braiding. Fermionic GILT needs a sign-aware audit of the whole
-        # plaquette wiring; reject rather than silently corrupt.
+        # transpose (no Koszul signs), and the double layer uses a plain
+        # conjugate (no fermionic twists) — both are only correct for
+        # bosonic braiding. Fermionic GILT needs a sign-aware audit of the
+        # whole plaquette wiring; reject rather than silently corrupt.
         raise NotImplementedError(
             "gilt_plaquette() does not support fermionic symmetries"
         )
-    B1, B2 = T, T
     if config.gilt_eps == 0.0:
-        return B1, B2, {"laps": [], "bond_dims": _leg_dims(B1)}
+        return T, T, {"laps": [], "bond_dims": _leg_dims(T)}
     cut = config.split_factor * config.gilt_eps
+    sym = T.indices[0].symmetry
+    orig = {lbl: _index_of(T, lbl) for lbl in _LEG_LABELS}
+    A = _to_host(T)
+    corners = {0: A, 1: A}
+    charges = {n: {lbl: orig[lbl].charges for lbl in _LEG_LABELS} for n in (0, 1)}
     lap_log = []
     for _ in range(config.max_laps):
         kmaxes = []
         for bond in _BOND_ORDER:
-            corners = (B1, B2, B2, B1)
+            four = tuple(corners[n] for n in _CORNER_TENSOR)
             ci, leg_i, cj, leg_j = _BONDS[bond]["ends"]
-            idx_i = _index_of(corners[ci], leg_i)
-            idx_j = _index_of(corners[cj], leg_j)
-            M = _bond_gram(corners, bond)
-            Q, kmax, rank = _gilt_cascade(
-                M, idx_i.charges, idx_j.charges, idx_i.symmetry, config
-            )
+            ca = charges[_CORNER_TENSOR[ci]][leg_i]
+            cb = charges[_CORNER_TENSOR[cj]][leg_j]
+            M = _bond_gram(four, bond)
+            Q, kmax, rank = _gilt_cascade(M, ca, cb, sym, config)
             kmaxes.append(kmax)
             # Absorb whenever the cascade refined the bond or the flat Q
             # carries a rank cut; skip only the exact no-op (flat AND
             # full-rank), where absorbing would just rotate the bond gauge.
             if kmax >= 1 or rank < M.shape[0]:
-                B1, B2 = _split_and_absorb((B1, B2), bond, Q, cut)
+                _absorb(corners, charges, bond, Q, cut)
         lap_log.append(kmaxes)
         if all(k <= 1 for k in kmaxes):
             break
+
+    def wrap(n: int) -> Tensor:
+        indices = tuple(
+            orig[lbl]
+            if charges[n][lbl] is orig[lbl].charges
+            else TensorIndex.from_charges(sym, charges[n][lbl], orig[lbl].flow, lbl)
+            for lbl in _LEG_LABELS
+        )
+        return _from_host(corners[n], indices, T)
+
+    B1, B2 = wrap(0), wrap(1)
     return B1, B2, {"laps": lap_log, "bond_dims": _leg_dims(B1)}
 
 

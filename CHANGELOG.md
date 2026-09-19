@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Changed
+
+- **The GILT stage of `gilt_plaquette` runs on the host** (numpy/LAPACK):
+  the plaquette environment grams, the Q cascade and the bond absorptions
+  work on dense copies of the checkerboard pair, re-wrapped into the input's
+  tensor type (block-sparse for `SymmetricTensor`) once per stage. Every
+  absorbed bond changes the shapes downstream, so under eager jax each
+  contraction, eigenproblem and SVD of the stage was compiled afresh by XLA
+  at essentially every call (1129 compilations, 16 s of 21 s wall, in two
+  chi = 30 rounds). `gilt_tnr_step` is 6-20x faster per round at chi 10-30
+  (chi 30: 15.1 s -> 0.62-0.65 s steady state) and now matches the reference
+  numpy implementation of Hauru et al. Results are unchanged up to a bond
+  permutation: an absorbed bond's basis is in charge-block order, and
+  `gilt_plaquette` returns its legs in `(up, down, left, right)` order.
+
 ### Added
 
 - **The implicit-AD CTM forward now measures its own stationarity** (#841):

@@ -82,6 +82,49 @@ def _cdl_tensor(crossed: bool = False) -> DenseTensor:
     return _make_dense_tensor(T / np.abs(T).max())
 
 
+def _z3_cdl_tensor() -> tuple[SymmetricTensor, DenseTensor]:
+    """A Z3-symmetric chi = 9 tensor, CDL-loaded, as a SymmetricTensor and
+    as the same array wrapped dense (one trivial sector).
+
+    Four charge-diagonal corner matrices wired around the site give a pure
+    corner-double-line piece; a small charge-conserving random part on top
+    keeps it from being exactly rank-one per corner.
+    """
+    from tenax.core.symmetry import ZnSymmetry
+
+    rng = np.random.default_rng(7)
+    sym = ZnSymmetry(3)
+    q = np.array([0, 0, 0, 1, 1, 1, 2, 2, 2], dtype=np.int32)
+    same = q[:, None] == q[None, :]
+    corners = [rng.normal(size=(9, 9)) * same for _ in range(4)]
+    cdl = np.einsum("ul,ld,dr,ru->udlr", *corners, optimize=True)
+    rule = (
+        q[:, None, None, None]
+        + q[None, None, :, None]
+        - q[None, :, None, None]
+        - q[None, None, None, :]
+    ) % 3 == 0
+    arr = cdl + 0.05 * rng.normal(size=(9, 9, 9, 9)) * rule
+    flows = (FlowDirection.IN, FlowDirection.OUT, FlowDirection.IN, FlowDirection.OUT)
+    indices = tuple(
+        TensorIndex.from_charges(sym, q, flow, label=lbl)
+        for flow, lbl in zip(flows, ("up", "down", "left", "right"))
+    )
+    T_sym = SymmetricTensor.from_dense(jnp.asarray(arr), indices, tol=1e-12)
+    return T_sym, _make_dense_tensor(arr)
+
+
+def _bipartite_singular_values(B) -> np.ndarray:
+    """Singular values of B across (up, down) | (left, right): invariant
+    under any basis change on a single leg, so they compare two outputs
+    that may differ by a bond gauge."""
+    A = np.asarray(B.todense())
+    A = np.transpose(
+        A, [B.labels().index(lbl) for lbl in ("up", "down", "left", "right")]
+    )
+    return np.linalg.svd(A.reshape(A.shape[0] * A.shape[1], -1), compute_uv=False)
+
+
 class TestGiltConfig:
     def test_default_values(self):
         cfg = GiltConfig()
@@ -134,6 +177,27 @@ class TestGiltPlaquette:
         T = compute_free_wilson_fermion_tensor(mass=1.0)
         with pytest.raises(NotImplementedError):
             gilt_plaquette(T, GiltConfig(gilt_eps=1e-6))
+
+    def test_symmetric_path_matches_dense_path(self):
+        """The block-sparse (Z3) stage and the dense stage on the same
+        array must agree on everything gauge-invariant: cascade depths,
+        bond dimensions, and the bipartite spectra of B1 and B2. The
+        symmetric output must come back block-sparse with its legs in
+        (up, down, left, right) order."""
+        T_sym, T_dense = _z3_cdl_tensor()
+        cfg = GiltConfig(gilt_eps=1e-2)
+        B1s, B2s, info_s = gilt_plaquette(T_sym, cfg)
+        B1d, B2d, info_d = gilt_plaquette(T_dense, cfg)
+        assert info_s["laps"] == info_d["laps"]
+        assert info_s["bond_dims"] == info_d["bond_dims"]
+        assert any(d < 9 for d in info_s["bond_dims"].values()), info_s
+        assert isinstance(B1s, SymmetricTensor) and isinstance(B2s, SymmetricTensor)
+        assert isinstance(B1d, DenseTensor) and isinstance(B2d, DenseTensor)
+        assert B1s.labels() == ("up", "down", "left", "right")
+        for Bs, Bd in ((B1s, B1d), (B2s, B2d)):
+            ss, sd = _bipartite_singular_values(Bs), _bipartite_singular_values(Bd)
+            assert ss.shape == sd.shape
+            np.testing.assert_allclose(ss, sd, rtol=0, atol=1e-10 * ss[0])
 
 
 class TestGiltTNRStep:
