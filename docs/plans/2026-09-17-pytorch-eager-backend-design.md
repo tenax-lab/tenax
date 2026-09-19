@@ -268,6 +268,17 @@ partition) or loudly (rejected argument), even with every other op implemented.
 curvature pairs — so the lowering is `torch.vdot(a.reshape(-1), b.reshape(-1))`, with a
 multidimensional parity case.
 
+**`split`/`take`/`vdot` are instances of a rule, not a closed list: no op mapping is
+assumed mechanical.** Each protocol entry's torch lowering is verified against the
+*jnp* semantics its call sites rely on, not against the same-spelled torch function —
+the two libraries diverge on argument meaning (`split` boundaries vs sizes), argument
+form (`take`/`vdot` rank), keyword names (jnp `axis` vs torch `dim` for
+`concatenate`/`stack`/`tensordot`), and layout (jnp `pad`'s per-axis `((lo,hi),…)` vs
+torch's flat, reverse-axis-ordered pad spec). Phase 0's op-parity test (§10) exercises
+each op against `jnp` on the shapes/dtypes/negative-index and multidimensional cases the
+call sites actually pass, so a divergence surfaces there rather than deep in a
+fixed-point or block-sparse run.
+
 **Functional indexed updates.** Tenax uses `x.at[idx].set/add/multiply(...)` **137
 times across 25 files** (only `.set`/`.add`/`.multiply` — no exotic `.at` variants),
 including `SymmetricTensor.todense()` (`core/tensor.py:1111`). Torch has no `.at`,
