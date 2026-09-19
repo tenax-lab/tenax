@@ -277,10 +277,22 @@ torch tensors do not match, and none are caught by a `jnp`/`lax`-token gate:
 
 So the seam exposes portable equivalents (`B.astype`/`.to`, `B.size`→`numel`,
 `B.copy`→`clone`, `B.transpose`→`permute`), the migration **audits and rewrites**
-these method sites, and the §4.1 grep-gate flags bare `.astype(` / `.size` / `.copy(`
-/ multi-arg `.transpose(` (as well as `.at[`) for per-site review. NumPy-array uses on genuinely host-only, non-backend arrays — e.g.
-`.astype` on a host gate before `jnp.asarray` (`pess.py:80/970`) — are out of scope;
-the audit is per-site and distinguishes the two.
+these method sites, and the §4.1 grep-gate flags them for per-site review. NumPy-array
+uses on genuinely host-only, non-backend arrays — e.g. `.astype` on a host gate before
+`jnp.asarray` (`pess.py:80/970`) — are out of scope; the audit is per-site and
+distinguishes the two.
+
+**This is a *closed* set, swept once — not discovered method-by-method.** A repo-wide
+grep of the incompatible-method surface (excluding `np.`/`jnp.`-prefixed calls) finds
+exactly: **`.astype(` ×23, `.copy(` ×60, multi-arg `.transpose(` ×56, `.tolist(` ×8,
+`.size`-as-property ×6, and `.item()`** (the R11–R14 exemplars are members of this
+set, not new classes). The methods that would *also* diverge —
+`.clip`/`.repeat`/`.swapaxes`/`.take`/`.view`/`.fill`/`.round` (note `np.repeat` ≠
+`torch.repeat`, which is `np.tile`) — currently have **zero** backend-array uses. So
+the Phase-0 gate blocks the **entire** enumerated class (present members *and* the
+currently-unused ones, preventively), and "migrated" for array methods is defined by
+that gate passing — closing the whack-a-mole rather than absorbing one method per
+review round.
 
 **`top_k` / `one_hot` are load-bearing on the default DMRG path.**
 `accelerator="auto"` (`dmrg.py:176`) routes dense-CPU and all GPU/TPU runs through
