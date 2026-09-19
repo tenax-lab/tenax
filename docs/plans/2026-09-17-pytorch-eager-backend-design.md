@@ -451,9 +451,11 @@ wrapper. But the wrapper carries **four** non-trivial contracts, each of which a
    second-order path §5.4 requires. So the contract is: **`setup_context` saves the
    raw *inputs* on `ctx`, and `backward` recomputes the decomposition from them**
    inside the recorded (differentiable) graph — or the primitive supplies a dedicated
-   double-backward rule. A `gradgrad`/`torch.autograd.gradcheck(...,
-   check_double_backward=True)` test (§10) guards it; `mark_non_differentiable` is
-   only acceptable for residuals that are genuinely constant w.r.t. the input.
+   double-backward rule. A `torch.autograd.gradgradcheck` test (§10) guards it — *not*
+   `gradcheck(..., check_double_backward=True)`, which raises `TypeError`: `gradcheck`
+   has no such kwarg, second derivatives are the separate `gradgradcheck` API (retain a
+   first-order `gradcheck` alongside it); `mark_non_differentiable` is only acceptable
+   for residuals that are genuinely constant w.r.t. the input.
 4. **`regularized_qr`'s backward is not pure `B`-ops — it calls `jax.vjp`.** Unlike
    the SVD/eigh backwards (hand-written F-matrix / gauge-fixed formulas),
    `_regularized_qr_bwd` delegates to JAX: it floors the diagonal to build
@@ -629,6 +631,19 @@ The branch **selects which RDM implementation supplies the energy**, so it is no
 diagnostic, and `.item()` cannot extract a functorch-wrapped scalar. It needs a
 transform-compatible **tensor predicate** (`where`-select both RDM paths, or a
 redesigned fallback) — with a **split two-site gradient** case in §10 to exercise it.
+
+**Forward-note: a validity gate on the energy fn is the same not-skippable class.**
+The #879 follow-up adds an opt-in `nan_on_invalid_rdm` gate to this energy fn — it
+runs `check_rdm` on the concrete RDMs and NaNs the returned energy when one is
+non-PSD/non-finite. It is **result-determining, not diagnostic** (it changes the
+output value), so it belongs to *this* class, not the §4.3 skippable one. It is safe
+under `torch.func` only because it is **default-off** and set solely by `fpeps()`'s
+concrete forward eval (`return float(energy)`, never differentiated). The migration
+guard: this gate must **never** be turned on unconditionally on the energy fn — that
+would drop a `check_rdm`+`float()`-branch straight onto the differentiated tape. If a
+differentiated caller ever needs it, it must be a tensor predicate
+(`where(is_psd, energy, nan)`), never a Python `float()`+branch — identical to the
+trace-floor site above.
 
 **This host-read-control class is a bounded, per-site *audit*, not a mechanical
 sweep.** Unlike the array-method class (§4.3, closable by a grep-gate), a
@@ -1043,7 +1058,7 @@ Risk × Bulk; rough person-weeks are indicative, not a commitment.
 | **2. Torch AD (leaf)** | Refactor the 6 leaf primitives to `_fwd/_bwd`; `torch.func`-compatible `Function` (`setup_context` + vmap rule) **incl. `nondiff_argnums` and hidden-residual returns (§5.2)** — intrinsic to these primitives; **`regularized_qr` needs a hand-written backend-neutral backward or `backend.ad.vjp` pulled forward from 3a (§5.2#4)** — its current bwd calls `jax.vjp`; complex-cotangent boundary + `_euclidean_grads` convention-guard + directional-derivative parity test (§5.3). Gradient-parity green (complex case). | **High** (§5.3) | Med | 3–5 |
 | **3a. Control + trees + transforms** | `backend.control` combinators (incl. `map`) + `jit`/`checkpoint` (container-aware, §7); `backend.tree` protocol + register all containers (186 sites); `backend.ad` transforms + `value_and_grad` adapter (~76 sites); migrate the ~18 tracer checks to the functorch-aware predicate (per-site review). DMRG parity green. | Med | High | 4–6 |
 | **3b. Fixed-point + solvers (the target)** | `fixed_point(step, params, …)` on the boundary-leaf + `setup_context` + double-differentiable contract (§5.4), incl. C4v-reference; `backend.linalg.gmres`/`solve_triangular`/`bicgstab` (bicgstab is the default). Small iPEPS energy+grad parity green **and the §10.7 AD-wall benchmark on a fermionic iPEPS/CTM AD step** — this is the deliverable the whole backend exists for (§2). | **High** | Med–High | 4–6 |
-| **3c. Optimizer** | Backend optimizer (§5.6): functional default L-BFGS returning a direction; migrate **every** Optax user (`_build_optimizer` + **both** PESS optimizers + root-implicit) to the `(direction, state)` contract. One iPEPS + a step through **each** PESS optimizer default-mode through torch (§10.4). | Med | Med | 2–3 |
+| **3c. Optimizer** | Backend optimizer (§5.6): functional default L-BFGS returning a direction; migrate **every** Optax user (`_build_optimizer` + **both** PESS optimizers + root-implicit) to the `(direction, state)` contract. One iPEPS + a step through **each** PESS optimizer through torch — **and, explicitly, `optimize_pess_ad`'s non-default `loss_builder="exact"` branch (trains `T_d`, §5.6), not only the `"convc"` default** (§10.4): because phases land as independent PRs and 3c is what makes the optimizer path usable, testing only the default mode lets 3c be declared complete with the exact branch silently broken until final integration. | Med | Med | 2–3 |
 | **4. Polish** | Drop GPU-only workarounds on torch path; docs + `capabilities.md`; `README.md` documents `set_backend`; example; CI torch job (**and, for D6, a CUDA runner or an explicit out-of-band owner**). | Low | Low–Med | 1–2 |
 
 Phase 0 is the tedious-but-safe backbone; Phase 2 is the small-but-dangerous core;
@@ -1120,7 +1135,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (22 rounds) and a
+The specific requirements above were hardened across a Codex review (23 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1261,3 +1276,13 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   (`:400/669`/`:479/789`, from a stale branch); corrected against `main` to the
   optimizers `:452`/`:758`, `value_and_grad` `:562`/`:869`, `optimizer.update`
   `:568`/`:878`.
+- **R23** — two acceptance-API/coverage fixes. **P2:** the §5.2#4 double-backward test
+  cited `gradcheck(..., check_double_backward=True)` — no such kwarg exists (it raises
+  `TypeError`); corrected to `torch.autograd.gradgradcheck` (first-order `gradcheck`
+  retained alongside). **P2:** the Phase-3c *table row* still gated only the PESS
+  "default-mode," so 3c (an independent PR) could be declared complete with
+  `optimize_pess_ad`'s `loss_builder="exact"` branch silently broken — the exact-branch
+  step is now in the 3c acceptance row, matching §10.4. Also added a §5.4 forward-note:
+  the #879 `nan_on_invalid_rdm` energy gate is a *result-determining* (not-skippable)
+  host-read, safe only because it is default-off and set solely on `fpeps()`'s concrete
+  eval; on any differentiated path it must be a `where`-predicate, never `float()`.
