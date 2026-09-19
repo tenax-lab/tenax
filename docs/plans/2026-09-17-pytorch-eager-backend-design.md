@@ -495,19 +495,28 @@ same gradient object on both backends," so it applies wherever a raw `value_and_
 result is consumed, not only at the `_euclidean_grads` call sites. The **PESS**
 optimizers do **not** apply `_euclidean_grads` at all: they feed the raw grad straight
 into a Hermitian line-search slope `_tree_real_dot(grad, direction) = Re Σ conj(g)·d`
-(`pess_optimize.py:297/340/354`) and an `-grad` descent fallback. In JAX that is
-self-consistent (`g = conj(∇E)`), but with §5.3's boundary conjugation
-`g_torch = conj(g_jax)`, `_tree_real_dot` conjugates its first argument, so the torch
-slope becomes `Re Σ conj(∇E)·d` where JAX had `Re Σ ∇E·d` — the line-search Wolfe/
-Armijo test diverges and the complex-PESS update drifts from JAX, even though the
-solvers agree. So the convention guard must include the PESS grad-consumption sites
-(un-conjugate to JAX convention before `_tree_real_dot`, or convention-guard
-`_tree_real_dot` itself), and the §10.4 complex-parameter PESS step must actually
-exercise it — a real-parameter PESS case is a `conj` no-op and would hide this.
-(Count note: `_euclidean_grads` appears at **7** `ipeps_optimize.py` sites —
-`1006/1762/2188/3340/3850/4575/4939` — plus `ipeps_optimize_root_implicit.py:540`,
-not the "6" an earlier draft stated; PESS is a **separate** convention regime, not one
-of them.)
+(`pess_optimize.py:297/340/354`) and an `-grad` descent fallback. **The fix is to apply `_euclidean_grads` on JAX (identity on torch) — not to make
+torch reproduce JAX, because raw JAX PESS is itself latently wrong.** PESS's fallback
+(`pess_optimize.py:298-300`) sets `direction = -g` and reports slope
+`-_tree_real_dot(g,g) = -‖g‖²`. But with `g = conj(∇E)` the *true* JAX directional
+derivative is `Re Σ g·d` (unconjugated pairing), so along `d=-g` the real change is
+`-Re Σ g²`, **not** `-‖g‖²`; the correct steepest descent is `-conj(g) = -∇E`
+(`-Σ|∇E|²`). So `direction=-g` is a dormant **#957-class** error — it ascends the
+imaginary coordinates for genuinely complex params, and `_tree_real_dot` measures the
+slope in the wrong (conjugated) metric that *masks* it. It stays hidden only because
+the benchmarked PESS runs are effectively **real** (for real `g`, `-g=-conj(g)` and
+`Re Σ g²=‖g‖²`). Therefore: **route PESS grads through the same convention-guarded
+`_euclidean_grads` as the iPEPS sites** — `∇E=conj(g)` on JAX, identity on torch (where
+`g_torch=conj(g_jax)=∇E` already) — so both backends consume the correct `∇E`,
+`direction=-∇E`, and `_tree_real_dot(∇E,·)` becomes the right metric. Reproducing the
+raw-JAX behavior on torch instead (an earlier draft of this note) would make the
+complex-PESS parity test **enshrine the #957 error**. The §10.4 complex-parameter PESS
+step must exercise this — a real-parameter case is a `conj` no-op that hides it. *(This
+also means shipped JAX PESS carries a latent complex-gradient bug worth its own
+tracking issue, separate from the port.)* (Count note: `_euclidean_grads` is at **7**
+`ipeps_optimize.py` sites — `1006/1762/2188/3340/3850/4575/4939` — plus
+`ipeps_optimize_root_implicit.py:540`, not the "6" an earlier draft stated; PESS joins
+this guard as a **9th** site once fixed.)
 
 **Parity test.** Comparing raw `jax.grad` vs `torch.func.grad` is invalid — a correct
 wrapper leaves them conjugated relative to each other. Compare **directional
@@ -1049,7 +1058,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (17 rounds) and a
+The specific requirements above were hardened across a Codex review (18 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1153,3 +1162,10 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   §10.4 complex-PESS step must exercise it (§5.3). **P2:** the seam gate is **staged
   with a shrinking allow-list**, not repo-wide from Phase 0 (which migrates only
   `core/tensor.py` + `linalg.py`) — §4.1.
+- **R18** — refines R17: the PESS fix is **not** "un-conjugate torch to match JAX" —
+  raw JAX PESS is *itself* latently wrong (`direction=-g` fallback +
+  conjugated-metric `_tree_real_dot`, `pess_optimize.py:298-300`, a dormant #957 that
+  only stays hidden because the benchmarked runs are effectively real). Apply
+  `_euclidean_grads` on **JAX** (identity on torch) so both consume the correct `∇E`;
+  reproducing raw JAX would enshrine the error (§5.3). Flags a **latent shipped-PESS
+  complex-gradient bug** worth its own tracking issue.
