@@ -215,6 +215,11 @@ _FILE_MARKERS = {
     # the replacement against an explicit non-unitary bond gauge.  Same cost
     # bracket as its `algorithm` neighbours (short D=2 sweeps + chi=8 CTM).
     "test_fpeps_881_sublattice_gap.py": "algorithm",
+    # #879 RDM-validity gate on the fermionic energy: a module-scoped D=2 chi=4
+    # CDW fixture (SU sweep + CTM) plus one extra minimal fpeps() for the wiring
+    # spy -- the same short-D=2-sweep + CTM cost bracket as its fpeps neighbours,
+    # well above `core`.
+    "test_fpeps_psd_gate_879.py": "algorithm",
     # Root-implicit AD wiring (#715): dispatch + guard surface only, no
     # CTM convergence, so it is milliseconds.  The production-run case it
     # also carries is explicitly @slow (#772).
