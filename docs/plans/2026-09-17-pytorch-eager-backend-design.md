@@ -1,7 +1,7 @@
 # Spec: PyTorch eager backend for Tenax block-sparse calculations
 
 **Status:** draft for review · **Author:** Claude Code (for @yingjerkao) · **Date:** 2026-09-17
-**Scope decisions (locked by YJ):** (a) **full single-device feature parity** with the JAX path; (b) **AD must work through the torch backend** in v1.
+**Scope decisions (locked by YJ):** (a) **v1 focus is block-sparse autodiff** — the eager backend exists to break the `SymmetricTensor` AD wall (see §2), *not* to be a general second backend; (b) **AD must work through the torch backend** in v1; (c) block-sparse/PEPS **AD** families are the parity targets, MPS defaults to the CPython path (D7), and *full* single-device feature parity is the eventual **direction**, not a v1 gate.
 
 > Provenance of the many specific requirements below (which review round surfaced each) is collected in **Appendix A** rather than inline, so the body reads as a design. Every code citation was independently verified against the tree at head `756f9e0`.
 
@@ -9,10 +9,22 @@
 
 ## 1. Summary
 
-Add a second array backend so every block-sparse (`SymmetricTensor`) and dense
-(`DenseTensor`) calculation can run on **PyTorch eager** with the **same public API,
-the same numerical results within f64/c128 tolerance, and working autodiff**
-(`torch.autograd`), while JAX remains the default and is selected per process.
+**The point of the eager backend is block-sparse autodiff.** The wall Tenax is
+hitting is not contraction throughput or MPS speed — it is the **`SymmetricTensor`
+AD path**: block-sparse VJP trace+compile cost dominates iPEPS/fPEPS/CTM
+optimization, and it is worst on the fermionic path (§2). A PyTorch **eager** backend
+attacks that wall directly — eager AD has no per-shape trace/compile, so the
+block-sparse VJP cost that XLA pays up front simply isn't incurred. So v1 is scoped to
+**block-sparse AD parity** (SymmetricTensor autodiff through CTM/iPEPS/fPEPS/PESS on
+one device), plus exactly the forward and dense machinery that path depends on. The
+seam is built to generalize (a full second backend is the eventual direction), but v1
+is measured by the AD wall, not by breadth.
+
+Concretely: a second array backend so block-sparse (`SymmetricTensor`) and its
+underlying dense (`DenseTensor`) calculations run on **PyTorch eager** with the **same
+public API, the same numerical results within f64/c128 tolerance, and working
+autodiff** (`torch.autograd`), while JAX remains the default and is selected per
+process.
 
 JAX's numerical **behavior** is unchanged; what changes is that the array namespace
 is rewritten behind a pass-through (`jnp.foo` → `B.foo`, where `B` on JAX is a thin
@@ -43,10 +55,22 @@ complex-cotangent convention, and PRNG threading. Sections 5–8 handle each.
   `blocksparse_backend` contraction-kernel *selector* — torch uses
   `torch.einsum`/`opt_einsum`. Also a feature excluded from "parity".
 
-"Full single-device feature parity" therefore means: every algorithm
-(DMRG/iDMRG/TDVP/TRG/HOTRG/GILT-TNR/iPEPS/fPEPS/PESS, forward **and** AD) produces
-tolerance-equal results on one device under torch; it does **not** promise the
-multi-GPU or specialized-kernel paths above.
+**What v1 delivers, in scope order:**
+1. **Block-sparse AD (the target):** `SymmetricTensor` autodiff through the CTM /
+   iPEPS / fPEPS / PESS optimizers on one device under torch, tolerance-equal to JAX —
+   this is the wall (§2) and the acceptance bar.
+2. **The dependencies of (1):** the dense per-block kernels (block-sparse decomps run
+   dense kernels per sector), the forward CTM/PEPS paths AD runs on, and the shared
+   array/linalg/control/tree seam. Dense is a *dependency* of block-sparse AD, not a
+   separate deliverable.
+3. **Supporting parity:** TRG/HOTRG, GILT-TNR forward+AD (block-sparse families that
+   ride the same seam).
+4. **MPS (DMRG/iDMRG/TDVP):** CPython default (D7); torch is an oracle-only sanity
+   check, not a v1 target.
+
+*Full* single-device parity across *every* algorithm is the eventual direction the
+seam is built toward — not a v1 gate. v1 does **not** promise the multi-GPU or
+specialized-kernel paths in the non-goals above, and does not gate on MPS throughput.
 
 **MPS algorithms default to the CPython path, not torch (Decision D7).** For the MPS
 families (DMRG/iDMRG/TDVP), the **fastest path is the existing NumPy/Cython
@@ -62,18 +86,31 @@ oracle-level (§10.3), not a throughput commitment.
 
 ---
 
-## 2. Motivation
+## 2. Motivation — the block-sparse AD wall
+
+**The wall.** Tenax's iPEPS/fPEPS/CTM optimization is bottlenecked by the
+**block-sparse autodiff** path, not by contraction or MPS speed. The cost is the
+`SymmetricTensor` VJP under XLA: differentiating the per-sector decompositions and the
+CTM fixed point compiles a large backward graph whose **trace+compile time** dominates
+wall-clock — measured on the fermionic path, where it is worst, the AD backward is a
+"slow one-time block-sparse compile," and the recorded conclusion is explicit that
+**"the wall is block-sparse VJPs, not contraction"** (the #565/#566 fermionic-AD
+compile-cost investigations; cuTensorNet was NO-GO). This is exactly the cost a
+**PyTorch eager** backend does not pay: eager reverse-mode records the tape as it runs,
+with no per-shape trace and no XLA compile of the backward, so the block-sparse VJP is
+executed, not compiled. That is the wall this backend is built to break.
 
 `docs/guide/capabilities.md` already concedes that for large-D fermionic systems
-"an eager PyTorch fermionic-PEPS code (YASTN/peps-torch) is the better tool today."
-An in-house torch backend gives us:
+"an eager PyTorch fermionic-PEPS code (YASTN/peps-torch) is the better tool today" —
+this backend is how Tenax stops conceding that. Secondary benefits (kept in view but
+not the driver):
 
-- **Debuggable eager execution** — no trace, real stack traces, `pdb` inside a CTM
-  sweep, dynamic shapes with no recompile penalty.
-- **Ecosystem** — torch optimizers, `torch.compile` later, checkpointing utilities,
-  the broader PEPS-torch/YASTN interop surface.
+- **Debuggable eager execution** — real stack traces, `pdb` inside a CTM sweep,
+  dynamic block shapes with no recompile penalty.
 - **A second oracle** — cross-backend parity tests become a standing correctness
   check on the symmetry/AD math itself (§10).
+- **Ecosystem** — torch optimizers, `torch.compile` later, the PEPS-torch/YASTN
+  interop surface.
 
 ---
 
@@ -620,9 +657,10 @@ users care about (CPU throughput), buying nothing over the oracle.
 
 ---
 
-## 10. Test / parity strategy
+## 10. Test / parity / AD-wall strategy
 
-Acceptance = a **cross-backend parity suite**:
+Acceptance = a **cross-backend parity suite** (correctness) **plus an AD-wall
+benchmark** (the §2 driver — item 7):
 
 1. **Op parity** — each `ArrayOps` method + block-sparse op (contract, permute,
    fuse/split), identical inputs both backends, `allclose` (f64/c128). **For SVD/QR/eigh,
@@ -640,10 +678,11 @@ Acceptance = a **cross-backend parity suite**:
    Includes a **complex-parameter** case and a case run **through
    `backend.ad.value_and_grad`** so the fixed-point `Function` is exercised under a
    `torch.func` transform, not just eager `.backward()`.
-3. **Algorithm parity — one representative case per *promised family*, not a sample.**
-   Under the locked full-single-device-parity scope, the suite must exercise **every**
-   family the design claims, or the checklist can pass while a supported entry point
-   stays JAX-bound. **Block-sparse / PEPS families (full parity, the torch target):**
+3. **Algorithm parity — one representative case per *targeted* family, not a sample.**
+   Per the v1 focus (§1), the parity target is the block-sparse/PEPS **AD** families;
+   the suite must exercise **every** one the design commits to, or the checklist can
+   pass while a targeted entry point stays JAX-bound. **Block-sparse / PEPS families
+   (full parity, the torch target):**
    **TRG/HOTRG**, **GILT-TNR** (exported `gilt_tnr`/`gilt_plaquette`; `algorithms/gilt.py`
    uses direct `jnp.linalg` eigh/eigvalsh/svd — a public JAX-coupled path that must go
    through the seam), a small iPEPS energy+grad, **fPEPS**, **PESS**, each end-to-end on
@@ -664,6 +703,15 @@ Acceptance = a **cross-backend parity suite**:
    variants** (JAX-GPU vs torch-GPU), skipping cleanly with no CUDA device. Non-optional
    given the CPU-green ≠ GPU-green history — **but only enforced if a CUDA CI runner
    exists** (D6 caveat); otherwise this validates out-of-band and must be owned.
+7. **AD-wall benchmark — did we break the wall (the whole point, §2)?** Correctness
+   parity alone does not prove v1 succeeded: the driver is the block-sparse VJP
+   trace+compile cost. So v1 ships a **benchmark**, not just tests, on a representative
+   **fermionic iPEPS/CTM AD step** (the worst case) comparing torch-eager backward vs
+   JAX — reporting *first-call* wall-clock (where XLA pays the block-sparse-VJP compile)
+   and steady-state per-step time. Acceptance is directional: torch eager must remove
+   the one-time compile cost and be competitive per-step at the D/χ where the wall
+   bites. This is a **benchmark artifact** (not a pass/fail gate — hardware-dependent),
+   but a required v1 deliverable so "we broke the wall" is measured, not asserted.
 
 Bucketing: fast op/grad parity → `core`; algorithm/optimizer → `algorithm`/`slow`;
 GPU-gated skips without CUDA. Scatter-accumulated ops (`segment_sum`) use a **relaxed
@@ -682,7 +730,7 @@ Risk × Bulk; rough person-weeks are indicative, not a commitment.
 | **1. Torch forward** | `TorchBackend` array ops + dense/symmetric linalg forward + contraction (`torch.einsum`/opt_einsum replay + segment-sum equiv); **RNG + default-dtype/promotion policy (§8)**; **`to_numpy` + device-native truncation, dtype predicates (§4.3)** — both are forward prerequisites, not polish. Op-parity green (gauge-invariant, §10). | Low–Med | Med | 3–4 |
 | **2. Torch AD (leaf)** | Refactor the 6 leaf primitives to `_fwd/_bwd`; `torch.func`-compatible `Function` (`setup_context` + vmap rule) **incl. `nondiff_argnums` and hidden-residual returns (§5.2)** — intrinsic to these primitives; complex-cotangent boundary + `_euclidean_grads` convention-guard + directional-derivative parity test (§5.3). Gradient-parity green (complex case). | **High** (§5.3) | Med | 3–5 |
 | **3a. Control + trees + transforms** | `backend.control` combinators (incl. `map`) + `jit`/`checkpoint` (container-aware, §7); `backend.tree` protocol + register all containers (186 sites); `backend.ad` transforms + `value_and_grad` adapter (~76 sites); migrate the ~18 tracer checks to the functorch-aware predicate (per-site review). DMRG parity green. | Med | High | 4–6 |
-| **3b. Fixed-point + solvers** | `fixed_point(step, params, …)` on the boundary-leaf + `setup_context` + double-differentiable contract (§5.4), incl. C4v-reference; `backend.linalg.gmres`/`solve_triangular`/`bicgstab` (bicgstab is the default). Small iPEPS energy+grad parity green. | **High** | Med–High | 4–6 |
+| **3b. Fixed-point + solvers (the target)** | `fixed_point(step, params, …)` on the boundary-leaf + `setup_context` + double-differentiable contract (§5.4), incl. C4v-reference; `backend.linalg.gmres`/`solve_triangular`/`bicgstab` (bicgstab is the default). Small iPEPS energy+grad parity green **and the §10.7 AD-wall benchmark on a fermionic iPEPS/CTM AD step** — this is the deliverable the whole backend exists for (§2). | **High** | Med–High | 4–6 |
 | **3c. Optimizer** | Backend optimizer (§5.6): functional default L-BFGS returning a direction; migrate **every** Optax user (`_build_optimizer` + PESS + root-implicit) to the `(direction, state)` contract. One iPEPS + one PESS default-mode step through torch (§10.4). | Med | Med | 2–3 |
 | **4. Polish** | Drop GPU-only workarounds on torch path; docs + `capabilities.md`; `README.md` documents `set_backend`; example; CI torch job (**and, for D6, a CUDA runner or an explicit out-of-band owner**). | Low | Low–Med | 1–2 |
 
@@ -696,6 +744,9 @@ until 3b/3c make an algorithm end-to-end usable.
 0) + documented in `README.md` (Phase 4) are merge-blocking.
 
 ### 11.1 Definition of Done (v1 exit checklist)
+- [ ] **AD-wall broken (the point, §2/§10.7):** the block-sparse VJP through a
+  fermionic iPEPS/CTM AD step runs under torch eager with **no XLA backward compile**
+  and competitive steady-state per-step time vs JAX, captured as a benchmark artifact.
 - [ ] **Block-sparse/PEPS families** — TRG/HOTRG, GILT-TNR (`gilt_tnr`/`gilt_plaquette`),
   iPEPS, fPEPS, PESS — run under `set_backend("torch")` forward **and** AD to
   tolerance-equal results vs JAX on **one device** (CPU and, if a CUDA runner exists,
