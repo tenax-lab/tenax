@@ -326,17 +326,26 @@ uses on genuinely host-only, non-backend arrays — e.g. `.astype` on a host gat
 `jnp.asarray` (`pess.py:80/970`) — are out of scope; the audit is per-site and
 distinguishes the two.
 
-**This is a *closed* set, swept once — not discovered method-by-method.** A repo-wide
-grep of the incompatible-method surface (excluding `np.`/`jnp.`-prefixed calls) finds
-exactly: **`.astype(` ×23, `.copy(` ×60, multi-arg `.transpose(` ×56, `.tolist(` ×8,
-`.size`-as-property ×6, and `.item()`** (the R11–R14 exemplars are members of this
-set, not new classes). The methods that would *also* diverge —
-`.clip`/`.repeat`/`.swapaxes`/`.take`/`.view`/`.fill`/`.round` (note `np.repeat` ≠
-`torch.repeat`, which is `np.tile`) — currently have **zero** backend-array uses. So
-the Phase-0 gate blocks the **entire** enumerated class (present members *and* the
-currently-unused ones, preventively), and "migrated" for array methods is defined by
-that gate passing — closing the whack-a-mole rather than absorbing one method per
-review round.
+**The set of incompatible method *names* is closed — but the per-site *count* is not a
+frozen number, and must not be used as the done-criterion.** The class is
+`.astype`/`.copy`/multi-arg `.transpose`/`.tolist`/`.size`-as-property/`.item()` (the
+R11–R14 exemplars are members, not new classes), plus the methods that would *also*
+diverge — `.clip`/`.repeat`/`.swapaxes`/`.take`/`.view`/`.fill`/`.round` (note
+`np.repeat` ≠ `torch.repeat`, which is `np.tile`) — which the gate blocks preventively.
+An **earlier draft quoted exact totals (`.astype(` ×23, `.copy(` ×60, …); those were
+wrong** — a naive repo-wide grep already finds `.astype(` ×92, `.copy(` ×102,
+`.transpose(` ×145 (`pess.py` alone has 31 `.astype(`, e.g. the backend-array
+`lambdas[i].astype(dtype)` at `pess.py:438-450`). The gap is not just a miscount: the
+number that matters is the **backend-array** call sites, and a grep total cannot tell a
+backend array's `.astype` (in scope) from a **host `np.ndarray`'s** `.astype` (out of
+scope — those stay NumPy under torch), which needs per-site classification, not a
+regex. So: the enumerated method set is authoritative; the per-site inventory is
+**regenerated at implementation, distinguishing host from backend calls**; and
+"migrated" for array methods is defined by the **Phase-0 grep-gate passing on the
+backend-array sites**, never by matching a count — otherwise migration could be declared
+complete against a stale total while torch-incompatible calls remain. This still closes
+the whack-a-mole (the gate blocks the whole class at once) without resting on a frozen
+number.
 
 **Negative-step slicing is the one *indexing* form in the same class.** Torch tensor
 slices do **not** support a negative step, so the eigenvector-reversal idiom
@@ -1204,7 +1213,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (28 rounds) and a
+The specific requirements above were hardened across a Codex review (29 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1395,3 +1404,11 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   `axis`→`dim`. `jnp.tensordot` takes `axes=` (`pess.py:136-139` passes it explicitly)
   and `torch.tensordot` takes **`dims=` (plural)**, distinct from the `axis`→`dim` rename
   that `concatenate`/`stack` share; the op-parity test must exercise the keyword form.
+- **R29** — **P2**, the array-method §4.3 counts were false precision: the draft quoted
+  `.astype(` ×23 / `.copy(` ×60 / `.transpose(` ×56, but a naive grep already finds ×92 /
+  ×102 / ×145 (`pess.py` alone has 31 `.astype(`, e.g. `lambdas[i].astype(dtype)` at
+  `:438-450`). Worse, a grep total conflates in-scope backend-array calls with out-of-scope
+  host `np.ndarray` calls. Reframed: the incompatible method-*name* set is closed, but the
+  per-site inventory is regenerated at implementation with a host-vs-backend split, and
+  "migrated" is defined by the **grep-gate passing on backend-array sites**, never by
+  matching a count.
