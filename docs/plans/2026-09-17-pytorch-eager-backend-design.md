@@ -377,10 +377,23 @@ CTM projector (`_ctm_tensor_projector_2x2.py:100`, `ipeps_optimize.py:459`), and
 adjoint GMRES (`_gmres_eager.py:117`). Under torch a tensor's `.dtype` is a
 `torch.dtype`, so `jnp.iscomplexobj(torch_tensor)` / `jnp.issubdtype(torch.complex128,
 …)` return wrong or raise, mis-selecting the complex-vs-real branch on a default run.
-`ArrayOps` therefore exposes `is_complex / is_floating / result_type / finfo`
-(torch: `torch.is_complex`, `torch.is_floating_point`, `torch.result_type` — **binary,
-vs jnp's variadic, so the wrapper folds**, `torch.finfo`). `issubdtype` has no torch
-analog and is reduced to the `is_complex`/`is_floating` predicates at each site.
+`ArrayOps` therefore exposes `is_complex / is_floating / result_type / finfo`.
+**These take dtype objects, not only tensors — the torch tensor functions do not, so
+the mapping is not a fold.** Several live sites pass a **dtype**, not an array:
+`_arnoldi.py:37` and `_ctm_tensor_projector_2x2.py:100` hand a dtype to the complex
+predicate, and `_lorentzian_eigh.py:56` and `core/stacked_view.py:68-70` hand *several*
+dtypes to `result_type`. But `torch.is_complex`/`torch.is_floating_point` require a
+**tensor** (they raise on a `torch.dtype`), and `torch.result_type` accepts tensors or
+Python numbers but **not** `torch.dtype` values — so a mechanical
+`jnp.iscomplexobj → torch.is_complex` / `jnp.result_type → torch.result_type` fails on
+exactly these sites, before AD, on a **default** Arnoldi/projector/block-sparse run.
+Each helper must therefore branch on its argument: for a **dtype object**, use the
+`torch.dtype` **properties** `.is_complex` / `.is_floating_point` and
+`torch.promote_types` (which *does* take two `torch.dtype`s); for a **tensor**, the
+`torch.is_*`/`torch.result_type` functions. `result_type` also stays variadic
+(jnp is variadic; `torch.promote_types`/`torch.result_type` are binary, so the wrapper
+folds a reduction over its args). `issubdtype` has no torch analog and is reduced to the
+`is_complex`/`is_floating` predicates at each site.
 
 ### 4.4 Tensor data contract
 
@@ -1161,7 +1174,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (24 rounds) and a
+The specific requirements above were hardened across a Codex review (25 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1325,3 +1338,13 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   reentrant is an incompatible `autograd.Function`) — so `backend.control.checkpoint`
   must no-op to a plain passthrough under an active transform, plus an explicit-CTM
   `value_and_grad` acceptance case so the path is exercised in CI.
+- **R25** — **P1**, dtype helpers must accept dtype objects, not only tensors (§4.3):
+  the mechanical `jnp.iscomplexobj → torch.is_complex` / `jnp.result_type →
+  torch.result_type` mapping raises on the live sites that pass a **dtype** rather than
+  an array — `_arnoldi.py:37`, `_ctm_tensor_projector_2x2.py:100` (complex predicate) and
+  `_lorentzian_eigh.py:56`, `core/stacked_view.py:68-70` (`result_type`) — because
+  `torch.is_complex`/`is_floating_point` require a tensor and `torch.result_type` rejects
+  `torch.dtype` values, failing the **default** Arnoldi/projector/block-sparse path before
+  AD. Each helper branches on its argument: dtype objects use the `torch.dtype` properties
+  `.is_complex`/`.is_floating_point` + `torch.promote_types`; tensors use the `torch.is_*`/
+  `result_type` functions.
