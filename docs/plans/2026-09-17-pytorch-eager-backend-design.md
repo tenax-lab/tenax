@@ -139,7 +139,7 @@ From a full sweep of `src/tenax` (120 files); counts re-verified at head `756f9e
 | **AD primitives** | 6 leaf `custom_vjp`: `_ad_primitives.py:229-719` (5) + `_lorentzian_eigh.py:81` (1), +`blocksparse_backend.py:149-177` | **Yes — redesign** (§5). |
 | **dtype introspection** | `jnp.iscomplexobj/issubdtype/result_type/finfo/complexfloating` (~18 sites) — incl. default Arnoldi `_arnoldi.py:37`, 2×2 projector, adjoint GMRES `_gmres_eager.py:117` | **Yes — backend predicates** (§4.2/§8). |
 | **Differentiation-state checks** | `isinstance(x, jax.core.Tracer)` ×~18 across **7 files** (`core/tensor.py:1043`, `linalg.py:274/2045`, `_ctm_projector.py` ×6, `_ctm_tensor_projector_2x2.py:1001`, `_ctm_tensor_energy.py:130`, `contractor.py:897`, `cutensornet_backend.py:64`) | **Yes — backend predicate** (§4.2). |
-| **Host reads** | truncation: `np.array(s_q)`/`np.asarray(block)` (`linalg.py:471/1112/1359`, `core/tensor.py:1044`); **AD-target diagnostics**: `fixed_point` backward `jax.device_get` (`_ctm_energy_ad.py:1694-1699`, gated `:1711/1714`, `:99`); **AD-target convergence control**: `float(...)`/`.item()` loop-exit/divergence/RDM-select determining the result — fixed-point backwards (`_split_ctm_energy_ad.py:252/256/565/569`, `ad_utils.py:913/941/1097/1111`), split-CTM energy loss (`_split_ctm_tensor_energy.py:824/974`), and the default-on Arnoldi precheck `np.linalg.eigvals` (`_arnoldi.py:70`, `ad_utils.py:856`); **oracle-only families**: dense iDMRG `idmrg.py:976-977` + `:1071-1085`, GILT `gilt.py:209/222/256/265/267/274/284/318` | **Yes** — truncation → device-native (§4.3); AD-target diagnostics → `to_numpy`, **skipped under `torch.func`** (§4.3); AD-target convergence control → **fixed-iteration / tensor-predicate + backend-native `eigvals`** (not skippable, §5.4); oracle-only sites **CPU-only by design** (§10.3), not migrated for v1. |
+| **Host reads** | truncation: `np.array(s_q)`/`np.asarray(block)` (`linalg.py:471/1112/1359`, `core/tensor.py:1044`); **AD-target diagnostics**: `fixed_point` backward `jax.device_get` (`_ctm_energy_ad.py:1694-1699`, gated `:1711/1714`, `:99`); **AD-target convergence control**: `float(...)`/`.item()` loop-exit/divergence/RDM-select determining the result — fixed-point backwards (`_split_ctm_energy_ad.py:252/256/565/569`, `ad_utils.py:913/941/1097/1111`), split-CTM energy loss (`_split_ctm_tensor_energy.py:824/974`), the C4v adjoint fallback/validation `float`/`bool`/`int(info)` (`_ctm_tensor_c4v_reference_ad.py:66-76/192-224`), and the default-on Arnoldi precheck `np.linalg.eigvals` (`_arnoldi.py:70`, `ad_utils.py:856`); **oracle-only families**: dense iDMRG `idmrg.py:976-977` + `:1071-1085`, GILT `gilt.py:209/222/256/265/267/274/284/318` | **Yes** — truncation → device-native (§4.3); AD-target diagnostics → `to_numpy`, **skipped under `torch.func`** (§4.3); AD-target convergence control → **fixed-iteration / tensor-predicate + backend-native `eigvals`** (not skippable, §5.4); oracle-only sites **CPU-only by design** (§10.3), not migrated for v1. |
 | **Control flow** | `lax` `while_loop`×29, `scan`×22, `fori_loop`×11, `cond`×0, `stop_gradient`×58; `lax.map` (`_ctm_chunked_absorb.py`); union across 27 files | **Yes — redesign** (§7). |
 | **Krylov / triangular solvers** | `_gmres_lax.py:171` (`solve_triangular`), `:299-336`; `_metric_precond.py:164`, `ad_utils.py:882` (`jax.scipy … gmres`); **`_krylov_bicgstab` (default `adjoint_solver`), `_ctm_tensor_c4v_reference_ad.py:166`** | **Yes — backend solvers incl. bicgstab** (§5.4). |
 | **DMRG truncation ops** | `jax.lax.top_k`/`jax.nn.one_hot` (`_padded_linalg.py:128/142`), reached by `accelerator="auto"` → `_jit_sweep` | **Yes — `ArrayOps.top_k`/`one_hot`** (§4.2). |
@@ -537,6 +537,19 @@ backward fails *before* it chooses the adjoint result — on the default config.
 seam needs a **backend-native `eigvals`/spectral-radius** op (`torch.linalg.eigvals`)
 **and** the Python decision it feeds must be migrated (transform-compatible), not just
 Arnoldi's dtype predicate.
+
+**Routing the C4v solver through the seam is not enough — its fallback *selection*
+host-reads too.** Even with `bicgstab`/`gmres` in the seam, the C4v-reference backward
+decides *which* solver to use and *whether it converged* on the host:
+`_ctm_tensor_c4v_reference_ad.py:66-76` computes `float(jnp.sqrt(‖·‖²))` and
+`all(bool(jnp.all(jnp.isfinite(x))) …)`, and `_solve_linear_adjoint` (`:192-224`)
+branches on those — plus `int(info)` — to pick the GMRES fallback after a BiCGSTAB
+failure and to raise on non-convergence. Under `torch.func` those scalars cannot be
+extracted, so the C4v gradient fails **before returning** even when both solvers work.
+So the fallback/validation control must be transform-compatible — a tensor-predicate
+solver select, or moving the validation *outside* the transformed backward — and §10
+must exercise **both the fallback and non-fallback C4v solves** through
+`value_and_grad`, not just a happy-path solve.
 
 **The adjoint loop's convergence control host-reads tensors — and unlike the
 diagnostics it is *not* skippable.** Distinct from the §4.3 *diagnostic* host-reads
@@ -971,7 +984,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (14 rounds) and a
+The specific requirements above were hardened across a Codex review (15 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1052,3 +1065,9 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   two-site promise had no §10 case because `optimize_fpeps_ad` (`ipeps_optimize.py:
   5306`) dispatches to the **one-site** path — added an explicit split-CTM two-site
   `value_and_grad` acceptance case (§10.3).
+- **R15** — routing the C4v solver through the seam is not enough: its adjoint backward
+  host-reads `float`/`bool`/`int(info)` to **select the GMRES fallback** and validate
+  convergence (`_ctm_tensor_c4v_reference_ad.py:66-76`, `_solve_linear_adjoint`
+  `:192-224`), so the C4v gradient fails under `torch.func` before returning →
+  tensor-predicate solver-select / validation outside the transformed backward, and
+  §10 exercises **both** the fallback and non-fallback C4v solves (§5.4).
