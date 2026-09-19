@@ -272,9 +272,10 @@ multidimensional parity case.
 assumed mechanical.** Each protocol entry's torch lowering is verified against the
 *jnp* semantics its call sites rely on, not against the same-spelled torch function —
 the two libraries diverge on argument meaning (`split` boundaries vs sizes), argument
-form (`take`/`vdot` rank), keyword names (jnp `axis` vs torch `dim` for
-`concatenate`/`stack`/`tensordot`), and layout (jnp `pad`'s per-axis `((lo,hi),…)` vs
-torch's flat, reverse-axis-ordered pad spec). Phase 0's op-parity test (§10) exercises
+form (`take`/`vdot` rank), keyword names — jnp `axis` → torch `dim` for
+`concatenate`/`stack`, but jnp `tensordot`'s `axes=` → torch's **`dims=` (plural)**, a
+*different* rename (`pess.py:136-139` passes `axes=` explicitly) — and layout (jnp
+`pad`'s per-axis `((lo,hi),…)` vs torch's flat, reverse-axis-ordered pad spec). Phase 0's op-parity test (§10) exercises
 each op against `jnp` on the shapes/dtypes/negative-index and multidimensional cases the
 call sites actually pass, so a divergence surfaces there rather than deep in a
 fixed-point or block-sparse run.
@@ -1203,7 +1204,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (27 rounds) and a
+The specific requirements above were hardened across a Codex review (28 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1390,3 +1391,7 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   `_ctm_root_implicit_multisite.py:734/741/750` (env tensors), and the §5.6 L-BFGS
   curvature pairs — so `B.vdot` lowers to `torch.vdot(a.reshape(-1), b.reshape(-1))`
   (bare `torch.vdot` would raise on the root-implicit paths), with a multidim parity case.
+- **R28** — **P2**, corrected my own generalizing note: `tensordot`'s rename is *not*
+  `axis`→`dim`. `jnp.tensordot` takes `axes=` (`pess.py:136-139` passes it explicitly)
+  and `torch.tensordot` takes **`dims=` (plural)**, distinct from the `axis`→`dim` rename
+  that `concatenate`/`stack` share; the op-parity test must exercise the keyword form.
