@@ -209,7 +209,14 @@ that blast radius and make the migration safe to land incrementally:
   `.at[`, `.astype(`, `.size`, `.copy(`, multi-arg `.transpose(`, negative-step
   `[::-1]` (§4.3). This both prevents a *half-migrated* state
   where a not-yet-ported file calls raw `jnp` (or a JAX-only tensor method) on a
-  torch tensor, and defines "migrated" mechanically.
+  torch tensor, and defines "migrated" mechanically. **The gate is staged with the
+  migration, not repo-wide from Phase 0**: Phase 0 migrates only `core/tensor.py` +
+  `linalg.py`, while dozens of algorithm/contraction modules still call raw `jnp`/
+  `lax` and are not genuinely JAX-only — so a repo-wide gate in the Phase-0 PR could
+  not coexist with a green suite. The gate therefore runs against an **explicit
+  allow-list of not-yet-migrated files that shrinks each phase and is empty by the
+  final phase** (plus the handful of permanently JAX-only modules); "migrated" for a
+  module means it has left that list.
 - **Opt-out**: the whole effort is behind `set_backend`; reverting to raw `jnp` is a
   one-line default, and any phase can be shipped with the torch path dormant.
 
@@ -470,8 +477,9 @@ inputs.
 
 **But the convention must be reconciled at exactly ONE layer — and the codebase
 already has one.** `_ipeps_optimize_shared.py:265` applies
-`_euclidean_grads(grads) = jax.tree.map(jnp.conj, grads)` at **6** gradient-production
-sites (`ipeps_optimize.py:1006/1762/2188/…`, `ipeps_optimize_root_implicit.py:540`) —
+`_euclidean_grads(grads) = jax.tree.map(jnp.conj, grads)` at **8** gradient-production
+sites (7 in `ipeps_optimize.py`, plus `ipeps_optimize_root_implicit.py:540`; see the
+count note below) —
 the #957 fix, because a JAX cotangent is `g = conj(∇E)` and steepest descent is
 `-conj(g)`; forgetting it made the optimizer **ascend** the imaginary coordinates.
 With §5.3's boundary conjugation, the torch end-to-end gradient handed to
@@ -480,6 +488,26 @@ is then kept on the torch path, it **double-conjugates back to `conj(∇E)` and
 reproduces #957 on torch.** So `_euclidean_grads` must be **convention-guarded**:
 identity under torch, `jnp.conj` under JAX. This is the single most subtle correctness
 item in the port.
+
+**The reconciliation must cover *every* optimizer/line-search gradient handoff — and
+PESS has one that lacks `_euclidean_grads`.** The guard is "the optimizer sees the
+same gradient object on both backends," so it applies wherever a raw `value_and_grad`
+result is consumed, not only at the `_euclidean_grads` call sites. The **PESS**
+optimizers do **not** apply `_euclidean_grads` at all: they feed the raw grad straight
+into a Hermitian line-search slope `_tree_real_dot(grad, direction) = Re Σ conj(g)·d`
+(`pess_optimize.py:297/340/354`) and an `-grad` descent fallback. In JAX that is
+self-consistent (`g = conj(∇E)`), but with §5.3's boundary conjugation
+`g_torch = conj(g_jax)`, `_tree_real_dot` conjugates its first argument, so the torch
+slope becomes `Re Σ conj(∇E)·d` where JAX had `Re Σ ∇E·d` — the line-search Wolfe/
+Armijo test diverges and the complex-PESS update drifts from JAX, even though the
+solvers agree. So the convention guard must include the PESS grad-consumption sites
+(un-conjugate to JAX convention before `_tree_real_dot`, or convention-guard
+`_tree_real_dot` itself), and the §10.4 complex-parameter PESS step must actually
+exercise it — a real-parameter PESS case is a `conj` no-op and would hide this.
+(Count note: `_euclidean_grads` appears at **7** `ipeps_optimize.py` sites —
+`1006/1762/2188/3340/3850/4575/4939` — plus `ipeps_optimize_root_implicit.py:540`,
+not the "6" an earlier draft stated; PESS is a **separate** convention regime, not one
+of them.)
 
 **Parity test.** Comparing raw `jax.grad` vs `torch.func.grad` is invalid — a correct
 wrapper leaves them conjugated relative to each other. Compare **directional
@@ -1021,7 +1049,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (16 rounds) and a
+The specific requirements above were hardened across a Codex review (17 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1117,3 +1145,11 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   allocation guard for "active-trace-only" was an over-correction (a live JAX tensor
   can't be reinterpreted by `TorchBackend`), so §4.1's allocation guard is preserved
   and generation bumps apply only to wrappers built-before-first-invocation (§7).
+- **R17** — **PESS breaks the "reconcile at one layer" rule**: unlike the 8
+  `_euclidean_grads` sites, the PESS optimizers feed the raw grad into a Hermitian
+  line-search slope `_tree_real_dot` (`pess_optimize.py:297/340/354`) with no
+  convention conversion, so under the §5.3 boundary conjugation the complex-PESS
+  slope diverges from JAX; the convention guard must cover the PESS grad sites and the
+  §10.4 complex-PESS step must exercise it (§5.3). **P2:** the seam gate is **staged
+  with a shrinking allow-list**, not repo-wide from Phase 0 (which migrates only
+  `core/tensor.py` + `linalg.py`) — §4.1.
