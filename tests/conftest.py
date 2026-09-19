@@ -618,66 +618,84 @@ _FILE_MARKERS = {
     "test_ipeps_config_stall_recovery_retries.py": "core",
     "test_make_neighbors.py": "core",
     "test_tuning_registry.py": "core",
+    # ---------------------------------------------------------------- #
+    # #805 drain: the last _UNBUCKETED_LEGACY files, bucketed by        #
+    # measured CI/local runtime (durations in comments are the max      #
+    # observed across the 3.11/3.12/macOS jobs, or a local CPU time).   #
+    # core = cheap and a wrong-number/correctness guard; slow = >150s   #
+    # (no self-declared slow marks, so the whole file goes to the slow  #
+    # bucket); algorithm = everything else (runs on push-to-main and    #
+    # the nightly, never silent). This empties the legacy list.         #
+    # (test_ipeps_ad_adjoint_methods.py was drained separately by #982.)#
+    # ---------------------------------------------------------------- #
+    # core: cheap correctness guards (all measured under 8s)
+    "test_ctm_honeycomb_env.py": "core",  # 0.2s / 7
+    "test_ctm_honeycomb_safeguards.py": "core",  # 0.9s / 5
+    "test_ctm_honeycomb_energy.py": "core",  # 2.5s / 14
+    "test_ctm_honeycomb_moves.py": "core",  # 3.3s / 10
+    "test_ctm_honeycomb_forward.py": "core",  # 5.6s / 7
+    "test_pess_local_energy.py": "core",  # 5.8s / 2
+    "test_ctm_honeycomb_projector.py": "core",  # 7.9s / 10
+    # slow: >150s with no self-declared slow marks, so the whole file
+    # runs only in the slow bucket rather than bloating fast-other (#960).
+    "test_split_ctm_chi_frozen_726.py": "slow",  # 164s / 9
+    "test_ctm_670_symmetric_2x2.py": "slow",  # 267s / 2
+    "test_ctm_700_env_collapse.py": "slow",  # >900s local CPU / 5
+    "test_pess_3site_multisite_rdm_invariants.py": "slow",  # 375s / 7
+    # algorithm: moderate cost; runs push-to-main + nightly.
+    "test_ctm_honeycomb_ad.py": "algorithm",  # 15.2s / 2
+    "test_ctm_honeycomb_convergence.py": "algorithm",
+    "test_ctm_honeycomb_cross_path.py": "algorithm",  # has a slow-marked case
+    "test_ctm_honeycomb_init.py": "algorithm",
+    "test_block_sparse_ctm_ad.py": "algorithm",  # 18.5s / 2
+    "test_c4v_reference_ad.py": "algorithm",  # 35.7s / 19
+    "test_coarse_grain.py": "algorithm",  # 126s / 26
+    "test_ctm_2x2_projector_symmetric.py": "algorithm",  # 29s / 25
+    "test_ctm_674_fermionic_fused.py": "algorithm",  # 85s / 2
+    "test_ctm_chi_ramp.py": "algorithm",
+    "test_ctm_direction_dependent_bonds.py": "algorithm",
+    "test_ctm_energy_implicit_chi_bump.py": "algorithm",  # 61s / 4
+    "test_ctm_in_loop_chi_bump.py": "algorithm",  # 37.5s / 18
+    "test_ctm_loop_core.py": "algorithm",
+    "test_ctm_projector.py": "algorithm",  # 22.4s / 7
+    "test_ctm_sharding_backward.py": "algorithm",
+    "test_hotrg_sharding.py": "algorithm",  # 13s / 2
+    "test_ipeps_ad_conv_criterion.py": "algorithm",  # 27.3s / 15
+    "test_ipeps_ad_f3_fused_bwd.py": "algorithm",  # 18.5s / 3
+    "test_ipeps_ad_history.py": "algorithm",
+    "test_ipeps_checkpoint_resume.py": "algorithm",  # 134s / 6
+    "test_ipeps_u1sz.py": "algorithm",  # has a slow-marked case
+    "test_metric_precond.py": "algorithm",  # 59s / 9
+    "test_profiler_u1sz_arm.py": "algorithm",
+    "test_reduced_corner_qr.py": "algorithm",
+    "test_split_ctm_energy_gauge.py": "algorithm",
+    "test_sublattice_rotation.py": "algorithm",  # 89s / 24
+    "test_varipeps_compare.py": "algorithm",  # external compare, skips if absent
+    "test_varipeps_compare_su.py": "algorithm",  # external compare
     # #827/#824: the adjoint-method (fixed_point vs gmres) equivalence tests.
-    # Drained from ``_UNBUCKETED_LEGACY`` -- this file running in no gating
-    # job is how its energy assertion sat red on one platform for a month
-    # (#803, then #827).  Both tests already carry an explicit
+    # Drained from ``_UNBUCKETED_LEGACY`` by #982 -- this file running in no
+    # gating job is how its energy assertion sat red on one platform for a
+    # month (#803, then #827).  Both tests already carry an explicit
     # ``@pytest.mark.algorithm``, so the required ``-m core`` gate is
     # unchanged; this entry makes the bucket reviewed rather than accidental.
     # Cost: two D=2 chi=8 CTM gradient evaluations to conv_tol=1e-10 plus two
     # 1-step optimizations (~40s CPU).
     "test_ipeps_ad_adjoint_methods.py": "algorithm",
+    # #899: the returned-energy-is-fresh guard.  ``core``: it is the
+    # regression test for a wrong number coming out of ``optimize_gs_ad``,
+    # which is exactly what should gate a merge, and it is cheap -- D=2
+    # chi=6, 4 L-BFGS steps with a line search, 21.6s CPU for the file.
+    "test_ipeps_final_energy_is_fresh_899.py": "core",
 }
 
 
 # ------------------------------------------------------------------ #
 # Frozen debt: test files that predate the bucket guard.              #
 # See tests/test_bucket_registry.py and issue #805.                    #
-# This list may SHRINK, never grow.                                    #
+# This list may SHRINK, never grow. Fully drained (#805).             #
 # ------------------------------------------------------------------ #
 
-_UNBUCKETED_LEGACY = {
-    "test_block_sparse_ctm_ad.py",
-    "test_c4v_reference_ad.py",
-    "test_coarse_grain.py",
-    "test_ctm_2x2_projector_symmetric.py",
-    "test_ctm_670_symmetric_2x2.py",
-    "test_ctm_674_fermionic_fused.py",
-    "test_ctm_700_env_collapse.py",
-    "test_ctm_chi_ramp.py",
-    "test_ctm_direction_dependent_bonds.py",
-    "test_ctm_energy_implicit_chi_bump.py",
-    "test_ctm_honeycomb_ad.py",
-    "test_ctm_honeycomb_convergence.py",
-    "test_ctm_honeycomb_cross_path.py",
-    "test_ctm_honeycomb_energy.py",
-    "test_ctm_honeycomb_env.py",
-    "test_ctm_honeycomb_forward.py",
-    "test_ctm_honeycomb_init.py",
-    "test_ctm_honeycomb_moves.py",
-    "test_ctm_honeycomb_projector.py",
-    "test_ctm_honeycomb_safeguards.py",
-    "test_ctm_in_loop_chi_bump.py",
-    "test_ctm_loop_core.py",
-    "test_ctm_projector.py",
-    "test_ctm_sharding_backward.py",
-    "test_hotrg_sharding.py",
-    "test_ipeps_ad_conv_criterion.py",
-    "test_ipeps_ad_f3_fused_bwd.py",
-    "test_ipeps_ad_history.py",
-    "test_ipeps_checkpoint_resume.py",
-    "test_ipeps_u1sz.py",
-    "test_metric_precond.py",
-    "test_pess_3site_multisite_rdm_invariants.py",
-    "test_pess_local_energy.py",
-    "test_profiler_u1sz_arm.py",
-    "test_reduced_corner_qr.py",
-    "test_split_ctm_chi_frozen_726.py",
-    "test_split_ctm_energy_gauge.py",
-    "test_sublattice_rotation.py",
-    "test_varipeps_compare.py",
-    "test_varipeps_compare_su.py",
-}
+_UNBUCKETED_LEGACY: set[str] = set()
 
 
 def pytest_collection_modifyitems(items):
