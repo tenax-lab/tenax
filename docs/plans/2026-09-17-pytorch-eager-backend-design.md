@@ -206,8 +206,8 @@ that blast radius and make the migration safe to land incrementally:
 - **A CI grep-gate enforces the seam boundary**: no `import jax.numpy` / bare `jnp.`
   / `lax.` outside `src/tenax/backend/` (allow-list the few genuinely JAX-only
   modules), and no bare backend-array **method** calls or indexing torch lacks —
-  `.at[`, `.astype(`, `.size`, `.copy(`, multi-arg `.transpose(`, negative-step
-  `[::-1]` (§4.3). This both prevents a *half-migrated* state
+  `.at[`, `.astype(`, `.size`, `.copy(`, any permutation `.transpose(` (comma-list,
+  tuple, or variable — not the 2-int torch form), negative-step `[::-1]` (§4.3). This both prevents a *half-migrated* state
   where a not-yet-ported file calls raw `jnp` (or a JAX-only tensor method) on a
   torch tensor, and defines "migrated" mechanically. **The gate is staged with the
   migration, not repo-wide from Phase 0**: Phase 0 migrates only `core/tensor.py` +
@@ -275,12 +275,20 @@ torch tensors do not match, and none are caught by a `jnp`/`lax`-token gate:
   method to `0` and even basic block-sparse **dtype access** breaks. Maps to `numel()`.
 - **`.copy()`** — the adjoint solve uses `grad.copy()` (`_metric_precond.py:231`) and
   `H[:j+2, j].copy()` (`_gmres_eager.py:189`); torch has no `.copy()`, only `.clone()`.
-- **`.transpose(...)` with a full permutation** — `theta.transpose(0,3,1,4,2,5)`
-  (`pess.py:110`) and `T4g.transpose(0,1,4,2,3)` (`ipeps_ctm_moves.py:147`) — **33
-  multi-arg calls** across those two files. `jnp`/`np` `.transpose(*perm)` takes an
-  arbitrary permutation; torch's `Tensor.transpose(d0,d1)` swaps **exactly two** dims,
-  and the permutation spelling is `.permute(*dims)`. So a verbatim port silently
-  mis-permutes or errors. Maps to `B.transpose`/`permute`.
+- **`.transpose(...)` with a full permutation — in *both* the comma and tuple/variable
+  forms.** `jnp`/`np` `.transpose` takes an arbitrary permutation as either
+  comma-separated ints — `theta.transpose(0,3,1,4,2,5)` (`pess.py:110`),
+  `T4g.transpose(0,1,4,2,3)` (`ipeps_ctm_moves.py:147`) — **or a single tuple/variable**
+  — `block.transpose(decomp_perm)` (`linalg.py:56`), `U.transpose((0,1,2,4,3))`
+  (`ipeps_simple_update.py:459/464/577`), `top_T.transpose(top_axes)`
+  (`_ctm_tensor_projector_2x2.py:435/453/473/492`), `a_t.transpose(perm)`
+  (`_ctm_root_implicit_multisite.py:1131`), `inter.transpose(perm)`
+  (`_ctm_honeycomb_moves.py:109`). Torch's `Tensor.transpose(d0,d1)` swaps **exactly
+  two** dims (permutation is `.permute(*dims)`), so **every** permutation form breaks —
+  and the tuple/variable spelling is the *more* common one, which a "multi-arg only"
+  gate would miss. So the gate flags **any `.transpose(` whose argument is not exactly
+  two ints** (comma-list, tuple literal, or a variable), rewritten to `B.transpose`/
+  `permute`.
 
 So the seam exposes portable equivalents (`B.astype`/`.to`, `B.size`→`numel`,
 `B.copy`→`clone`, `B.transpose`→`permute`), the migration **audits and rewrites**
@@ -900,6 +908,16 @@ the oracle.
 Acceptance = a **cross-backend parity suite** (correctness) **plus an AD-wall
 benchmark** (the §2 driver — item 7):
 
+**Harness: one backend per process.** Every parity leg computes the JAX result and the
+torch result on identical inputs — but the JAX leg allocates tensors, and §4.1's
+allocation guard refuses a `set_backend` switch once any tensor exists, so the
+natural parametrized `for backend in (jax, torch)` in a single pytest process would
+throw at the guard before the torch assertion. So each backend runs in its **own
+subprocess/worker** (e.g. a `subprocess`-per-backend fixture or `pytest-forked`),
+comparing **serialized/host-materialized** results across the boundary — not two
+`set_backend` calls in one interpreter. This applies to the op, gradient, algorithm,
+and optimizer legs alike, and to the §10.7 benchmark's cold-cache leg.
+
 1. **Op parity** — each `ArrayOps` method + block-sparse op (contract, permute,
    fuse/split), identical inputs both backends, `allclose` (f64/c128). **For SVD/QR/eigh,
    compare gauge-invariants, not raw factors** — `U`/`V` columns, `R` diagonal signs,
@@ -979,6 +997,14 @@ benchmark** (the §2 driver — item 7):
    the one-time compile cost and be competitive per-step at the D/χ where the wall
    bites. This is a **benchmark artifact** (not a pass/fail gate — hardware-dependent),
    but a required v1 deliverable so "we broke the wall" is measured, not asserted.
+   **The JAX cold leg must run in a fresh process with an empty, unique compilation
+   cache** — Tenax enables the **persistent** JAX compile cache on import
+   (`__init__.py:50-55`, `min_compile_time_secs=1`, default `~/.cache/jax`), so a rerun
+   after any prior compile would load the block-sparse VJP executable from disk and
+   falsely report the wall gone. So the harness spawns a subprocess with
+   `JAX_COMPILATION_CACHE_DIR` pointed at a fresh temp dir (or the cache disabled) for
+   the first-call measurement; a warm-cache leg may be reported *separately* but is not
+   the wall evidence.
 
 Bucketing: fast op/grad parity → `core`; algorithm/optimizer → `algorithm`/`slow`;
 GPU-gated skips without CUDA. Scatter-accumulated ops (`segment_sum`) use a **relaxed
@@ -1072,7 +1098,7 @@ through-torch-AD is ambitious but bounded.
 
 ## Appendix A — review provenance & internal-review deltas
 
-The specific requirements above were hardened across a Codex review (19 rounds) and a
+The specific requirements above were hardened across a Codex review (20 rounds) and a
 four-lens internal review (citation-verification, torch/AD audit, completeness sweep,
 design/consistency). Rather than tag each paragraph inline, the load-bearing findings
 are listed here.
@@ -1191,3 +1217,12 @@ primitive; `ArrayOps.top_k`/`one_hot`; live `B` proxy; tracer→predicate; host-
   for releases); **P2** `segment_sum` needs a runnable **deterministic sort-based
   fallback** under `use_deterministic_algorithms(True)` (`CUBLAS_WORKSPACE_CONFIG`
   covers cuBLAS, not scatter) — §8.
+- **R20** — `.transpose` audit was incomplete: the **tuple/variable** permutation form
+  `block.transpose(perm)` (`linalg.py:56`, `ipeps_simple_update.py:459/464/577`,
+  `_ctm_tensor_projector_2x2.py:435/453/473/492`, others) is *more* common than the
+  comma-literal form and a "multi-arg only" gate misses it — gate now flags any
+  non-2-int `.transpose(` (§4.3); the **AD-wall benchmark cold leg** must run in a
+  fresh process with an empty cache, because the persistent JAX compile cache
+  (`__init__.py:50-55`) would load the block-sparse VJP from disk and fake the wall
+  disappearing (§10.7); **P2** the parity suite runs **one backend per subprocess**
+  (the R16 allocation guard rejects a same-process JAX→torch switch) — §10.
