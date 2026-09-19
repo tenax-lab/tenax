@@ -128,6 +128,18 @@ _FILE_MARKERS = {
     # violation on public entry points, so they belong in the required gate.
     # Cheap (~8s): a 1x1 product state, no real convergence run.
     "test_ctm_min_iter_contract_925_976.py": "core",
+    # #879: the only PR-gate assertion on the fermionic CTM energy path.  Every
+    # other fermionic energy test is a finiteness/positivity/shape check, so
+    # ``compute_energy_split_ctm_tensor_2site`` could return any finite number --
+    # exactly how #878 hid (fpeps() returned 0 for months, every isfinite passed).
+    # This pins it to the analytic -V/site on a fully-polarised CDW and asserts
+    # the RDMs are PSD (the #854 gate).  DELIBERATELY ``core`` despite being the
+    # slowest core test (~50-87s, fermionic block-sparse compile #565/#566, no
+    # cheaper route -- charge conservation forbids a hand-built product state):
+    # the whole point of #879 is that a fermionic-energy regression must not be
+    # able to merge unseen, which only the required gate prevents.  If the gate
+    # budget forces a demotion, the fallback is the ``algorithm`` bucket.
+    "test_fermionic_ctm_energy_anchor_879.py": "core",
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
