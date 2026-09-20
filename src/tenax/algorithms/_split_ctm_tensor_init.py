@@ -361,6 +361,22 @@ def _init_symmetric_edge_bra(
 
 # Edge specs: (label_first, label_D, label_last, flow_first, flow_D, flow_last,
 #              ref_axis_chi, ref_axis_D)
+#
+# ``ref_axis_chi`` must name the SAME axis of ``A`` that the corner on the other
+# end of that chi bond uses (``_CORNER_SPECS``).  Both ends are seeded by tiling
+# one of A's virtual legs with :func:`_derive_charges`, so if they tile
+# *different* legs the seam is contractible only while those legs happen to
+# carry the same charge layout.  A uniform iPEPS satisfies that by accident; a
+# state whose horizontal and vertical bonds differ does not, and the 2x2
+# plaquette projector dies in ``_build_enlarged_corner`` with a shape error
+# (#1024).  Such states are not exotic -- they are what simple update produces
+# once the truncation may discover the bond charges instead of being pinned to
+# the initial guess (#878).
+#
+# The fused table ``_ctm_tensor_init._STD_EDGE_SPECS`` states and satisfies the
+# same rule, annotating each chi leg with the corner it meets; this table had
+# drifted from it on the four horizontal seams.  Corner reference axes are
+# C1=d(1), C2=u(0), C3=d(1), C4=u(0).
 _EDGE_KET_SPECS = {
     "T1": (
         "t1k_l",
@@ -369,9 +385,9 @@ _EDGE_KET_SPECS = {
         FlowDirection.IN,
         FlowDirection.IN,
         FlowDirection.OUT,
-        3,
+        1,
         0,
-    ),  # ref=r(3), D=u(0); D-flow opposite to A's u(OUT)
+    ),  # t1k_l meets C1.c1_r (C1 ref=d(1)); D=u(0), flow opposite A's u(OUT)
     "T2": (
         "t2k_u",
         "r_ket",
@@ -389,9 +405,9 @@ _EDGE_KET_SPECS = {
         FlowDirection.OUT,
         FlowDirection.OUT,
         FlowDirection.IN,
-        3,
+        0,
         1,
-    ),  # ref=r(3), D=d(1); D-flow opposite to A's d(IN)
+    ),  # t3k_r meets C4.c4_r (C4 ref=u(0)); D=d(1), flow opposite A's d(IN)
     "T4": (
         "t4k_d",
         "l_ket",
@@ -412,9 +428,9 @@ _EDGE_BRA_SPECS = {
         FlowDirection.IN,
         FlowDirection.OUT,
         FlowDirection.IN,
-        3,
         0,
-    ),  # D-flow opposite to A.bar()'s u(IN)
+        0,
+    ),  # t1b_r meets C2.c2_l (C2 ref=u(0)); D-flow opposite A.bar()'s u(IN)
     "T2": (
         "t2b_I",
         "r_bra",
@@ -432,9 +448,9 @@ _EDGE_BRA_SPECS = {
         FlowDirection.OUT,
         FlowDirection.IN,
         FlowDirection.OUT,
-        3,
         1,
-    ),  # D-flow opposite to A.bar()'s d(OUT)
+        1,
+    ),  # t3b_l meets C3.c3_l (C3 ref=d(1)); D-flow opposite A.bar()'s d(OUT)
     "T4": (
         "t4b_I",
         "l_bra",
