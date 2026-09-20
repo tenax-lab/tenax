@@ -485,8 +485,26 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
     # The base_charges pin is fermionic-only, so with it active the two
     # arms run DIFFERENT truncations (per-sector keep counts vs global
     # top-k) and their fidelities differ at the pin's expense, not the
-    # signs'.  Disable it so the arms are code-identical (SS5.1 already
-    # established the pin is a regularizer, not a structural need).
+    # signs'.  Disable it so the arms are code-identical.  That is the
+    # whole reason, and it is local to this comparison: this test drives
+    # one bond update per arm and never reaches a CTM or an AD trace, so
+    # nothing here depends on the bond layout holding still.
+    #
+    # It previously also cited "SS5.1 already established the pin is a
+    # regularizer, not a structural need".  **That claim is retracted.**
+    # Measured on the shipped ``fpeps()`` path (dt=0.05, 100 steps, 5
+    # seeds), the pin is not a weak regulariser that helps a little -- it
+    # is what drives the collapse:
+    #
+    #     V=0, pin ON    D=3 3/5 survive   D=4 3/5
+    #     V=0, pin OFF   D=3 5/5           D=4 5/5
+    #     V=2, pin ON    D=3 2/5           D=4 4/5
+    #
+    # Nor is "not a structural need" right in general: under a tracer the
+    # global SV sort cannot run at all (``linalg.py`` dispatches to a
+    # static per-sector allocation), and unpinning currently breaks the
+    # 2x2 split-CTM, which cannot contract a corner against an edge once
+    # the layout goes direction-dependent (#1024).  See #878.
     orig_pin = isu._truncation_base_charges
     isu._truncation_base_charges = lambda A, leg: None
     try:
