@@ -295,7 +295,7 @@ def test_chi_bump_fires_when_smin_above_threshold():
     from tenax.algorithms._ctm_energy_ad import _sigma_gauged_ctm_converge
 
     site_tensors = {(0, 0): _build_site_tensor()}
-    envs, chi_post = _sigma_gauged_ctm_converge(
+    envs, chi_post, _converged = _sigma_gauged_ctm_converge(
         site_tensors,
         SINGLE_SITE_NEIGHBORS,
         chi=4,
@@ -323,7 +323,7 @@ def test_chi_bump_does_not_fire_when_below_threshold():
     from tenax.algorithms._ctm_energy_ad import _sigma_gauged_ctm_converge
 
     site_tensors = {(0, 0): _build_site_tensor()}
-    envs, chi_post = _sigma_gauged_ctm_converge(
+    envs, chi_post, _converged = _sigma_gauged_ctm_converge(
         site_tensors,
         SINGLE_SITE_NEIGHBORS,
         chi=4,

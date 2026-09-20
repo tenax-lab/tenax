@@ -5,7 +5,9 @@ import pytest
 
 from tenax.algorithms.ipeps_config import CTMConfig
 
-pytestmark = pytest.mark.core
+# Bucket comes from ``_FILE_MARKERS`` in conftest, not from a module-level
+# ``pytestmark`` (#933): conftest *adds* its marker, so a module-level core
+# mark would override the per-test ``@pytest.mark.slow`` withholding below.
 
 
 def test_fuse_virtual_legs_defaults_true():
@@ -147,7 +149,10 @@ def _split_implicit_loss(D, seed=7, chi=None):
     return loss, A
 
 
-@pytest.mark.parametrize("D", [2, 3])
+@pytest.mark.parametrize(
+    "D",
+    [2, pytest.param(3, marks=pytest.mark.slow)],  # D=3 is 69s (#933)
+)
 def test_split_implicit_energy_finite(D):
     """ctm_energy_split_implicit returns a finite energy (forward correctness)."""
     loss, A = _split_implicit_loss(D)
@@ -155,7 +160,10 @@ def test_split_implicit_energy_finite(D):
     assert jnp.isfinite(e), f"energy is not finite: {e}"
 
 
-@pytest.mark.parametrize("D", [2, 3])
+@pytest.mark.parametrize(
+    "D",
+    [2, pytest.param(3, marks=pytest.mark.slow)],  # D=3 is 94s (#933)
+)
 def test_split_implicit_grad_finite(D):
     """ctm_energy_split_implicit returns a finite, non-zero gradient."""
     loss, A = _split_implicit_loss(D)
@@ -550,12 +558,17 @@ def test_optimize_gs_ad_split_returns_split_env():
 
 
 def test_optimize_gs_ad_fused_still_returns_fused_env():
-    """Regression: the default fused path is unchanged (returns CTMTensorEnv)."""
+    """Regression: the default fused path is unchanged (returns CTMTensorEnv).
+
+    ``gs_recipe="2x2"`` explicitly: the helper's ``"1x1"`` default is for the
+    split tests, and the fused path always ran 2x2 under that label anyway --
+    since #938 it refuses the mislabel instead.
+    """
     from tenax.algorithms._ctm_tensor import CTMTensorEnv
     from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 
     A, gate = _split_opt_inputs()
-    _, env, E = optimize_gs_ad(gate, A, _split_opt_config(fuse=True))
+    _, env, E = optimize_gs_ad(gate, A, _split_opt_config(fuse=True, gs_recipe="2x2"))
     assert isinstance(env, CTMTensorEnv)
     assert jnp.isfinite(E)
 

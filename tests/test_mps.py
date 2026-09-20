@@ -903,3 +903,152 @@ class TestSymmetricMPSNonzeroTargetCharge:
         # Target charge is recoverable from block structure
         sector = compute_mps_sector(list(mps.tensors))
         assert sector == 2
+
+
+class TestSetitemInvalidatesCaches945:
+    """__setitem__ must invalidate every cached bond spectrum (#945).
+
+    It cleared only ``orth_center``, so after a nonunitary local replacement
+    ``entanglement_entropy`` served the OLD state's Schmidt spectrum from the
+    ``singular_values`` cache.  All bonds must go, not just the neighbours:
+    projecting one site of a Bell pair changes the spectrum at the far cut.
+    """
+
+    def _bell_mps(self):
+        from tenax.algorithms.tdvp import _make_site_tensor
+        from tenax.core.mps import FiniteMPS
+
+        a = np.zeros((1, 2, 2))
+        a[0, 0, 0] = a[0, 1, 1] = 1.0 / np.sqrt(2.0)
+        b = np.zeros((2, 2, 1))
+        b[0, 0, 0] = b[1, 1, 0] = 1.0
+        return FiniteMPS.from_tensors(
+            [
+                _make_site_tensor(jnp.array(a), 0, 2),
+                _make_site_tensor(jnp.array(b), 1, 2),
+            ]
+        ).compute_singular_values()
+
+    def test_projecting_a_bell_pair_drops_the_cached_entropy(self):
+        mps = self._bell_mps()
+        np.testing.assert_allclose(mps.entanglement_entropy(0), np.log(2), atol=1e-12)
+        data = mps[0].todense().at[:, 1, :].set(0)
+        mps[0] = DenseTensor(data, mps[0].indices)
+        S = mps.entanglement_entropy(0)
+        assert abs(S) < 1e-12, (
+            f"entropy {S} served from a stale cache; the projected state is a "
+            f"product state (#945)"
+        )
+
+    def test_every_bond_is_invalidated_not_just_the_neighbours(self):
+        from tenax.algorithms.tdvp import _make_site_tensor
+        from tenax.core.mps import FiniteMPS
+
+        key = jax.random.PRNGKey(3)
+        arrs = [
+            jax.random.normal(k, s)
+            for k, s in zip(
+                jax.random.split(key, 4),
+                [(1, 2, 2), (2, 2, 2), (2, 2, 2), (2, 2, 1)],
+            )
+        ]
+        mps = FiniteMPS.from_tensors(
+            [_make_site_tensor(a, i, 4) for i, a in enumerate(arrs)]
+        ).compute_singular_values()
+        assert all(sv is not None for sv in mps.singular_values)
+        mps[3] = mps[3]  # replacement at the far right edge
+        assert all(sv is None for sv in mps.singular_values), (
+            "a site replacement must blank every cached bond spectrum, "
+            "including bonds far from the replaced site (#945)"
+        )
+
+    def test_entropy_recomputes_after_invalidation(self):
+        """The None path canonicalizes and recomputes -- not an error path."""
+        mps = self._bell_mps()
+        mps[0] = mps[0]  # same tensor: state unchanged, caches blanked
+        np.testing.assert_allclose(mps.entanglement_entropy(0), np.log(2), atol=1e-12)
+
+
+# --------------------------------------------------------------------------- #
+# #997/#998: canonicalization preserves a fermionic state                      #
+# --------------------------------------------------------------------------- #
+
+
+class TestFermionicCanonicalize:
+    """#998 review round 1 (Codex P1, verified by reproduction): with the
+    QR matricization sign deleted (#997), the right-to-left sweep's
+    bond-to-front reorder of ``Q`` must be ``permute_legs`` -- the graded
+    ``transpose`` it used previously was correct only because the deleted
+    matricization sign canceled it, and with one half of that pair gone a
+    two-site FermionParity canonicalization negated every odd-odd sector
+    amplitude (measured: per-element ratio exactly -1, state error 2.0).
+    """
+
+    def _fermionic_mps(self, L=3, chi=2):
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import FermionParity
+
+        fp = FermionParity()
+        bond = np.array([0, 1], dtype=np.int32)[:chi]
+        phys = np.array([0, 1], dtype=np.int32)
+        dummy = np.zeros(1, dtype=np.int32)
+        key = jax.random.PRNGKey(7)
+        tensors = []
+        for i in range(L):
+            lch = dummy if i == 0 else bond
+            rch = dummy if i == L - 1 else bond
+            idx = (
+                TensorIndex.from_charges(
+                    fp, lch, FlowDirection.IN, label=f"v{i - 1}_{i}"
+                ),
+                TensorIndex.from_charges(fp, phys, FlowDirection.IN, label=f"p{i}"),
+                TensorIndex.from_charges(
+                    fp, rch, FlowDirection.OUT, label=f"v{i}_{i + 1}"
+                ),
+            )
+            key, sub = jax.random.split(key)
+            tensors.append(SymmetricTensor.random_normal(idx, sub))
+        return tensors
+
+    def _dense_state(self, mps):
+        from tenax.contraction.contractor import contract
+
+        acc = mps.tensors[0]
+        for t in mps.tensors[1:]:
+            acc = contract(acc, t)
+        d = np.asarray(acc.todense())
+        order = tuple(acc.labels().index(f"p{i}") for i in range(len(mps.tensors)))
+        extra = tuple(
+            i for i, lab in enumerate(acc.labels()) if not lab.startswith("p")
+        )
+        d = np.transpose(d, order + extra).reshape([2] * len(mps.tensors) + [-1])
+        return np.exp(mps.log_norm) * d[..., 0] if d.shape[-1] == 1 else d
+
+    def test_canonicalize_preserves_the_state(self):
+        from tenax.core.mps import FiniteMPS
+
+        tensors = self._fermionic_mps()
+        # Regime: a realized block must carry two odd charges, or no reorder
+        # in the sweep can braid and the test asserts nothing.
+        fp = tensors[0].indices[0].symmetry
+        assert any(
+            sum(int(fp.parity(np.array([q]))[0]) for q in k) >= 2
+            for t in tensors
+            for k in t.blocks
+        ), "fixture out of regime: no realized odd-odd block anywhere"
+
+        mps = FiniteMPS.from_tensors(tensors)
+        before = self._dense_state(mps)
+        assert np.linalg.norm(before) > 1e-6
+
+        for center in (0, len(tensors) - 1, 1):
+            canon = mps.canonicalize(center)
+            after = self._dense_state(canon)
+            np.testing.assert_allclose(
+                after,
+                before,
+                atol=1e-10,
+                err_msg=f"canonicalize(center={center}) changed a fermionic "
+                "state (#998: bookkeeping reorders of QR/SVD factors must "
+                "be sign-free once the matricization is)",
+            )

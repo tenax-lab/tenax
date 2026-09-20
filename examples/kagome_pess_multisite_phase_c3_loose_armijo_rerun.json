@@ -1,0 +1,27 @@
+{
+ "D": 4,
+ "chi": 16,
+ "ad_iter": 30,
+ "seed": 0,
+ "loose_max_iter": 30,
+ "loose_conv_tol": 1e-07,
+ "tight_max_iter": 300,
+ "tight_conv_tol": 1e-12,
+ "e_su_loose": -0.22540003330846212,
+ "e_ad_loose": -0.3775626283958066,
+ "e_ad_tight": -0.3763929812452422,
+ "delta_loose_to_tight": 0.0011696471505644457,
+ "liao_asymptotic": -0.43752,
+ "delta_tight_to_liao": 0.061127018754757845,
+ "wall_seconds_su": 3.2471928680315614,
+ "wall_seconds_ad": 2602.1472904509865,
+ "wall_seconds_tight": 65.73049661284313,
+ "line_search_method": "armijo",
+ "provenance": {
+  "run_date": "2026-09-13",
+  "main_commit": "9bf90f8",
+  "script": "kagome_pess_multisite_phase_c3_tight_ctm_probe.py with line_search_method='armijo' pinned",
+  "purpose": "Final cell of the #985 protocol matrix (Codex round 3): loose CTM (30/1e-7) + Armijo -- the most plausible reconstruction of the exact May configuration -- on current main, same seed and deterministic SU state as every other control.",
+  "verdict": "NO breach: e_ad_loose=-0.37756, tight re-eval -0.37639, floor -0.43752 (delta +6.11e-2). With this cell the matrix is complete: tight-HZ -0.37057, tight-Armijo -0.39113, loose-HZ -0.37342, loose-Armijo -0.37756 -- every protocol/line-search combination clears the floor on current main, while May code breached at -0.44476 under the loose protocol. Attribution to the post-May CTM fixes holds under either line-search assumption for the May run."
+ }
+}

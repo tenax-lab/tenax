@@ -20,6 +20,9 @@ Output: JSON list of ``{"delta", "E_per_site", "Sz_avg"}``.
 
 Usage:
     python examples/kagome_spin1_xxz_anisotropy_sweep.py
+
+
+Note (#1002): re-pointed at the exact blocking (kagome_xxz_pess_cg_gates_exact + loss_builder='exact'). Numbers produced by this script before that change came through the Convention-C probe, whose collapsed rank-1 CTM readout is backend-dependent and not the kagome energy — discard them.
 """
 
 from __future__ import annotations
@@ -126,7 +129,12 @@ def run_anisotropy_sweep(
         )
         t0 = time.perf_counter()
         state, e_ad = optimize_pess_ad(
-            state, cg_gates, config, max_iter=max_iter, verbose=verbose
+            state,
+            cg_gates,
+            config,
+            max_iter=max_iter,
+            verbose=verbose,
+            loss_builder="exact",
         )
         dt = time.perf_counter() - t0
         sz = _ipess_per_site_sz(state)

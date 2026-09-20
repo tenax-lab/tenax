@@ -170,3 +170,413 @@ def test_ctm_energy_explicit_chi_max_required_when_bump_enabled():
             ctmrg_heuristic_increase_chi=True,
             chi_max=None,
         )
+
+
+# ---------------------------------------------------------------------------
+# #841 honesty guard: the implicit-AD forward must not silently hand the
+# backward a non-stationary environment.
+#
+# The implicit fixed-point backward linearizes gauge_fix(step(.)) around the
+# environment the forward returns; its premise is env* = gauge_fix(step(env*)).
+# Before the guard, `_sigma_gauged_ctm_converge` discarded the loop's
+# convergence flag, and neither conv_method could certify the premise anyway:
+# 'sv' certifies singular-value spectra only, and 'elementwise' can exit on a
+# coincidental dip of a residual-gauge (Z2^chi bond-sign) limit cycle -- the
+# consecutive-sweep diff touches 1e-13 on a sweep where the sign pattern
+# happens to realign, then jumps back to O(0.3) on the very next sweep
+# (measured on a D=2 SU state at chi=4: dips at sweeps 3, 5, 9, 17 of an
+# otherwise flat 3.3e-01 plateau).  The guard measures the LITERAL residual
+# ||gauge_fix(step(env*)) - env*|| with one extra gauged sweep and warns when
+# it exceeds max(100*conv_tol, 1e-8).
+# ---------------------------------------------------------------------------
+
+
+def _normed_random_d2_site(seed: int = 0):
+    """Deterministic normalized D=2 site tensor (trivial U(1) charges)."""
+    site = _make_minimal_site_tensors_for_validation(seed)[(0, 0)]
+    data = site.todense()
+    return _wrap_as_dense_tensor(data / jnp.linalg.norm(data))
+
+
+def test_forward_nonstationary_warns_when_starved():
+    """A max_iter-starved forward must warn instead of silently returning.
+
+    max_iter=6 on a state that needs ~40 sweeps at chi=4: the loop exits
+    non-converged with a stationarity residual of O(0.6), far above the
+    max(100*conv_tol, 1e-8) threshold.  Before #841's guard this outcome
+    was discarded at the `_sigma_gauged_ctm_converge` call site and the
+    backward would linearize around the non-stationary environment with
+    no diagnostic at all.
+    """
+    site = _normed_random_d2_site()
+    gate = heisenberg_gate()
+
+    with pytest.warns(RuntimeWarning, match="stationarity residual"):
+        ctm_energy_implicit(
+            {(0, 0): site},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+            max_iter=6,
+            min_iter=2,
+            conv_tol=1e-9,
+            conv_method="elementwise",
+        )
+
+
+def test_forward_stationary_does_not_warn():
+    """A truly stationary forward fixed point must NOT trigger the guard.
+
+    recipe="1x1" is the one configuration measured to reach a literally
+    stationary environment (the #841 campaign\'s control: its implicit
+    gradient has slope_fd/|g| = 1.0000 on the very state where 2x2 gives
+    0.13).  On the random D=2 fixture it converges element-wise at sweep
+    ~79 and the residual keeps SHRINKING over further sweeps (7.7e-10 ->
+    3.1e-10 over five extra sweeps, measured) -- a stable fixed point,
+    not a coincidence dip.  The guard must stay quiet here; this pins it
+    to the literal residual rather than to "2x2 always warns".
+
+    (The 1x1 recipe is deprecated (#911) because its fixed point is a
+    rank-collapsed environment -- stationary but physically wrong for
+    D > 1.  That makes it unfit for production and exactly fit for this
+    control: stationarity is the property under test, not energy
+    quality.  Its deprecation UserWarning is swallowed by the recorder.)
+    """
+    import warnings as _warnings
+
+    site = _normed_random_d2_site()
+    gate = heisenberg_gate()
+
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        ctm_energy_implicit(
+            {(0, 0): site},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+            max_iter=120,
+            conv_tol=1e-9,
+            conv_method="elementwise",
+            recipe="1x1",
+        )
+    # Match the guard's distinctive phrase, not bare "stationar": the 1x1
+    # deprecation text (#911) itself contains "no environment is stationary".
+    stationarity_warnings = [
+        w for w in caught if "stationarity residual" in str(w.message).lower()
+    ]
+    assert not stationarity_warnings, (
+        f"Guard fired on a stationary fixed point: {stationarity_warnings}"
+    )
+
+
+@pytest.mark.slow
+def test_sv_convergence_does_not_certify_elementwise_premise():
+    """#841 signature: 'sv' reports converged while the premise fails.
+
+    On a D=3 SU-relaxed state at chi=9, conv_method='sv' crosses its
+    tolerance in ~11 sweeps (the corner spectra genuinely converge), but
+    the literal stationarity residual stays at O(0.5): the phase gauge
+    leaves Z2^chi bond signs and near-degenerate multiplet rotations
+    unpinned, so the environment never reaches an element-wise fixed
+    point.  This is exactly the configuration in which issue #841
+    measured slope_fd/|g| = 0.13: the forward reports success, the
+    backward premise is violated, and before the guard nothing warned.
+    """
+    import warnings as _warnings
+
+    from tenax.algorithms._ctm_energy_ad import get_last_implicit_ad_diagnostics
+    from tenax.algorithms.ipeps import ipeps
+    from tenax.algorithms.ipeps_config import iPEPSConfig
+
+    gate = heisenberg_gate()
+    config = iPEPSConfig(max_bond_dim=3, num_imaginary_steps=30, dt=0.05)
+    with _warnings.catch_warnings():
+        # ipeps()'s own #839 CTM warning is not under test here.
+        _warnings.simplefilter("ignore")
+        _, (A_su, _), _ = ipeps(gate, None, config)
+    data = A_su.todense()
+    site = _wrap_as_dense_tensor(data / jnp.linalg.norm(data))
+
+    with pytest.warns(RuntimeWarning, match="stationarity residual"):
+        ctm_energy_implicit(
+            {(0, 0): site},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=9,
+            max_iter=25,
+            conv_tol=1e-5,
+            conv_method="sv",
+        )
+
+    diag = get_last_implicit_ad_diagnostics()
+    # The loop itself must have reported success -- that is the point:
+    # 'sv' certifies converged spectra while the element-wise premise fails.
+    assert diag["forward_converged"] is True
+    assert diag["forward_stationarity_residual"] > 0.1
+
+
+# ---------------------------------------------------------------------------
+# #798: the 2x2 sweep writes corners in reversed axis order; the sigma-gauge
+# path read them positionally, so every corner got a gauge transform applied
+# to the wrong bond.  The pairing that matters (verified bond connectivity in
+# _ctm_tensor_energy.py):
+#     C1: c1_d <-> T4 (s4),  c1_r <-> T1 (s1)
+#     C2: c2_l <-> T1 (s1),  c2_d <-> T2 (s2)
+#     C3: c3_u <-> T2 (s2),  c3_l <-> T3 (s3)
+#     C4: c4_u <-> T3 (s3),  c4_r <-> T4 (s4)
+# The positional read paired C1-C3 wrongly on the 2x2 layout (all four
+# corners leave a 2x2 sweep axis-reversed) and C4 wrongly on the canonical
+# layout (its storage order (c4_r, c4_u) is reversed relative to the ring
+# order the sigma calls assume).  Label-based application fixes both.
+# ---------------------------------------------------------------------------
+
+
+def test_sigma_gauge_fix_is_a_pure_gauge_transform():
+    """_sigma_gauge_fix_env must preserve gauge-invariant content exactly.
+
+    Sigma alignment applies a unitary to every chi bond.  Whatever those
+    unitaries are, the 2-site energy contracted from the transformed
+    environment must equal the untransformed one: on each bond the two
+    transforms cancel (s s^H = 1).  A mis-paired application (s from one
+    bond applied to a leg living on another) is NOT a gauge transform and
+    changes the energy -- which is exactly the #798 defect: before the
+    fix this test fails with |dE| = 1.26e-04 on this D=2 SU fixture.
+    """
+    from functools import partial
+
+    from tenax.algorithms._ctm_energy_ad import _sigma_gauge_fix_env
+    from tenax.algorithms._ctm_loop_core import _run_ctm_loop_with_bump
+    from tenax.algorithms._ctm_python_loop import _make_jit_ctm_step
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+    from tenax.algorithms.ad_utils import _phase_fix_ctm_tensor
+
+    site = _make_su_tensor(D=2, d=2)
+    gate = heisenberg_gate()
+    sts = {(0, 0): site}
+    step = partial(_make_jit_ctm_step(SINGLE_SITE_NEIGHBORS, "2x2"), chunk_size=None)
+    envs0 = {c: initialize_ctm_tensor_env(a, 6) for c, a in sts.items()}
+
+    def gauge_pair(envs_new, _old):
+        return {c: _phase_fix_ctm_tensor(envs_new[c]) for c in envs_new}
+
+    result = _run_ctm_loop_with_bump(
+        step,
+        sts,
+        envs0,
+        chi_current=6,
+        chi_max=None,
+        bump_enabled=False,
+        bump_threshold=1e-6,
+        bump_step_size=2,
+        projector_method="svd",
+        renormalize=True,
+        projector_backward="auto",
+        gauge_fix_fn=gauge_pair,
+        max_iter=60,
+        min_iter=4,
+        conv_tol=1e-8,
+        conv_method="sv",
+        plateau_patience=None,
+    )
+    env_old = result.envs[(0, 0)]
+    envs_new, _eps, _smin = step(
+        sts,
+        result.envs,
+        chi=6,
+        projector_method="svd",
+        renormalize=True,
+        projector_backward="auto",
+    )
+    env_new = envs_new[(0, 0)]
+
+    e_before = float(compute_energy_ctm_tensor(site, env_new, gate))
+    env_fixed = _sigma_gauge_fix_env(env_new, env_old)
+    e_after = float(compute_energy_ctm_tensor(site, env_fixed, gate))
+
+    assert abs(e_after - e_before) < 1e-11, (
+        f"sigma gauge fix changed the energy: before={e_before:.12f}, "
+        f"after={e_after:.12f}, |dE|={abs(e_after - e_before):.3e} -- "
+        f"the applied transform is not a pure gauge (mis-paired bond sigmas)"
+    )
+
+
+@pytest.mark.slow
+def test_sigma_and_phase_converge_to_the_same_energy_on_2x2():
+    """forward_gauge='sigma' and 'phase' must agree on gauge-invariant content.
+
+    Both gauges fix only the redundant directions of the CTM environment;
+    the converged energy is gauge-invariant, so sigma+2x2 and phase+2x2
+    must produce the same energy.  Before the #798 fix the mis-paired
+    sigma application corrupted the environment every sweep and sigma
+    converged to a WRONG environment (measured on the issue-style D=3
+    state: E=-0.666676 vs phase's -0.656309, |dE| ~ 1e-2; this D=2
+    fixture shows the same signature at |dE| = 2.28e-03).
+    """
+    site = _make_su_tensor(D=2, d=2)
+    gate = heisenberg_gate()
+
+    def energy(forward_gauge):
+        return float(
+            ctm_energy_implicit(
+                {(0, 0): site},
+                SINGLE_SITE_NEIGHBORS,
+                gate,
+                chi=8,
+                max_iter=80,
+                conv_tol=1e-10,
+                conv_method="sv",
+                min_iter=4,
+                forward_gauge=forward_gauge,
+            )
+        )
+
+    e_phase = energy("phase")
+    e_sigma = energy("sigma")
+    assert abs(e_phase - e_sigma) < 1e-9, (
+        f"sigma+2x2 disagrees with phase+2x2: E_phase={e_phase:.12f}, "
+        f"E_sigma={e_sigma:.12f}, |dE|={abs(e_phase - e_sigma):.3e}"
+    )
+
+
+def test_sigma_gauge_fix_ctm_tensor_is_a_pure_gauge_transform():
+    """ad_utils._sigma_gauge_fix_ctm_tensor must also be a pure gauge (#798).
+
+    The #798 defect had TWO instances: `_ctm_energy_ad._sigma_gauge_fix_env`
+    (the implicit-AD path, fixed first) and this sibling on the
+    Tensor-protocol path (`ctm_tensor_converge` and the explicit-AD sweep,
+    callers in ad_utils), which read corner legs positionally from
+    ``todense()`` arrays and hardcoded a C4 bond map contradicting the
+    verified connectivity in ``_ctm_tensor_energy.py`` (c4_u <-> t3_r on
+    the bottom bond, c4_r <-> t4_u on the left bond).  On the 2x2 sweep's
+    axis-reversed corner layout every corner got a bond gauge on the wrong
+    leg -- not a gauge transform at all.  Before the fix this test fails
+    with |dE| = 6.9e-03; after, the energy is invariant to 1e-11.
+
+    Fixture notes: the site is RANDOM (not SU) because the SU state is
+    C4v-symmetric to high accuracy, which makes all four edge sigmas
+    nearly equal -- and when s1 = s2 = s3 = s4 every mis-pairing is
+    accidentally still a gauge (measured: the defect shrinks to
+    |dE| ~ 1e-9 on the SU fixture).  The env pair is deliberately
+    UNCONVERGED (max_iter=6): near the fixed point the sigmas approach
+    identity and the defect shrinks toward the noise floor.  Sigma is
+    exactly unitary for ANY env pair (Q_new @ Q_old^H from QR), so gauge
+    purity must hold far from convergence too -- where mis-pairing is
+    glaring instead.
+    """
+    from functools import partial
+
+    import numpy as np
+
+    from tenax.algorithms._ctm_loop_core import _run_ctm_loop_with_bump
+    from tenax.algorithms._ctm_python_loop import _make_jit_ctm_step
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+    from tenax.algorithms.ad_utils import (
+        _phase_fix_ctm_tensor,
+        _sigma_gauge_fix_ctm_tensor,
+    )
+
+    rng = np.random.default_rng(7)
+    data = rng.standard_normal((2, 2, 2, 2, 2))
+    site = _wrap_as_dense_tensor(jnp.asarray(data / np.linalg.norm(data)))
+    gate = heisenberg_gate()
+    sts = {(0, 0): site}
+    step = partial(_make_jit_ctm_step(SINGLE_SITE_NEIGHBORS, "2x2"), chunk_size=None)
+    envs0 = {c: initialize_ctm_tensor_env(a, 6) for c, a in sts.items()}
+
+    def gauge_pair(envs_new, _old):
+        return {c: _phase_fix_ctm_tensor(envs_new[c]) for c in envs_new}
+
+    result = _run_ctm_loop_with_bump(
+        step,
+        sts,
+        envs0,
+        chi_current=6,
+        chi_max=None,
+        bump_enabled=False,
+        bump_threshold=1e-6,
+        bump_step_size=2,
+        projector_method="svd",
+        renormalize=True,
+        projector_backward="auto",
+        gauge_fix_fn=gauge_pair,
+        max_iter=6,
+        min_iter=4,
+        conv_tol=1e-8,
+        conv_method="sv",
+        plateau_patience=None,
+    )
+    env_old = result.envs[(0, 0)]
+    envs_new, _eps, _smin = step(
+        sts,
+        result.envs,
+        chi=6,
+        projector_method="svd",
+        renormalize=True,
+        projector_backward="auto",
+    )
+    env_new = envs_new[(0, 0)]
+
+    e_before = float(compute_energy_ctm_tensor(site, env_new, gate))
+    env_fixed = _sigma_gauge_fix_ctm_tensor(env_new, env_old)
+    e_after = float(compute_energy_ctm_tensor(site, env_fixed, gate))
+
+    assert abs(e_after - e_before) < 1e-11, (
+        f"ad_utils sigma gauge fix changed the energy: before={e_before:.12f}, "
+        f"after={e_after:.12f}, |dE|={abs(e_after - e_before):.3e} -- "
+        f"the applied transform is not a pure gauge (mis-paired bond sigmas)"
+    )
+
+
+def test_stationarity_warning_fires_once_per_cached_build():
+    """#841 guard noise control: warn once per cached vjp-fn build.
+
+    ``optimize_gs_ad`` (``gs_implicit_ad`` defaults True) reuses one cached
+    energy function across every optimizer iteration, and the residual it
+    embeds in the message drifts, so Python's default warning dedup never
+    collapses repeats: a per-call warning floods stderr for hundreds of
+    iterations and trains users to blanket-ignore RuntimeWarning -- which
+    silences the #841 signal entirely.  The guard therefore warns on the
+    FIRST non-stationary forward of each cached build and stays quiet
+    afterwards, while ``get_last_implicit_ad_diagnostics()`` keeps
+    reporting the freshly measured residual on every call.
+    """
+    import warnings as _warnings
+
+    from tenax.algorithms._ctm_energy_ad import get_last_implicit_ad_diagnostics
+
+    site = _normed_random_d2_site()
+    gate = heisenberg_gate()  # one gate object -> one cached build
+
+    def call():
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            ctm_energy_implicit(
+                {(0, 0): site},
+                SINGLE_SITE_NEIGHBORS,
+                gate,
+                chi=4,
+                max_iter=7,
+                min_iter=2,
+                conv_tol=2e-9,
+                conv_method="elementwise",
+            )
+        return [w for w in caught if "stationarity residual" in str(w.message)]
+
+    first = call()
+    assert len(first) == 1, (
+        f"expected exactly one stationarity warning on the first call of a "
+        f"fresh build, got {len(first)}"
+    )
+
+    second = call()
+    diag = get_last_implicit_ad_diagnostics()
+    assert diag["forward_stationarity_residual"] > 1e-4, (
+        "diagnostics must keep reporting the per-call residual even when "
+        "the warning is deduplicated"
+    )
+    assert not second, (
+        f"guard must warn once per cached build, not on every call: second "
+        f"call emitted {len(second)} stationarity warning(s)"
+    )

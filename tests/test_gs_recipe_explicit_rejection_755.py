@@ -1,0 +1,278 @@
+"""The fused explicit-AD path rejects a recipe it cannot honour (#755).
+
+``ctm_energy_explicit`` takes no ``recipe`` and always runs the 2x2 step.
+``make_ctm_energy_fn`` used to accept ``gs_recipe="1x1"`` on that branch and
+thread it nowhere, so the run produced the ``2x2`` answer under a ``"1x1"``
+label -- measured agreeing with ``2x2``+explicit to all 12 digits, with no
+diagnostic.  The cost of that is not a wrong number; it is a *correctly
+labelled config attached to the wrong experiment*, which survives into notes,
+plots and papers.
+
+The repo had already ruled on this one branch away: the 2-site split path
+raises rather than accept-then-substitute, on the stated grounds that it
+"would mislabel the experiment".  These tests pin the same rule for the fused
+explicit path, and -- importantly -- pin that it stops there.  The *split*
+explicit path does implement ``"1x1"`` and must keep accepting it.
+"""
+
+from __future__ import annotations
+
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import pytest
+
+from tenax.algorithms.ipeps_ad_policy import make_ctm_energy_fn
+from tenax.algorithms.ipeps_config import CTMConfig
+
+
+def _energy_fn(*, recipe, fuse_virtual_legs=True, use_explicit=True):
+    ctm_cfg = CTMConfig(chi=4, max_iter=4, fuse_virtual_legs=fuse_virtual_legs)
+    return make_ctm_energy_fn(
+        neighbors={(0, 0): {}},
+        gate=None,
+        get_ctm_cfg=lambda: ctm_cfg,
+        env_cache={},
+        use_explicit=use_explicit,
+        explicit_warmup=1,
+        explicit_steps=1,
+        recipe=recipe,
+    )
+
+
+@pytest.mark.core
+def test_fused_explicit_rejects_1x1():
+    """The defect: accepted, ignored, and silently run as 2x2."""
+    fn = _energy_fn(recipe="1x1")
+    with pytest.raises(NotImplementedError, match="only supports gs_recipe='2x2'"):
+        fn({(0, 0): None})
+
+
+@pytest.mark.core
+def test_the_rejection_points_at_2x2_not_at_implicit_ad():
+    """A raise that names a broken alternative is worse than one that names none.
+
+    The first version of this message said "Use gs_implicit_ad=True for the
+    '1x1' recipe".  That is not a consistent way to get a 1x1 run:
+    ``ctm_converge_kwargs`` does not forward ``recipe``, so the implicit
+    path's line-search and final-evaluation forwards fall back to
+    ``python_loop_ctm_converge``'s ``"2x2"`` default while only the loss sees
+    ``"1x1"`` (#938).  It would have sent callers from one silent
+    substitution into a subtler one.
+
+    The honest recommendation is ``2x2``, because per #911 the ``1x1`` recipe
+    reaches no fixed point for any state with ``D > 1`` under any projector
+    method — so it is not a result the caller wants under *any* AD mode.
+    """
+    fn = _energy_fn(recipe="1x1")
+    with pytest.raises(NotImplementedError) as exc:
+        fn({(0, 0): None})
+    msg = str(exc.value)
+
+    assert "gs_recipe='2x2'" in msg, "the message must name the recipe to migrate to"
+    assert "#911" in msg, "and say why 1x1 is not worth rescuing"
+    # The split path is the one place 1x1 is genuinely wired end to end --
+    # but only for a single-site cell.  The 2-site split branch rejects every
+    # recipe but "2x2" twenty lines further up in this same function, so an
+    # unqualified "use fuse_virtual_legs=False" sends a 2-site caller from
+    # one NotImplementedError straight into another.
+    assert "fuse_virtual_legs=False" in msg
+    assert "unit_cell='1x1'" in msg, (
+        "the split-path suggestion must be qualified as single-site-only"
+    )
+    assert "2-site split branch rejects" in msg, (
+        "and must say why it is not available for unit_cell='2site'"
+    )
+    # Implicit AD may be mentioned, but only as a caveat carrying #938 —
+    # never as the bare recommendation it used to be.
+    if "gs_implicit_ad=True" in msg:
+        assert "#938" in msg, (
+            "the message names gs_implicit_ad=True without flagging that it "
+            "threads recipe into the loss only (#938)"
+        )
+
+
+@pytest.mark.core
+def test_fused_explicit_still_accepts_2x2():
+    """The negative half: the guard must not reject the supported recipe.
+
+    Constructing the closure and getting *past* the recipe check is the
+    assertion; the call then fails downstream on the deliberately-empty
+    neighbour map, which is a different error than the one under test.
+    """
+    fn = _energy_fn(recipe="2x2")
+    with pytest.raises(Exception) as exc:  # noqa: B017 - any *other* failure
+        fn({(0, 0): None})
+    assert "only supports gs_recipe='2x2'" not in str(exc.value)
+
+
+@pytest.mark.core
+def test_the_rejection_is_scoped_to_the_fused_path():
+    """``fuse_virtual_legs=False`` + ``"1x1"`` is supported and must stay so.
+
+    ``ctm_energy_split_explicit`` does take ``recipe`` and does implement the
+    single-site 1x1 forward, so a blanket raise in ``make_ctm_energy_fn`` --
+    which is what #755 literally suggested -- would have broken a working
+    combination (``test_split_ctm_fuse_flag.py`` exercises it).  This pins the
+    scope, not just the behaviour.
+    """
+    fn = _energy_fn(recipe="1x1", fuse_virtual_legs=False)
+    with pytest.raises(Exception) as exc:  # noqa: B017
+        fn({(0, 0): None})
+    assert "only supports gs_recipe='2x2'" not in str(exc.value), (
+        "the fused-path guard leaked onto the split path, which implements 1x1"
+    )
+
+
+@pytest.mark.core
+def test_the_implicit_branch_is_untouched():
+    """Implicit AD threads ``"1x1"`` properly and must not be rejected."""
+    fn = _energy_fn(recipe="1x1", use_explicit=False)
+    with pytest.raises(Exception) as exc:  # noqa: B017
+        fn({(0, 0): None})
+    assert "only supports gs_recipe='2x2'" not in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# #938: the same defect class, at the optimizer level.  ctm_converge_kwargs
+# deliberately forwards no ``recipe``, so all nine fused forwards (warm-start,
+# line-search probe, final evaluation) run 2x2 whatever ``gs_recipe`` says —
+# under 1x1 the loss would descend a 1x1 gradient and the reported energy
+# would be measured on a 2x2 environment.  optimize_gs_ad must refuse the
+# combination up front, on every fused dispatch path.
+# ---------------------------------------------------------------------------
+
+
+def _cfg_938(**overrides):
+    from tenax.algorithms.ipeps_config import iPEPSConfig
+
+    kwargs = dict(
+        max_bond_dim=2,
+        unit_cell="1x1",
+        gs_recipe="1x1",
+        gs_num_steps=1,
+        su_init=False,
+        ctm=CTMConfig(chi=2, max_iter=2),
+    )
+    kwargs.update(overrides)
+    with pytest.warns(DeprecationWarning, match="gs_recipe='1x1'"):
+        return iPEPSConfig(**kwargs)
+
+
+def _gate_938():
+    import jax.numpy as jnp
+
+    z = jnp.diag(jnp.array([0.5, -0.5]))
+    return (jnp.kron(z, z)).reshape(2, 2, 2, 2)
+
+
+@pytest.mark.core
+def test_optimizer_refuses_1x1_on_the_fused_path():
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A = jax.random.normal(jax.random.PRNGKey(0), (2, 2, 2, 2, 2))
+    with pytest.raises(ValueError, match="#938"):
+        optimize_gs_ad(_gate_938(), A, _cfg_938())
+
+
+@pytest.mark.core
+def test_optimizer_refuses_1x1_on_the_fused_implicit_path():
+    """The implicit path threads gs_recipe into its loss, which is exactly
+    what makes the fused-forward mismatch an inconsistency rather than a
+    mislabel: the gradient sees 1x1, the reported energy sees 2x2."""
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A = jax.random.normal(jax.random.PRNGKey(0), (2, 2, 2, 2, 2))
+    with pytest.raises(ValueError, match="#938"):
+        optimize_gs_ad(_gate_938(), A, _cfg_938(gs_implicit_ad=True))
+
+
+@pytest.mark.core
+def test_the_938_guard_is_scoped_to_fused():
+    """fuse_virtual_legs=False + 1x1 is the supported combination; the new
+    guard must not intercept it.  The split path's own validator accepts it
+    and the run proceeds past the guard (gs_num_steps=0 keeps it cheap)."""
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A = jax.random.normal(jax.random.PRNGKey(1), (2, 2, 2, 2, 2))
+    cfg = _cfg_938(
+        gs_num_steps=0,
+        gs_implicit_ad=True,
+        gs_line_search=False,
+        ctm=CTMConfig(chi=2, max_iter=3, fuse_virtual_legs=False),
+    )
+    out = optimize_gs_ad(_gate_938(), A, cfg)
+    assert out is not None
+
+
+@pytest.mark.core
+def test_optimizer_refuses_1x1_on_the_c4v_reference_engine():
+    """c4v_reference reads no recipe, so fuse_virtual_legs=False does NOT make
+    1x1 supported there: without the guard the config dispatches to
+    _optimize_gs_ad_tensor_reference_c4v and '1x1' is silently ignored
+    (Codex round 2 on #972)."""
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A = jax.random.normal(jax.random.PRNGKey(2), (2, 2, 2, 2, 2))
+    cfg = _cfg_938(
+        gs_c4v=True,
+        gs_implicit_ad=True,
+        ctm=CTMConfig(
+            chi=2, max_iter=2, fuse_virtual_legs=False, ctm_ad_mode="c4v_reference"
+        ),
+    )
+    with pytest.raises(ValueError, match="#938"):
+        optimize_gs_ad(_gate_938(), A, cfg)
+
+
+@pytest.mark.core
+def test_optimizer_refuses_1x1_on_the_root_implicit_engine():
+    """Same class as the c4v_reference gap: the root-implicit engine (#715)
+    reads no recipe either, and it dispatches before the split path."""
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A = jax.random.normal(jax.random.PRNGKey(3), (2, 2, 2, 2, 2))
+    cfg = _cfg_938(
+        gs_implicit_ad=True,
+        ctm=CTMConfig(
+            chi=2, max_iter=2, fuse_virtual_legs=False, ctm_ad_mode="root_implicit"
+        ),
+    )
+    with pytest.raises(ValueError, match="#938"):
+        optimize_gs_ad(_gate_938(), A, cfg)
+
+
+@pytest.mark.core
+def test_optimizer_refuses_1x1_on_the_2site_zero_step_path():
+    """unit_cell='2site' never threads '1x1': the split loss rejects it, but a
+    gs_num_steps=0 run skips loss construction entirely and _eval_fresh_2site
+    measures a 2x2 energy under the 1x1 label (reproduced: returned E with no
+    error before the guard covered non-single-site cells; Codex round 4 on
+    #972)."""
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    A = jax.random.normal(jax.random.PRNGKey(4), (2, 2, 2, 2, 2))
+    B = jax.random.normal(jax.random.PRNGKey(5), (2, 2, 2, 2, 2))
+    cfg = _cfg_938(
+        unit_cell="2site",
+        gs_implicit_ad=True,
+        gs_num_steps=0,
+        gs_line_search=False,
+        ctm=CTMConfig(chi=2, max_iter=3, fuse_virtual_legs=False),
+    )
+    with pytest.raises(ValueError, match="#938"):
+        optimize_gs_ad(_gate_938(), (A, B), cfg)
+
+
+@pytest.mark.core
+def test_fpeps_entry_point_runs_the_938_guard():
+    """optimize_fpeps_ad dispatches straight to the private tensor optimizer,
+    bypassing optimize_gs_ad's validation -- it must run the shared guard
+    itself, or fPEPS + fused + '1x1' reproduces the mislabel (Codex round 5
+    on #972). The sentinel A_init proves rejection happens before any tensor
+    work."""
+    from tenax.algorithms.ipeps_optimize import optimize_fpeps_ad
+
+    with pytest.raises(ValueError, match="#938"):
+        optimize_fpeps_ad(_gate_938(), object(), _cfg_938())

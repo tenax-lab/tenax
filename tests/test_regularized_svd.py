@@ -1,5 +1,7 @@
 """Tests for regularized SVD, explicit AD warmup, and split CTM explicit AD."""
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -241,13 +243,18 @@ class TestSplitCTMExplicitAD:
                 num_steps=3,
                 warmup_steps=2,
             )
-            # NOTE: do *not* use ``sum(C1**2)`` here. The #463 double-layer
-            # split path renormalizes each corner per move (max_abs_normalize),
-            # and the boundary corner of a uniform 1-site iPEPS is genuinely
-            # rank-1, so the normalized C1 collapses to a constant one-hot
-            # matrix that is identically independent of A — its gradient is
-            # exactly zero. The A dependence lives in the edge tensors, so sum
-            # over the full environment to exercise the explicit-AD gradient.
+            # Sums the whole environment, which is the broadest signal. The
+            # corner's own contribution is exercised separately by
+            # ``test_split_ctm_corner_gradient_is_not_zero`` below.
+            #
+            # This used to carry a NOTE saying ``sum(C1**2)`` must *not* be used
+            # because "the boundary corner of a uniform 1-site iPEPS is
+            # genuinely rank-1", so C1 is independent of A and its gradient is
+            # exactly zero. The observation was right and the diagnosis was
+            # wrong: that was the ``1x1`` collapse (#726/#746/#911), not
+            # physics. Measured on this exact fixture,
+            # ``|d sum(C1**2)/dA|_1`` is 0.0 at ``recipe="1x1"`` and **3.26**
+            # at the ``"2x2"`` default.
             env_tensors = (
                 env.C1,
                 env.C2,
@@ -267,3 +274,73 @@ class TestSplitCTMExplicitAD:
         grad = jax.grad(loss)(A_data)
         assert jnp.all(jnp.isfinite(grad))
         assert float(jnp.sum(jnp.abs(grad))) > 0
+
+    def test_split_ctm_corner_gradient_is_not_zero(self):
+        """The corner's contribution to the explicit-AD gradient (#726).
+
+        #726's second half: the test above was rewritten to sum the *whole*
+        environment because ``sum(C1**2)`` had a gradient of exactly zero, and a
+        comment recorded that as physics -- "the boundary corner of a uniform
+        1-site iPEPS is genuinely rank-1".  It is not physics.  It was the
+        ``1x1`` collapse, which #746 moved the default off and #911 deprecated.
+
+        The consequence was that the corner contribution went **untested** on
+        this path: a defect that zeroed it would have been invisible, because
+        the edge tensors carry enough signal to keep the summed gradient
+        non-zero (measured: 15.96 on ``1x1``, where the corner part is 0).
+
+        Both recipes are asserted on purpose.  ``2x2`` alone would pass if the
+        corner gradient were non-zero for some unrelated reason; pinning
+        ``1x1`` at exactly zero is what identifies the collapse as the cause,
+        and turns the old comment's observation into a regression guard for the
+        thing it actually described.
+        """
+        from tenax.algorithms.ad_utils import ctm_split_tensor_converge_explicit
+        from tenax.core.index import FlowDirection, TensorIndex
+        from tenax.core.symmetry import U1Symmetry
+        from tenax.core.tensor import DenseTensor
+
+        key = jax.random.PRNGKey(0)
+        sym = U1Symmetry()
+        D, d = 2, 2
+        A_data = jax.random.normal(key, (D, D, D, D, d))
+        charges = jnp.zeros(D, dtype=jnp.int32)
+        phys_charges = jnp.zeros(d, dtype=jnp.int32)
+        indices = tuple(
+            TensorIndex.from_charges(sym, charges, flow, label=lbl)
+            for lbl, flow in [
+                ("d", FlowDirection.IN),
+                ("u", FlowDirection.OUT),
+                ("r", FlowDirection.IN),
+                ("l", FlowDirection.OUT),
+            ]
+        ) + (
+            TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="phys"),
+        )
+
+        def corner_loss(A_data, recipe):
+            env = ctm_split_tensor_converge_explicit(
+                DenseTensor(A_data, indices),
+                chi=4,
+                num_steps=3,
+                warmup_steps=2,
+                recipe=recipe,
+            )
+            return jnp.sum(env.C1.todense() ** 2)
+
+        with warnings.catch_warnings():
+            # ``1x1`` is deprecated (#911); measured here deliberately.
+            warnings.simplefilter("ignore", DeprecationWarning)
+            g_2x2 = jax.grad(corner_loss)(A_data, "2x2")
+            g_1x1 = jax.grad(corner_loss)(A_data, "1x1")
+
+        assert jnp.all(jnp.isfinite(g_2x2))
+        assert float(jnp.sum(jnp.abs(g_2x2))) > 1e-3, (
+            "the corner carries no gradient on the default recipe -- the "
+            "condition #726 found, which the old comment misread as physics"
+        )
+        assert float(jnp.sum(jnp.abs(g_1x1))) == 0.0, (
+            "the collapsed recipe no longer zeroes the corner gradient; the "
+            "mechanism this test pins has changed, so the comment above needs "
+            "re-measuring rather than trusting"
+        )

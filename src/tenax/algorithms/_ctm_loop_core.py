@@ -27,6 +27,7 @@ from tenax.algorithms._ctm_tensor_convergence import (
     _get_base_charges,
     _max_env_leaf_diff,
     _max_virtual_bond_dim,
+    _nan_safe_max,
 )
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
@@ -253,7 +254,9 @@ def _run_ctm_loop_with_bump(
                 continue
             max_diff = 0.0
             for c in sorted(envs):
-                max_diff = max(max_diff, _max_env_leaf_diff(prev_envs[c], envs[c]))
+                max_diff = _nan_safe_max(
+                    max_diff, _max_env_leaf_diff(prev_envs[c], envs[c])
+                )
             converged = max_diff < conv_tol
             final_diff = max_diff
             prev_envs = {c: envs[c] for c in envs}
@@ -267,17 +270,22 @@ def _run_ctm_loop_with_bump(
             # #903 P1: rank 1 is a collapse only if more was reachable.
             # Per coordinate, not per cell (#903 review): a cell-wide
             # aggregate fails open with `min` and wrongly closed with `max`.
-            _mr = {
-                c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2)
-                for c, A in site_tensors.items()
-            }
+            # #903 P1: a corner can be built from a NEIGHBOUR's tensor in the
+            # 2x2 recipe, so a bound keyed on the storage coordinate can accept
+            # a collapsed corner.  `neighbors` is not in scope here, so this
+            # takes the max over every site -- a strict superset of any
+            # coordinate's contributors, and therefore conservative: a larger
+            # bound only makes the exemption harder to obtain.
+            _mr_all = _forced_corner_rank(
+                max(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
+            )
             converged = True
             max_diff = 0.0
             for c in sorted(envs):
                 sv = _corner_singular_values(envs[c].C1)
                 if c in prev_svs:
-                    diff = float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr[c]))
-                    max_diff = max(max_diff, diff)
+                    diff = float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr_all))
+                    max_diff = _nan_safe_max(max_diff, diff)
                     if diff >= conv_tol:
                         converged = False
                 else:

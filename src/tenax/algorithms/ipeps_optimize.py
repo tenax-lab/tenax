@@ -20,6 +20,7 @@ from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms._ipeps_optimize_shared import (  # noqa: F401
     _build_optimizer,
     _converged_outer,
+    _euclidean_grads,
     _grad_l2_norm,
     _log_ad_converged,
     _normalize_params,
@@ -41,31 +42,6 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 _logger = logging.getLogger(__name__)
 
 Coord = tuple[int, int]
-
-
-def _env_dict_chi(envs) -> int | None:
-    """Extract chi from a ``coord -> CTMTensorEnv`` mapping.
-
-    Returns ``None`` if the input is falsy or malformed (missing
-    ``C1.indices[0].dim``).  Used by the finalize-pad sites to derive
-    the *actual* chi an env carries — the in-CTM χ-bump
-    (``ctmrg_heuristic_increase_chi=True``, #492/#514) grows chi inside
-    ``python_loop_ctm_converge`` without updating the optimizer's local
-    ``ctm_cfg.chi``.
-
-    Accepts the bare env dict (``{coord: CTMTensorEnv}``), not an
-    env_cache wrapper — callers should index ``env_cache["envs"]``
-    themselves so both live cache and snapshot dicts can be queried
-    with the same helper (Codex P2 on PR #542: a cleared live cache
-    must not mask a bumped best-env snapshot).
-    """
-    if not envs:
-        return None
-    try:
-        sample = next(iter(envs.values()))
-        return int(sample.C1.indices[0].dim)
-    except (AttributeError, IndexError, StopIteration):
-        return None
 
 
 def _restore_env_cache_after_line_search(env_cache: dict, snapshot: tuple) -> None:
@@ -743,6 +719,27 @@ def optimize_gs_ad(
             "Multisite / C4v-reference checkpoint wiring is a follow-up (#497)."
         )
 
+    # gs_recipe='1x1' is wired end-to-end only on the single-site split-CTM
+    # path (fuse_virtual_legs=False), whose forwards all thread the recipe.
+    # Every fused path packs its warm-start, line-search probe, and final
+    # evaluation through ctm_converge_kwargs, which deliberately does not
+    # forward recipe (#938): accepting '1x1' there descends a 1x1 gradient
+    # and then reports an energy measured on a 2x2 environment -- an
+    # internally inconsistent, mislabelled experiment (the same
+    # accept-then-silently-run-2x2 class #755 closed for one branch).
+    # The c4v_reference and root-implicit engines are the same class with a
+    # different mechanism: they read no recipe at all, so '1x1' would be
+    # silently ignored even with fuse_virtual_legs=False (Codex on #972).
+    # So are the non-single-site cells (Codex round 4): the 2-site split
+    # branch rejects '1x1' at loss build but its zero-step _eval_fresh path
+    # measures 2x2 without ever building the loss, and the multisite Lattice
+    # loss threads gs_recipe while its env-cache/forward evals go through
+    # ctm_converge_kwargs, which drops it. Only unit_cell='1x1' threads the
+    # recipe end to end.
+    # Refuse rather than thread: threading would make nine forwards
+    # genuinely non-convergent, since '1x1' reaches no fixed point (#911).
+    _reject_mislabelled_1x1(config)
+
     # Root implicit AD (#715).  Placed ahead of the unit-cell branches because
     # the variant (dense 1x1 vs dense cell vs symmetric) is selected from the
     # unit cell *inside* that dispatcher, and its own validator decides what it
@@ -804,7 +801,7 @@ def optimize_gs_ad(
         D = config.max_bond_dim
 
         if config.su_init:
-            _, (A_su, _B_su), _ = ipeps(gate, None, config)
+            _, (A_su, _B_su), _ = ipeps(gate, None, config, compute_energy=False)
             A_init = A_su
         elif cg_with_map_fn and config.cg_gates.init_fn is not None:
             key = jax.random.PRNGKey(0)
@@ -827,6 +824,36 @@ def optimize_gs_ad(
 def _use_reference_c4v_path(config: iPEPSConfig) -> bool:
     """Compatibility wrapper around the shared AD policy helper."""
     return use_reference_c4v_path(config)
+
+
+def _reject_mislabelled_1x1(config: iPEPSConfig) -> None:
+    """Refuse gs_recipe='1x1' everywhere it is not threaded end to end (#938).
+
+    Shared by every public optimizer entry point -- ``optimize_gs_ad`` and
+    ``optimize_fpeps_ad`` (which dispatches straight to
+    ``_optimize_gs_ad_tensor`` and would otherwise bypass the check, Codex
+    round 5 on #972). See the call site in ``optimize_gs_ad`` for the
+    per-path inventory of where the recipe gets dropped."""
+    if config.gs_recipe == "1x1" and (
+        config.ctm.fuse_virtual_legs
+        or config.unit_cell != "1x1"
+        or _use_reference_c4v_path(config)
+        or use_root_implicit_path(config)
+    ):
+        raise ValueError(
+            "gs_recipe='1x1' is only supported with fuse_virtual_legs=False, "
+            "unit_cell='1x1', and no ctm_ad_mode engine override (the "
+            "single-site split-CTM path). Every other configuration runs or "
+            "measures on recipe='2x2' somewhere (#938) -- fused warm-starts, "
+            "line-search probes and final evaluations, the 2-site zero-step "
+            "evaluation, and the multisite env cache all drop the recipe, "
+            "while the c4v_reference and root-implicit engines read no "
+            "recipe at all -- so a '1x1' run would mislabel a 2x2 result or "
+            "descend a gradient inconsistent with the energy it reports. Set "
+            "gs_recipe='2x2', or use the single-site split path -- and note "
+            "that recipe='1x1' is deprecated and reaches no CTM fixed point "
+            "for D > 1 (#911)."
+        )
 
 
 def _optimize_gs_ad_tensor_reference_c4v(
@@ -869,7 +896,7 @@ def _optimize_gs_ad_tensor_reference_c4v(
         A = _wrap_as_dense_tensor(A_init)
     elif A_init is None:
         if config.su_init:
-            _, (A_su, _), _ = ipeps(gate, None, config)
+            _, (A_su, _), _ = ipeps(gate, None, config, compute_energy=False)
             A = A_su
         else:
             key = jax.random.PRNGKey(0)
@@ -951,6 +978,7 @@ def _optimize_gs_ad_tensor_reference_c4v(
                 )
             continue
         grads = jnp.where(jnp.isfinite(grads), grads, 0.0)
+        grads = _euclidean_grads(grads)
         E = float(energy_val)
 
         # Score / convergence-check on the *pre-step* params.  ``energy_val``
@@ -1052,6 +1080,9 @@ def _optimize_gs_ad_tensor(
             ``optimize_gs_ad`` forwards a tuple ``A_init`` (or its own
             init_fn output) here so the user's starting state is honored.
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     config = _normalize_stall_recovery(config, unit_cell="1x1")
     _warn_implicit_ad_variational_caveat(config, path="1-site Tensor-protocol")
     import optax
@@ -1619,14 +1650,22 @@ def _optimize_gs_ad_tensor(
                 flush=True,
             )
 
+    # Last step each checkpoint file was written for.  Every exit path pairs
+    # a save with the post-loop force flush (#958): cadence-aligned normal
+    # completion pairs it with the end-of-step save, and the in-body break
+    # sites pair it with their own force_last call.  No state mutates between
+    # a same-step pair, so the second serialization of the large
+    # params/env bundle is pure I/O waste — skip it (codex P2 on #963).
+    _ckpt_written_1s = {"last": None, "best": None}
+
     def _maybe_save_1s_checkpoint(step, chi_before, e_prev, *, force_last=False):
         if config.gs_checkpoint_path is None:
             return
         chi_changed = ctm_cfg.chi != chi_before
-        is_new_best = best_energy < e_prev
+        is_new_best = best_energy < e_prev and _ckpt_written_1s["best"] != step
         should_save_last = (
             force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
-        )
+        ) and _ckpt_written_1s["last"] != step
         if not (should_save_last or is_new_best):
             return
         _ckpt_state = {
@@ -1656,10 +1695,15 @@ def _optimize_gs_ad_tensor(
         }
         if should_save_last:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path)
+            _ckpt_written_1s["last"] = step
         if is_new_best:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path, is_best=True)
+            _ckpt_written_1s["best"] = step
 
     _log_ad_compile_notice(config)
+    # Sentinel for the post-loop checkpoint flush: stays None only if the
+    # loop body never ran (nothing new to save).
+    _chi_at_step_start = None
     for step in range(start_step, config.gs_num_steps):
         # Snapshots for checkpoint "did chi change / new best" detection.
         # ``best_energy`` only decreases, so a strict < comparison after the
@@ -1690,6 +1734,7 @@ def _optimize_gs_ad_tensor(
             _step_t0 = _time.perf_counter()
         try:
             energy_val, grads = jax.value_and_grad(loss_fn)(params)
+            grads = _euclidean_grads(grads)
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -2115,7 +2160,7 @@ def _optimize_gs_ad_tensor(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
                     _, g = jax.value_and_grad(loss_fn)(trial)
-                    return _tree_dot(g, direction)
+                    return _tree_dot(_euclidean_grads(g), direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                 param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -2412,6 +2457,17 @@ def _optimize_gs_ad_tensor(
         # End-of-step save: cadence-based + new-best detection.
         _maybe_save_1s_checkpoint(step, _chi_at_step_start, _best_energy_at_step_start)
 
+    # Every ``break`` above (convergence, stall budgets) exits before the
+    # end-of-step save, so a run that converged at its first evaluation wrote
+    # NO checkpoint at all even with gs_checkpoint_every=1, and gs_resume
+    # then raised FileNotFoundError (#958).  One forced flush covers every
+    # exit path — break or normal exhaustion — and runs before the final
+    # fresh-CTM re-evaluation below, so a crash there cannot lose the run.
+    if _chi_at_step_start is not None:
+        _maybe_save_1s_checkpoint(
+            step, _chi_at_step_start, _best_energy_at_step_start, force_last=True
+        )
+
     # Re-evaluate both final A and best_A with fully converged fresh CTM.
     # In-loop energies use warm-started CTM that can produce unphysical values
     # (non-variational at finite chi), so we compare fresh evaluations only.
@@ -2439,47 +2495,31 @@ def _optimize_gs_ad_tensor(
             E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
         return A_t, env_, E_
 
-    A_final, env_final, E_final = _eval_fresh(params, _env_cache.get("envs", None))
-
-    # Pad best_env_cache envs to the current ctm_cfg.chi before use.
-    # best_env_cache is a snapshot taken when best_energy was recorded, so its
-    # env tensors may be at a smaller chi if the reactive auto-bump or the chi
-    # schedule fired after that snapshot.  pad_dense_env_chi is a no-op when
-    # chi_new == chi_old, so this is safe to call unconditionally.  Fixes #469.
-    # NOTE: if a new _eval_fresh(best_params, best_env_cache["envs"]) call site
-    # is added later, it must reapply this padding — there's no producer-side
-    # guarantee that the snapshot is at ctm_cfg.chi.
-    _best_env_init = best_env_cache.get("envs", None)
-    if _best_env_init:
-        # Issue #514: ``ctm_cfg.chi`` may be stale if the in-CTM χ-bump fired
-        # during a gradient evaluation.  Pad to the larger of the static
-        # config chi and the env_cache's actual chi so we never try to
-        # shrink a bumped env.
-        # Consult both the live cache *and* the best-env snapshot:
-        # rollback paths may have cleared ``_env_cache`` after the
-        # snapshot was taken, leaving the bumped chi reachable only via
-        # ``_best_env_init`` itself (Codex P2 on PR #542).
-        _target_chi = max(
-            ctm_cfg.chi,
-            _env_dict_chi(_env_cache.get("envs")) or 0,
-            _env_dict_chi(_best_env_init) or 0,
-        )
-        _best_env_init = {
-            c: pad_dense_env_chi(
-                _best_env_init[c], _target_chi, base_charges=_bump_base_charges
-            )
-            for c in _best_env_init
-        }
+    # #899: NO env_init.  The block comment above says these evaluations are
+    # fresh, and the code then seeded them from ``_env_cache["envs"]`` -- which
+    # ``_restore_env_cache_after_line_search`` has just reverted to the
+    # environment converged at the PREVIOUS parameters.  The returned number
+    # was therefore ``_eval_fresh(params_final, env(previous params))``: not an
+    # evaluation of the tensor handed back, and not washed out by a bigger
+    # budget (measured bit-identical at max_iter 40/100/300, conv_tol to
+    # 1e-12).  ``best_params`` is evaluated cold for the same reason -- the
+    # ``E_final <= E_best_fresh`` comparison below only means something if both
+    # sides are the same kind of quantity.
+    #
+    # This also retires the #469 chi-padding of the best-env snapshot: it
+    # existed solely to make that snapshot shape-compatible as a SEED, and
+    # nothing is seeded now.
+    A_final, env_final, E_final = _eval_fresh(params)
 
     if best_params is not params:
-        _, env_best, E_best_fresh = _eval_fresh(best_params, _best_env_init)
+        _, env_best, E_best_fresh = _eval_fresh(best_params)
     else:
         E_best_fresh = E_final
 
     if E_final <= E_best_fresh:
         env, E_gs = env_final, E_final
     else:
-        A_final, _, _ = _eval_fresh(best_params, _best_env_init)
+        A_final, _, _ = _eval_fresh(best_params)
         env, E_gs = env_best, E_best_fresh
     if config.gs_verbose:
         print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
@@ -2556,7 +2596,7 @@ def _optimize_gs_ad_2site(
                 ctm=config.ctm,
                 su_independent_bond_lambdas=config.su_independent_bond_lambdas,
             )
-            _, (A_su, B_su), _ = ipeps(gate, None, su_config)
+            _, (A_su, B_su), _ = ipeps(gate, None, su_config, compute_energy=False)
             AB_init = (A_su, B_su)
         else:
             # Random complex128 initialization for 2-site AD (matches variPEPS)
@@ -2598,6 +2638,9 @@ def _optimize_gs_ad_tensor_2site(
         models, prefer ``gs_c4v=True`` or 1-site optimization with
         ``sublattice_rotate_gate()`` + ``gs_c4v=True``.
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     config = _normalize_stall_recovery(config, unit_cell="2site")
     use_c4v = config.gs_c4v
     if not use_c4v:
@@ -3150,6 +3193,9 @@ def _optimize_gs_ad_tensor_2site(
     # closure; step-local snapshots (``chi_before``, ``e_prev``) are
     # passed explicitly so the caller controls the "did chi change /
     # did we accept a new best this step" detection.
+    # Same-step rewrite guard — see ``_ckpt_written_1s`` in the 1-site path.
+    _ckpt_written_2s = {"last": None, "best": None}
+
     def _maybe_save_2s_checkpoint(
         step: int,
         chi_before: int,
@@ -3160,10 +3206,10 @@ def _optimize_gs_ad_tensor_2site(
         if config.gs_checkpoint_path is None:
             return
         chi_changed = ctm_cfg_2s.chi != chi_before
-        is_new_best = best_energy < e_prev
+        is_new_best = best_energy < e_prev and _ckpt_written_2s["best"] != step
         should_save_last = (
             force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
-        )
+        ) and _ckpt_written_2s["last"] != step
         if not (should_save_last or is_new_best):
             return
         _ckpt_state = {
@@ -3192,8 +3238,10 @@ def _optimize_gs_ad_tensor_2site(
         }
         if should_save_last:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path)
+            _ckpt_written_2s["last"] = step
         if is_new_best:
             save_checkpoint(_ckpt_state, config.gs_checkpoint_path, is_best=True)
+            _ckpt_written_2s["best"] = step
 
     # Enable per-backward ``||lam||`` extraction in the implicit-AD F3 path
     # only when a consumer is reading them (verbose logging in this loop).
@@ -3213,6 +3261,8 @@ def _optimize_gs_ad_tensor_2site(
 
     try:
         _log_ad_compile_notice(config)
+        # Sentinel for the post-loop checkpoint flush, as in the 1-site path.
+        _chi_at_step_start = None
         for step in range(start_step, config.gs_num_steps):
             # Snapshots for checkpoint "did chi change / new best" detection.
             # ``best_energy`` only decreases, so a strict < comparison after
@@ -3246,6 +3296,7 @@ def _optimize_gs_ad_tensor_2site(
                 _step_t0 = _time.perf_counter()
             try:
                 energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                grads = _euclidean_grads(grads)
             except CTMRGGradientError as exc:
                 _logger.warning(
                     "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -3755,7 +3806,7 @@ def _optimize_gs_ad_tensor_2site(
                             _tree_add(params, _tree_scale(direction, alpha))
                         )
                         _, g = jax.value_and_grad(loss_fn)(trial)
-                        return _tree_dot(g, direction)
+                        return _tree_dot(_euclidean_grads(g), direction)
 
                     dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                     param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -4102,6 +4153,15 @@ def _optimize_gs_ad_tensor_2site(
             # End-of-step save: cadence-based + new-best detection.
             _maybe_save_2s_checkpoint(step, chi_before, _best_energy_at_step_start)
 
+        # Same #958 flush as the 1-site path.  ``_chi_at_step_start`` (top of
+        # the iteration), not ``chi_before``: the latter is assigned after the
+        # convergence/stall breaks, so it can be undefined on a first-step
+        # convergence exit.
+        if _chi_at_step_start is not None:
+            _maybe_save_2s_checkpoint(
+                step, _chi_at_step_start, _best_energy_at_step_start, force_last=True
+            )
+
         # Re-evaluate both final params and best_params with fully converged
         # fresh CTM.  In-loop energies use warm-started CTM that can produce
         # unphysical values, so we compare fresh evaluations only.
@@ -4132,46 +4192,15 @@ def _optimize_gs_ad_tensor_2site(
             )
             return A_t, B_t, envs, E_
 
-        A_last, B_last, envs_last, E_last = _eval_fresh_2site(
-            params, _env_cache_2s.get("envs", None)
-        )
+        # #899: NO env_init -- see the 1-site path for the full reasoning.
+        # The seed was the line-search-reverted cache, i.e. a different
+        # state's environment, and ``best_params`` is evaluated cold for the
+        # same reason so the comparison below compares like with like.
+        A_last, B_last, envs_last, E_last = _eval_fresh_2site(params)
         env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
 
-        # Pad best_env_cache_2s envs to the current ctm_cfg_2s.chi before use.
-        # Mirrors the same fix on the 1-site path — see comment there.  Fixes #469.
-        # NOTE: if a new _eval_fresh_2site(best_params, best_env_cache_2s["envs"])
-        # call site is added later, it must reapply this padding — there's no
-        # producer-side guarantee that the snapshot is at ctm_cfg_2s.chi.
-        _best_env_init_2s = best_env_cache_2s.get("envs", None)
-        if _best_env_init_2s:
-            # On the split path this padding is a safe no-op: split chi is fixed
-            # (schedules/bump rejected up front), so _target_chi_2s == the env's
-            # chi and pad_dense_env_chi short-circuits before any fused-only
-            # access.  If split chi ever becomes mutable, guard this with
-            # ``not use_split_2s``.
-            # Issue #514: see 1-site finalize.  Pad to the larger of the
-            # static ``ctm_cfg_2s.chi`` and the env_cache's actual chi
-            # so a bumped env is never asked to shrink.
-            # See 1-site finalize: consult both live cache and the
-            # best-env snapshot (Codex P2 on PR #542).
-            _target_chi_2s = max(
-                ctm_cfg_2s.chi,
-                _env_dict_chi(_env_cache_2s.get("envs")) or 0,
-                _env_dict_chi(_best_env_init_2s) or 0,
-            )
-            _best_env_init_2s = {
-                c: pad_dense_env_chi(
-                    _best_env_init_2s[c],
-                    _target_chi_2s,
-                    base_charges=_bump_base_charges_2s,
-                )
-                for c in _best_env_init_2s
-            }
-
         if best_params is not params:
-            A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(
-                best_params, _best_env_init_2s
-            )
+            A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(best_params)
             env_A_best = envs_best[(0, 0)]
             env_B_best = envs_best[(1, 0)]
         else:
@@ -4216,6 +4245,9 @@ def _optimize_gs_ad_multisite(
     Returns ``(site_tensors_dict, envs_dict, E_gs)`` where the dicts are
     keyed by site name (e.g. ``"u"``, ``"v"``, ``"w"``).
     """
+    # #973: drop any previous run's adjoint seed before this run's first
+    # gradient -- see invalidate_implicit_ad_warm_start's docstring.
+    invalidate_implicit_ad_warm_start()
     config = _normalize_stall_recovery(config, unit_cell="multisite")
     _warn_implicit_ad_variational_caveat(config, path="Multisite Lattice")
 
@@ -4363,7 +4395,6 @@ def _optimize_gs_ad_multisite(
 
     best_energy = float("inf")
     best_params = params
-    best_env_cache: dict[str, dict] = {}
     prev_energy = float("inf")
     prev_grad = None
     cg_direction = None
@@ -4468,6 +4499,7 @@ def _optimize_gs_ad_multisite(
             _step_t0 = _time.perf_counter()
         try:
             energy_val, grads = jax.value_and_grad(loss_fn)(params)
+            grads = _euclidean_grads(grads)
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -4557,7 +4589,6 @@ def _optimize_gs_ad_multisite(
         ):
             best_energy = energy_float
             best_params = params
-            best_env_cache = dict(_env_cache)
 
         delta_energy = abs(energy_float - prev_energy)
         grad_norm_val = _grad_l2_norm(grads)
@@ -4831,7 +4862,7 @@ def _optimize_gs_ad_multisite(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
                     _, g = jax.value_and_grad(loss_fn)(trial)
-                    return _tree_dot(g, direction)
+                    return _tree_dot(_euclidean_grads(g), direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                 param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -5138,38 +5169,14 @@ def _optimize_gs_ad_multisite(
         )
         return site_tensors, envs, E_
 
-    sites_last, envs_last, E_last = _eval_fresh(params, _env_cache.get("envs", None))
-
-    # Pad best_env_cache envs to the current ctm_cfg.chi before use.
-    # Mirrors the same fix on the 1-site and 2-site paths — see comment there.
-    # Fixes #469.
-    # NOTE: if a new _eval_fresh(best_params, best_env_cache["envs"]) call site
-    # is added later, it must reapply this padding — there's no producer-side
-    # guarantee that the snapshot is at ctm_cfg.chi.
-    _best_env_init_multi = best_env_cache.get("envs", None)
-    if _best_env_init_multi:
-        # Issue #514: see 1-site finalize.  Pad to the larger of the
-        # static ``ctm_cfg.chi`` and the env_cache's actual chi.
-        # See 1-site finalize: consult both live cache and the
-        # best-env snapshot (Codex P2 on PR #542).
-        _target_chi_multi = max(
-            ctm_cfg.chi,
-            _env_dict_chi(_env_cache.get("envs")) or 0,
-            _env_dict_chi(_best_env_init_multi) or 0,
-        )
-        _best_env_init_multi = {
-            c: pad_dense_env_chi(
-                _best_env_init_multi[c],
-                _target_chi_multi,
-                base_charges=_bump_base_charges_multi,
-            )
-            for c in _best_env_init_multi
-        }
+    # #899: NO env_init -- see the 1-site path for the full reasoning.
+    # The seed was the line-search-reverted cache, i.e. a different
+    # state's environment, and ``best_params`` is evaluated cold for the
+    # same reason so the comparison below compares like with like.
+    sites_last, envs_last, E_last = _eval_fresh(params)
 
     if best_params is not params:
-        sites_best, envs_best, E_best_fresh = _eval_fresh(
-            best_params, _best_env_init_multi
-        )
+        sites_best, envs_best, E_best_fresh = _eval_fresh(best_params)
     else:
         E_best_fresh = E_last
 
@@ -5244,4 +5251,8 @@ def optimize_fpeps_ad(
 
         A_init = _build_initial_fpeps_tensor(fpeps_config)
 
+    # Dispatches straight to the private optimizer, so it must run the #938
+    # recipe guard itself -- _optimize_gs_ad_tensor threads gs_recipe into
+    # the implicit loss while its warm-start and final evaluations drop it.
+    _reject_mislabelled_1x1(config)
     return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)

@@ -59,6 +59,97 @@ def _derive_charges(base_charges: np.ndarray, target_dim: int) -> np.ndarray:
     return np.asarray(np.tile(base_charges, reps)[:target_dim], dtype=np.int32)
 
 
+def _sector_floor(base_charges: np.ndarray | None, *, floor: int = 1) -> dict[int, int]:
+    """Minimum number of chi-bond slots each charge sector must keep.
+
+    ``base_charges`` names the charges that carry the physical bond's own
+    sector structure.  The floor exists so that a sector whose weight dips
+    below the chi cut for one sweep still keeps a slot on the bond: a charge
+    absent from the bond index cannot be produced by ``_contract_symmetric``,
+    which pairs blocks by charge *value*, so dropping it is not a truncation
+    but a deletion.  It is deliberately a *floor* and not a quota -- see
+    :func:`_select_chi_slots`.
+    """
+    if base_charges is None or floor <= 0:
+        return {}
+    return {int(q): floor for q in np.asarray(base_charges)}
+
+
+def _select_chi_slots(
+    values: np.ndarray,
+    slot_charges: np.ndarray,
+    *,
+    base_charges: np.ndarray | None,
+    chi: int,
+    floor: int = 1,
+) -> list[int]:
+    """Choose which slots of a full decomposition survive the chi cut.
+
+    Global top-``chi`` by ``values``, after reserving ``floor`` slots for each
+    charge named in ``base_charges`` (taking that sector's own largest values).
+
+    ``base_charges`` used to *pin* the per-sector counts, via
+    ``_derive_charges(base_charges, chi)``.  That capped every sector at its
+    tiled share and gave the charges absent from ``base_charges`` a share of
+    zero, so the CTM chi bond could never allocate a slot to them however much
+    weight they carried -- the environment saturated below the dense reference
+    and the gap *grew* with chi (#922).  It now only raises a floor.
+
+    Two limits, both deliberate:
+
+    * The floor can only ration slots that exist.  A charge named by
+      ``base_charges`` that contributes no entry to ``values`` gets nothing
+      here, because there is no vector to keep; callers needing such a sector
+      on the bond have to supply one first, as
+      :func:`~tenax.algorithms._ctm_projector._eigh_projector_symmetric` does.
+    * With more distinct base charges than ``chi``, the floor spends the whole
+      budget and the largest values can lose.  The floor costs at most one slot
+      per distinct charge, bounded by D^2 and normally far below chi.
+
+    This is the *eager* rule.  Under ``jax.jit`` the per-sector block shapes are
+    baked at trace time, so the cut cannot read ``values`` at all and
+    ``linalg._truncated_svd_symmetric_traced`` keeps the old quota -- see #929.
+
+    Args:
+        values:        Singular/eigen values, one per slot.  Need not be sorted.
+        slot_charges:  Charge of each slot, in the same order as ``values``.
+        base_charges:  Charges whose sectors get the floor; ``None`` disables it.
+        chi:           Number of slots to keep (clamped to ``len(values)``).
+        floor:         Slots reserved per charge in ``base_charges``.
+
+    Returns:
+        The kept slot indices, ascending.  Ascending order preserves the
+        caller's slot ordering, which for a descending-sorted decomposition
+        means the result is still ordered by decreasing value.
+    """
+    values = np.asarray(values, dtype=float)
+    slot_charges = np.asarray(slot_charges, dtype=np.int32)
+    n = len(values)
+    chi = min(int(chi), n)
+    if chi <= 0:
+        return []
+
+    order = [int(j) for j in np.argsort(-values, kind="stable")]
+    by_sector: dict[int, list[int]] = {}
+    for j in order:  # descending value within each sector
+        by_sector.setdefault(int(slot_charges[j]), []).append(j)
+
+    keep: list[int] = []
+    taken: set[int] = set()
+    for q, want in sorted(_sector_floor(base_charges, floor=floor).items()):
+        for j in by_sector.get(q, [])[:want]:
+            if j not in taken and len(keep) < chi:
+                keep.append(j)
+                taken.add(j)
+    for j in order:
+        if len(keep) >= chi:
+            break
+        if j not in taken:
+            keep.append(j)
+            taken.add(j)
+    return sorted(keep)
+
+
 # A labels: (u, d, l, r, phys), flows: (OUT, IN, OUT, IN, IN)
 # Env label/flow conventions per the plan
 _CORNER_SPECS = {

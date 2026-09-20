@@ -6,13 +6,26 @@ Pipeline:
      arXiv:1610.04727 ("Gapless spin-liquid ground state in the S=1/2
      kagome antiferromagnet"). Liao 2017 reports E/site → -0.43752(6)
      in the large-D limit (Fig 1(b) inset).
-  2. AD optimization through the Tenax square-CG-iPEPS CTM
-     (Convention C: PESS -> 1-site square supersite, chi = 2*D**2).
+  2. AD optimization through the EXACT single-supersite square CTM
+     (#991: ``pess_to_kagome_supersite_exact`` — ``T_d`` contracted
+     explicitly, no dummy leg; ``T_d`` is a variational parameter).
      This step is a Tenax extension; Liao 2017 has no AD optimization
      for kagome PESS. The AD machinery is reused from Liao et al.,
      PRX 9, 031041 (2019), "Differentiable Programming Tensor
      Networks", which applies AD to *square-lattice* iPEPS, not
      kagome PESS.
+
+Both the ``[SU only]`` readout and the AD stage go through the exact
+blocking (``build_pess_loss_exact`` /
+``optimize_pess_ad(..., loss_builder="exact")``). Until #1002 this
+script measured and optimized the Convention-C loss
+(``build_pess_loss``), whose CTM collapses to rank-1 corners on
+SU-converged states: the readout was backend-dependent and NOT the
+kagome energy (D=2 SU state: -0.2357 instead of the exact -0.386195;
+D=4 SU state: CPU -0.3417 / GPU -0.2088 instead of the
+backend-identical -0.423235). Discard any numbers this script produced
+before #1002. The exact path matches the independent Husimi probe
+(D=4: -0.420004) and sits in Liao 2017's D=4 band (-0.429).
 
 For an SU-only Liao 2017 replication audit (no AD, two energy probes),
 see ``kagome_spin12_pess_liao2017_replication.py``.
@@ -41,10 +54,10 @@ from tenax.algorithms.ipeps_config import CTMConfig
 from tenax.algorithms.pess import (
     IPESSState,
     kagome_triangle_xxz_hamiltonian,
-    kagome_xxz_pess_cg_gates,
+    kagome_xxz_pess_cg_gates_exact,
     pess_simple_update,
 )
-from tenax.algorithms.pess_optimize import build_pess_loss, optimize_pess_ad
+from tenax.algorithms.pess_optimize import build_pess_loss_exact, optimize_pess_ad
 
 DELTA = 1.0  # isotropic Heisenberg
 D_PHYS = 2  # spin-½
@@ -80,18 +93,23 @@ def run_kagome_spin12_benchmark(
 ) -> tuple[IPESSState, float, float]:
     """Run SU warm-start + AD optimization. Returns ``(state, e_ad, e_su)``."""
     H = kagome_triangle_xxz_hamiltonian(delta=DELTA, d=D_PHYS)
-    cg_gates = kagome_xxz_pess_cg_gates(delta=DELTA, d=D_PHYS)
+    cg_gates = kagome_xxz_pess_cg_gates_exact(delta=DELTA, d=D_PHYS)
     state = IPESSState.random(D=D, d=D_PHYS, key=jax.random.PRNGKey(seed))
     state = pess_simple_update(state, H, dt_schedule=list(su_steps), D_max=D)
 
     config = _make_ctm_config(chi=chi)
-    loss_fn = build_pess_loss(cg_gates, config)
+    loss_fn = build_pess_loss_exact(cg_gates, config)
     e_su = float(loss_fn(state).real)
     if verbose:
         print(f"  [SU only] E/site = {e_su:.6f}", flush=True)
 
     state, e_ad = optimize_pess_ad(
-        state, cg_gates, config, max_iter=max_iter, verbose=verbose
+        state,
+        cg_gates,
+        config,
+        max_iter=max_iter,
+        verbose=verbose,
+        loss_builder="exact",
     )
     return state, e_ad, e_su
 
