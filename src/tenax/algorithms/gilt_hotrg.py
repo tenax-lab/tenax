@@ -115,9 +115,13 @@ def _filter_bond(T: Tensor, bond: str, config: GiltConfig) -> Tensor:
     # environment gram of this bond on the uniform lattice (all four plaquette
     # corners are the same site tensor), then the geometry-independent cascade.
     gram = _bond_gram((T, T, T, T), bond)
-    Q, _k, _rank = _gilt_cascade(
-        gram, idx_i.charges, idx_j.charges, idx_i.symmetry, config
-    )
+    # #934 folded the bond charges and the symmetry into ``_BondGram`` itself,
+    # so the cascade takes only ``(gram, config)`` now -- the three dropped
+    # arguments are carried by the gram.  This call site landed from #932 while
+    # #934 was still open, so neither PR's CI could see the mismatch: #934's
+    # branch had no ``gilt_hotrg.py``, and #932 merged against the old
+    # five-argument signature.
+    Q, _k, _rank = _gilt_cascade(gram, config)
     # split Q charge-conservingly (drop s < split_factor*eps individually,
     # keep >=1) and absorb u*sqrt(s) into leg_i, sqrt(s)*vh into leg_j.
     cut = config.split_factor * config.gilt_eps
