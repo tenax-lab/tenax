@@ -691,6 +691,12 @@ _FILE_MARKERS = {
     # which is exactly what should gate a merge, and it is cheap -- D=2
     # chi=6, 4 L-BFGS steps with a line search, 21.6s CPU for the file.
     "test_ipeps_final_energy_is_fresh_899.py": "core",
+    # #983: the 2x2 projector-response guard.  ``core``: the frozen
+    # projector made the gradient of the DEFAULT recipe wrong by up to 15x
+    # and sometimes wrong in sign, which is a silently-wrong-answer bug on
+    # the required AD path, and the file is cheap -- one CTM sweep at D=2
+    # chi=4, 18.3s CPU for all four tests.
+    "test_ctm_2x2_projector_backward_983.py": "core",
 }
 
 
