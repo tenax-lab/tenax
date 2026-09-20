@@ -175,10 +175,16 @@ def _contract_sandwich(
 
         if i in ops_at_site:
             op = ops_at_site[i]
+            # <psi|O|psi> = sum_{q,p} conj(psi)_q O[q,p] psi_p: the operator's
+            # ROW index pairs with the bra (conjugated) tensor.  These
+            # subscripts were "pq,..." -- row paired with the ket -- which
+            # evaluates the TRANSPOSE of the supplied matrix.  Real symmetric
+            # operators (Sz, Sx, densities) hid it; every genuinely complex
+            # Hermitian measurement (Sy) came back with the wrong sign (#944).
             if tm is None:
-                contracted = jnp.einsum("pq,apr,aqs->rs", op, A, A_conj)
+                contracted = jnp.einsum("qp,apr,aqs->rs", op, A, A_conj)
             else:
-                contracted = jnp.einsum("ab,pq,apr,bqs->rs", tm, op, A, A_conj)
+                contracted = jnp.einsum("ab,qp,apr,bqs->rs", tm, op, A, A_conj)
         else:
             # Identity: contract physical indices directly
             if tm is None:

@@ -14,7 +14,13 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor
 # ------------------------------------------------------------------ #
 
 _FILE_MARKERS = {
+    "test_eps_t_blindness_727.py": "core",
+    "test_gs_recipe_explicit_rejection_755.py": "core",
     "test_tensor.py": "core",
+    # PR #986 Phase 1: the swap-gate primitive.  Pure block-metadata sign
+    # tests, no CTM, ~1s; the graded-transpose cross-check is the mutation
+    # anchor for the fermionic CTM-AD reform's build-time statistics.
+    "test_swap_gate.py": "core",
     "test_index.py": "core",
     "test_symmetry.py": "core",
     "test_contraction.py": "core",
@@ -29,6 +35,7 @@ _FILE_MARKERS = {
     "test_hotrg.py": "algorithm",
     "test_ipeps.py": "algorithm",
     "test_ipeps_bp_gauge.py": "algorithm",
+    "test_bp_gauge_rank_collapse.py": "core",
     "test_ipeps_gauge.py": "algorithm",
     # #882 Tasks 7 and 7b: the dense ``gauge_fix`` is one traced call -- a
     # ``lax.while_loop`` solve with ``absorb_weights`` compiled around it --
@@ -97,9 +104,69 @@ _FILE_MARKERS = {
     # chi<=16 dense, ~50s each.
     "test_ctm_723_single_site_collapse.py": "core",
     "test_split_ctm_746_single_site_collapse.py": "core",
+    # #907: a confined symmetric CTM environment made the split 2x2 projector
+    # raise a bare ``StopIteration`` (empty SVD, ``next(iter)``) then an
+    # ``IndexError`` (``S[0]`` on a size-0 spectrum), four frames from the
+    # cause -- the same silent/opaque-failure class as the collapse guards
+    # above.  The three unit anchors are cheap (empty-SVD passthrough + guard
+    # raise/no-op, ~2s); the end-to-end confined-state repro carries its own
+    # ``@pytest.mark.slow`` (SU evolution + two CTM builds, ~20s), which the
+    # rule below honours by withholding ``core`` from it.
+    "test_split_ctm_symmetric_empty_projector_907.py": "core",
+    # #890: ``ipeps()`` accepted an ``initial_peps`` whose bond dim disagreed
+    # with ``config.max_bond_dim`` and failed several frames into the SU sweep
+    # with an opaque reshape ``TypeError``.  Warm-starting a larger-D run from a
+    # smaller-D state is the natural way to hit it, so the clear-error guard on
+    # the default public path belongs in the required gate.  Cheap (~11s): the
+    # mismatch case raises before SU; the match and independent-re-dimension
+    # cases run SU only (``compute_energy=False``).
+    "test_ipeps_initial_peps_validation_890.py": "core",
+    # #925/#976: the legacy ``ctm`` / ``ctm_2site`` / ``ctm_split`` ignored
+    # ``CTMConfig.min_iter`` (could certify convergence at 2 sweeps against a
+    # ``min_iter=30``) and ``ctm`` excluded QR warm-up sweeps from ``n_iter``.
+    # These are the mechanism guards for the stopping rule -- a silent contract
+    # violation on public entry points, so they belong in the required gate.
+    # Cheap (~8s): a 1x1 product state, no real convergence run.
+    "test_ctm_min_iter_contract_925_976.py": "core",
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
+    # ``ctm_tensor(return_meta=True)``: the only way a caller can find out
+    # whether the environment it is about to read an energy from is a fixed
+    # point.  Same defect class as the two files above -- a silent wrong answer
+    # on the default path -- so it belongs in the required gate for the same
+    # reason.  Shares one D=2 chi=8 module fixture across every case (~9s).
+    "test_ctm_tensor_return_info.py": "core",
+    # The #911 ``recipe="1x1"`` deprecation contract.  ``core`` rather than the
+    # ``_UNBUCKETED_LEGACY`` set the older deprecation files sit in: a warning
+    # that silently stops firing is indistinguishable from one nobody hit, and
+    # the suite-wide ``ignore:`` filter in pyproject means nothing else would
+    # notice.  No CTM convergence anywhere -- ``max_iter=2`` on a random D=2
+    # site, since the warning does not depend on physics (~4.5s).
+    "test_recipe_1x1_deprecation.py": "core",
+    # The #911 coverage rule: every public function taking ``recipe`` warns or
+    # is explicitly exempt.  Pure AST over ``src/tenax``, no JAX, ~1s -- and it
+    # is the guard that three review rounds of hand-maintained lists could not
+    # replace, so it belongs in the required gate.
+    "test_recipe_1x1_coverage.py": "core",
+    # #933: these seven carried a module-level ``pytestmark = pytest.mark.core``
+    # and no registry entry, so they entered the required gate without the
+    # justification every line in this table has to carry.  Three of them were
+    # 29% of its runtime.  Registered here so the cost is visible; the
+    # expensive cases inside them now carry explicit ``@pytest.mark.slow``,
+    # which this table's "core" mapping deliberately withholds ``core`` from.
+    "test_chi_ramp_chi_auto_bump_deprecation.py": "core",
+    "test_ctm_explicit_tbptt.py": "core",
+    "test_ctm_implicit_warm_start_adjoint.py": "core",
+    "test_ctm_in_loop_bump_ad_paths.py": "core",
+    "test_line_search_auto.py": "core",
+    "test_split_ctm_doublelayer_projector.py": "core",
+    "test_split_ctm_fuse_flag.py": "core",
+    # #726: the split-CTM corner gradient.  Moved out of _UNBUCKETED_LEGACY,
+    # where it ran in no required job -- which is how a comment asserting the
+    # rank-1 corner was physics survived, and how the corner contribution to
+    # the explicit-AD gradient went untested.  D=2 chi=4, 3 sweeps (~21s).
+    "test_regularized_svd.py": "core",
     # #785: the only thing that says whether a root-implicit gradient is
     # accurate.  The contract tests run on a closed-form quartic with no CTM
     # anywhere (~0.2s), so the measurement semantics -- a wrong gradient
@@ -199,6 +266,14 @@ _FILE_MARKERS = {
     # a NaN cotangent there is as fatal as a NaN value.  Milliseconds for the
     # unit half; the reachability test converges one D=2 chi=8 CTM.
     "test_normalise_rdm_zero_grad.py": "core",
+    # Complex-Hermitian gate expectations across every energy path (#966):
+    # Tr(rho H) vs Tr(rho H^T) separate only there, and the whole rest of the
+    # suite is real-symmetric, so nothing else can catch a regression.  Exact
+    # D=1 product fixtures, seconds.
+    "test_rdm_gate_transpose_966.py": "core",
+    # The chi-convergence example's provenance gate (#938 round 2): pre-#938
+    # outdirs must be refused, not resumed. File ops + one path-load, seconds.
+    "test_chi_convergence_provenance.py": "core",
     # The bucket guard itself (#805). Pure filesystem inspection, microseconds,
     # and it must run in the gate it protects or it protects nothing.
     "test_bucket_registry.py": "core",
@@ -306,7 +381,24 @@ _FILE_MARKERS = {
     # convergences (one symmetric, one dense) plus one RDM -- core budget; the
     # chi-scan that needs chi=16 carries its own ``@pytest.mark.slow``.
     "test_ctm_charged_sectors_905.py": "core",
+    # #957: complex cotangents fed unconjugated to Optax — the optimizer
+    # ASCENDED on complex tensors and the result depended on the initial
+    # tensor's global phase.  Silent-wrong-answer class, so it belongs in the
+    # gate; the fixture is an exact D=chi=1 product state, ~15s for all nine
+    # cases with in-process compile sharing.
+    "test_ipeps_optimize_complex_grads_957.py": "core",
+    # #853's severity-attribution control, relocated out of the deleted #610
+    # prototype suite (review of #959): the only PSD-and-attainable-energy
+    # check on the plain symmetric U(1)-Sz CTM path.  One D=3 chi=12
+    # convergence at ~44 min cold -- far too expensive for the gate, and
+    # "algorithm" is currently aspirational: the fast-other bucket has hit the
+    # 6h job limit on every run since at least 2026-09-03 (#960), so nothing
+    # this deep in it executes.  Registered here so the control survives in
+    # the tree and runs the day #960 is fixed, not as a claim that it runs
+    # today.
+    "test_ctm_symmetric_rdm_positive_853.py": "algorithm",
     "test_ctm_chi_truncation_policy_922.py": "core",
+    "test_ctm_traced_chi_inventory_929.py": "core",
     "test_integration_regression.py": "algorithm",
     "test_krylov.py": "core",
     "test_tdvp.py": "algorithm",
@@ -344,6 +436,8 @@ _FILE_MARKERS = {
     "test_cbe.py": "algorithm",
     "test_lattice.py": "algorithm",
     "test_linalg.py": "core",
+    "test_eigh_bond_order.py": "core",
+    "test_svd_bond_order.py": "core",
     "test_linalg_np.py": "core",
     "test_observables.py": "algorithm",
     "test_cbe_validation.py": "algorithm",
@@ -374,6 +468,12 @@ _FILE_MARKERS = {
     "test_ipeps_chi_bump_integration.py": "algorithm",
     "test_ctm_convergence_random_iPEPS.py": "algorithm",
     "test_ipeps_grad_spike_guard.py": "slow",
+    # #973 cross-run warm-start leak: wiring tests are ms-scale (planted
+    # cache entry + junk args); the end-to-end determinism repro runs five
+    # short implicit-AD optimizations and sits with the other multi-run
+    # optimizer integrations in slow.
+    "test_warm_start_entry_invalidation_973.py": "core",
+    "test_optimizer_run_independence_973.py": "slow",
     # Block-sparse stacked-contraction backend seam (#200 / #566): fast,
     # mechanism-level (small even-D fermionic tensors, no CTM convergence).
     "test_harness.py": "core",
@@ -422,111 +522,184 @@ _FILE_MARKERS = {
     # it does not gate a merge -- but it is what keeps a crashed gate cell from
     # being recorded as a confirmed rank-1 collapse (#747).
     "test_bench_672_driver_guard.py": "algorithm",
+    # ------------------------------------------------------------------ #
+    # #805 drain, tiers A and B.  Bucketed from a per-file measurement of   #
+    # all 87 legacy entries (see #805 for the full table): one file per     #
+    # process, ``-m "not slow"``, CPU, against a shared initially-cold JAX  #
+    # compile cache, so the cost model is one CI job rather than 87 cold    #
+    # starts.  Costs quoted below are *marginal* -- measured wall-clock     #
+    # minus the 4.9 s per-process floor (interpreter + ``import jax`` +     #
+    # conftest), which one gate run pays once, not once per file.           #
+    # ------------------------------------------------------------------ #
+    #
+    # Tier A, part 1: these 12 were **already in the required gate** --
+    # every one of their 62 tests carries an explicit ``@pytest.mark.core``.
+    # That is the third route in, the one #933 did not close: the registry
+    # guard treats a file as accounted for when it sits in
+    # ``_UNBUCKETED_LEGACY``, so per-test marks enter the gate unreviewed the
+    # same way module-level ``pytestmark`` used to.  Registering them changes
+    # no behaviour and costs no runtime; it makes the table describe what is
+    # already true, which is the only way the gate's contents stay reviewable.
+    "test_apply_chi_bump.py": "core",
+    "test_ctm_env_pad_chi_schedule.py": "core",
+    "test_ipeps_chi_adaptive_bump_unit.py": "core",
+    "test_ipeps_chi_bump_rollback_desync.py": "core",
+    "test_ipeps_chi_schedule_wiring.py": "core",
+    "test_ipeps_ctm_stall_recovery_cap.py": "core",
+    "test_ipeps_stall_recovery_cap.py": "core",
+    "test_optimize_gs_ad_chi_schedule_shim.py": "core",
+    "test_pess_3site_multisite_encoding.py": "core",
+    "test_pess_3site_multisite_wavefunction.py": "core",
+    "test_pess_supersite_exact.py": "core",
+    "test_regularized_qr.py": "core",
+    "test_varipeps_compare_payload.py": "core",
+    #
+    # Tier A, part 2: every test in these 7 already carries an explicit
+    # ``@pytest.mark.slow``, and ``pytest_collection_modifyitems`` deliberately
+    # withholds ``core`` from a slow-marked test -- so no bucket here can add
+    # anything to the gate.  ``slow`` is simply the honest label: they run in
+    # the ``slow`` CI bucket today and continue to.
+    "test_ctm_honeycomb_lukin_sotnikov.py": "slow",
+    "test_ctm_multisite_2x2_contract.py": "slow",
+    "test_ctm_recipe_2x2_production_correctness.py": "slow",
+    "test_optimize_gs_ad_chi_schedule_unified.py": "slow",
+    "test_pess_ad_honeycomb.py": "slow",
+    "test_split_ctm_large_d_memory.py": "slow",
+    "test_split_ctm_production_correctness.py": "slow",
+    #
+    # Tier B, part 1 -- decomposition adjoints, linear solvers, line search
+    # (9 files, +66 gate tests, +38 s marginal).  This is the class
+    # #805's criterion is actually about: a wrong number here is not confined
+    # to one algorithm, it corrupts every gradient that flows through it.  The
+    # QR backward that #912/#917 fixed (real-only, assumed m>=n) shipped
+    # exactly this way.  All are kernel-level -- no CTM convergence, no
+    # optimisation -- which is why the whole group costs under half a minute.
+    "test_ad_primitives_rank_aware.py": "core",
+    "test_gmres_lax.py": "core",
+    "test_ipeps_tree_dot.py": "core",
+    "test_line_search.py": "core",
+    "test_lorentzian_eigh_kernel.py": "core",
+    "test_projector_backward_dispatch.py": "core",
+    "test_svd_adjoint_fd_750.py": "core",
+    "test_symmetric_custom_vjp.py": "core",
+    "test_truncated_lowrank_svd.py": "core",
+    #
+    # Tier B, part 2 -- CTM structural invariants (7 files, +47 gate tests,
+    # +18 s marginal).  Charge tiling (#667/#700), flow flips (#422),
+    # rank-1 padded init, the 2x2 projector, and the compiled raw-array moves.
+    # Each guards a defect class that has already shipped once; the expensive
+    # members of the same family (the symmetric/U(1)-Sz ones, 90-180 s apiece
+    # on block-sparse compile, #566) are deliberately NOT here -- they go to
+    # ``algorithm`` in tier D.
+    "test_complex128_ad.py": "core",
+    "test_ctm_compiled.py": "core",
+    "test_ctm_energy_implicit.py": "core",
+    "test_ctm_tensor_flow_flip.py": "core",
+    "test_ctm_tensor_init_rank1.py": "core",
+    "test_ctm_tensor_projector_2x2.py": "core",
+    "test_ctm_tensor_tiling.py": "core",
+    #
+    # Tier B, part 3 -- config, policy and dispatch (9 files, +201 gate tests,
+    # +3 s marginal).  These do not compute a number; they decide which
+    # code path computes it, so a silent failure routes the run somewhere the
+    # author did not intend and every number downstream is wrong without
+    # anything looking broken.  Nearly free -- ``test_tuning_registry.py`` is
+    # 155 parametrised cases in 0.2 s, because it is pure schema inspection
+    # over the registry rather than anything numerical.
+    # ``test_architecture_imports.py`` joins the gate here having been red on
+    # ``main`` for a month as #790 precisely because it was unbucketed; #790 is
+    # now closed and the file passes.
+    "test_architecture_imports.py": "core",
+    "test_ipeps_ad_policy.py": "core",
+    "test_ipeps_checkpoint.py": "core",
+    "test_ipeps_config_chi_ceiling_bailout.py": "core",
+    "test_ipeps_config_grad_spike.py": "core",
+    "test_ipeps_config_hz_max_iter.py": "core",
+    "test_ipeps_config_stall_recovery_retries.py": "core",
+    "test_make_neighbors.py": "core",
+    "test_tuning_registry.py": "core",
+    # ---------------------------------------------------------------- #
+    # #805 drain: the last _UNBUCKETED_LEGACY files, bucketed by        #
+    # measured CI/local runtime (durations in comments are the max      #
+    # observed across the 3.11/3.12/macOS jobs, or a local CPU time).   #
+    # core = cheap and a wrong-number/correctness guard; slow = >150s   #
+    # (no self-declared slow marks, so the whole file goes to the slow  #
+    # bucket); algorithm = everything else (runs on push-to-main and    #
+    # the nightly, never silent). This empties the legacy list.         #
+    # (test_ipeps_ad_adjoint_methods.py was drained separately by #982.)#
+    # ---------------------------------------------------------------- #
+    # core: cheap correctness guards (all measured under 8s)
+    "test_ctm_honeycomb_env.py": "core",  # 0.2s / 7
+    "test_ctm_honeycomb_safeguards.py": "core",  # 0.9s / 5
+    "test_ctm_honeycomb_energy.py": "core",  # 2.5s / 14
+    "test_ctm_honeycomb_moves.py": "core",  # 3.3s / 10
+    "test_ctm_honeycomb_forward.py": "core",  # 5.6s / 7
+    "test_pess_local_energy.py": "core",  # 5.8s / 2
+    "test_ctm_honeycomb_projector.py": "core",  # 7.9s / 10
+    # slow: >150s with no self-declared slow marks, so the whole file
+    # runs only in the slow bucket rather than bloating fast-other (#960).
+    "test_split_ctm_chi_frozen_726.py": "slow",  # 164s / 9
+    "test_ctm_670_symmetric_2x2.py": "slow",  # 267s / 2
+    "test_ctm_700_env_collapse.py": "slow",  # >900s local CPU / 5
+    "test_pess_3site_multisite_rdm_invariants.py": "slow",  # 375s / 7
+    # algorithm: moderate cost; runs push-to-main + nightly.
+    "test_ctm_honeycomb_ad.py": "algorithm",  # 15.2s / 2
+    "test_ctm_honeycomb_convergence.py": "algorithm",
+    "test_ctm_honeycomb_cross_path.py": "algorithm",  # has a slow-marked case
+    "test_ctm_honeycomb_init.py": "algorithm",
+    "test_block_sparse_ctm_ad.py": "algorithm",  # 18.5s / 2
+    "test_c4v_reference_ad.py": "algorithm",  # 35.7s / 19
+    "test_coarse_grain.py": "algorithm",  # 126s / 26
+    "test_ctm_2x2_projector_symmetric.py": "algorithm",  # 29s / 25
+    "test_ctm_674_fermionic_fused.py": "algorithm",  # 85s / 2
+    "test_ctm_chi_ramp.py": "algorithm",
+    "test_ctm_direction_dependent_bonds.py": "algorithm",
+    "test_ctm_energy_implicit_chi_bump.py": "algorithm",  # 61s / 4
+    "test_ctm_in_loop_chi_bump.py": "algorithm",  # 37.5s / 18
+    "test_ctm_loop_core.py": "algorithm",
+    "test_ctm_projector.py": "algorithm",  # 22.4s / 7
+    "test_ctm_sharding_backward.py": "algorithm",
+    "test_hotrg_sharding.py": "algorithm",  # 13s / 2
+    "test_ipeps_ad_conv_criterion.py": "algorithm",  # 27.3s / 15
+    "test_ipeps_ad_f3_fused_bwd.py": "algorithm",  # 18.5s / 3
+    "test_ipeps_ad_history.py": "algorithm",
+    "test_ipeps_checkpoint_resume.py": "algorithm",  # 134s / 6
+    "test_ipeps_u1sz.py": "algorithm",  # has a slow-marked case
+    "test_metric_precond.py": "algorithm",  # 59s / 9
+    "test_profiler_u1sz_arm.py": "algorithm",
+    "test_reduced_corner_qr.py": "algorithm",
+    "test_split_ctm_energy_gauge.py": "algorithm",
+    "test_sublattice_rotation.py": "algorithm",  # 89s / 24
+    "test_varipeps_compare.py": "algorithm",  # external compare, skips if absent
+    "test_varipeps_compare_su.py": "algorithm",  # external compare
+    # #827/#824: the adjoint-method (fixed_point vs gmres) equivalence tests.
+    # Drained from ``_UNBUCKETED_LEGACY`` by #982 -- this file running in no
+    # gating job is how its energy assertion sat red on one platform for a
+    # month (#803, then #827).  Both tests already carry an explicit
+    # ``@pytest.mark.algorithm``, so the required ``-m core`` gate is
+    # unchanged; this entry makes the bucket reviewed rather than accidental.
+    # Cost: two D=2 chi=8 CTM gradient evaluations to conv_tol=1e-10 plus two
+    # 1-step optimizations (~40s CPU).
+    "test_ipeps_ad_adjoint_methods.py": "algorithm",
+    # #974: the non-finite-environment convergence guard.  ``core``: a NaN
+    # env certifying as converged is a silently-wrong-answer bug in the
+    # required path, and the file is pure aggregation logic -- 3.96s CPU.
+    "test_ctm_nonfinite_convergence_974.py": "core",
+    # #899: the returned-energy-is-fresh guard.  ``core``: it is the
+    # regression test for a wrong number coming out of ``optimize_gs_ad``,
+    # which is exactly what should gate a merge, and it is cheap -- D=2
+    # chi=6, 4 L-BFGS steps with a line search, 21.6s CPU for the file.
+    "test_ipeps_final_energy_is_fresh_899.py": "core",
 }
 
 
 # ------------------------------------------------------------------ #
 # Frozen debt: test files that predate the bucket guard.              #
 # See tests/test_bucket_registry.py and issue #805.                    #
-# This list may SHRINK, never grow.                                    #
+# This list may SHRINK, never grow. Fully drained (#805).             #
 # ------------------------------------------------------------------ #
 
-_UNBUCKETED_LEGACY = {
-    "test_ad_primitives_rank_aware.py",
-    "test_apply_chi_bump.py",
-    "test_architecture_imports.py",
-    "test_block_sparse_ctm_ad.py",
-    "test_c4v_reference_ad.py",
-    "test_chi_ramp_chi_auto_bump_deprecation.py",
-    "test_coarse_grain.py",
-    "test_complex128_ad.py",
-    "test_ctm_2x2_projector_symmetric.py",
-    "test_ctm_670_symmetric_2x2.py",
-    "test_ctm_674_fermionic_fused.py",
-    "test_ctm_700_env_collapse.py",
-    "test_ctm_chi_ramp.py",
-    "test_ctm_compiled.py",
-    "test_ctm_direction_dependent_bonds.py",
-    "test_ctm_energy_implicit.py",
-    "test_ctm_energy_implicit_chi_bump.py",
-    "test_ctm_env_pad_chi_schedule.py",
-    "test_ctm_explicit_tbptt.py",
-    "test_ctm_honeycomb_ad.py",
-    "test_ctm_honeycomb_convergence.py",
-    "test_ctm_honeycomb_cross_path.py",
-    "test_ctm_honeycomb_energy.py",
-    "test_ctm_honeycomb_env.py",
-    "test_ctm_honeycomb_forward.py",
-    "test_ctm_honeycomb_init.py",
-    "test_ctm_honeycomb_lukin_sotnikov.py",
-    "test_ctm_honeycomb_moves.py",
-    "test_ctm_honeycomb_projector.py",
-    "test_ctm_honeycomb_safeguards.py",
-    "test_ctm_implicit_warm_start_adjoint.py",
-    "test_ctm_in_loop_bump_ad_paths.py",
-    "test_ctm_in_loop_chi_bump.py",
-    "test_ctm_loop_core.py",
-    "test_ctm_multisite_2x2_contract.py",
-    "test_ctm_projector.py",
-    "test_ctm_recipe_2x2_production_correctness.py",
-    "test_ctm_sharding_backward.py",
-    "test_ctm_tensor_flow_flip.py",
-    "test_ctm_tensor_init_rank1.py",
-    "test_ctm_tensor_projector_2x2.py",
-    "test_ctm_tensor_tiling.py",
-    "test_gmres_lax.py",
-    "test_hotrg_sharding.py",
-    "test_ipeps_ad_adjoint_methods.py",
-    "test_ipeps_ad_conv_criterion.py",
-    "test_ipeps_ad_f3_fused_bwd.py",
-    "test_ipeps_ad_history.py",
-    "test_ipeps_ad_policy.py",
-    "test_ipeps_checkpoint.py",
-    "test_ipeps_checkpoint_resume.py",
-    "test_ipeps_chi_adaptive_bump_unit.py",
-    "test_ipeps_chi_bump_rollback_desync.py",
-    "test_ipeps_chi_schedule_wiring.py",
-    "test_ipeps_config_chi_ceiling_bailout.py",
-    "test_ipeps_config_grad_spike.py",
-    "test_ipeps_config_hz_max_iter.py",
-    "test_ipeps_config_stall_recovery_retries.py",
-    "test_ipeps_ctm_stall_recovery_cap.py",
-    "test_ipeps_stall_recovery_cap.py",
-    "test_ipeps_tree_dot.py",
-    "test_ipeps_u1sz.py",
-    "test_line_search.py",
-    "test_line_search_auto.py",
-    "test_lorentzian_eigh_kernel.py",
-    "test_make_neighbors.py",
-    "test_metric_precond.py",
-    "test_optimize_gs_ad_chi_schedule_shim.py",
-    "test_optimize_gs_ad_chi_schedule_unified.py",
-    "test_pess_3site_multisite_encoding.py",
-    "test_pess_3site_multisite_rdm_invariants.py",
-    "test_pess_3site_multisite_wavefunction.py",
-    "test_pess_ad_honeycomb.py",
-    "test_pess_local_energy.py",
-    "test_profiler_u1sz_arm.py",
-    "test_projector_backward_dispatch.py",
-    "test_reduced_corner_qr.py",
-    "test_regularized_qr.py",
-    "test_regularized_svd.py",
-    "test_split_ctm_chi_frozen_726.py",
-    "test_split_ctm_doublelayer_projector.py",
-    "test_split_ctm_energy_gauge.py",
-    "test_split_ctm_fuse_flag.py",
-    "test_split_ctm_large_d_memory.py",
-    "test_split_ctm_production_correctness.py",
-    "test_sublattice_rotation.py",
-    "test_svd_adjoint_fd_750.py",
-    "test_symmetric_custom_vjp.py",
-    "test_truncated_lowrank_svd.py",
-    "test_tuning_registry.py",
-    "test_u1sz_defrag_prototype_610.py",
-    "test_varipeps_compare.py",
-    "test_varipeps_compare_payload.py",
-    "test_varipeps_compare_su.py",
-}
+_UNBUCKETED_LEGACY: set[str] = set()
 
 
 def pytest_collection_modifyitems(items):

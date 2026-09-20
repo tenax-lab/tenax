@@ -624,8 +624,8 @@ def compute_energy_ctm_tensor(
 
     rdm_h = _rdm2x1_tensor(A, env)
     rdm_v = _rdm1x2_tensor(A, env)
-    E_h = jnp.einsum("ijkl,ijkl->", rdm_h, H)
-    E_v = jnp.einsum("ijkl,ijkl->", rdm_v, H)
+    E_h = jnp.einsum("ijkl,klij->", rdm_h, H)
+    E_v = jnp.einsum("ijkl,klij->", rdm_v, H)
     return (E_h + E_v).real
 
 
@@ -826,10 +826,10 @@ def compute_energy_ctm_tensor_2site(
     rdm_v_AB = _rdm1x2_tensor_2site(A, B, env_A, env_B)
     rdm_v_BA = _rdm1x2_tensor_2site(B, A, env_B, env_A)
     E = (
-        jnp.einsum("ijkl,ijkl->", rdm_h_AB, H)
-        + jnp.einsum("ijkl,ijkl->", rdm_h_BA, H)
-        + jnp.einsum("ijkl,ijkl->", rdm_v_AB, H)
-        + jnp.einsum("ijkl,ijkl->", rdm_v_BA, H)
+        jnp.einsum("ijkl,klij->", rdm_h_AB, H)
+        + jnp.einsum("ijkl,klij->", rdm_h_BA, H)
+        + jnp.einsum("ijkl,klij->", rdm_v_AB, H)
+        + jnp.einsum("ijkl,klij->", rdm_v_BA, H)
     )
     # 4 bonds (2 A-B + 2 B-A) / 2 unique sites per unit cell.
     return 0.5 * E.real
@@ -904,7 +904,7 @@ def compute_energy_ctm_tensor_multisite(
                 else:
                     rdm = _rdm1x2_tensor_2site(A, B, env_A, env_B)
 
-            bond_energy = jnp.einsum("ijkl,ijkl->", rdm, H)
+            bond_energy = jnp.einsum("ijkl,klij->", rdm, H)
             total_energy = total_energy + bond_energy
 
     return total_energy.real / n_sites

@@ -32,7 +32,9 @@ from tenax.algorithms.ipeps import heisenberg_gate, ipeps
 from tenax.algorithms.ipeps_config import iPEPSConfig
 from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
 
-pytestmark = pytest.mark.core
+# Bucket comes from ``_FILE_MARKERS`` in conftest, not from a module-level
+# ``pytestmark`` (#933): conftest *adds* its marker, so a module-level core
+# mark would override the per-test ``@pytest.mark.slow`` withholding below.
 
 
 def _make_su_tensor(D: int = 2, d: int = 2):
@@ -96,6 +98,7 @@ def test_adjoint_warm_start_grad_unchanged():
     np.testing.assert_allclose(g1_arr, g2_arr, atol=1e-8, rtol=1e-8)
 
 
+@pytest.mark.slow  # ~31s; performance, not correctness -- warm start being *faster* cannot produce a wrong answer (#933)
 def test_adjoint_warm_start_reduces_iters():
     """Second ``jax.grad`` call uses cached warm-start, converging in <= iters.
 
@@ -178,6 +181,7 @@ def test_adjoint_warm_start_invalidated_on_divergence():
     # exception already verifies.
 
 
+@pytest.mark.slow  # ~31s; asserts a log line, not a numerical result (#933)
 def test_gmres_logger_emits_at_f3_path(caplog):
     """f_bwd's F3 success path emits a DEBUG record on the tenax.ctm.gmres logger.
 
@@ -279,6 +283,7 @@ def test_adjoint_warm_start_invalidated_on_shape_mismatch():
     )
 
 
+@pytest.mark.slow  # ~31s; API mechanics of the invalidation helper; the two invalidation *behaviours* stay in core (#933)
 def test_invalidate_implicit_ad_warm_start_clears_seed():
     """Public invalidation API drops the cached prev_lam_leaves seed (#501).
 
@@ -336,6 +341,7 @@ def test_invalidate_implicit_ad_warm_start_clears_seed():
     )
 
 
+@pytest.mark.slow  # ~31s; asserts a log line, not a numerical result (#933)
 def test_gmres_logger_emits_at_eager_fallback(caplog):
     """When F3 diverges (gmres_maxiter=1 forces it), eager-GMRES log fires too.
 

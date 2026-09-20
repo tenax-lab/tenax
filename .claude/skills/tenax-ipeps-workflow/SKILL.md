@@ -317,7 +317,11 @@ forward and returns a `SplitCTMTensorEnv`:
 config = iPEPSConfig(
     max_bond_dim=D,
     unit_cell="1x1",
-    gs_recipe="1x1",
+    # gs_recipe defaults to "2x2" — do NOT set "1x1" here.  It is deprecated
+    # (#911) and reaches no fixed point: measured on the split path it collapses
+    # the corner to rank 1 at every chi, with the energy bit-identical to 12
+    # digits across chi=4..32.  "2x2" has been the working split recipe since
+    # #746.  ``unit_cell="1x1"`` is a different knob and is correct here.
     gs_implicit_ad=True,          # implicit AD (default) — the validated split path
     ctm=CTMConfig(
         chi=chi,
@@ -331,9 +335,10 @@ A_opt, env, E_gs = optimize_gs_ad(gate, None, config)  # env is a SplitCTMTensor
 
 Constraints (each raises a clear `NotImplementedError` otherwise):
 
-- **Single-site dense only** — `unit_cell="1x1"` + `gs_recipe="1x1"`,
-  `DenseTensor`. SymmetricTensor/fermionic and multisite split AD are later
-  phases.
+- **Single-site dense only** — `unit_cell="1x1"`, `DenseTensor`, on the default
+  `gs_recipe="2x2"`. SymmetricTensor/fermionic and multisite split AD are later
+  phases. (`gs_recipe="1x1"` is still *accepted* on this path but deprecated and
+  non-convergent — #911.)
 - **Fixed chi** — the χ-changing knobs (`chi_ramp`, `chi_auto_bump`,
   `ctmrg_heuristic_increase_chi`) and CTM schedules are rejected; pick one
   `chi`. `gs_metric_precond` auto-disables with a warning.

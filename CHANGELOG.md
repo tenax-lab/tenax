@@ -4,6 +4,60 @@
 
 ### Added
 
+- **The implicit-AD CTM forward now measures its own stationarity** (#841):
+  `ctm_energy_implicit` runs one extra gauged sweep after the forward loop and
+  warns (`RuntimeWarning`) when the literal residual
+  `||gauge_fix(step(env*)) - env*||` exceeds `max(100*conv_tol, 1e-8)` — the
+  premise the fixed-point backward linearizes under, which neither
+  `conv_method='sv'` (spectra only) nor `'elementwise'` (can exit on a
+  coincidental dip of a bond-sign limit cycle) certifies.  The residual and
+  the forward loop's own verdict are also exposed as
+  `forward_stationarity_residual` / `forward_converged` in
+  `get_last_implicit_ad_diagnostics()`, and `_sigma_gauged_ctm_converge`
+  returns its convergence flag instead of discarding it.  The warning is
+  emitted once per cached energy-function build — optimizer loops reuse one
+  build across all iterations, and a per-call warning (whose drifting
+  residual defeats Python's warning dedup) would flood stderr and train
+  users to blanket-ignore `RuntimeWarning`; the residual itself stays
+  freshly measured in the diagnostics on every call.
+
+- **`optimize_pess_ad(..., loss_builder="exact")`** (#1002): the kagome
+  iPESS L-BFGS optimizer can now minimize the exact supersite loss
+  (`build_pess_loss_exact`, #991) instead of the Convention-C one. On the
+  exact blocking `T_d` is a real wavefunction tensor (it is contracted
+  explicitly, not gauge-absorbed), so the exact arm optimizes it alongside
+  the other primitives — the same choice `optimize_pess_3site_multisite_ad`
+  already makes. Convention-C gates are rejected on the exact arm (the two
+  builders encode different inter-cell sub-site pairings). Default
+  `loss_builder="convc"` is byte-identical to the old behavior.
+
+- **The BP gauge solve is compiled for `SymmetricTensor` pairs** (#882
+  Phase 3): `bp_gauge_checkerboard` and `gauge_fix` now run a symmetric pair
+  through the same `lax.while_loop` driver a dense pair takes, via
+  `svd(bond_order="sector")` in `_gauge_bond` and a carry that holds block
+  buffers behind a trace-time canonical relayout (charge-grouped legs, this
+  module's flows, dead charge slots dropped, block set closed with zero
+  blocks). Measured on the D=3 fixture whose jitted sweep used to die at
+  sweep 108: eager and traced now converge on the identical 167-sweep
+  trajectory (state drift 1.6e-15), at 11.9 ms warm against ~150 s eager —
+  and a 1600-step symmetric simple-update run drops from 5768 s to ~12 min
+  at D=3 and from 22091 s to ~53 min at D=4, which promotes the symmetric
+  arm into the D=3/D=4 acceptance sweep (`kind` axis of
+  `test_su_evolve_reaches_the_simple_update_reference_energy`). A pair whose
+  block structure cannot hold the static carry falls back to the eager loop
+  at trace time.
+
+- **`svd(..., bond_order="sector")`** (`tenax.linalg.svd`): the traceable
+  ordering of a block-sparse SVD, twin to `eigh`'s (#939). The bond comes
+  back charge-grouped (values descending within each sector), `s_full` is
+  the returned spectrum, and — the point — sector mode takes the *same*
+  code path eager and traced instead of the tracer reroute to
+  `_truncated_svd_symmetric_traced`, so no subrank floor is applied: the
+  reroute's `1e-12 · (s_max + 1e-30)` floor zeroes real ~1e-43 singular
+  values on 1×1 sectors, which is what made a jitted BP-gauge sweep stop
+  being a gauge (3.0e-01 state drift). Rejected with `max_singular_values`
+  and `max_truncation_err`; ignored on the dense path.
+
 - **GILT and Gilt-TNR** (`tenax.algorithms.gilt`): graph-independent local
   truncation (Hauru-Delcamp-Mizera PRB 97, 045111) with the iterative cascade
   of Ebel-Kennedy-Rychkov (PRX 15, 031047, App. C), and a `gilt_tnr` driver
@@ -234,6 +288,135 @@
   and a `SymmetricTensor` pair still takes the eager route bit-identically.
 
 ### Fixed
+
+- **A non-finite CTM environment can no longer certify as converged** (#974).
+  `max(0.0, float("nan"))` is `0.0` — every comparison against NaN is False, so
+  Python's `max` returns its *first* argument, and the sibling idiom
+  `if diff > worst` never fires either. Both appear in the convergence
+  reducers, so a NaN leaf difference vanished from the aggregate and
+  `python_loop_ctm_converge` returned `converged=True, sv_diff=0.0` over an
+  environment whose every tensor was NaN. `ctm_conv_method` defaults to
+  `"elementwise"`, which is the affected path; the spectral `"sv"` method was
+  already correct and is pinned by a test so a future refactor cannot trade one
+  for the other. Four aggregation sites are fixed behind one `_nan_safe_max`
+  helper: `_max_env_leaf_diff`, both of `_ctm_loop_core`'s per-coordinate
+  aggregations (whose comment already *assumed* a NaN leaf would propagate),
+  and both honeycomb reducers — an SVD of a NaN corner yields NaN singular
+  values rather than raising, so `"svd"` had the same hole. Any non-finite
+  input now collapses the aggregate to `inf`, which fails closed on both
+  downstream tests (`inf < conv_tol` is False, and the plateau guard's
+  `math.isfinite` rejects it). The trap is order-dependent, which is how it
+  survived review: `max(nan, 0.0)` *is* `nan`, so only an accumulator seeded
+  from `0.0` loses it.
+- **The final energy `optimize_gs_ad` returns is now an evaluation of the
+  tensor it returns** (#899): the three optimizer paths (1-site, 2-site, and
+  `_optimize_gs_ad_multisite`) each re-evaluated the final and best tensors
+  with `env_init=_env_cache["envs"]`, directly under a block comment
+  promising a "fully converged fresh CTM ... so we compare fresh evaluations
+  only".  With a line search enabled (`gs_optimizer` `lbfgs`/`cg`, or an
+  explicit `gs_line_search`) `_restore_env_cache_after_line_search` has just
+  reverted that cache to the environment converged at the *previous*
+  parameters, so the seed belonged to a different state: the reported energy
+  was a partially-converged restart from a stale environment, not a property
+  of the returned tensor, and the `E_final <= E_best` comparison that decides
+  *which* tensor to return weighed one seeded number against another.  At
+  D=2/chi=6 the returned energy sat 1.3e-3 below a cold re-evaluation of the
+  same tensor.  Both evaluations are now seeded from scratch on all three
+  paths.  The #469 chi-padding of the best-environment snapshot existed
+  solely to make it shape-compatible *as a seed* and is removed with it;
+  `optimize_gs_ad` is unchanged when no line search is active, where the
+  cache was never reverted and the seed was already the current state's own
+  environment.
+
+- **The sigma forward gauge is a pure gauge transform again** (#798): the
+  2x2 sweep writes every corner axis-reversed relative to the canonical
+  `_ctm_tensor_init` order, and `_apply_sigma_to_corner` /
+  `_apply_sigma_to_edge` read legs positionally, so every sigma-gauged sweep
+  applied bond gauges to the wrong corner legs — on the 2x2 layout for C1-C3
+  and on the canonical layout for C4 (stored `(c4_r, c4_u)`, the reverse of
+  the ring order the calls assumed).  That is not a gauge transform and
+  corrupted the environment (sigma+2x2 energy off by 2.3e-3 at D=2, ~1e-2 at
+  D=3).  Sigma application is now label-based; sigma+2x2 and phase+2x2 agree
+  to 3e-15 on the #841 D=3 state.  Measured caveat, in the `forward_gauge`
+  docstring: the repaired sigma still does not reach an element-wise fixed
+  point on the 2x2 recipe (the transfer-matrix eigenvector carries no weight
+  on the weak bond directions where the residual Z2 signs live), and its
+  implicit gradient at the #841 state is worse than phase's
+  (slope_fd/|g| = -0.008 vs 0.131) — it is not a repair for #841.
+  The same defect class lived in `ad_utils._sigma_gauge_fix_ctm_tensor` —
+  the sibling sigma implementation on the Tensor-protocol path
+  (`ctm_tensor_converge` and every `CTMConfig(forward_gauge="sigma")`
+  caller) — which read corner legs positionally from `todense()` arrays and
+  hardcoded a C4 bond map contradicting the verified connectivity
+  (sigma_bottom on `c4_r`, sigma_left on `c4_u`).  It now delegates to the
+  same label-based sigma application, keeping its per-tensor global-phase
+  alignment (measured: |dE| = 6.9e-3 per application on an unconverged
+  random D=2 env pair before, ≤ 2e-16 after).
+
+- **The kagome PESS AD benchmarks measure and optimize the exact blocking**
+  (#1002): `examples/kagome_spin12_pess_ad_benchmark.py`,
+  `examples/kagome_spin1_xxz_anisotropy_sweep.py`, and
+  `examples/kagome_spin1_pess_ad_benchmark.py` now route both the
+  `[SU only]` readout and the AD stage through `build_pess_loss_exact` /
+  `optimize_pess_ad(..., loss_builder="exact")`. They previously went
+  through `build_pess_loss` (Convention-C dummy-leg supersite), whose CTM
+  collapses to exactly rank-1 corners on SU-converged states — the reported
+  energy was backend-dependent garbage (same D=4 spin-½ SU state: CPU
+  -0.341731, GPU -0.208799, vs the backend-identical exact -0.423235; at
+  D=2, -0.2357 vs the exact -0.386195). Numbers produced by these two
+  scripts before this fix should be discarded. CLI unchanged. The two
+  `test_pess_validation` smoke windows were re-pointed from the collapsed
+  readouts they encoded (spin-½ "-0.25 classical fixed point" → -0.386,
+  window [-0.42, -0.35]; spin-1 "-1.13" → -1.270, window [-1.35, -1.20]).
+
+- **DMRG canonicalizes `target_charge` before comparing it to the MPS
+  sector** (#735). `compute_mps_sector` reports canonical representatives,
+  but the pre-run validation and the per-sweep drift check compared them to
+  the raw user value, so `ZnSymmetry(3)` with `target_charge=3` raised a
+  phantom "MPS sector 0 does not match target_charge=3" even though the
+  state was in exactly the requested sector. No-op for U(1)/FermionicU1,
+  where every integer is its own representative.
+
+- **The traced CTM chi bond inherits the environment's inventory instead of
+  re-guessing it** (#929). #922 fixed the *eager* cut; the AD path could not
+  have it, because `jax.jit` bakes the per-sector block shapes at trace time
+  and the sector owning each chi slot must be fixed before the SVD runs. Its
+  fallback was the double-layer `u2` charge list tiled to chi — a guess about
+  the environment made from the *state* — and it is measurably wrong against
+  the same-state dense reference:
+
+  | D | chi | eager (#922) | traced, tiled guess |
+  |---|-----|--------------|---------------------|
+  | 2 | 8   | 1.540e-04    | 9.924e-04 |
+  | 3 | 16  | 4.441e-16    | 1.839e-07 |
+
+  The environment's own chi leg is a far better guess and is static metadata
+  even under tracing: at a fixed point it *is* the bond `chi_new` replaces.
+  Seeding the static rule with the eager inventory and re-converging reproduces
+  the eager environment exactly — `|E_eager - E_seeded| = 0.0` at both D=2
+  chi=8 and D=3 chi=16 — and gets there faster than the eager cut (168s vs
+  279s at D=3 chi=16), because a fixed inventory does not churn block shapes
+  between sweeps. The leg is refused when it is not exactly `chi` wide, so a
+  chi ramp falls back rather than sizing the new bond by the old chi.
+
+  **Correction to #929 as filed:** it said `optimize_gs_ad` still carries #922's
+  truncation. That is wrong for the documented symmetric optimiser.
+  `ctm_ad_mode="root_implicit_symmetric"` does not use the 2x2 projector at all
+  — measured, zero calls through a full `sym_root_implicit_energy_and_grad` —
+  and its own `_ctm_root_implicit_sym_sectors.sector_svd` decomposes each
+  sector and then takes **one global top-chi** over the union of the spectra,
+  recording it in a `BondLayout` frozen for the adjoint. That path was never
+  affected, and a guard now pins it so it cannot regress into a quota the way
+  the other one did.
+
+  What this fixes is the traced 2x2 projector, which is reachable: symmetric
+  site tensors through `ctm_energy_explicit` / `ctm_energy_implicit` under
+  `jax.grad` take it 8 times in a 2-sweep warmup, eagerly zero. There the cold
+  environment's inventory still comes from `initialize_ctm_tensor_env`, and
+  inheritance perpetuates it — so a cold run of *those* entry points is
+  unchanged. What changes is that a good inventory now survives: before this,
+  handing them a converged environment did not help, because the first traced
+  sweep re-imposed the guess.
 
 - **The CTM chi bond follows its own spectrum; `base_charges` is now only a
   floor** (#922). With #905's flow faults gone the symmetric CTM still
@@ -1069,6 +1252,84 @@
   `xfail`, not by a loosened threshold.
 
 ### CI / tests
+
+- **`test_regularized_qr_backward_finite_at_rank_deficiency` now fails when the
+  `diag(R)` floor is removed** (#927).  It previously did not: the input was
+  built by zeroing singular values and reconstructing
+  (`s.at[8:].set(0.0); M = (U * s) @ Vh`), which leaves `min|diag(R)|` at
+  ~5e-17 rather than at zero — so raw `jnp.linalg.qr`'s VJP is finite too, the
+  floor never engages, and asserting "our gradient is finite" passes for free.
+  #913's mutation run had measured exactly this and disclosed it rather than
+  fixing it: delete the floor and three *other* tests failed while this one
+  passed.  A **structurally** zero column is what makes the real square case
+  genuinely singular — measured on real 12x12: svd-zeroed 4.974e-17 (raw
+  finite), duplicated column 2.640e-16 (raw finite), zero column **0.000e+00**
+  (raw non-finite).  The test now uses a zero column, parametrised over first /
+  middle / last position, asserts the exactly-zero precondition, and asserts
+  non-vacuity the way #913/#917 do for the wide and complex branches — that raw
+  JAX really does go non-finite, so the floor is demonstrably doing work.
+  Verified by re-running the mutation: **6 failures now, against 3 before.**
+- **The merge queue runs only the required jobs** (`no-cython-shard`, `docs`
+  and `build` now carry `if: github.event_name != 'merge_group'`).  The
+  queue's 120-minute limit is a *scheduling* budget, not a compute one: after
+  #1011 a queue run asks for ~19 job slots from a pool that serves 2-4 at a
+  time, so required jobs sit behind non-required ones and the PR is dropped
+  with every shard green.  This blocked `main` outright -- #1015 was evicted
+  74s after its last shard passed with the three aggregators still queued,
+  and #1014 was evicted **with the queue otherwise empty**.  Only the three
+  `Tests (...)` aggregators are branch-protected; the skipped jobs still run
+  on every `pull_request` and on push to `main`, so nothing goes unchecked --
+  they simply do not re-run against the merge commit.
+
+  Measured caveat, not addressed here: the **macOS** path is the binding
+  constraint and this does not touch it.  The two macOS shards never overlap
+  in either eviction (in #1014's run shard 1 started 14s after shard 2
+  ended), so `core-shard-macos: NSHARDS=2` buys no parallelism while paying
+  two runner waits and two macOS setups; `Tests (macOS)` waited 45 min for a
+  runner to do 4 seconds of work.  Unsharding macOS is the follow-up.
+
+- **The required `-m core` gate is sharded across runners** (`core-shard`, 4
+  shards x 2 Python versions, plus `core-shard-macos`), using the same
+  stable-`cksum` rule the non-core buckets adopted in #960.  All three
+  branch-protected contexts are sharded, ubuntu into four and macOS into two
+  (`h % 2` nests inside `h % 4`, so a macOS shard is exactly the union of two
+  ubuntu shards and a macOS-only failure still lands in a known pair).  macOS
+  takes two rather than four because its runners are the scarce resource here:
+  four of them starved the merge queue, leaving one shard unscheduled for over
+  two hours and evicting the PR past the ~2 h drop limit, for about six minutes
+  of wall-clock.  Leaving macOS serial was not an option either: leaving macOS serial would have capped the
+  change, since the gate is bounded by its slowest required job and macOS
+  measured 27-52 min (median ~44) against ubuntu shards that finish inside
+  that.  The Cython-fallback run is sharded on the same partition
+  (`no-cython-shard`): at 2h09m it was the longest job in every run and held a
+  runner for two hours per PR, which is the contention that left #984 queued
+  73 min behind three in-progress jobs.  It is not a branch-protection
+  context, so it gets no aggregator and its old single-job name is retired.
+
+  Measured on the sharded run, all twelve core shards green: shard 1
+  4m6s / 4m20s / 4m19s (mac), shard 2 23m18s / 18m6s / 10m53s, shard 3
+  16m35s / 17m6s / 15m55s, shard 4 10m15s / 10m42s / 10m40s — so the gate is
+  bounded by a 23m18s shard against 101m41s serial, a **4.4x** reduction with
+  no test removed.  The gate had grown to 2664 of 4310 tests (62% of
+  the suite) and 101m41s, against the 120-min merge-queue limit that already
+  dropped #936 and grazed #920 at 120.1 — and the usual lever was spent, since
+  coverage is already off on pull requests.  Measured per-file cost splits
+  13.8 / 37.4 / 24.1 / 26.2 min across the four shards, so the gate is bounded
+  by its slowest shard rather than their sum.  **No test is removed,
+  reassigned, or skipped**: every test file maps to exactly one shard
+  (verified — 242 files, each assigned once) and the four shards collect
+  2664 tests, exactly matching the serial gate.
+
+  `pytest-xdist` was tried first and **rejected on memory** (#1009).  The
+  gate's `conftest` cache-clear hook measures `RUSAGE_SELF`, so its threshold
+  applies per worker, not in aggregate; with the suite's ~5 GB single-test
+  working set and a 4.78 GB largest fixture, N in-process workers want N times
+  that against ~7 GB Linux runners.  `-n 4` killed all three ubuntu jobs with
+  "the runner has received a shutdown signal" at 79-81%, after 12m18s /
+  20m50s / 36m58s.  A shard is its own runner running serially, so each keeps
+  today's exact memory profile.  Branch protection's `Tests (Python 3.11)` /
+  `Tests (Python 3.12)` contexts are preserved by aggregator jobs that gate on
+  the shard matrix, so the required check names keep reporting.
 
 - **A network blip no longer reds the documentation build.** `sphinx-build -W`
   in CI and `fail_on_warning: true` on Read the Docs both make every warning

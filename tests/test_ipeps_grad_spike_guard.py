@@ -45,7 +45,6 @@ def _tiny_config(grad_spike_ratio):
         unit_cell="1x1",
         gs_c4v=True,
         gs_implicit_ad=True,
-        gs_recipe="1x1",
         gs_optimizer="lbfgs",
         gs_line_search_method="hager_zhang",
         gs_metric_precond=True,
@@ -70,6 +69,12 @@ def test_grad_spike_guard_1site_runs_and_is_physical():
 def test_grad_spike_guard_off_matches_baseline():
     """With no spike in a clean short run, the guard is inert (same energy)."""
     gate = sublattice_rotate_gate(heisenberg_gate())
+    # This comparison is bit-exact only because independent optimize_gs_ad
+    # calls are: the module-level implicit-AD warm-start cache used to leak
+    # between runs at 8e-5 -- the same scale as a firing guard -- which
+    # this test's migration off the rank-1-collapsed 1x1 fixture exposed
+    # (#973).  Entry-point invalidation now guarantees run independence;
+    # test_optimizer_run_independence_973.py owns that contract.
     _A0, _e0, E_off = optimize_gs_ad(gate, None, _tiny_config(grad_spike_ratio=None))
     _A1, _e1, E_on = optimize_gs_ad(gate, None, _tiny_config(grad_spike_ratio=5.0))
     # deterministic su_init + optimization → identical when the guard never fires

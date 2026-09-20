@@ -21,7 +21,9 @@ import pytest
 
 from tenax.algorithms.ipeps_config import CTMConfig
 
-pytestmark = pytest.mark.core
+# Bucket comes from ``_FILE_MARKERS`` in conftest, not from a module-level
+# ``pytestmark`` (#933): conftest *adds* its marker, so a module-level core
+# mark would override the per-test ``@pytest.mark.slow`` withholding below.
 
 
 def test_chi_ramp_emits_deprecation_warning():

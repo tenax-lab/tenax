@@ -44,13 +44,30 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
-    name: Tests (Python ${{ matrix.python-version }})
+  # The required gate, sharded across runners by the same stable-hash rule the
+  # non-core buckets use (#960).  Sharding and NOT pytest-xdist: the gate's
+  # memory profile forbids in-process workers.  conftest's cache-clear hook
+  # bounds peak RSS to ONE test's working set (~5 GB) and the largest fixture
+  # in the suite is 4.78 GB, against ~7 GB Linux runners, so N workers want
+  # N x that.  Measured on #1009: ``-n 4`` killed all three ubuntu jobs with
+  # "the runner has received a shutdown signal" at 79-81%, after 12m18s /
+  # 20m50s / 36m58s.  A shard is its own runner running serially, so it keeps
+  # today's exact memory profile.
+  #
+  # NSHARDS=4, not 3: measured against real per-file cost (run 35198352577),
+  # the cksum split lands 13.8 / 37.4 / 24.1 / 26.2 min at 4 versus
+  # 22.2 / 53.3 / 26.0 at 3 -- the hash is cost-blind and this suite is
+  # long-tailed (one file is 14.4 min), so 3 shards leave a 53-min straggler
+  # that beats only half the serial gate.  Raise NSHARDS (and the matrix list)
+  # if the max shard drifts back up.
+  core-shard:
+    name: Core shard ${{ matrix.shard }} (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+        shard: ["1", "2", "3", "4"]
 
     steps:
       - uses: actions/checkout@v6
@@ -59,6 +76,11 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
+          # uv.lock is gitignored in this repo, so the action's default
+          # ``**/uv.lock`` glob would match nothing and the cache would never
+          # invalidate; key on pyproject.toml instead.
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -66,25 +88,123 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      # tenax enables JAX's persistent compile cache (~/.cache/jax, see
+      # src/tenax/__init__.py) but CI never restored it, so every run compiled
+      # cold.  Honest sizing, measured 2026-09-09: a full 56-min gate run
+      # deposits only ~15 MB / 56 entries (min_compile_time_secs=1 skips the
+      # small compiles), and a warm rerun of the single most compile-heavy
+      # gate file saved 17% (155 s vs 188 s) -- the wall on the block-sparse
+      # files is TRACING, which this cache cannot skip (#566).  So this is a
+      # ~10-15% lever, not a 2x one; the 2x levers are the --no-cov toggle
+      # below and (future) sharding.
+      #
+      # The run_id key means every run SAVES a fresh cache and the prefixed
+      # restore-key loads the most recent one -- an exact-match key would be
+      # immutable after the first save and never absorb new entries.
+      - name: Restore JAX persistent compile cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/jax
+          # Shard in the save key so the shards do not clobber one another; the
+          # restore-key prefix stays per-python so any shard warms from the
+          # most recent cache of any other.
+          key: jax-xla-${{ runner.os }}-py${{ matrix.python-version }}-s${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: |
+            jax-xla-${{ runner.os }}-py${{ matrix.python-version }}-
+
       - name: Run linter
+        # Once per run, not once per shard -- it lints the whole tree anyway.
+        if: matrix.shard == '1' && matrix.python-version == '3.11'
         run: uv run ruff check src/ tests/
 
       - name: Run core tests
         env:
           JAX_PLATFORMS: cpu
+          # Coverage instruments every Python-level operation, and pyproject's
+          # addopts turn it on by default -- so the gate needs an explicit
+          # --no-cov in the contexts where wall-clock is the constraint.
+          # Measured 2026-09-09: +155% on unit-heavy files (test_tensor +
+          # test_symmetry + test_index: 3.3 s -> 8.5 s), +17% on the most
+          # compile-heavy file; blended, roughly 25-35% of the CI gate's
+          # 90-112 min, against a 120-min merge-queue wait limit that has
+          # already dropped one PR (#936) and grazed another (#920, 120.1).
+          # Coverage still runs on push-to-main, the nightly schedule, and
+          # manual dispatch, so Codecov keeps its main-branch trend; what is
+          # given up is per-PR patch coverage -- the accepted trade (see the
+          # PR that introduced this toggle, git blame on this line).
+          WITH_COV: ${{ contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && '1' || '0' }}
+          SHARD: ${{ matrix.shard }}
+          # Must equal the number of entries in the matrix ``shard`` list.
+          NSHARDS: 4
         run: |
-          uv run pytest tests/ -m "core" \
-            --cov=tenax \
-            --cov-report=xml \
-            --cov-report=term-missing \
+          if [ "$WITH_COV" = "1" ]; then
+            COV_ARGS="--cov=tenax --cov-report=xml --cov-report=term-missing"
+          else
+            COV_ARGS="--no-cov"
+          fi
+          # Same rule as the non-core buckets: ``find`` (not a top-level glob)
+          # because tests/stacked/ holds test files too, and ``cksum`` is POSIX
+          # CRC-32 keyed on the file NAME, so editing a file's contents never
+          # shuffles it to a different shard.  Every test file maps to exactly
+          # one shard, so the four shards are a partition of the gate -- a
+          # newly added core file is picked up automatically and can never be
+          # silently dropped from the required check.
+          FILES=""
+          for f in $(find tests -name 'test_*.py' | LC_ALL=C sort); do
+            h=$(printf '%s' "$f" | cksum | cut -d' ' -f1)
+            if [ $(( h % NSHARDS )) -eq $(( SHARD - 1 )) ]; then
+              FILES="$FILES $f"
+            fi
+          done
+          set +e
+          uv run pytest $FILES -m "core" $COV_ARGS \
+            --durations=50 \
             -v
+          rc=$?
+          set -e
+          # Exit 5 = this shard's files hold no ``core`` tests.
+          if [ "$rc" -eq 5 ]; then
+            echo "Shard collected no core tests; OK."
+            rc=0
+          fi
+          exit $rc
 
       - name: Upload coverage to Codecov
+        # Only the contexts that produced coverage.xml (see WITH_COV above).
+        if: contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name)
         uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.xml
           fail_ci_if_error: false
+
+  # Branch protection requires the literal names "Tests (Python 3.11)" and
+  # "Tests (Python 3.12)".  The work now happens in ``core-shard``, so these
+  # two jobs carry those names and go green only when every shard is green.
+  # Renaming the required contexts instead would leave the old names never
+  # reporting, which blocks every PR indefinitely.
+  #
+  # ``needs.core-shard.result`` is the aggregate over the WHOLE matrix, so a
+  # 3.12 shard failure also reds "Tests (Python 3.11)".  That is deliberate:
+  # it fails closed, and the gate's job is to stop the merge, not to attribute
+  # blame -- the per-shard jobs show which one broke.
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    needs: [core-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Gate on the core shards
+        run: |
+          echo "core-shard matrix result: ${{ needs.core-shard.result }}"
+          if [ "${{ needs.core-shard.result }}" != "success" ]; then
+            echo "::error::A core shard did not pass - see the 'Core shard *' jobs."
+            exit 1
+          fi
+          echo "All core shards passed."
 
   changes:
     name: Detect code changes
@@ -118,22 +238,58 @@ jobs:
        github.event_name == 'workflow_dispatch' ||
        contains(github.event.pull_request.labels.*.name, 'run-full-tests'))
     runs-on: ${{ matrix.os }}
+    # Bound the burn: before sharding, ``fast-other`` and ``slow`` hit the 6 h
+    # job-limit ``cancelled`` on every run (#960), which reports nothing AND
+    # occupies a runner all day -- six such jobs per push starved the merge
+    # queue's own group builds past the 2 h drop limit.  A shard that trips
+    # this limit reports ``failure`` (a real alert) instead.  Tighten once
+    # the post-shard timings from #960 have a few days of history.
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
-        bucket: ["fast-ipeps", "fast-other", "slow"]
+        bucket: ["fast-other", "slow"]
+        shard: ["1", "2", "3"]
+        # ``fast-ipeps`` finishes in ~13 min unsharded (#960), so it stays a
+        # single job: these include entries match no cross-product row (the
+        # bucket/os differ) and are therefore ADDED as standalone combinations
+        # without a ``shard`` key.
         include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+            bucket: "fast-ipeps"
+          - os: ubuntu-latest
+            python-version: "3.12"
+            bucket: "fast-ipeps"
           - os: macos-latest
             python-version: "3.12"
             bucket: "fast-ipeps"
           - os: macos-latest
             python-version: "3.12"
             bucket: "fast-other"
+            shard: "1"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "fast-other"
+            shard: "2"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "fast-other"
+            shard: "3"
           - os: macos-latest
             python-version: "3.12"
             bucket: "slow"
+            shard: "1"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "slow"
+            shard: "2"
+          - os: macos-latest
+            python-version: "3.12"
+            bucket: "slow"
+            shard: "3"
 
     steps:
       - uses: actions/checkout@v6
@@ -142,6 +298,11 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
+          # uv.lock is gitignored in this repo, so the action's default
+          # ``**/uv.lock`` glob would match nothing and the cache would never
+          # invalidate; key on pyproject.toml instead (same as the gate).
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -149,62 +310,127 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Run non-core tests (${{ matrix.bucket }} bucket)
+      # Same lever as the gate's cache step (see the ``test`` job): tenax
+      # writes JAX's persistent compile cache to ~/.cache/jax on every
+      # platform, but these jobs always compiled cold.  Keyed per bucket and
+      # shard so each job warms exactly the entries its own tests compile.
+      - name: Restore JAX persistent compile cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/jax
+          key: jax-xla-full-${{ runner.os }}-py${{ matrix.python-version }}-${{ matrix.bucket }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}-${{ github.run_id }}
+          restore-keys: |
+            jax-xla-full-${{ runner.os }}-py${{ matrix.python-version }}-${{ matrix.bucket }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}-
+
+      - name: Run non-core tests (${{ matrix.bucket }} bucket, shard ${{ matrix.shard || 'n/a' }})
         # Skip ``-m core`` since the required ``test`` job already covers it.
-        # Three buckets give parallelism, isolation, and per-bucket retry
+        # Buckets give parallelism, isolation, and per-bucket retry
         # granularity:
         #   - ``fast-ipeps`` runs ``tests/test_ipeps.py`` and
         #     ``tests/test_fpeps_ad.py``.  These files alone consumed
         #     ~11+ min of the previous combined ``fast`` bucket (out of
         #     a ~57min total) because every test runs CTM convergence
-        #     and many run AD optimization.  Isolating them keeps the
-        #     other-bucket runtime under ~25 min on ubuntu.
+        #     and many run AD optimization.
         #   - ``fast-other`` runs the rest of the non-core, non-slow
         #     suite (DMRG / iDMRG / HOTRG / fermionic CTM / ad_utils /
         #     coarse-grain / etc.).
         #   - ``slow`` runs everything tagged ``@pytest.mark.slow``.
         # The earlier single combined ``fast`` bucket got reaped on
-        # Linux ~30–45 min in (see merge run 25197411849, where the
-        # runner died at ~01:45 mid-``test_optimize_gs_ad_symmetric_
-        # energy_decreases``).  The split addresses #354 / #370.
+        # Linux ~30–45 min in (see merge run 25197411849); the split into
+        # three addressed #354 / #370.  By 2026-09 ``fast-other`` and
+        # ``slow`` had themselves outgrown the 6 h job limit and died on
+        # every run (#960), so they are sharded by a stable hash of the
+        # test-file path -- unlike the required gate these are not
+        # branch-protection contexts, so multiplying jobs costs nothing.
+        # ``cksum`` is POSIX CRC-32: identical on ubuntu and macOS, and
+        # keyed on the file NAME so edits to a file's contents don't
+        # shuffle it to a different shard.
+        #
+        # Coverage: dropped here for the same reason as the gate's
+        # ``--no-cov`` toggle (+155% on unit-heavy files, measured for
+        # #953).  Codecov's main-branch trend comes from the gate's
+        # push/schedule uploads; these buckets never completed a run, so
+        # they never contributed coverage anyway (#960).
         env:
           JAX_PLATFORMS: cpu
           BUCKET: ${{ matrix.bucket }}
+          SHARD: ${{ matrix.shard }}
+          # Must equal the number of entries in the matrix ``shard`` list.
+          NSHARDS: 3
         run: |
           case "$BUCKET" in
             slow)
-              FILES="tests/"
               FILTER='slow'
+              EXCLUDE=''
               ;;
             fast-ipeps)
-              FILES="tests/test_ipeps.py tests/test_fpeps_ad.py"
               FILTER='not core and not slow'
               ;;
             fast-other)
-              FILES="tests/ --ignore=tests/test_ipeps.py --ignore=tests/test_fpeps_ad.py"
               FILTER='not core and not slow'
+              EXCLUDE='tests/test_ipeps.py tests/test_fpeps_ad.py'
               ;;
             *)
               echo "Unknown bucket: $BUCKET" >&2
               exit 1
               ;;
           esac
+          if [ "$BUCKET" = "fast-ipeps" ]; then
+            FILES="tests/test_ipeps.py tests/test_fpeps_ad.py"
+          else
+            # ``find`` (not a top-level glob): tests/stacked/ holds test
+            # files too, and the old ``tests/`` dir form collected them.
+            FILES=""
+            for f in $(find tests -name 'test_*.py' | LC_ALL=C sort); do
+              case " $EXCLUDE " in *" $f "*) continue ;; esac
+              h=$(printf '%s' "$f" | cksum | cut -d' ' -f1)
+              if [ $(( h % NSHARDS )) -eq $(( SHARD - 1 )) ]; then
+                FILES="$FILES $f"
+              fi
+            done
+          fi
+          set +e
           uv run pytest $FILES -m "$FILTER" \
-            --cov=tenax \
-            --cov-report=xml \
-            --cov-report=term-missing \
+            --no-cov \
+            --durations=100 \
             -v
+          rc=$?
+          set -e
+          # Exit 5 = this shard's files hold no tests for this marker
+          # (likely for ``slow``, whose tests cluster in a few files).
+          if [ "$rc" -eq 5 ]; then
+            echo "Shard collected no tests for marker '$FILTER'; OK."
+            rc=0
+          fi
+          exit $rc
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.xml
-          fail_ci_if_error: false
-
-  test-no-cython:
-    name: Tests without Cython (Python 3.12)
+  # The Cython-fallback run, sharded on the same partition as the gate.  It is
+  # NOT a branch-protection context, so it gets no aggregator and the old
+  # "Tests without Cython (Python 3.12)" name is retired rather than preserved
+  # -- nothing depends on it reporting.  Sharded anyway because at 2h09m it was
+  # the longest job in the run and held a runner for two hours on every PR,
+  # which is the contention that had #984 queued 73 min behind three
+  # in-progress jobs.
+  no-cython-shard:
+    name: No-Cython shard ${{ matrix.shard }} (Python 3.12)
     runs-on: ubuntu-latest
+    # Not a branch-protection context, so on ``merge_group`` it gates nothing
+    # while still occupying a runner.  The merge queue's 120-minute wait limit
+    # is a SCHEDULING budget, not a compute one: after #1011 a queue run asks
+    # for ~19 job slots from a pool that serves 2-4 at a time, so the required
+    # jobs sit behind non-required ones and the PR is dropped with every shard
+    # green.  Measured on the two evictions this caused: #1015 dropped 74s
+    # after its last shard passed, with the three aggregators still waiting for
+    # a runner; #1014 dropped with the QUEUE OTHERWISE EMPTY, its macOS shard 1
+    # not starting until 109 minutes in and one aggregator running for 4
+    # SECONDS after an hour of queueing.  These still run on every
+    # ``pull_request`` and on push to ``main``, so nothing goes unchecked --
+    # they simply do not re-run against the merge commit.
+    if: github.event_name != 'merge_group'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1", "2", "3", "4"]
 
     steps:
       - uses: actions/checkout@v6
@@ -224,12 +450,59 @@ jobs:
         env:
           JAX_PLATFORMS: cpu
           TENAX_DISABLE_CYTHON_BLAS: "1"
+          SHARD: ${{ matrix.shard }}
+          # Same partition as the gate; see the core-shard job.
+          NSHARDS: 4
         run: |
-          uv run pytest tests/ -m "core" -v
+          FILES=""
+          for f in $(find tests -name 'test_*.py' | LC_ALL=C sort); do
+            h=$(printf '%s' "$f" | cksum | cut -d' ' -f1)
+            if [ $(( h % NSHARDS )) -eq $(( SHARD - 1 )) ]; then
+              FILES="$FILES $f"
+            fi
+          done
+          set +e
+          uv run pytest $FILES -m "core" -v
+          rc=$?
+          set -e
+          if [ "$rc" -eq 5 ]; then
+            echo "Shard collected no core tests; OK."
+            rc=0
+          fi
+          exit $rc
 
-  test-macos:
-    name: Tests (macOS, Python 3.12)
+  # Sharded on the same rule as the ubuntu gate, and with the same NSHARDS, so
+  # shard N holds the SAME files on both platforms -- a macOS-only failure in
+  # shard 2 is directly comparable to ubuntu shard 2.  macOS is a required
+  # context too, so leaving it serial would have capped this change: measured
+  # 27/35/39/44/45/46/47/52 min over recent runs (median ~44), against ubuntu
+  # shards that finish well inside that.  The gate is bounded by its slowest
+  # required job, so the serial macOS run -- not the ubuntu shards -- would
+  # have set the floor.
+  core-shard-macos:
+    name: Core shard ${{ matrix.shard }} (macOS, Python 3.12)
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # TWO shards here, four on ubuntu.  macOS runners are the scarce
+        # resource on this plan, and four of them per run starved the merge
+        # queue: #1011's own group build ran every shard green but left
+        # ``Core shard 3 (macOS)`` unscheduled for over two hours -- the other
+        # three macOS shards finished in 5/10/11 min and that same shard took
+        # 17m48s in the PR run, so it starved rather than hung -- which pushed
+        # the group past the ~2 h drop limit and evicted the PR (silently
+        # disarming auto-merge with it).
+        #
+        # ``h % 2`` nests inside ``h % 4``: macOS shard 1 is exactly the union
+        # of ubuntu shards 1 and 3, shard 2 the union of 2 and 4.  So the
+        # cross-platform comparability survives, one level coarser -- a
+        # macOS-only failure still lands in a known pair of ubuntu shards.
+        #
+        # Sizing: macOS ran 27-52 min unsharded (median ~44), so two shards put
+        # it near the ubuntu bound of ~24 min.  Four bought ~6 more minutes and
+        # cost the merge.
+        shard: ["1", "2"]
 
     steps:
       - uses: actions/checkout@v6
@@ -238,6 +511,10 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
+          # Same rationale as the ubuntu job: uv.lock is gitignored, so key
+          # the package cache on pyproject.toml.
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python 3.12
         run: uv python install 3.12
@@ -245,21 +522,91 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      # See the ubuntu job for sizing; keyed by runner.os because jaxlib's
+      # compiled artifacts differ per platform.
+      - name: Restore JAX persistent compile cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/jax
+          key: jax-xla-${{ runner.os }}-py3.12-s${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: |
+            jax-xla-${{ runner.os }}-py3.12-
+
       - name: Run linter
+        # Once per run, not once per shard; the ubuntu gate lints too.
+        if: matrix.shard == '1'
         run: uv run ruff check src/ tests/
 
       - name: Run core tests
         env:
           JAX_PLATFORMS: cpu
+          # Same toggle and measurements as the ubuntu job.  This job never
+          # uploaded to Codecov, so in the coverage contexts it keeps only the
+          # terminal report it always had.
+          WITH_COV: ${{ contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && '1' || '0' }}
+          SHARD: ${{ matrix.shard }}
+          # Must equal the number of entries in the matrix ``shard`` list.
+          # Deliberately 2 while the ubuntu gate uses 4 -- see the matrix
+          # comment above for why, and why the partitions still nest.
+          NSHARDS: 2
         run: |
-          uv run pytest tests/ -m "core" \
-            --cov=tenax \
-            --cov-report=term-missing \
+          if [ "$WITH_COV" = "1" ]; then
+            COV_ARGS="--cov=tenax --cov-report=term-missing"
+          else
+            COV_ARGS="--no-cov"
+          fi
+          FILES=""
+          for f in $(find tests -name 'test_*.py' | LC_ALL=C sort); do
+            h=$(printf '%s' "$f" | cksum | cut -d' ' -f1)
+            if [ $(( h % NSHARDS )) -eq $(( SHARD - 1 )) ]; then
+              FILES="$FILES $f"
+            fi
+          done
+          set +e
+          uv run pytest $FILES -m "core" $COV_ARGS \
+            --durations=50 \
             -v
+          rc=$?
+          set -e
+          if [ "$rc" -eq 5 ]; then
+            echo "Shard collected no core tests; OK."
+            rc=0
+          fi
+          exit $rc
+
+  # Carries the branch-protected "Tests (macOS, Python 3.12)" context; see the
+  # ubuntu aggregator above for why the name has to survive verbatim.
+  test-macos:
+    name: Tests (macOS, Python 3.12)
+    needs: [core-shard-macos]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate on the macOS core shards
+        run: |
+          echo "core-shard-macos result: ${{ needs.core-shard-macos.result }}"
+          if [ "${{ needs.core-shard-macos.result }}" != "success" ]; then
+            echo "::error::A macOS core shard did not pass - see the 'Core shard * (macOS' jobs."
+            exit 1
+          fi
+          echo "All macOS core shards passed."
 
   docs:
     name: Build documentation
     runs-on: ubuntu-latest
+    # Not a branch-protection context, so on ``merge_group`` it gates nothing
+    # while still occupying a runner.  The merge queue's 120-minute wait limit
+    # is a SCHEDULING budget, not a compute one: after #1011 a queue run asks
+    # for ~19 job slots from a pool that serves 2-4 at a time, so the required
+    # jobs sit behind non-required ones and the PR is dropped with every shard
+    # green.  Measured on the two evictions this caused: #1015 dropped 74s
+    # after its last shard passed, with the three aggregators still waiting for
+    # a runner; #1014 dropped with the QUEUE OTHERWISE EMPTY, its macOS shard 1
+    # not starting until 109 minutes in and one aggregator running for 4
+    # SECONDS after an hour of queueing.  These still run on every
+    # ``pull_request`` and on push to ``main``, so nothing goes unchecked --
+    # they simply do not re-run against the merge commit.
+    if: github.event_name != 'merge_group'
 
     steps:
       - uses: actions/checkout@v6
@@ -282,6 +629,19 @@ jobs:
     name: Build distribution
     runs-on: ubuntu-latest
     needs: test
+    # Not a branch-protection context, so on ``merge_group`` it gates nothing
+    # while still occupying a runner.  The merge queue's 120-minute wait limit
+    # is a SCHEDULING budget, not a compute one: after #1011 a queue run asks
+    # for ~19 job slots from a pool that serves 2-4 at a time, so the required
+    # jobs sit behind non-required ones and the PR is dropped with every shard
+    # green.  Measured on the two evictions this caused: #1015 dropped 74s
+    # after its last shard passed, with the three aggregators still waiting for
+    # a runner; #1014 dropped with the QUEUE OTHERWISE EMPTY, its macOS shard 1
+    # not starting until 109 minutes in and one aggregator running for 4
+    # SECONDS after an hour of queueing.  These still run on every
+    # ``pull_request`` and on push to ``main``, so nothing goes unchecked --
+    # they simply do not re-run against the merge commit.
+    if: github.event_name != 'merge_group'
 
     steps:
       - uses: actions/checkout@v6

@@ -28,6 +28,7 @@ from tenax.algorithms._ctm_projector import (
     _gauge_fix_qr_dense,
     _reduced_qr_projector,
 )
+from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
 from tenax.algorithms._ctm_tensor_convergence import ctm_tensor, ctm_tensor_2site
 from tenax.algorithms._ctm_tensor_energy import (
     compute_energy_ctm_tensor,
@@ -198,9 +199,27 @@ def _build_physical_state_heisenberg_D2():
     Copied/adapted from the spike harness ``build_physical_state``: sublattice
     rotation makes the Neel AFM ground state a *uniform* single-site iPEPS;
     simple update converges a physical ``A``; then ``A`` is **C4v-symmetrized**
-    (load-bearing — otherwise the four directional 1x1 moves are inequivalent
-    and the single-site eigh sweep limit-cycles at the #425/#426 plateau, so the
-    eigh oracle is untrustworthy) and renormalized.
+    and renormalized.
+
+    **Why C4v symmetrization is load-bearing — corrected (#911).**  This used
+    to say it was load-bearing because *"otherwise the four directional 1x1
+    moves are inequivalent and the single-site eigh sweep limit-cycles at the
+    #425/#426 plateau, so the eigh oracle is untrustworthy"*.  #911 measured
+    that claim and it is false in the direction that matters: the
+    C4v-symmetrized state limit-cycles **as hard or harder** than the raw one
+    — energy range over the last 40 of 240 sweeps 4.47e-3 (C4v) against
+    4.86e-3 (raw), and C4v's terminal ``sv_diff`` is 4.41e-4 against raw's
+    1.08e-4, the *worse* of the two.  Neither state converges on the generic
+    1x1 sweep at any projector method.  Symmetrizing does not buy an oracle.
+
+    What it actually buys is **admission to a different engine**.
+    ``ctm_tensor_c4v`` requires a C4v-symmetric state, and it is the only
+    entry point that runs ``eigh``/``qr`` at full rank to a genuine fixed
+    point — #911's control has all three projector methods agreeing there to
+    1e-12, against ``recipe="1x1"`` where ``svd`` collapses to rank 1 and
+    ``eigh``/``qr`` limit-cycle.  So the symmetrization is what lets the
+    tests below compare projector methods on an engine that honours the
+    parameter at all.  See ``_heisenberg_D2_ctm_energy_c4v``.
     """
     global _PHYS_STATE
     if _PHYS_STATE is not None:
@@ -214,56 +233,198 @@ def _build_physical_state_heisenberg_D2():
         dt=0.05,
         ctm=CTMConfig(chi=16, max_iter=80, projector_method="eigh"),
     )
-    _E_su, (A, _B), _envs = ipeps(gate_rot, initial_peps=None, config=config)
+    _E_su, (A, _B), _envs = ipeps(
+        gate_rot, initial_peps=None, config=config, compute_energy=False
+    )
     A = DenseTensor(symmetrize_c4v(A._data), A.indices)
     A = A * (1.0 / float(A.norm()))
     _PHYS_STATE = (A, gate_rot)
     return _PHYS_STATE
 
 
-def _heisenberg_D2_ctm_energy_1x1(chi, projector_method, max_iter=200):
-    """Converged single-site (1x1) dense CTM energy for the given projector.
+def _heisenberg_D2_ctm_energy_c4v(chi, projector_method, max_iter=200):
+    """Converged dense CTM energy for the given projector, via ``ctm_tensor_c4v``.
 
-    Mirrors the spike's drive of the canonical single-site sweep
-    (``_ctm_tensor_sweep``, reached here via the public ``ctm_tensor`` entry on
-    a DenseTensor, which selects ``_ctm_tensor_sweep`` and therefore exercises
-    ``_compute_projector_tensor`` — the 1x1 path the spec points at).  The
-    ``"qr"`` method runs the ``qr_warmup_steps`` eigh warm-up (matching the
-    spike's 6-sweep eigh warm-up) before switching to the reduced-corner QR
-    projector; energy via ``compute_energy_ctm_tensor(A, env, gate_rot)``.
+    **This used to call ``ctm_tensor`` and test nothing.**  It was written
+    when ``ctm_tensor``'s ``recipe`` defaulted to ``"1x1"``, and it never
+    passed ``recipe=`` explicitly.  ``988c2a8`` (#765, 2026-08-03) flipped
+    that default to ``"2x2"`` — which hardcodes Fishman SVD and *ignores*
+    ``projector_method`` entirely — so from that commit every caller below
+    silently compared ``2x2`` against itself.  Measured on the state this
+    module builds, ``eigh``, ``qr`` and ``svd`` returned **bit-identical**
+    energies:
+
+        chi=8   all three  -0.659430578410895
+        chi=16  all three  -0.659430578425110
+
+    so ``test_reduced_qr_energy_matches_eigh_heisenberg_D2`` was asserting
+    ``abs(0.0) < 1e-3`` and would have passed with the reduced-corner QR
+    projector deleted from the codebase.  That is the whole point of this
+    module gone quiet for a month.
+
+    The fix is not to pass ``recipe="1x1"``: #911 established that recipe
+    reaches no fixed point at any projector method (``svd`` collapses to
+    rank 1, ``eigh``/``qr`` limit-cycle), so pinning it would pin an orbit
+    sample.  ``ctm_tensor_c4v`` is the engine that genuinely honours
+    ``projector_method`` — it is #911's own control, where all three methods
+    hold full rank and agree with ``2x2`` to 1e-12 — and the module's state
+    is already C4v-symmetrized, which is what admits it.  It is also exactly
+    the migration the ``recipe="1x1"`` deprecation message points callers to.
 
     ``max_iter`` is exposed so a fixed-point-stability check can re-converge
     with a larger sweep budget (the CTM still stops early at ``conv_tol``).
+    ``test_the_projector_method_actually_reaches_the_projector`` pins that
+    this helper is on a path that consults the parameter, so the comparison
+    below cannot quietly go vacuous again.
     """
     A, gate_rot = _build_physical_state_heisenberg_D2()
-    env, _eps = ctm_tensor(
+    env = ctm_tensor_c4v(
         A,
         chi=chi,
         max_iter=max_iter,
         conv_tol=1e-10,
         projector_method=projector_method,
-        qr_warmup_steps=6,
     )
     return float(compute_energy_ctm_tensor(A, env, gate_rot))
+
+
+def _c4v_probe_state(D=2, d=2, chi_seed=0):
+    """A tiny C4v-symmetric state, for liveness probes that need no physics."""
+    rng = np.random.default_rng(chi_seed)
+    sym = U1Symmetry()
+    idx = tuple(
+        TensorIndex.from_charges(sym, np.zeros(D, dtype=np.int32), flow, label=lbl)
+        for lbl, flow in [
+            ("u", FlowDirection.OUT),
+            ("d", FlowDirection.IN),
+            ("l", FlowDirection.OUT),
+            ("r", FlowDirection.IN),
+        ]
+    ) + (
+        TensorIndex.from_charges(
+            sym, np.zeros(d, dtype=np.int32), FlowDirection.IN, label="phys"
+        ),
+    )
+    A = DenseTensor(jnp.asarray(rng.standard_normal((D, D, D, D, d))), idx)
+    A = DenseTensor(symmetrize_c4v(A._data), A.indices)
+    return A * (1.0 / float(A.norm()))
+
+
+@pytest.mark.core
+def test_the_projector_method_actually_reaches_the_projector(monkeypatch):
+    """``projector_method`` must select a *different code path*, not a label.
+
+    This is the guard the module lacked.  For a month
+    ``_heisenberg_D2_ctm_energy_*`` ran ``ctm_tensor`` on the default
+    ``recipe="2x2"``, which hardcodes Fishman SVD and ignores
+    ``projector_method``, so every ``qr``-vs-``eigh`` comparison below was a
+    value against itself and would have passed with ``_reduced_qr_projector``
+    deleted.  An energy assertion cannot detect that — the two numbers agree
+    whether or not the parameter did anything.  Reachability can.
+
+    Sabotage the QR projector and require the failure to propagate on
+    ``"qr"`` and *not* on ``"eigh"``.  Both halves matter: the first says QR
+    is on the path, the second says the parameter chooses.
+    """
+    A = _c4v_probe_state()
+    sentinel = RuntimeError("reduced-corner QR projector reached")
+
+    def _boom(*args, **kwargs):
+        raise sentinel
+
+    monkeypatch.setattr("tenax.algorithms._ctm_projector._reduced_qr_projector", _boom)
+
+    with pytest.raises(RuntimeError, match="reduced-corner QR projector reached"):
+        ctm_tensor_c4v(A, chi=4, max_iter=2, projector_method="qr")
+
+    # ...and the selector genuinely selects: eigh must not touch it.
+    ctm_tensor_c4v(A, chi=4, max_iter=2, projector_method="eigh")
+
+
+@pytest.mark.core
+def test_the_energy_helper_is_wired_to_the_engine_that_honours_the_selector(
+    monkeypatch,
+):
+    """Pin the *wiring*, not just the engine.
+
+    ``test_the_projector_method_actually_reaches_the_projector`` proves
+    ``ctm_tensor_c4v`` consults ``projector_method``.  It does not prove the
+    energy helper below calls ``ctm_tensor_c4v`` — so pointing the helper back
+    at ``ctm_tensor`` would make every energy comparison vacuous again while
+    that test carried on passing.  That is the exact shape of the original
+    defect, so it gets its own guard.
+
+    Stubbed rather than converged: this asserts a call, and the physics is
+    covered by the ``algorithm``-marked tests below.
+    """
+    recorded = {}
+
+    def _fake_c4v(A, **kwargs):
+        recorded.update(kwargs)
+        return "sentinel-env"
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "the energy helper called ctm_tensor, whose default recipe='2x2' "
+            "ignores projector_method — the comparison is vacuous again"
+        )
+
+    # The module caches the SU state in a global; seed it so this stays cheap.
+    import sys
+
+    mod = sys.modules[__name__]
+    monkeypatch.setattr(mod, "_PHYS_STATE", (_c4v_probe_state(), None))
+    monkeypatch.setattr(mod, "ctm_tensor_c4v", _fake_c4v)
+    monkeypatch.setattr(mod, "ctm_tensor", _forbidden)
+    monkeypatch.setattr(mod, "compute_energy_ctm_tensor", lambda *a, **k: -1.0)
+
+    e = _heisenberg_D2_ctm_energy_c4v(chi=4, projector_method="qr")
+
+    assert e == -1.0
+    assert recorded.get("projector_method") == "qr", (
+        f"the selector did not reach the engine: {recorded}"
+    )
+    assert recorded.get("chi") == 4
+
+
+@pytest.mark.core
+def test_recipe_2x2_ignores_projector_method(monkeypatch):
+    """Pin the trap that made this module vacuous (#911, #765).
+
+    ``recipe="2x2"`` -- ``ctm_tensor``'s default since ``988c2a8`` --
+    hardcodes Fishman SVD.  Passing ``projector_method="qr"`` there is
+    accepted and silently ignored, which is why the energy tests above had to
+    move to ``ctm_tensor_c4v``.  If this ever starts raising, ``2x2`` grew a
+    QR path and the helper above can be reconsidered.
+    """
+    A = _c4v_probe_state()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("should not be reached on the 2x2 recipe")
+
+    monkeypatch.setattr("tenax.algorithms._ctm_projector._reduced_qr_projector", _boom)
+
+    # No raise: the 2x2 recipe never consults projector_method.
+    ctm_tensor(A, chi=4, max_iter=2, projector_method="qr", recipe="2x2")
 
 
 @pytest.mark.algorithm
 @pytest.mark.parametrize("chi", [8, 16])
 def test_reduced_qr_energy_matches_eigh_heisenberg_D2(chi):
-    e_eigh = _heisenberg_D2_ctm_energy_1x1(chi=chi, projector_method="eigh")
-    e_qr = _heisenberg_D2_ctm_energy_1x1(chi=chi, projector_method="qr")
+    e_eigh = _heisenberg_D2_ctm_energy_c4v(chi=chi, projector_method="eigh")
+    e_qr = _heisenberg_D2_ctm_energy_c4v(chi=chi, projector_method="qr")
     assert abs(e_qr - e_eigh) < 1e-3  # loosened vs eps; different scheme, same physics
 
 
 @pytest.mark.algorithm
 def test_reduced_qr_energy_gap_shrinks_with_chi():
     g8 = abs(
-        _heisenberg_D2_ctm_energy_1x1(8, "qr")
-        - _heisenberg_D2_ctm_energy_1x1(8, "eigh")
+        _heisenberg_D2_ctm_energy_c4v(8, "qr")
+        - _heisenberg_D2_ctm_energy_c4v(8, "eigh")
     )
     g16 = abs(
-        _heisenberg_D2_ctm_energy_1x1(16, "qr")
-        - _heisenberg_D2_ctm_energy_1x1(16, "eigh")
+        _heisenberg_D2_ctm_energy_c4v(16, "qr")
+        - _heisenberg_D2_ctm_energy_c4v(16, "eigh")
     )
     assert g16 <= g8 + 1e-12  # gap does not grow as chi increases
 
@@ -285,12 +446,12 @@ def test_reduced_qr_ctm_converges_with_warmup():
       hold the eigh fixed point) would surface here.
     """
     # Finite, real energy (no NaN/Inf) from the qr + warm-up CTM:
-    e = _heisenberg_D2_ctm_energy_1x1(chi=8, projector_method="qr")
+    e = _heisenberg_D2_ctm_energy_c4v(chi=8, projector_method="qr")
     assert np.isfinite(e)
 
     # Converged fixed point: doubling max_iter does not move the energy.
-    e_n = _heisenberg_D2_ctm_energy_1x1(chi=8, projector_method="qr", max_iter=100)
-    e_2n = _heisenberg_D2_ctm_energy_1x1(chi=8, projector_method="qr", max_iter=200)
+    e_n = _heisenberg_D2_ctm_energy_c4v(chi=8, projector_method="qr", max_iter=100)
+    e_2n = _heisenberg_D2_ctm_energy_c4v(chi=8, projector_method="qr", max_iter=200)
     assert np.isfinite(e_n) and np.isfinite(e_2n)
     assert abs(e_n - e_2n) < 1e-8
 
@@ -341,7 +502,9 @@ def _build_physical_state_heisenberg_D2_2site():
         dt=0.05,
         ctm=CTMConfig(chi=16, max_iter=80, projector_method="eigh"),
     )
-    _E_su, (A, B), _envs = ipeps(gate, initial_peps=None, config=config)
+    _E_su, (A, B), _envs = ipeps(
+        gate, initial_peps=None, config=config, compute_energy=False
+    )
     A = A * (1.0 / float(A.norm()))
     B = B * (1.0 / float(B.norm()))
     gate_dense = jnp.asarray(gate.todense() if hasattr(gate, "todense") else gate)
@@ -985,111 +1148,27 @@ def test_implicit_qr_eigh_gradient_gap_shrinks_with_chi():
 
 
 # --------------------------------------------------------------------------- #
-# Phase 2, Task 7 — full optimize_gs_ad GS optimization under implicit AD.      #
+# Phase 2, Task 7 (REMOVED with #938) — full optimize_gs_ad run under QR.       #
 #                                                                              #
-# Tasks 5b/6 proved recipe='1x1' + qr RUNS and DIFFERENTIATES correctly under  #
-# implicit-diff AD.  This validates the *whole* production GS optimizer: a few  #
-# optimize_gs_ad steps with gs_recipe='1x1' + gs_projector_method='qr' must     #
-# decrease the energy, stay finite, and track the eigh result on the same       #
-# physical D=2 Heisenberg state.  The 1-site implicit adjoint uses the          #
-# Neumann-series VJP (``ad_backward_method="vjp"``) with EMA divergence          #
-# detection and a ``lam_norm`` safety truncation; we only require the run to     #
-# complete without NaN / blow-up.                                                #
+# ``test_optimize_gs_ad_qr_1x1_converges`` ran the production optimizer with   #
+# gs_recipe='1x1' + gs_projector_method='qr' and was xfail(strict=True) as a   #
+# tripwire for the #858 adjoint divergence.  Both halves of its premise are    #
+# now gone:                                                                    #
+#                                                                              #
+# 1. The combination is unrepresentable.  QR is consulted only on the '1x1'    #
+#    recipe (the '2x2' plaquette projector is always Fishman SVD — #795/#931), #
+#    and since #938 ``optimize_gs_ad`` refuses '1x1' on every path that        #
+#    reaches this fused engine.  The xfail would have "xfailed" on that        #
+#    ValueError at config validation, testing nothing.                         #
+# 2. The tripwire's subject is resolved.  #858 is closed: the divergence was   #
+#    measured against the rank-1-collapsed 1x1 boundary.  Re-running this      #
+#    exact fixture under the honest default (gs_recipe='2x2', where the        #
+#    projector knob is inert) DESCENDS: e0=-0.65943 -> ef=-0.65998 in 5        #
+#    steps, inside the physical window — the recorded "ascent" was the #938    #
+#    1x1-gradient/2x2-energy mislabel, not an optimizer defect.                #
+#                                                                              #
+# QR forward/AD coverage lives in Tasks 5b/6 above (direct make_ctm_energy_fn  #
+# calls, which the optimizer guard does not gate).  A production-optimizer QR  #
+# test becomes possible again only when QR is wired into the 2x2 projector;    #
+# the stranded-QR-test class is tracked in #931.                               #
 # --------------------------------------------------------------------------- #
-
-
-def _short_optimize(gs_recipe, gs_projector_method, steps=5):
-    """Run a short ``optimize_gs_ad`` (implicit AD) on the physical C4v
-    D=2 Heisenberg state and return ``(initial_energy, final_energy, A_final)``.
-
-    Starts from the C4v-symmetrized simple-update site tensor (near the 2D
-    Heisenberg fixed point, E0 ~ -0.5) on the *sublattice-rotated* gate, so the
-    single-site (1x1) uniform iPEPS is the correct ansatz.  Kept small/fast
-    (``chi=8``, few CTM iters, few optimizer steps) — the point is the
-    convergence *behavior* (decrease + finite + eigh-tracking), not a deep
-    optimization.  ``su_init=False`` so the supplied ``A_init`` is honored
-    (no extra simple-update rebuild).
-    """
-    A0, gate_rot = _build_physical_state_heisenberg_D2()
-    config = iPEPSConfig(
-        max_bond_dim=2,
-        unit_cell="1x1",
-        gs_implicit_ad=True,
-        gs_recipe=gs_recipe,
-        gs_projector_method=gs_projector_method,
-        su_init=False,
-        gs_num_steps=steps,
-        gs_learning_rate=1e-2,
-        ctm=CTMConfig(
-            chi=8,
-            max_iter=40,
-            min_iter=10,
-            conv_tol=1e-10,
-            projector_method=gs_projector_method,
-            qr_warmup_steps=4,
-        ),
-    )
-    # Initial energy: a zero-step run returns the energy of A_init unchanged.
-    cfg0 = replace(config, gs_num_steps=0)
-    _A_i, _env_i, e0 = optimize_gs_ad(gate_rot, A0, cfg0)
-    A_f, _env_f, ef = optimize_gs_ad(gate_rot, A0, config)
-    return float(e0), float(ef), A_f
-
-
-@pytest.mark.algorithm
-@pytest.mark.xfail(
-    reason=(
-        "#858, surfaced here by #844 -- a REAL optimizer failure, not a "
-        "harness artifact, and deliberately left failing rather than retuned. "
-        "The run now STARTS at e0=-0.65943 (essentially the converged answer; "
-        "cf. the 2x2 reference -0.65900) and 5 Adam steps drive it UP to "
-        "ef=-0.52262, an ascent of +0.1368. Before #844 changed the fixture "
-        "state it started at -0.51363 and ended at -0.65949, so the same "
-        "ascent read as a descent purely because the starting point was "
-        "garbage; the assertion passed for the wrong reason for months. The "
-        "cause is visible in the run: 'adjoint solve did not converge "
-        "(relative residual 4.496e-01)' plus non-PSD RDMs at -0.0316 and "
-        "-0.113 -- the C4v D=2 adjoint divergence of #858. The gradient is "
-        "wrong by roughly the residual, so the optimizer is walking uphill on "
-        "a direction that is not the gradient. Fixing this means fixing #858, "
-        "not touching this file. strict=True on purpose: the ascent is 0.1368, "
-        "far outside any BLAS variation, so if this ever passes the adjoint "
-        "has genuinely been repaired and the xfail must come off."
-    ),
-    strict=True,
-)
-def test_optimize_gs_ad_qr_1x1_converges():
-    """A short optimize_gs_ad run with gs_recipe='1x1' + gs_projector_method='qr'
-    decreases the energy, stays finite, and reaches the physical Heisenberg
-    fixed point.
-
-    Core deliverable: the production implicit-diff GS optimizer runs end-to-end
-    with the reduced-corner QR projector, the energy *decreases* (does not
-    increase / NaN / blow up), and the QR-optimized state lands in the physical
-    D=2 Heisenberg energy basin (~-0.66).
-
-    Measured (chi=8, 5 Adam steps, lr=1e-2, deterministic):
-        e0_qr = -0.5136, ef_qr = -0.6590 (decreased ~0.145).
-    The 1-site implicit adjoint uses the Neumann-series VJP with
-    divergence-truncation safeguards; the run stays finite (no NaN) and the
-    energy descends.
-
-    NOTE (#692): an earlier version re-ran a *forward eigh-CTM* oracle on the
-    optimized tensor and asserted ``|ef_qr - e_eigh| < 5e-3``. That was both
-    fragile and redundant. Fragile: eigh is uncertified under implicit AD
-    precisely because it is unstable, and on the post-optimization tensor the
-    eigh forward CTM can diverge (``e_eigh ~ 15`` on some CI BLAS/XLA builds)
-    even though the certified QR result ``ef_qr`` stays physical. Redundant:
-    forward QR-vs-eigh agreement on the base SU state is already covered by
-    ``test_reduced_qr_energy_matches_eigh_heisenberg_D2``. We therefore assert
-    the actual deliverable — ``ef_qr`` reaches the physical energy window —
-    which depends only on the stable QR result.
-    """
-    e0_qr, ef_qr, _A_qr = _short_optimize(
-        gs_recipe="1x1", gs_projector_method="qr", steps=5
-    )
-    assert np.isfinite(ef_qr)
-    assert ef_qr <= e0_qr + 1e-9  # energy does not increase
-    # Reached the physical D=2 Heisenberg basin (~-0.66); the wide window
-    # excludes divergence without over-constraining the 5-step descent depth.
-    assert -0.75 < ef_qr < -0.45, f"ef_qr={ef_qr} outside physical Heisenberg window"

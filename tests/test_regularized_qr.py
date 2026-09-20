@@ -25,6 +25,12 @@ def _scalar(M):
     return jnp.real(jnp.sum(Q) + jnp.sum(R))
 
 
+def _raw_scalar(M):
+    """``_scalar`` through plain ``jnp.linalg.qr`` -- the no-floor baseline."""
+    Q, R = jnp.linalg.qr(M)
+    return jnp.real(jnp.sum(Q) + jnp.sum(R))
+
+
 @pytest.mark.core
 def test_regularized_qr_forward_matches_plain_qr():
     M = jax.random.normal(jax.random.PRNGKey(1), (10, 6))
@@ -63,14 +69,51 @@ def test_regularized_qr_backward_matches_analytic_vjp_well_conditioned():
 
 
 @pytest.mark.core
-def test_regularized_qr_backward_finite_at_rank_deficiency():
-    # Exactly rank-deficient: raw QR VJP would NaN; the floor keeps ours finite.
-    A = jax.random.normal(jax.random.PRNGKey(3), (12, 12))
-    U, s, Vh = jnp.linalg.svd(A)
-    s = s.at[8:].set(0.0)  # 4 exactly-zero singular values
-    M = (U * s) @ Vh
+@pytest.mark.parametrize("zero_col", [0, 5, 11])
+def test_regularized_qr_backward_finite_at_rank_deficiency(zero_col):
+    """Real square, genuinely singular: raw JAX NaNs and the floor rescues it.
+
+    #927: this test used to build ``M`` by zeroing singular values --
+
+        U, s, Vh = svd(A); s = s.at[8:].set(0.0); M = (U * s) @ Vh
+
+    -- and assert only that our gradient is finite.  That is **vacuous**:
+    reconstructing from a truncated SVD leaves ``min|diag(R)|`` at ~5e-17
+    rather than at zero, so raw ``jnp.linalg.qr``'s VJP is finite too and the
+    floor never engages.  The #913 mutation run measured it directly: delete
+    the ``diag(R)`` floor and three *other* tests fail while this one passes.
+
+    A **structurally** zero column is the difference -- it drives the
+    corresponding ``diag(R)`` entry to exactly ``0.0``, and only then does raw
+    JAX go non-finite.  Measured on real 12x12 float64:
+
+        svd-zeroed 4 of 12 sv     min|diag R| = 4.974e-17   raw finite
+        duplicated column         min|diag R| = 2.640e-16   raw finite
+        zero column (0 / 5 / 11)  min|diag R| = 0.000e+00   raw NON-finite
+
+    The non-vacuity assertion below is the point of the test, matching the
+    pattern #913/#917 established for the wide and complex branches: assert
+    that the bad outcome was reachable, not merely that the good one happened.
+    """
+    M = jax.random.normal(jax.random.PRNGKey(3), (12, 12)).at[:, zero_col].set(0.0)
+
+    # The exactly-singular precondition, stated rather than assumed: without it
+    # the floor is never reached and everything below passes for free.
+    R = jnp.linalg.qr(M)[1]
+    assert float(jnp.min(jnp.abs(jnp.diagonal(R)))) == 0.0, (
+        "diag(R) has no exactly-zero entry, so this M does not reach the floor"
+    )
+
     g = jax.grad(_scalar)(M)
-    assert jnp.all(jnp.isfinite(g))
+    assert jnp.all(jnp.isfinite(g)), "regularized backward went non-finite"
+
+    # Non-vacuity: raw JAX really does go non-finite here, so the floor is
+    # doing work rather than this assertion passing for free.
+    raw = jax.grad(_raw_scalar)(M)
+    assert not jnp.all(jnp.isfinite(raw)), (
+        "raw jnp.linalg.qr is finite on this input, so it does not exercise "
+        "the floor and this test proves nothing -- pick a more singular M"
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -27,6 +27,7 @@ from tenax.algorithms._ctm_tensor_convergence import (
     _forced_corner_rank,
     _max_virtual_bond_dim,
     _sort_coords_for_direction,
+    _warn_recipe_1x1_deprecated,
 )
 from tenax.algorithms._split_ctm_tensor_init import (
     SplitCTMTensorEnv,
@@ -188,6 +189,14 @@ def ctm_split_tensor(
         raise ValueError(
             f"Unknown split CTM recipe {recipe!r}: expected '1x1' or '2x2'."
         )
+    if recipe == "1x1":
+        # The split path is not exempt (#911 review).  Measured on the D=2
+        # Heisenberg SU state, this collapses exactly as the fused one does --
+        # corner rank 1 at chi=4/8/16/32 with the energy bit-identical to 12
+        # digits (-0.649578563296) across an 8x change in chi, against
+        # -0.65782 at full rank on "2x2".  Same signature, same cause: the
+        # legacy single-site projector.
+        _warn_recipe_1x1_deprecated("ctm_split_tensor")
 
     env = initialize_split_ctm_tensor_env(A, chi, chi_I)
     # A uniform 1-site lattice is just the multisite path with a
@@ -646,6 +655,7 @@ def _split_ctm_multisite(
     chi_I: int | None = None,
     renormalize: bool = True,
     recipe: str = "2x2",
+    _deprecation_stacklevel: int = 3,
 ) -> dict[Coord, SplitCTMTensorEnv]:
     """Run split multisite CTM to convergence (mirrors ``_ctm_tensor_multisite``).
 
@@ -666,9 +676,17 @@ def _split_ctm_multisite(
     """
     if chi_I is None:
         chi_I = chi
+    # Covers ``ctm_split_tensor_2site``, which delegates here.  Stacklevel 4,
+    # not the default 3: the wrapper adds a frame, so 3 would name the
+    # delegating line inside this module rather than the caller's.
+    if recipe == "1x1":
+        _warn_recipe_1x1_deprecated(
+            "ctm_split_tensor_multisite", stacklevel=_deprecation_stacklevel
+        )
     bars = {c: A.bar() for c, A in site_tensors.items()}
     envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
     prev_svs: dict[Coord, jax.Array] = {}
+
     # #903 P1: rank 1 is a collapse only if more was reachable.
     # Per coordinate, not per cell (#903 review).  A cell-wide aggregate is
     # wrong in both directions: `min` lets one trivial site exempt every
@@ -677,10 +695,37 @@ def _split_ctm_multisite(
     # wrongly).  The reachable rank is a property of the site sitting at that
     # coordinate, so it is computed there.  Built before the loop and outside
     # every branch.
-    _mr2 = {
-        c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2)
-        for c, A in site_tensors.items()
-    }
+    # Keyed to every site that can CONTRIBUTE to a corner, not to the
+    # coordinate the corner is stored under (#903 review, P1).  In the 2x2
+    # recipe `_ctm_tensor_sweep_multisite` builds a destination's C1 from a
+    # *neighbour's* double layer (`s_src = neighbors[s_dst]["top"]`), so
+    # `envs[c].C1` is not necessarily produced by the site at `c`.  Keying on
+    # `c` alone gives a D=1 destination fed by a rich source `max_rank=1` --
+    # accepting a collapsed corner -- and the reverse mismatch leaves a
+    # legitimate comparison blind forever.
+    #
+    # Taking the max over the contributing set is the conservative reading:
+    # a larger bound can only make the exemption harder to obtain, so a
+    # mis-attribution fails closed rather than certifying.
+    # ONE bound for the whole cell: the max over every site (#898, #916).
+    #
+    # Six successive derivations of a per-corner bound were each a correct fix
+    # to the previous one and each still under-covered: `indices[0]`, then
+    # `min` across sites, then `max` across sites, then per coordinate, then
+    # `{c} | neighbours(c)` -- which still misses the DIAGONAL sites of the
+    # four-site plaquettes the 2x2 projectors are built from.  Every miss
+    # failed OPEN: too small a bound certifies a collapsed corner, and nothing
+    # downstream can tell.
+    #
+    # A global max cannot under-cover, by construction, in any recipe.  The
+    # price is that a legitimate D=1 coordinate in a heterogeneous cell is no
+    # longer exempt and will spend its budget -- the safe direction, and the
+    # exemption only ever mattered for uniformly trivial states, where the
+    # global max still equals 1.
+    _mr2 = _forced_corner_rank(
+        max(_max_virtual_bond_dim(A) ** 2 for A in site_tensors.values())
+    )
+
     for _ in range(max_iter):
         envs = _split_ctm_sweep_multisite(
             envs, site_tensors, bars, neighbors, chi, chi_I, renormalize, recipe
@@ -689,7 +734,7 @@ def _split_ctm_multisite(
         for c in sorted(envs):
             sv = _corner_singular_values(envs[c].C1)
             if c in prev_svs:
-                if float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr2[c])) >= conv_tol:
+                if float(_ctm_sv_diff(sv, prev_svs[c], max_rank=_mr2)) >= conv_tol:
                     converged = False
             else:
                 converged = False
@@ -742,5 +787,8 @@ def ctm_split_tensor_2site(
         chi_I=chi_I,
         renormalize=renormalize,
         recipe=recipe,
+        # One extra frame: this wrapper sits between the helper and the user,
+        # so the default 3 would name this line, not the caller's.
+        _deprecation_stacklevel=4,
     )
     return envs[(0, 0)], envs[(1, 0)]

@@ -276,7 +276,13 @@ def compute_energy_cg(
     """
     # --- intra-cell energy from 1-site RDM ---
     rdm_1 = _rdm_1site_tensor(A, env)  # (d_eff, d_eff)
-    e_intra = jnp.einsum("ij,ij->", rdm_1, gates.h_intra)
+    # ``rdm_1`` is ``(phys, phys_bra)``, so the expectation pairs the gate's
+    # column with the RDM's ket: ``Tr(rho H) = rho[k, b] H[b, k]``.  The
+    # elementwise ``"ij,ij->"`` computed ``Tr(rho H^T)`` -- bit-identical for
+    # the real-symmetric gates every shipped model uses, coherently wrong for
+    # a complex Hermitian ``h_intra`` (#966; the 1-site residue of the
+    # two-site ``ijkl,klij`` fix).
+    e_intra = jnp.einsum("ij,ji->", rdm_1, gates.h_intra)
 
     # --- inter-cell energies from 2-site RDMs ---
     e_inter = jnp.zeros((), dtype=rdm_1.dtype)
@@ -292,7 +298,7 @@ def compute_energy_cg(
         else:
             raise ValueError(f"Unknown inter-cell direction: {direction!r}")
         rdm = rdm_fn(A, env)  # (d_eff, d_eff, d_eff, d_eff)
-        e_inter = e_inter + jnp.einsum("ijkl,ijkl->", rdm, gate)
+        e_inter = e_inter + jnp.einsum("ijkl,klij->", rdm, gate)
 
     return ((e_intra + e_inter) / gates.n_sites).real
 
@@ -346,7 +352,13 @@ def compute_energy_cg_split(
     from tenax.algorithms._split_ctm_tensor_energy import _rdm_1site_split_tensor
 
     rdm_1 = _rdm_1site_split_tensor(A, env)
-    e_intra = jnp.einsum("ij,ij->", rdm_1, gates.h_intra)
+    # ``rdm_1`` is ``(phys, phys_bra)``, so the expectation pairs the gate's
+    # column with the RDM's ket: ``Tr(rho H) = rho[k, b] H[b, k]``.  The
+    # elementwise ``"ij,ij->"`` computed ``Tr(rho H^T)`` -- bit-identical for
+    # the real-symmetric gates every shipped model uses, coherently wrong for
+    # a complex Hermitian ``h_intra`` (#966; the 1-site residue of the
+    # two-site ``ijkl,klij`` fix).
+    e_intra = jnp.einsum("ij,ji->", rdm_1, gates.h_intra)
 
     dispatch = _split_rdm_dispatch()
     e_inter = jnp.zeros((), dtype=rdm_1.dtype)
@@ -354,6 +366,6 @@ def compute_energy_cg_split(
         if direction not in dispatch:
             raise ValueError(f"Unknown inter-cell direction: {direction!r}")
         rdm = dispatch[direction](A, env)
-        e_inter = e_inter + jnp.einsum("ijkl,ijkl->", rdm, gate)
+        e_inter = e_inter + jnp.einsum("ijkl,klij->", rdm, gate)
 
     return ((e_intra + e_inter) / gates.n_sites).real

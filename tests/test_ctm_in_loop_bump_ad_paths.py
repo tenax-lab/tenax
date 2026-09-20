@@ -26,7 +26,9 @@ from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
 from tenax.algorithms.ipeps import heisenberg_gate
 from tenax.core import DenseTensor, FlowDirection, TensorIndex, U1Symmetry
 
-pytestmark = pytest.mark.core
+# Bucket comes from ``_FILE_MARKERS`` in conftest, not from a module-level
+# ``pytestmark`` (#933): conftest *adds* its marker, so a module-level core
+# mark would override the per-test ``@pytest.mark.slow`` withholding below.
 
 
 # ---------------------------------------------------------------------------

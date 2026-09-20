@@ -18,9 +18,9 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), iTEBD (numerically stable infinite TEBD, incl. inversion-free Hastings update), TRG, Gilt-TNR (TRG with graph-independent local truncation), HOTRG, iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
 - **GPU/TPU-accelerated DMRG** — JIT-compiled sweeps via `jax.lax.scan` for dense tensors and per-operation JIT for block-sparse symmetric tensors; automatic warmup-to-JIT transition when bond dimensions are growing; multi-GPU sharding via GSPMD for large bond dimensions (`DMRGConfig(accelerator="jit"|"sharded")`)
 - **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
-- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via iterative VJP (default) and optional GMRES route; explicit AD through unrolled CTM iterations for 1-site C4v path; **2-site shared-tensor C4v path** (`unit_cell="2site"` + `gs_c4v=True`) where a single C4v tensor is optimized and the second sublattice is derived by spin-π rotation, stable across χ=8–24 for spin-1/2 AFMs; opt-in reference-mode dense C4v Appendix C-F mode (`ctm_ad_mode="c4v_reference"`) with Krylov implicit backward (`bicgstab` + `gmres` fallback); **root implicit AD** (`ctm_ad_mode="root_implicit"`, dense 1x1 only; Burgelman et al. arXiv:2607.15030) driving the characteristic equations rather than back-propagating the CTM sweep, so no SVD/eigh backward appears in the gradient path — an accuracy/stability lever, not a speed one (~63x slower than explicit AD at D=2 χ=6, reproducing the paper's §VI.3), whose reason to exist is that explicit backprop NaNs on every entry at D=3 χ=4 where this path stays finite and FD-correct. Its gradient accuracy is state-dependent and **no diagnostic predicts it** (#785) — measure it with `measure_gradient_error` rather than reading the root residual, which is anti-correlated with it; sigma gauge fixing (`forward_gauge="sigma"`) on the explicit-AD path — the implicit path validates `forward_gauge="phase"` and refuses every other value; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement
+- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via iterative VJP (default) and optional GMRES route; explicit AD through unrolled CTM iterations for 1-site C4v path; **2-site shared-tensor C4v path** (`unit_cell="2site"` + `gs_c4v=True`) where a single C4v tensor is optimized and the second sublattice is derived by spin-π rotation, stable across χ=8–24 for spin-1/2 AFMs; opt-in reference-mode dense C4v Appendix C-F mode (`ctm_ad_mode="c4v_reference"`) with Krylov implicit backward (`bicgstab` + `gmres` fallback); **root implicit AD** (`ctm_ad_mode="root_implicit"`, dense 1x1 and 2-site checkerboard cells — `unit_cell="2site"`, #894; Burgelman et al. arXiv:2607.15030) driving the characteristic equations rather than back-propagating the CTM sweep, so no SVD/eigh backward appears in the gradient path — an accuracy/stability lever, not a speed one (~63x slower than explicit AD at D=2 χ=6, reproducing the paper's §VI.3), whose reason to exist is that explicit backprop NaNs on every entry at D=3 χ=4 where this path stays finite and FD-correct. Its gradient accuracy is state-dependent and **no diagnostic predicts it** (#785) — measure it with `measure_gradient_error` rather than reading the root residual, which is anti-correlated with it; sigma gauge fixing (`forward_gauge="sigma"`) on the explicit-AD path — the implicit path validates `forward_gauge="phase"` and refuses every other value; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement
 - **In-CTM χ-bump (variPEPS §2.8.2)** — recommended reactive growth of the CTM bond dimension *inside* CTM convergence (`CTMConfig.ctmrg_heuristic_increase_chi=True` with `chi_max` set); the env is always converged at the new χ before the optimizer sees it, avoiding the zero-padded-env cliff-edge artifact that the legacy end-of-outer-step `chi_auto_bump` and scheduled `chi_ramp` introduce between L-BFGS steps. Both legacy knobs still work but emit `DeprecationWarning` (see issue #512) and will be removed in a future release. References: Naumann et al., SciPost Phys. Lect. Notes 86, 2024
-- **SVD and QR CTMRG projectors** — SVD (Fishman) projectors (`projector_method="svd"`, default) and `eigh` projectors, plus a reduced-corner QR-CTMRG projector (`projector_method="qr"`, arXiv:2505.00494) on the dense single-site path, usable both forward-only and under AD ground-state optimization via `gs_recipe="1x1"` + `gs_projector_method="qr"` (Phase 2, dense; block-sparse is a later phase)
+- **SVD and QR CTMRG projectors** — SVD (Fishman) projectors (`projector_method="svd"`, default) and `eigh` projectors, plus a reduced-corner QR-CTMRG projector (`projector_method="qr"`, arXiv:2505.00494) on the dense single-site path (Phase 2, dense; block-sparse is a later phase). **`projector_method` is consulted only on the `1x1` recipe, which is deprecated** — for any state with D > 1 it reaches no fixed point in any reachable configuration (#911; D=1 is the one exception, where rank 1 is the maximum reachable corner rank, but the removal still applies), so `gs_recipe="1x1"` + `gs_projector_method="qr"` is no longer the way in. `recipe="2x2"` hardcodes Fishman SVD and ignores the parameter; for `qr` or `eigh` on a C4v-symmetric state use `ctm_tensor_c4v`, which runs all three methods at full rank and agrees with `2x2` to 1e-12
 - **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) *projector* cost instead of O(χ³D⁶); works with both `DenseTensor` and `SymmetricTensor` via the Tensor protocol (Naumann et al., arXiv:2502.10298). Note this is a projector **cost** bound, not a peak-memory one: the realized `value_and_grad` peak is 1.02–2.7× below the fused path depending on χ, and converges to ~1× at the memory ceiling (#825)
 - **Split-CTM energy entry points** — `compute_energy_split_ctm_tensor_2site` and `compute_energy_split_ctm_tensor_multisite` for 2-site checkerboard and multisite unit cells (kagome PESS, etc.) at large D
 - **Split-CTM AD ground-state optimization** — `optimize_gs_ad` with `CTMConfig(fuse_virtual_legs=False)` drives the single-site optimizer (`unit_cell="1x1"`) **and** the 2-site checkerboard optimizer (`unit_cell="2site"`), both on the default `gs_recipe="2x2"` (single-site since #746; `gs_recipe="1x1"` remains reachable but collapses the environment to rank-1 corners and is bisection-only — see #726) through the split χ²·D⁴ forward instead of the fused χ²·D⁶ double layer: implicit AD via a Γ-gauge-fixed fixed-point `custom_vjp` (Neumann backward; the 2-site case differentiates the coupled `(env_A, env_B)` fixed point), with the line-search probe, warm-start, and final environment all routed through the same split forward (returns `SplitCTMTensorEnv`). The implicit gradient matches the trusted explicit-AD gradient to machine precision in the non-degenerate regime (~1e-15; the SU(2)-symmetric Heisenberg point carries a degenerate-SV SVD-backward floor on the explicit reference). `DenseTensor` only (SymmetricTensor/fermionic split AD is a later phase); fixed χ (the χ-changing knobs are rejected on this path); the memory win over fused is a large-D effect (D≳16) — measured at `recipe="2x2"` on one A100-80GB it reaches χ=96/48/32 at D=8/10/12 against the fused path's χ=64/48/16, i.e. 1.5× / 1.0× / 2.0× in χ, and the per-cell peak advantage shrinks from 2.66× at χ=16 to 1.02× at the ceiling (#825). References: Naumann et al., arXiv:2502.10298
@@ -371,7 +371,17 @@ flag — setting it would silently evolve the uniform model. Per-bond gates are
 The energy `ipeps()` reports comes from the legacy 2-site CTM, which does not
 converge on a genuinely entangled state — it sits ~0.02 above the truth. For an
 accurate number, measure the returned state with `ctm_tensor(recipe="2x2")`
-(D=2 gives −0.65933, χ-converged). Simple update itself was fixed in #667; if
+(D=2 gives −0.65933, χ-converged).
+
+When you want only the simple-update state — as a warm start or fixture — skip
+that measurement entirely:
+
+```python
+_, (A, B), _ = ipeps(gate, None, config, compute_energy=False)
+# returns (None, (A, B), None): no CTM is run, no energy is computed
+```
+
+Simple update itself was fixed in #667; if
 you have results from before that, note it converged to the product state and
 that *smaller* `dt` made it worse — see the changelog.
 
@@ -514,7 +524,8 @@ config_reference = iPEPSConfig(
 )
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config_reference)
 
-# Root implicit AD (Burgelman et al. arXiv:2607.15030), dense 1x1 only.
+# Root implicit AD (Burgelman et al. arXiv:2607.15030): dense 1x1 (below) and
+# 2-site checkerboard cells via optimize_gs_ad(..., unit_cell="2site") (#894).
 # Drives the characteristic equations instead of back-propagating the CTM
 # sweep, so no SVD/eigh backward appears in the gradient path.
 config_root = iPEPSConfig(
@@ -593,9 +604,9 @@ E = compute_energy_split_ctm(A, env, gate, d=2)
 
 ### Checking whether the CTM actually converged
 
-`ctm`, `ctm_2site` and `ctm_split` return an environment whether or not the
-sweep met `conv_tol` — running out of `max_iter` is not an error. Pass
-`return_meta=True` for a `CTMConvergenceInfo` saying which happened, rather
+`ctm`, `ctm_2site`, `ctm_split` and `ctm_tensor` return an environment whether
+or not the sweep met `conv_tol` — running out of `max_iter` is not an error.
+Pass `return_meta=True` for a `CTMConvergenceInfo` saying which happened, rather
 than inferring it from an energy that silently moves with `max_iter` (#839):
 
 ```python
@@ -610,12 +621,32 @@ if not bool(info.converged):
 `info.diff` is the convergence criterion — the change in the corner singular
 values, not in the energy. `ipeps()` performs this check itself and warns.
 
+`ctm_tensor` takes the same flag, and returns the info as a *third* element
+after `(env, max_truncation_error)`:
+
+```python
+from tenax import ctm_tensor
+from tenax.algorithms._ctm_diagnostics import env_is_collapsed
+
+env, eps_T, info = ctm_tensor(A, chi=16, max_iter=100, return_meta=True)
+if not info.converged:
+    # inf means the criterion never produced a value: either fewer than two
+    # sweeps ran, or the corner collapsed to rank 1 and the criterion refused
+    # to certify it (#898).  Only the second is unfixable by more sweeps.
+    reason = "collapsed" if env_is_collapsed(env) else "budget"
+    print(f"not a fixed point ({reason}): {info.n_iter} sweeps, diff {info.diff:.2e}")
+```
+
 ## Fermionic iPEPS (fPEPS)
 
 Spinless fermions on the square lattice — `H = -t(c†c + h.c.) + V n n` — with
 `FermionParity` block-sparse tensors, so the exchange signs come from the graded
-tensor algebra (Koszul signs in transpose, contraction and SVD) rather than from
-hand-placed swap gates.
+tensor algebra rather than from hand-placed swap gates. The convention (#555,
+#994): the graded `transpose` and the matricization inside `svd`/`qr`/`eigh`
+carry Koszul signs; label-based `contract` is sign-free (correct for the planar
+networks every tenax algorithm uses), and `permute_legs` reorders leg *storage*
+with no sign — it, not `transpose`, is how code restores an axis order after
+`contract`.
 
 ```python
 import jax
@@ -767,10 +798,11 @@ the Hamiltonian is the intra-triangle 3-spin operator.
 Differentiable iPESS pipeline for kagome XXZ ground states (Liao et al.,
 PRX 9, 031041, 2019). Two simplex tensors `T_u`, `T_d` and three site
 tensors `R_a`, `R_b`, `R_c` define the variational state; triangle
-simple update gives the SU warm start, then L-BFGS through the
-square-coarse-grained CTM (Convention C) refines `(R_a, R_b, R_c, T_u,
-lambdas)`. `T_d` is held frozen during AD — its variational role is
-absorbed by the down-bond gauges.
+simple update gives the SU warm start, then L-BFGS through the exact
+single-supersite CTM (`loss_builder="exact"`, the #991 blocking: `T_d`
+contracted explicitly, no dummy leg) refines all five primitives.
+`T_d` is a real wavefunction tensor in this blocking, so it is
+optimized alongside the rest.
 
 ```python
 import jax
@@ -778,14 +810,14 @@ from tenax import (
     CTMConfig,
     IPESSState,
     kagome_triangle_xxz_hamiltonian,
-    kagome_xxz_pess_cg_gates,
+    kagome_xxz_pess_cg_gates_exact,
     pess_simple_update,
     optimize_pess_ad,
 )
 
 D, d = 2, 3  # spin-1
 H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=d)
-cg_gates = kagome_xxz_pess_cg_gates(delta=1.0, d=d)
+cg_gates = kagome_xxz_pess_cg_gates_exact(delta=1.0, d=d)
 
 state = IPESSState.random(D=D, d=d, key=jax.random.PRNGKey(0))
 state = pess_simple_update(state, H,
@@ -795,9 +827,21 @@ state = pess_simple_update(state, H,
 config = CTMConfig(chi=8, max_iter=30, conv_tol=1e-7,
                    projector_method="svd", forward_gauge="phase",
                    ctm_conv_method="elementwise")
-state, e_per_site = optimize_pess_ad(state, cg_gates, config, max_iter=30)
-print(f"E/site = {e_per_site:.6f}")  # spin-1 D=2 lands around -1.0
+state, e_per_site = optimize_pess_ad(state, cg_gates, config, max_iter=30,
+                                     loss_builder="exact")
+print(f"E/site = {e_per_site:.6f}")  # spin-1 D=2 lands around -1.27
 ```
+
+`loss_builder` defaults to `"convc"` — the legacy Convention-C loss
+(`kagome_xxz_pess_cg_gates` gates, `T_d` frozen) kept only for backward
+compatibility. **Do not use it for physics results (#1002):** on
+SU-converged states its CTM collapses to rank-1 corners, so the
+converged readout is backend-dependent and is not the kagome energy
+(the spin-1 D=2 "around -1.0" quoted here before #1002 came through
+that broken probe; the exact-path value is -1.270). Each
+`loss_builder` requires its matching gate builder, as above —
+mismatched pairings encode different inter-cell sub-site pairings and
+are rejected at entry.
 
 The full kagome Hamiltonian (3 up-triangle bonds + 3 down-triangle
 bonds per unit cell) is reconstructed via `compute_energy_cg`'s
@@ -805,12 +849,39 @@ intra-cell + horizontal/vertical/diagonal inter-cell 2-site RDMs; see
 `examples/kagome_spin12_pess_ad_benchmark.py` and
 `examples/kagome_spin1_pess_ad_benchmark.py` for full sweeps.
 
+### Exact supersite loss readout
+
+`pess_to_kagome_supersite_exact` blocks all five iPESS primitives
+(`R_a, R_b, R_c, T_u, T_d`) into one rank-5 supersite with four real
+virtual legs and no dummy — the same single-PEPS-site mapping variPEPS
+uses for kagome 3-PESS. `build_pess_loss_exact` runs it through the
+single-site CTM (forward + implicit AD); on control states it agrees
+with variPEPS to 1e-9 and with exact cylinder oracles to ~2e-4 at D=2
+and D=4 (issue #991). This is the loss `optimize_pess_ad(...,
+loss_builder="exact")` optimizes; call it directly for a standalone
+energy readout of an existing state:
+
+```python
+from tenax import (
+    build_pess_loss_exact,
+    kagome_xxz_pess_cg_gates_exact,
+)
+
+loss = build_pess_loss_exact(kagome_xxz_pess_cg_gates_exact(delta=1.0, d=d),
+                             config)
+e_per_site = float(loss(state).real)
+```
+
 ### Multisite path (3-site kagome on a square unit cell)
 
 For the multisite encoding `pess_to_kagome_3site_multisite`, where the
 kagome unit cell maps to three sites `(u, v, w)` on a square lattice and
 the energy uses 4 NN bonds + 2 marginalised-3-site contributions, use
-`build_pess_loss_3site_multisite` and `optimize_pess_3site_multisite_ad`:
+`build_pess_loss_3site_multisite` and `optimize_pess_3site_multisite_ad`.
+**Caution (#991):** the multisite encoding places dim-1 bonds on the CTM
+lattice, where the plaquette environment's fixed point rank-truncates and
+biases per-site energies by ~2.5e-3 in the non-variational direction —
+prefer `build_pess_loss_exact` above for any quantitative energy readout:
 
 ```python
 from tenax import (
@@ -881,6 +952,42 @@ packed = ProductSymmetry.encode_charges(
     np.array([1, 0, -1], dtype=np.int32),  # S_z
 )
 q1, q2 = ProductSymmetry.decode_charges(packed)
+```
+
+### Fermionic swap gates
+
+`SymmetricTensor.swap_gate(axes=(i, j))` multiplies each block by
+`(-1)**(p_i * p_j)` — a minus sign exactly when *both* crossing legs carry
+odd parity. This is the Corboz-style build-time encoding of fermionic
+exchange statistics: place the sign where two fermionic lines cross in the
+(fixed) network diagram, and the rest of the contraction needs no graded
+logic. For an adjacent leg exchange it reproduces the Koszul sign of the
+graded `transpose` exactly. The optional `grading=({charge: parity}, ...)`
+override supplies the parity maps explicitly — needed by pipelines that
+retype graded tensors onto bosonic symmetry objects, where `parity()` is
+all-even by definition (see `docs/plans/2026-09-12-fermionic-ctm-ad-swap-gates-design.md`).
+
+```python
+import jax
+import numpy as np
+from tenax import FermionParity, FlowDirection, SymmetricTensor, TensorIndex
+
+fp = FermionParity()
+charges = np.array([0, 0, 1, 1], dtype=np.int32)  # both parities on each leg
+idx = lambda flow, lbl: TensorIndex.from_charges(fp, charges, flow, label=lbl)
+T = SymmetricTensor.random_normal(
+    indices=(idx(FlowDirection.OUT, "a"), idx(FlowDirection.IN, "b")),
+    key=jax.random.PRNGKey(0),
+)
+
+G = T.swap_gate((0, 1))  # odd-odd blocks flip sign, others unchanged
+
+# involution: applying the same gate twice restores the tensor
+assert np.allclose(np.asarray(G.swap_gate((0, 1))._data), np.asarray(T._data))
+
+# adjacent-exchange identity: the graded transpose's Koszul sign IS the
+# swap gate — transpose(T) block-equals sign-free-permute(swap_gate(T))
+graded = T.transpose((1, 0))
 ```
 
 ### Charge arithmetic
@@ -964,6 +1071,81 @@ accelerated block-sparse backends (`TENAX_BATCH_BLOCKSPARSE`,
 Those paths drop out-of-set output keys without consulting the check, so an
 audit that left them enabled would report clean on the products it never
 inspected — and a diagnostic whose silence is unreliable is worse than none.
+
+### Bond ordering of a block-sparse `eigh`
+
+`tenax.linalg.eigh` returns its eigenvalues **algebraically descending** by
+default — largest first, so a negative eigenvalue sorts below every positive one
+whatever its magnitude — and lays the output bond out in that order. On a
+`SymmetricTensor` that ranking is a comparison *across* charge sectors, so it
+reads the eigenvalues on the host, and that raises under `jax.jit`. It is why a
+block-sparse `eigh` cannot appear in a traced computation.
+
+Pass `bond_order="sector"` to get the bond charge-grouped instead:
+
+```python
+from tenax.linalg import eigh
+
+V, w = eigh(m, ["row"], ["col"], new_bond_label="k", bond_order="sector")
+```
+
+`"sector"` is **not value-ordered at all**: sectors come in ascending charge
+order and each keeps `jnp.linalg.eigh`'s own ascending output, so `w[0]` is not
+the largest and the array is not monotone. On an indefinite operator with
+sectors `{0: [-5, -3], 1: [2, 0.5]}` the default returns `[2, 0.5, -3, -5]` and
+`"sector"` returns `[0.5, 2, -5, -3]`.
+
+The two modes differ only by a permutation of the bond — `V` and `w` are permuted
+together, and `V diag(w) V†` is unchanged — so nothing that pairs the two is
+affected. Anything that reads `w[0]` as "the largest", or assumes the array is
+sorted, is.
+
+Two constraints:
+
+- It is **rejected with `max_eigenvalues`**, because a truncation has to rank the
+  sectors against each other; that is exactly the host read the option exists to
+  avoid. Without a truncation the ranking decides nothing, which is what makes
+  the option safe.
+- It is **ignored on the dense path**, which has no sectors to group by and is
+  traceable already.
+
+The caller this exists for is `ipeps_bp_gauge._sqrt_pinv`, which factors a PSD
+message and never truncates.
+
+### Bond ordering of a block-sparse `svd`
+
+`tenax.linalg.svd` has the same pair of modes, for the same reason: the default
+ranks the whole spectrum on the host, which raises under `jax.jit`, and under a
+tracer the block-sparse path is silently rerouted to a static-allocation
+variant whose per-sector SVD applies a subrank floor — real singular values
+below `1e-12 · (s_max + 1e-30)` come back **exactly zero**, which on a 1×1
+sector makes the `+1e-30` term an absolute ~1e-42 cutoff.
+
+```python
+from tenax.linalg import svd
+
+U, s, Vh, s_full = svd(t, ["row"], ["col"], new_bond_label="k", bond_order="sector")
+```
+
+`"sector"` emits the bond charge-grouped — ascending by the bond charge each
+sector carries, values **descending within** each sector — and takes the same
+code path eager and traced, so no reroute and no floor: a 4.6e-43 singular
+value comes back as itself. The array is not globally monotone, `s[0]` is not
+the largest, and `s_full` **is** `s` (nothing was truncated). As with `eigh`,
+the two modes differ only by a permutation of the bond, with `U`, `s`, `Vh`
+permuted together.
+
+Constraints, one more than `eigh`'s:
+
+- It is **rejected with `max_singular_values` and with `max_truncation_err`** —
+  both truncation knobs rank sectors against each other on the host.
+- It is **ignored on the dense path**, which has no sectors to group by.
+- Reverse-mode AD through sector mode uses the default SVD JVP, not the
+  Lorentzian-regularized `truncated_svd_ad`; do not differentiate it at
+  degenerate spectra.
+
+The caller this exists for is `ipeps_bp_gauge._gauge_bond`, which re-gauges a
+bond at full rank and never truncates.
 
 ## Gotchas
 

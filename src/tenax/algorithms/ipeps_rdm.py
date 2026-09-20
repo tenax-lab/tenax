@@ -201,8 +201,8 @@ def compute_energy_ctm(
     rdm_h = _rdm2x1(A, env, d)
     rdm_v = _rdm1x2(A, env, d)
     H = hamiltonian_gate.reshape(d, d, d, d)
-    E_h = jnp.einsum("ijkl,ijkl->", rdm_h, H)
-    E_v = jnp.einsum("ijkl,ijkl->", rdm_v, H)
+    E_h = jnp.einsum("ijkl,klij->", rdm_h, H)
+    E_v = jnp.einsum("ijkl,klij->", rdm_v, H)
     return (E_h + E_v).real
 
 
@@ -312,8 +312,8 @@ def compute_energy_ctm_2site(
     H = hamiltonian_gate.reshape(d, d, d, d)
     rdm_h = _rdm2x1_2site(A, B, env_A, env_B, d)
     rdm_v = _rdm1x2_2site(A, B, env_A, env_B, d)
-    E_h = jnp.einsum("ijkl,ijkl->", rdm_h, H)
-    E_v = jnp.einsum("ijkl,ijkl->", rdm_v, H)
+    E_h = jnp.einsum("ijkl,klij->", rdm_h, H)
+    E_v = jnp.einsum("ijkl,klij->", rdm_v, H)
     return (E_h + E_v).real
 
 

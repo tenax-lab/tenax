@@ -203,3 +203,109 @@ class TestExpectationValueWarning:
         non_herm_op = 1j * I2
         with pytest.warns(match="non-negligible imaginary part"):
             expectation_value(result.mps, non_herm_op, 0)
+
+
+# ------------------------------------------------------------------ #
+# #944: the operator subscripts evaluated the TRANSPOSE                #
+# ------------------------------------------------------------------ #
+#
+# Every operator above is real-symmetric (Sz, SzSz, Sp-charge checks), for
+# which O^T's expectation on a real sandwich is indistinguishable from O's --
+# which is exactly how "pq,apr,aqs" survived here.  These cases are marked
+# ``core``: a wrong sign on a Hermitian measurement is a shipped wrong number,
+# and each runs on hand-built exact states in milliseconds.
+
+Sy = np.array([[0.0, -0.5j], [0.5j, 0.0]])
+
+
+def _state_mps(amplitudes: np.ndarray) -> list:
+    """Exact product/entangled MPS for small explicit states."""
+    import jax.numpy as jnp
+
+    from tenax.algorithms.tdvp import _make_site_tensor
+
+    amps = np.asarray(amplitudes, dtype=np.complex128)
+    L = int(np.log2(amps.size))
+    psi = amps.reshape([2] * L)
+    tensors = []
+    chi_l = 1
+    rest = psi.reshape(chi_l * 2, -1)
+    for i in range(L - 1):
+        u, s, vh = np.linalg.svd(rest, full_matrices=False)
+        chi_r = len(s)
+        tensors.append(_make_site_tensor(jnp.array(u.reshape(chi_l, 2, chi_r)), i, L))
+        rest = (np.diag(s) @ vh).reshape(chi_r * 2, -1)
+        chi_l = chi_r
+    tensors.append(_make_site_tensor(jnp.array(rest.reshape(chi_l, 2, 1)), L - 1, L))
+    return tensors
+
+
+class TestOperatorOrientation944:
+    @pytest.mark.core
+    def test_sy_on_a_circular_spin_has_the_right_sign(self):
+        """<+y|Sy|+y> = +1/2; the transposed contraction returned -1/2."""
+        psi = np.array([1.0, 1.0j]) / np.sqrt(2)
+        mps = _state_mps(psi)
+        exact = np.vdot(psi, Sy @ psi).real
+        assert exact == pytest.approx(0.5)
+        assert expectation_value(mps, Sy, 0) == pytest.approx(exact)
+
+    @pytest.mark.core
+    def test_sy_at_a_later_site_through_an_accumulated_transfer_matrix(self):
+        """Site > 0 exercises the second einsum branch (tm is not None)."""
+        psi1 = np.array([1.0, 1.0j]) / np.sqrt(2)
+        full = np.kron(np.array([1.0, 0.0]), psi1)  # |0> x |+y>
+        mps = _state_mps(full)
+        assert expectation_value(mps, Sy, 1) == pytest.approx(0.5)
+
+    @pytest.mark.core
+    def test_why_only_complex_operators_can_catch_this(self):
+        """For any REAL operator, Re<psi|O^T|psi> == Re<psi|O|psi>.
+
+        <psi|O^T|psi> = conj(<psi|O|psi>) whenever O is real, and the public
+        API returns the real part -- so no real operator, symmetric or not,
+        can distinguish the transposed contraction.  That is why this file's
+        pre-#944 suite (Sz, SzSz, Sp/Sm charges) could not see the defect,
+        and why the guards above must use Sy.  Pinned so nobody "simplifies"
+        them back to real operators.
+        """
+        psi = np.array([1.0, 1.0j]) / np.sqrt(2)
+        exact = np.vdot(psi, Sp @ psi)
+        transposed = np.vdot(psi, Sp.T @ psi)
+        assert exact.real == pytest.approx(transposed.real)
+        assert exact.imag == pytest.approx(-transposed.imag)
+        mps = _state_mps(psi)
+        assert expectation_value(mps, Sp, 0) == pytest.approx(exact.real)
+
+    @pytest.mark.core
+    def test_same_site_correlation_composes_instead_of_overwriting(self):
+        """correlation(op_i, s, op_j, s) is <O_i O_j>, not <O_j> alone.
+
+        _contract_sandwich keys operators by site in a dict, so if the
+        same-site case ever fell through to it, op_j would silently replace
+        op_i.  <Sp Sm> = |c_1|^2 = 0.09 here; a dropped Sp would instead give
+        <Sm> = 0.286..., and a dropped Sm gives <Sp> = 0.286... too.
+        """
+        psi = np.array([0.3, np.sqrt(1 - 0.09)])
+        mps = _state_mps(psi)
+        exact = float(np.vdot(psi, (Sp @ Sm) @ psi).real)
+        assert exact == pytest.approx(0.09)
+        assert correlation(mps, Sp, 0, Sm, 0) == pytest.approx(exact)
+
+    @pytest.mark.core
+    def test_sy_sy_correlation_on_a_bell_state(self):
+        """<Bell|Sy x Sy|Bell> on (|01> - |10>)/sqrt(2) is -1/4."""
+        bell = np.array([0.0, 1.0, -1.0, 0.0]) / np.sqrt(2)
+        mps = _state_mps(bell)
+        sy_dense = np.kron(Sy, Sy)
+        exact = np.vdot(bell, sy_dense @ bell).real
+        assert exact == pytest.approx(-0.25)
+        assert correlation(mps, Sy, 0, Sy, 1) == pytest.approx(exact)
+
+    @pytest.mark.core
+    def test_szsz_is_unchanged_by_the_fix(self):
+        """Anti-overreach: real-symmetric results must not move."""
+        bell = np.array([0.0, 1.0, -1.0, 0.0]) / np.sqrt(2)
+        mps = _state_mps(bell)
+        assert correlation(mps, Sz, 0, Sz, 1) == pytest.approx(-0.25)
+        assert expectation_value(mps, Sz, 0) == pytest.approx(0.0)

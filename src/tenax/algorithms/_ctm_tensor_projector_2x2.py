@@ -96,8 +96,12 @@ def _gauge_fix_symmetric_svd(
     new_vh_blocks: dict[tuple[int, ...], jax.Array] = dict(Vh_T.blocks)
 
     # Detect dtype statically so we don't promote real blocks to complex.
-    sample_block = next(iter(U_T.blocks.values()))
-    is_complex = jnp.issubdtype(sample_block.dtype, jnp.complexfloating)
+    # Read it off the tensor rather than a sample block: an empty ``U_T``
+    # (no charge sectors -- a confined environment, #905/#907) has no block to
+    # sample, and the per-sector loop below is already a no-op on it, so the
+    # gauge fix must pass an empty tensor through unchanged rather than raise a
+    # ``StopIteration`` four frames down.
+    is_complex = jnp.issubdtype(U_T.dtype, jnp.complexfloating)
 
     for q in np.unique(bond_charges):
         q_int = int(q)
@@ -139,6 +143,58 @@ def _gauge_fix_symmetric_svd(
     U_out = SymmetricTensor._from_blocks_unchecked(new_u_blocks, U_T.indices)
     Vh_out = SymmetricTensor._from_blocks_unchecked(new_vh_blocks, Vh_T.indices)
     return U_out, Vh_out
+
+
+def _require_svd_connected(
+    M_T: SymmetricTensor,
+    U_T: SymmetricTensor,
+    *,
+    left_labels: tuple[str, ...],
+    right_labels: tuple[str, ...],
+    direction: str,
+    matrix_name: str,
+) -> None:
+    """Raise a diagnosis if a projector SVD produced an empty (rank-0) bond.
+
+    ``M_T`` is a double-layer corner contraction; the SVD splits its left and
+    right label groups over a shared bond.  When ``M_T`` carries no charge
+    blocks -- the corners it was contracted from share no sector on their
+    internal bond -- the SVD bond has dimension zero: ``U_T`` has no blocks and
+    the singular-value vector is length zero.  Left unguarded this surfaces far
+    from its cause -- a ``StopIteration`` in :func:`_gauge_fix_symmetric_svd`
+    (``next(iter(U_T.blocks))`` on an empty tensor) or an ``IndexError`` in
+    :func:`_fishman_truncate_S` (``S[0]`` on a size-0 array).
+
+    On the symmetric CTM path this is the confined-environment limitation of
+    #905 -- the corners occupy a charge sector that cannot connect the two
+    halves of the double-layer plaquette, so no 2x2 projector exists.  The dense
+    path densifies and never sees an absent sector, which is why it runs on the
+    same state.  Raise a named diagnosis rather than let an empty projector flow
+    into the sweep and certify a wrong environment (#907).
+    """
+    if U_T.blocks:
+        return
+
+    def _sectors(labels: tuple[str, ...]) -> dict[str, list[int]]:
+        out: dict[str, list[int]] = {}
+        m_labels = M_T.labels()
+        for lbl in labels:
+            charges = M_T.indices[m_labels.index(lbl)].charges
+            out[lbl] = sorted({int(c) for c in charges})
+        return out
+
+    raise ValueError(
+        f"symmetric 2x2 projector: {matrix_name} (direction={direction!r}) has "
+        f"a rank-0 SVD bond -- the contracted double-corner tensor has "
+        f"{len(M_T.blocks)} charge blocks, so the SVD produces an empty bond and "
+        f"no projector can be built. This is the confined symmetric CTM "
+        f"environment of #905: the corners occupy a charge sector that does not "
+        f"connect the plaquette halves (their leg sectors are left="
+        f"{_sectors(left_labels)}, right={_sectors(right_labels)}, but no fused "
+        f"block survives the contraction). The dense path densifies and does "
+        f"not hit this -- pass DenseTensor inputs, or use ctm_tensor_c4v for a "
+        f"C4v-symmetric state. See #907."
+    )
 
 
 def _scale_bond_by_diag(
@@ -800,6 +856,51 @@ def _retruncate_chi_bond(
     )
 
 
+def _incoming_chi_charges(
+    Q_TL: SymmetricTensor,
+    Q_TR: SymmetricTensor,
+    Q_BL: SymmetricTensor,
+    Q_BR: SymmetricTensor,
+    direction: str,
+    chi: int,
+) -> np.ndarray | None:
+    """Charges of the chi leg whose bond ``chi_new`` is about to replace.
+
+    Under ``jax.jit`` the per-sector block shapes are baked at trace time, so
+    the traced SVD cannot choose its chi inventory from the singular values the
+    way :func:`_retruncate_chi_bond` does eagerly (#922).  Its fallback was the
+    double-layer ``u2`` charge list tiled to ``chi``, which is a guess about the
+    environment made from the *state*; the environment's own chi leg is a much
+    better one, and it is static metadata even under tracing.
+
+    At a CTM fixed point the two are the same bond, so inheriting the incoming
+    leg's multiset reproduces whatever inventory the environment converged to.
+    Measured on a D=3 U(1)-Sz pair at chi=16: the tiled guess keeps
+    ``{-2: 3, 0: 9, 2: 4}`` and lands 1.8e-07 off the dense reference, while
+    inheriting keeps ``{-4: 1, -2: 4, 0: 6, 2: 4, 4: 1}`` and reproduces the
+    eager environment *exactly* (#929).
+
+    Returns ``None`` when the leg is missing or is not ``chi`` wide -- during a
+    chi ramp the environment is still at the old width, and a stale inventory
+    is worse than the tiled guess.
+    """
+    corner, label = {
+        "left": (Q_TL, "chi_B"),
+        "right": (Q_TR, "chi_B"),
+        "top": (Q_TL, "chi_R"),
+        "bottom": (Q_BL, "chi_R"),
+    }[direction]
+    if not isinstance(corner, SymmetricTensor):
+        return None
+    labels = corner.labels()
+    if label not in labels:
+        return None
+    idx = corner.indices[labels.index(label)]
+    if idx.dim != chi:
+        return None
+    return np.asarray(idx.charges, dtype=np.int32)
+
+
 def _compute_2x2_projector_symmetric(
     Q_TL: SymmetricTensor,
     Q_TR: SymmetricTensor,
@@ -883,6 +984,14 @@ def _compute_2x2_projector_symmetric(
         new_bond_label="m1_bond",
         max_singular_values=None,
     )
+    _require_svd_connected(
+        M1_T,
+        U_M1_T,
+        left_labels=m1_left_labels,
+        right_labels=m1_right_labels,
+        direction=direction,
+        matrix_name="M1 (upper double-corner)",
+    )
     U_M1_T, Vh_M1_T = _gauge_fix_symmetric_svd(U_M1_T, Vh_M1_T)
     M1_S = _fishman_truncate_S(M1_S, eps=1e-12)
 
@@ -892,6 +1001,14 @@ def _compute_2x2_projector_symmetric(
         right_labels=m2_right_labels,
         new_bond_label="m2_bond",
         max_singular_values=None,
+    )
+    _require_svd_connected(
+        M2_T,
+        U_M2_T,
+        left_labels=m2_left_labels,
+        right_labels=m2_right_labels,
+        direction=direction,
+        matrix_name="M2 (lower double-corner)",
     )
     U_M2_T, Vh_M2_T = _gauge_fix_symmetric_svd(U_M2_T, Vh_M2_T)
     M2_S = _fishman_truncate_S(M2_S, eps=1e-12)
@@ -959,13 +1076,20 @@ def _compute_2x2_projector_symmetric(
             for b in q.blocks.values()
         )
         if is_traced_inputs:
+            # The traced allocation is static, so it cannot read the singular
+            # values.  Give it the environment's own chi inventory rather than
+            # the double-layer charges tiled to chi -- see
+            # :func:`_incoming_chi_charges` (#929).
+            traced_base = _incoming_chi_charges(Q_TL, Q_TR, Q_BL, Q_BR, direction, chi)
+            if traced_base is None:
+                traced_base = base_charges
             U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
                 M_prime_T,
                 left_labels=mp_left_labels,
                 right_labels=mp_right_labels,
                 new_bond_label="chi_new",
                 max_singular_values=chi,
-                base_charges=base_charges,
+                base_charges=traced_base,
             )
         else:
             U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
@@ -978,6 +1102,14 @@ def _compute_2x2_projector_symmetric(
             U_Mp_T, S_Mp, Vh_Mp_T = _retruncate_chi_bond(
                 U_Mp_T, S_Mp, Vh_Mp_T, base_charges=base_charges, chi=chi
             )
+    _require_svd_connected(
+        M_prime_T,
+        U_Mp_T,
+        left_labels=mp_left_labels,
+        right_labels=mp_right_labels,
+        direction=direction,
+        matrix_name="M_prime (combined projector)",
+    )
     U_Mp_T, Vh_Mp_T = _gauge_fix_symmetric_svd(U_Mp_T, Vh_Mp_T)
 
     # ε_T via the Frobenius identity (Issue #474).  Block-sparse SVD
