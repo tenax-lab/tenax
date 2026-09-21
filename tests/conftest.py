@@ -691,6 +691,16 @@ _FILE_MARKERS = {
     # which is exactly what should gate a merge, and it is cheap -- D=2
     # chi=6, 4 L-BFGS steps with a line search, 21.6s CPU for the file.
     "test_ipeps_final_energy_is_fresh_899.py": "core",
+    # #1024: the split-CTM chi-seam layout invariant.  ``core``: a charge
+    # layout that disagrees across a chi bond kills the 2x2 projector with a
+    # shape error on any state whose horizontal and vertical bonds differ --
+    # which is what simple update produces once truncation is free to pick
+    # the bond charges (#878) -- and the invariant itself is checked at init
+    # in ~3s.  The two end-to-end sweeps in that file carry an explicit
+    # ``slow`` marker and so stay out of the gate: they are 582s of the
+    # file's 590s, and they confirm the same defect the init check already
+    # catches.
+    "test_split_ctm_asymmetric_layout_1024.py": "core",
 }
 
 

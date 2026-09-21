@@ -1,20 +1,28 @@
-"""#1024: the split-CTM env must be consistent when u/d and l/r layouts differ.
+"""#1024: every chi leg of the split-CTM env must be seeded from ONE axis of A.
 
-Every chi bond of the environment has two ends -- a corner leg and an edge leg
--- and both are seeded by tiling one of ``A``'s virtual legs
-(``_derive_charges``).  If the two ends tile *different* legs, the seam is only
-contractible when those legs happen to carry the same charge layout.  A uniform
-iPEPS hides the defect; a state whose horizontal and vertical bonds differ does
-not, and the 2x2 plaquette projector dies with a shape error.
+Each chi leg is seeded by tiling one of ``A``'s virtual legs
+(``_derive_charges``), and the chi bonds form a **ring**: within a cell
+``C1.c1_d`` meets ``T4.t4_d`` and ``C4.c4_u`` meets ``T4.t4_u``, and across
+cells ``T4(above).t4_u`` meets ``T4(below).t4_d``.  Chaining those, every chi
+leg -- both corner legs, and both ends of every edge -- is forced onto a single
+layout.  Matching seams *pairwise* satisfies each constraint locally and still
+admits a global inconsistency, which is how the first round of fixes left the
+2x2 plaquette projector dying with a shape error.
 
-That is not a contrived state.  It is what simple update produces as soon as the
-truncation is allowed to discover the bond charges rather than being pinned to
-the initial guess (#878): measured on ``fpeps()`` at D=3, ``u,d`` stay
-``{even:2, odd:1}`` while ``l,r`` move to ``{even:1, odd:2}``.
+Two traps make this easy to get wrong, and both are exercised below.
 
-The fused CTM already states and satisfies this invariant -- ``_STD_EDGE_SPECS``
-annotates each chi leg with the corner it meets and uses that corner's reference
-axis.  These tests hold the split path to the same rule.
+* ``_derive_charges`` tiles the charge **array**, so it is order-sensitive:
+  ``[0,1,0]`` tiles to ``{0: 11, 1: 5}`` at chi=16 while ``[1,0,0]`` tiles to
+  ``{0: 10, 1: 6}``.  "An axis with the same charges" is therefore not "the
+  same axis".
+* ``u`` and ``d`` are opposite ends of one lattice bond, so they *always* agree
+  as multisets -- which makes substituting one for the other look safe -- but
+  simple update leaves them in different orders.  A fixture that passes the
+  same array for both cannot reach this case at all.
+
+None of this is contrived.  It is what simple update produces as soon as the
+truncation may discover the bond charges instead of being pinned to the initial
+guess (#878).
 """
 
 from __future__ import annotations
@@ -163,12 +171,24 @@ def test_both_ends_of_every_chi_bond_carry_the_same_layout(
     )
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(("label", "u", "d", "ll", "r"), _FIXTURES)
 def test_the_2x2_split_ctm_runs_on_every_layout(label, u, d, ll, r):
     """End to end: the sweep itself, which is where #1024 surfaced.
 
     The uniform arm is the control -- it passed before any of this, so a
     regression that breaks it is distinguishable from the bug being fixed here.
+
+    ``slow`` so the required ``-m core`` gate skips these: they are nearly all
+    of the file's runtime (28 tests, 689s) while the init-time invariant above
+    catches the same defect in seconds.  ``conftest`` withholds the file's
+    ``core`` marker from any item carrying an explicit ``slow`` marker, so
+    these stay in the full suite without weighing down the gate.
+
+    They are not redundant with the init check, though: ``reordered-vertical``
+    passed every init seam *and still crashed here*, because the chi bonds
+    form a ring and pairwise agreement does not imply global agreement.  That
+    is the defect this arm exists to catch.
     """
     A, B = _site(u, d, ll, r, 0), _site(u, d, ll, r, 1)
     env_A, env_B = ctm_split_tensor_2site(A, B, _CHI, max_iter=4, conv_tol=1e-6)
