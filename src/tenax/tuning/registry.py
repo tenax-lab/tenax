@@ -822,12 +822,16 @@ _register(
             "'auto' promotes to 'lorentzian' when gs_implicit_ad=False and "
             "the effective projector is 'eigh'. 'standard' forces the "
             "legacy regularized_eigh backward; 'lorentzian' forces the "
-            "Francuz-Schmoll truncated-eigh Lorentzian backward."
+            "Francuz-Schmoll truncated-eigh Lorentzian backward. 'flow' "
+            "(2x2 recipe, #983) additionally lets the plaquette projectors' "
+            "dP/dA reach the gradient; use it only on paths with no "
+            "fixed-point adjoint solve -- it is unsafe under implicit AD "
+            "(#1028)."
         ),
         hint=TuningHint(
             scale=Scale.CATEGORICAL,
             sensitivity=Sensitivity.HIGH,
-            values=("auto", "standard", "lorentzian"),
+            values=("auto", "standard", "lorentzian", "flow"),
             cost=CostModel(
                 runtime="lorentzian slightly slower per backward",
                 accuracy="lorentzian stabilizes chi>=16",
