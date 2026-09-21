@@ -377,6 +377,18 @@ def _init_symmetric_edge_bra(
 # same rule, annotating each chi leg with the corner it meets; this table had
 # drifted from it on the four horizontal seams.  Corner reference axes are
 # C1=d(1), C2=u(0), C3=d(1), C4=u(0).
+#
+# "The same axis" means literally the same axis, not an axis carrying the same
+# charges.  ``_derive_charges`` tiles the leg's charge ARRAY, so it is sensitive
+# to charge ORDER, not just to the multiset: ``[0,1,0]`` tiled to chi=16 yields
+# 5 odd slots, ``[1,0,0]`` yields 6.  ``u`` and ``d`` are opposite ends of one
+# lattice bond and therefore carry the same multiset, but simple update can
+# leave them in different ORDERS -- measured on the D=3 fermionic sweep, ``u``
+# and ``d`` both report ``{even:2, odd:1}`` while their corners seed
+# ``{0: 11, 1: 5}`` and ``{0: 10, 1: 6}`` respectively.  Substituting one for
+# the other on the grounds that "u and d carry the same charges" is therefore
+# wrong, and it is how the two vertical seams stayed broken after the
+# horizontal ones were fixed.
 _EDGE_KET_SPECS = {
     "T1": (
         "t1k_l",
@@ -385,7 +397,7 @@ _EDGE_KET_SPECS = {
         FlowDirection.IN,
         FlowDirection.IN,
         FlowDirection.OUT,
-        1,
+        0,
         0,
     ),  # t1k_l meets C1.c1_r (C1 ref=d(1)); D=u(0), flow opposite A's u(OUT)
     "T2": (
@@ -415,7 +427,7 @@ _EDGE_KET_SPECS = {
         FlowDirection.IN,
         FlowDirection.IN,
         FlowDirection.OUT,
-        1,
+        0,
         2,
     ),  # ref=d(1), D=l(2); D-flow opposite to A's l(OUT)
 }
@@ -440,7 +452,7 @@ _EDGE_BRA_SPECS = {
         FlowDirection.OUT,
         0,
         3,
-    ),  # D-flow opposite to A.bar()'s r(OUT)
+    ),  # t2b_d meets C3.c3_u (C3 ref=d(1)); D-flow opposite A.bar()'s r(OUT)
     "T3": (
         "t3b_I",
         "d_bra",
@@ -448,7 +460,7 @@ _EDGE_BRA_SPECS = {
         FlowDirection.OUT,
         FlowDirection.IN,
         FlowDirection.OUT,
-        1,
+        0,
         1,
     ),  # t3b_l meets C3.c3_l (C3 ref=d(1)); D-flow opposite A.bar()'s d(OUT)
     "T4": (
@@ -458,9 +470,9 @@ _EDGE_BRA_SPECS = {
         FlowDirection.IN,
         FlowDirection.OUT,
         FlowDirection.IN,
-        1,
+        0,
         2,
-    ),  # D-flow opposite to A.bar()'s l(IN)
+    ),  # t4b_u meets C4.c4_u (C4 ref=u(0)); D-flow opposite A.bar()'s l(IN)
 }
 
 

@@ -39,6 +39,14 @@ _VERT = np.array([0, 1, 0], dtype=np.int32)
 #: ``{even:1, odd:2}`` -- where the horizontal bonds actually land once the
 #: truncation is free to choose (#878).
 _HORIZ = np.array([0, 1, 1], dtype=np.int32)
+#: Same MULTISET as ``_VERT``, different ORDER.  This is the case a
+#: multiset-level fixture cannot reach, and it is the real one: ``u`` and ``d``
+#: are opposite ends of a lattice bond, so they always agree as multisets, but
+#: simple update leaves them in different orders.  ``_derive_charges`` tiles the
+#: array, so ``[0,1,0]`` gives ``{0: 11, 1: 5}`` at chi=16 while ``[1,0,0]``
+#: gives ``{0: 10, 1: 6}`` -- which is exactly the 10-vs-11 mismatch measured on
+#: the D=3 fermionic sweep.
+_VERT_REORDERED = np.array([1, 0, 0], dtype=np.int32)
 
 _CHI = 16
 
@@ -56,15 +64,30 @@ _CHI_BONDS = (
 )
 
 
-def _site(vert, horiz, seed):
+def _site(u, d, ll, r, seed):
     idx = (
-        TensorIndex.from_charges(_SYM, vert, FlowDirection.OUT, label="u"),
-        TensorIndex.from_charges(_SYM, vert, FlowDirection.IN, label="d"),
-        TensorIndex.from_charges(_SYM, horiz, FlowDirection.OUT, label="l"),
-        TensorIndex.from_charges(_SYM, horiz, FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(_SYM, u, FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(_SYM, d, FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(_SYM, ll, FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(_SYM, r, FlowDirection.IN, label="r"),
         TensorIndex.from_charges(_SYM, _PHYS, FlowDirection.IN, label="phys"),
     )
     return SymmetricTensor.random_normal(idx, jax.random.PRNGKey(seed))
+
+
+#: ``(label, u, d, l, r)``.
+#:
+#: ``uniform`` is the control -- it worked before any of this and must keep
+#: working.  ``direction-dependent`` is the multiset-level case (#1024 as
+#: originally filed).  ``reordered-vertical`` is the case a multiset-level
+#: fixture cannot reach: every leg carries ``{even:2, odd:1}``, so nothing
+#: "looks" asymmetric, yet ``u`` and ``d`` tile differently because their charge
+#: ORDER differs.  It is the one the real fermionic sweep produces.
+_FIXTURES = (
+    ("uniform", _VERT, _VERT, _VERT, _VERT),
+    ("direction-dependent", _VERT, _VERT, _HORIZ, _HORIZ),
+    ("reordered-vertical", _VERT, _VERT_REORDERED, _VERT, _VERT),
+)
 
 
 def _layout(tensor, label):
@@ -77,66 +100,76 @@ def _layout(tensor, label):
     raise AssertionError(f"{label!r} not found on {tensor.labels()}")
 
 
-def test_the_fixture_actually_has_direction_dependent_layouts():
-    """Regime guard: without this the other two tests assert nothing.
+def _multiset(arr):
+    uniq, counts = np.unique(np.asarray(arr), return_counts=True)
+    return dict(zip(uniq.tolist(), counts.tolist()))
 
-    ``_VERT`` and ``_HORIZ`` must disagree, and must disagree *after* tiling to
-    ``chi`` -- two layouts can differ at D=3 and still tile to the same
-    multiset, which would make the seam agree by accident and leave the
-    invariant untested.
+
+def test_the_fixtures_reach_the_cases_they_claim_to():
+    """Regime guard: without this the seam tests can pass vacuously.
+
+    Two distinct traps, and the second is the one that let this bug survive a
+    first round of fixes:
+
+    * ``direction-dependent`` needs ``_VERT`` and ``_HORIZ`` to still differ
+      *after tiling to chi* -- two layouts can differ at D=3 and tile to the
+      same multiset, which would make every seam agree by accident.
+    * ``reordered-vertical`` needs ``_VERT`` and ``_VERT_REORDERED`` to be the
+      same multiset (so nothing looks asymmetric) yet tile *differently* (so
+      the seam is genuinely exercised).  A fixture that passes the same array
+      for ``u`` and ``d`` cannot reach this at all.
     """
-    A = _site(_VERT, _HORIZ, 0)
-    assert _layout(A, "u") != _layout(A, "l"), (
-        "fixture is uniform -- #1024 cannot be reached"
-    )
-
     from tenax.algorithms._ctm_utils import _derive_charges
 
-    tiled_vert = _derive_charges(_VERT, _CHI)
-    tiled_horiz = _derive_charges(_HORIZ, _CHI)
+    assert _multiset(_derive_charges(_VERT, _CHI)) != _multiset(
+        _derive_charges(_HORIZ, _CHI)
+    ), f"_VERT and _HORIZ tile to the same multiset at chi={_CHI}"
 
-    def multiset(arr):
-        uniq, counts = np.unique(np.asarray(arr), return_counts=True)
-        return dict(zip(uniq.tolist(), counts.tolist()))
-
-    assert multiset(tiled_vert) != multiset(tiled_horiz), (
-        f"the two layouts tile to the same multiset at chi={_CHI} "
-        f"({multiset(tiled_vert)}), so every seam would agree by accident"
+    assert _multiset(_VERT) == _multiset(_VERT_REORDERED), (
+        "_VERT_REORDERED must be a REORDERING of _VERT, else it is just "
+        "another direction-dependent case and tests nothing new"
+    )
+    assert _multiset(_derive_charges(_VERT, _CHI)) != _multiset(
+        _derive_charges(_VERT_REORDERED, _CHI)
+    ), (
+        f"_VERT and _VERT_REORDERED tile identically at chi={_CHI}, so the "
+        f"order-sensitivity of _derive_charges is not exercised"
     )
 
 
+@pytest.mark.parametrize(("label", "u", "d", "ll", "r"), _FIXTURES)
 @pytest.mark.parametrize(("corner", "corner_leg", "edge", "edge_leg"), _CHI_BONDS)
 def test_both_ends_of_every_chi_bond_carry_the_same_layout(
-    corner, corner_leg, edge, edge_leg
+    corner, corner_leg, edge, edge_leg, label, u, d, ll, r
 ):
     """The invariant itself, checked at init -- before any sweep runs.
 
-    Asserts the charge *multiset*, not the total dimension: both ends are
-    ``chi`` wide either way, and it is the per-sector split that disagrees
-    (measured ``{0: 11, 1: 5}`` on the corners against ``{0: 6, 1: 10}`` on the
-    horizontal edges).  A dimension check passes on the broken env.
+    Asserts the charge *multiset* of the leg, not its total dimension: both
+    ends are ``chi`` wide either way, and it is the per-sector split that
+    disagrees (measured ``{0: 11, 1: 5}`` against ``{0: 6, 1: 10}`` on the
+    horizontal seams, and ``{0: 11, 1: 5}`` against ``{0: 10, 1: 6}`` on the
+    vertical ones).  A dimension check passes on the broken env.
     """
-    A = _site(_VERT, _HORIZ, 0)
+    A = _site(u, d, ll, r, 0)
     env = initialize_split_ctm_tensor_env(A, _CHI, _CHI)
 
     got = _layout(getattr(env, corner), corner_leg)
     want = _layout(getattr(env, edge), edge_leg)
     assert got == want, (
-        f"chi seam {corner}.{corner_leg} <-> {edge}.{edge_leg} disagrees: "
-        f"{got} vs {want}.  Both ends must tile the same leg of A (#1024)."
+        f"[{label}] chi seam {corner}.{corner_leg} <-> {edge}.{edge_leg} "
+        f"disagrees: {got} vs {want}.  Both ends must tile the SAME AXIS of A "
+        f"-- not merely an axis carrying the same charges, since "
+        f"_derive_charges tiles the array and is order-sensitive (#1024)."
     )
 
 
-@pytest.mark.parametrize(
-    ("label", "horiz"),
-    [("uniform", _VERT), ("direction-dependent", _HORIZ)],
-)
-def test_the_2x2_split_ctm_runs_on_both_layouts(label, horiz):
+@pytest.mark.parametrize(("label", "u", "d", "ll", "r"), _FIXTURES)
+def test_the_2x2_split_ctm_runs_on_every_layout(label, u, d, ll, r):
     """End to end: the sweep itself, which is where #1024 surfaced.
 
-    The uniform arm is the control -- it passed before the fix, so a regression
-    that breaks it is distinguishable from the bug being fixed here.
+    The uniform arm is the control -- it passed before any of this, so a
+    regression that breaks it is distinguishable from the bug being fixed here.
     """
-    A, B = _site(_VERT, horiz, 0), _site(_VERT, horiz, 1)
+    A, B = _site(u, d, ll, r, 0), _site(u, d, ll, r, 1)
     env_A, env_B = ctm_split_tensor_2site(A, B, _CHI, max_iter=4, conv_tol=1e-6)
     assert env_A is not None and env_B is not None
