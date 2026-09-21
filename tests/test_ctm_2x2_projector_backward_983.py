@@ -247,3 +247,72 @@ def test_flow_reaches_the_split_2x2_projector_too():
         "'flow' changed nothing on the split recipe -- projector_backward is "
         "not reaching _compute_2x2_projector through the split call chain"
     )
+
+
+@pytest.mark.parametrize(
+    ("fuse_virtual_legs", "coords", "leaf"),
+    [
+        (True, [(0, 0)], "ctm_energy_explicit"),
+        (False, [(0, 0)], "ctm_energy_split_explicit"),
+        (False, [(0, 0), (1, 0)], "ctm_energy_split_explicit_2site"),
+    ],
+)
+def test_the_optimizer_dispatcher_forwards_flow(fuse_virtual_legs, coords, leaf):
+    """``make_ctm_energy_fn`` must hand ``projector_backward`` to every leaf.
+
+    This option has now been dropped at three successive layers -- the
+    projector itself, then the split sweep/energy chain, then the optimizer
+    dispatcher that ``optimize_gs_ad`` actually calls.  Each time the layer
+    below was correct and the caller simply did not pass the argument, which
+    is invisible to any test that exercises only the layer below.
+
+    So this asserts at the dispatcher: build the real closure, stub the leaf
+    energy functions, and read back the kwarg they were called with.  No CTM
+    runs, so it is nearly free and it fails loudly if a fourth layer forgets.
+    """
+    from tenax.algorithms import _ctm_energy_ad, _split_ctm_energy_ad
+    from tenax.algorithms.ipeps_ad_policy import make_ctm_energy_fn
+    from tenax.algorithms.ipeps_config import CTMConfig
+
+    seen = {}
+
+    def _stub(*args, **kwargs):
+        seen.update(kwargs)
+        return jnp.asarray(0.0)
+
+    targets = {
+        "ctm_energy_explicit": _ctm_energy_ad,
+        "ctm_energy_split_explicit": _split_ctm_energy_ad,
+        "ctm_energy_split_explicit_2site": _split_ctm_energy_ad,
+    }
+    originals = {name: getattr(mod, name) for name, mod in targets.items()}
+    for name, mod in targets.items():
+        setattr(mod, name, _stub)
+    try:
+        cfg = CTMConfig(
+            chi=4,
+            projector_backward="flow",
+            fuse_virtual_legs=fuse_virtual_legs,
+        )
+        neighbors = {
+            c: {d: c for d in ("left", "right", "top", "bottom")} for c in coords
+        }
+        energy_fn = make_ctm_energy_fn(
+            neighbors=neighbors,
+            gate=jnp.zeros((2, 2, 2, 2)),
+            get_ctm_cfg=lambda: cfg,
+            env_cache={},
+            use_explicit=True,
+            explicit_warmup=1,
+            explicit_steps=1,
+        )
+        energy_fn({c: _wrap_as_dense_tensor(_random_site(D=2, seed=1)) for c in coords})
+    finally:
+        for name, mod in targets.items():
+            setattr(mod, name, originals[name])
+
+    assert seen.get("projector_backward") == "flow", (
+        f"{leaf} was called with projector_backward="
+        f"{seen.get('projector_backward')!r}; the dispatcher dropped it, so "
+        f"CTMConfig(projector_backward='flow') silently re-freezes"
+    )

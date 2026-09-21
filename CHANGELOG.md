@@ -317,6 +317,17 @@
   energy -> sweep -> plaquette projector. Both gaps were caught in review of
   this PR's first revision.
 
+  A third layer was found on the next pass: `make_ctm_energy_fn`, the
+  dispatcher `optimize_gs_ad` actually calls, forwarded
+  `ctm_cfg.projector_backward` on the fused explicit branch but not on either
+  split explicit branch, so `CTMConfig(projector_backward="flow")` with
+  `fuse_virtual_legs=False` still froze. The option had now been dropped at
+  three successive layers -- projector, split chain, dispatcher -- each time
+  because the caller simply did not pass it, which is invisible to any test
+  exercising only the layer below. There is now a dispatcher-level test that
+  stubs the leaf energy functions and reads back the kwarg; it fails on
+  exactly the two split branches if the forwarding is removed.
+
   **Why it is opt-in and not the default.**  Restoring `dP/denv` puts the CTM
   gauge mode back into `J`, and the implicit-AD adjoint `(I - Jᵀ)λ = dE/denv`
   then has no reliable solution: on the D=2 chi=4 fixture of
