@@ -17,6 +17,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tenax.algorithms._ctm_tensor_convergence import (
     CHECKERBOARD_NEIGHBORS,
@@ -251,9 +252,31 @@ def _initialize_split_multisite_env(
     chi: int,
     chi_I: int,
 ) -> dict[Coord, SplitCTMTensorEnv]:
-    """Per-coord split env init: reuse the single-site builder per site."""
+    """Per-coord split env init, with ONE chi seed shared by every cell.
+
+    Each cell's env is built by the single-site builder, but they must not each
+    seed their chi legs from their own site tensor.  The chi ring does not stop
+    at a cell boundary -- a 2x2 plaquette spans four cells, so ``Q_TL.chi_R``
+    (cell TL's ``T1.t1_r``) contracts against ``Q_TR.chi_L`` (cell TR's
+    ``T1.t1_l``).  ``_derive_charges`` tiles the charge ARRAY and is therefore
+    order-sensitive, and two sublattices can carry the same multiset in
+    different orders, so a per-cell seed lets the envs disagree even when each
+    one is internally consistent: measured on a D=3 fermionic pair, sublattice A
+    seeded ``{0: 11, 1: 5}`` throughout and sublattice B ``{0: 10, 1: 6}``, and
+    the plaquette died on 11-vs-10 (#1024).
+
+    Sorting the seeds would not fix it.  On a checkerboard ``A.u`` pairs with
+    ``B.d`` and ``B.u`` with ``A.d`` -- two different bonds, which need not
+    share a multiset at all.  One designated array is the only thing that makes
+    every cell agree, and the seed layout is arbitrary anyway.
+    """
+    seed = None
+    if site_tensors:
+        first = min(site_tensors)
+        ref = site_tensors[first].indices[0]
+        seed = np.asarray(ref.charges)
     return {
-        c: initialize_split_ctm_tensor_env(A, chi, chi_I)
+        c: initialize_split_ctm_tensor_env(A, chi, chi_I, chi_seed=seed)
         for c, A in site_tensors.items()
     }
 

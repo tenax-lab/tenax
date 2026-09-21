@@ -171,6 +171,48 @@ def test_both_ends_of_every_chi_bond_carry_the_same_layout(
     )
 
 
+def test_every_cell_of_a_multisite_env_shares_one_chi_seed():
+    """The invariant does not stop at a cell boundary.
+
+    A 2x2 plaquette spans four cells, so ``Q_TL.chi_R`` (cell TL's ``T1.t1_r``)
+    contracts against ``Q_TR.chi_L`` (cell TR's ``T1.t1_l``).  Seeding each
+    cell's env from *its own* site tensor therefore lets two sublattices
+    disagree even when each one is internally consistent -- measured on a D=3
+    fermionic pair, sublattice A seeded ``{0: 11, 1: 5}`` throughout and
+    sublattice B ``{0: 10, 1: 6}``, and the plaquette died on 11-vs-10.
+
+    The two cells here differ ONLY in the order of their axis-0 charges, which
+    is what makes this case unreachable by the fixtures above: they build both
+    cells from the same arrays, so every cell agrees trivially.
+
+    Sorting the seeds would not be enough either.  On a checkerboard ``A.u``
+    pairs with ``B.d`` and ``B.u`` with ``A.d`` -- different bonds, which need
+    not share a multiset -- so one designated array is the only thing that makes
+    every cell agree.
+    """
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        _initialize_split_multisite_env,
+    )
+
+    cell_a = _site(_VERT, _VERT, _VERT, _VERT, 0)
+    cell_b = _site(_VERT_REORDERED, _VERT_REORDERED, _VERT, _VERT, 1)
+
+    # Regime guard: the two cells must actually seed differently by default,
+    # else the test cannot observe the defect.
+    from tenax.algorithms._ctm_utils import _derive_charges
+
+    assert _multiset(_derive_charges(_VERT, _CHI)) != _multiset(
+        _derive_charges(_VERT_REORDERED, _CHI)
+    ), "the two cells tile identically; this test would pass vacuously"
+
+    envs = _initialize_split_multisite_env({(0, 0): cell_a, (1, 0): cell_b}, _CHI, _CHI)
+    seeds = {c: _layout(e.C1, "c1_d") for c, e in envs.items()}
+    assert len(set(map(str, seeds.values()))) == 1, (
+        f"cells seed different chi layouts: {seeds}.  Every chi leg in a "
+        f"multisite env must tile ONE array -- the chi ring spans cells (#1024)."
+    )
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize(("label", "u", "d", "ll", "r"), _FIXTURES)
 def test_the_2x2_split_ctm_runs_on_every_layout(label, u, d, ll, r):
@@ -191,5 +233,19 @@ def test_the_2x2_split_ctm_runs_on_every_layout(label, u, d, ll, r):
     is the defect this arm exists to catch.
     """
     A, B = _site(u, d, ll, r, 0), _site(u, d, ll, r, 1)
+    env_A, env_B = ctm_split_tensor_2site(A, B, _CHI, max_iter=4, conv_tol=1e-6)
+    assert env_A is not None and env_B is not None
+
+
+@pytest.mark.slow
+def test_the_2x2_split_ctm_runs_when_the_two_cells_seed_differently():
+    """End to end for the cross-cell case, which the arms above cannot reach.
+
+    The sublattices differ only in the ORDER of their axis-0 charges.  This is
+    what the real D=3 fermionic sweep produces, and it is what kept seed 1
+    crashing after the within-cell ring fix had landed.
+    """
+    A = _site(_VERT, _VERT, _VERT, _VERT, 0)
+    B = _site(_VERT_REORDERED, _VERT_REORDERED, _VERT, _VERT, 1)
     env_A, env_B = ctm_split_tensor_2site(A, B, _CHI, max_iter=4, conv_tol=1e-6)
     assert env_A is not None and env_B is not None
