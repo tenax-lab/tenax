@@ -127,6 +127,7 @@ def test_both_ends_of_every_chi_bond_carry_the_same_layout(
     )
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     ("label", "horiz"),
     [("uniform", _VERT), ("direction-dependent", _HORIZ)],
@@ -136,6 +137,12 @@ def test_the_2x2_split_ctm_runs_on_both_layouts(label, horiz):
 
     The uniform arm is the control -- it passed before the fix, so a regression
     that breaks it is distinguishable from the bug being fixed here.
+
+    ``slow`` so the required ``-m core`` gate skips these two: measured 352s
+    and 230s against 590s for the whole file, while the init-time invariant
+    above catches the same defect in ~3s.  ``conftest`` withholds the file's
+    ``core`` marker from any item carrying an explicit ``slow`` marker, so
+    this stays in the full suite without weighing down the gate.
     """
     A, B = _site(_VERT, horiz, 0), _site(_VERT, horiz, 1)
     env_A, env_B = ctm_split_tensor_2site(A, B, _CHI, max_iter=4, conv_tol=1e-6)
