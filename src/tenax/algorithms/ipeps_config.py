@@ -191,9 +191,21 @@ class CTMConfig:
     #                   Honored even when ``projector_method != "eigh"``, in
     #                   which case the forward doesn't use eigh at all and
     #                   the flag is a no-op.
+    #   "flow"       -> 2x2 recipe only (#983): let the plaquette projectors'
+    #                   ``dP/dA`` reach the gradient instead of returning them
+    #                   as ``stop_gradient`` constants.  Every other value
+    #                   above freezes them, which is the historical behaviour.
+    #                   Use this on paths with NO fixed-point adjoint solve --
+    #                   explicit AD, or a bare sweep -- where it is measurably
+    #                   more correct (AD/FD 0.229..0.928 frozen against
+    #                   0.944..0.994 flowing on ``ctm_energy_explicit``).  It
+    #                   is NOT safe under implicit AD: restoring ``dP/denv``
+    #                   puts the CTM gauge mode back into ``J`` and
+    #                   ``(I - J^T)λ = dE/denv`` stops being solvable (#1028,
+    #                   blocked on #841).
     # Kept at the end of the dataclass to preserve positional-argument
     # compatibility for callers that construct CTMConfig positionally.
-    projector_backward: Literal["auto", "standard", "lorentzian"] = "auto"
+    projector_backward: Literal["auto", "standard", "lorentzian", "flow"] = "auto"
     adjoint_arnoldi_precheck: bool = True
     adjoint_arnoldi_threshold: float = 5.0
     # variPEPS §2.8.2 reactive auto-χ_E bump.  When enabled, the optimizer
@@ -315,7 +327,7 @@ class CTMConfig:
                 f"adjoint_solver must be one of {valid_solvers}, "
                 f"got {self.adjoint_solver!r}"
             )
-        valid_projector_backward = {"auto", "standard", "lorentzian"}
+        valid_projector_backward = {"auto", "standard", "lorentzian", "flow"}
         if self.projector_backward not in valid_projector_backward:
             raise ValueError(
                 f"projector_backward must be one of {valid_projector_backward}, "
