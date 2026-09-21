@@ -702,10 +702,10 @@ _FILE_MARKERS = {
     # shape error on any state whose horizontal and vertical bonds differ --
     # which is what simple update produces once truncation is free to pick
     # the bond charges (#878) -- and the invariant itself is checked at init
-    # in ~3s.  The two end-to-end sweeps in that file carry an explicit
-    # ``slow`` marker and so stay out of the gate: they are 582s of the
-    # file's 590s, and they confirm the same defect the init check already
-    # catches.
+    # cheaply.  The end-to-end sweeps in that file carry an explicit
+    # ``slow`` marker and so stay out of the gate: measured 784.7s for those
+    # 3 against 11.7s for the 25 the gate does run, and they confirm the same
+    # defect the init-time invariant already catches.
     "test_split_ctm_asymmetric_layout_1024.py": "core",
 }
 
