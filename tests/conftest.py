@@ -694,8 +694,8 @@ _FILE_MARKERS = {
     # #983: the 2x2 projector-response guard.  ``core``: the frozen
     # projector made the gradient of the DEFAULT recipe wrong by up to 15x
     # and sometimes wrong in sign, which is a silently-wrong-answer bug on
-    # the required AD path, and the file is cheap -- one CTM sweep at D=2
-    # chi=4, 18.3s CPU for all four tests.
+    # the required AD path, and the file is cheap -- single CTM sweeps at
+    # D=2 chi=4, 31.5s CPU for all eight tests (fused and split).
     "test_ctm_2x2_projector_backward_983.py": "core",
 }
 

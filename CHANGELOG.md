@@ -308,6 +308,15 @@
   which has no adjoint solve, 0.229..0.928 frozen against 0.944..0.994 flowing.
   Use `"flow"` there today.
 
+  Reachable from the supported API: `"flow"` is accepted by
+  `CTMConfig.projector_backward`, round-trips through the JIT-boundary tuple
+  encoding in `ad_utils` (a value missing from `_PB_STR_TO_INT` is silently
+  encoded as `"auto"`, which would have re-frozen the projectors on the very
+  path the option exists to fix), is declared in the tuning registry, and is
+  threaded through the **split** 2x2 chain as well as the fused one — split
+  energy -> sweep -> plaquette projector. Both gaps were caught in review of
+  this PR's first revision.
+
   **Why it is opt-in and not the default.**  Restoring `dP/denv` puts the CTM
   gauge mode back into `J`, and the implicit-AD adjoint `(I - Jᵀ)λ = dE/denv`
   then has no reliable solution: on the D=2 chi=4 fixture of

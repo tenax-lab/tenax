@@ -161,3 +161,89 @@ def test_everything_but_flow_keeps_the_stop_gradient(projector_backward):
         f"projector_backward={projector_backward!r} produced FD-consistent "
         f"ratios {ratios}; only 'flow' is supposed to unfreeze the projectors"
     )
+
+
+# --------------------------------------------------------------------- #
+# The option has to survive the trip from the public API to the          #
+# projector.  Both gaps below were found by review on the first revision #
+# of this PR, and both would have left the fix above unreachable.        #
+# --------------------------------------------------------------------- #
+
+
+def test_flow_survives_the_config_and_the_jit_boundary():
+    """``CTMConfig`` must accept ``"flow"`` and round-trip it.
+
+    ``optimize_gs_ad`` reaches the CTM through ``CTMConfig``, and the config
+    is packed into a hashable tuple at the JIT boundary by
+    ``_config_to_tuple``.  A value missing from either the validation set or
+    the ``_PB_*`` maps is rejected outright or -- worse -- silently encoded
+    as ``0 == "auto"`` by the map's ``.get`` default, which re-freezes the
+    projectors exactly where the fix is supposed to apply.
+    """
+    from tenax.algorithms.ad_utils import _config_from_tuple, _config_to_tuple
+    from tenax.algorithms.ipeps_config import CTMConfig
+
+    for value in ("auto", "standard", "lorentzian", "flow"):
+        cfg = CTMConfig(projector_backward=value)
+        assert cfg.projector_backward == value
+        round_tripped = _config_from_tuple(_config_to_tuple(cfg))
+        assert round_tripped.projector_backward == value, (
+            f"projector_backward={value!r} degraded to "
+            f"{round_tripped.projector_backward!r} at the JIT boundary"
+        )
+
+    with pytest.raises(ValueError, match="projector_backward must be one of"):
+        CTMConfig(projector_backward="not-a-mode")
+
+
+def test_flow_reaches_the_split_2x2_projector_too():
+    """The split recipe calls the same projector and must honour the option.
+
+    ``_compute_split_plaquette_projector_pair`` used to call
+    ``_compute_2x2_projector`` without forwarding ``projector_backward``, so
+    the split 2x2 path silently kept the frozen default no matter what the
+    caller asked for.  Asserts the forward is untouched and the gradient
+    genuinely moves.
+    """
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        _split_ctm_sweep_multisite,
+    )
+    from tenax.algorithms._split_ctm_tensor_init import (
+        initialize_split_ctm_tensor_env,
+    )
+
+    chi = 4
+    A_data = _random_site(D=2, seed=5)
+    env0 = jax.tree.map(
+        jax.lax.stop_gradient,
+        initialize_split_ctm_tensor_env(_wrap_as_dense_tensor(A_data), chi, chi),
+    )
+
+    def f(p, projector_backward):
+        A = _wrap_as_dense_tensor(p)
+        out = _split_ctm_sweep_multisite(
+            {(0, 0): env0},
+            {(0, 0): A},
+            {(0, 0): A.bar()},
+            SINGLE_SITE_NEIGHBORS,
+            chi,
+            chi,
+            True,
+            "2x2",
+            projector_backward=projector_backward,
+        )[(0, 0)]
+        s = jnp.linalg.svd(out.C1.todense(), compute_uv=False)
+        w = jnp.arange(1, s.shape[0] + 1, dtype=s.dtype)
+        return jnp.sum(w * s / (s[0] + 1e-30))
+
+    assert float(f(A_data, "auto")) == float(f(A_data, "flow")), (
+        "the forward moved -- only the VJP may change"
+    )
+
+    g_auto = jax.grad(lambda p: f(p, "auto"))(A_data)
+    g_flow = jax.grad(lambda p: f(p, "flow"))(A_data)
+    assert jnp.all(jnp.isfinite(g_flow))
+    assert float(jnp.linalg.norm(g_flow - g_auto)) > 1e-10, (
+        "'flow' changed nothing on the split recipe -- projector_backward is "
+        "not reaching _compute_2x2_projector through the split call chain"
+    )

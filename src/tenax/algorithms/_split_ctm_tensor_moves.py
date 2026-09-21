@@ -265,6 +265,7 @@ def _compute_split_plaquette_projector_pair(
     chi: int,
     direction: str,
     base_charges: np.ndarray | None = None,
+    projector_backward: str = "auto",
 ) -> tuple[Tensor, Tensor, jax.Array, jax.Array]:
     """Split twin of :func:`_compute_plaquette_projector_pair`.
 
@@ -319,7 +320,14 @@ def _compute_split_plaquette_projector_pair(
         position="bottom_right",
     )
     P_top_raw, P_bot_raw, eps_T, smallest_S = _compute_2x2_projector(
-        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction=direction, base_charges=base_charges
+        Q_TL,
+        Q_TR,
+        Q_BL,
+        Q_BR,
+        chi,
+        direction=direction,
+        base_charges=base_charges,
+        projector_backward=projector_backward,
     )
     return (
         _half_to_chi_new_top(P_top_raw),
