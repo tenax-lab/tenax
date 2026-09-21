@@ -289,6 +289,70 @@
 
 ### Fixed
 
+- **`projector_backward` now works on the 2x2 CTM recipe** (#983):
+  `_compute_2x2_projector` returned `stop_gradient(P_top), stop_gradient(P_bot)`
+  unconditionally, so `dP/dA` was dropped from every gradient taken through the
+  default `recipe="2x2"` path and the knob had no effect there at all.  It is
+  now honoured end to end (sweep -> move -> projector, dense and symmetric):
+  `projector_backward="flow"` lets the projector response reach the gradient,
+  backed by a new `_regularized_dense_svd` (bare `_dense_svd` forward,
+  Lorentzian backward).  **The default is unchanged** — every other value,
+  including `"auto"`, still freezes the projectors — so no existing gradient
+  moves, and the eager forward is bit-identical because only the VJP changed.
+
+  What it is worth, measured on ONE CTM sweep against a gauge-invariant
+  functional (deliberately not at a fixed point, where the comparison is
+  confounded by #841): frozen gives AD/FD ratios spanning **-7.98 to +14.95**
+  across D=2 chi=4 and D=3 chi=9 — wrong by up to 15x and sometimes wrong in
+  *sign* — against **1.000000** to seven digits flowing.  On `ctm_energy_explicit`,
+  which has no adjoint solve, 0.229..0.928 frozen against 0.944..0.994 flowing.
+  Use `"flow"` there today.
+
+  Reachable from the supported API: `"flow"` is accepted by
+  `CTMConfig.projector_backward`, round-trips through the JIT-boundary tuple
+  encoding in `ad_utils` (a value missing from `_PB_STR_TO_INT` is silently
+  encoded as `"auto"`, which would have re-frozen the projectors on the very
+  path the option exists to fix), is declared in the tuning registry, and is
+  threaded through the **split** 2x2 chain as well as the fused one — split
+  energy -> sweep -> plaquette projector. Both gaps were caught in review of
+  this PR's first revision.
+
+  A third layer was found on the next pass: `make_ctm_energy_fn`, the
+  dispatcher `optimize_gs_ad` actually calls, forwarded
+  `ctm_cfg.projector_backward` on the fused explicit branch but not on either
+  split explicit branch, so `CTMConfig(projector_backward="flow")` with
+  `fuse_virtual_legs=False` still froze. The option had now been dropped at
+  three successive layers -- projector, split chain, dispatcher -- each time
+  because the caller simply did not pass it, which is invisible to any test
+  exercising only the layer below. There is now a dispatcher-level test that
+  stubs the leaf energy functions and reads back the kwarg; it fails on
+  exactly the two split branches if the forwarding is removed.
+
+  **Why it is opt-in and not the default.**  Restoring `dP/denv` puts the CTM
+  gauge mode back into `J`, and the implicit-AD adjoint `(I - Jᵀ)λ = dE/denv`
+  then has no reliable solution: on the D=2 chi=4 fixture of
+  `test_adjoint_convergence_gate.py` the flowing residual runs 4.2e-13 /
+  4.5e-15 / 5.1e-01 / 8.1e-02 / 7.9e-01 at `ctm_max_iter` 20/40/80/150/300
+  (`forward_gauge="phase"`; `"sigma"` is likewise erratic), flat in both Krylov
+  restart and `maxiter`, while the frozen control is 1e-16 at every point.
+  A well-posed fixed point does not swing 15 orders of magnitude with the
+  forward sweep count — this is #841: the 2x2 forward does not reach an
+  element-wise fixed point, so linearizing the *true* step map around it is
+  ill-posed.  Freezing hides that by substituting a different, artificially
+  contracting operator, which means the implicit gradient solves the wrong
+  linear system exactly.  #841 has to land before `"flow"` can be the default
+  under implicit AD.
+
+  Two premises in the issue were misdiagnoses, corrected here.  The NaN the
+  freeze was protecting against is triggered by EXACT rank deficiency
+  (`_fishman_truncate_S` zeroes the sub-floor tail, so `F_ij = 1/(s_i^2 -
+  s_j^2)` evaluates `1/(0-0)`), not by the "near-degenerate singular values ...
+  typical at small D" the old comment blamed: a point carrying a 2.2e-06
+  adjacent gap and no exact zero differentiates cleanly unregularized, while
+  the points that NaN are exactly the rank-deficient ones.  And tuning the
+  Lorentzian `eps`, the fix the issue suggested, was measured and refuted —
+  1e-12/1e-10/1e-8/1e-6 give 2.10/2.03/2.25/2.53 at the hardest point.
+
 - **A non-finite CTM environment can no longer certify as converged** (#974).
   `max(0.0, float("nan"))` is `0.0` — every comparison against NaN is False, so
   Python's `max` returns its *first* argument, and the sibling idiom

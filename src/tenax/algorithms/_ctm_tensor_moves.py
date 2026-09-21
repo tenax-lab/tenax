@@ -413,6 +413,7 @@ def _compute_plaquette_projector_pair(
     chi: int,
     direction: str,
     base_charges: np.ndarray | None = None,
+    projector_backward: str = "auto",
 ) -> tuple[Tensor, Tensor, jax.Array, jax.Array]:
     """Compute the (P_top, P_bot, eps_T, smallest_S) projector quad for a 2x2 plaquette.
 
@@ -436,6 +437,10 @@ def _compute_plaquette_projector_pair(
     the variPEPS ``norm_smallest_S`` scalar driving in-CTM χ-bump
     (Issue #492); ``stop_gradient`` applied upstream to both.
 
+    ``projector_backward="flow"`` lets ``dP/dA`` reach the gradient; every
+    other value (including the ``"auto"`` default) freezes ``(P_top, P_bot)``
+    as constants on the backward path (#983).
+
     For LEFT/RIGHT direction, ``P_top`` projects the BOTTOM face of TL
     (or top face of TR for direction='right') and ``P_bot`` projects the
     TOP face of BL (or bottom face of BR).  See ``_compute_2x2_projector``.
@@ -453,7 +458,14 @@ def _compute_plaquette_projector_pair(
         env_BR.C3, env_BR.T3, env_BR.T2, a_BR, position="bottom_right"
     )
     P_top_raw, P_bot_raw, eps_T, smallest_S = _compute_2x2_projector(
-        Q_TL, Q_TR, Q_BL, Q_BR, chi, direction=direction, base_charges=base_charges
+        Q_TL,
+        Q_TR,
+        Q_BL,
+        Q_BR,
+        chi,
+        direction=direction,
+        base_charges=base_charges,
+        projector_backward=projector_backward,
     )
     return (
         _half_to_chi_new_top(P_top_raw),

@@ -63,11 +63,27 @@ def test_ctm_energy_implicit_gradient_is_finite_and_nontrivial():
 
     Captures the production contract for implicit-AD: the optimizer needs
     a finite, non-zero gradient with magnitude comparable to the energy.
-    Strict FD-parity is *not* checked here — at D=2 χ=4 the 2x2 plaquette
-    projector's stop_gradient (PR #447) drops the basis-rotation
-    contribution from ∂(projector)/∂A, giving ~25% FD bias.  The bias
-    shrinks at larger bond dimension and does not block L-BFGS
-    convergence (verified empirically up to D=3, χ=24).
+
+    Strict FD-parity is *not* checked here.  This docstring used to put a
+    number on why -- "~25% FD bias" from the 2x2 plaquette projector's
+    stop_gradient (PR #447) dropping ∂(projector)/∂A -- and that number was
+    never a measurement of this path.  #983 measured the projector response
+    directly, on a single sweep: freezing it costs ratios spanning
+    -7.98..+14.95, and letting it flow gives 1.000000.
+
+    The stop_gradient is still in place here, because this is the implicit
+    path.  Letting the response flow restores the CTM gauge mode in ``J``,
+    and the adjoint ``(I - Jᵀ)λ = dE/denv`` then has no reliable solution
+    (residual 4.5e-15 at ctm_max_iter=40 but 7.9e-01 at 300, flat in Krylov
+    restart and maxiter).  That is #841 again: the forward here is not an
+    element-wise fixed point -- the implicit-AD guard reports a 3.3e-01
+    stationarity residual on this state -- so linearizing the true step map
+    around it is ill-posed, and an FD-vs-AD ratio measures the
+    non-stationary forward rather than the adjoint.
+
+    The projector-response guard that CAN be stated cleanly lives in
+    ``test_ctm_2x2_projector_backward_983.py``, which measures one sweep
+    under ``projector_backward="flow"`` and so needs no fixed-point premise.
     """
     A = _make_su_tensor(D=2, d=2)
     chi = 4

@@ -130,12 +130,16 @@ def test_ad_gradient_matches_fd_with_bump():
     CTM grows chi 4 -> 8.
 
     The bulk-agreement check (90th-percentile relative error) is used
-    instead of strict allclose because the 2x2 plaquette projector's
-    stop_gradient (PR #447) creates a documented ~25% FD bias at D=2,
-    and individual FD probes can occasionally cross the projector's
-    near-degenerate SVD threshold — on macOS Accelerate this produced a
+    instead of strict allclose because individual FD probes can cross the
+    projector's truncation threshold — on macOS Accelerate this produced a
     single-index ~0.3 outlier in 32 elements (#529) while the bulk
-    agreement was as tight as on Linux.
+    agreement was as tight as on Linux.  This used to also cite a "~25% FD
+    bias at D=2" from the 2x2 projector's stop_gradient (PR #447).  The
+    stop_gradient is still here -- #983 measured its cost (one sweep, ratios
+    -7.98..+14.95 frozen against 1.000000 flowing) and made unfreezing an
+    opt-in, because on this implicit path the flowing Jacobian makes the
+    adjoint solve unreliable.  So the projector IS a source of bias here;
+    "~25%" was simply never a measurement of it.
 
     This test does NOT verify the chi-lock contract.  The strict
     chi-lock check is test_ad_gradient_invariance_bump_vs_fixed_chi_max
@@ -265,7 +269,9 @@ def test_ad_gradient_invariance_bump_vs_fixed_chi_max():
     # seeds): the two trajectories land on energy-identical envs that differ
     # by a rotation inside (near-)degenerate projector-SV subspaces, and the
     # projector stop_gradient + degenerate-SV SVD backward feel that
-    # rotation.  Both gradients are individually FD-consistent
+    # rotation.  (#983 left that stop_gradient in place on this path by
+    # default -- see its `_PROJECTOR_BACKWARD_FLOW` note.)
+    # Both gradients are individually FD-consistent
     # (test_ad_gradient_matches_fd_with_bump).  The gates below sit above
     # the floor with >10x margin while still failing catastrophically on
     # the chi-lock breakage signature (backward differentiating the chi=4

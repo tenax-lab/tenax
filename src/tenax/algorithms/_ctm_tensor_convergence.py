@@ -301,8 +301,12 @@ def _ctm_tensor_sweep_multisite(
         projector_method:  ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
                         Only consulted on the 1x1 path; the 2x2 path always
                         uses Fishman SVD via :func:`_compute_2x2_projector`.
-        projector_backward:  Forwarded to the 1x1 move functions; ignored
-                        on the 2x2 path.
+        projector_backward:  ``"flow"`` lets the 2x2 plaquette projectors'
+                        ``dP/dA`` reach the gradient; every other value
+                        (including the ``"auto"`` default) freezes them as
+                        ``stop_gradient`` constants, which is the pre-#983
+                        behaviour.  On the 1x1 path it selects the eigh
+                        backward as before.
         recipe:         ``"2x2"`` (default) — use the 2x2 plaquette projector
                         of :func:`_ctm_tensor_move_*_2x2` (matches variPEPS's
                         ``do_*_absorption`` workhorses).
@@ -431,6 +435,7 @@ def _ctm_tensor_sweep_multisite(
                         chi,
                         direction,
                         base_charges=base_charges,
+                        projector_backward=projector_backward,
                     )
                 )
                 projectors[s_anchor] = (P_top, P_bot)
