@@ -66,6 +66,28 @@ The PSD tolerance here is 1e-6 rather than the 1e-8 used elsewhere, because on
 a near-product state the exact RDM is rank 1 and the measured minimum is CTM
 error rather than physics -- see ``_PSD_TOL`` for the chi scan that shows a
 1e-8 gate flipping sign between chi=4 and chi=6.
+
+**What these anchors do NOT certify.**  Both fixtures are product or
+near-product states, and that buys the exact expected value at the cost of two
+whole defect classes.  Neither is a weakness in the assertions; both are
+consequences of the fixture, so do not read a green run here as covering them:
+
+* *Direction.*  Every bond of the all-occupied state carries the same RDM
+  (``|11><11|``), and every ``A -> B`` bond of the polarised CDW joins an
+  occupied site to an empty one, so the horizontal and vertical RDMs coincide.
+  Swapping them is therefore invisible: a mutant that feeds the vertical bond
+  the *horizontal* RDM leaves all four tests green, because it can only shuffle
+  energy inside the 2e-5 non-product residue.  Direction-correctness is
+  covered by ``test_split_2site_energy_equals_multisite`` and the #1024 layout
+  suite, not here.
+* *Fermionic signs.*  A product state has no exchange, so no Koszul convention
+  can show up in its energy.  These anchors say nothing about #995, and a green
+  run here is not evidence that the CTM sign handling is right.
+
+Mutation coverage, measured: dropping a bond (E = V), flipping the sign
+(E = -2V) and mis-normalising (E = V) are each killed by both anchors.  The
+double-count guard is dead code on a 2-site checkerboard -- all four bond ids
+are distinct -- so disabling it is an equivalent mutant rather than an escape.
 """
 
 from __future__ import annotations
