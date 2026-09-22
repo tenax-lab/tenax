@@ -220,6 +220,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "gilt_plaquette": ("tenax.algorithms.gilt", "gilt_plaquette"),
     "gilt_tnr": ("tenax.algorithms.gilt", "gilt_tnr"),
     "gilt_tnr_step": ("tenax.algorithms.gilt", "gilt_tnr_step"),
+    # gilt-hotrg
+    "GiltHOTRGConfig": ("tenax.algorithms.gilt_hotrg", "GiltHOTRGConfig"),
+    "gilt_hotrg": ("tenax.algorithms.gilt_hotrg", "gilt_hotrg"),
+    "gilt_hotrg_step": ("tenax.algorithms.gilt_hotrg", "gilt_hotrg_step"),
     # hotrg
     "HOTRGConfig": ("tenax.algorithms.hotrg", "HOTRGConfig"),
     "hotrg": ("tenax.algorithms.hotrg", "hotrg"),
@@ -470,6 +474,10 @@ __all__ = [
     "gilt_plaquette",
     "gilt_tnr",
     "gilt_tnr_step",
+    # Gilt-HOTRG
+    "GiltHOTRGConfig",
+    "gilt_hotrg",
+    "gilt_hotrg_step",
     # HOTRG
     "HOTRGConfig",
     "hotrg",

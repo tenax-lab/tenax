@@ -354,6 +354,7 @@ def make_ctm_energy_fn(
                     chi_I=ctm_cfg.chi_I,
                     renormalize=ctm_cfg.renormalize,
                     energy_fn=None,
+                    projector_backward=ctm_cfg.projector_backward,
                 )
             _cached = env_cache.get("envs", None)
             envs_init = _cached if _cached else None
@@ -398,6 +399,7 @@ def make_ctm_energy_fn(
                 renormalize=ctm_cfg.renormalize,
                 energy_fn=energy_fn,
                 recipe=recipe,
+                projector_backward=ctm_cfg.projector_backward,
             )
         # Warm-start the gauge-fixed forward from the cached split env (the
         # optimizer stores a {coord: SplitCTMTensorEnv} dict).  The seed is

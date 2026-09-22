@@ -122,7 +122,11 @@ gauge for equal or better energy.
   truncated-eigh kernel (`_lorentzian_eigh.py`) instead of the legacy
   `regularized_eigh` path. This closes the 2-site χ=8 convergence gap
   tracked in issue #299 (E_best improves from ≈ −0.558 to ≈ −0.6602 at
-  D=2, χ=8). Set to `"standard"` to force the legacy backward, or
+  D=2, χ=8). On the 2x2 recipe there is also `"flow"`, which additionally
+  lets the plaquette projectors' `dP/dA` reach the gradient instead of
+  returning them as `stop_gradient` constants (#983) — use it on explicit
+  AD, which has no fixed-point adjoint solve; it is **not** safe under
+  implicit AD (#1028). Set to `"standard"` to force the legacy backward, or
   `"lorentzian"` to opt in even when using `projector_method="qr"/"svd"`
   (the flag is a no-op on non-eigh projectors). Currently dense-only;
   U(1) `SymmetricTensor` support is deferred to Approach B of the plan.

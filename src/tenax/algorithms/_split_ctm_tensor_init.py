@@ -139,12 +139,19 @@ def _init_symmetric_corner(
     flow_a: FlowDirection,
     flow_b: FlowDirection,
     ref_axis: int,
+    chi_seed: np.ndarray | None = None,
 ) -> SymmetricTensor:
-    """Create an identity-like SymmetricTensor corner from A's bond charges."""
+    """Create an identity-like SymmetricTensor corner from A's bond charges.
+
+    ``chi_seed`` overrides the reference axis.  Every chi leg in a multisite
+    env must tile ONE array -- the chi ring spans cells, so a per-cell seed
+    lets two sublattices disagree even when each is internally consistent
+    (#1024).
+    """
     ref_idx = A.indices[ref_axis]
     sym = ref_idx.symmetry
     # Derive chi-leg charges: repeat A's bond charges up to chi
-    base_charges = ref_idx.charges
+    base_charges = ref_idx.charges if chi_seed is None else np.asarray(chi_seed)
     n_base = len(base_charges)
     if chi <= n_base:
         charges = base_charges[:chi].copy()
@@ -249,6 +256,7 @@ def _init_symmetric_edge_ket(
     ref_axis_D: int,
     *,
     I_charges_arr: np.ndarray | None = None,
+    chi_seed: np.ndarray | None = None,
 ) -> SymmetricTensor:
     """Create an identity-like SymmetricTensor ket edge.
 
@@ -260,7 +268,9 @@ def _init_symmetric_edge_ket(
     sym = A.indices[0].symmetry
 
     # chi-leg charges from A's ref bond
-    chi_charges = _derive_charges(A.indices[ref_axis_chi].charges, chi)
+    chi_charges = _derive_charges(
+        A.indices[ref_axis_chi].charges if chi_seed is None else chi_seed, chi
+    )
     D_charges = np.asarray(A.indices[ref_axis_D].charges.copy(), dtype=np.int32)
 
     # Canonical I-charges via the symmetry's group operation.  Caller may pass
@@ -314,6 +324,7 @@ def _init_symmetric_edge_bra(
     ref_axis_D: int,
     *,
     I_charges_arr: np.ndarray | None = None,
+    chi_seed: np.ndarray | None = None,
 ) -> SymmetricTensor:
     """Create an identity-like SymmetricTensor bra edge.
 
@@ -324,7 +335,9 @@ def _init_symmetric_edge_bra(
     sym = A.indices[0].symmetry
 
     D_charges = np.asarray(A.indices[ref_axis_D].charges.copy(), dtype=np.int32)
-    chi_charges = _derive_charges(A.indices[ref_axis_chi].charges, chi)
+    chi_charges = _derive_charges(
+        A.indices[ref_axis_chi].charges if chi_seed is None else chi_seed, chi
+    )
 
     # Canonical I-charges (caller-supplied or derived from the bra's local
     # conservation rule).  Sharing the same array between ket and bra makes
@@ -361,6 +374,34 @@ def _init_symmetric_edge_bra(
 
 # Edge specs: (label_first, label_D, label_last, flow_first, flow_D, flow_last,
 #              ref_axis_chi, ref_axis_D)
+#
+# ``ref_axis_chi`` must name the SAME axis of ``A`` that the corner on the other
+# end of that chi bond uses (``_CORNER_SPECS``).  Both ends are seeded by tiling
+# one of A's virtual legs with :func:`_derive_charges`, so if they tile
+# *different* legs the seam is contractible only while those legs happen to
+# carry the same charge layout.  A uniform iPEPS satisfies that by accident; a
+# state whose horizontal and vertical bonds differ does not, and the 2x2
+# plaquette projector dies in ``_build_enlarged_corner`` with a shape error
+# (#1024).  Such states are not exotic -- they are what simple update produces
+# once the truncation may discover the bond charges instead of being pinned to
+# the initial guess (#878).
+#
+# The fused table ``_ctm_tensor_init._STD_EDGE_SPECS`` states and satisfies the
+# same rule, annotating each chi leg with the corner it meets; this table had
+# drifted from it on the four horizontal seams.  Corner reference axes are
+# C1=d(1), C2=u(0), C3=d(1), C4=u(0).
+#
+# "The same axis" means literally the same axis, not an axis carrying the same
+# charges.  ``_derive_charges`` tiles the leg's charge ARRAY, so it is sensitive
+# to charge ORDER, not just to the multiset: ``[0,1,0]`` tiled to chi=16 yields
+# 5 odd slots, ``[1,0,0]`` yields 6.  ``u`` and ``d`` are opposite ends of one
+# lattice bond and therefore carry the same multiset, but simple update can
+# leave them in different ORDERS -- measured on the D=3 fermionic sweep, ``u``
+# and ``d`` both report ``{even:2, odd:1}`` while their corners seed
+# ``{0: 11, 1: 5}`` and ``{0: 10, 1: 6}`` respectively.  Substituting one for
+# the other on the grounds that "u and d carry the same charges" is therefore
+# wrong, and it is how the two vertical seams stayed broken after the
+# horizontal ones were fixed.
 _EDGE_KET_SPECS = {
     "T1": (
         "t1k_l",
@@ -369,9 +410,9 @@ _EDGE_KET_SPECS = {
         FlowDirection.IN,
         FlowDirection.IN,
         FlowDirection.OUT,
-        3,
         0,
-    ),  # ref=r(3), D=u(0); D-flow opposite to A's u(OUT)
+        0,
+    ),  # t1k_l meets C1.c1_r (C1 ref=d(1)); D=u(0), flow opposite A's u(OUT)
     "T2": (
         "t2k_u",
         "r_ket",
@@ -389,9 +430,9 @@ _EDGE_KET_SPECS = {
         FlowDirection.OUT,
         FlowDirection.OUT,
         FlowDirection.IN,
-        3,
+        0,
         1,
-    ),  # ref=r(3), D=d(1); D-flow opposite to A's d(IN)
+    ),  # t3k_r meets C4.c4_r (C4 ref=u(0)); D=d(1), flow opposite A's d(IN)
     "T4": (
         "t4k_d",
         "l_ket",
@@ -399,7 +440,7 @@ _EDGE_KET_SPECS = {
         FlowDirection.IN,
         FlowDirection.IN,
         FlowDirection.OUT,
-        1,
+        0,
         2,
     ),  # ref=d(1), D=l(2); D-flow opposite to A's l(OUT)
 }
@@ -412,9 +453,9 @@ _EDGE_BRA_SPECS = {
         FlowDirection.IN,
         FlowDirection.OUT,
         FlowDirection.IN,
-        3,
         0,
-    ),  # D-flow opposite to A.bar()'s u(IN)
+        0,
+    ),  # t1b_r meets C2.c2_l (C2 ref=u(0)); D-flow opposite A.bar()'s u(IN)
     "T2": (
         "t2b_I",
         "r_bra",
@@ -424,7 +465,7 @@ _EDGE_BRA_SPECS = {
         FlowDirection.OUT,
         0,
         3,
-    ),  # D-flow opposite to A.bar()'s r(OUT)
+    ),  # t2b_d meets C3.c3_u (C3 ref=d(1)); D-flow opposite A.bar()'s r(OUT)
     "T3": (
         "t3b_I",
         "d_bra",
@@ -432,9 +473,9 @@ _EDGE_BRA_SPECS = {
         FlowDirection.OUT,
         FlowDirection.IN,
         FlowDirection.OUT,
-        3,
+        0,
         1,
-    ),  # D-flow opposite to A.bar()'s d(OUT)
+    ),  # t3b_l meets C3.c3_l (C3 ref=d(1)); D-flow opposite A.bar()'s d(OUT)
     "T4": (
         "t4b_I",
         "l_bra",
@@ -442,9 +483,9 @@ _EDGE_BRA_SPECS = {
         FlowDirection.IN,
         FlowDirection.OUT,
         FlowDirection.IN,
-        1,
+        0,
         2,
-    ),  # D-flow opposite to A.bar()'s l(IN)
+    ),  # t4b_u meets C4.c4_u (C4 ref=u(0)); D-flow opposite A.bar()'s l(IN)
 }
 
 
@@ -452,6 +493,8 @@ def initialize_split_ctm_tensor_env(
     A: Tensor,
     chi: int,
     chi_I: int,
+    *,
+    chi_seed: np.ndarray | None = None,
 ) -> SplitCTMTensorEnv:
     """Initialize a SplitCTMTensorEnv from an iPEPS site tensor.
 
@@ -469,7 +512,9 @@ def initialize_split_ctm_tensor_env(
     if isinstance(A, SymmetricTensor):
         corners = {}
         for name, (la, lb, fa, fb, ref) in _CORNER_SPECS.items():
-            corners[name] = _init_symmetric_corner(A, chi, la, lb, fa, fb, ref)
+            corners[name] = _init_symmetric_corner(
+                A, chi, la, lb, fa, fb, ref, chi_seed
+            )
 
         # Compute I-charges once per edge using the ket's flow conventions
         # and share with the bra so both halves of the SVD bond carry
@@ -477,7 +522,9 @@ def initialize_split_ctm_tensor_env(
         sym = A.indices[0].symmetry
         shared_I_charges: dict[str, np.ndarray] = {}
         for name, (_, _, _, f1, f2, f3, ref_chi, ref_D) in _EDGE_KET_SPECS.items():
-            chi_charges = _derive_charges(A.indices[ref_chi].charges, chi)
+            chi_charges = _derive_charges(
+                A.indices[ref_chi].charges if chi_seed is None else chi_seed, chi
+            )
             D_charges = np.asarray(A.indices[ref_D].charges.copy(), dtype=np.int32)
             shared_I_charges[name] = _canonical_I_charges(
                 sym, chi_charges, D_charges, f1, f2, f3, chi_I
@@ -499,6 +546,7 @@ def initialize_split_ctm_tensor_env(
                 ref_chi,
                 ref_D,
                 I_charges_arr=shared_I_charges[name],
+                chi_seed=chi_seed,
             )
 
         bra_edges = {}
@@ -517,6 +565,7 @@ def initialize_split_ctm_tensor_env(
                 ref_chi,
                 ref_D,
                 I_charges_arr=shared_I_charges[name],
+                chi_seed=chi_seed,
             )
     else:
         # DenseTensor path
