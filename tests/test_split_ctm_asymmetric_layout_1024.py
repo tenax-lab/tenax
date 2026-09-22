@@ -292,8 +292,29 @@ def test_the_legal_sublattice_fixture_reaches_the_case_it_claims_to():
     ), "both sublattices tile alike -- the envs would agree by accident"
 
 
-def test_every_corner_agrees_across_a_legal_sublattice_split():
-    """All four corners, not just C1: a partial fix would pass on one.
+#: Both legs of every corner, from ``_CORNER_SPECS``.  One leg each is not
+#: enough: each corner carries one horizontal and one vertical leg, so a
+#: partial initializer that shared the seed across cells for the horizontal
+#: legs while keeping a per-cell seed for the vertical ones would satisfy a
+#: horizontal-only assertion *and* the same-cell seam checks above, and still
+#: produce incompatible vertical cross-cell contractions.  The only thing left
+#: to catch that would be the end-to-end arm below, which is ``slow`` and so
+#: sits outside the required gate this file is registered for -- which makes
+#: this the assertion that has to discriminate.
+_CORNER_LEGS = (
+    ("C1", "c1_d"),
+    ("C1", "c1_r"),
+    ("C2", "c2_l"),
+    ("C2", "c2_d"),
+    ("C3", "c3_u"),
+    ("C3", "c3_l"),
+    ("C4", "c4_r"),
+    ("C4", "c4_u"),
+)
+
+
+def test_every_corner_leg_agrees_across_a_legal_sublattice_split():
+    """Both legs of all four corners: a partial fix must not pass.
 
     Measured before the fix: ``{0: 11, 1: 5}`` on sublattice A against
     ``{0: 6, 1: 10}`` on B.
@@ -304,7 +325,7 @@ def test_every_corner_agrees_across_a_legal_sublattice_split():
 
     A, B = _legal_checkerboard_pair()
     envs = _initialize_split_multisite_env({(0, 0): A, (1, 0): B}, _CHI, _CHI)
-    for corner, leg in (("C1", "c1_r"), ("C2", "c2_l"), ("C3", "c3_l"), ("C4", "c4_r")):
+    for corner, leg in _CORNER_LEGS:
         got = _layout(getattr(envs[(0, 0)], corner), leg)
         want = _layout(getattr(envs[(1, 0)], corner), leg)
         assert got == want, (
