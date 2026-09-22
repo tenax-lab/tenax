@@ -313,6 +313,54 @@ _CORNER_LEGS = (
 )
 
 
+#: The OUTER chi leg of each edge half -- the end that contracts across a cell
+#: boundary.  Corners alone are not enough: wiring the shared seed into
+#: ``_init_symmetric_corner`` but dropping it from the edge builders leaves all
+#: eight corner comparisons passing while every one of these differs.  Verified
+#: by simulating exactly that: the corner assertion PASSED and all eight of
+#: these read ``{0: 11, 1: 5}`` against ``{0: 6, 1: 10}``.
+#:
+#: Deliberately NOT the ``*_ket`` / ``*_bra`` D legs (``u_ket``, ``d_ket``, ...).
+#: Those are the site's own virtual bonds and are *supposed* to differ between
+#: sublattices -- on this fixture ``u`` is ``{0:2, 1:1}`` on A and ``{0:1, 1:2}``
+#: on B.  Asserting them equal would fail correct code.
+#:
+#: Also not the ``*_I`` interlayer bonds: they happen to agree, but they are
+#: internal to one edge's ket/bra split rather than contracted across cells, so
+#: requiring agreement there would assert more than the invariant.
+_EDGE_CHI_LEGS = (
+    ("T1_ket", "t1k_l"),
+    ("T1_bra", "t1b_r"),
+    ("T2_ket", "t2k_u"),
+    ("T2_bra", "t2b_d"),
+    ("T3_ket", "t3k_r"),
+    ("T3_bra", "t3b_l"),
+    ("T4_ket", "t4k_d"),
+    ("T4_bra", "t4b_u"),
+)
+
+
+def test_every_edge_chi_leg_agrees_across_a_legal_sublattice_split():
+    """The edges too, not only the corners.
+
+    The same-cell seam test earlier cannot cover this: it builds each
+    environment with no cross-cell seed at all, so that env's corner and edge
+    legs both derive from its own site tensor and agree trivially.  Only a
+    cross-cell comparison of the edges themselves detects a seed wired into
+    the corners but dropped from the edge builders.
+    """
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        _initialize_split_multisite_env,
+    )
+
+    A, B = _legal_checkerboard_pair()
+    envs = _initialize_split_multisite_env({(0, 0): A, (1, 0): B}, _CHI, _CHI)
+    for edge, leg in _EDGE_CHI_LEGS:
+        got = _layout(getattr(envs[(0, 0)], edge), leg)
+        want = _layout(getattr(envs[(1, 0)], edge), leg)
+        assert got == want, f"{edge}.{leg} differs across sublattices: {got} vs {want}"
+
+
 def test_every_corner_leg_agrees_across_a_legal_sublattice_split():
     """Both legs of all four corners: a partial fix must not pass.
 
