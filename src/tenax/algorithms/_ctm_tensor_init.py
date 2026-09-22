@@ -90,10 +90,25 @@ def _fuse_pair_by_label(
 def _build_double_layer_tensor(A: Tensor) -> Tensor:
     """Build the 4-leg double-layer tensor from iPEPS site tensor A.
 
-    Uses ``A.bar()`` (conjugate + flip flows + Koszul twist for
-    fermionic symmetries; identical to ``bar()`` for bosonic) as the bra
-    layer. Contracts over the physical index, then fuses ket/bra virtual
-    pairs.
+    Uses ``A.bar()`` as the bra layer: element-wise conjugate with all flows
+    flipped, **no charge dual and no fermionic twist**.  See
+    :meth:`SymmetricTensor.bar` -- ``bar`` is deliberately the untwisted
+    operation, which is why split CTM uses it rather than :meth:`dagger`
+    (``dagger`` duals the charges, which mismatches blocks for nontrivial
+    U(1)).  ``dagger`` is the one that carries the super-algebra sign
+    ``(-1)^{sum_{i<j} p_i p_j}``; ``bar`` carries none.
+
+    This comment previously claimed ``bar()`` applied a "Koszul twist for
+    fermionic symmetries".  It does not, and never has -- the description
+    belonged to ``dagger``.  The distinction is load-bearing, not pedantic:
+    it means **no fermionic twist is applied anywhere in double-layer
+    construction**, so the sign structure of the doubled legs is whatever
+    the ket/bra fuse leaves, not a twisted convention.  A hypothesis about
+    #995 was built on the false version of this sentence and had to be
+    retracted; see that issue before assuming either the twist or its
+    absence here is correct.
+
+    Contracts over the physical index, then fuses ket/bra virtual pairs.
 
     Input:  A with labels (u, d, l, r, phys), 5 legs.
     Output: 4-leg tensor with labels (u2, d2, l2, r2), dimensions D².
