@@ -697,6 +697,16 @@ _FILE_MARKERS = {
     # the required AD path, and the file is cheap -- single CTM sweeps at
     # D=2 chi=4, 31.5s CPU for all eight tests (fused and split).
     "test_ctm_2x2_projector_backward_983.py": "core",
+    # #1024: the split-CTM chi-seam layout invariant.  ``core``: a charge
+    # layout that disagrees across a chi bond kills the 2x2 projector with a
+    # shape error on any state whose horizontal and vertical bonds differ --
+    # which is what simple update produces once truncation is free to pick
+    # the bond charges (#878) -- and the invariant itself is checked at init
+    # cheaply.  The end-to-end sweeps in that file carry an explicit
+    # ``slow`` marker and so stay out of the gate: measured 784.7s for those
+    # 3 against 11.7s for the 25 the gate does run, and they confirm the same
+    # defect the init-time invariant already catches.
+    "test_split_ctm_asymmetric_layout_1024.py": "core",
 }
 
 
