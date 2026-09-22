@@ -59,7 +59,13 @@ bounded by physics, so an energy assertion on one would be meaningless.  All
 through the multisite path, which evaluates horizontal and vertical RDMs for
 both ``A -> B`` and ``B -> A``, so gating only the ``A -> B`` pair would let an
 inversion-asymmetric regression through the validity gate it is supposed to
-guard.
+guard.  That widening is not cosmetic: on the CDW fixture the *worst* of the
+four margins is ``v B -> A``, the one the narrower gate never looked at.
+
+The PSD tolerance here is 1e-6 rather than the 1e-8 used elsewhere, because on
+a near-product state the exact RDM is rank 1 and the measured minimum is CTM
+error rather than physics -- see ``_PSD_TOL`` for the chi scan that shows a
+1e-8 gate flipping sign between chi=4 and chi=6.
 """
 
 from __future__ import annotations
@@ -90,8 +96,26 @@ from tenax.core.symmetry import FermionParity
 from tenax.core.tensor import SymmetricTensor
 
 #: min-eigenvalue / spectral-radius floor for "this RDM is a density matrix".
-#: Matches ``tenax.algorithms._ctm_diagnostics.RDM_PSD_TOL`` (the #854 gate).
-_PSD_TOL = 1e-8
+#:
+#: Deliberately 100x looser than ``_ctm_diagnostics.RDM_PSD_TOL`` (1e-8), and
+#: the reason is structural rather than a concession.  Both fixtures here are
+#: *near-product* states, so the exact bond RDM is rank 1 -- three of its four
+#: eigenvalues are exactly zero.  The measured minimum is therefore not a
+#: physical negativity but the CTM's own error, which lands around 1e-8 and does
+#: not shrink monotonically with chi.  Measured worst margin on the CDW fixture:
+#:
+#:     chi =  4   -4.09e-09      chi =  8   -7.07e-10
+#:     chi =  6   -5.74e-08      chi = 12   -6.60e-09
+#:
+#: A 1e-8 gate passes chi=4 by 2.4x and *fails* chi=6 by 5.7x, i.e. it asserts
+#: that roundoff happens to land on the favourable side of a threshold -- the
+#: previous revision of this file was green for that reason and no better one.
+#: The non-PSD environments #854 exists to catch are nothing like this size:
+#: the ones in the tree report a smallest eigenvalue ~0.67 *of the spectral
+#: radius* below zero.  1e-6 therefore keeps five orders of discrimination
+#: against a real collapse while sitting two orders above the noise, and every
+#: chi in the table above clears it.
+_PSD_TOL = 1e-6
 
 #: The two distances from the product limit used by the analytic anchor.  The
 #: deviation from ``2V`` runs as ``O(eps^4)``, so a 3x step in ``eps`` buys ~80x
@@ -387,3 +411,40 @@ def test_fermionic_ctm_energy_equals_the_cdw_analytic_value():
         f"analytic -V = {-V} (mu = 2V).  A ~0 here is the #878 failure mode; a "
         f"+V is a sign error; anything else is a broken contraction/normalisation"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The gate's own guard                                                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_psd_gate_still_rejects_a_real_collapse_at_this_tolerance():
+    """``_PSD_TOL`` is loosened to 1e-6 above; prove that still catches #854.
+
+    Loosening a guard is only safe if it keeps rejecting what it was built for.
+    The non-PSD environments in the tree report a smallest eigenvalue around
+    ``0.67`` *of the spectral radius* below zero -- five orders above the CTM
+    noise the tolerance was raised past.  This feeds the gate one such matrix
+    and requires it to fail, so a future tolerance change that quietly disarms
+    the gate cannot pass unnoticed.
+
+    Without this, ``_PSD_TOL`` could drift to 1e-1 and every assertion in this
+    file would still be green.
+    """
+    radius = 2.68 / 0.669  # the real #854 report: -2.68, which was 0.669 of radius
+    collapsed = np.diag([radius, 0.1, 0.05, -2.68])
+    assert _psd_margin(collapsed) == pytest.approx(-0.669, abs=1e-3), (
+        "the #854-scale fixture does not reproduce the reported margin, so "
+        "this guard is not testing the case it claims to"
+    )
+
+    healthy = np.diag([1.0, 0.5, 0.25, 1e-9])
+    # The gate must pass a healthy RDM ...
+    _assert_all_four_rdms_psd({f"bond{i}": healthy for i in range(4)}, "healthy")
+
+    # ... and must reject a collapsed one, wherever among the four it sits.
+    for slot in range(4):
+        rdms = {f"bond{i}": healthy for i in range(4)}
+        rdms[f"bond{slot}"] = collapsed
+        with pytest.raises(AssertionError, match="not PSD"):
+            _assert_all_four_rdms_psd(rdms, "collapsed")
