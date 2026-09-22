@@ -316,6 +316,49 @@ class Tensor(ABC):
     @abstractmethod
     def transpose(self, axes: tuple[int, ...]) -> Tensor: ...
 
+    def twist(self, axes: tuple[int, ...]) -> Tensor:
+        """Multiply each block by ``(-1)^(parity on *axes*)`` -- the twist.
+
+        The categorical twist, matching TensorKit's ``twist(t, i)``.  This is
+        the primitive #555 deferred when it removed the contractor's automatic
+        Koszul tracking:
+
+            For planar networks -- the only kind Tenax's CTM/RDM/energy code
+            uses -- no signs are needed ... For future non-planar
+            applications an explicit ``twist`` primitive can be added.
+
+        It is needed wherever a diagram is **not** planar, because there
+        ``FermionParity``'s R-symbol does contribute: a periodic (torus)
+        contraction wraps legs past one another, and the wrap crossings carry
+        signs that :func:`~tenax.contraction.contract` does not apply.  Until
+        this existed, a periodic fermionic reference had no way to be correct
+        -- ``reference_energy_2x2_pbc`` was used as fermionic ground truth
+        while missing exactly those signs, and on the #995 adjudication the
+        periodic and planar oracles disagreed by up to 13x and reversed which
+        CTM convention they favoured.
+
+        Applying it to *every* leg of a charge-conserving tensor is the
+        identity, since the total parity is even.  It can therefore only act
+        through an imbalance across a cut, which is what makes it safe to
+        apply to one side of a wrap bond.
+
+        Args:
+            axes: Leg positions to twist.  Repeating an axis twists it twice,
+                which is the identity.
+
+        Returns:
+            A tensor of identical structure with the signs applied.  On a
+            non-graded symmetry, and on any :class:`DenseTensor`, this is a
+            no-op -- there is no grading to twist.
+        """
+        for ax in axes:
+            if not -len(self.indices) <= ax < len(self.indices):
+                raise IndexError(
+                    f"twist axis {ax} out of range for a rank-{len(self.indices)} "
+                    f"tensor"
+                )
+        return self
+
     def permute_legs(self, axes: tuple[int, ...]) -> Tensor:
         """Reorder leg *storage* without any Koszul sign.
 
@@ -1194,6 +1237,30 @@ class SymmetricTensor(Tensor):
                     transposed = -transposed
             new_blocks[new_key] = transposed
         return SymmetricTensor._from_blocks_unchecked(new_blocks, new_indices)
+
+    def twist(self, axes: tuple[int, ...]) -> SymmetricTensor:
+        """Multiply each block by ``(-1)^(parity on *axes*)``.
+
+        See :meth:`Tensor.twist` for what this is for.  Bosonic symmetries
+        have no parity grading, so the tensor is returned unchanged.
+        """
+        rank = len(self._indices)
+        for ax in axes:
+            if not -rank <= ax < rank:
+                raise IndexError(
+                    f"twist axis {ax} out of range for a rank-{rank} tensor"
+                )
+        sym = self._indices[0].symmetry if self._indices else None
+        if sym is None or not sym.is_fermionic or not axes:
+            return self
+        norm_axes = tuple(ax % rank for ax in axes)
+        new_blocks: dict[BlockKey, jax.Array] = {}
+        for key, block in self.blocks.items():
+            n = 0
+            for ax in norm_axes:
+                n += int(sym.parity(np.array([key[ax]]))[0])
+            new_blocks[key] = -block if n % 2 else block
+        return SymmetricTensor._from_blocks_unchecked(new_blocks, self._indices)
 
     def permute_legs(self, axes: tuple[int, ...]) -> SymmetricTensor:
         """Reorder leg storage without any Koszul sign.
