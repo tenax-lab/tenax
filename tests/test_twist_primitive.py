@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import FermionParity, U1Symmetry
+from tenax.core.symmetry import BraidingStyle, FermionParity, U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 jax.config.update("jax_enable_x64", True)
@@ -118,3 +118,53 @@ def test_twist_rejects_an_out_of_range_axis():
     T = _fp_tensor(6)
     with pytest.raises((IndexError, ValueError)):
         T.twist((len(T.indices),))
+
+
+class _AnyonicStub(FermionParity):
+    """Stand-in for a symmetry whose ribbon element is not a sign.
+
+    ``BraidingStyle.ANYONIC`` is declared and "reserved for future use", so
+    there is no concrete anyonic symmetry in-tree to test against.  This
+    subclass supplies one: the charge arithmetic of ``FermionParity`` with
+    the braiding style of the future case.
+    """
+
+    @property
+    def braiding_style(self) -> BraidingStyle:
+        return BraidingStyle.ANYONIC
+
+    @property
+    def is_fermionic(self) -> bool:
+        return self.braiding_style == BraidingStyle.FERMIONIC
+
+
+def test_twist_refuses_an_anyonic_symmetry_rather_than_silently_doing_nothing():
+    """The ``is_fermionic`` gate must not read as "nothing to twist" here.
+
+    A bosonic no-op is *correct* -- the twist really is the identity with no
+    grading.  An anyonic no-op would be silently **wrong**: the symmetry
+    declares a ribbon phase this implementation cannot apply.  Failing loudly
+    is the difference between an unsupported case and a wrong answer.
+    """
+    sym = _AnyonicStub()
+    ch = np.array([0, 1], dtype=np.int32)
+    idx = tuple(
+        TensorIndex.from_charges(sym, ch.copy(), f, label=lbl)
+        for f, lbl in ((FlowDirection.OUT, "a"), (FlowDirection.IN, "b"))
+    )
+    T = SymmetricTensor.random_normal(idx, jax.random.PRNGKey(7))
+    with pytest.raises(NotImplementedError, match="anyonic"):
+        T.twist((0,))
+
+
+def test_twist_of_no_axes_is_accepted_on_an_anyonic_symmetry():
+    """Twisting nothing is the identity for *any* braiding style."""
+    sym = _AnyonicStub()
+    ch = np.array([0, 1], dtype=np.int32)
+    idx = tuple(
+        TensorIndex.from_charges(sym, ch.copy(), f, label=lbl)
+        for f, lbl in ((FlowDirection.OUT, "a"), (FlowDirection.IN, "b"))
+    )
+    T = SymmetricTensor.random_normal(idx, jax.random.PRNGKey(8))
+    for key, blk in T.twist(()).blocks.items():
+        np.testing.assert_allclose(np.asarray(blk), np.asarray(T.blocks[key]))

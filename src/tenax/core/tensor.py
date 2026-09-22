@@ -32,6 +32,28 @@ from tenax.core.index import FlowDirection, Label, TensorIndex, _net_charges
 BlockKey = tuple[int, ...]
 
 
+def _reject_anyonic_twist(symmetry: Any) -> None:
+    """Refuse :meth:`Tensor.twist` on a symmetry with anyonic braiding.
+
+    ``twist`` applies ``(-1)^p``, the ribbon element of a Z2-graded
+    category.  A bosonic symmetry returning the tensor unchanged is correct;
+    an anyonic one is not, because it declares a ``twist_phase`` that this
+    sign cannot represent.  Guarding here keeps the ``is_fermionic`` gate
+    from doubling as "nothing to twist" for a case where something does need
+    twisting.
+    """
+    from tenax.core.symmetry import BraidingStyle
+
+    if getattr(symmetry, "braiding_style", None) is BraidingStyle.ANYONIC:
+        raise NotImplementedError(
+            f"twist() implements the fermionic sign (-1)^parity only, but "
+            f"{symmetry!r} declares anyonic braiding, whose ribbon element "
+            f"is a general complex phase. Applying the fermionic sign here "
+            f"would be silently wrong; use symmetry.twist_phase() to "
+            f"implement the general case."
+        )
+
+
 def _charge_summary(idx: TensorIndex) -> str:
     """Format index sectors as ``{charge: count, ...}``."""
     parts = [f"{int(q)}:{int(m)}" for q, m in zip(idx.sectors, idx.multiplicities)]
@@ -350,6 +372,24 @@ class Tensor(ABC):
             A tensor of identical structure with the signs applied.  On a
             non-graded symmetry, and on any :class:`DenseTensor`, this is a
             no-op -- there is no grading to twist.
+
+        Raises:
+            IndexError: If any axis is out of range.
+            NotImplementedError: If the symmetry declares
+                :attr:`~tenax.core.symmetry.BraidingStyle.ANYONIC` braiding.
+
+        Note:
+            **This implements the fermionic twist only.**  The sign applied
+            is ``(-1)^p``, which is the ribbon element of a Z2-graded
+            category and nothing more general.  A bosonic symmetry is a
+            genuine no-op -- with no grading the twist *is* the identity --
+            but an anyonic one is not: it declares a ribbon phase
+            (:meth:`~tenax.core.symmetry.BaseSymmetry.twist_phase`) that
+            this method cannot apply, so it is rejected rather than silently
+            ignored.  Supporting it means a complex phase, which would also
+            cost the two properties relied on above: the twist would no
+            longer be its own inverse (the inverse is the conjugate), and
+            the all-legs identity rests on Z2 parity summing to even.
         """
         for ax in axes:
             if not -len(self.indices) <= ax < len(self.indices):
@@ -357,6 +397,8 @@ class Tensor(ABC):
                     f"twist axis {ax} out of range for a rank-{len(self.indices)} "
                     f"tensor"
                 )
+        if axes and self.indices:
+            _reject_anyonic_twist(self.indices[0].symmetry)
         return self
 
     def permute_legs(self, axes: tuple[int, ...]) -> Tensor:
@@ -1241,8 +1283,8 @@ class SymmetricTensor(Tensor):
     def twist(self, axes: tuple[int, ...]) -> SymmetricTensor:
         """Multiply each block by ``(-1)^(parity on *axes*)``.
 
-        See :meth:`Tensor.twist` for what this is for.  Bosonic symmetries
-        have no parity grading, so the tensor is returned unchanged.
+        See :meth:`Tensor.twist` for what this is for, and for the
+        fermions-only restriction this shares with it.
         """
         rank = len(self._indices)
         for ax in axes:
@@ -1251,7 +1293,10 @@ class SymmetricTensor(Tensor):
                     f"twist axis {ax} out of range for a rank-{rank} tensor"
                 )
         sym = self._indices[0].symmetry if self._indices else None
-        if sym is None or not sym.is_fermionic or not axes:
+        if sym is None or not axes:
+            return self
+        _reject_anyonic_twist(sym)
+        if not sym.is_fermionic:
             return self
         norm_axes = tuple(ax % rank for ax in axes)
         new_blocks: dict[BlockKey, jax.Array] = {}

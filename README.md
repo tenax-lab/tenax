@@ -666,7 +666,8 @@ tensor algebra rather than from hand-placed swap gates. The convention (#555,
 carry Koszul signs; label-based `contract` is sign-free (correct for the planar
 networks every tenax algorithm uses), and `permute_legs` reorders leg *storage*
 with no sign — it, not `transpose`, is how code restores an axis order after
-`contract`.
+`contract`. Non-planar diagrams are the exception and need the explicit
+[`twist`](#the-twist-non-planar-diagrams).
 
 ```python
 import jax
@@ -1009,6 +1010,69 @@ assert np.allclose(np.asarray(G.swap_gate((0, 1))._data), np.asarray(T._data))
 # swap gate — transpose(T) block-equals sign-free-permute(swap_gate(T))
 graded = T.transpose((1, 0))
 ```
+
+### The twist (non-planar diagrams)
+
+`Tensor.twist(axes)` multiplies each block by `(-1)**(sum of the parities of
+that block's charges on `axes`)` — the categorical twist, matching TensorKit's
+`twist(t, i)` and the `twist(F_west, 3)` PEPSKit applies when fusing a ket/bra
+sandwich. It is the primitive #555 deferred when it removed the contractor's
+automatic Koszul tracking:
+
+> For planar networks — the only kind tenax's CTM/RDM/energy code uses — no
+> signs are needed … For future non-planar applications an explicit `twist`
+> primitive can be added.
+
+**Planar networks do not need it.** Reach for it only where a diagram is *not*
+planar, because there `FermionParity`'s R-symbol does contribute: a periodic
+(torus) contraction wraps legs past one another, and the wrap crossings carry
+signs `contract` does not apply. A periodic fermionic reference that skips them
+is not ground truth — on the #995 adjudication the periodic and planar oracles
+disagreed by up to 13x and reversed which CTM convention they favoured.
+
+**Twisting *every* leg of a charge-conserving tensor is the identity**, since
+the total parity is even. The operation can therefore only act through an
+imbalance across a cut, which is what makes it safe to apply to one side of a
+wrap bond — and why applying it to a whole closed diagram does nothing.
+
+```python
+import jax
+import numpy as np
+from tenax import FermionParity, FlowDirection, SymmetricTensor, TensorIndex
+
+fp = FermionParity()
+charges = np.array([0, 1], dtype=np.int32)
+idx = lambda flow, lbl: TensorIndex.from_charges(fp, charges.copy(), flow, label=lbl)
+T = SymmetricTensor.random_normal(
+    indices=(idx(FlowDirection.OUT, "a"), idx(FlowDirection.IN, "b")),
+    key=jax.random.PRNGKey(0),
+)
+
+W = T.twist((0,))  # blocks whose leg-0 charge is odd flip sign
+
+# involution: twisting the same leg twice restores the tensor
+assert all(
+    np.allclose(np.asarray(W.twist((0,)).blocks[k]), np.asarray(v))
+    for k, v in T.blocks.items()
+)
+
+# all legs at once is the identity -- parity is conserved
+assert all(
+    np.allclose(np.asarray(T.twist((0, 1)).blocks[k]), np.asarray(v))
+    for k, v in T.blocks.items()
+)
+```
+
+**This is the fermionic twist only.** The sign `(-1)**p` is the ribbon element
+of a Z2-graded category and nothing more general. A bosonic symmetry — and any
+`DenseTensor` — is returned unchanged, which is correct: with no grading the
+twist *is* the identity. A symmetry declaring `BraidingStyle.ANYONIC` raises
+`NotImplementedError` instead, because its `twist_phase()` is a general complex
+phase that this sign cannot represent, and silently returning the tensor
+unchanged there would be wrong rather than trivial. Supporting it would also
+cost the two properties above: the twist would no longer be its own inverse
+(the inverse is the conjugate), and the all-legs identity rests on Z2 parity
+summing to even.
 
 ### Charge arithmetic
 
