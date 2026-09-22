@@ -289,6 +289,30 @@
 
 ### Fixed
 
+- **The split-CTM chi seed is one array for the whole environment** (#1024):
+  every chi bond of a split env has two ends, both seeded by tiling one of
+  `A`'s virtual legs, and seeding them from *different* legs left the seam
+  contractible only when those legs happened to agree — the 2x2 plaquette
+  projector died with a shape error otherwise, which is what simple update
+  produces once truncation is free to discover the bond charges (#878).
+  `_derive_charges` tiles the charge *array*, so it is order-sensitive and not
+  merely multiset-sensitive: `[0,1,0]` at chi=16 yields 5 odd slots, `[1,0,0]`
+  yields 6. "An axis with the same charges" is therefore not "the same axis",
+  which is how the vertical seams stayed broken after the horizontal ones were
+  fixed.
+
+  The seed is shared across every **cell** too, not just within one: a 2x2
+  plaquette spans four cells, so `Q_TL.chi_R` contracts against `Q_TR.chi_L`.
+  `initialize_split_ctm_tensor_env` takes an optional `chi_seed` and
+  `_initialize_split_multisite_env` derives one array for the cell. Two
+  independent cases are covered: sublattices differing only in charge *order*,
+  and — on a fixture first verified to have all four bonds paired, since the
+  checkerboard pairs `A.d<->B.u` and `B.d<->A.u` rather than `A.u<->B.u` —
+  sublattices differing in *multiset*, which crashed
+  `ctm_split_tensor_2site(chi=5, max_iter=1)` on `FermionParity` D=3 with
+  `ValueError: Size of label 'c' for operand 1 (3) does not match previous
+  terms (2)`.
+
 - **`projector_backward` now works on the 2x2 CTM recipe** (#983):
   `_compute_2x2_projector` returned `stop_gradient(P_top), stop_gradient(P_bot)`
   unconditionally, so `dP/dA` was dropped from every gradient taken through the
