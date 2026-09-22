@@ -249,3 +249,78 @@ def test_the_2x2_split_ctm_runs_when_the_two_cells_seed_differently():
     B = _site(_VERT_REORDERED, _VERT_REORDERED, _VERT, _VERT, 1)
     env_A, env_B = ctm_split_tensor_2site(A, B, _CHI, max_iter=4, conv_tol=1e-6)
     assert env_A is not None and env_B is not None
+
+
+# --------------------------------------------------------------------- #
+# Different MULTISET across the sublattices, on a fixture verified legal #
+# first.  The cross-cell arms above differ only in charge ORDER, and     #
+# their fixtures leave the vertical bonds unpaired (`A.u=[0,1,0]` against#
+# `B.d=[1,0,0]`), so they exercise the seed invariant but not a state    #
+# the lattice could actually produce.                                    #
+# --------------------------------------------------------------------- #
+
+#: Checkerboard pairing is ``A.d<->B.u`` and ``B.d<->A.u`` (README:363), so a
+#: LEGAL state can give the two sublattices different ``u`` layouts: B's ``u``
+#: is the partner of A's ``d``, not of A's ``u``.
+_SUB_X = np.array([0, 1, 0], dtype=np.int32)
+_SUB_Y = np.array([0, 1, 1], dtype=np.int32)
+
+
+def _legal_checkerboard_pair():
+    """A/B whose four bonds all pair, with the sublattices' ``u`` differing."""
+    return (
+        _site(_SUB_X, _SUB_Y, _HORIZ, _HORIZ, 0),
+        _site(_SUB_Y, _SUB_X, _HORIZ, _HORIZ, 1),
+    )
+
+
+def test_the_legal_sublattice_fixture_reaches_the_case_it_claims_to():
+    """Regime guard: the bonds must pair AND the seeds must disagree.
+
+    The pairing half matters on its own.  If the two ends of a vertical bond
+    carry different charges the state is not something the lattice can hold,
+    and a downstream failure would be correct behaviour rather than a defect
+    -- so a test built on an unpaired fixture cannot distinguish the two.
+    """
+    from tenax.algorithms._ctm_utils import _derive_charges
+
+    A, B = _legal_checkerboard_pair()
+    assert _layout(A, "u") == _layout(B, "d"), "A.u<->B.d unpaired: illegal state"
+    assert _layout(A, "d") == _layout(B, "u"), "A.d<->B.u unpaired: illegal state"
+    assert _multiset(_derive_charges(_SUB_X, _CHI)) != _multiset(
+        _derive_charges(_SUB_Y, _CHI)
+    ), "both sublattices tile alike -- the envs would agree by accident"
+
+
+def test_every_corner_agrees_across_a_legal_sublattice_split():
+    """All four corners, not just C1: a partial fix would pass on one.
+
+    Measured before the fix: ``{0: 11, 1: 5}`` on sublattice A against
+    ``{0: 6, 1: 10}`` on B.
+    """
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        _initialize_split_multisite_env,
+    )
+
+    A, B = _legal_checkerboard_pair()
+    envs = _initialize_split_multisite_env({(0, 0): A, (1, 0): B}, _CHI, _CHI)
+    for corner, leg in (("C1", "c1_r"), ("C2", "c2_l"), ("C3", "c3_l"), ("C4", "c4_r")):
+        got = _layout(getattr(envs[(0, 0)], corner), leg)
+        want = _layout(getattr(envs[(1, 0)], corner), leg)
+        assert got == want, (
+            f"{corner}.{leg} differs across sublattices: {got} vs {want}"
+        )
+
+
+@pytest.mark.slow
+def test_the_2x2_split_ctm_runs_on_a_legal_sublattice_dependent_state():
+    """End to end on a state the lattice can actually hold.
+
+    ``chi=5`` deliberately: the crash this reproduces
+    (``ValueError: Size of label 'c' for operand 1 (3) does not match previous
+    terms (2)``) needs a chi where the two seeds tile to different sector
+    counts, and small chi reaches it in one sweep.
+    """
+    A, B = _legal_checkerboard_pair()
+    env_A, env_B = ctm_split_tensor_2site(A, B, 5, max_iter=1, conv_tol=1e-6)
+    assert env_A is not None and env_B is not None
