@@ -276,7 +276,7 @@ def _initialize_split_multisite_env(
         ref = site_tensors[first].indices[0]
         seed = np.asarray(ref.charges)
     return {
-        c: initialize_split_ctm_tensor_env(A, chi, chi_I, chi_seed=seed)
+        c: initialize_split_ctm_tensor_env(A, chi, chi_I, chi_ref_charges=seed)
         for c, A in site_tensors.items()
     }
 
