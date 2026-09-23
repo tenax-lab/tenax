@@ -25,8 +25,79 @@ from tenax.linalg import _dense_svd
 __all__ = ["_build_enlarged_corner", "_compute_2x2_projector"]
 
 
+# The single ``projector_backward`` value that lets ``dP/dA`` reach the
+# gradient on the 2x2 recipe.  Every other value -- including the "auto"
+# default, and the "none" spelling #983 proposed for the explicit freeze --
+# keeps the projectors as ``stop_gradient`` constants.
+#
+# Opt-in rather than default, and the reason is measured, not cautious: the
+# implicit-AD backward solves ``(I - J^T) λ = dE/denv``, and restoring
+# ``dP/denv`` puts the CTM gauge mode back into ``J``.  On the D=2 chi=4
+# fixture of ``tests/test_adjoint_convergence_gate.py``, with restart=200 and
+# gmres_maxiter=600, the flowing adjoint residual goes 4.2e-13 / 4.5e-15 /
+# 5.1e-01 / 8.1e-02 / 7.9e-01 at ctm_max_iter 20/40/80/150/300 under
+# forward_gauge="phase" (and 5.6e-13 / 2.0e-02 / 7.2e-01 / 9.2e-01 / 4.2e-12
+# under "sigma"); the frozen control is 1e-16 at every one of those points.
+# That is not a Krylov-budget stall -- it is flat in both restart and maxiter
+# -- it is a system that sometimes has no solution, depending on where the
+# forward iterate happened to land.  Which is #841: the 2x2 forward does not
+# reach an element-wise fixed point, so linearizing the TRUE step map around
+# it is ill-posed.  Freezing the projectors hides that by substituting a
+# different, artificially contracting operator.
+#
+# So on the implicit path the frozen default is wrong-but-solvable and the
+# flowing one is right-but-unsolvable; #841 has to land before "flow" can
+# become the default there.  Paths with no adjoint solve (explicit AD, a bare
+# sweep) have no such obstruction and should pass "flow" today -- measured
+# AD/FD on ctm_energy_explicit at this fixture: 0.229..0.928 frozen against
+# 0.944..0.994 flowing.
+_PROJECTOR_BACKWARD_FLOW = "flow"
+
+
+@jax.custom_vjp
+def _regularized_dense_svd(M: jax.Array):
+    """``_dense_svd`` forward, Lorentzian-regularized backward.
+
+    Deliberately *not* :func:`tenax.algorithms._ad_primitives.regularized_svd`:
+    that helper applies ``_fix_svd_signs`` in its forward, and the 2x2 path
+    fixes the gauge itself in :func:`_gauge_fixed_svd`.  Wrapping the bare
+    ``_dense_svd`` instead keeps the forward bit-identical to the pre-#983
+    path -- only the VJP changes -- so eager CTM numbers cannot move.
+
+    The regularization is required, not cosmetic: the Fishman halves are
+    routinely rank deficient (``_fishman_truncate_S`` zeroes the sub-floor
+    tail), and a repeated EXACT zero makes the textbook adjoint's
+    ``F_ij = 1/(s_i^2 - s_j^2)`` evaluate ``1/(0-0)``.  Measured on a D=2
+    chi=4 random site (seed 3, 2 zeroed of 16): 32 NaN gradient entries
+    unregularized, finite and FD-consistent with the Lorentzian F.
+
+    Note the trigger is rank deficiency, *not* the near-degeneracy the old
+    comment here blamed: a seed with a 2.2e-06 adjacent gap and no exact
+    zero differentiates cleanly through the unregularized backward.
+    """
+    return _dense_svd(M, full_matrices=False)
+
+
+def _regularized_dense_svd_fwd(M):
+    U, s, Vh = _dense_svd(M, full_matrices=False)
+    return (U, s, Vh), (U, s, Vh)
+
+
+def _regularized_dense_svd_bwd(residuals, g):
+    from tenax.algorithms._ad_primitives import _svd_sector_backward
+
+    U, s, Vh = residuals
+    dU, ds, dVh = g
+    return (_svd_sector_backward(U, s, Vh, dU, ds, dVh),)
+
+
+_regularized_dense_svd.defvjp(_regularized_dense_svd_fwd, _regularized_dense_svd_bwd)
+
+
 def _gauge_fixed_svd(
     M: jax.Array,
+    *,
+    regularized: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Reconstruction-preserving gauge-fixed SVD for the 2x2 projector.
 
@@ -47,8 +118,19 @@ def _gauge_fixed_svd(
     now equivalent; the workaround was masking a defect that also corrupted
     the complex SVD *backward* (#750/#751).  This copy is kept only to avoid
     churn in a correctness fix -- deduplicating it is safe follow-up work.
+
+    Args:
+        M: Matrix to decompose.
+        regularized: Route the *backward* through
+            :func:`_regularized_dense_svd`.  The forward is bit-identical
+            either way; set this whenever the projectors are actually
+            differentiated (#983), since the Fishman halves are routinely
+            rank deficient.
     """
-    U, s, Vh = _dense_svd(M, full_matrices=False)
+    if regularized:
+        U, s, Vh = _regularized_dense_svd(M)
+    else:
+        U, s, Vh = _dense_svd(M, full_matrices=False)
     max_idx = jnp.argmax(jnp.abs(U), axis=0)  # (k,)
     diag = U[max_idx, jnp.arange(U.shape[1])]
     phases = _unit_phase(diag)
@@ -373,6 +455,7 @@ def _compute_2x2_projector(
     *,
     direction: str = "left",
     base_charges: np.ndarray | None = None,
+    projector_backward: str = "auto",
 ) -> tuple[Tensor, Tensor, jax.Array]:
     r"""Fishman 2x2 plaquette cross-projector for the multisite CTM move.
 
@@ -405,6 +488,15 @@ def _compute_2x2_projector(
             symmetric branch each named charge is floored at one ``chi_new``
             slot; the rest of the budget follows the singular values (#922).
             Ignored on the dense path (no charge sectors).
+        projector_backward: ``"flow"`` lets the projector response reach
+            the gradient, with the Fishman SVDs' backward
+            Lorentzian-regularized.  Every other value -- including the
+            ``"auto"`` default -- returns the projectors as
+            ``stop_gradient`` constants, so ``dP/dA`` is dropped.  Use
+            ``"flow"`` on paths with no fixed-point adjoint solve (explicit
+            AD, a bare sweep); see ``_PROJECTOR_BACKWARD_FLOW`` for why it
+            is not yet the default under implicit AD (#983, blocked on
+            #841).
 
     Returns:
         Triple ``(P_top, P_bot, eps_T)`` of rank-3 :class:`DenseTensor`
@@ -468,6 +560,7 @@ def _compute_2x2_projector(
             chi,
             direction=direction,
             base_charges=base_charges,
+            projector_backward=projector_backward,
         )
 
     # ---- Step 1: form the two halves (M1, M2) for the chosen direction. ----
@@ -562,9 +655,12 @@ def _compute_2x2_projector(
     # which produce non-smooth gradients (mirrors the 1x1 path in
     # _ctm_projector.py, which uses _fix_svd_signs there).
     eps = 1e-12
-    M1_U, M1_S, M1_Vh = _gauge_fixed_svd(M1)
+    # #983: when the projectors are differentiated, the halves' SVD backward
+    # must be regularized -- these matrices are routinely rank deficient.
+    _reg = projector_backward == _PROJECTOR_BACKWARD_FLOW
+    M1_U, M1_S, M1_Vh = _gauge_fixed_svd(M1, regularized=_reg)
     M1_S = _fishman_truncate_S(M1_S, eps)
-    M2_U, M2_S, M2_Vh = _gauge_fixed_svd(M2)
+    M2_U, M2_S, M2_Vh = _gauge_fixed_svd(M2, regularized=_reg)
     M2_S = _fishman_truncate_S(M2_S, eps)
 
     # ---- Step 3: pick which side of each Fishman SVD becomes the half. ----
@@ -626,7 +722,7 @@ def _compute_2x2_projector(
         # P_second ~ second @ V_M S^-1/2 (row side -> chi_new)
         M_prime = first_half @ second_half
 
-    U_M, S_M, V_M_h = _gauge_fixed_svd(M_prime)
+    U_M, S_M, V_M_h = _gauge_fixed_svd(M_prime, regularized=_reg)
     k = min(chi, S_M.shape[0])
     # ε_T from the FULL spectrum (before truncation) — variPEPS §2.8.2
     # indicator that drives ``chi_auto_bump``.  Issue #474.
@@ -756,17 +852,33 @@ def _compute_2x2_projector(
     else:
         P_top = DenseTensor(P_top_arr, P_top_idx)
         P_bot = DenseTensor(P_bot_arr, P_bot_idx)
-    # Project as a stop_gradient constant on the backward path: variPEPS
-    # treats CTM projectors as fixed-point constants so the implicit-AD
-    # adjoint solve recovers the env dependence on A without flowing
-    # through jnp.linalg.svd, whose F_ij = 1/(s_i² - s_j²) backward NaN-s
-    # on near-degenerate singular values of M_prime (typical at small D).
-    # ``eps_T`` and ``smallest_S`` are also stop_gradient'd — both are
+    # #983: the projectors carry a real ``dP/dA``, and freezing them here
+    # silently dropped it from every gradient taken through ``recipe="2x2"``
+    # -- which is the default recipe.  Measured on ONE sweep (no fixed-point
+    # premise, so uncontaminated by #841), AD/FD on a gauge-invariant
+    # functional at D=2 chi=4 and D=3 chi=9: frozen gave ratios spanning
+    # -7.98 to +14.95 -- wrong by up to 15x and sometimes wrong in SIGN --
+    # against 1.000000 (7 digits) once the response flows.
+    #
+    # The older reasoning here was that the SVD backward NaN-s on
+    # "near-degenerate singular values of M_prime (typical at small D)".
+    # The NaN is real but the trigger was misdiagnosed: it is EXACT rank
+    # deficiency (``_fishman_truncate_S`` zeroes the sub-floor tail, and a
+    # repeated zero makes ``F_ij = 1/(s_i^2 - s_j^2)`` evaluate ``1/(0-0)``).
+    # A point with a 2.2e-06 adjacent gap and no exact zero differentiates
+    # cleanly unregularized; the points that NaN are exactly the rank-
+    # deficient ones.  ``_regularized_dense_svd`` above handles that, so the
+    # freeze is no longer load-bearing for finiteness.
+    #
+    # ``eps_T`` and ``smallest_S`` stay frozen unconditionally -- both are
     # consumed only by the CTM convergence loop's chi-bump logic (#474 /
     # #492), which is non-AD.
+    if projector_backward != _PROJECTOR_BACKWARD_FLOW:
+        P_top = jax.tree.map(jax.lax.stop_gradient, P_top)
+        P_bot = jax.tree.map(jax.lax.stop_gradient, P_bot)
     return (
-        jax.tree.map(jax.lax.stop_gradient, P_top),
-        jax.tree.map(jax.lax.stop_gradient, P_bot),
+        P_top,
+        P_bot,
         jax.lax.stop_gradient(eps_T),
         jax.lax.stop_gradient(smallest_S),
     )
@@ -910,6 +1022,7 @@ def _compute_2x2_projector_symmetric(
     *,
     direction: str,
     base_charges: np.ndarray | None = None,
+    projector_backward: str = "auto",
 ) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array]:
     """Block-sparse 2x2 Fishman projector for SymmetricTensor inputs.
 
@@ -1192,11 +1305,17 @@ def _compute_2x2_projector_symmetric(
             for lbl in ("chi_new_bot", "chi_outer", "fused_D2")
         )
     )
-    # Same stop_gradient treatment as the dense path — see the comment
-    # at the end of _compute_2x2_projector.  (#474 / #492)
+    # Same treatment as the dense path — see the comment at the end of
+    # _compute_2x2_projector.  (#474 / #492 / #983.)  This branch needs no
+    # regularization switch of its own: under tracing ``tenax.linalg.svd``
+    # already routes each charge sector through ``truncated_svd_ad``, whose
+    # backward carries the same Lorentzian F-matrix.
+    if projector_backward != _PROJECTOR_BACKWARD_FLOW:
+        P_top = jax.tree.map(jax.lax.stop_gradient, P_top)
+        P_bot = jax.tree.map(jax.lax.stop_gradient, P_bot)
     return (
-        jax.tree.map(jax.lax.stop_gradient, P_top),
-        jax.tree.map(jax.lax.stop_gradient, P_bot),
+        P_top,
+        P_bot,
         jax.lax.stop_gradient(eps_T),
         jax.lax.stop_gradient(smallest_S),
     )
