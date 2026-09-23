@@ -70,9 +70,17 @@ def random_even_tensors(R: int, C: int, rng: np.random.Generator) -> dict:
 # ------------------------------------------------------------------ #
 
 
+def _parity(x: np.ndarray) -> np.ndarray:
+    """Parity of the population count of non-negative int64s (NumPy 1.x-safe;
+    ``np.bitwise_count`` needs NumPy 2)."""
+    x = x.astype(np.int64)
+    for shift in (32, 16, 8, 4, 2, 1):
+        x = x ^ (x >> shift)
+    return x & 1
+
+
 def _jw_sign(src: np.ndarray, k: int) -> np.ndarray:
-    below = (src & ((1 << k) - 1)).astype(np.uint64)
-    return 1 - 2 * (np.bitwise_count(below).astype(np.int64) % 2)
+    return 1 - 2 * _parity(src & ((1 << k) - 1))
 
 
 def _create(vec: np.ndarray, k: int) -> np.ndarray:
