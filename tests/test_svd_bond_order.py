@@ -271,3 +271,30 @@ def test_the_dense_path_ignores_bond_order_rather_than_refusing_it():
 
     with pytest.raises(ValueError, match="must be 'descending' or 'sector'"):
         svd(t, ["row"], ["col"], bond_order="ascending")
+
+
+def test_a_capped_unpinned_svd_traces_through_the_proportional_fallback():
+    """An UNPINNED truncated SVD is traceable: ``base_charges=None`` with a
+    ``max_singular_values`` cap takes the proportional static allocation in
+    ``_truncated_svd_symmetric_traced`` (the ``else`` branch after the
+    ``base_charges is not None`` one).
+
+    ``test_descending_order_still_cannot_be_traced_as_one_code_path`` does
+    not show this -- it passes no cap, so it takes the full-spectrum branch.
+    This test is what ``test_fermionic_ipeps.py``'s #878 comment cites for
+    "an unpinned traced SVD is reachable".  Two sectors of capacity 2 under a
+    cap of 3: the fallback keeps every sector (>= 1 each) and hits the cap.
+    """
+    t = _two_sector()
+
+    def capped(a):
+        blocks = {k: a * b for k, b in t.blocks.items()}
+        scaled = SymmetricTensor._from_blocks_unchecked(blocks, t.indices)
+        _U, s, _Vh, _ = svd(
+            scaled, ["row"], ["col"], new_bond_label="k", max_singular_values=3
+        )
+        return s
+
+    s = jax.jit(capped)(jnp.asarray(1.0))
+    assert s.shape == (3,)
+    assert bool(jnp.all(jnp.isfinite(s)))

@@ -485,8 +485,62 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
     # The base_charges pin is fermionic-only, so with it active the two
     # arms run DIFFERENT truncations (per-sector keep counts vs global
     # top-k) and their fidelities differ at the pin's expense, not the
-    # signs'.  Disable it so the arms are code-identical (SS5.1 already
-    # established the pin is a regularizer, not a structural need).
+    # signs'.  Disable it so the arms are code-identical.  That is the
+    # whole reason, and it is local to this comparison: this test drives
+    # one bond update per arm and never reaches a CTM or an AD trace, so
+    # nothing here depends on the bond layout holding still.
+    #
+    # It previously also cited "SS5.1 already established the pin is a
+    # regularizer, not a structural need".  **That claim is retracted.**
+    # Measured on the shipped ``fpeps()`` path (dt=0.05, 100 steps, 5
+    # seeds), the pin is not a weak regulariser that helps a little -- it
+    # is what drives the collapse:
+    #
+    #     V=0, pin ON    D=3 3/5 survive   D=4 3/5
+    #     V=0, pin OFF   D=3 5/5           D=4 5/5
+    #     V=2, pin ON    D=3 2/5           D=4 4/5
+    #
+    # What the pin IS still good for is narrower than "structural need",
+    # and narrower than the previous revision of this comment claimed.
+    # That revision said the global SV sort "cannot run at all" under a
+    # tracer, implying the pin is required for traceability.  It is not:
+    # ``_truncated_svd_symmetric_traced`` handles ``base_charges=None``
+    # with a proportional static allocation (the ``else`` branch at
+    # ``linalg.py:881``, "proportional to per-sector available capacity"),
+    # so an unpinned traced SVD is reachable.  That is pinned by
+    # ``test_svd_bond_order.py::
+    # test_a_capped_unpinned_svd_traces_through_the_proportional_fallback``
+    # -- a mutant raising inside the fallback fails it, and only it.  An
+    # earlier revision cited
+    # ``test_descending_order_still_cannot_be_traced_as_one_code_path``
+    # here; that test passes no cap, so it takes the full-spectrum branch
+    # and never reaches the fallback.
+    #
+    # The true statement is about AGREEMENT, not reachability: the traced
+    # base_charges branch is built to reproduce the EAGER per-sector keep
+    # counts, and the proportional fallback carries no such guarantee.  So
+    # unpinning costs traced/eager parity under AD; it does not cost the
+    # ability to trace.
+    #
+    # The eager side is the ``base_charges is not None`` branch inside
+    # ``_truncated_svd_symmetric`` (``linalg.py:525-600``), implemented
+    # inline there.  Naming the live code rather than a helper matters here:
+    # the first revision of this line cited ``_retruncate_by_base_charges``,
+    # copying the phrasing from ``linalg.py:752``/``:860``, and **no such
+    # function exists anywhere in the tree** -- it survives only in comments
+    # that reference it.  A reader sent to verify the central claim would
+    # have found nothing.  (Those two production comments still carry the
+    # dead name; out of scope for this branch, flagged separately.)
+    #
+    # There used to be a second reason here -- that unpinning breaks the
+    # 2x2 split-CTM, which could not contract a corner against an edge
+    # once the layout went direction-dependent.  **That was #1024 and it
+    # is fixed** (``ded9446`` seeds every environment chi leg from one
+    # shared axis); ``test_split_ctm_asymmetric_layout_1024.py::
+    # test_the_2x2_split_ctm_runs_on_every_layout`` now covers exactly the
+    # layouts simple update discovers once the pin is gone.  Leaving it
+    # written as a present-tense limitation would misdirect the #878 work,
+    # which is gated on this and no longer blocked by it.  See #878.
     orig_pin = isu._truncation_base_charges
     isu._truncation_base_charges = lambda A, leg: None
     try:
