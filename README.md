@@ -720,6 +720,41 @@ observed to settle on them — measured at 200 steps, D=2, `E ≈ -6e-05` at `V=
 where the half-filled answer is ≈ `-1.6t`. `sublattice_gap` tells you *which*
 state you landed on; it does not tell you it is the ground state.
 
+### Refusing an energy built from an invalid RDM
+
+`Σ_bonds tr(ρ H)` is bounded by `H`'s spectrum only when every `ρ` is a genuine
+density matrix. When a bond RDM is not one — non-finite, trace collapsed, or
+badly non-PSD — the split-CTM energy path returned the number anyway: finite,
+and an unphysical lie (#879). Both entry points now take an opt-in gate:
+
+```python
+from tenax import compute_energy_split_ctm_tensor_2site
+
+E = compute_energy_split_ctm_tensor_2site(
+    A, B, env_A, env_B, gate, d=2,
+    nan_on_invalid_rdm=True,   # default False
+    psd_tol=None,              # default None -> RDM_PSD_TOL = 1e-8
+)
+```
+
+- **`nan_on_invalid_rdm`** (default `False`) — re-check every bond RDM with
+  `check_rdm(strict=True)` and return `NaN` if any bond fails.
+- **`psd_tol`** (default `None` → `RDM_PSD_TOL = 1e-8`) — negativity tolerance
+  for the **PSD arm only**, relative to the spectral radius. The non-finite and
+  trace-collapse arms keep their own tolerances, so a collapse is refused at
+  *any* `psd_tol`.
+
+The gate is **eager-only**: it is skipped on tracers, so `jit`, `grad` and every
+optimizer path are bit-for-bit unchanged, and leaving it off is the identity on
+existing callers.
+
+`fpeps()` turns the gate on and loosens the PSD arm to `1e-2`. A low-χ CTM leaves
+~1e-3 relative negativity that is convergence noise rather than a collapse, so
+those runs still return a number and only *gross* non-PSD is refused (the #853
+case sits ~80× higher, its smallest eigenvalue 0.8 of the spectral radius below
+zero). **This changes `fpeps()` behaviour**: on such a state it now returns
+`NaN` rather than a finite unphysical energy.
+
 ## Honeycomb iPEPS CTM (native rank-4)
 
 Native rank-4 CTMRG for honeycomb iPEPS — six corners, three edge
