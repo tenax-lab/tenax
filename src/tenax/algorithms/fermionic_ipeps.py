@@ -63,6 +63,15 @@ from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
+#: PSD-arm tolerance for fpeps()'s #879 RDM-validity gate (negativity relative to
+#: the RDM's spectral radius).  Deliberately looser than the strict #854 gate
+#: (``RDM_PSD_TOL = 1e-8``): a low-chi CTM leaves a small negativity that is
+#: convergence noise, not a collapse -- measured ~1e-3 at chi=8, V=1/V=2 -- so
+#: fpeps() still returns a number there and only refuses *gross* non-PSD (the #854
+#: case sits at ~0.8).  The non-finite and trace-collapse arms are unaffected (they
+#: use their own tolerances), so a collapsed environment is refused regardless.
+_FPEPS_RDM_PSD_TOL = 1e-2
+
 
 @dataclass
 class FPEPSConfig:
@@ -616,8 +625,24 @@ def fpeps(
         conv_tol=config.ctm_conv_tol,
     )
     d = A_phys.indices[A_phys.labels().index("phys")].dim
+    # #879: refuse (NaN) an energy built from a non-density-matrix RDM rather than
+    # return a finite but unphysical number.  fpeps() evaluates concretely (it
+    # returns ``float(energy)``), so this rides the already-concrete path and adds
+    # no jit/grad cost -- the gate inspects only non-tracer RDMs.  The PSD arm is
+    # loosened (``_FPEPS_RDM_PSD_TOL``): a low-chi CTM leaves a small negativity
+    # (~1e-3 of the spectral radius at chi=8, seen at V=1/V=2) that is convergence
+    # noise, not a collapse, so those runs still return a number; only gross
+    # non-PSD -- and, at their own tolerances, any non-finite or trace-collapse --
+    # are refused.
     energy = compute_energy_split_ctm_tensor_2site(
-        A_phys, B_phys, env_A, env_B, hamiltonian_gate, d=d
+        A_phys,
+        B_phys,
+        env_A,
+        env_B,
+        hamiltonian_gate,
+        d=d,
+        nan_on_invalid_rdm=True,
+        psd_tol=_FPEPS_RDM_PSD_TOL,
     )
 
     return float(energy), (A_phys, B_phys), (env_A, env_B)

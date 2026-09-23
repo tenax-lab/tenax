@@ -1137,6 +1137,8 @@ def compute_energy_split_ctm_tensor_2site(
     env_B: SplitCTMTensorEnv,
     hamiltonian_gate: Tensor | jax.Array,
     d: int | None = None,
+    nan_on_invalid_rdm: bool = False,
+    psd_tol: float | None = None,
 ) -> jax.Array:
     """Compute energy per site for a 2-site checkerboard iPEPS, split-aware.
 
@@ -1147,9 +1149,16 @@ def compute_energy_split_ctm_tensor_2site(
         env_B:            Converged SplitCTMTensorEnv for sublattice B.
         hamiltonian_gate: 2-site Hamiltonian gate.
         d:                Physical dimension (inferred from A if None).
+        nan_on_invalid_rdm: Return ``NaN`` if any bond's concrete RDM fails
+                          :func:`~tenax.algorithms._ctm_diagnostics.check_rdm`
+                          (#879); see
+                          :func:`compute_energy_split_ctm_tensor_multisite`.
+        psd_tol:          PSD-arm negativity tolerance for the gate; see
+                          :func:`compute_energy_split_ctm_tensor_multisite`.
 
     Returns:
-        Scalar energy per site.
+        Scalar energy per site, or ``NaN`` when ``nan_on_invalid_rdm`` is set and a
+        bond RDM is not a density matrix.
     """
     # Route through the generic multisite N=2 checkerboard path so the two
     # split energy code paths never diverge. The multisite function counts the
@@ -1164,6 +1173,8 @@ def compute_energy_split_ctm_tensor_2site(
         CHECKERBOARD_NEIGHBORS,
         hamiltonian_gate,
         d=d,
+        nan_on_invalid_rdm=nan_on_invalid_rdm,
+        psd_tol=psd_tol,
     )
 
 
@@ -1173,6 +1184,8 @@ def compute_energy_split_ctm_tensor_multisite(
     neighbors: dict,
     gate: Tensor | jax.Array,
     d: int | None = None,
+    nan_on_invalid_rdm: bool = False,
+    psd_tol: float | None = None,
 ) -> jax.Array:
     """Compute energy per site summed over all NN bonds in a multi-site unit cell, split-aware.
 
@@ -1185,10 +1198,43 @@ def compute_energy_split_ctm_tensor_multisite(
                       "bottom": coord}}`` neighbor map.
         gate:         2-site Hamiltonian gate.
         d:            Physical dimension (inferred from first site if None).
+        nan_on_invalid_rdm: When ``True``, run
+                      :func:`~tenax.algorithms._ctm_diagnostics.check_rdm` on each
+                      bond's concrete RDM and return ``NaN`` if any fails (#879).
+                      The energy ``sum tr(rho H)`` is an expectation value bounded
+                      by the spectrum of ``H`` only when every ``rho`` is a density
+                      matrix; on a collapsed/non-finite/non-PSD RDM the number is
+                      finite but not physical (#845/#848/#854), and returning it
+                      lets a caller record an unusable energy as a real one.  This
+                      gate refuses it instead.  Default ``False`` -- callers that
+                      want the guarantee opt in (``fpeps()`` does).  The check runs
+                      only on concrete (non-tracer) arrays, so the ``jit``/``grad``
+                      path is bit-for-bit unchanged whether or not it is set; a
+                      differentiated caller that needs the guard must instead
+                      express it as a tensor predicate, never this host-read.
+        psd_tol:      Negativity tolerance for the PSD arm of the gate (relative to
+                      the RDM's spectral radius), passed to ``check_rdm``.  ``None``
+                      uses the strict :data:`~tenax.algorithms._ctm_diagnostics.RDM_PSD_TOL`
+                      (``1e-8``).  Only the PSD arm is affected -- the non-finite
+                      and trace-collapse arms use their own tolerances, so a gross
+                      collapse is refused at *any* ``psd_tol``.  ``fpeps()`` loosens
+                      this so a low-chi environment with a small (CTM-convergence)
+                      negativity still returns a number (see ``_FPEPS_RDM_PSD_TOL``).
 
     Returns:
-        Scalar energy per site.
+        Scalar energy per site, or ``NaN`` when ``nan_on_invalid_rdm`` is set and a
+        bond RDM is not a density matrix (beyond ``psd_tol`` for the PSD arm).
     """
+    check_rdm = collapsed_rdm_error = None
+    resolved_psd_tol = psd_tol
+    if nan_on_invalid_rdm:
+        from tenax.algorithms._ctm_diagnostics import RDM_PSD_TOL, check_rdm
+        from tenax.algorithms._ctm_diagnostics import (
+            CollapsedRDMError as collapsed_rdm_error,
+        )
+
+        if resolved_psd_tol is None:
+            resolved_psd_tol = RDM_PSD_TOL
     # Infer physical dimension
     if d is None:
         first_A = next(iter(site_tensors.values()))
@@ -1204,6 +1250,7 @@ def compute_energy_split_ctm_tensor_multisite(
     n_sites = len(site_tensors)
     total_energy = jnp.array(0.0)
     counted_bonds: set = set()
+    invalid_rdm = False
 
     for coord, A in site_tensors.items():
         env_A = envs[coord]
@@ -1236,7 +1283,25 @@ def compute_energy_split_ctm_tensor_multisite(
                 else:
                     rdm = _rdm1x2_split_tensor_2site(A, B, env_A, env_B)
 
+            # #879: on the concrete path, refuse an energy built from an RDM that
+            # is not a density matrix.  Under jit/grad ``rdm`` is a tracer with no
+            # runtime value, so the check is skipped and the AD path is unchanged.
+            if nan_on_invalid_rdm and not isinstance(rdm, jax.core.Tracer):
+                try:
+                    check_rdm(
+                        rdm,
+                        context=f"{coord} {direction}",
+                        strict=True,
+                        psd_tol=resolved_psd_tol,
+                    )
+                except collapsed_rdm_error:
+                    invalid_rdm = True
+
             bond_energy = jnp.einsum("ijkl,klij->", rdm, H)
             total_energy = total_energy + bond_energy
 
+    if invalid_rdm:
+        # A single non-density-matrix bond makes the whole cell energy
+        # unbounded by physics; poison the total rather than report a lie (#879).
+        return jnp.array(jnp.nan, dtype=total_energy.real.dtype)
     return total_energy.real / n_sites
