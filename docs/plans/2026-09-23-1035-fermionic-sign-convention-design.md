@@ -390,15 +390,38 @@ result.
    that `U·S·V` reconstructs the input under rule 2, and check a truncated
    2-site update on a 2×2 cluster against Fock. **This is the go/no-go for B**
    (D0).
-3. **Double layer, RDM and energy on the graded path.** #1038's strict xfail
-   flips, and its #1037 characterization test is removed.
+3. **Fusion and the double layer, RDM and energy on the graded path.** Under B
+   the ket/bra fuse is itself a reorder. `_build_double_layer_tensor` produces
+   roughly `(u, d, l, r, U, D, L, R)` and then `_fuse_pair_by_label` →
+   `fuse_indices` moves `U` past `d, l, r` with a raw `jnp.transpose`
+   (`_tensor_utils.py:466`), which carries no Koszul sign. Either make
+   `fuse_indices` graded on fermionic tensors, or have the graded contractor
+   emit the pairs already interleaved through `output_labels`, so that the fuse
+   is a pure reshape. Add fuse→split round-trip tests under graded contraction.
+   Then #1038's strict xfail flips, and its #1037 characterization test is
+   removed.
 4. **Re-derive the CTM reorders.** Each of the 9 sites is either a correct
    graded reorder already or has to change. Check them with the signed-reorder
    G1 and, where a finite patch allows, with G2′. #995 closes and #1023 is
    superseded.
 5. **Strict mode.** `permute_legs` on fermionic tensors raises when a flag is
-   set. Run the full suite under it for the census, then migrate.
-6. **Flip both defaults.** Delete the sign-free fermionic contraction path, and
+   set. Run the full suite under it for the census, then migrate. **The census
+   must also cover raw block reorders**, which no `permute_legs` guard can see:
+   `jnp.transpose` / `.transpose` on the blocks of a fermionic tensor inside
+   `fuse_indices`, linalg matricization (`_block_in_decomp_order`) and any
+   helper like them. Audit them by grep and route each through a graded reorder
+   or document it as order-preserving.
+6. **Flip both defaults, gated on every fermionic user, not only PEPS.**
+   Fermionic TRG and HOTRG also contract `FermionParity` tensors through
+   `contract` (`trg.py:161-165`, `hotrg.py:176-203`). The Wilson-fermion
+   tensor already contains hand-built Grassmann/Koszul phases
+   (`trg.py:550-584`) that assume a sign-free contractor, so B could
+   double-count or relocate them. Before the flip, either migrate those
+   tensors so the contractor supplies those signs, gated on the exact
+   `wilson_fermion_free_energy_exact` benchmark (`test_trg.py`) plus HOTRG and
+   Gilt convention checks, or scope the new default to the migrated PEPS path
+   and leave TRG/HOTRG on the sign-free path explicitly. Then delete the
+   sign-free fermionic contraction path (or keep only the scoped one), and
    make `permute_legs` on a fermionic `SymmetricTensor` **raise by default**,
    permanently and not just behind the census flag. A new caller then cannot
    reintroduce the silent failure named in D0. Anything that really needs a
@@ -426,7 +449,9 @@ G2′.
 
 - `dagger`'s sign convention (order-independent, §3.1; used only by HOTRG).
 - The general anyonic phase (`twist_phase`), which #1034 declines deliberately.
-- `trg.py`'s Grassmann signs (model data, not a reorder).
+- `trg.py`'s Grassmann signs (model data, not a reorder) are out of scope
+  **under A only**. Under B they interact with the contractor and are gated in
+  §5 step 6.
 - `DenseTensor.twist` being a no-op on fermionic indices (pre-existing,
   documented in #1034).
 
