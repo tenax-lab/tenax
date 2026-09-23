@@ -261,7 +261,17 @@ def _occupations(rdm) -> tuple[float, float]:
     return float(np.real(m[2, 2] + m[3, 3])), float(np.real(m[1, 1] + m[3, 3]))
 
 
-def _assert_all_four_rdms_psd(rdms: dict[str, np.ndarray], what: str) -> None:
+def _assert_all_four_rdms_psd(
+    rdms: dict[str, np.ndarray], what: str
+) -> dict[str, float]:
+    """Gate every bond RDM, and RETURN the margins it checked.
+
+    Returning them is what makes the *wiring* testable.  A caller that forgets
+    to gate one of its two environments is invisible to any assertion about
+    values -- the omission only matters on a future regression, so no fixture
+    here would go red.  Handing back the margins lets the caller assert that
+    the gate actually saw four bonds, which a dropped call cannot satisfy.
+    """
     margins = {k: _psd_margin(v) for k, v in rdms.items()}
     bad = {k: m for k, m in margins.items() if m < -_PSD_TOL}
     assert not bad, (
@@ -270,6 +280,7 @@ def _assert_all_four_rdms_psd(rdms: dict[str, np.ndarray], what: str) -> None:
         f"gate.  The energy below is not an expectation value on a "
         f"non-density-matrix, so the anchor would be void"
     )
+    return margins
 
 
 def _energy_and_rdms(A, B, gate, chi: int = 8, max_iter: int = 40):
@@ -368,8 +379,15 @@ def test_fermionic_ctm_energy_converges_to_the_analytic_product_value():
     # shrink pass while demonstrating nothing (Codex P2, round 2).  A vacuous
     # pass here is worse than a failure: it certifies convergence that was
     # never measured.
-    _assert_all_four_rdms_psd(rdms_coarse, "near-product (coarse eps)")
-    _assert_all_four_rdms_psd(rdms, "near-product")
+    checked_coarse = _assert_all_four_rdms_psd(rdms_coarse, "near-product (coarse)")
+    checked_fine = _assert_all_four_rdms_psd(rdms, "near-product")
+    # Pin the wiring, not just the values: both environments must have been
+    # gated on all four bonds. Dropping either call makes this fail, which a
+    # value assertion alone cannot do while both environments happen to be PSD.
+    assert len(checked_coarse) == 4 and len(checked_fine) == 4, (
+        f"expected both environments gated on 4 bonds, got "
+        f"coarse={sorted(checked_coarse)} fine={sorted(checked_fine)}"
+    )
 
     # Regime guard: this must still be the all-occupied state, or 2V is not the
     # value it should be converging to.
