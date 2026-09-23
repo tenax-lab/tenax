@@ -17,6 +17,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tenax.algorithms._ctm_tensor_convergence import (
     CHECKERBOARD_NEIGHBORS,
@@ -251,9 +252,31 @@ def _initialize_split_multisite_env(
     chi: int,
     chi_I: int,
 ) -> dict[Coord, SplitCTMTensorEnv]:
-    """Per-coord split env init: reuse the single-site builder per site."""
+    """Per-coord split env init, with ONE chi seed shared by every cell.
+
+    Each cell's env is built by the single-site builder, but they must not each
+    seed their chi legs from their own site tensor.  The chi ring does not stop
+    at a cell boundary -- a 2x2 plaquette spans four cells, so ``Q_TL.chi_R``
+    (cell TL's ``T1.t1_r``) contracts against ``Q_TR.chi_L`` (cell TR's
+    ``T1.t1_l``).  ``_derive_charges`` tiles the charge ARRAY and is therefore
+    order-sensitive, and two sublattices can carry the same multiset in
+    different orders, so a per-cell seed lets the envs disagree even when each
+    one is internally consistent: measured on a D=3 fermionic pair, sublattice A
+    seeded ``{0: 11, 1: 5}`` throughout and sublattice B ``{0: 10, 1: 6}``, and
+    the plaquette died on 11-vs-10 (#1024).
+
+    Sorting the seeds would not fix it.  On a checkerboard ``A.u`` pairs with
+    ``B.d`` and ``B.u`` with ``A.d`` -- two different bonds, which need not
+    share a multiset at all.  One designated array is the only thing that makes
+    every cell agree, and the seed layout is arbitrary anyway.
+    """
+    seed = None
+    if site_tensors:
+        first = min(site_tensors)
+        ref = site_tensors[first].indices[0]
+        seed = np.asarray(ref.charges)
     return {
-        c: initialize_split_ctm_tensor_env(A, chi, chi_I)
+        c: initialize_split_ctm_tensor_env(A, chi, chi_I, chi_seed=seed)
         for c, A in site_tensors.items()
     }
 
@@ -415,6 +438,7 @@ def _split_ctm_sweep_multisite_2x2_via_fused(
     chi: int,
     chi_I: int,
     renormalize: bool = True,
+    projector_backward: str = "auto",
 ) -> dict[Coord, SplitCTMTensorEnv]:
     """One fermionic 2×2 split sweep via ``merge → fused sweep → resplit``.
 
@@ -433,7 +457,13 @@ def _split_ctm_sweep_multisite_2x2_via_fused(
     fused_envs = {c: _split_env_to_tensor_standard(e) for c, e in envs.items()}
     double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
     new_fused, _eps, _sS = _ctm_tensor_sweep_multisite(
-        fused_envs, double_layers, neighbors, chi, renormalize, recipe="2x2"
+        fused_envs,
+        double_layers,
+        neighbors,
+        chi,
+        renormalize,
+        recipe="2x2",
+        projector_backward=projector_backward,
     )
     return {
         c: _tensor_env_to_split_standard(fe, site_tensors[c], chi_I)
@@ -454,6 +484,7 @@ def _split_ctm_sweep_multisite_2x2(
     chi: int,
     chi_I: int,
     renormalize: bool = True,
+    projector_backward: str = "auto",
 ) -> dict[Coord, SplitCTMTensorEnv]:
     """One 2x2-recipe split sweep — twin of the fused 2x2 branch of
     :func:`_ctm_tensor_sweep_multisite`.
@@ -476,7 +507,13 @@ def _split_ctm_sweep_multisite_2x2(
     """
     if _split_env_is_fermionic(next(iter(envs.values()))):
         return _split_ctm_sweep_multisite_2x2_via_fused(
-            envs, site_tensors, neighbors, chi, chi_I, renormalize=renormalize
+            envs,
+            site_tensors,
+            neighbors,
+            chi,
+            chi_I,
+            renormalize=renormalize,
+            projector_backward=projector_backward,
         )
     # Function-local import: _split_ctm_tensor_moves imports from this module,
     # so importing the absorb helpers at module scope would form a cycle.
@@ -514,6 +551,7 @@ def _split_ctm_sweep_multisite_2x2(
                 chi,
                 direction,
                 base_charges=_split_base_charges(site_tensors[s]),
+                projector_backward=projector_backward,
             )
             projectors[s] = (Pt, Pb)
         # Phase 2: absorb per destination cell using two plaquettes' halves.
@@ -604,6 +642,7 @@ def _split_ctm_sweep_multisite(
     chi_I: int,
     renormalize: bool,
     recipe: str = "2x2",
+    projector_backward: str = "auto",
 ) -> dict[Coord, SplitCTMTensorEnv]:
     """One full split multisite CTM sweep.
 
@@ -635,7 +674,14 @@ def _split_ctm_sweep_multisite(
                 )
     elif recipe == "2x2":
         envs = _split_ctm_sweep_multisite_2x2(
-            envs, site_tensors, bars, neighbors, chi, chi_I, renormalize=renormalize
+            envs,
+            site_tensors,
+            bars,
+            neighbors,
+            chi,
+            chi_I,
+            renormalize=renormalize,
+            projector_backward=projector_backward,
         )
     else:
         raise ValueError(

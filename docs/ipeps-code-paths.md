@@ -446,6 +446,7 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | Stall recovery (2-site)           | **Working**      | ``gs_stall_recovery="reset"`` auto-default since #298.             |
 | 2-site L-BFGS at χ=8              | **Working**      | ``E_best ≈ -0.6602`` at D=2 with Lorentzian projector backward (issue #299 closed; post-convergence re-eval tracked separately by #317). |
 | Lorentzian projector backward     | **Aspirational** | ``CTMConfig`` documents auto-promotion of ``"auto"`` to ``"lorentzian"`` when ``gs_implicit_ad=False`` + ``projector_method="eigh"``, but the ``"auto"`` resolver is **not yet implemented** (see ``_ctm_projector.py`` "Task 8 will resolve 'auto'"); ``"auto"`` currently behaves as ``"standard"``. Setting ``projector_backward="lorentzian"`` explicitly works. |
+| 2x2 projector response (``"flow"``) | **Working (explicit AD only)** | ``projector_backward="flow"`` lets the 2x2 plaquette projectors' ``dP/dA`` reach the gradient (#983); every other value freezes them, which was the only behaviour before. Measured on ``ctm_energy_explicit``: AD/FD 0.229..0.928 frozen against 0.944..0.994 flowing. **Not safe under implicit AD** — restoring ``dP/denv`` puts the CTM gauge mode back into ``J`` and ``(I − J^T)λ = dE/denv`` stops being reliably solvable (#1028, blocked on #841). |
 | Adjoint Arnoldi precheck          | **Working**      | ``adjoint_arnoldi_precheck=True`` (default) probes ``J^T``'s spectral radius before the Krylov solve; falls back to a regularized solve when ``> adjoint_arnoldi_threshold`` (default 5.0). |
 | Adjoint Tikhonov damping          | **Working**      | ``adjoint_tikhonov`` (default ``1e-6``) adds ``+τI`` to ``(I − J^T)`` to prevent Krylov stalls near a well-converged GS. |
 | Auto-χ_E bump (variPEPS §2.8.2)  | **Working**      | ``CTMConfig(chi_auto_bump=True, chi_auto_bump_eps=1e-5, chi_auto_bump_step=2, chi_max=N)``. Dense single-site path only; SymmetricTensor + multisite are follow-up issues. |
@@ -498,7 +499,7 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | AD projector override | ``gs_projector_method``     | ``None``         | ``"qr"`` (recommended for explicit AD); implicit AD requires ``"svd"`` |
 | Backward              | ``ad_backward_method``      | ``"vjp"``        | ``"gmres"`` (BROKEN — issue #292)    |
 | Projector             | ``projector_method``        | ``"svd"``        | ``"eigh"`` / ``"qr"`` (recommended for explicit AD only)  |
-| Projector backward    | ``projector_backward``      | ``"auto"``       | ``"standard"`` / ``"lorentzian"`` (``"auto"`` resolver not yet implemented; behaves as ``"standard"``) |
+| Projector backward    | ``projector_backward``      | ``"auto"``       | ``"standard"`` / ``"lorentzian"`` (``"auto"`` resolver not yet implemented; behaves as ``"standard"``) / ``"flow"`` (2x2 recipe: unfreeze ``dP/dA`` — explicit AD only, see #983/#1028) |
 | Forward gauge         | ``forward_gauge``           | ``"phase"``      | ``"qr"`` / ``"sigma"`` / ``"none"`` (no silent promotion; implicit AD requires ``"phase"``) |
 | CTM conv method       | ``ctm_conv_method``         | ``"elementwise"``| ``"sv"`` (singular-value); implicit AD requires ``"elementwise"`` |
 | Conv tol schedule     | ``gs_ctm_conv_tol_schedule``| ``None``         | ``[(frac, tol), ...]``               |
