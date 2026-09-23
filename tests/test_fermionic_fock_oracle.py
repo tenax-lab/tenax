@@ -28,6 +28,7 @@ from _fermionic_fock_oracle import (
     fock_psi,
     ground_energy,
     hop_energy,
+    hop_energy_matvec,
     leg_dims,
     plain_amplitudes,
     plain_double_layer,
@@ -104,6 +105,20 @@ def test_an_oracle_state_never_goes_below_the_fermionic_ground_state(R, C):
     for _ in range(4):
         psi = fock_psi(R, C, random_even_tensors(R, C, rng))
         assert hop_energy(R, C, psi, fermion=True) >= E_F - 1e-12
+
+
+def test_the_oracle_energy_is_a_bra_ket_for_complex_states():
+    """``hop_energy`` must conjugate the bra: a bilinear ``psi @ H psi`` is not
+    an expectation value once the tensors are complex."""
+    R, C = 2, 2
+    rng = np.random.default_rng(3)
+    re, im = random_even_tensors(R, C, rng), random_even_tensors(R, C, rng)
+    psi = fock_psi(R, C, {s: re[s] + 1j * im[s] for s in re})
+    assert np.abs(psi.imag).max() > 1e-3  # regime: genuinely complex
+    N = psi.size
+    H = np.stack([hop_energy_matvec(R, C, e, fermion=True) for e in np.eye(N)], axis=1)
+    expected = (np.conj(psi) @ H @ psi / (np.conj(psi) @ psi)).real
+    assert hop_energy(R, C, psi, fermion=True) == pytest.approx(expected, abs=1e-12)
 
 
 # ------------------------------------------------------------------ #

@@ -154,7 +154,8 @@ def hop_energy(R: int, C: int, psi: np.ndarray, *, fermion: bool) -> float:
     for s, _, t, _ in bonds_of(R, C):
         a, b = sid[s], sid[t]
         h -= cr(an(psi, b), a) + cr(an(psi, a), b)
-    return float(psi @ h / (psi @ psi))
+    # vdot conjugates its first argument: <psi|H|psi>, valid for complex states
+    return float((np.vdot(psi, h) / np.vdot(psi, psi)).real)
 
 
 def ground_energy(R: int, C: int, *, fermion: bool) -> float:
