@@ -420,8 +420,24 @@ result.
    tensors so the contractor supplies those signs, gated on the exact
    `wilson_fermion_free_energy_exact` benchmark (`test_trg.py`) plus HOTRG and
    Gilt convention checks, or scope the new default to the migrated PEPS path
-   and leave TRG/HOTRG on the sign-free path explicitly. Then delete the
-   sign-free fermionic contraction path (or keep only the scoped one), and
+   and leave TRG/HOTRG on the sign-free path explicitly. **The same applies to
+   every other fermionic consumer**, including those that bypass `contract`.
+   DMRG's symmetric environment update (`dmrg.py:2055-2063`) builds the bra
+   with `A.bar()`, relies on its `(left, phys, right)` leg positions through
+   hard-coded subscripts, and contracts through its own sign-free
+   `_blockwise_contract` (`dmrg.py:1848`). The NumPy backend has its own
+   `ba_bar`. `tests/test_mps.py` already builds `FermionParity` MPS. Each such
+   consumer is either migrated and gated on a physical fermionic check (for
+   DMRG, a free-fermion chain against its exact energy), or rejects fermionic
+   input explicitly. B is active only for the consumers that pass.
+   **`bar` flips in the same step.** Step 1's graded `bar` sits beside the
+   current one. Here `SymmetricTensor.bar()` itself becomes graded (and so does
+   `ba_bar`), or rule 3 is silently dropped on every production path, which is
+   §3.4's O(1) mutant. Use rule 3's **order-preserving form**: keep the leg
+   order and multiply each block by (−1)^(Σ_{i<j} pᵢpⱼ). That is the same
+   Grassmann object as the reversed form, and positional callers such as
+   DMRG's subscripts keep working. Then delete the sign-free fermionic
+   contraction path (or keep only the scoped one), and
    make `permute_legs` on a fermionic `SymmetricTensor` **raise by default**,
    permanently and not just behind the census flag. A new caller then cannot
    reintroduce the silent failure named in D0. Anything that really needs a
