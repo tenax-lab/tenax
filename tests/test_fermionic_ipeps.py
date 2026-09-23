@@ -506,11 +506,15 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
     # tracer, implying the pin is required for traceability.  It is not:
     # ``_truncated_svd_symmetric_traced`` handles ``base_charges=None``
     # with a proportional static allocation (the ``else`` branch at
-    # ``linalg.py:880``, "proportional to per-sector available capacity"),
-    # so an unpinned traced SVD is reachable -- which
-    # ``test_svd_bond_order.py:226::
-    # test_descending_order_still_cannot_be_traced_as_one_code_path``
-    # exercises.
+    # ``linalg.py:881``, "proportional to per-sector available capacity"),
+    # so an unpinned traced SVD is reachable.  That is pinned by
+    # ``test_svd_bond_order.py::
+    # test_a_capped_unpinned_svd_traces_through_the_proportional_fallback``
+    # -- a mutant raising inside the fallback fails it, and only it.  An
+    # earlier revision cited
+    # ``test_descending_order_still_cannot_be_traced_as_one_code_path``
+    # here; that test passes no cap, so it takes the full-spectrum branch
+    # and never reaches the fallback.
     #
     # The true statement is about AGREEMENT, not reachability: the traced
     # base_charges branch is built to reproduce the EAGER per-sector keep
