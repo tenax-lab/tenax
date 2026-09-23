@@ -153,8 +153,17 @@ def _select_chi_slots(
 # A labels: (u, d, l, r, phys), flows: (OUT, IN, OUT, IN, IN)
 # Env label/flow conventions per the plan
 _CORNER_SPECS = {
-    "C1": ("c1_d", "c1_r", FlowDirection.IN, FlowDirection.OUT, 1),  # ref_axis=d(1)
-    "C2": ("c2_l", "c2_d", FlowDirection.IN, FlowDirection.OUT, 0),  # ref_axis=u(0)
-    "C3": ("c3_u", "c3_l", FlowDirection.OUT, FlowDirection.IN, 1),  # ref_axis=d(1)
-    "C4": ("c4_r", "c4_u", FlowDirection.OUT, FlowDirection.IN, 0),  # ref_axis=u(0)
+    # ref_axis is 0 (``u``) for EVERY corner leg, and every edge chi leg in
+    # ``_split_ctm_tensor_init`` uses 0 as well.  The chi bonds form a
+    # connected ring -- within a cell C1.c1_d meets T4.t4_d and C4.c4_u meets
+    # T4.t4_u, and across cells T4(above).t4_u meets T4(below).t4_d -- so the
+    # two ends of every seam, and the two ends of every edge, chain together
+    # until a single layout has to serve all of them.  Pairwise matching is not
+    # enough.  See the note in ``_split_ctm_tensor_init._EDGE_KET_SPECS`` for
+    # why "an axis with the same charges" is not the same as "the same axis"
+    # (#1024).
+    "C1": ("c1_d", "c1_r", FlowDirection.IN, FlowDirection.OUT, 0),
+    "C2": ("c2_l", "c2_d", FlowDirection.IN, FlowDirection.OUT, 0),
+    "C3": ("c3_u", "c3_l", FlowDirection.OUT, FlowDirection.IN, 0),
+    "C4": ("c4_r", "c4_u", FlowDirection.OUT, FlowDirection.IN, 0),
 }

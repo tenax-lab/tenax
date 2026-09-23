@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 __all__ = [
     "CHECKERBOARD_NEIGHBORS",
     "Coord",
@@ -299,8 +301,12 @@ def _ctm_tensor_sweep_multisite(
         projector_method:  ``"svd"`` (Fishman, default), ``"eigh"``, or ``"qr"``.
                         Only consulted on the 1x1 path; the 2x2 path always
                         uses Fishman SVD via :func:`_compute_2x2_projector`.
-        projector_backward:  Forwarded to the 1x1 move functions; ignored
-                        on the 2x2 path.
+        projector_backward:  ``"flow"`` lets the 2x2 plaquette projectors'
+                        ``dP/dA`` reach the gradient; every other value
+                        (including the ``"auto"`` default) freezes them as
+                        ``stop_gradient`` constants, which is the pre-#983
+                        behaviour.  On the 1x1 path it selects the eigh
+                        backward as before.
         recipe:         ``"2x2"`` (default) — use the 2x2 plaquette projector
                         of :func:`_ctm_tensor_move_*_2x2` (matches variPEPS's
                         ``do_*_absorption`` workhorses).
@@ -429,6 +435,7 @@ def _ctm_tensor_sweep_multisite(
                         chi,
                         direction,
                         base_charges=base_charges,
+                        projector_backward=projector_backward,
                     )
                 )
                 projectors[s_anchor] = (P_top, P_bot)
@@ -810,6 +817,32 @@ def _tensor_leaf_data(leaf):
     return leaf.todense() if hasattr(leaf, "todense") else leaf
 
 
+def _nan_safe_max(current: float, candidate: float) -> float:
+    """``max`` that propagates non-finite values instead of swallowing them.
+
+    ``max(0.0, float("nan"))`` is ``0.0``: every comparison against NaN is
+    False, so Python's ``max`` returns its *first* argument, and the sibling
+    idiom ``if diff > worst`` never fires either.  A NaN leaf difference
+    therefore vanished from the aggregate and the CTM loop certified an
+    environment whose every tensor was NaN, reporting ``converged=True`` with
+    residual ``0.0`` (#974).
+
+    The trap is order-dependent, which is how it survived review: ``max(nan,
+    0.0)`` *is* ``nan``, so only an accumulator seeded from ``0.0`` -- which is
+    what every reducer here does -- loses it.
+
+    Any non-finite input collapses the aggregate to ``inf``, the fail-closed
+    value on both downstream tests: ``inf < conv_tol`` is False, so the sweep
+    cannot certify, and ``math.isfinite(inf)`` is False, so the plateau guard
+    in ``_ctm_loop_core`` also refuses to count it as an improvement.  ``inf``
+    rather than NaN keeps one sentinel for "unusable residual", matching what
+    ``_ctm_sv_diff`` already returns for a rank-blind spectrum.
+    """
+    if not math.isfinite(candidate) or not math.isfinite(current):
+        return math.inf
+    return candidate if candidate > current else current
+
+
 def _max_env_leaf_diff(env_old: CTMTensorEnv, env_new: CTMTensorEnv) -> float:
     """Maximum absolute element-wise difference across environment leaves."""
     max_diff = 0.0
@@ -817,7 +850,7 @@ def _max_env_leaf_diff(env_old: CTMTensorEnv, env_new: CTMTensorEnv) -> float:
         a = _tensor_leaf_data(told)
         b = _tensor_leaf_data(tnew)
         diff = float(jnp.max(jnp.abs(b - a)))
-        max_diff = max(max_diff, diff)
+        max_diff = _nan_safe_max(max_diff, diff)
     return max_diff
 
 

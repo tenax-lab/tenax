@@ -26,11 +26,18 @@ Conventions:
       right)`` with flows (IN, OUT, IN, OUT), matching ``trg.py``.
 
 The plaquette environment gram is built with label-based ``contract`` calls
-(block-sparse for ``SymmetricTensor``), while the cascade itself runs on the
-dense gram — a ``(chi^2, chi^2)`` object, small compared to the chi^6
-contraction that produces it. The composed ``Q`` is charge-conserving
-whenever the input tensor is, and is re-wrapped into the input's tensor type
-before absorption.
+(block-sparse for ``SymmetricTensor``). Rather than densify it into a full
+``(r, r, r, r)`` (i.e. ``chi^4``) array, the gram is kept in the
+charge-difference-block form it already has: reshaped to a matrix
+``mat[(i, j), (I, J)]`` it is exactly block-diagonal in
+``dq = fuse(charge_i, dual(charge_j))`` (the plaquette environment conserves
+the charge flowing across the cut bond), so only the ``dq`` diagonal blocks
+are nonzero. The cascade — spectrum, optimal ``Q``, and the per-iteration
+absorb — runs on those blocks directly (:class:`_BondGram`), which for a
+``Z_n`` grading is an ``n``-fold memory saving over the dense ``chi^4`` object
+and never materializes it. The composed ``Q`` is charge-conserving whenever
+the input tensor is, and is re-wrapped into the input's tensor type before
+absorption.
 """
 
 from __future__ import annotations
@@ -140,13 +147,143 @@ def _double_layer(T: Tensor, relabel_map: dict[str, str]) -> Tensor:
     return contract(ket, bra)
 
 
-def _bond_gram(corners: tuple[Tensor, ...], bond: str) -> jax.Array:
-    """Dense environment gram M[i, j, I, J] = (E E^dagger) for one bond.
+@dataclass
+class _BondGram:
+    """Environment gram in charge-difference-block form (never densified).
+
+    The gram, reshaped to a matrix ``mat[(i, j), (I, J)]`` with row/column
+    flat index ``i * rb + j``, is exactly block-diagonal in the charge
+    difference ``dq = fuse(charge_i, dual(charge_j))`` across the cut bond
+    (a ``dq`` off-diagonal block would violate the plaquette's charge
+    conservation, and is verified to carry exactly zero weight). Only those
+    diagonal blocks are stored.
+
+    Attributes:
+        blocks:   ``{dq_value: (n_dq, n_dq) raw matrix}`` — the un-symmetrized
+                  sub-block ``mat[fidx, fidx]`` for each charge-difference
+                  sector, with ``fidx = sectors[dq_value]``.
+        sectors:  ``{dq_value: fidx}`` — the flat ``i * rb + j`` positions of
+                  each sector, ascending (as ``np.flatnonzero`` returns).
+        ra, rb:   Dimensions of the two cut ends (row leg ``i``/``I`` and
+                  column leg ``j``/``J``); ``ra`` is the cut bond dimension.
+        ca, cb:   Per-state charges of the ``i``/``I`` and ``j``/``J`` legs,
+                  in the dense (``todense``) ordering.
+        dq_id:    The identity charge difference — the sector that carries the
+                  optimal ``Q`` (``Q`` lives purely there).
+        sym:      The leg symmetry.
+        dtype:    Block dtype.
+        dense_full: For a non-symmetric (``DenseTensor``) gram only, the full
+                  ``(ra*rb, ra*rb)`` raw matrix. There is no block structure to
+                  exploit (a single trivial charge sector), so it is kept whole
+                  and the absorb uses the original dense einsum — reproducing
+                  the pre-refactor dense path bit-for-bit. ``None`` for the
+                  block-sparse (``SymmetricTensor``) path, which never
+                  materializes the full matrix.
+    """
+
+    blocks: dict[int, jax.Array]
+    sectors: dict[int, np.ndarray]
+    ra: int
+    rb: int
+    ca: np.ndarray
+    cb: np.ndarray
+    dq_id: int
+    sym: object
+    dtype: object
+    dense_full: jax.Array | None = None
+
+    @property
+    def dim(self) -> int:
+        """The cut bond dimension (rows of the gram operator)."""
+        return self.ra
+
+
+def _dq_sectors(
+    ca: np.ndarray, cb: np.ndarray, rb: int, sym
+) -> tuple[dict[int, np.ndarray], np.ndarray]:
+    """Partition the flat ``(i, j)`` index space by charge difference ``dq``.
+
+    Returns ``(sectors, local_of)`` where ``sectors[dq] = fidx`` are the flat
+    ``i * rb + j`` positions with ``fuse(ca[i], dual(cb[j])) == dq`` (ascending),
+    and ``local_of[p]`` is the position of flat index ``p`` within its own
+    sector — the inverse map used to scatter blocks into their sector matrix.
+    """
+    dq_flat = np.asarray(sym.fuse(ca[:, None], sym.dual(cb)[None, :])).ravel()
+    sectors: dict[int, np.ndarray] = {}
+    local_of = np.empty(dq_flat.size, dtype=np.int64)
+    for val in np.unique(dq_flat):
+        fidx = np.flatnonzero(dq_flat == val)
+        sectors[int(val)] = fidx
+        local_of[fidx] = np.arange(fidx.size)
+    return sectors, local_of
+
+
+def _gram_from_tensor(M: Tensor) -> _BondGram:
+    """Build the block-diagonal :class:`_BondGram` from the 4-leg gram tensor.
+
+    ``M`` has legs labeled ``i, j, I, J`` (capitals the bra copies, sharing
+    the charge structure of ``i, j``). For a ``SymmetricTensor`` the sector
+    matrices are scattered directly from ``M``'s charge blocks — the full
+    ``chi^4`` dense array is never formed. For a ``DenseTensor`` (a single
+    trivial charge sector) the whole matrix is one block; there is no symmetry
+    to exploit, so it degenerates to the former dense path.
+    """
+    perm = tuple(M.labels().index(lbl) for lbl in ("i", "j", "I", "J"))
+    idx_i = M.indices[perm[0]]
+    idx_j = M.indices[perm[1]]
+    sym = idx_i.symmetry
+    ca = np.asarray(idx_i.charges)
+    cb = np.asarray(idx_j.charges)
+    ra, rb = int(idx_i.dim), int(idx_j.dim)
+    dq_id = int(sym.identity())
+    dtype = M.dtype
+
+    sectors, local_of = _dq_sectors(ca, cb, rb, sym)
+    blocks: dict[int, jax.Array] = {
+        val: jnp.zeros((fidx.size, fidx.size), dtype=dtype)
+        for val, fidx in sectors.items()
+    }
+
+    if isinstance(M, SymmetricTensor):
+        for key, block in M.blocks.items():
+            q_i, q_j = int(key[perm[0]]), int(key[perm[1]])
+            q_I, q_J = int(key[perm[2]]), int(key[perm[3]])
+            dq_r = int(sym.fuse(np.array([q_i]), sym.dual(np.array([q_j])))[0])
+            dq_c = int(sym.fuse(np.array([q_I]), sym.dual(np.array([q_J])))[0])
+            if dq_r != dq_c:
+                # A dq off-diagonal block: the per-sector spectrum ignores it
+                # and the plaquette gram carries none (charge is conserved
+                # across the cut). Skipping keeps us faithful and dense-free.
+                continue
+            rows_i = np.flatnonzero(ca == q_i)
+            rows_j = np.flatnonzero(cb == q_j)
+            cols_I = np.flatnonzero(ca == q_I)
+            cols_J = np.flatnonzero(cb == q_J)
+            flat_rows = (rows_i[:, None] * rb + rows_j[None, :]).ravel()
+            flat_cols = (cols_I[:, None] * rb + cols_J[None, :]).ravel()
+            lr = local_of[flat_rows]
+            lc = local_of[flat_cols]
+            bp = jnp.transpose(block, perm).reshape(flat_rows.size, flat_cols.size)
+            blocks[dq_r] = blocks[dq_r].at[lr[:, None], lc[None, :]].add(bp)
+        return _BondGram(blocks, sectors, ra, rb, ca, cb, dq_id, sym, dtype)
+
+    # DenseTensor: a single trivial charge sector, no symmetry to exploit.
+    # Keep the whole matrix so the absorb can use the original dense einsum
+    # (bit-for-bit identical to the pre-refactor dense path).
+    mat = jnp.transpose(M.todense(), perm).reshape(ra * rb, ra * rb)
+    for val, fidx in sectors.items():
+        blocks[val] = mat[fidx[:, None], fidx[None, :]]
+    return _BondGram(blocks, sectors, ra, rb, ca, cb, dq_id, sym, dtype, dense_full=mat)
+
+
+def _bond_gram(corners: tuple[Tensor, ...], bond: str) -> _BondGram:
+    """Environment gram (E E^dagger) for one bond, as a :class:`_BondGram`.
 
     ``i`` is the cut end at corner_i, ``j`` the end at corner_j; capitals
     are the bra copies. Built by chaining the four double-layer corners
     around the plaquette (chi^6 cost, block-sparse for SymmetricTensor),
-    then densified — a (r, r, r, r) object with r the cut bond dimension.
+    then packed into charge-difference blocks (never a dense ``chi^4`` array;
+    see :class:`_BondGram`) with ``r`` the cut bond dimension.
 
     For ``bond="top"`` the ket layer of E is the plaquette with the top
     bond cut open (ends i, j); the bra copy closes every outer leg::
@@ -182,14 +319,10 @@ def _bond_gram(corners: tuple[Tensor, ...], bond: str) -> jax.Array:
     M = layers[chain[0]]
     for c in chain[1:]:
         M = contract(M, layers[c])
-    dense = M.todense()
-    perm = [M.labels().index(lbl) for lbl in ("i", "j", "I", "J")]
-    return jnp.transpose(dense, perm)
+    return _gram_from_tensor(M)
 
 
-def _optimal_q(
-    M: jax.Array, ca: np.ndarray, cb: np.ndarray, sym, eps: float
-) -> jax.Array:
+def _optimal_q(gram: _BondGram, eps: float) -> jax.Array:
     """The optimal bond matrix Q from the environment gram, sector-resolved.
 
     The gram (as an operator on bond matrices) exactly conserves the
@@ -201,34 +334,33 @@ def _optimal_q(
     only the identity sector effectively rescales gilt_eps), while the
     trace vector t — and hence Q itself — lives purely in the identity
     sector, so Q is charge-conserving by construction.
-    """
-    ra, rb = M.shape[0], M.shape[1]
-    mat = M.reshape(ra * rb, ra * rb)
-    mat = 0.5 * (mat + mat.conj().T)
-    dq = sym.fuse(ca[:, None], sym.dual(cb)[None, :])
-    dq_flat = np.asarray(dq).ravel()
-    dq_id = int(sym.identity())
 
-    sector_eigs = {}
+    Each ``gram.blocks[val]`` is the raw (un-symmetrized) sector sub-matrix;
+    symmetrizing it here is identical to slicing the symmetrized full matrix,
+    since the sector is on the block diagonal.
+    """
+    ra, rb, dq_id = gram.ra, gram.rb, gram.dq_id
+
+    sector_eigs = None
     total = 0.0
-    for val in np.unique(dq_flat):
-        fidx = np.flatnonzero(dq_flat == val)
-        sub = mat[fidx[:, None], fidx[None, :]]
-        if int(val) == dq_id:
+    for val in sorted(gram.blocks):
+        sub_raw = gram.blocks[val]
+        sub = 0.5 * (sub_raw + sub_raw.conj().T)
+        if val == dq_id:
             w, U = jnp.linalg.eigh(sub)
-            sector_eigs[int(val)] = (fidx, w, U)
+            sector_eigs = (gram.sectors[val], w, U)
         else:
             w = jnp.linalg.eigvalsh(sub)
         total += float(jnp.sum(jnp.sqrt(jnp.clip(w, 0.0, None))))
 
-    if dq_id not in sector_eigs or total <= 0.0:
-        return jnp.zeros((ra, rb), dtype=M.dtype)
-    fidx0, w0, U0 = sector_eigs[dq_id]
+    if sector_eigs is None or total <= 0.0:
+        return jnp.zeros((ra, rb), dtype=gram.dtype)
+    fidx0, w0, U0 = sector_eigs
     sh = jnp.sqrt(jnp.clip(w0, 0.0, None)) / total
-    eye_flat = jnp.eye(ra, rb, dtype=M.dtype).reshape(ra * rb)
+    eye_flat = jnp.eye(ra, rb, dtype=gram.dtype).reshape(ra * rb)
     tvec = U0.conj().T @ eye_flat[fidx0]
     tp = tvec * sh**2 / (sh**2 + eps**2)
-    q_flat = jnp.zeros(ra * rb, dtype=M.dtype).at[fidx0].set(U0 @ tp)
+    q_flat = jnp.zeros(ra * rb, dtype=gram.dtype).at[fidx0].set(U0 @ tp)
     return q_flat.reshape(ra, rb)
 
 
@@ -284,17 +416,65 @@ def _blockwise_svd_split(
     return L, jnp.concatenate(s_all), R, np.asarray(charges, dtype=ca.dtype)
 
 
-def _gilt_cascade(
-    M: jax.Array, ca: np.ndarray, cb: np.ndarray, sym, config: GiltConfig
-) -> tuple[jax.Array, int, int]:
+def _absorb_gram(
+    gram: _BondGram, L: jax.Array, R: jax.Array, kept_charges: np.ndarray
+) -> _BondGram:
+    """Absorb the split halves (L, R) into the gram, sector by sector.
+
+    Realizes ``M'[a,b,A,B] = sum_{ijIJ} L[i,a] R[b,j] M[i,j,I,J]
+    conj(L[I,A]) conj(R[B,J])`` — but per charge-difference sector rather
+    than as a dense ``chi^4`` einsum. Since ``L`` is charge-block-diagonal
+    (``L[i,a]`` nonzero only where ``ca[i] == kept_charges[a]``) and likewise
+    ``R``, the row map ``P[(a,b),(i,j)] = L[i,a] R[b,j]`` couples a new sector
+    only to the same old sector, so each new block is
+    ``P_val @ old_block @ P_val^H``. The new bond legs both carry
+    ``kept_charges``.
+
+    A ``DenseTensor`` gram (``dense_full`` set) has no block structure to
+    exploit; it takes the original dense einsum on the full 4-leg matrix
+    instead, reproducing the pre-refactor path exactly (per-sector matmuls
+    would reorder the floating-point sums, which the near-critical flow
+    amplifies).
+    """
+    kc = np.asarray(kept_charges)
+    k = int(kc.size)
+    sym = gram.sym
+    rb_old = gram.rb
+    sectors, _ = _dq_sectors(kc, kc, k, sym)
+
+    if gram.dense_full is not None:
+        # No block structure to exploit: run the original dense einsum on the
+        # full 4-leg gram, bit-for-bit as before, and re-slice its sectors.
+        m4 = gram.dense_full.reshape(gram.ra, rb_old, gram.ra, rb_old)
+        mp = jnp.einsum("ia,bj,ijIJ,IA,BJ->abAB", L, R, m4, L.conj(), R.conj())
+        new_full = mp.reshape(k * k, k * k)
+        blocks = {v: new_full[f[:, None], f[None, :]] for v, f in sectors.items()}
+        return _BondGram(
+            blocks, sectors, k, k, kc, kc, gram.dq_id, sym, gram.dtype, new_full
+        )
+
+    blocks: dict[int, jax.Array] = {}
+    for val, new_fidx in sectors.items():
+        old_block = gram.blocks.get(val)
+        old_fidx = gram.sectors.get(val)
+        if old_block is None or old_fidx is None:
+            blocks[val] = jnp.zeros((new_fidx.size, new_fidx.size), dtype=gram.dtype)
+            continue
+        new_a, new_b = new_fidx // k, new_fidx % k
+        old_i, old_j = old_fidx // rb_old, old_fidx % rb_old
+        p = L[old_i[None, :], new_a[:, None]] * R[new_b[:, None], old_j[None, :]]
+        blocks[val] = p @ old_block @ p.conj().T
+    return _BondGram(blocks, sectors, k, k, kc, kc, gram.dq_id, sym, gram.dtype)
+
+
+def _gilt_cascade(gram: _BondGram, config: GiltConfig) -> tuple[jax.Array, int, int]:
     """Recursive optimization of the bond matrix Q (Hauru et al.'s scheme).
 
-    Given the dense gram M[i, j, I, J] and the charge arrays of the two
-    bond ends: compute the optimal Q from the environment spectrum
-    (sum-normalized, weights S^2/(S^2 + eps^2)), SVD-split it at
-    ``split_factor * gilt_eps``; if its retained spectrum is flat (all
-    within ``convergence_eps`` of 1, Ebel et al. Eq. C2) stop, otherwise
-    absorb the split halves into the gram and recurse. The innermost
+    Given the block-diagonal gram :class:`_BondGram`: compute the optimal Q
+    from the environment spectrum (sum-normalized, weights S^2/(S^2 + eps^2)),
+    SVD-split it at ``split_factor * gilt_eps``; if its retained spectrum is
+    flat (all within ``convergence_eps`` of 1, Ebel et al. Eq. C2) stop,
+    otherwise absorb the split halves into the gram and recurse. The innermost
     (flat, truncated) Q is included in the composition, and the composed
     Q is meant to be absorbed by the caller even when the first pass is
     already flat — a flat spectrum can still carry a nontrivial rank cut
@@ -312,8 +492,8 @@ def _gilt_cascade(
     right_factors: list[jax.Array] = []
     k = 0
     while True:
-        Qn = _optimal_q(M, ca, cb, sym, eps)
-        L, s, R, kept_charges = _blockwise_svd_split(Qn, ca, cb, cut)
+        Qn = _optimal_q(gram, eps)
+        L, s, R, kept_charges = _blockwise_svd_split(Qn, gram.ca, gram.cb, cut)
         if (
             float(jnp.max(jnp.abs(s - 1.0))) < config.convergence_eps
             or k >= config.max_cascade_iterations
@@ -323,8 +503,7 @@ def _gilt_cascade(
             break
         left_factors.append(L)
         right_factors.append(R)
-        M = jnp.einsum("ia,bj,ijIJ,IA,BJ->abAB", L, R, M, L.conj(), R.conj())
-        ca = cb = kept_charges
+        gram = _absorb_gram(gram, L, R, kept_charges)
         k += 1
     Q = core
     for m in reversed(left_factors):
@@ -417,11 +596,11 @@ def gilt_plaquette(T: Tensor, config: GiltConfig) -> tuple[Tensor, Tensor, dict]
     if not isinstance(T, Tensor):
         raise TypeError(f"gilt_plaquette() requires a Tensor, got {type(T).__name__}")
     if any(idx.symmetry.is_fermionic for idx in T.indices):
-        # The gram is densified and its legs reordered with a plain
-        # transpose (no Koszul signs), and the double layer uses ``bar()``
-        # (no fermionic twists) — both are only correct for bosonic
-        # braiding. Fermionic GILT needs a sign-aware audit of the whole
-        # plaquette wiring; reject rather than silently corrupt.
+        # The gram's blocks are reordered with a plain transpose (no Koszul
+        # signs) when packed into charge-difference sectors, and the double
+        # layer uses ``bar()`` (no fermionic twists) — both are only correct
+        # for bosonic braiding. Fermionic GILT needs a sign-aware audit of the
+        # whole plaquette wiring; reject rather than silently corrupt.
         raise NotImplementedError(
             "gilt_plaquette() does not support fermionic symmetries"
         )
@@ -434,18 +613,13 @@ def gilt_plaquette(T: Tensor, config: GiltConfig) -> tuple[Tensor, Tensor, dict]
         kmaxes = []
         for bond in _BOND_ORDER:
             corners = (B1, B2, B2, B1)
-            ci, leg_i, cj, leg_j = _BONDS[bond]["ends"]
-            idx_i = _index_of(corners[ci], leg_i)
-            idx_j = _index_of(corners[cj], leg_j)
-            M = _bond_gram(corners, bond)
-            Q, kmax, rank = _gilt_cascade(
-                M, idx_i.charges, idx_j.charges, idx_i.symmetry, config
-            )
+            gram = _bond_gram(corners, bond)
+            Q, kmax, rank = _gilt_cascade(gram, config)
             kmaxes.append(kmax)
             # Absorb whenever the cascade refined the bond or the flat Q
             # carries a rank cut; skip only the exact no-op (flat AND
             # full-rank), where absorbing would just rotate the bond gauge.
-            if kmax >= 1 or rank < M.shape[0]:
+            if kmax >= 1 or rank < gram.dim:
                 B1, B2 = _split_and_absorb((B1, B2), bond, Q, cut)
         lap_log.append(kmaxes)
         if all(k <= 1 for k in kmaxes):
