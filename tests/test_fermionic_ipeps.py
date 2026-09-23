@@ -512,11 +512,21 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
     # test_descending_order_still_cannot_be_traced_as_one_code_path``
     # exercises.
     #
-    # The true statement is about AGREEMENT, not reachability: the
-    # base_charges branch mirrors ``_retruncate_by_base_charges`` so the
-    # traced per-sector keep counts match the eager path's, and the
-    # proportional fallback carries no such guarantee.  So unpinning costs
-    # traced/eager parity under AD; it does not cost the ability to trace.
+    # The true statement is about AGREEMENT, not reachability: the traced
+    # base_charges branch is built to reproduce the EAGER per-sector keep
+    # counts, and the proportional fallback carries no such guarantee.  So
+    # unpinning costs traced/eager parity under AD; it does not cost the
+    # ability to trace.
+    #
+    # The eager side is the ``base_charges is not None`` branch inside
+    # ``_truncated_svd_symmetric`` (``linalg.py:525-600``), implemented
+    # inline there.  Naming the live code rather than a helper matters here:
+    # the first revision of this line cited ``_retruncate_by_base_charges``,
+    # copying the phrasing from ``linalg.py:752``/``:860``, and **no such
+    # function exists anywhere in the tree** -- it survives only in comments
+    # that reference it.  A reader sent to verify the central claim would
+    # have found nothing.  (Those two production comments still carry the
+    # dead name; out of scope for this branch, flagged separately.)
     #
     # There used to be a second reason here -- that unpinning breaks the
     # 2x2 split-CTM, which could not contract a corner against an edge
