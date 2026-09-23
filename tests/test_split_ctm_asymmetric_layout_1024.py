@@ -249,3 +249,147 @@ def test_the_2x2_split_ctm_runs_when_the_two_cells_seed_differently():
     B = _site(_VERT_REORDERED, _VERT_REORDERED, _VERT, _VERT, 1)
     env_A, env_B = ctm_split_tensor_2site(A, B, _CHI, max_iter=4, conv_tol=1e-6)
     assert env_A is not None and env_B is not None
+
+
+# --------------------------------------------------------------------- #
+# Different MULTISET across the sublattices, on a fixture verified legal #
+# first.  The cross-cell arms above differ only in charge ORDER, and     #
+# their fixtures leave the vertical bonds unpaired (`A.u=[0,1,0]` against#
+# `B.d=[1,0,0]`), so they exercise the seed invariant but not a state    #
+# the lattice could actually produce.                                    #
+# --------------------------------------------------------------------- #
+
+#: Checkerboard pairing is ``A.d<->B.u`` and ``B.d<->A.u`` (README:363), so a
+#: LEGAL state can give the two sublattices different ``u`` layouts: B's ``u``
+#: is the partner of A's ``d``, not of A's ``u``.
+_SUB_X = np.array([0, 1, 0], dtype=np.int32)
+_SUB_Y = np.array([0, 1, 1], dtype=np.int32)
+
+
+def _legal_checkerboard_pair():
+    """A/B whose four bonds all pair, with the sublattices' ``u`` differing."""
+    return (
+        _site(_SUB_X, _SUB_Y, _HORIZ, _HORIZ, 0),
+        _site(_SUB_Y, _SUB_X, _HORIZ, _HORIZ, 1),
+    )
+
+
+def test_the_legal_sublattice_fixture_reaches_the_case_it_claims_to():
+    """Regime guard: the bonds must pair AND the seeds must disagree.
+
+    The pairing half matters on its own.  If the two ends of a vertical bond
+    carry different charges the state is not something the lattice can hold,
+    and a downstream failure would be correct behaviour rather than a defect
+    -- so a test built on an unpaired fixture cannot distinguish the two.
+    """
+    from tenax.algorithms._ctm_utils import _derive_charges
+
+    A, B = _legal_checkerboard_pair()
+    assert _layout(A, "u") == _layout(B, "d"), "A.u<->B.d unpaired: illegal state"
+    assert _layout(A, "d") == _layout(B, "u"), "A.d<->B.u unpaired: illegal state"
+    assert _multiset(_derive_charges(_SUB_X, _CHI)) != _multiset(
+        _derive_charges(_SUB_Y, _CHI)
+    ), "both sublattices tile alike -- the envs would agree by accident"
+
+
+#: Both legs of every corner, from ``_CORNER_SPECS``.  One leg each is not
+#: enough: each corner carries one horizontal and one vertical leg, so a
+#: partial initializer that shared the seed across cells for the horizontal
+#: legs while keeping a per-cell seed for the vertical ones would satisfy a
+#: horizontal-only assertion *and* the same-cell seam checks above, and still
+#: produce incompatible vertical cross-cell contractions.  The only thing left
+#: to catch that would be the end-to-end arm below, which is ``slow`` and so
+#: sits outside the required gate this file is registered for -- which makes
+#: this the assertion that has to discriminate.
+_CORNER_LEGS = (
+    ("C1", "c1_d"),
+    ("C1", "c1_r"),
+    ("C2", "c2_l"),
+    ("C2", "c2_d"),
+    ("C3", "c3_u"),
+    ("C3", "c3_l"),
+    ("C4", "c4_r"),
+    ("C4", "c4_u"),
+)
+
+
+#: The OUTER chi leg of each edge half -- the end that contracts across a cell
+#: boundary.  Corners alone are not enough: wiring the shared seed into
+#: ``_init_symmetric_corner`` but dropping it from the edge builders leaves all
+#: eight corner comparisons passing while every one of these differs.  Verified
+#: by simulating exactly that: the corner assertion PASSED and all eight of
+#: these read ``{0: 11, 1: 5}`` against ``{0: 6, 1: 10}``.
+#:
+#: Deliberately NOT the ``*_ket`` / ``*_bra`` D legs (``u_ket``, ``d_ket``, ...).
+#: Those are the site's own virtual bonds and are *supposed* to differ between
+#: sublattices -- on this fixture ``u`` is ``{0:2, 1:1}`` on A and ``{0:1, 1:2}``
+#: on B.  Asserting them equal would fail correct code.
+#:
+#: Also not the ``*_I`` interlayer bonds: they happen to agree, but they are
+#: internal to one edge's ket/bra split rather than contracted across cells, so
+#: requiring agreement there would assert more than the invariant.
+_EDGE_CHI_LEGS = (
+    ("T1_ket", "t1k_l"),
+    ("T1_bra", "t1b_r"),
+    ("T2_ket", "t2k_u"),
+    ("T2_bra", "t2b_d"),
+    ("T3_ket", "t3k_r"),
+    ("T3_bra", "t3b_l"),
+    ("T4_ket", "t4k_d"),
+    ("T4_bra", "t4b_u"),
+)
+
+
+def test_every_edge_chi_leg_agrees_across_a_legal_sublattice_split():
+    """The edges too, not only the corners.
+
+    The same-cell seam test earlier cannot cover this: it builds each
+    environment with no cross-cell seed at all, so that env's corner and edge
+    legs both derive from its own site tensor and agree trivially.  Only a
+    cross-cell comparison of the edges themselves detects a seed wired into
+    the corners but dropped from the edge builders.
+    """
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        _initialize_split_multisite_env,
+    )
+
+    A, B = _legal_checkerboard_pair()
+    envs = _initialize_split_multisite_env({(0, 0): A, (1, 0): B}, _CHI, _CHI)
+    for edge, leg in _EDGE_CHI_LEGS:
+        got = _layout(getattr(envs[(0, 0)], edge), leg)
+        want = _layout(getattr(envs[(1, 0)], edge), leg)
+        assert got == want, f"{edge}.{leg} differs across sublattices: {got} vs {want}"
+
+
+def test_every_corner_leg_agrees_across_a_legal_sublattice_split():
+    """Both legs of all four corners: a partial fix must not pass.
+
+    Measured before the fix: ``{0: 11, 1: 5}`` on sublattice A against
+    ``{0: 6, 1: 10}`` on B.
+    """
+    from tenax.algorithms._split_ctm_tensor_convergence import (
+        _initialize_split_multisite_env,
+    )
+
+    A, B = _legal_checkerboard_pair()
+    envs = _initialize_split_multisite_env({(0, 0): A, (1, 0): B}, _CHI, _CHI)
+    for corner, leg in _CORNER_LEGS:
+        got = _layout(getattr(envs[(0, 0)], corner), leg)
+        want = _layout(getattr(envs[(1, 0)], corner), leg)
+        assert got == want, (
+            f"{corner}.{leg} differs across sublattices: {got} vs {want}"
+        )
+
+
+@pytest.mark.slow
+def test_the_2x2_split_ctm_runs_on_a_legal_sublattice_dependent_state():
+    """End to end on a state the lattice can actually hold.
+
+    ``chi=5`` deliberately: the crash this reproduces
+    (``ValueError: Size of label 'c' for operand 1 (3) does not match previous
+    terms (2)``) needs a chi where the two seeds tile to different sector
+    counts, and small chi reaches it in one sweep.
+    """
+    A, B = _legal_checkerboard_pair()
+    env_A, env_B = ctm_split_tensor_2site(A, B, 5, max_iter=1, conv_tol=1e-6)
+    assert env_A is not None and env_B is not None
