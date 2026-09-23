@@ -33,6 +33,7 @@ from _fermionic_fock_oracle import (
     plain_amplitudes,
     plain_double_layer,
     random_even_tensors,
+    real_scalar,
     sign_formula,
     site_bits,
     sites_of,
@@ -141,6 +142,22 @@ def test_the_derived_local_rule_reproduces_the_oracle(R, C):
         assert abs(E_plain - E_fock) > 1e-3
 
 
+def _complex_even_tensors(R, C, seed):
+    rng = np.random.default_rng(seed)
+    re, im = random_even_tensors(R, C, rng), random_even_tensors(R, C, rng)
+    return {s: re[s] + 1j * im[s] for s in re}
+
+
+def test_the_derived_local_rule_reproduces_the_oracle_for_complex_tensors():
+    R, C = 2, 2
+    As = _complex_even_tensors(R, C, 4)
+    E_fock = hop_energy(R, C, fock_psi(R, C, As), fermion=True)
+    Es = {s: plain_double_layer(A) for s, A in As.items()}
+    E_rule, norm = double_layer_energy(R, C, Es, rule=True)
+    assert norm > 0
+    assert E_rule == pytest.approx(E_fock, abs=1e-12)
+
+
 # ------------------------------------------------------------------ #
 # 4. tenax's double layer (the #1037 defect)                          #
 # ------------------------------------------------------------------ #
@@ -206,7 +223,7 @@ def _tenax_energy(R: int, C: int, As: dict) -> float:
         ops += [ident(n_of[s]) for s in sites if n_of[s] not in on]
         if bond is not None:
             ops.append(hop(*on))
-        return float(np.asarray(contract(*ops).todense()).reshape(-1)[0])
+        return real_scalar(contract(*ops).todense())
 
     norm = value(None)
     return sum(value((s, t)) for s, _, t, _ in bonds_of(R, C)) / norm
@@ -228,6 +245,17 @@ def test_1037_tenax_double_layer_is_the_hard_core_boson_functional(R, C):
         E_fock = hop_energy(R, C, fock_psi(R, C, As), fermion=True)
         assert E_tenax == pytest.approx(E_hcb, abs=1e-10)
         assert abs(E_tenax - E_fock) > 1e-3
+
+
+def test_1037_characterization_holds_for_complex_tensors():
+    """Same defect pin as above, with complex site tensors (2x2)."""
+    R, C = 2, 2
+    As = _complex_even_tensors(R, C, 5)
+    E_tenax = _tenax_energy(R, C, As)
+    E_hcb = hop_energy(R, C, plain_amplitudes(R, C, As), fermion=False)
+    E_fock = hop_energy(R, C, fock_psi(R, C, As), fermion=True)
+    assert E_tenax == pytest.approx(E_hcb, abs=1e-10)
+    assert abs(E_tenax - E_fock) > 1e-3
 
 
 @pytest.mark.xfail(

@@ -314,11 +314,20 @@ def double_layer_energy(
         if bond is not None:
             _, s, t = bond
             args += [_H2, [pid[s][1], pid[t][1], pid[s][0], pid[t][0]]]
-        return float(np.einsum(*args, [], optimize="greedy"))
+        return real_scalar(np.einsum(*args, [], optimize="greedy"))
 
     bonds = [("h" if x == "r" else "v", s, t) for s, x, t, _ in bonds_of(R, C)]
     norm = net(None)
     return sum(net(b) for b in bonds) / norm, norm
+
+
+def real_scalar(x) -> float:
+    """A closed network that must be real (a norm, a Hermitian expectation
+    value): check the imaginary residual, then return the real part.  Complex
+    tensors give a complex dtype even when the value is real."""
+    z = complex(np.asarray(x).reshape(-1)[0])
+    assert abs(z.imag) <= 1e-10 * max(1.0, abs(z.real)), z
+    return z.real
 
 
 def plain_double_layer(A: np.ndarray) -> np.ndarray:
