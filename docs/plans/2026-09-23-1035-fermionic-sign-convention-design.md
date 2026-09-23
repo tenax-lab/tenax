@@ -269,17 +269,19 @@ complete one, gated on an oracle that can.
 | storage order | carries no physics | **is** physics: the Grassmann order |
 | double layer | needs a derived gate rule (24 terms for the NN hop, §3.3); a drawing got it wrong | falls out of rules 1–3 (§3.4, matches Fock to 1e−16) |
 | each new operator / RDM shape | new rule to derive and certify | nothing new |
-| odd tensors (excitations, c† correlators) | non-local string through the environment, by hand | follows from the declared global order (§3.4) |
+| odd tensors (excitations, c† correlators) | non-local string through the environment, by hand | automatic on a finite network in the declared global order (§3.4). A CTM regroups per site and loses it (§3.4's regroup table), so the environment has to carry that order explicitly (§5 step 7) |
 | the #994 class | a signed reorder of a sign-free result | a **sign-free** reorder (`permute_legs`) of a graded result |
-| compile / AD cost | ~0 | a per-block constant sign; #986 measured graded overhead at ~2% of compile |
+| compile / AD cost | ~0 | **unmeasured.** Per-block constant signs (no data-dependent work), but applied in every contraction and every `bar`. #986's ~2% measured only today's `transpose` signs against a bosonic control, so it does not bound this. Benchmark the step-1 reference contractor. |
 | migration risk | every missed gate is silent | every sign-free reorder is silent; linalg and the 9 CTM sites must be re-derived |
 
 **Why B:**
 - **Correctness by construction.** Three local, mechanical rules reproduce the
   oracle exactly, including odd tensors. A needs a certified rule for every
   diagram shape, and §3.3 shows the obvious rule is wrong.
-- **Excitations** (a stated goal) need odd B tensors, which is where A is
-  weakest.
+- **Excitations** (a stated goal) need odd B tensors. Neither A nor B gets a
+  CTM with odd insertions for free (§5 step 7). But B needs a single declared
+  order, which the environment carries. A needs strings threaded by hand for
+  every operator shape.
 - **Enforcement stays possible.** B also has one silent failure: a sign-free
   reorder of fermionic data. A strict mode can catch it, just as revision 1's
   plan catches a graded `transpose`: `permute_legs` raises on fermionic
@@ -396,10 +398,23 @@ result.
    superseded.
 5. **Strict mode.** `permute_legs` on fermionic tensors raises when a flag is
    set. Run the full suite under it for the census, then migrate.
-6. **Flip the default** and delete the sign-free fermionic contraction path.
-   Re-check the fermionic SU against G2′; it has not been verified yet.
-7. **Excitations** on the graded path, with odd B checked against G2′ (§3.4
-   shape) before any momentum-space code.
+6. **Flip both defaults.** Delete the sign-free fermionic contraction path, and
+   make `permute_legs` on a fermionic `SymmetricTensor` **raise by default**,
+   permanently and not just behind the census flag. A new caller then cannot
+   reintroduce the silent failure named in D0. Anything that really needs a
+   sign-free relabelling of fermionic data must say so through a separately
+   named method. Re-check the fermionic SU against G2′; it has not been
+   verified yet.
+7. **Odd insertions in the CTM, then excitations.** Graded contraction alone is
+   not enough here. §3.4's regroup experiment is exactly the per-site double
+   layer a CTM builds, and it gets the sign wrong whenever the bra insertion
+   follows the ket insertion. Before any excitation code, add a representation
+   that keeps the global `bar(K_N)…bar(K_1) K_1…K_N` order through the
+   environment. The candidate: odd double layers carry their parity on an
+   explicit leg that is threaded, in the declared order, through the corner
+   and edge tensors, so the string is part of the network's data. The gate is
+   that it reproduces §3.4's full (x, y) table on 2×2 and 2×3 against G2′,
+   including the sign for y after x. Momentum-space code comes after that.
 
 **If A is chosen instead**, revision 1's plan applies unchanged: add `braid` and
 G1, add a strict graded `transpose`, migrate mechanically, flip the default,
