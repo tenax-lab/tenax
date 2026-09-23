@@ -356,10 +356,19 @@ def test_fermionic_ctm_energy_converges_to_the_analytic_product_value():
     gate = spinless_fermion_gate(cfg)
     expected = 2.0 * V
 
-    E_coarse, _ = _energy_and_rdms(*_perturbed_all_occupied_pair(_EPS_COARSE, 17), gate)
+    E_coarse, rdms_coarse = _energy_and_rdms(
+        *_perturbed_all_occupied_pair(_EPS_COARSE, 17), gate
+    )
     A, B = _perturbed_all_occupied_pair(_EPS_FINE, 17)
     E_fine, rdms = _energy_and_rdms(A, B, gate)
 
+    # BOTH environments are gated, not just the fine one.  The assertion below
+    # is a RATIO, so a non-PSD coarse environment would make `E_coarse` an
+    # unbounded not-an-expectation-value, inflate `dev_coarse`, and let the 10x
+    # shrink pass while demonstrating nothing (Codex P2, round 2).  A vacuous
+    # pass here is worse than a failure: it certifies convergence that was
+    # never measured.
+    _assert_all_four_rdms_psd(rdms_coarse, "near-product (coarse eps)")
     _assert_all_four_rdms_psd(rdms, "near-product")
 
     # Regime guard: this must still be the all-occupied state, or 2V is not the
@@ -450,9 +459,38 @@ def test_the_psd_gate_still_rejects_a_real_collapse_at_this_tolerance():
     and requires it to fail, so a future tolerance change that quietly disarms
     the gate cannot pass unnoticed.
 
-    Without this, ``_PSD_TOL`` could drift to 1e-1 and every assertion in this
-    file would still be green.
+    The #854-scale fixture alone does NOT establish that, which was the second
+    round-2 Codex P2 and it was right: at margin ``-0.669`` the collapse stays
+    rejected even at ``_PSD_TOL = 1e-1``, so a test built only on it would go
+    on passing through exactly the drift its docstring warned about.  A guard
+    that cannot fail for the reason it names is not a guard.
+
+    So the tolerance is pinned three ways: an explicit ceiling, a fixture just
+    ABOVE ``_PSD_TOL`` that must be rejected, and one just BELOW it that must
+    be accepted.  Together those bracket the threshold, so moving ``_PSD_TOL``
+    in either direction turns something red.
     """
+    # 1. An explicit ceiling. Independent of any fixture, so it survives even
+    #    if the ones below are ever weakened.
+    assert _PSD_TOL <= 1e-4, (
+        f"_PSD_TOL has drifted to {_PSD_TOL:g}. The CTM noise it must sit "
+        f"above is ~1e-8 and the #854 collapse it must reject is ~0.67; "
+        f"anything looser than 1e-4 is no longer discriminating between them"
+    )
+
+    # 2. Bracket the threshold itself. `_psd_margin` is min_eig / radius, so a
+    #    matrix with radius 1 and smallest eigenvalue -m has margin exactly -m.
+    just_bad = np.diag([1.0, 0.1, 0.05, -10.0 * _PSD_TOL])
+    just_ok = np.diag([1.0, 0.1, 0.05, -0.1 * _PSD_TOL])
+    assert _psd_margin(just_bad) == pytest.approx(-10.0 * _PSD_TOL, rel=1e-6)
+    assert _psd_margin(just_ok) == pytest.approx(-0.1 * _PSD_TOL, rel=1e-6)
+
+    with pytest.raises(AssertionError, match="not PSD"):
+        _assert_all_four_rdms_psd({"bond0": just_bad}, "10x over tolerance")
+    # ... and must NOT over-reject just inside it, or the gate would fire on
+    # ordinary convergence noise and the anchors would be unusable.
+    _assert_all_four_rdms_psd({"bond0": just_ok}, "10x under tolerance")
+
     radius = 2.68 / 0.669  # the real #854 report: -2.68, which was 0.669 of radius
     collapsed = np.diag([radius, 0.1, 0.05, -2.68])
     assert _psd_margin(collapsed) == pytest.approx(-0.669, abs=1e-3), (
