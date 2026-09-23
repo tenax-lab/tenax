@@ -27,6 +27,9 @@ _FILE_MARKERS = {
     "test_network.py": "core",
     "test_netfile.py": "core",
     "test_fermionic.py": "core",
+    # The exact fermionic reference (#1037).  2x2 cases only (~6 s); the 2x3
+    # cases carry an explicit ``slow`` and so withhold this marker.
+    "test_fermionic_fock_oracle.py": "core",
     "test_dmrg.py": "algorithm",
     "test_idmrg.py": "algorithm",
     "test_itebd.py": "algorithm",
