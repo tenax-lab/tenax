@@ -532,8 +532,17 @@ def fpeps(
         eigenstates -- fixed points of imaginary time that are not the ground
         state -- and the sweep is observed to settle on them: at 200 steps,
         D=2, ``V=0``, it reports ``E = -6e-05`` where the half-filled answer is
-        about ``-1.6 t``.  :func:`sublattice_gap` tells you *which* state you
-        landed on; it does not tell you it is the ground state.
+        ``-8t/pi**2 = -0.8106``.  :func:`sublattice_gap` tells you *which* state
+        you landed on; it does not tell you it is the ground state.
+
+        That reference is the **spinless** one, which is what this model is:
+        the local space is ``{|0>, |1>}`` (``d = 2``).  At ``V = 0`` the
+        Hamiltonian is free fermions with ``eps(k) = -2t(cos kx + cos ky)``,
+        and filling every ``eps < 0`` state -- which is half filling at
+        ``mu = 0`` -- gives ``E/site = -8t/pi**2 = -0.810569``.  This line
+        previously read ``-1.6 t``, which is ``-16t/pi**2``, the value for
+        *spinful* fermions (two species); an acceptance target that is wrong by
+        a factor of two certifies the wrong answer in both directions.
 
     Args:
         hamiltonian_gate: 2-site Hamiltonian as SymmetricTensor.
