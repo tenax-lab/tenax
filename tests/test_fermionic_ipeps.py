@@ -500,9 +500,23 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
     #     V=0, pin OFF   D=3 5/5           D=4 5/5
     #     V=2, pin ON    D=3 2/5           D=4 4/5
     #
-    # Nor is "not a structural need" right in general: under a tracer the
-    # global SV sort cannot run at all (``linalg.py`` dispatches to a
-    # static per-sector allocation).
+    # What the pin IS still good for is narrower than "structural need",
+    # and narrower than the previous revision of this comment claimed.
+    # That revision said the global SV sort "cannot run at all" under a
+    # tracer, implying the pin is required for traceability.  It is not:
+    # ``_truncated_svd_symmetric_traced`` handles ``base_charges=None``
+    # with a proportional static allocation (the ``else`` branch at
+    # ``linalg.py:880``, "proportional to per-sector available capacity"),
+    # so an unpinned traced SVD is reachable -- which
+    # ``test_svd_bond_order.py:226::
+    # test_descending_order_still_cannot_be_traced_as_one_code_path``
+    # exercises.
+    #
+    # The true statement is about AGREEMENT, not reachability: the
+    # base_charges branch mirrors ``_retruncate_by_base_charges`` so the
+    # traced per-sector keep counts match the eager path's, and the
+    # proportional fallback carries no such guarantee.  So unpinning costs
+    # traced/eager parity under AD; it does not cost the ability to trace.
     #
     # There used to be a second reason here -- that unpinning breaks the
     # 2x2 split-CTM, which could not contract a corner against an edge
