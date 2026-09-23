@@ -502,9 +502,17 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
     #
     # Nor is "not a structural need" right in general: under a tracer the
     # global SV sort cannot run at all (``linalg.py`` dispatches to a
-    # static per-sector allocation), and unpinning currently breaks the
-    # 2x2 split-CTM, which cannot contract a corner against an edge once
-    # the layout goes direction-dependent (#1024).  See #878.
+    # static per-sector allocation).
+    #
+    # There used to be a second reason here -- that unpinning breaks the
+    # 2x2 split-CTM, which could not contract a corner against an edge
+    # once the layout went direction-dependent.  **That was #1024 and it
+    # is fixed** (``ded9446`` seeds every environment chi leg from one
+    # shared axis); ``test_split_ctm_asymmetric_layout_1024.py::
+    # test_the_2x2_split_ctm_runs_on_every_layout`` now covers exactly the
+    # layouts simple update discovers once the pin is gone.  Leaving it
+    # written as a present-tense limitation would misdirect the #878 work,
+    # which is gated on this and no longer blocked by it.  See #878.
     orig_pin = isu._truncation_base_charges
     isu._truncation_base_charges = lambda A, leg: None
     try:
