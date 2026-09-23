@@ -303,7 +303,8 @@
 
   The seed is shared across every **cell** too, not just within one: a 2x2
   plaquette spans four cells, so `Q_TL.chi_R` contracts against `Q_TR.chi_L`.
-  `initialize_split_ctm_tensor_env` takes an optional `chi_seed` and
+  `initialize_split_ctm_tensor_env` takes an optional `chi_ref_charges`
+  (formerly `chi_seed`, still accepted as a deprecated alias) and
   `_initialize_split_multisite_env` derives one array for the cell. Two
   independent cases are covered: sublattices differing only in charge *order*,
   and — on a fixture first verified to have all four bonds paired, since the

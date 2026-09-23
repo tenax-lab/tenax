@@ -15,6 +15,7 @@ __all__ = [
     "initialize_split_ctm_tensor_env",
 ]
 
+import warnings
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -505,6 +506,7 @@ def initialize_split_ctm_tensor_env(
     chi_I: int,
     *,
     chi_ref_charges: np.ndarray | None = None,
+    chi_seed: np.ndarray | None = None,
 ) -> SplitCTMTensorEnv:
     """Initialize a SplitCTMTensorEnv from an iPEPS site tensor.
 
@@ -512,10 +514,28 @@ def initialize_split_ctm_tensor_env(
         A:     Site tensor with 5 legs ``(u, d, l, r, phys)``.
         chi:   Environment bond dimension.
         chi_I: Interlayer bond dimension.
+        chi_ref_charges: Charge array the chi legs are tiled from, overriding
+               the default read off ``ref_axis``.
+        chi_seed: Deprecated alias for ``chi_ref_charges``.  Kept because
+               ``CHANGELOG.md`` documents the old keyword by name, so callers
+               outside this repository were told to use it and a bare rename
+               would turn those calls into ``TypeError``.  Passing both raises.
 
     Returns:
         Initialized SplitCTMTensorEnv.
     """
+    if chi_seed is not None:
+        if chi_ref_charges is not None:
+            raise TypeError(
+                "pass chi_ref_charges or its deprecated alias chi_seed, not both"
+            )
+        warnings.warn(
+            "chi_seed is deprecated; use chi_ref_charges instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        chi_ref_charges = chi_seed
+
     D = A.indices[0].dim  # virtual bond dim
     dtype = A.dtype
 
