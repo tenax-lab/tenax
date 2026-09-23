@@ -86,8 +86,13 @@ _CONV_METHOD_STR_TO_INT = {"sv": 0, "elementwise": 1}
 _CONV_METHOD_INT_TO_STR = {0: "sv", 1: "elementwise"}
 
 
-_PB_STR_TO_INT = {"auto": 0, "standard": 1, "lorentzian": 2}
-_PB_INT_TO_STR = {0: "auto", 1: "standard", 2: "lorentzian"}
+# Any value missing here is silently encoded as 0 == "auto" by the ``.get``
+# below, so a new ``projector_backward`` spelling that is not added to BOTH
+# maps round-trips to "auto" at the JIT boundary and is quietly ignored.
+# "flow" (#983) is exactly such a value -- omitting it would re-freeze the
+# 2x2 projectors on the very explicit-AD path the option exists to fix.
+_PB_STR_TO_INT = {"auto": 0, "standard": 1, "lorentzian": 2, "flow": 3}
+_PB_INT_TO_STR = {0: "auto", 1: "standard", 2: "lorentzian", 3: "flow"}
 
 
 def _config_to_tuple(config) -> tuple:
@@ -1382,6 +1387,7 @@ def ctm_split_tensor_converge_explicit(
     num_steps: int | None = None,
     warmup_steps: int = 0,
     recipe: str = "2x2",
+    projector_backward: str = "auto",
     _recipe_warning_emitted: bool = False,
 ):
     """Split-CTM with explicit (unrolled) autodiff.
@@ -1451,6 +1457,7 @@ def ctm_split_tensor_converge_explicit(
                 chi_I,
                 renormalize,
                 recipe="2x2",
+                projector_backward=projector_backward,
             )[(0, 0)]
     else:
 

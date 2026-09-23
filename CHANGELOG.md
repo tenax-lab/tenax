@@ -289,6 +289,133 @@
 
 ### Fixed
 
+- **The split-CTM chi seed is one array for the whole environment** (#1024):
+  every chi bond of a split env has two ends, both seeded by tiling one of
+  `A`'s virtual legs, and seeding them from *different* legs left the seam
+  contractible only when those legs happened to agree — the 2x2 plaquette
+  projector died with a shape error otherwise, which is what simple update
+  produces once truncation is free to discover the bond charges (#878).
+  `_derive_charges` tiles the charge *array*, so it is order-sensitive and not
+  merely multiset-sensitive: `[0,1,0]` at chi=16 yields 5 odd slots, `[1,0,0]`
+  yields 6. "An axis with the same charges" is therefore not "the same axis",
+  which is how the vertical seams stayed broken after the horizontal ones were
+  fixed.
+
+  The seed is shared across every **cell** too, not just within one: a 2x2
+  plaquette spans four cells, so `Q_TL.chi_R` contracts against `Q_TR.chi_L`.
+  `initialize_split_ctm_tensor_env` takes an optional `chi_seed` and
+  `_initialize_split_multisite_env` derives one array for the cell. Two
+  independent cases are covered: sublattices differing only in charge *order*,
+  and — on a fixture first verified to have all four bonds paired, since the
+  checkerboard pairs `A.d<->B.u` and `B.d<->A.u` rather than `A.u<->B.u` —
+  sublattices differing in *multiset*, which crashed
+  `ctm_split_tensor_2site(chi=5, max_iter=1)` on `FermionParity` D=3 with
+  `ValueError: Size of label 'c' for operand 1 (3) does not match previous
+  terms (2)`.
+
+- **`projector_backward` now works on the 2x2 CTM recipe** (#983):
+  `_compute_2x2_projector` returned `stop_gradient(P_top), stop_gradient(P_bot)`
+  unconditionally, so `dP/dA` was dropped from every gradient taken through the
+  default `recipe="2x2"` path and the knob had no effect there at all.  It is
+  now honoured end to end (sweep -> move -> projector, dense and symmetric):
+  `projector_backward="flow"` lets the projector response reach the gradient,
+  backed by a new `_regularized_dense_svd` (bare `_dense_svd` forward,
+  Lorentzian backward).  **The default is unchanged** — every other value,
+  including `"auto"`, still freezes the projectors — so no existing gradient
+  moves, and the eager forward is bit-identical because only the VJP changed.
+
+  What it is worth, measured on ONE CTM sweep against a gauge-invariant
+  functional (deliberately not at a fixed point, where the comparison is
+  confounded by #841): frozen gives AD/FD ratios spanning **-7.98 to +14.95**
+  across D=2 chi=4 and D=3 chi=9 — wrong by up to 15x and sometimes wrong in
+  *sign* — against **1.000000** to seven digits flowing.  On `ctm_energy_explicit`,
+  which has no adjoint solve, 0.229..0.928 frozen against 0.944..0.994 flowing.
+  Use `"flow"` there today.
+
+  Reachable from the supported API: `"flow"` is accepted by
+  `CTMConfig.projector_backward`, round-trips through the JIT-boundary tuple
+  encoding in `ad_utils` (a value missing from `_PB_STR_TO_INT` is silently
+  encoded as `"auto"`, which would have re-frozen the projectors on the very
+  path the option exists to fix), is declared in the tuning registry, and is
+  threaded through the **split** 2x2 chain as well as the fused one — split
+  energy -> sweep -> plaquette projector. Both gaps were caught in review of
+  this PR's first revision.
+
+  A third layer was found on the next pass: `make_ctm_energy_fn`, the
+  dispatcher `optimize_gs_ad` actually calls, forwarded
+  `ctm_cfg.projector_backward` on the fused explicit branch but not on either
+  split explicit branch, so `CTMConfig(projector_backward="flow")` with
+  `fuse_virtual_legs=False` still froze. The option had now been dropped at
+  three successive layers -- projector, split chain, dispatcher -- each time
+  because the caller simply did not pass it, which is invisible to any test
+  exercising only the layer below. There is now a dispatcher-level test that
+  stubs the leaf energy functions and reads back the kwarg; it fails on
+  exactly the two split branches if the forwarding is removed.
+
+  **Why it is opt-in and not the default.**  Restoring `dP/denv` puts the CTM
+  gauge mode back into `J`, and the implicit-AD adjoint `(I - Jᵀ)λ = dE/denv`
+  then has no reliable solution: on the D=2 chi=4 fixture of
+  `test_adjoint_convergence_gate.py` the flowing residual runs 4.2e-13 /
+  4.5e-15 / 5.1e-01 / 8.1e-02 / 7.9e-01 at `ctm_max_iter` 20/40/80/150/300
+  (`forward_gauge="phase"`; `"sigma"` is likewise erratic), flat in both Krylov
+  restart and `maxiter`, while the frozen control is 1e-16 at every point.
+  A well-posed fixed point does not swing 15 orders of magnitude with the
+  forward sweep count — this is #841: the 2x2 forward does not reach an
+  element-wise fixed point, so linearizing the *true* step map around it is
+  ill-posed.  Freezing hides that by substituting a different, artificially
+  contracting operator, which means the implicit gradient solves the wrong
+  linear system exactly.  #841 has to land before `"flow"` can be the default
+  under implicit AD.
+
+  Two premises in the issue were misdiagnoses, corrected here.  The NaN the
+  freeze was protecting against is triggered by EXACT rank deficiency
+  (`_fishman_truncate_S` zeroes the sub-floor tail, so `F_ij = 1/(s_i^2 -
+  s_j^2)` evaluates `1/(0-0)`), not by the "near-degenerate singular values ...
+  typical at small D" the old comment blamed: a point carrying a 2.2e-06
+  adjacent gap and no exact zero differentiates cleanly unregularized, while
+  the points that NaN are exactly the rank-deficient ones.  And tuning the
+  Lorentzian `eps`, the fix the issue suggested, was measured and refuted —
+  1e-12/1e-10/1e-8/1e-6 give 2.10/2.03/2.25/2.53 at the hardest point.
+
+- **A non-finite CTM environment can no longer certify as converged** (#974).
+  `max(0.0, float("nan"))` is `0.0` — every comparison against NaN is False, so
+  Python's `max` returns its *first* argument, and the sibling idiom
+  `if diff > worst` never fires either. Both appear in the convergence
+  reducers, so a NaN leaf difference vanished from the aggregate and
+  `python_loop_ctm_converge` returned `converged=True, sv_diff=0.0` over an
+  environment whose every tensor was NaN. `ctm_conv_method` defaults to
+  `"elementwise"`, which is the affected path; the spectral `"sv"` method was
+  already correct and is pinned by a test so a future refactor cannot trade one
+  for the other. Four aggregation sites are fixed behind one `_nan_safe_max`
+  helper: `_max_env_leaf_diff`, both of `_ctm_loop_core`'s per-coordinate
+  aggregations (whose comment already *assumed* a NaN leaf would propagate),
+  and both honeycomb reducers — an SVD of a NaN corner yields NaN singular
+  values rather than raising, so `"svd"` had the same hole. Any non-finite
+  input now collapses the aggregate to `inf`, which fails closed on both
+  downstream tests (`inf < conv_tol` is False, and the plateau guard's
+  `math.isfinite` rejects it). The trap is order-dependent, which is how it
+  survived review: `max(nan, 0.0)` *is* `nan`, so only an accumulator seeded
+  from `0.0` loses it.
+- **The final energy `optimize_gs_ad` returns is now an evaluation of the
+  tensor it returns** (#899): the three optimizer paths (1-site, 2-site, and
+  `_optimize_gs_ad_multisite`) each re-evaluated the final and best tensors
+  with `env_init=_env_cache["envs"]`, directly under a block comment
+  promising a "fully converged fresh CTM ... so we compare fresh evaluations
+  only".  With a line search enabled (`gs_optimizer` `lbfgs`/`cg`, or an
+  explicit `gs_line_search`) `_restore_env_cache_after_line_search` has just
+  reverted that cache to the environment converged at the *previous*
+  parameters, so the seed belonged to a different state: the reported energy
+  was a partially-converged restart from a stale environment, not a property
+  of the returned tensor, and the `E_final <= E_best` comparison that decides
+  *which* tensor to return weighed one seeded number against another.  At
+  D=2/chi=6 the returned energy sat 1.3e-3 below a cold re-evaluation of the
+  same tensor.  Both evaluations are now seeded from scratch on all three
+  paths.  The #469 chi-padding of the best-environment snapshot existed
+  solely to make it shape-compatible *as a seed* and is removed with it;
+  `optimize_gs_ad` is unchanged when no line search is active, where the
+  cache was never reverted and the seed was already the current state's own
+  environment.
+
 - **The sigma forward gauge is a pure gauge transform again** (#798): the
   2x2 sweep writes every corner axis-reversed relative to the canonical
   `_ctm_tensor_init` order, and `_apply_sigma_to_corner` /
@@ -1214,6 +1341,22 @@
 
 ### CI / tests
 
+- **`test_regularized_qr_backward_finite_at_rank_deficiency` now fails when the
+  `diag(R)` floor is removed** (#927).  It previously did not: the input was
+  built by zeroing singular values and reconstructing
+  (`s.at[8:].set(0.0); M = (U * s) @ Vh`), which leaves `min|diag(R)|` at
+  ~5e-17 rather than at zero — so raw `jnp.linalg.qr`'s VJP is finite too, the
+  floor never engages, and asserting "our gradient is finite" passes for free.
+  #913's mutation run had measured exactly this and disclosed it rather than
+  fixing it: delete the floor and three *other* tests failed while this one
+  passed.  A **structurally** zero column is what makes the real square case
+  genuinely singular — measured on real 12x12: svd-zeroed 4.974e-17 (raw
+  finite), duplicated column 2.640e-16 (raw finite), zero column **0.000e+00**
+  (raw non-finite).  The test now uses a zero column, parametrised over first /
+  middle / last position, asserts the exactly-zero precondition, and asserts
+  non-vacuity the way #913/#917 do for the wide and complex branches — that raw
+  JAX really does go non-finite, so the floor is demonstrably doing work.
+  Verified by re-running the mutation: **6 failures now, against 3 before.**
 - **The merge queue runs only the required jobs** (`no-cython-shard`, `docs`
   and `build` now carry `if: github.event_name != 'merge_group'`).  The
   queue's 120-minute limit is a *scheduling* budget, not a compute one: after
