@@ -75,8 +75,12 @@ permutation inverts, followed by `permute_legs(p)`.
 | FermionParity | **0.0** | 59/60 | 59/59 | **0.0** |
 | FermionicU1 | **0.0** | 60/60 | 60/60 | **0.0** |
 
-So `transpose(p) ≡ permute_legs(p) ∘ ∏_{inverted pairs} swap_gate`, exactly. Two
-consequences follow:
+So `transpose(p) ≡ permute_legs(p) ∘ ∏_{inverted pairs} swap_gate`, exactly.
+This extends an existing test. `test_swap_gate.py:96`
+(`test_adjacent_transpose_cross_check`, from #988) already pins the identity for
+a single **adjacent** swap on `FermionParity`. The probe covers arbitrary
+permutations, `FermionicU1`, and the `dagger` commutation. Two consequences
+follow:
 
 1. **Removing the signed form costs nothing.** Anyone who really wants the braid
    can write it out as swap gates plus a sign-free permutation, and get the same
@@ -195,8 +199,9 @@ result.
 ## 5. Plan (PR-sized)
 
 1. **Add `braid` and G1, with no behaviour change.**
-   `SymmetricTensor.braid(axes)` as swap gates + `permute_legs`, a test pinning
-   the §3.1 identity (with the drop-one-gate mutant), and a
+   `SymmetricTensor.braid(axes)` as swap gates + `permute_legs`, a test extending
+   `test_adjacent_transpose_cross_check` to the full §3.1 identity (with the
+   drop-one-gate mutant), and a
    storage-order metamorphic test over the fermionic CTM → RDM path. Fix the
    stale citations from §2.2.
 2. **Add a strict mode.** `TENAX_STRICT_GRADED_TRANSPOSE=1` makes graded
