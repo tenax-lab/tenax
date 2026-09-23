@@ -15,6 +15,7 @@ __all__ = [
     "initialize_split_ctm_tensor_env",
 ]
 
+import warnings
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -139,19 +140,27 @@ def _init_symmetric_corner(
     flow_a: FlowDirection,
     flow_b: FlowDirection,
     ref_axis: int,
-    chi_seed: np.ndarray | None = None,
+    chi_ref_charges: np.ndarray | None = None,
 ) -> SymmetricTensor:
     """Create an identity-like SymmetricTensor corner from A's bond charges.
 
-    ``chi_seed`` overrides the reference axis.  Every chi leg in a multisite
-    env must tile ONE array -- the chi ring spans cells, so a per-cell seed
-    lets two sublattices disagree even when each is internally consistent
+    ``chi_ref_charges``, when given, supplies the charge array the chi legs
+    are tiled from *instead of* reading it off ``ref_axis`` -- the axis
+    argument still names where the default comes from, so the two are a source
+    and an override rather than two separate references.  The ``chi_`` prefix
+    is load-bearing next to ``ref_axis_D`` in the edge builders: only the chi
+    source is overridable, because the D leg is a real lattice bond and must
+    keep coming from the site tensor or charge conservation breaks.  Every chi leg in a
+    multisite env must tile ONE array: the chi ring spans cells, so a per-cell
+    seed lets two sublattices disagree even when each is internally consistent
     (#1024).
     """
     ref_idx = A.indices[ref_axis]
     sym = ref_idx.symmetry
     # Derive chi-leg charges: repeat A's bond charges up to chi
-    base_charges = ref_idx.charges if chi_seed is None else np.asarray(chi_seed)
+    base_charges = (
+        ref_idx.charges if chi_ref_charges is None else np.asarray(chi_ref_charges)
+    )
     n_base = len(base_charges)
     if chi <= n_base:
         charges = base_charges[:chi].copy()
@@ -256,7 +265,7 @@ def _init_symmetric_edge_ket(
     ref_axis_D: int,
     *,
     I_charges_arr: np.ndarray | None = None,
-    chi_seed: np.ndarray | None = None,
+    chi_ref_charges: np.ndarray | None = None,
 ) -> SymmetricTensor:
     """Create an identity-like SymmetricTensor ket edge.
 
@@ -269,7 +278,8 @@ def _init_symmetric_edge_ket(
 
     # chi-leg charges from A's ref bond
     chi_charges = _derive_charges(
-        A.indices[ref_axis_chi].charges if chi_seed is None else chi_seed, chi
+        A.indices[ref_axis_chi].charges if chi_ref_charges is None else chi_ref_charges,
+        chi,
     )
     D_charges = np.asarray(A.indices[ref_axis_D].charges.copy(), dtype=np.int32)
 
@@ -324,7 +334,7 @@ def _init_symmetric_edge_bra(
     ref_axis_D: int,
     *,
     I_charges_arr: np.ndarray | None = None,
-    chi_seed: np.ndarray | None = None,
+    chi_ref_charges: np.ndarray | None = None,
 ) -> SymmetricTensor:
     """Create an identity-like SymmetricTensor bra edge.
 
@@ -336,7 +346,8 @@ def _init_symmetric_edge_bra(
 
     D_charges = np.asarray(A.indices[ref_axis_D].charges.copy(), dtype=np.int32)
     chi_charges = _derive_charges(
-        A.indices[ref_axis_chi].charges if chi_seed is None else chi_seed, chi
+        A.indices[ref_axis_chi].charges if chi_ref_charges is None else chi_ref_charges,
+        chi,
     )
 
     # Canonical I-charges (caller-supplied or derived from the bra's local
@@ -494,6 +505,7 @@ def initialize_split_ctm_tensor_env(
     chi: int,
     chi_I: int,
     *,
+    chi_ref_charges: np.ndarray | None = None,
     chi_seed: np.ndarray | None = None,
 ) -> SplitCTMTensorEnv:
     """Initialize a SplitCTMTensorEnv from an iPEPS site tensor.
@@ -502,10 +514,28 @@ def initialize_split_ctm_tensor_env(
         A:     Site tensor with 5 legs ``(u, d, l, r, phys)``.
         chi:   Environment bond dimension.
         chi_I: Interlayer bond dimension.
+        chi_ref_charges: Charge array the chi legs are tiled from, overriding
+               the default read off ``ref_axis``.
+        chi_seed: Deprecated alias for ``chi_ref_charges``.  Kept because
+               ``CHANGELOG.md`` documents the old keyword by name, so callers
+               outside this repository were told to use it and a bare rename
+               would turn those calls into ``TypeError``.  Passing both raises.
 
     Returns:
         Initialized SplitCTMTensorEnv.
     """
+    if chi_seed is not None:
+        if chi_ref_charges is not None:
+            raise TypeError(
+                "pass chi_ref_charges or its deprecated alias chi_seed, not both"
+            )
+        warnings.warn(
+            "chi_seed is deprecated; use chi_ref_charges instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        chi_ref_charges = chi_seed
+
     D = A.indices[0].dim  # virtual bond dim
     dtype = A.dtype
 
@@ -513,7 +543,7 @@ def initialize_split_ctm_tensor_env(
         corners = {}
         for name, (la, lb, fa, fb, ref) in _CORNER_SPECS.items():
             corners[name] = _init_symmetric_corner(
-                A, chi, la, lb, fa, fb, ref, chi_seed
+                A, chi, la, lb, fa, fb, ref, chi_ref_charges
             )
 
         # Compute I-charges once per edge using the ket's flow conventions
@@ -523,7 +553,10 @@ def initialize_split_ctm_tensor_env(
         shared_I_charges: dict[str, np.ndarray] = {}
         for name, (_, _, _, f1, f2, f3, ref_chi, ref_D) in _EDGE_KET_SPECS.items():
             chi_charges = _derive_charges(
-                A.indices[ref_chi].charges if chi_seed is None else chi_seed, chi
+                A.indices[ref_chi].charges
+                if chi_ref_charges is None
+                else chi_ref_charges,
+                chi,
             )
             D_charges = np.asarray(A.indices[ref_D].charges.copy(), dtype=np.int32)
             shared_I_charges[name] = _canonical_I_charges(
@@ -546,7 +579,7 @@ def initialize_split_ctm_tensor_env(
                 ref_chi,
                 ref_D,
                 I_charges_arr=shared_I_charges[name],
-                chi_seed=chi_seed,
+                chi_ref_charges=chi_ref_charges,
             )
 
         bra_edges = {}
@@ -565,7 +598,7 @@ def initialize_split_ctm_tensor_env(
                 ref_chi,
                 ref_D,
                 I_charges_arr=shared_I_charges[name],
-                chi_seed=chi_seed,
+                chi_ref_charges=chi_ref_charges,
             )
     else:
         # DenseTensor path

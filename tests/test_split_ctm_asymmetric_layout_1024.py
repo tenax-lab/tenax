@@ -393,3 +393,74 @@ def test_the_2x2_split_ctm_runs_on_a_legal_sublattice_dependent_state():
     A, B = _legal_checkerboard_pair()
     env_A, env_B = ctm_split_tensor_2site(A, B, 5, max_iter=1, conv_tol=1e-6)
     assert env_A is not None and env_B is not None
+
+
+#: A chi seed that is NOT any of the site tensor's own axes, so supplying it
+#: genuinely changes the environment.  Needed because the first version of the
+#: test below seeded with `A.indices[0].charges` -- which is what the function
+#: already defaults to -- and so passed with the alias silently dropped.
+_ALT_SEED = np.array([1, 1, 0], dtype=np.int32)
+
+
+def _env_fields(env):
+    """Every tensor in the env, densified. The seed moves EDGES, not corners."""
+    return {f: np.asarray(getattr(env, f).todense()) for f in env._fields}
+
+
+def _identical(lhs, rhs):
+    return lhs.shape == rhs.shape and bool((lhs == rhs).all())
+
+
+def test_the_alt_seed_actually_changes_the_environment():
+    """Regime guard for the alias tests: prove the seed is not inert here.
+
+    Without this, an alias test can pass while the alias is ignored -- which
+    is exactly what happened on the first attempt: seeding with the function's
+    own default axis and comparing only ``C1..C4`` (which the seed does not
+    touch at all) left the 'silently dropped' mutant alive.
+    """
+    A = _site(_VERT, _VERT, _HORIZ, _HORIZ, seed=0)
+    default = _env_fields(initialize_split_ctm_tensor_env(A, _CHI, _CHI))
+    seeded = _env_fields(
+        initialize_split_ctm_tensor_env(A, _CHI, _CHI, chi_ref_charges=_ALT_SEED)
+    )
+    differing = [f for f in default if not _identical(default[f], seeded[f])]
+    assert differing, (
+        "_ALT_SEED leaves the environment unchanged, so the alias tests below "
+        "cannot distinguish 'honoured' from 'ignored'"
+    )
+    # It is the edges that carry the chi seed; corners are seed-independent.
+    assert all(f.startswith("T") for f in differing), differing
+
+
+def test_chi_seed_still_works_as_a_deprecated_alias():
+    """``chi_seed`` was renamed to ``chi_ref_charges``; the old name must live.
+
+    ``CHANGELOG.md`` documents ``chi_seed`` by name, so callers outside this
+    repository were told to use it.  A bare rename turns every one of those
+    calls into ``TypeError`` -- the rename is internal, the keyword is not.
+
+    Asserts *equivalence over every field*, not mere acceptance.  A test that
+    only checked "does not raise" passes when the argument is silently
+    dropped, which is the worse failure: the caller's seed vanishes and every
+    chi leg falls back to the default axis -- the #1024 bug the seed exists to
+    prevent.
+    """
+    A = _site(_VERT, _VERT, _HORIZ, _HORIZ, seed=0)
+
+    with pytest.warns(DeprecationWarning, match="chi_seed is deprecated"):
+        aliased = initialize_split_ctm_tensor_env(A, _CHI, _CHI, chi_seed=_ALT_SEED)
+    current = initialize_split_ctm_tensor_env(A, _CHI, _CHI, chi_ref_charges=_ALT_SEED)
+
+    lhs, rhs = _env_fields(aliased), _env_fields(current)
+    mismatched = [f for f in lhs if not _identical(lhs[f], rhs[f])]
+    assert not mismatched, f"alias diverges from the new name on: {mismatched}"
+
+
+def test_passing_both_the_alias_and_the_new_name_is_refused():
+    """Silently preferring one would hide a caller mid-migration passing both."""
+    A = _site(_VERT, _VERT, _HORIZ, _HORIZ, seed=0)
+    with pytest.raises(TypeError, match="not both"):
+        initialize_split_ctm_tensor_env(
+            A, _CHI, _CHI, chi_ref_charges=_ALT_SEED, chi_seed=_ALT_SEED
+        )
