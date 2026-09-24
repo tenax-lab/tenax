@@ -13,8 +13,16 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms._ctm_tensor_init import _fuse_pair_by_label
-from tenax.algorithms._graded_double_layer import graded_fuse_pair, graded_split_pair
+from tenax.algorithms._ctm_tensor_init import (
+    _build_double_layer_open_tensor,
+    _build_double_layer_tensor,
+    _fuse_pair_by_label,
+)
+from tenax.algorithms._graded_double_layer import (
+    build_graded_double_layer,
+    graded_fuse_pair,
+    graded_split_pair,
+)
 from tenax.core._graded import graded_contract, graded_reorder
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionicU1, FermionParity, U1Symmetry
@@ -129,3 +137,48 @@ def test_a_bosonic_pair_fuses_as_production_does():
     plain = _fuse_pair_by_label(graded_reorder(T, ["k", "K", "a"]), "k", "K", "f", OUT)
     assert graded.labels() == plain.labels()
     assert _maxdiff(graded, plain) == 0.0
+
+
+def _site(sym, ch, seed):
+    """A site tensor in production's convention: ``(u, d, l, r, phys)``
+    with flows ``(OUT, IN, OUT, IN, IN)``."""
+    flows = (OUT, IN, OUT, IN)
+    legs = [_idx(sym, ch, f, x) for f, x in zip(flows, "udlr")]
+    legs.append(_idx(sym, [0, 1], IN, "phys"))
+    return _rand(legs, seed)
+
+
+# Dimension-2 bonds: a double layer squares every bond, and FermionicU1 at
+# dimension 5 costs minutes of block-sparse compile for a structure check.
+SITE_SYMS = [
+    pytest.param(FermionParity(), [0, 1], id="FermionParity"),
+    pytest.param(FermionicU1(), [0, 1], id="FermionicU1"),
+]
+
+
+@pytest.mark.parametrize("sym,ch", SITE_SYMS)
+@pytest.mark.parametrize("open_phys", [False, True])
+def test_the_graded_double_layer_has_productions_structure(sym, ch, open_phys):
+    A = _site(sym, ch, 5)
+    if open_phys:
+        prod = _build_double_layer_open_tensor(A)
+        graded = build_graded_double_layer(A, phys_bra="phys_bra")
+    else:
+        prod = _build_double_layer_tensor(A)
+        graded = build_graded_double_layer(A)
+    assert graded.labels() == prod.labels()
+    for g, p in zip(graded.indices, prod.indices):
+        assert g.flow == p.flow
+        assert list(g.charges) == list(p.charges)
+
+
+def test_regime_the_graded_double_layer_differs_from_productions():
+    A = _site(FermionParity(), [0, 1], 5)
+    assert _maxdiff(build_graded_double_layer(A), _build_double_layer_tensor(A)) > 1e-3
+
+
+def test_the_graded_double_layer_traces_under_jit():
+    A = _site(FermionParity(), [0, 1], 5)
+    eager = build_graded_double_layer(A, phys_bra="phys_bra")
+    jitted = jax.jit(lambda t: build_graded_double_layer(t, phys_bra="phys_bra"))(A)
+    assert _maxdiff(jitted, eager) < 1e-12

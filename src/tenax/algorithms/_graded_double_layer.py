@@ -26,7 +26,13 @@ contracting them unfused, in either operand order.
 from __future__ import annotations
 
 from tenax.algorithms._tensor_utils import fuse_indices, split_index
-from tenax.core._graded import _is_graded, _scale_blocks, graded_reorder
+from tenax.core._graded import (
+    _is_graded,
+    _scale_blocks,
+    graded_bar,
+    graded_contract,
+    graded_reorder,
+)
 from tenax.core.index import FlowDirection
 from tenax.core.tensor import SymmetricTensor
 
@@ -81,3 +87,22 @@ def graded_split_pair(t: SymmetricTensor, fused_label) -> SymmetricTensor:
     if _is_graded(out) and info.parent_indices[0].flow == IN:
         out = _pair_sign(out, i)  # the sign is its own inverse
     return out
+
+
+def build_graded_double_layer(A: SymmetricTensor, *, phys_bra=None) -> SymmetricTensor:
+    """Graded twin of ``_build_double_layer_tensor`` (``phys_bra=None``: the
+    physical leg is contracted) and ``_build_double_layer_open_tensor``
+    (``phys_bra="phys_bra"``: it stays open under that label).
+
+    Same labels, order and flows as production -- ``(u2, d2, l2, r2)`` then
+    ``phys, phys_bra`` when open -- built with ``graded_bar`` (rule 3),
+    ``graded_contract`` and :func:`graded_fuse_pair`.  ``A`` has labels
+    ``(u, d, l, r, phys)``.
+    """
+    rename = {x: x.upper() for x in "udlr"}
+    if phys_bra is not None:
+        rename["phys"] = phys_bra
+    a = graded_contract(A, graded_bar(A).relabels(rename))
+    for x in "udlr":
+        a = graded_fuse_pair(a, x, x.upper(), f"{x}2")
+    return a
