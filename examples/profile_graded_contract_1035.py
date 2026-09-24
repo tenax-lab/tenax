@@ -3,8 +3,9 @@
 
 A CTM-shaped pairwise contraction on FermionParity tensors: an edge tensor
 ``T(l, m, r)`` (chi, D^2, chi) against a double-layer-shaped ``a(m, u, d, s)``.
-Reports eager wall time (median of repeats, after a warm-up) and jit compile
-time (``jax.clear_caches()`` before each arm, so each compile is fresh).
+Randomizes arm evaluation order across trials and repeats compile timing to
+account for order and cache effects: reports eager time (median of per-trial medians,
+with min–max) and jit compile time (median and min–max over trials), each sampled fresh.
 
     JAX_PLATFORMS=cpu uv run python examples/profile_graded_contract_1035.py --chi 16 --d2 4
 """
@@ -62,29 +63,97 @@ def main() -> None:
     ap.add_argument("--chi", type=int, default=16)
     ap.add_argument("--d2", type=int, default=4)
     ap.add_argument("--repeats", type=int, default=20)
+    ap.add_argument("--trials", type=int, default=7)
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+
+    # Disable JAX compilation cache to ensure each arm gets a fresh compile
+    try:
+        jax.config.update("jax_enable_compilation_cache", False)
+    except (AttributeError, ValueError) as e:
+        print(f"Note: Could not disable jax_enable_compilation_cache: {e}")
+
     T, a = _operands(args.chi, args.d2)
-    res = {}
-    for name, fn in _arms(T, a).items():
-        fn(T, a).block_until_ready()  # warm-up
-        times = []
-        for _ in range(args.repeats):
+    arms = _arms(T, a)
+
+    # One warm-up per arm
+    for name, fn in arms.items():
+        fn(T, a).block_until_ready()
+
+    # Collect per-trial, per-arm timings
+    res = {name: {"eager": [], "compile": []} for name in arms}
+    rng = np.random.default_rng(args.seed)
+    order_counts = {"sign_free_first": 0, "graded_first": 0}
+
+    for trial in range(args.trials):
+        # Randomize arm order per trial
+        arm_names = list(arms.keys())
+        arm_order = rng.permutation(arm_names)
+
+        # Track which ran first in this trial
+        if arm_order[0] == "sign_free":
+            order_counts["sign_free_first"] += 1
+        else:
+            order_counts["graded_first"] += 1
+
+        for name in arm_order:
+            fn = arms[name]
+
+            # Measure eager execution
+            times = []
+            for _ in range(args.repeats):
+                t0 = time.perf_counter()
+                fn(T, a).block_until_ready()
+                times.append(time.perf_counter() - t0)
+            eager_median = statistics.median(times)
+            res[name]["eager"].append(eager_median)
+
+            # Measure JIT compile time (fresh cache, fresh jit)
+            jax.clear_caches()
+            jitted = jax.jit(fn)
             t0 = time.perf_counter()
-            fn(T, a).block_until_ready()
-            times.append(time.perf_counter() - t0)
-        jax.clear_caches()
-        jitted = jax.jit(fn)
-        t0 = time.perf_counter()
-        jitted(T, a).block_until_ready()
-        compile_s = time.perf_counter() - t0
-        res[name] = (statistics.median(times), compile_s)
+            jitted(T, a).block_until_ready()
+            compile_s = time.perf_counter() - t0
+            res[name]["compile"].append(compile_s)
+
+    # Aggregate results across trials
+    for name in arms:
+        eager_trials = res[name]["eager"]
+        compile_trials = res[name]["compile"]
+
+        eager_median = statistics.median(eager_trials)
+        eager_min = min(eager_trials)
+        eager_max = max(eager_trials)
+
+        compile_median = statistics.median(compile_trials)
+        compile_min = min(compile_trials)
+        compile_max = max(compile_trials)
+
         print(
-            f"{name:10s} eager median {res[name][0] * 1e3:8.2f} ms   jit first call {compile_s:7.3f} s",
+            f"{name:10s} eager median {eager_median * 1e3:8.2f} ms "
+            f"[{eager_min * 1e3:8.2f}–{eager_max * 1e3:8.2f}]   "
+            f"jit compile {compile_median:7.3f} s [{compile_min:7.3f}–{compile_max:7.3f}]",
             flush=True,
         )
-    (e0, c0), (e1, c1) = res["sign_free"], res["graded"]
+
+    # Ratio line
+    eager_ratios = [
+        statistics.median(res["graded"]["eager"]) / statistics.median(res["sign_free"]["eager"])
+    ]
+    compile_ratios = [
+        statistics.median(res["graded"]["compile"]) / statistics.median(res["sign_free"]["compile"])
+    ]
+    eager_ratio = eager_ratios[0]
+    compile_ratio = compile_ratios[0]
+
     print(
-        f"ratio graded/sign_free: eager {e1 / e0:.2f}x   compile {c1 / c0:.2f}x   (chi={args.chi}, D^2={args.d2})"
+        f"ratio graded/sign_free: eager {eager_ratio:.2f}x   compile {compile_ratio:.2f}x   "
+        f"(chi={args.chi}, D^2={args.d2}, trials={args.trials}, seed={args.seed})"
+    )
+
+    # Print order statistics
+    print(
+        f"Trials: {order_counts['sign_free_first']} sign_free first, {order_counts['graded_first']} graded first"
     )
 
 
