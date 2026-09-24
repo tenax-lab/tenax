@@ -30,6 +30,8 @@ _FILE_MARKERS = {
     # The exact fermionic reference (#1037).  2x2 cases only (~6 s); the 2x3
     # cases carry an explicit ``slow`` and so withhold this marker.
     "test_fermionic_fock_oracle.py": "core",
+    "test_graded_contract.py": "core",
+    "test_graded_contract_oracle.py": "core",
     "test_dmrg.py": "algorithm",
     "test_idmrg.py": "algorithm",
     "test_itebd.py": "algorithm",
