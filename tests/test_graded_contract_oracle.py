@@ -31,11 +31,14 @@ from _fermionic_fock_oracle import (
 from _graded_cluster import (
     cluster_energy,
     cluster_value,
+    double_layer_energy,
+    double_layer_value,
     fock_of_kets,
     gate_operator,
     ket_site,
 )
 
+import tenax.algorithms._graded_double_layer as _gdl
 from tenax.algorithms._ctm_tensor_projector_2x2 import _scale_bond_by_diag
 from tenax.core._graded import graded_contract, graded_reorder, graded_svd
 
@@ -253,3 +256,85 @@ def test_go_no_go_a_truncated_two_site_update_matches_fock(keep):
     k_bad, d_bad, _, _ = _update_bond0(kets, keep=keep, reorder=_sign_free)
     bad = fock_of_kets(R, C, {**kets, **k_bad}) + fock_of_kets(R, C, {**kets, **d_bad})
     assert np.linalg.norm(bad - psi_full) > 1e-3 * np.linalg.norm(psi_full)
+
+
+# ------------------------------------------------------------------ #
+# Phase 2: the graded double layer (design §5 step 3)                 #
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.parametrize("R,C", CLUSTERS)
+def test_the_graded_double_layer_energy_matches_fock(R, C):
+    """Production-shaped double layers (``build_graded_double_layer``: same
+    labels, flows and fused legs as ``_build_double_layer_tensor``),
+    contracted site by site, give the energy of the ket-level state that
+    ``graded_contract`` defines -- the state gates and SVDs act on."""
+    rng = np.random.default_rng(2)
+    for _ in range(2):
+        As = random_even_tensors(R, C, rng)
+        psi = fock_psi(R, C, z_gauge(R, C, As))
+        E, norm = double_layer_energy(R, C, As)
+        E_hcb = hop_energy(R, C, plain_amplitudes(R, C, As), fermion=False)
+        assert norm == pytest.approx(np.vdot(psi, psi).real, rel=1e-12)
+        assert E == pytest.approx(hop_energy(R, C, psi, fermion=True), abs=1e-12)
+        assert abs(E - E_hcb) > 1e-3  # regime: the bosonic answer is different
+
+
+def test_the_graded_double_layer_energy_matches_fock_for_complex_tensors():
+    rng = np.random.default_rng(4)
+    re, im = random_even_tensors(2, 2, rng), random_even_tensors(2, 2, rng)
+    As = {s: re[s] + 1j * im[s] for s in re}
+    psi = fock_psi(2, 2, z_gauge(2, 2, As))
+    E, norm = double_layer_energy(2, 2, As)
+    assert norm == pytest.approx(np.vdot(psi, psi).real, rel=1e-12)
+    assert E == pytest.approx(hop_energy(2, 2, psi, fermion=True), abs=1e-12)
+
+
+def _fock_bond_element(psi, a, b, P_a, P_b, p_a, p_b):
+    """``<psi| (c_a^+)^P_a (c_b^+)^P_b |0><0|_ab (c_b)^p_b (c_a)^p_a |psi>``:
+    the operator ``|P_a P_b><p_a p_b|`` in the local ``(a, b)`` basis."""
+    v = psi
+    if p_a:
+        v = _annihilate(v, a)
+    if p_b:
+        v = _annihilate(v, b)
+    idx = np.arange(v.size)
+    v = np.where(((idx >> a) & 1) | ((idx >> b) & 1), 0, v)  # |0><0| on a, b
+    if P_b:
+        v = _create(v, b)
+    if P_a:
+        v = _create(v, a)
+    return np.vdot(psi, v)
+
+
+def test_every_two_site_rdm_element_matches_fock():
+    """The two-site reduced density matrix of every bond, element by
+    element: all eight parity-even operators ``|P_s P_t><p_s p_t|``,
+    including the pairing ones (the random tensors conserve parity, not
+    number) and the bond whose sites are not neighbours in Jordan-Wigner
+    order, (0,0)-(1,0)."""
+    R, C = 2, 2
+    As = random_even_tensors(R, C, np.random.default_rng(6))
+    psi = fock_psi(R, C, z_gauge(R, C, As))
+    n_of = {s: n for n, s in enumerate(sites_of(R, C))}
+    checked = 0
+    for s, _, t, _ in bonds_of(R, C):
+        for k in itertools.product((0, 1), repeat=4):
+            if sum(k) % 2:
+                continue
+            h2 = np.zeros((2, 2, 2, 2))
+            h2[k] = 1.0
+            got = double_layer_value(R, C, As, op=((s, t), h2))
+            want = _fock_bond_element(psi, n_of[s], n_of[t], *k)
+            assert got == pytest.approx(want, abs=1e-12), (s, t, k)
+            checked += abs(want) > 1e-3
+    assert checked >= 16  # regime: most elements are not trivially zero
+
+
+def test_regime_the_fuse_needs_its_pair_sign(monkeypatch):
+    """Without the pair sign, the fused double layer is a different state."""
+    monkeypatch.setattr(_gdl, "_pair_sign", lambda t, k: t)
+    As = random_even_tensors(2, 2, np.random.default_rng(2))
+    psi = fock_psi(2, 2, z_gauge(2, 2, As))
+    E, _ = double_layer_energy(2, 2, As)
+    assert abs(E - hop_energy(2, 2, psi, fermion=True)) > 1e-3

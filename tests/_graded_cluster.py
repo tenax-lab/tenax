@@ -7,8 +7,9 @@ import itertools
 
 import jax.numpy as jnp
 import numpy as np
-from _fermionic_fock_oracle import _H2, bonds_of, fock_psi, sites_of
+from _fermionic_fock_oracle import _H2, bonds_of, fock_psi, real_scalar, sites_of
 
+from tenax.algorithms._graded_double_layer import build_graded_double_layer
 from tenax.core._graded import graded_bar, graded_contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity
@@ -62,17 +63,17 @@ def bra_site(ket: SymmetricTensor, n: int, *, touched: bool) -> SymmetricTensor:
 def hop_operator(ns: int, nt: int) -> SymmetricTensor:
     """``-(c_s^+ c_t + h.c.)``: legs ``(P_s, P_t, p_t, p_s)`` -- the creation
     half (s, t) then the annihilation half (t, s)."""
-    return _bond_operator(_H2, ns, nt)
+    return bond_operator(_H2, ns, nt)
 
 
 def gate_operator(ns: int, nt: int, tau: float) -> SymmetricTensor:
     """``exp(tau (c_s^+ c_t + h.c.))`` = ``exp(-tau h)``, legs as
     :func:`hop_operator`."""
     w, v = np.linalg.eigh(_H2.reshape(4, 4))
-    return _bond_operator((v * np.exp(-tau * w)) @ v.T, ns, nt)
+    return bond_operator((v * np.exp(-tau * w)) @ v.T, ns, nt)
 
 
-def _bond_operator(h2: np.ndarray, ns: int, nt: int) -> SymmetricTensor:
+def bond_operator(h2: np.ndarray, ns: int, nt: int) -> SymmetricTensor:
     """``h2[P_s, P_t, p_s, p_t]`` (the local ``(s, t)`` basis) stored with
     the annihilation half reversed; ``<P_s P_t|`` is ``<0| c_t c_s``, so the
     raw transpose carries no sign."""
@@ -201,3 +202,64 @@ def fock_of_kets(R: int, C: int, kets: dict) -> np.ndarray:
             As[s] = out
         psi = psi + fock_psi(R, C, As)
     return psi
+
+
+def production_site(A: np.ndarray) -> SymmetricTensor:
+    """``A[u,d,l,r,p]`` in production's convention: labels
+    ``(u, d, l, r, phys)``, flows ``FLOW`` then ``phys`` IN, boundary legs
+    kept (dimension 1, parity 0) -- the input of the double-layer builders."""
+    idx = [
+        TensorIndex.from_charges(
+            SYM, np.arange(n, dtype=np.int32) % 2, FLOW[x], label=x
+        )
+        for n, x in zip(A.shape[:4], "udlr")
+    ]
+    idx.append(_index(2, IN, "phys"))
+    return SymmetricTensor.from_dense(jnp.asarray(A), tuple(idx))
+
+
+def double_layer_value(R, C, As, *, op=None):
+    """``<psi| O |psi>`` from graded double layers
+    (:func:`build_graded_double_layer`), contracted site by site with
+    ``graded_contract`` -- the per-site order a CTM builds.
+
+    ``op=None`` is the norm.  ``op=((s, t), h2)`` puts the two-site operator
+    ``h2[P_s, P_t, p_s, p_t]`` (the local ``(s, t)`` basis, as
+    :func:`bond_operator`) on sites ``s, t``, whose double layers keep their
+    physical legs open.
+    """
+    sites = sites_of(R, C)
+    n_of = {s: n for n, s in enumerate(sites)}
+    rename = {s: {} for s in sites}
+    for b, (s, x, t, y) in enumerate(bonds_of(R, C)):
+        rename[s][f"{x}2"] = rename[t][f"{y}2"] = f"b{b}"
+    on = () if op is None else op[0]
+    seq = []
+    for s in sites:
+        n = n_of[s]
+        if s in on:
+            a = build_graded_double_layer(production_site(As[s]), phys_bra=f"P{n}")
+            m = {"phys": f"p{n}"}
+        else:
+            a = build_graded_double_layer(production_site(As[s]))
+            m = {}
+        m |= {f"{x}2": f"open_{n}_{x}" for x in "udlr"} | rename[s]
+        seq.append(a.relabels(m))
+    if op is not None:
+        (s, t), h2 = op
+        seq.append(bond_operator(h2, n_of[s], n_of[t]))
+    out = seq[0]
+    for u in seq[1:]:
+        out = graded_contract(out, u)
+    arr = np.asarray(out.todense()).reshape(-1)  # only dimension-1 legs remain
+    assert arr.size == 1, out.labels()
+    return complex(arr[0])
+
+
+def double_layer_energy(R, C, As):
+    norm = real_scalar(double_layer_value(R, C, As))
+    e = sum(
+        real_scalar(double_layer_value(R, C, As, op=((s, t), _H2)))
+        for s, _, t, _ in bonds_of(R, C)
+    )
+    return e / norm, norm

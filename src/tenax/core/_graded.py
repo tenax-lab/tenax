@@ -39,8 +39,14 @@ def _scale_blocks(t: SymmetricTensor, exponent) -> SymmetricTensor:
 
 
 def twist_legs(t: SymmetricTensor, labels) -> SymmetricTensor:
-    """Multiply each block by ``(-1)**(sum of parities on the named legs)``."""
+    """Multiply each block by ``(-1)**(sum of parities on the named legs)``.
+
+    Every label must name a leg of ``t``: a misspelt label would otherwise
+    drop its sign silently."""
     labels = set(labels)
+    unknown = labels - set(t.labels())
+    if unknown:
+        raise ValueError(f"twist_legs: no leg labelled {sorted(unknown, key=str)}")
     axes = [i for i, lab in enumerate(t.labels()) if lab in labels]
     if not axes or not _is_graded(t):
         return t
@@ -73,6 +79,11 @@ def graded_contract(a: SymmetricTensor, b: SymmetricTensor) -> SymmetricTensor:
         raise TypeError(
             "graded_contract needs SymmetricTensor operands when either is "
             "fermionic: DenseTensor carries no parity grading"
+        )
+    if a.ndim and b.ndim and _is_graded(a) != _is_graded(b):
+        raise TypeError(
+            "graded_contract got one fermionic and one bosonic operand; a "
+            "bosonic leg has no parity, so the graded sign is undefined"
         )
     b_labels = set(b.labels())
     shared = [lab for lab in a.labels() if lab in b_labels]
