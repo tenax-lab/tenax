@@ -80,7 +80,7 @@ def graded_contract(a: SymmetricTensor, b: SymmetricTensor) -> SymmetricTensor:
             "graded_contract needs SymmetricTensor operands when either is "
             "fermionic: DenseTensor carries no parity grading"
         )
-    if _is_graded(a) != _is_graded(b):
+    if a.ndim and b.ndim and _is_graded(a) != _is_graded(b):
         raise TypeError(
             "graded_contract got one fermionic and one bosonic operand; a "
             "bosonic leg has no parity, so the graded sign is undefined"

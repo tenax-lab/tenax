@@ -7,7 +7,7 @@ import itertools
 
 import jax.numpy as jnp
 import numpy as np
-from _fermionic_fock_oracle import _H2, bonds_of, fock_psi, sites_of
+from _fermionic_fock_oracle import _H2, bonds_of, fock_psi, real_scalar, sites_of
 
 from tenax.algorithms._graded_double_layer import build_graded_double_layer
 from tenax.core._graded import graded_bar, graded_contract
@@ -257,9 +257,9 @@ def double_layer_value(R, C, As, *, op=None):
 
 
 def double_layer_energy(R, C, As):
-    norm = double_layer_value(R, C, As).real
+    norm = real_scalar(double_layer_value(R, C, As))
     e = sum(
-        double_layer_value(R, C, As, op=((s, t), _H2)).real
+        real_scalar(double_layer_value(R, C, As, op=((s, t), _H2)))
         for s, _, t, _ in bonds_of(R, C)
     )
     return e / norm, norm

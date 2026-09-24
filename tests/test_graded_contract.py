@@ -183,6 +183,43 @@ def test_a_mixed_fermionic_and_bosonic_pair_is_refused(order):
         graded_contract(a, b)
 
 
+@pytest.mark.parametrize("order", ["scalar_first", "tensor_first"])
+def test_a_fermionic_scalar_is_accepted_against_a_fermionic_tensor(order):
+    """A 0-leg tensor reads as non-graded (``_is_graded`` checks
+    ``t.indices[0]``), so the mixed-operand guard must not fire on a fully
+    contracted fermionic scalar paired with a fermionic tensor -- before the
+    guard this went through plain ``contract``, which is correct for a
+    scalar."""
+    sym, ch = FermionParity(), [0, 1, 0, 1]
+    A = _rand(
+        [
+            _idx(sym, ch, IN, "a"),
+            _idx(sym, ch, OUT, "x"),
+            _idx(sym, ch, IN, "y"),
+            _idx(sym, ch, OUT, "b"),
+        ],
+        0,
+    )
+    B = _rand(
+        [
+            _idx(sym, ch, IN, "a"),
+            _idx(sym, ch, OUT, "x"),
+            _idx(sym, ch, IN, "y"),
+            _idx(sym, ch, OUT, "b"),
+        ],
+        1,
+    )
+    s = graded_contract(A, B)  # every label shared -> a 0-leg scalar
+    assert s.ndim == 0
+
+    T = _rand([_idx(sym, ch, IN, "p"), _idx(sym, ch, OUT, "q")], 2)
+    a, b = (s, T) if order == "scalar_first" else (T, s)
+    out = graded_contract(a, b)
+    assert out.labels() == T.labels()
+    expected = s.todense().reshape(()) * T.todense()
+    assert float(jnp.max(jnp.abs(out.todense() - expected))) < 1e-12
+
+
 def test_twist_legs_refuses_a_label_the_tensor_does_not_have():
     """Design §8 Phase 2 entry criterion 3: an unknown label used to be
     ignored, dropping its sign silently."""

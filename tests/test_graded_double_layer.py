@@ -23,7 +23,7 @@ from tenax.algorithms._graded_double_layer import (
     graded_fuse_pair,
     graded_split_pair,
 )
-from tenax.core._graded import graded_contract, graded_reorder
+from tenax.core._graded import graded_bar, graded_contract, graded_reorder
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionicU1, FermionParity, U1Symmetry
 from tenax.core.tensor import SymmetricTensor
@@ -115,12 +115,28 @@ def test_a_pair_with_equal_flows_is_refused():
         graded_fuse_pair(T1, "k", "b", "f")
 
 
+def test_a_fused_label_already_in_use_is_refused():
+    T1, _ = _bond_pair(FermionParity(), [0, 1, 0, 1])
+    with pytest.raises(ValueError, match="already"):
+        graded_fuse_pair(T1, "k", "K", "a")  # "a" is a remaining label
+
+
 def test_an_unknown_label_is_refused():
     T1, _ = _bond_pair(FermionParity(), [0, 1, 0, 1])
     with pytest.raises(ValueError, match="no leg labelled"):
         graded_fuse_pair(T1, "k", "nope", "f")
     with pytest.raises(ValueError, match="no leg labelled"):
         graded_split_pair(T1, "nope")
+
+
+def test_splitting_a_leg_whose_flow_changed_since_fusion_is_refused():
+    """``graded_bar`` of a fused tensor flips the fused leg's flow; splitting
+    it would silently use the fusion-time flow instead, mis-splitting."""
+    T1, _ = _bond_pair(FermionParity(), [0, 1, 0, 1])
+    F = graded_fuse_pair(T1, "k", "K", "f")
+    barred = graded_bar(F)
+    with pytest.raises(ValueError, match="flow"):
+        graded_split_pair(barred, "f")
 
 
 def test_splitting_a_leg_that_was_never_fused_is_refused():

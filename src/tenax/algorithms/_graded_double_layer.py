@@ -8,19 +8,26 @@ partner ``K`` (opposite flows).  Bringing them together is a graded reorder
 (rule 1), and the fused leg takes the bra leg's flow, as production's
 ``_build_double_layer_tensor`` does.  That is not yet enough: rule 2 twists
 a contracted leg by the parity of the whole leg when it is IN on the left
-operand, but the unfused pair needs ``(-1)^{p_k}`` alone, and the fused
-basis must be enumerated in the same ``(k, K)`` order on both ends of the
-bond.  Both are repaired by one sign on exactly one end of every bond --
-the end whose ket leg is IN:
+operand, and the fused basis must be enumerated in the same ``(k, K)`` order
+on both ends of the bond.  Which sign the unfused pair needs depends on
+which operand order a later ``graded_contract`` uses: in one order the
+unfused pair needs ``(-1)^{p_k}`` alone and the fused leg's own twist would
+be ``(-1)^{p_k p_K}``; in the other order the unfused twist falls on the
+bra leg alone, ``(-1)^{p_K}``, and the fused leg's twist would be
+``(-1)^{p_k + p_K}``.  Either way the NET correction -- what turns the
+fused leg's twist into the unfused pair's -- is the same: ``(-1)^{p_k}``.
+Both needs are repaired by one sign on exactly one end of every bond -- the
+end whose ket leg is IN:
 
     (-1)^{p_k p_K + p_k}
 
 ``p_k p_K`` is the Koszul swap between the ``(K, k)`` order nesting needs
-and the ``(k, K)`` order the fused basis uses; ``p_k`` converts the fused
-leg's twist into the ket leg's.  The sign depends only on the parity of a
-contracted pair, so either end would do; tying it to the ket leg's flow
-makes the rule local.  With it, contracting two fused tensors equals
-contracting them unfused, in either operand order.
+and the ``(k, K)`` order the fused basis uses; ``p_k`` is that net
+correction, applied once at fuse time so it holds in either later
+contraction order.  The sign depends only on the parity of a contracted
+pair, so either end would do; tying it to the ket leg's flow makes the rule
+local.  With it, contracting two fused tensors equals contracting them
+unfused, in either operand order.
 """
 
 from __future__ import annotations
@@ -66,6 +73,11 @@ def graded_fuse_pair(t: SymmetricTensor, ket, bra, fused_label) -> SymmetricTens
             "ket/bra pair has opposite flows"
         )
     rest = [lab for lab in labels if lab not in (ket, bra)]
+    if fused_label in rest:
+        raise ValueError(
+            f"graded_fuse_pair: fused_label {fused_label!r} is already a leg "
+            "of this tensor"
+        )
     i = min(labels.index(ket), labels.index(bra))
     t = graded_reorder(t, rest[:i] + [ket, bra] + rest[i:])
     if _is_graded(t) and flow_k == IN:
@@ -74,8 +86,13 @@ def graded_fuse_pair(t: SymmetricTensor, ket, bra, fused_label) -> SymmetricTens
 
 
 def graded_split_pair(t: SymmetricTensor, fused_label) -> SymmetricTensor:
-    """Inverse of :func:`graded_fuse_pair`: the ket and bra legs come back,
-    in that order, where the fused leg was."""
+    """Inverse of :func:`graded_fuse_pair` for a leg that came straight from
+    it: the ket and bra legs come back, in that order, where the fused leg
+    was, for a fuse-then-split round trip.
+
+    A leg fused by production's sign-free fuse is not detectable here (its
+    ``fuse_info`` looks the same) and must not be split with this function.
+    """
     labels = list(t.labels())
     if fused_label not in labels:
         raise ValueError(f"graded_split_pair: no leg labelled {fused_label!r}")
@@ -83,6 +100,12 @@ def graded_split_pair(t: SymmetricTensor, fused_label) -> SymmetricTensor:
     info = t.indices[i].fuse_info
     if info is None:
         raise ValueError(f"graded_split_pair: {fused_label!r} is not a fused leg")
+    if t.indices[i].flow != info.fused_flow:
+        raise ValueError(
+            f"graded_split_pair: {fused_label!r}'s flow has changed since "
+            "fusion (e.g. by graded_bar); the fusion-time flow can no "
+            "longer be inverted correctly"
+        )
     out = split_index(t, i)
     if _is_graded(out) and info.parent_indices[0].flow == IN:
         out = _pair_sign(out, i)  # the sign is its own inverse
