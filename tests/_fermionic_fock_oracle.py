@@ -104,7 +104,8 @@ def _fock_state(R: int, C: int, As: dict, site_order: list) -> np.ndarray:
 
     Shared implementation for fock_psi and fock_psi_ordered. The site_order
     parameter determines the order in which parity-even site operators are
-    applied (O_N ... O_1 |0> for reversed order, O_1 ... O_N for forward).
+    applied: site_order[0] is applied first (innermost, closest to |0>), so
+    forward site_order gives O_N ... O_1 |0> and reversed gives O_1 ... O_N.
     """
     sites = sites_of(R, C)
     sid = {s: n for n, s in enumerate(sites)}
