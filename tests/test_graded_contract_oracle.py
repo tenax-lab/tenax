@@ -83,10 +83,15 @@ def _odd(shape, rng):
 
 
 @pytest.mark.parametrize("R,C", CLUSTERS)
-def test_odd_tensors_on_an_auxiliary_leg_match_fock_in_every_order(R, C):
+def test_one_odd_tensor_per_side_on_an_auxiliary_leg_matches_fock_in_both_orders(R, C):
     """Design §5 step 7's representation: an odd site tensor carries its
     parity on a dimension-1 odd leg, contracted bra-to-ket.  Every tensor is
-    then even, so the per-site (CTM) order is as good as the global one."""
+    then even, so the per-site (CTM) order is as good as the global one.
+    Each ket and each bra has exactly one odd site, so this covers only the
+    bra-versus-ket crossing (the sign when y is applied after x); with a
+    single odd operator per side the Fock state does not depend on
+    application order.  Two odd tensors in the same ket need an ordering
+    convention for several auxiliary legs, and are left to the next phase."""
     rng = np.random.default_rng(11)
     sites = sites_of(R, C)
     bg = random_even_tensors(R, C, rng)
@@ -99,6 +104,7 @@ def test_odd_tensors_on_an_auxiliary_leg_match_fock_in_every_order(R, C):
             px = fock_psi_ordered(R, C, z_gauge(R, C, kx))
             py = fock_psi_ordered(R, C, z_gauge(R, C, by))
             N_f = py @ px
+            assert abs(N_f) > 1e-3, (x, y)
             H_f = py @ hop_energy_matvec(R, C, px, fermion=True)
             for order in ("global", "per_site"):
                 kw = dict(ket_aux=x, bra_aux=y, order=order)
