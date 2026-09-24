@@ -3,9 +3,9 @@
 
 A CTM-shaped pairwise contraction on FermionParity tensors: an edge tensor
 ``T(l, m, r)`` (chi, D^2, chi) against a double-layer-shaped ``a(m, u, d, s)``.
-Randomizes arm evaluation order across trials and repeats compile timing to
+Randomizes arm evaluation order across trials and repeats first-call timing to
 account for order and cache effects: reports eager time (median of per-trial medians,
-with min–max) and jit compile time (median and min–max over trials), each sampled fresh.
+with min–max) and jit first-call time (trace+compile+run, median and min–max over trials).
 
     JAX_PLATFORMS=cpu uv run python examples/profile_graded_contract_1035.py --chi 16 --d2 4
 """
@@ -81,7 +81,7 @@ def main() -> None:
         fn(T, a).block_until_ready()
 
     # Collect per-trial, per-arm timings
-    res = {name: {"eager": [], "compile": []} for name in arms}
+    res = {name: {"eager": [], "first_call": []} for name in arms}
     rng = np.random.default_rng(args.seed)
     order_counts = {"sign_free_first": 0, "graded_first": 0}
 
@@ -108,46 +108,45 @@ def main() -> None:
             eager_median = statistics.median(times)
             res[name]["eager"].append(eager_median)
 
-            # Measure JIT compile time (fresh cache, fresh jit)
+            # Measure JIT first-call time (trace+compile+run, fresh cache, fresh jit)
             jax.clear_caches()
             jitted = jax.jit(fn)
             t0 = time.perf_counter()
             jitted(T, a).block_until_ready()
-            compile_s = time.perf_counter() - t0
-            res[name]["compile"].append(compile_s)
+            first_call_s = time.perf_counter() - t0
+            res[name]["first_call"].append(first_call_s)
 
     # Aggregate results across trials
     for name in arms:
         eager_trials = res[name]["eager"]
-        compile_trials = res[name]["compile"]
+        first_call_trials = res[name]["first_call"]
 
         eager_median = statistics.median(eager_trials)
         eager_min = min(eager_trials)
         eager_max = max(eager_trials)
 
-        compile_median = statistics.median(compile_trials)
-        compile_min = min(compile_trials)
-        compile_max = max(compile_trials)
+        first_call_median = statistics.median(first_call_trials)
+        first_call_min = min(first_call_trials)
+        first_call_max = max(first_call_trials)
 
         print(
             f"{name:10s} eager median {eager_median * 1e3:8.2f} ms "
             f"[{eager_min * 1e3:8.2f}–{eager_max * 1e3:8.2f}]   "
-            f"jit compile {compile_median:7.3f} s [{compile_min:7.3f}–{compile_max:7.3f}]",
+            f"jit first call (trace+compile+run) {first_call_median:7.3f} s [{first_call_min:7.3f}–{first_call_max:7.3f}]",
             flush=True,
         )
 
     # Ratio line
-    eager_ratios = [
+    eager_ratio = (
         statistics.median(res["graded"]["eager"]) / statistics.median(res["sign_free"]["eager"])
-    ]
-    compile_ratios = [
-        statistics.median(res["graded"]["compile"]) / statistics.median(res["sign_free"]["compile"])
-    ]
-    eager_ratio = eager_ratios[0]
-    compile_ratio = compile_ratios[0]
+    )
+    first_call_ratio = (
+        statistics.median(res["graded"]["first_call"])
+        / statistics.median(res["sign_free"]["first_call"])
+    )
 
     print(
-        f"ratio graded/sign_free: eager {eager_ratio:.2f}x   compile {compile_ratio:.2f}x   "
+        f"ratio graded/sign_free: eager {eager_ratio:.2f}x   first-call {first_call_ratio:.2f}x   "
         f"(chi={args.chi}, D^2={args.d2}, trials={args.trials}, seed={args.seed})"
     )
 
