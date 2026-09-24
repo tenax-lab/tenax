@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from tenax.contraction.contractor import contract
-from tenax.core._graded import graded_bar, graded_contract, graded_reorder
+from tenax.core._graded import graded_bar, graded_contract, graded_reorder, twist_legs
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionicU1, FermionParity, U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
@@ -169,3 +169,24 @@ def test_regime_plain_svd_reorders_sign_free_and_does_not_reconstruct():
     U, S, Vh, _ = svd(T, ["p", "r"], ["q", "s"], new_bond_label="k")
     target = graded_reorder(T, ["p", "r", "q", "s"])
     assert _maxdiff(graded_contract(_scaled(U, S, "k"), Vh), target) > 1e-3
+
+
+@pytest.mark.parametrize("order", ["fermionic_first", "bosonic_first"])
+def test_a_mixed_fermionic_and_bosonic_pair_is_refused(order):
+    """Design §8 Phase 2 entry criterion 2: production ``contract`` accepts
+    this pair silently; the graded contractor must not."""
+    A, _, _ = _triple(FermionParity(), [0, 1, 0, 1])
+    u1 = U1Symmetry()
+    z = _rand([_idx(u1, [-1, 0, 1], IN, "z")], 9)
+    a, b = (A, z) if order == "fermionic_first" else (z, A)
+    with pytest.raises(TypeError, match="one fermionic and one bosonic"):
+        graded_contract(a, b)
+
+
+def test_twist_legs_refuses_a_label_the_tensor_does_not_have():
+    """Design §8 Phase 2 entry criterion 3: an unknown label used to be
+    ignored, dropping its sign silently."""
+    A, _, _ = _triple(FermionParity(), [0, 1, 0, 1])
+    with pytest.raises(ValueError, match="no leg labelled"):
+        twist_legs(A, ["a", "nope"])
+    assert _maxdiff(twist_legs(A, []), A) == 0.0
