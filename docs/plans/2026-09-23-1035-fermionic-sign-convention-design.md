@@ -487,3 +487,23 @@ G2′.
    twist becomes an explicit choice of boundary condition (periodic or
    antiperiodic) rather than a correction for a missing crossing sign. This is
    untested, because the oracle is OBC. Should #1034's `twist` wait for this?
+
+## 8. Phase 1 result (go/no-go)
+
+Implemented in PR #1039 (`feat/1035-graded-contractor-phase1`, head `d274721`, on `origin/main` @ `b6fad3d`). The reference graded contractor (`tenax.core._graded`, beside the production path, unimported) was checked against the #1038 oracle on tenax's own `SymmetricTensor`s:
+
+| Check | Result |
+|---|---|
+| Even states, global and per-site order, 2×2 / 2×3 | match Fock (asserted to 1e−12); graded − HCB > 1e−3 |
+| Complex tensors (2×2) | match Fock |
+| One odd tensor per ket and per bra on an auxiliary leg, every (x, y), per-site order | match Fock, including the sign when y follows x. §5 step 7's representation holds for this case on finite clusters |
+| SVD regauge of a bond (§5 step 2) | energy and norm unchanged (asserted to 1e−12); a sign-free reorder around the SVD moves the energy by > 1e−3 (≈ 0.37). The merged tensor is already in `left + right` order, so this test exercises the restoring reorder; `graded_svd`'s reorder-first step is covered by its reconstruction test |
+| Cost, graded/sign-free contraction, χ=16 / χ=32 (7 randomized trials, CPU, one contraction) | eager 1.13× / 1.09×; first call (trace+compile+run) 1.02× / 1.04× |
+| Cost, `graded_bar`/`bar`, χ=16 / χ=32 | eager 1.16× / 1.17×; first call 0.99× / 1.05× |
+
+**Verdict: GO on correctness.** Linalg needs no change of its own beyond a graded reorder into `left + right` order (`graded_svd`), because `svd`'s bond orientation (U's bond leg OUT) is rule 2's +1 pairing. **Cost:** about 10–17% eager overhead per graded operation and no measurable first-call cost at these sizes. Whole-sweep and GPU cost remain unmeasured. The cost verdict is the user's call.
+
+**Phase 2 entry criteria** (from the Phase 1 reviews):
+1. **Two odd tensors in one ket or bra:** needs an ordering convention for several auxiliary legs (§5 step 7). Phase 1 covers one odd tensor per side, where the Fock state is order-independent.
+2. **`graded_contract` must reject mixed bosonic and fermionic operands** before any production caller. Production `contract` accepts them silently.
+3. **`twist_legs` must reject unknown labels.**
