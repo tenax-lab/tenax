@@ -3,9 +3,11 @@ tenax.core._graded, so the graded contractor can be checked against Fock."""
 
 from __future__ import annotations
 
+import itertools
+
 import jax.numpy as jnp
 import numpy as np
-from _fermionic_fock_oracle import _H2, bonds_of, sites_of
+from _fermionic_fock_oracle import _H2, bonds_of, fock_psi, sites_of
 
 from tenax.core._graded import graded_bar, graded_contract
 from tenax.core.index import FlowDirection, TensorIndex
@@ -60,7 +62,21 @@ def bra_site(ket: SymmetricTensor, n: int, *, touched: bool) -> SymmetricTensor:
 def hop_operator(ns: int, nt: int) -> SymmetricTensor:
     """``-(c_s^+ c_t + h.c.)``: legs ``(P_s, P_t, p_t, p_s)`` -- the creation
     half (s, t) then the annihilation half (t, s)."""
-    data = np.einsum("ABab->ABba", _H2)
+    return _bond_operator(_H2, ns, nt)
+
+
+def gate_operator(ns: int, nt: int, tau: float) -> SymmetricTensor:
+    """``exp(tau (c_s^+ c_t + h.c.))`` = ``exp(-tau h)``, legs as
+    :func:`hop_operator`."""
+    w, v = np.linalg.eigh(_H2.reshape(4, 4))
+    return _bond_operator((v * np.exp(-tau * w)) @ v.T, ns, nt)
+
+
+def _bond_operator(h2: np.ndarray, ns: int, nt: int) -> SymmetricTensor:
+    """``h2[P_s, P_t, p_s, p_t]`` (the local ``(s, t)`` basis) stored with
+    the annihilation half reversed; ``<P_s P_t|`` is ``<0| c_t c_s``, so the
+    raw transpose carries no sign."""
+    data = np.einsum("ABab->ABba", np.reshape(h2, (2, 2, 2, 2)))
     idx = (
         _index(2, IN, f"P{ns}"),
         _index(2, IN, f"P{nt}"),
@@ -134,3 +150,54 @@ def cluster_energy(R, C, As, **kw):
         for s, _, t, _ in bonds_of(R, C)
     )
     return e / norm, norm
+
+
+def fock_of_kets(R: int, C: int, kets: dict) -> np.ndarray:
+    """The Fock state that graded ket tensors represent, for comparison with
+    the oracle -- bond legs of any dimension, parity layout and flow (e.g.
+    after an SVD).
+
+    The oracle's bonds are one mode each (index == parity), so every bond
+    index is summed explicitly as a flavour, embedded at its parity slot.
+    Rule 2 pairs a bond with +1 when the earlier site's leg is OUT and
+    ``(-1)^p`` when it is IN; against the oracle's ``(1 + a_t a_s)`` that is
+    a Z on the later site's leg exactly when the earlier leg is IN
+    (:func:`z_gauge` is the case where every earlier leg is IN).
+    """
+    sites, bonds = sites_of(R, C), bonds_of(R, C)
+    where = {s: {} for s in sites}  # site -> {bond label: leg letter}
+    for b, (s, x, t, y) in enumerate(bonds):
+        where[s][f"b{b}"], where[t][f"b{b}"] = x, y
+    dense, par, flow = {}, {}, {}
+    for n, s in enumerate(sites):
+        K, labs = kets[s], list(kets[s].labels())
+        assert sorted(labs) == sorted([*where[s], f"p{n}"]), (s, labs)
+        dense[s] = np.asarray(K.todense())  # one site tensor: small
+        par[s] = {lab: ix.charges for lab, ix in zip(labs, K.indices)}
+        flow[s] = {lab: ix.flow for lab, ix in zip(labs, K.indices)}
+        assert list(par[s][f"p{n}"]) == [0, 1]
+    twisted = {  # (site, bond label) carrying the Z
+        (t, f"b{b}") for b, (s, _, t, _) in enumerate(bonds) if flow[s][f"b{b}"] == IN
+    }
+    dims = [len(par[s][f"b{b}"]) for b, (s, *_) in enumerate(bonds)]
+    psi = 0
+    for f in itertools.product(*map(range, dims)):
+        As = {}
+        for n, s in enumerate(sites):
+            labs = list(kets[s].labels())
+            A = dense[s]
+            slot, sign = [0, 0, 0, 0], 1.0
+            for lab in [lab for lab in labs if lab != f"p{n}"]:
+                q = int(par[s][lab][f[int(lab[1:])]])
+                slot["udlr".index(where[s][lab])] = q
+                if (s, lab) in twisted and q:
+                    sign = -sign
+            take = tuple(
+                f[int(lab[1:])] if lab != f"p{n}" else slice(None) for lab in labs
+            )
+            dm = [2 if (x in where[s].values()) else 1 for x in "udlr"]
+            out = np.zeros([*dm, 2], dtype=A.dtype)
+            out[tuple(slot)] = sign * A[take]
+            As[s] = out
+        psi = psi + fock_psi(R, C, As)
+    return psi

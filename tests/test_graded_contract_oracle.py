@@ -15,6 +15,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from _fermionic_fock_oracle import (
+    _annihilate,
+    _create,
     bonds_of,
     fock_psi,
     fock_psi_ordered,
@@ -26,7 +28,13 @@ from _fermionic_fock_oracle import (
     sites_of,
     z_gauge,
 )
-from _graded_cluster import cluster_energy, cluster_value, ket_site
+from _graded_cluster import (
+    cluster_energy,
+    cluster_value,
+    fock_of_kets,
+    gate_operator,
+    ket_site,
+)
 
 from tenax.algorithms._ctm_tensor_projector_2x2 import _scale_bond_by_diag
 from tenax.core._graded import graded_contract, graded_reorder, graded_svd
@@ -151,3 +159,97 @@ def test_go_no_go_an_svd_regauge_leaves_the_state_unchanged():
     assert n1 == pytest.approx(n0, rel=1e-12)
     E_bad, _ = cluster_energy(2, 2, As, override=_regauge_bond0(As, reorder=_sign_free))
     assert abs(E_bad - E0) > 1e-3  # regime: a sign-free reorder around the SVD is wrong
+
+
+TAU = 0.4
+
+
+def _fock_gate(psi, a, b, tau):
+    """``exp(-tau h_ab) psi`` in Fock space, ``h_ab = -(c_a^+ c_b + h.c.)``."""
+    n = psi.size
+    h = np.zeros((n, n))
+    for col in range(n):
+        e = np.zeros(n)
+        e[col] = 1.0
+        h[:, col] = -(_create(_annihilate(e, b), a) + _create(_annihilate(e, a), b))
+    w, v = np.linalg.eigh(h)
+    return (v * np.exp(-tau * w)) @ v.T @ psi
+
+
+def _update_bond0(kets, *, keep, reorder):
+    """Apply the imaginary-time gate to bond b0 = (0,0)-(0,1), split it with
+    ``graded_svd`` and re-absorb sqrt(S) on each side.
+
+    Returns the kept sites (a real truncation to ``keep`` singular values),
+    the discarded remainder (the full-rank split with the kept values
+    masked out), and the kept and full bond parities."""
+    s, t = (0, 0), (0, 1)
+    Ks, Kt = kets[s], kets[t]
+    M = graded_contract(gate_operator(0, 1, TAU), graded_contract(Ks, Kt))
+    M = M.relabels({"P0": "p0", "P1": "p1"})
+    left = [lab for lab in Ks.labels() if lab != "b0"]
+    right = [lab for lab in Kt.labels() if lab != "b0"]
+
+    def sites(U, r, Vh):
+        return {
+            s: reorder(_scale_bond_by_diag(U, r, "b0"), list(Ks.labels())),
+            t: reorder(_scale_bond_by_diag(Vh, r, "b0"), list(Kt.labels())),
+        }
+
+    U, S, Vh, _ = graded_svd(M, left, right, "b0")
+    Uk, Sk, Vhk, _ = graded_svd(M, left, right, "b0", max_singular_values=keep)
+    S, Sk = np.asarray(S), np.asarray(Sk)
+    np.testing.assert_allclose(np.sort(Sk)[::-1], np.sort(S)[::-1][:keep], rtol=1e-12)
+    drop = np.ones_like(S)
+    drop[np.argsort(-S)[:keep]] = 0.0
+    parity = lambda T: sorted(T.indices[T.labels().index("b0")].charges)  # noqa: E731
+    return (
+        sites(Uk, jnp.sqrt(Sk), Vhk),
+        sites(U, jnp.sqrt(S * drop), Vh),
+        parity(Uk),
+        parity(U),
+    )
+
+
+@pytest.mark.parametrize("keep", [1, 2, 3])
+def test_go_no_go_a_truncated_two_site_update_matches_fock(keep):
+    """Design §5 step 2's gate: a truncated two-site update on a 2x2 cluster
+    against Fock.  The gate acts through the graded contractor (its physical
+    legs are reordered onto the merged pair), ``graded_svd`` splits the bond
+    and the split is truncated, discarding whole singular vectors -- at
+    ``keep=1`` a whole parity sector of the bond.
+
+    Fock has no bond to truncate on a cluster with a loop, so the oracle
+    check is linearity: the kept state plus the discarded remainder must be
+    exactly the Fock-space gate applied to the Fock state, and the graded
+    contractor must measure the kept state as Fock does."""
+    R, C = 2, 2
+    As = random_even_tensors(R, C, np.random.default_rng(3))
+    kets = {q: ket_site(R, C, q, As[q]) for q in sites_of(R, C)}
+    psi0 = fock_psi(R, C, z_gauge(R, C, As))
+    np.testing.assert_allclose(fock_of_kets(R, C, kets), psi0, atol=1e-13)
+
+    kept, dropped, kept_par, full_par = _update_bond0(
+        kets, keep=keep, reorder=graded_reorder
+    )
+    psi_full = _fock_gate(psi0, 0, 1, TAU)
+    psi_keep = fock_of_kets(R, C, {**kets, **kept})
+    psi_drop = fock_of_kets(R, C, {**kets, **dropped})
+
+    # regime: the gate moves the state, and the truncation discards weight
+    cos = abs(np.vdot(psi0, psi_full)) / np.linalg.norm(psi0) / np.linalg.norm(psi_full)
+    assert cos < 1 - 1e-3
+    assert np.linalg.norm(psi_drop) > 1e-3 * np.linalg.norm(psi_full)
+    assert full_par == [0, 0, 1, 1]
+    if keep == 1:
+        assert len(set(kept_par)) == 1  # a whole parity sector of the bond is gone
+
+    np.testing.assert_allclose(psi_keep + psi_drop, psi_full, atol=1e-12)
+    E, norm = cluster_energy(R, C, As, override=kept)
+    assert norm == pytest.approx(np.vdot(psi_keep, psi_keep).real, rel=1e-12)
+    assert E == pytest.approx(hop_energy(R, C, psi_keep, fermion=True), abs=1e-12)
+
+    # regime: a sign-free reorder around the split breaks the update
+    k_bad, d_bad, _, _ = _update_bond0(kets, keep=keep, reorder=_sign_free)
+    bad = fock_of_kets(R, C, {**kets, **k_bad}) + fock_of_kets(R, C, {**kets, **d_bad})
+    assert np.linalg.norm(bad - psi_full) > 1e-3 * np.linalg.norm(psi_full)
