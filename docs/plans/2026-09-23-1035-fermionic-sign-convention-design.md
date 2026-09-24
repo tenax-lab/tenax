@@ -509,3 +509,56 @@ Implemented in PR #1039 (`feat/1035-graded-contractor-phase1`, head `7695282`, o
 1. **Two odd tensors in one ket or bra:** needs an ordering convention for several auxiliary legs (§5 step 7). Phase 1 covers one odd tensor per side, where the Fock state is order-independent.
 2. **`graded_contract` must reject mixed bosonic and fermionic operands** before any production caller. Production `contract` accepts them silently.
 3. **`twist_legs` must reject unknown labels.**
+
+## 9. Phase 2 result (§5 step 3: fusion and the double layer)
+
+Implemented in PR #1040 (`feat/1035-graded-double-layer-phase2`, on `origin/main` @ `13d59c2`). It adds `tenax.algorithms._graded_double_layer`, beside the production path and imported by nothing in `src/`:
+- `graded_fuse_pair` and `graded_split_pair`;
+- `build_graded_double_layer`, a graded twin of `_build_double_layer_tensor` and `_build_double_layer_open_tensor`, with the same labels, order, flows and charges.
+
+`_graded` gains §8's entry criteria 2 and 3:
+- `graded_contract` refuses one fermionic and one bosonic operand when both have legs. A fermionic scalar reads as bosonic, so it is exempt.
+- `twist_legs` refuses unknown labels.
+
+The fuse refuses a fused label that is already in use. The split refuses a leg whose flow changed after fusion, for example one that went through `graded_bar`.
+
+**The fuse rule.** §5 step 3 proposed emitting the ket/bra pairs interleaved, so that the fuse is a pure reshape. That is not enough, for two reasons:
+- Rule 2 twists a contracted leg by the parity of the whole leg when it is IN on the left operand. A fused ket⊗bra leg would get (−1)^(p_k+p_K), but the unfused pair needs (−1)^(p_k).
+- The fused basis must be enumerated in the same `(k, K)` order on both ends of a bond, while nesting wants `(K, k)` on one of them.
+
+Both are repaired by one sign on exactly one end of each bond, the end whose ket leg is IN:
+
+  (−1)^(p_k·p_K + p_k),  with the fused leg taking the bra leg's flow (as production does).
+
+The sign depends only on a contracted pair's parity, so either end is correct. Tying it to the ket leg's flow makes the rule local. With it, contracting fused legs equals contracting the pairs, in either operand order, to 1e−15 on `FermionParity` and `FermionicU1`.
+
+**Which state.** The graded double layer must reproduce the state that `graded_contract` on the kets defines, `Fock(z_gauge(As))`. That is the state graded gates and `graded_svd` act on (§8), and a double layer measuring any other state would make the CTM measure something other than what simple update optimizes. The same fuse with a bra-parity twist reproduces the un-gauged `Fock(As)` instead, 1.9 away on the test fixture. Both are fermionic PEPS related by a bond gauge; consistency with the ket level decides.
+
+| Check (finite clusters, graded double layers contracted site by site) | Result |
+|---|---|
+| Norm and hopping energy, 2×2 and 2×3 | match `Fock(z_gauge(As))` to 1e−12; graded − HCB > 1e−3 |
+| Complex tensors (2×2) | match Fock |
+| Two-site RDM, every bond, all 8 parity-even `\|P_s P_t⟩⟨p_s p_t\|` (2×2) | match Fock element by element to 1e−12, including pairing elements and the bond (0,0)–(1,0), whose sites are not Jordan–Wigner neighbours |
+| Fuse algebra | fused contraction = unfused, both operand orders, `FermionParity` and `FermionicU1`; split inverts fuse exactly; a sign-free fuse fails the property |
+| Structure | same labels, flows and charges as production's builders; traces under `jit` |
+| Mutants (10, plus 2 in the final review) | all caught. They are: twist on the bra parity; no swap sign; the sign on both ends; `bar` for `graded_bar`; the fused leg taking the ket flow; a sign-free move in the fuse; the two guards removed; split without its sign. The sign on the other end of the bond is equivalent for the fuse, as the rule predicts, and only the fuse→split round trip catches it |
+
+**Rulings.**
+- **#1038's strict xfail and its #1037 characterization tests stay.** They test production (`_build_double_layer_*` with sign-free `contract`), which this phase does not change. They flip when production is routed through the graded double layer: step 4 for the CTM, step 6 for the default.
+- **§8 entry criterion 1 (two odd tensors in one ket or bra) moves to step 7.** Every tensor here is even.
+
+**Step 4 entry criteria.**
+1. Every one of the 9 CTM reorders is either a graded reorder already, or is changed to one.
+2. The environment's own fused legs (corner and edge χ⊗D² fusions) go through `graded_fuse_pair`, or are shown to be order-preserving.
+3. `double_layer_value` in `tests/_graded_cluster.py` is the finite-patch reference that a CTM environment on a small patch must reproduce. Its limits:
+   - it takes only dense numpy `A[u,d,l,r,p]` with `FermionParity` bonds whose parity is `index % 2`, so no SVD output or `FermionicU1`;
+   - it contracts in one fixed order (row-major, operator last);
+   - it handles only nearest-neighbour operators with s before t;
+   - it works on finite open-boundary clusters only.
+
+   Give it a `SymmetricTensor` input path (the equivalent of `cluster_value`'s `override`) before step 4 relies on it.
+4. `graded_contract` refuses shared legs with equal flows. It is the companion of criterion 2; production `contract` accepts such legs silently.
+
+**Step 7 items.**
+- `build_graded_double_layer` contracts ket first, while §3.4 and Phase 1 put the bra first. For even tensors the two are identical (checked to 2e−16), because the per-site sign cancels bond by bond. That cancellation fails for odd tensors, so fix the order before odd insertions.
+- The builder contracts any leg that ket and bra share, such as an auxiliary `x`, without checking it. That is right for Phase 1's auxiliary-leg convention, but it is implicit.
