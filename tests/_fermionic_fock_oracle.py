@@ -126,6 +126,49 @@ def fock_psi(R: int, C: int, As: dict) -> np.ndarray:
     return vec[: 1 << len(sites)]  # every virtual mode in its vacuum
 
 
+def z_gauge(R: int, C: int, As: dict) -> dict:
+    """Z on every bond's t-side leg (u, l).  Rule 2's "OUT leg first" pairing
+    equals the oracle's ``(1 + a_t a_s)`` projector in this gauge.  The sign
+    is per bond, so the s-side legs would do equally well."""
+    out = {}
+    for s, A in As.items():
+        A = np.array(A, copy=True)
+        for ax in (0, 2):
+            if A.shape[ax] == 2:
+                idx = [slice(None)] * A.ndim
+                idx[ax] = 1
+                A[tuple(idx)] *= -1
+        out[s] = A
+    return out
+
+
+def fock_psi_ordered(R: int, C: int, As: dict) -> np.ndarray:
+    """``O_1 O_2 ... O_N |0>`` (row-major, left to right).  Equal to
+    ``fock_psi`` for even tensors; defines the order when some are odd."""
+    sites = sites_of(R, C)
+    sid = {s: n for n, s in enumerate(sites)}
+    mode, M = {}, len(sites)
+    for s, x, t, y in bonds_of(R, C):
+        mode[(s, x)], mode[(t, y)] = M, M + 1
+        M += 2
+    vec = np.zeros(1 << M, dtype=np.result_type(*As.values()))
+    vec[0] = 1.0
+    for s in reversed(sites):  # O_N acts first
+        A, new = As[s], np.zeros_like(vec)
+        for k in itertools.product(*[range(n) for n in A.shape]):
+            if A[k] == 0:
+                continue
+            v = vec
+            for leg, bit in reversed(list(zip("udlrp", k))):
+                if bit:
+                    v = _create(v, sid[s] if leg == "p" else mode[(s, leg)])
+            new = new + A[k] * v
+        vec = new
+    for s, x, t, y in bonds_of(R, C):
+        vec = vec + _annihilate(_annihilate(vec, mode[(s, x)]), mode[(t, y)])
+    return vec[: 1 << len(sites)]
+
+
 def hop_energy(R: int, C: int, psi: np.ndarray, *, fermion: bool) -> float:
     """``<psi| -sum_<st> (c_s^+ c_t + h.c.) |psi> / <psi|psi>``.
 
