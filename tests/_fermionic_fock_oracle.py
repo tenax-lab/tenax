@@ -99,17 +99,22 @@ def _annihilate(vec: np.ndarray, k: int) -> np.ndarray:
     return out
 
 
-def fock_psi(R: int, C: int, As: dict) -> np.ndarray:
-    """The fermionic state of the cluster, over physical Fock states."""
+def _fock_state(R: int, C: int, As: dict, site_order: list) -> np.ndarray:
+    """Build fermionic state by applying site operators in the given order.
+
+    Shared implementation for fock_psi and fock_psi_ordered. The site_order
+    parameter determines the order in which parity-even site operators are
+    applied (O_N ... O_1 |0> for reversed order, O_1 ... O_N for forward).
+    """
     sites = sites_of(R, C)
     sid = {s: n for n, s in enumerate(sites)}
     mode, M = {}, len(sites)
     for s, x, t, y in bonds_of(R, C):
         mode[(s, x)], mode[(t, y)] = M, M + 1
         M += 2
-    vec = np.zeros(1 << M)
+    vec = np.zeros(1 << M, dtype=np.result_type(*As.values()))
     vec[0] = 1.0
-    for s in sites:  # parity-even site operators commute: order is free
+    for s in site_order:
         A, new = As[s], np.zeros_like(vec)
         for k in itertools.product(*[range(n) for n in A.shape]):
             if A[k] == 0:
@@ -124,6 +129,14 @@ def fock_psi(R: int, C: int, As: dict) -> np.ndarray:
     for s, x, t, y in bonds_of(R, C):
         vec = vec + _annihilate(_annihilate(vec, mode[(s, x)]), mode[(t, y)])
     return vec[: 1 << len(sites)]  # every virtual mode in its vacuum
+
+
+def fock_psi(R: int, C: int, As: dict) -> np.ndarray:
+    """The fermionic state of the cluster, over physical Fock states.
+
+    Parity-even site operators commute: order is free. Returns O_N ... O_1 |0>.
+    """
+    return _fock_state(R, C, As, sites_of(R, C))
 
 
 def z_gauge(R: int, C: int, As: dict) -> dict:
@@ -145,28 +158,7 @@ def z_gauge(R: int, C: int, As: dict) -> dict:
 def fock_psi_ordered(R: int, C: int, As: dict) -> np.ndarray:
     """``O_1 O_2 ... O_N |0>`` (row-major, left to right).  Equal to
     ``fock_psi`` for even tensors; defines the order when some are odd."""
-    sites = sites_of(R, C)
-    sid = {s: n for n, s in enumerate(sites)}
-    mode, M = {}, len(sites)
-    for s, x, t, y in bonds_of(R, C):
-        mode[(s, x)], mode[(t, y)] = M, M + 1
-        M += 2
-    vec = np.zeros(1 << M, dtype=np.result_type(*As.values()))
-    vec[0] = 1.0
-    for s in reversed(sites):  # O_N acts first
-        A, new = As[s], np.zeros_like(vec)
-        for k in itertools.product(*[range(n) for n in A.shape]):
-            if A[k] == 0:
-                continue
-            v = vec
-            for leg, bit in reversed(list(zip("udlrp", k))):
-                if bit:
-                    v = _create(v, sid[s] if leg == "p" else mode[(s, leg)])
-            new = new + A[k] * v
-        vec = new
-    for s, x, t, y in bonds_of(R, C):
-        vec = vec + _annihilate(_annihilate(vec, mode[(s, x)]), mode[(t, y)])
-    return vec[: 1 << len(sites)]
+    return _fock_state(R, C, As, list(reversed(sites_of(R, C))))
 
 
 def hop_energy(R: int, C: int, psi: np.ndarray, *, fermion: bool) -> float:
