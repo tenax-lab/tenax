@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 
 import _graded_cluster
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from _fermionic_fock_oracle import (
@@ -25,7 +26,10 @@ from _fermionic_fock_oracle import (
     sites_of,
     z_gauge,
 )
-from _graded_cluster import cluster_energy, cluster_value
+from _graded_cluster import cluster_energy, cluster_value, ket_site
+
+from tenax.algorithms._ctm_tensor_projector_2x2 import _scale_bond_by_diag
+from tenax.core._graded import graded_contract, graded_reorder, graded_svd
 
 CLUSTERS = [(2, 2), pytest.param(2, 3, marks=pytest.mark.slow)]
 
@@ -105,3 +109,39 @@ def test_odd_tensors_on_an_auxiliary_leg_match_fock_in_every_order(R, C):
                 )
                 assert N == pytest.approx(N_f, abs=1e-12), (x, y, order)
                 assert H == pytest.approx(H_f, abs=1e-12), (x, y, order)
+
+
+def _regauge_bond0(As, *, reorder):
+    """Merge sites (0,0)-(0,1) over bond b0, SVD back with sqrt(S) on each
+    side (exact rank), and restore each site's leg order with ``reorder``."""
+    s, t = (0, 0), (0, 1)
+    Ks, Kt = ket_site(2, 2, s, As[s]), ket_site(2, 2, t, As[t])
+    M = graded_contract(Ks, Kt)
+    left = [lab for lab in Ks.labels() if lab != "b0"]
+    right = [lab for lab in Kt.labels() if lab != "b0"]
+    _, S, _, _ = graded_svd(M, left, right, "b0")
+    keep = int(np.sum(np.asarray(S) > 1e-12 * float(np.max(S))))
+    U, S, Vh, _ = graded_svd(M, left, right, "b0", max_singular_values=keep)
+    r = jnp.sqrt(S)
+    return {
+        s: reorder(_scale_bond_by_diag(U, r, "b0"), list(Ks.labels())),
+        t: reorder(_scale_bond_by_diag(Vh, r, "b0"), list(Kt.labels())),
+    }
+
+
+def _sign_free(t, labels):
+    return t.permute_legs(tuple(t.labels().index(lab) for lab in labels))
+
+
+def test_go_no_go_an_svd_regauge_leaves_the_state_unchanged():
+    """Design §5 step 2: linalg under graded semantics.  Splitting a bond and
+    re-absorbing sqrt(S) is a gauge move; the energy must not change."""
+    As = random_even_tensors(2, 2, np.random.default_rng(3))
+    E0, n0 = cluster_energy(2, 2, As)
+    E1, n1 = cluster_energy(
+        2, 2, As, override=_regauge_bond0(As, reorder=graded_reorder)
+    )
+    assert E1 == pytest.approx(E0, abs=1e-12)
+    assert n1 == pytest.approx(n0, rel=1e-12)
+    E_bad, _ = cluster_energy(2, 2, As, override=_regauge_bond0(As, reorder=_sign_free))
+    assert abs(E_bad - E0) > 1e-3  # regime: a sign-free reorder around the SVD is wrong

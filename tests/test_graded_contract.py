@@ -125,3 +125,47 @@ def test_a_dense_operand_is_refused_when_either_is_fermionic():
     A, B, _ = _triple(FermionParity(), [0, 1, 0, 1])
     with pytest.raises(TypeError, match="DenseTensor"):
         graded_contract(A, DenseTensor(B.todense(), B.indices))
+
+
+def _scaled(U, S, bond):
+    from tenax.algorithms._ctm_tensor_projector_2x2 import _scale_bond_by_diag
+
+    return _scale_bond_by_diag(U, S, bond)
+
+
+def test_graded_svd_reconstructs_when_storage_order_is_not_left_plus_right():
+    from tenax.core._graded import graded_svd
+
+    fp, ch = FermionParity(), [0, 1, 0, 1]
+    T = _rand(
+        [
+            _idx(fp, ch, IN, "p"),
+            _idx(fp, ch, OUT, "q"),
+            _idx(fp, ch, IN, "r"),
+            _idx(fp, ch, OUT, "s"),
+        ],
+        5,
+    )
+    left, right = ["p", "r"], ["q", "s"]
+    U, S, Vh, _ = graded_svd(T, left, right, "k")
+    assert U.labels() == ("p", "r", "k") and Vh.labels() == ("k", "q", "s")
+    target = graded_reorder(T, left + right)
+    assert _maxdiff(graded_contract(_scaled(U, S, "k"), Vh), target) < 1e-12
+
+
+def test_regime_plain_svd_reorders_sign_free_and_does_not_reconstruct():
+    from tenax.linalg import svd
+
+    fp, ch = FermionParity(), [0, 1, 0, 1]
+    T = _rand(
+        [
+            _idx(fp, ch, IN, "p"),
+            _idx(fp, ch, OUT, "q"),
+            _idx(fp, ch, IN, "r"),
+            _idx(fp, ch, OUT, "s"),
+        ],
+        5,
+    )
+    U, S, Vh, _ = svd(T, ["p", "r"], ["q", "s"], new_bond_label="k")
+    target = graded_reorder(T, ["p", "r", "q", "s"])
+    assert _maxdiff(graded_contract(_scaled(U, S, "k"), Vh), target) > 1e-3

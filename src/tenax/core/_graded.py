@@ -89,3 +89,27 @@ def graded_contract(a: SymmetricTensor, b: SymmetricTensor) -> SymmetricTensor:
         a2, [lab for lab in shared if flows[lab] == FlowDirection.IN]
     )  # rule 2
     return contract(a2, b2, output_labels=out)
+
+
+def graded_svd(
+    t: SymmetricTensor, left_labels, right_labels, new_bond_label: str, **svd_kwargs
+):
+    """``tenax.linalg.svd`` under graded semantics.
+
+    ``svd`` matricizes with a sign-free reorder, which is only correct when
+    the legs are already in ``left + right`` order, so reorder them first with
+    the Koszul sign.  ``U`` is returned as ``(left..., bond)`` and ``Vh`` as
+    ``(bond, right...)``, so ``graded_contract(U * S, Vh)`` reconstructs
+    ``graded_reorder(t, left + right)``; ``svd``'s bond orientation (``U``'s
+    bond leg OUT) is exactly rule 2's +1 pairing, so no twist is needed.
+    """
+    from tenax.linalg import svd
+
+    left, right = list(left_labels), list(right_labels)
+    return svd(
+        graded_reorder(t, left + right),
+        left,
+        right,
+        new_bond_label=new_bond_label,
+        **svd_kwargs,
+    )
