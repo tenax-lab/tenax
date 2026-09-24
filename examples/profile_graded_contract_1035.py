@@ -15,9 +15,15 @@ Two arm pairs, each run with the same randomized-trial method:
 * ``bar`` vs ``graded_bar`` -- the plain ``SymmetricTensor.bar()`` against
   rule 3's sign-corrected ``graded_bar``, on ``T`` alone.
 
+Every arm returns the block-sparse ``SymmetricTensor`` itself and the timer
+blocks on its packed buffer: densifying inside the timed region would add a
+shared ``chi^2 * D^6`` scatter to both arms and dilute the ratio.
+
 Randomizes arm evaluation order across trials and repeats first-call timing to
-account for order and cache effects: reports eager time (median of per-trial medians,
-with min–max) and jit first-call time (trace+compile+run, median and min–max over trials).
+account for order and cache effects.  Reports, as the median over trials with
+min–max: eager time, compiled steady-state time (``jit run`` -- the production
+cost, since fermionic contractions run inside jitted CTM steps), and jit
+first-call time (trace+compile+run).
 
     JAX_PLATFORMS=cpu uv run python examples/profile_graded_contract_1035.py --chi 16 --d2 4
 """
@@ -78,16 +84,16 @@ def _assert_same_labels(T, a):
 def _contract_arms(T, a):
     out = _contract_out_labels(T, a)
     arms = {
-        "sign_free": lambda x, y: contract(x, y, output_labels=out).todense(),
-        "graded": lambda x, y: graded_contract(x, y).todense(),
+        "sign_free": lambda x, y: contract(x, y, output_labels=out),
+        "graded": lambda x, y: graded_contract(x, y),
     }
     return arms, (T, a)
 
 
 def _bar_arms(T):
     arms = {
-        "bar": lambda x: x.bar().todense(),
-        "graded_bar": lambda x: graded_bar(x).todense(),
+        "bar": lambda x: x.bar(),
+        "graded_bar": lambda x: graded_bar(x),
     }
     return arms, (T,)
 
@@ -100,9 +106,9 @@ def _bench(
     per-trial timings and a count of which arm ran first, keyed by name."""
     # One warm-up per arm
     for fn in arms.values():
-        fn(*operands).block_until_ready()
+        jax.block_until_ready(fn(*operands))
 
-    res = {name: {"eager": [], "first_call": []} for name in arms}
+    res = {name: {"eager": [], "first_call": [], "jit_run": []} for name in arms}
     order_counts = {name: 0 for name in arms}
 
     for _ in range(trials):
@@ -116,7 +122,7 @@ def _bench(
             times = []
             for _ in range(repeats):
                 t0 = time.perf_counter()
-                fn(*operands).block_until_ready()
+                jax.block_until_ready(fn(*operands))
                 times.append(time.perf_counter() - t0)
             res[name]["eager"].append(statistics.median(times))
 
@@ -124,8 +130,17 @@ def _bench(
             jax.clear_caches()
             jitted = jax.jit(fn)
             t0 = time.perf_counter()
-            jitted(*operands).block_until_ready()
+            jax.block_until_ready(jitted(*operands))
             res[name]["first_call"].append(time.perf_counter() - t0)
+
+            # Measure compiled steady state (the production cost: every
+            # fermionic contraction runs inside a jitted CTM step)
+            times = []
+            for _ in range(repeats):
+                t0 = time.perf_counter()
+                jax.block_until_ready(jitted(*operands))
+                times.append(time.perf_counter() - t0)
+            res[name]["jit_run"].append(statistics.median(times))
 
     return res, order_counts
 
@@ -133,35 +148,26 @@ def _bench(
 def _report(name_a: str, name_b: str, res: dict, order_counts: dict, args) -> None:
     """Print per-arm timing lines, a ``ratio {a}/{b}:`` line, and the arm
     order counts -- for the pair ``(name_a, name_b)`` in ``res``."""
+
+    def span(trials, scale, fmt):
+        med = statistics.median(trials) * scale
+        return f"{med:{fmt}} [{min(trials) * scale:{fmt}}–{max(trials) * scale:{fmt}}]"
+
     for name in (name_b, name_a):
-        eager_trials = res[name]["eager"]
-        first_call_trials = res[name]["first_call"]
-
-        eager_median = statistics.median(eager_trials)
-        eager_min = min(eager_trials)
-        eager_max = max(eager_trials)
-
-        first_call_median = statistics.median(first_call_trials)
-        first_call_min = min(first_call_trials)
-        first_call_max = max(first_call_trials)
-
+        r = res[name]
         print(
-            f"{name:10s} eager median {eager_median * 1e3:8.2f} ms "
-            f"[{eager_min * 1e3:8.2f}–{eager_max * 1e3:8.2f}]   "
-            f"jit first call (trace+compile+run) {first_call_median:7.3f} s "
-            f"[{first_call_min:7.3f}–{first_call_max:7.3f}]",
+            f"{name:10s} eager {span(r['eager'], 1e3, '7.3f')} ms   "
+            f"jit run {span(r['jit_run'], 1e3, '7.3f')} ms   "
+            f"jit first call (trace+compile+run) {span(r['first_call'], 1, '6.3f')} s",
             flush=True,
         )
 
-    eager_ratio = statistics.median(res[name_a]["eager"]) / statistics.median(
-        res[name_b]["eager"]
-    )
-    first_call_ratio = statistics.median(res[name_a]["first_call"]) / statistics.median(
-        res[name_b]["first_call"]
-    )
+    def ratio(key):
+        return statistics.median(res[name_a][key]) / statistics.median(res[name_b][key])
 
     print(
-        f"ratio {name_a}/{name_b}: eager {eager_ratio:.2f}x   first-call {first_call_ratio:.2f}x   "
+        f"ratio {name_a}/{name_b}: eager {ratio('eager'):.2f}x   "
+        f"jit run {ratio('jit_run'):.2f}x   first-call {ratio('first_call'):.2f}x   "
         f"(chi={args.chi}, D^2={args.d2}, trials={args.trials}, seed={args.seed})"
     )
 
