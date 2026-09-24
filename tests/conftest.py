@@ -32,6 +32,7 @@ _FILE_MARKERS = {
     "test_fermionic_fock_oracle.py": "core",
     "test_graded_contract.py": "core",
     "test_graded_contract_oracle.py": "core",
+    "test_graded_double_layer.py": "core",
     "test_dmrg.py": "algorithm",
     "test_idmrg.py": "algorithm",
     "test_itebd.py": "algorithm",
