@@ -15,13 +15,20 @@ import warnings
 import numpy as np
 import pytest
 from _graded_cluster import double_layer_value, production_site
-from _graded_ctm import centre_bond, patch, untruncated_env
+from _graded_ctm import centre_bond, patch, untruncated_env, vacuum_boundary_env
 
+from tenax.algorithms._ctm_tensor_convergence import (
+    CHECKERBOARD_NEIGHBORS,
+    _ctm_tensor_sweep_multisite,
+)
 from tenax.algorithms._ctm_tensor_energy import (
     _rdm1x2_tensor,
+    _rdm1x2_tensor_2site,
     _rdm2x1_tensor,
+    _rdm2x1_tensor_2site,
     _rdm_1site_tensor,
 )
+from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
 
 
 def _random_even_site(seed: int) -> np.ndarray:
@@ -40,10 +47,11 @@ def site_and_env():
     return A_np, A, env
 
 
-def _reference_rdm2(R, C, A_np, s, t) -> np.ndarray:
+def _reference_rdm2(R, C, A_np, s, t, As=None) -> np.ndarray:
     """``ref[p_s, p_t, P_s, P_t] = <|P_s P_t><p_s p_t|>`` on the patch --
-    the CTM RDM's ``(phys, phys_2, phys_bra, phys_bra_2)`` order."""
-    As = patch(R, C, A_np)
+    the CTM RDM's ``(phys, phys_2, phys_bra, phys_bra_2)`` order.  ``As``
+    overrides the uniform patch (e.g. a checkerboard)."""
+    As = patch(R, C, A_np) if As is None else As
     norm = double_layer_value(R, C, As)
     ref = np.zeros((2, 2, 2, 2), dtype=complex)
     for k in itertools.product((0, 1), repeat=4):
@@ -119,3 +127,38 @@ def test_the_sign_free_1x1_recipe_refuses_fermions(site_and_env, sweep):
                 "svd",
                 recipe="1x1",
             )
+
+
+@pytest.fixture(scope="module")
+def checkerboard_and_envs():
+    """A 2-site A/B checkerboard (what ``fpeps()`` runs), one untruncated
+    sweep from the vacuum boundary."""
+    A_np, B_np = _random_even_site(11), _random_even_site(12)
+    A, B = production_site(A_np), production_site(B_np)
+    chi = 4
+    envs = {(0, 0): vacuum_boundary_env(A, chi), (1, 0): vacuum_boundary_env(B, chi)}
+    dls = {(0, 0): _build_double_layer_tensor(A), (1, 0): _build_double_layer_tensor(B)}
+    envs, _, _ = _ctm_tensor_sweep_multisite(
+        envs, dls, CHECKERBOARD_NEIGHBORS, chi, True
+    )
+    return A_np, B_np, A, B, envs
+
+
+@pytest.mark.parametrize(
+    "fn,R,C,horizontal",
+    [(_rdm2x1_tensor_2site, 3, 4, True), (_rdm1x2_tensor_2site, 4, 3, False)],
+    ids=["2x1", "1x2"],
+)
+def test_checkerboard_rdm_equals_the_exact_patch(
+    checkerboard_and_envs, fn, R, C, horizontal
+):
+    A_np, B_np, A, B, envs = checkerboard_and_envs
+    s, t = centre_bond(R, C, horizontal)
+    pa, pb = patch(R, C, A_np), patch(R, C, B_np)
+    As = {c: pa[c] if (c[0] - s[0] + c[1] - s[1]) % 2 == 0 else pb[c] for c in pa}
+    ref = _reference_rdm2(R, C, None, s, t, As=As)
+    assert abs(ref[0, 0, 1, 1]) > 5e-3  # regime: pairing is populated
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        got = np.asarray(fn(A, B, envs[(0, 0)], envs[(1, 0)]))
+    np.testing.assert_allclose(got, ref, atol=1e-12)

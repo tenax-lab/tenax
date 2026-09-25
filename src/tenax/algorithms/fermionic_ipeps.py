@@ -25,7 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 
 # Imported at module level rather than under ``TYPE_CHECKING``, and that is not
-# a style choice: ``SplitCTMTensorEnv`` appears in the public signatures of
+# a style choice: ``CTMTensorEnv`` appears in the public signatures of
 # :func:`fpeps` and :func:`sublattice_gap`.  ``from __future__ import
 # annotations`` keeps annotations as strings, so a ``TYPE_CHECKING``-only import
 # survives import and ordinary attribute access -- but anything that *evaluates*
@@ -33,7 +33,7 @@ import numpy as np
 # purpose::
 #
 #     >>> typing.get_type_hints(fpeps)
-#     NameError: name 'SplitCTMTensorEnv' is not defined
+#     NameError: name 'CTMTensorEnv' is not defined
 #
 # That breaks every consumer that introspects a signature: runtime validators
 # (pydantic, typeguard, beartype), ``inspect.signature(..., eval_str=True)``,
@@ -48,11 +48,14 @@ import numpy as np
 # Fix this because the public annotations should resolve, not because the docs
 # are on fire.
 #
-# There is no cycle to avoid here: ``_split_ctm_tensor_init`` imports only
-# ``_ctm_utils`` and ``tenax.core``, and importing it does not pull this module
-# in.  If that ever changes, the fix is a qualified annotation that resolves at
-# runtime, not a retreat to ``TYPE_CHECKING``.
-from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
+# There is no cycle to avoid here: ``_ctm_tensor_init`` does not import this
+# module.  If that ever changes, the fix is a qualified annotation that resolves
+# at runtime, not a retreat to ``TYPE_CHECKING``.
+#
+# The environments are the fused graded Tensor CTM's (#1035 step 4); the split
+# CTM refuses fermionic input, because its split <-> fused conversions are
+# sign-free.
+from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.algorithms.ipeps_simple_update import (
     BondWeights,
     _simple_update_checkerboard_sweep,
@@ -325,8 +328,8 @@ def _fpeps_simple_update(
 def sublattice_gap(
     A: SymmetricTensor,
     B: SymmetricTensor,
-    env_A: SplitCTMTensorEnv,
-    env_B: SplitCTMTensorEnv,
+    env_A: CTMTensorEnv,
+    env_B: CTMTensorEnv,
 ) -> float:
     """Is there **charge order** between the two checkerboard sublattices?
 
@@ -376,7 +379,7 @@ def sublattice_gap(
         A, B:           The two checkerboard site tensors, in **physical**
                         (CTM-contractable) form -- the pair :func:`fpeps`
                         returns, not the bare Vidal ``Gamma``.
-        env_A, env_B:   Their converged ``SplitCTMTensorEnv`` environments, the
+        env_A, env_B:   Their converged ``CTMTensorEnv`` environments, the
                         pair :func:`fpeps` returns alongside the state.
 
     Returns:
@@ -389,10 +392,10 @@ def sublattice_gap(
         signal that the environment is too small or too few sweeps, and
         clipping would hide it inside a plausible-looking 1.0.
     """
-    from tenax.algorithms._split_ctm_tensor_energy import _rdm2x1_split_tensor_2site
+    from tenax.algorithms._ctm_tensor_energy import _rdm2x1_tensor_2site
 
     # (s1_A_ket, s2_B_ket, s1_A_bra, s2_B_bra), already trace-normalised.
-    rho = np.asarray(_rdm2x1_split_tensor_2site(A, B, env_A, env_B))
+    rho = np.asarray(_rdm2x1_tensor_2site(A, B, env_A, env_B))
     rho_A = np.einsum("abcb->ac", rho)
     rho_B = np.einsum("abad->bd", rho)
     # The two-site RDM is trace-normalised, so both traces are 1 already; divide
@@ -515,7 +518,7 @@ def fpeps(
 ) -> tuple[
     float,
     tuple[SymmetricTensor, SymmetricTensor],
-    tuple[SplitCTMTensorEnv, SplitCTMTensorEnv],
+    tuple[CTMTensorEnv, CTMTensorEnv],
 ]:
     """Run fPEPS: simple update optimization + CTM energy evaluation.
 
@@ -588,10 +591,8 @@ def fpeps(
         bond-ordered state has identical on-site densities on both sublattices.
         See :func:`sublattice_gap` for the full statement.
     """
-    from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
-    from tenax.algorithms._split_ctm_tensor_energy import (
-        compute_energy_split_ctm_tensor_2site,
-    )
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
 
     if isinstance(initial_tensor, tuple):
         A, B = initial_tensor
@@ -626,7 +627,9 @@ def fpeps(
     # freed, or when #882 removes stored lambdas altogether.
     A_phys, B_phys = _to_physical_pair(A_opt, B_opt, lambdas)
 
-    env_A, env_B = ctm_split_tensor_2site(
+    # The fused graded Tensor CTM (#1035 step 4).  The split CTM's split <->
+    # fused conversions are sign-free and refuse fermionic input.
+    env_A, env_B = ctm_tensor_2site(
         A_phys,
         B_phys,
         config.ctm_chi,
@@ -643,7 +646,7 @@ def fpeps(
     # noise, not a collapse, so those runs still return a number; only gross
     # non-PSD -- and, at their own tolerances, any non-finite or trace-collapse --
     # are refused.
-    energy = compute_energy_split_ctm_tensor_2site(
+    energy = compute_energy_ctm_tensor_2site(
         A_phys,
         B_phys,
         env_A,

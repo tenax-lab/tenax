@@ -1225,6 +1225,16 @@ def compute_energy_split_ctm_tensor_multisite(
         Scalar energy per site, or ``NaN`` when ``nan_on_invalid_rdm`` is set and a
         bond RDM is not a density matrix (beyond ``psd_tol`` for the PSD arm).
     """
+    from tenax.algorithms._ctm_graded import is_fermionic
+
+    if any(is_fermionic(t) for t in site_tensors.values()):
+        # The split RDM kernels contract sign-free (#1035 step 4): on fermionic
+        # tensors they compute hard-core-boson expectation values.
+        raise NotImplementedError(
+            "split-CTM energy: fermionic tensors are not supported (sign-free "
+            "contraction, #1035); use compute_energy_ctm_tensor_2site / "
+            "compute_energy_ctm_tensor_multisite on the fused Tensor CTM"
+        )
     check_rdm = collapsed_rdm_error = None
     resolved_psd_tol = psd_tol
     if nan_on_invalid_rdm:

@@ -789,6 +789,8 @@ def compute_energy_ctm_tensor_2site(
     env_B: CTMTensorEnv,
     hamiltonian_gate: Tensor | jax.Array,
     d: int | None = None,
+    nan_on_invalid_rdm: bool = False,
+    psd_tol: float | None = None,
 ) -> jax.Array:
     """Compute energy per site for a 2-site checkerboard iPEPS.
 
@@ -808,9 +810,16 @@ def compute_energy_ctm_tensor_2site(
         env_B:            Converged CTMTensorEnv for sublattice B.
         hamiltonian_gate: 2-site Hamiltonian gate.
         d:                Physical dimension (inferred from A if None).
+        nan_on_invalid_rdm: Return ``NaN`` if any bond's concrete RDM fails
+                          :func:`~tenax.algorithms._ctm_diagnostics.check_rdm`
+                          (#879); skipped under jit/grad, where the RDMs are
+                          tracers.
+        psd_tol:          PSD-arm negativity tolerance for that gate (``None``:
+                          the default ``RDM_PSD_TOL``).
 
     Returns:
-        Scalar energy per site.
+        Scalar energy per site, or ``NaN`` when ``nan_on_invalid_rdm`` is set and
+        a bond RDM is not a density matrix.
     """
     if d is None:
         phys_idx = [i for i in A.indices if i.label == "phys"]
@@ -825,14 +834,36 @@ def compute_energy_ctm_tensor_2site(
     rdm_h_BA = _rdm2x1_tensor_2site(B, A, env_B, env_A)
     rdm_v_AB = _rdm1x2_tensor_2site(A, B, env_A, env_B)
     rdm_v_BA = _rdm1x2_tensor_2site(B, A, env_B, env_A)
-    E = (
-        jnp.einsum("ijkl,klij->", rdm_h_AB, H)
-        + jnp.einsum("ijkl,klij->", rdm_h_BA, H)
-        + jnp.einsum("ijkl,klij->", rdm_v_AB, H)
-        + jnp.einsum("ijkl,klij->", rdm_v_BA, H)
-    )
+    rdms = {"h AB": rdm_h_AB, "h BA": rdm_h_BA, "v AB": rdm_v_AB, "v BA": rdm_v_BA}
+    E = sum(jnp.einsum("ijkl,klij->", rdm, H) for rdm in rdms.values())
+    if nan_on_invalid_rdm and _any_invalid_rdm(rdms, psd_tol):
+        # One non-density-matrix bond makes the cell energy unbounded by
+        # physics; poison it rather than report a lie (#879).
+        return jnp.array(jnp.nan, dtype=E.real.dtype)
     # 4 bonds (2 A-B + 2 B-A) / 2 unique sites per unit cell.
     return 0.5 * E.real
+
+
+def _any_invalid_rdm(rdms: dict, psd_tol: float | None) -> bool:
+    """#879's gate: True if any *concrete* RDM fails ``check_rdm``.  Tracers
+    (jit/grad) carry no runtime value and are skipped, so the AD path is
+    unchanged.  Same gate as the split energy's."""
+    from tenax.algorithms._ctm_diagnostics import (
+        RDM_PSD_TOL,
+        CollapsedRDMError,
+        check_rdm,
+    )
+
+    tol = RDM_PSD_TOL if psd_tol is None else psd_tol
+    invalid = False
+    for context, rdm in rdms.items():
+        if isinstance(rdm, jax.core.Tracer):
+            continue
+        try:
+            check_rdm(rdm, context=context, strict=True, psd_tol=tol)
+        except CollapsedRDMError:
+            invalid = True
+    return invalid
 
 
 def compute_energy_ctm_tensor_multisite(
