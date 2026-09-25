@@ -88,3 +88,34 @@ def test_one_site_rdm_equals_the_exact_patch(site_and_env):
     got = _ctm_rdm(_rdm_1site_tensor, A, env)
     np.testing.assert_allclose(got, ref, atol=1e-12)
     assert np.linalg.eigvalsh(got).min() > -1e-12
+
+
+@pytest.mark.parametrize("sweep", ["single", "paired", "multisite"])
+def test_the_sign_free_1x1_recipe_refuses_fermions(site_and_env, sweep):
+    """The 1x1 recipe and the paired moves fuse chi and D² legs sign-free;
+    fermionic input must not reach them silently."""
+    from tenax.algorithms._ctm_tensor_convergence import (
+        SINGLE_SITE_NEIGHBORS,
+        _ctm_tensor_sweep,
+        _ctm_tensor_sweep_multisite,
+        _ctm_tensor_sweep_paired,
+    )
+    from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+
+    _, A, env = site_and_env
+    a = _build_double_layer_tensor(A)
+    with pytest.raises(NotImplementedError, match="recipe='2x2'"):
+        if sweep == "single":
+            _ctm_tensor_sweep(env, a, 4, True)
+        elif sweep == "paired":
+            _ctm_tensor_sweep_paired(env, a, 4, True)
+        else:
+            _ctm_tensor_sweep_multisite(
+                {(0, 0): env},
+                {(0, 0): a},
+                SINGLE_SITE_NEIGHBORS,
+                4,
+                True,
+                "svd",
+                recipe="1x1",
+            )

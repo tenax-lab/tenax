@@ -372,6 +372,8 @@ def _ctm_tensor_sweep_multisite(
             return a
 
     if recipe == "1x1":
+        for a in double_layers.values():
+            _refuse_fermionic_1x1(a, "_ctm_tensor_sweep_multisite(recipe='1x1')")
         for direction, move_fn in _DIRECTION_MOVES:
             for coord in _sort_coords_for_direction(all_coords, direction):
                 nb = neighbors[coord][direction]
