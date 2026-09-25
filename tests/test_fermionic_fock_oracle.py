@@ -7,9 +7,10 @@ Fock space, where every sign comes from the operator algebra.  These tests
 2. check that the clusters used can tell fermions from hard-core bosons at all
    (otherwise nothing below could fail);
 3. pin #1037's derived local double-layer rule against the oracle; and
-4. record the defect: tenax's own double layer + ``contract`` computes the
-   HARD-CORE-BOSON energy of the sign-free amplitudes, and does not match
-   the oracle.
+4. check that the Tensor CTM's double layer, contracted as the CTM contracts
+   it (graded, #1035 step 4), gives the oracle's fermionic energy.  Before
+   that step it gave the HARD-CORE-BOSON energy of the sign-free amplitudes
+   (#1037).
 
 Everything is exact (no CTM, no optimisation): D=2 bonds, t=1, V=0.
 """
@@ -37,10 +38,14 @@ from _fermionic_fock_oracle import (
     sign_formula,
     site_bits,
     sites_of,
+    z_gauge,
 )
 
-from tenax.algorithms._ctm_tensor_init import _build_double_layer_open_tensor
-from tenax.contraction.contractor import contract
+from tenax.algorithms._ctm_tensor_init import (
+    _build_double_layer_open_tensor,
+    _build_double_layer_tensor,
+)
+from tenax.core._graded import graded_contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity
 from tenax.core.tensor import SymmetricTensor
@@ -178,30 +183,27 @@ def _tenax_site(A: np.ndarray) -> SymmetricTensor:
 
 
 def _tenax_energy(R: int, C: int, As: dict) -> float:
-    """Norm and hopping energy from ``_build_double_layer_open_tensor`` +
-    ``contract`` alone -- the double layer every fermionic CTM/RDM path uses."""
+    """Norm and hopping energy from the Tensor CTM's own builders, contracted
+    site by site with ``graded_contract`` as the CTM contracts them (#1035
+    step 4): ``_build_double_layer_open_tensor`` on the operator's two sites,
+    ``_build_double_layer_tensor`` (physical leg traced inside, graded)
+    everywhere else.  Closing a site by pairing its open legs with an
+    identity tensor instead is a sign-free trace -- a supertrace under
+    rule 2 -- and flips the energy."""
     sites = sites_of(R, C)
     n_of = {s: n for n, s in enumerate(sites)}
     rename = {s: {} for s in sites}
     for b, (s, x, t, y) in enumerate(bonds_of(R, C)):
         rename[s][f"{x}2"] = rename[t][f"{y}2"] = f"b{b}"
-    ao = {}
+    ao, a = {}, {}
     for s in sites:
-        T = _build_double_layer_open_tensor(_tenax_site(As[s]))
         m = {f"{x}2": f"open_{n_of[s]}_{x}" for x in "udlr"} | rename[s]
+        a[s] = _build_double_layer_tensor(_tenax_site(As[s])).relabels(m)
+        T = _build_double_layer_open_tensor(_tenax_site(As[s]))
         m |= {"phys": f"p{n_of[s]}", "phys_bra": f"P{n_of[s]}"}
         ao[s] = T.relabels(m)
     sym = FermionParity()
     ch = np.array([0, 1], dtype=np.int32)
-
-    def ident(n):
-        return SymmetricTensor.from_dense(
-            jnp.eye(2),
-            (
-                TensorIndex.from_charges(sym, ch, FlowDirection.OUT, label=f"p{n}"),
-                TensorIndex.from_charges(sym, ch, FlowDirection.IN, label=f"P{n}"),
-            ),
-        )
 
     h = np.zeros((2, 2, 2, 2))
     h[1, 0, 0, 1] = h[0, 1, 1, 0] = -1.0
@@ -218,54 +220,37 @@ def _tenax_energy(R: int, C: int, As: dict) -> float:
         )
 
     def value(bond):
-        ops = [ao[s] for s in sites]
         on = () if bond is None else (n_of[bond[0]], n_of[bond[1]])
-        ops += [ident(n_of[s]) for s in sites if n_of[s] not in on]
+        ops = [ao[s] if n_of[s] in on else a[s] for s in sites]
         if bond is not None:
             ops.append(hop(*on))
-        return real_scalar(contract(*ops).todense())
+        out = ops[0]
+        for op in ops[1:]:
+            out = graded_contract(out, op)
+        return real_scalar(out.todense())
 
     norm = value(None)
     return sum(value((s, t)) for s, _, t, _ in bonds_of(R, C)) / norm
 
 
 @pytest.mark.parametrize("R,C", CLUSTERS)
-def test_1037_tenax_double_layer_is_the_hard_core_boson_functional(R, C):
-    """Pins the DEFECT: remove together with the fix for #1037.
-
-    tenax's double layer, contracted with tenax's ``contract``, returns exactly
-    the hard-core-boson energy of the sign-free ket amplitudes -- and not the
-    fermionic energy of the same tensors.
-    """
+def test_tenax_double_layer_matches_the_fermionic_oracle(R, C):
+    """#1037 fixed on the Tensor CTM's path: its double layer, contracted as
+    the CTM contracts it, gives the fermionic energy of the state graded
+    contraction defines, ``Fock(z_gauge(As))`` (design §9) -- not the
+    hard-core-boson energy of the plain amplitudes."""
     rng = np.random.default_rng(2)
     for _ in range(3):
         As = random_even_tensors(R, C, rng)
-        E_tenax = _tenax_energy(R, C, As)
+        E = _tenax_energy(R, C, As)
+        E_fock = hop_energy(R, C, fock_psi(R, C, z_gauge(R, C, As)), fermion=True)
         E_hcb = hop_energy(R, C, plain_amplitudes(R, C, As), fermion=False)
-        E_fock = hop_energy(R, C, fock_psi(R, C, As), fermion=True)
-        assert E_tenax == pytest.approx(E_hcb, abs=1e-10)
-        assert abs(E_tenax - E_fock) > 1e-3
+        assert E == pytest.approx(E_fock, abs=1e-10)
+        assert abs(E - E_hcb) > 1e-3  # regime: the two functionals differ here
 
 
-def test_1037_characterization_holds_for_complex_tensors():
-    """Same defect pin as above, with complex site tensors (2x2)."""
+def test_tenax_double_layer_matches_the_oracle_for_complex_tensors():
     R, C = 2, 2
     As = _complex_even_tensors(R, C, 5)
-    E_tenax = _tenax_energy(R, C, As)
-    E_hcb = hop_energy(R, C, plain_amplitudes(R, C, As), fermion=False)
-    E_fock = hop_energy(R, C, fock_psi(R, C, As), fermion=True)
-    assert E_tenax == pytest.approx(E_hcb, abs=1e-10)
-    assert abs(E_tenax - E_fock) > 1e-3
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="#1037: the fermionic double layer applies no fermionic sign",
-)
-@pytest.mark.parametrize("R,C", CLUSTERS)
-def test_tenax_double_layer_matches_the_fermionic_oracle(R, C):
-    rng = np.random.default_rng(2)
-    As = random_even_tensors(R, C, rng)
-    E_fock = hop_energy(R, C, fock_psi(R, C, As), fermion=True)
+    E_fock = hop_energy(R, C, fock_psi(R, C, z_gauge(R, C, As)), fermion=True)
     assert _tenax_energy(R, C, As) == pytest.approx(E_fock, abs=1e-10)
