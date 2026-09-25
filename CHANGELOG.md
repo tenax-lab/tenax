@@ -4,6 +4,20 @@
 
 ### Added
 
+- **#1037 is a closed-loop defect, and tree clusters pin its boundary**
+  (`tests/test_fermionic_fock_oracle.py`): on an acyclic cluster the fermionic
+  and hard-core-boson functionals are not merely close but *identically* equal
+  -- a hopping term's fermionic sign can only differ from the bosonic one
+  around a cycle -- so tenax's double layer is already exact there, and the
+  defect switches on with the first plaquette.  Measured against the #1037
+  oracle: 1x3 and 1x4 agree to the last bit (0.8158780672 / 0.8439192202 for
+  all three of fermionic, hard-core-boson and tenax), while 2x2 and 2x3
+  separate by 4.7e-01 and 4.4e-01.  Both tree tests assert a non-trivial
+  energy first, since 1x2 gives exactly 0 and would pass vacuously.  These are
+  the regression guard for the #1035/#1036 fix: a change that corrects the
+  plaquette clusters by moving tree results has introduced a second defect
+  where there was none.
+
 - **The implicit-AD CTM forward now measures its own stationarity** (#841):
   `ctm_energy_implicit` runs one extra gauged sweep after the forward loop and
   warns (`RuntimeWarning`) when the literal residual
