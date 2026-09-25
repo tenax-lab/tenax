@@ -15,6 +15,7 @@ from __future__ import annotations
 from tenax.contraction.contractor import contract as _contract
 from tenax.core._graded import (
     _is_graded,
+    _scale_blocks,
     graded_bar,
     graded_contract,
     graded_reorder,
@@ -22,7 +23,7 @@ from tenax.core._graded import (
 )
 from tenax.core.tensor import SymmetricTensor
 
-__all__ = ["bar", "contract", "is_fermionic", "svd"]
+__all__ = ["bar", "contract", "dense_rdm", "is_fermionic", "svd"]
 
 
 def is_fermionic(t) -> bool:
@@ -66,3 +67,28 @@ def svd(t, left_labels, right_labels, new_bond_label="bond", **kwargs):
         new_bond_label=new_bond_label,
         **kwargs,
     )
+
+
+def dense_rdm(rdm_t, bra_labels):
+    """The dense reduced density matrix of a contracted RDM tensor.
+
+    ``rdm_t`` holds the ket physical legs, then the bra legs ``bra_labels``.
+    On a fermionic tensor the raw blocks are not the matrix elements
+    ``<|P><p|>``: reading one off means contracting the bra legs with a
+    basis operator, which costs rule 2's pair sign ``(-1)**P_i`` on each bra
+    leg and the Koszul sign ``(-1)**sum_{i<j} P_i P_j`` of taking the bra
+    legs in reverse (the operator's annihilation half).  Without it the
+    1-site RDM reads ``diag(q0, -q1)`` and the pairing elements come out
+    antisymmetric.  Checked against the finite-patch reference in
+    ``tests/test_graded_ctm.py``.  Non-fermionic tensors are read as is.
+    """
+    if is_fermionic(rdm_t):
+        axes = [rdm_t.labels().index(lab) for lab in bra_labels]
+        rdm_t = _scale_blocks(
+            rdm_t,
+            lambda p: (
+                sum(p[i] for i in axes)
+                + sum(p[i] * p[j] for n, i in enumerate(axes) for j in axes[n + 1 :])
+            ),
+        )
+    return rdm_t.todense()

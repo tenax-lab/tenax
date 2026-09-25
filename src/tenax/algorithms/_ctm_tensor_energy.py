@@ -183,7 +183,7 @@ def _rdm_1site_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
         output_labels=["phys", "phys_bra"],
     )
 
-    rdm = rdm_t.todense()
+    rdm = G.dense_rdm(rdm_t, ["phys_bra"])
     rdm = _normalise_rdm_for_energy(rdm, "_rdm_1site_tensor")
     return rdm
 
@@ -288,7 +288,7 @@ def _rdm_diagonal_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
         output_labels=["phys", "phys_BR", "phys_bra", "phys_bra_BR"],
     )
 
-    rdm = rdm_t.todense()
+    rdm = G.dense_rdm(rdm_t, ["phys_bra", "phys_bra_BR"])
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
     rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm_diagonal_tensor")
@@ -409,7 +409,7 @@ def _rdm_diagonal_tensor_4site(
         output_labels=["phys", "phys_BR", "phys_bra", "phys_bra_BR"],
     )
 
-    rdm = rdm_t.todense()
+    rdm = G.dense_rdm(rdm_t, ["phys_bra", "phys_bra_BR"])
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
     rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm_diagonal_tensor_4site")
@@ -498,7 +498,7 @@ def _rdm2x1_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     # → (s1_ket, s2_ket, s1_bra, s2_bra)
 
     # RDM is d^2 x d^2 (physical dimension) — always small, todense OK.
-    rdm = rdm_t.todense()
+    rdm = G.dense_rdm(rdm_t, ["phys_bra", "phys_braR"])
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
     rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm2x1_tensor")
@@ -586,7 +586,7 @@ def _rdm1x2_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     )
 
     # RDM is d^2 x d^2 (physical dimension) — always small, todense OK.
-    rdm = rdm_t.todense()
+    rdm = G.dense_rdm(rdm_t, ["phys_bra", "phys_braB"])
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
     rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm1x2_tensor")
@@ -691,7 +691,7 @@ def _rdm2x1_tensor_2site(
     )
 
     # RDM is d^2 x d^2 (physical dimension) — always small, todense OK.
-    rdm = rdm_t.todense()
+    rdm = G.dense_rdm(rdm_t, ["phys_bra", "phys_braR"])
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
     rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm2x1_tensor_2site")
@@ -775,7 +775,7 @@ def _rdm1x2_tensor_2site(
     )
 
     # RDM is d^2 x d^2 (physical dimension) — always small, todense OK.
-    rdm = rdm_t.todense()
+    rdm = G.dense_rdm(rdm_t, ["phys_bra", "phys_braB"])
     d = rdm.shape[0]
     rdm_mat = rdm.reshape(d * d, d * d)
     rdm_mat = _normalise_rdm_for_energy(rdm_mat, "_rdm1x2_tensor_2site")

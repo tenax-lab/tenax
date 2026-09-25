@@ -1,0 +1,90 @@
+"""The graded Tensor CTM against an exact finite patch (#1035, design §5 step 4).
+
+An untruncated CTM from the vacuum boundary is an exact contraction of a
+finite open patch (``tests/_graded_ctm.py``), so its RDMs must equal Phase 2's
+``double_layer_value`` on that patch element by element.  The Fock oracle
+itself cannot be used here: it stores ``2**(sites + 2*bonds)`` amplitudes,
+``2**33`` already for 3x3.
+"""
+
+from __future__ import annotations
+
+import itertools
+import warnings
+
+import numpy as np
+import pytest
+from _graded_cluster import double_layer_value, production_site
+from _graded_ctm import centre_bond, patch, untruncated_env
+
+from tenax.algorithms._ctm_tensor_energy import (
+    _rdm1x2_tensor,
+    _rdm2x1_tensor,
+    _rdm_1site_tensor,
+)
+
+
+def _random_even_site(seed: int) -> np.ndarray:
+    A = np.random.default_rng(seed).standard_normal((2, 2, 2, 2, 2))
+    for k in itertools.product(*[range(n) for n in A.shape]):
+        if sum(k) % 2:
+            A[k] = 0.0
+    return A
+
+
+@pytest.fixture(scope="module")
+def site_and_env():
+    A_np = _random_even_site(11)
+    A = production_site(A_np)
+    env, _chi = untruncated_env(A, 1)
+    return A_np, A, env
+
+
+def _reference_rdm2(R, C, A_np, s, t) -> np.ndarray:
+    """``ref[p_s, p_t, P_s, P_t] = <|P_s P_t><p_s p_t|>`` on the patch --
+    the CTM RDM's ``(phys, phys_2, phys_bra, phys_bra_2)`` order."""
+    As = patch(R, C, A_np)
+    norm = double_layer_value(R, C, As)
+    ref = np.zeros((2, 2, 2, 2), dtype=complex)
+    for k in itertools.product((0, 1), repeat=4):
+        if sum(k) % 2:
+            continue
+        h2 = np.zeros((2, 2, 2, 2))
+        h2[k[2], k[3], k[0], k[1]] = 1.0  # h2[P_s, P_t, p_s, p_t]
+        ref[k] = double_layer_value(R, C, As, op=((s, t), h2)) / norm
+    return ref
+
+
+def _ctm_rdm(fn, A, env) -> np.ndarray:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)  # the non-PSD warning
+        return np.asarray(fn(A, env))
+
+
+@pytest.mark.parametrize(
+    "fn,R,C,horizontal",
+    [(_rdm2x1_tensor, 3, 4, True), (_rdm1x2_tensor, 4, 3, False)],
+    ids=["2x1", "1x2"],
+)
+def test_two_site_rdm_equals_the_exact_patch(site_and_env, fn, R, C, horizontal):
+    A_np, A, env = site_and_env
+    s, t = centre_bond(R, C, horizontal)
+    ref = _reference_rdm2(R, C, A_np, s, t)
+    # Regime: the elements a wrong sign would corrupt are not trivially zero --
+    # both occupied (P_s P_t term of the sign), hopping, and pairing (which
+    # symmetrisation cancels when the sign is wrong).
+    for k in [(1, 1, 1, 1), (0, 1, 1, 0), (0, 0, 1, 1)]:
+        assert abs(ref[k]) > 5e-3, k
+    got = _ctm_rdm(fn, A, env)
+    np.testing.assert_allclose(got, ref, atol=1e-12)
+
+
+def test_one_site_rdm_equals_the_exact_patch(site_and_env):
+    A_np, A, env = site_and_env
+    R, C = 3, 3  # one sweep around a 1x1 centre
+    rho2 = _reference_rdm2(R, C, A_np, (1, 1), (1, 2))
+    ref = np.einsum("abcb->ac", rho2)  # trace out (1, 2): [p, P]
+    assert ref[1, 1].real > 5e-3  # regime: the odd sector is populated
+    got = _ctm_rdm(_rdm_1site_tensor, A, env)
+    np.testing.assert_allclose(got, ref, atol=1e-12)
+    assert np.linalg.eigvalsh(got).min() > -1e-12
