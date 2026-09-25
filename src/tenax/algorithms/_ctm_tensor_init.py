@@ -24,6 +24,8 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_graded import is_fermionic as _is_fermionic
+from tenax.algorithms._graded_double_layer import build_graded_double_layer
 from tenax.algorithms._tensor_utils import fuse_indices
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, Label, TensorIndex
@@ -112,7 +114,14 @@ def _build_double_layer_tensor(A: Tensor) -> Tensor:
 
     Input:  A with labels (u, d, l, r, phys), 5 legs.
     Output: 4-leg tensor with labels (u2, d2, l2, r2), dimensions D².
+
+    A fermionic ``A`` gets the graded double layer (#1035, design §5 step 4):
+    same labels, order, flows and charges, built with ``graded_bar``,
+    ``graded_contract`` and the graded fuse.  Everything above about ``bar``
+    describes the bosonic path only.
     """
+    if _is_fermionic(A):
+        return build_graded_double_layer(A)
     A_bra = A.bar().relabels({"u": "U", "d": "D", "l": "L", "r": "R"})
     # Contract over shared "phys" label → 8-leg tensor
     a8 = contract(A, A_bra)
@@ -132,7 +141,12 @@ def _build_double_layer_open_tensor(A: Tensor) -> Tensor:
     to ``phys_bra`` on the bra side so it stays as a free leg.
 
     Output: 6-leg tensor (u2, d2, l2, r2, phys, phys_bra).
+
+    A fermionic ``A`` gets the graded double layer, as in
+    :func:`_build_double_layer_tensor`.
     """
+    if _is_fermionic(A):
+        return build_graded_double_layer(A, phys_bra="phys_bra")
     A_bra = A.bar().relabels(
         {"u": "U", "d": "D", "l": "L", "r": "R", "phys": "phys_bra"}
     )

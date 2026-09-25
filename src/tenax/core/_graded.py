@@ -87,6 +87,15 @@ def graded_contract(a: SymmetricTensor, b: SymmetricTensor) -> SymmetricTensor:
         )
     b_labels = set(b.labels())
     shared = [lab for lab in a.labels() if lab in b_labels]
+    if _is_graded(a) and _is_graded(b):
+        flow_a = dict(zip(a.labels(), (i.flow for i in a.indices)))
+        flow_b = dict(zip(b.labels(), (i.flow for i in b.indices)))
+        same = [lab for lab in shared if flow_a[lab] == flow_b[lab]]
+        if same:
+            raise ValueError(
+                f"graded_contract: shared legs {same} have the same flow on both "
+                "operands; rule 2's sign needs one IN and one OUT end"
+            )
     free_a = [lab for lab in a.labels() if lab not in b_labels]
     free_b = [lab for lab in b.labels() if lab not in set(shared)]
     out = tuple(free_a + free_b)
