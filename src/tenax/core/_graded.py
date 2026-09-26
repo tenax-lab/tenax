@@ -17,7 +17,7 @@ import numpy as np
 
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection
-from tenax.core.tensor import SymmetricTensor
+from tenax.core.tensor import SymmetricTensor, _reject_anyonic_twist
 
 
 def _is_graded(t) -> bool:
@@ -38,6 +38,31 @@ def _scale_blocks(t: SymmetricTensor, exponent) -> SymmetricTensor:
     return SymmetricTensor._from_blocks_unchecked(blocks, t.indices)
 
 
+def twist_axes(t: SymmetricTensor, axes) -> SymmetricTensor:
+    """The twist by leg *position* -- the one implementation of the sign.
+
+    :func:`twist_legs` is the label-based spelling and
+    :meth:`~tenax.core.tensor.SymmetricTensor.twist` the public axis-based
+    one; both land here, so the two cannot drift apart.
+    """
+    rank = len(t.indices)
+    for ax in axes:
+        if not -rank <= ax < rank:
+            raise IndexError(f"twist axis {ax} out of range for a rank-{rank} tensor")
+    sym = t.indices[0].symmetry if t.indices else None
+    if sym is None or not axes:
+        return t
+    # An anyonic symmetry declares a ribbon phase that (-1)**p cannot carry,
+    # so refuse rather than silently return the tensor unchanged.
+    _reject_anyonic_twist(sym)
+    if not _is_graded(t):
+        return t
+    # Repeats are kept, not de-duplicated: twisting one axis twice must be
+    # the identity, which the parity sum already gives.
+    norm = [ax % rank for ax in axes]
+    return _scale_blocks(t, lambda p: sum(p[ax] for ax in norm))
+
+
 def twist_legs(t: SymmetricTensor, labels) -> SymmetricTensor:
     """Multiply each block by ``(-1)**(sum of parities on the named legs)``.
 
@@ -48,9 +73,7 @@ def twist_legs(t: SymmetricTensor, labels) -> SymmetricTensor:
     if unknown:
         raise ValueError(f"twist_legs: no leg labelled {sorted(unknown, key=str)}")
     axes = [i for i, lab in enumerate(t.labels()) if lab in labels]
-    if not axes or not _is_graded(t):
-        return t
-    return _scale_blocks(t, lambda p: sum(p[i] for i in axes))
+    return twist_axes(t, axes)
 
 
 def graded_bar(t: SymmetricTensor) -> SymmetricTensor:

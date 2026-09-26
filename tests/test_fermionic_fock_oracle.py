@@ -254,3 +254,59 @@ def test_tenax_double_layer_matches_the_oracle_for_complex_tensors():
     As = _complex_even_tensors(R, C, 5)
     E_fock = hop_energy(R, C, fock_psi(R, C, z_gauge(R, C, As)), fermion=True)
     assert _tenax_energy(R, C, As) == pytest.approx(E_fock, abs=1e-10)
+
+
+# ------------------------------------------------------------------ #
+# 5. Where the defect starts: the first closed loop                  #
+# ------------------------------------------------------------------ #
+#
+# Every cluster above has a plaquette, so all of them separate fermions
+# from hard-core bosons.  A 1xC cluster is a TREE, and there the two
+# functionals are not merely close -- they are identically equal, because
+# the fermionic sign of a hopping term can only differ from the bosonic
+# one around a cycle.  tenax's double layer is therefore already EXACT on
+# a tree, and #1037 switches on with the first loop.
+#
+# This is the boundary of the defect, so it is the regression guard for
+# the fix: whatever #1035/#1036 change, tree clusters must not move.
+
+TREE_CLUSTERS = [(1, 3), (1, 4)]
+
+
+def _is_acyclic(R: int, C: int) -> bool:
+    """A connected graph is acyclic iff |edges| = |vertices| - 1."""
+    return len(bonds_of(R, C)) == len(sites_of(R, C)) - 1
+
+
+@pytest.mark.parametrize("R,C", TREE_CLUSTERS)
+def test_a_tree_cluster_cannot_separate_fermions_from_hard_core_bosons(R, C):
+    """The mirror of ``test_the_clusters_separate_...``: on a tree it can't.
+
+    Not an approximation -- the two functionals agree to the last bit, so
+    there is no fermionic sign to get wrong in the first place.
+    """
+    assert _is_acyclic(R, C), f"{R}x{C} is not a tree"
+    rng = np.random.default_rng(2)
+    As = random_even_tensors(R, C, rng)
+    E_fock = hop_energy(R, C, fock_psi(R, C, As), fermion=True)
+    E_hcb = hop_energy(R, C, plain_amplitudes(R, C, As), fermion=False)
+    # Guard against a vacuous pass: 1x2 has E == 0 for both, which would
+    # satisfy any equality assertion without exercising anything.
+    assert abs(E_fock) > 1e-3, f"{R}x{C} energy is trivial ({E_fock})"
+    assert E_fock == pytest.approx(E_hcb, abs=1e-12)
+
+
+@pytest.mark.parametrize("R,C", TREE_CLUSTERS)
+def test_tenax_double_layer_is_already_exact_on_a_tree(R, C):
+    """#1037 is a LOOP defect: on an acyclic cluster tenax is exact.
+
+    Keep this passing through the #1037 fix.  A fix that corrects the
+    plaquette clusters by changing tree results has introduced a second
+    defect where there was none.
+    """
+    assert _is_acyclic(R, C), f"{R}x{C} is not a tree"
+    rng = np.random.default_rng(2)
+    As = random_even_tensors(R, C, rng)
+    E_fock = hop_energy(R, C, fock_psi(R, C, As), fermion=True)
+    assert abs(E_fock) > 1e-3, f"{R}x{C} energy is trivial ({E_fock})"
+    assert _tenax_energy(R, C, As) == pytest.approx(E_fock, abs=1e-10)

@@ -32,6 +32,28 @@ from tenax.core.index import FlowDirection, Label, TensorIndex, _net_charges
 BlockKey = tuple[int, ...]
 
 
+def _reject_anyonic_twist(symmetry: Any) -> None:
+    """Refuse :meth:`Tensor.twist` on a symmetry with anyonic braiding.
+
+    ``twist`` applies ``(-1)^p``, the ribbon element of a Z2-graded
+    category.  A bosonic symmetry returning the tensor unchanged is correct;
+    an anyonic one is not, because it declares a ``twist_phase`` that this
+    sign cannot represent.  Guarding here keeps the ``is_fermionic`` gate
+    from doubling as "nothing to twist" for a case where something does need
+    twisting.
+    """
+    from tenax.core.symmetry import BraidingStyle
+
+    if getattr(symmetry, "braiding_style", None) is BraidingStyle.ANYONIC:
+        raise NotImplementedError(
+            f"twist() implements the fermionic sign (-1)^parity only, but "
+            f"{symmetry!r} declares anyonic braiding, whose ribbon element "
+            f"is a general complex phase. Applying the fermionic sign here "
+            f"would be silently wrong; use symmetry.twist_phase() to "
+            f"implement the general case."
+        )
+
+
 def _charge_summary(idx: TensorIndex) -> str:
     """Format index sectors as ``{charge: count, ...}``."""
     parts = [f"{int(q)}:{int(m)}" for q, m in zip(idx.sectors, idx.multiplicities)]
@@ -315,6 +337,69 @@ class Tensor(ABC):
 
     @abstractmethod
     def transpose(self, axes: tuple[int, ...]) -> Tensor: ...
+
+    def twist(self, axes: tuple[int, ...]) -> Tensor:
+        """Multiply each block by ``(-1)^(parity on *axes*)`` -- the twist.
+
+        The categorical twist, matching TensorKit's ``twist(t, i)``.  This is
+        the primitive #555 deferred when it removed the contractor's automatic
+        Koszul tracking:
+
+            For planar networks -- the only kind Tenax's CTM/RDM/energy code
+            uses -- no signs are needed ... For future non-planar
+            applications an explicit ``twist`` primitive can be added.
+
+        It is needed wherever a diagram is **not** planar, because there
+        ``FermionParity``'s R-symbol does contribute: a periodic (torus)
+        contraction wraps legs past one another, and the wrap crossings carry
+        signs that :func:`~tenax.contraction.contract` does not apply.  Until
+        this existed, a periodic fermionic reference had no way to be correct
+        -- ``reference_energy_2x2_pbc`` was used as fermionic ground truth
+        while missing exactly those signs, and on the #995 adjudication the
+        periodic and planar oracles disagreed by up to 13x and reversed which
+        CTM convention they favoured.
+
+        Applying it to *every* leg of a charge-conserving tensor is the
+        identity, since the total parity is even.  It can therefore only act
+        through an imbalance across a cut, which is what makes it safe to
+        apply to one side of a wrap bond.
+
+        Args:
+            axes: Leg positions to twist.  Repeating an axis twists it twice,
+                which is the identity.
+
+        Returns:
+            A tensor of identical structure with the signs applied.  On a
+            non-graded symmetry, and on any :class:`DenseTensor`, this is a
+            no-op -- there is no grading to twist.
+
+        Raises:
+            IndexError: If any axis is out of range.
+            NotImplementedError: If the symmetry declares
+                :attr:`~tenax.core.symmetry.BraidingStyle.ANYONIC` braiding.
+
+        Note:
+            **This implements the fermionic twist only.**  The sign applied
+            is ``(-1)^p``, which is the ribbon element of a Z2-graded
+            category and nothing more general.  A bosonic symmetry is a
+            genuine no-op -- with no grading the twist *is* the identity --
+            but an anyonic one is not: it declares a ribbon phase
+            (:meth:`~tenax.core.symmetry.BaseSymmetry.twist_phase`) that
+            this method cannot apply, so it is rejected rather than silently
+            ignored.  Supporting it means a complex phase, which would also
+            cost the two properties relied on above: the twist would no
+            longer be its own inverse (the inverse is the conjugate), and
+            the all-legs identity rests on Z2 parity summing to even.
+        """
+        for ax in axes:
+            if not -len(self.indices) <= ax < len(self.indices):
+                raise IndexError(
+                    f"twist axis {ax} out of range for a rank-{len(self.indices)} "
+                    f"tensor"
+                )
+        if axes and self.indices:
+            _reject_anyonic_twist(self.indices[0].symmetry)
+        return self
 
     def permute_legs(self, axes: tuple[int, ...]) -> Tensor:
         """Reorder leg *storage* without any Koszul sign.
@@ -1194,6 +1279,19 @@ class SymmetricTensor(Tensor):
                     transposed = -transposed
             new_blocks[new_key] = transposed
         return SymmetricTensor._from_blocks_unchecked(new_blocks, new_indices)
+
+    def twist(self, axes: tuple[int, ...]) -> SymmetricTensor:
+        """Multiply each block by ``(-1)^(parity on *axes*)``.
+
+        See :meth:`Tensor.twist` for what this is for, and for the
+        fermions-only restriction this shares with it.
+        """
+        # One implementation, two spellings: this is the axis-based name for
+        # ``_graded.twist_legs``.  Imported here rather than at module scope
+        # because ``_graded`` imports this module.
+        from tenax.core._graded import twist_axes
+
+        return twist_axes(self, axes)
 
     def permute_legs(self, axes: tuple[int, ...]) -> SymmetricTensor:
         """Reorder leg storage without any Koszul sign.
