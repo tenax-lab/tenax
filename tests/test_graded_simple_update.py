@@ -7,9 +7,9 @@ Fock-space gate applied to the cluster state before it.  With all bond
 weights 1 and no truncation, the update is an exact local move, and slicing
 the open boundary afterwards commutes with it.
 
-The bond (0,0)-(1,0) is the sign-sensitive one: its sites are not
-Jordan-Wigner neighbours on the row-major line, so a string runs through
-(0,1).  The sign-free update this replaces gives the hard-core-boson gate.
+The vertical bonds are the most sign-sensitive: their sites are not
+Jordan-Wigner neighbours on the row-major line, so a string runs between
+them.  The sign-free update this replaces gives the hard-core-boson gate.
 """
 
 from __future__ import annotations
@@ -99,20 +99,29 @@ def exact(monkeypatch):
 ONES = np.ones(2)
 
 
-@pytest.mark.parametrize(
-    "bond", ["horizontal (0,0)-(0,1)", "vertical (0,0)-(1,0)"], ids=["h", "v"]
-)
-def test_a_bond_update_is_the_fermionic_gate(cluster, gate, exact, bond):
-    s, t = ((0, 0), (0, 1)) if bond.startswith("h") else ((0, 0), (1, 0))
+#: All four bonds of the 2x2 cluster.  Each direction needs one whose sites
+#: have interior legs: on the top row both sites' other legs are open
+#: boundary (parity 0 after slicing), which hides most Koszul signs -- a
+#: sign-free ``theta`` passes there and fails on the bottom row.
+BONDS = [
+    ("h", (0, 0), (0, 1)),
+    ("h", (1, 0), (1, 1)),
+    ("v", (0, 0), (1, 0)),
+    ("v", (0, 1), (1, 1)),
+]
+
+
+@pytest.mark.parametrize("kind,s,t", BONDS, ids=[f"{k}{s}{t}" for k, s, t in BONDS])
+def test_a_bond_update_is_the_fermionic_gate(cluster, gate, exact, kind, s, t):
     update = (
         su._simple_update_2site_horizontal_tensor
-        if bond.startswith("h")
+        if kind == "h"
         else su._simple_update_2site_vertical_tensor
     )
     psi0 = _state(cluster)
     A_new, B_new, lam = update(cluster[s], cluster[t], gate, ONES, ONES, 16)
     # Vidal form: the new bond's weight lives in lam; put it back on A.
-    A_new = scale_bond_axis(A_new, "r" if bond.startswith("h") else "d", lam)
+    A_new = scale_bond_axis(A_new, "r" if kind == "h" else "d", lam)
     psi1 = _state({**cluster, s: A_new, t: B_new})
 
     n = sites_of(R, C)
