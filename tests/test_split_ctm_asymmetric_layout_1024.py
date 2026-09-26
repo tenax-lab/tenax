@@ -34,12 +34,17 @@ import pytest
 from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
 from tenax.algorithms._split_ctm_tensor_init import initialize_split_ctm_tensor_env
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import FermionParity
+from tenax.core.symmetry import ZnSymmetry
 from tenax.core.tensor import SymmetricTensor
 
 jax.config.update("jax_enable_x64", True)
 
-_SYM = FermionParity()
+#: Bosonic Z2, not ``FermionParity``: the seeding layout is symmetry-agnostic
+#: (the same 0/1 charge arrays), and since #1035 step 4 the split CTM refuses
+#: fermionic input -- its split <-> fused conversions are sign-free -- so a
+#: fermionic fixture would only test the refusal.  The layouts below are still
+#: the ones the fermionic simple update produces.
+_SYM = ZnSymmetry(2)
 _PHYS = np.array([0, 1], dtype=np.int32)
 
 #: ``{even:2, odd:1}`` -- the layout ``_build_initial_fpeps_tensor`` seeds at D=3.

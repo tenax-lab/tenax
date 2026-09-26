@@ -128,6 +128,19 @@ def _make_split_edges(env: SplitCTMTensorEnv) -> dict[str, Tensor]:
     }
 
 
+def _refuse_fermionic_split(*site_tensors: Tensor) -> None:
+    """The split RDM kernels contract sign-free (#1035 step 4): on fermionic
+    tensors they compute hard-core-boson expectation values, so refuse."""
+    from tenax.algorithms._ctm_graded import is_fermionic
+
+    if any(is_fermionic(t) for t in site_tensors):
+        raise NotImplementedError(
+            "split-CTM energy: fermionic tensors are not supported (sign-free "
+            "contraction, #1035); use the fused Tensor CTM's energy "
+            "(compute_energy_ctm_tensor / _2site / _multisite)"
+        )
+
+
 def _rdm_1site_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     """Single-site RDM via split-aware contraction.
 
@@ -139,6 +152,7 @@ def _rdm_1site_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     1-site exists for parity testing and small-D probes; energy never uses it
     for nearest-neighbour bonds.
     """
+    _refuse_fermionic_split(A)
     splits = _make_split_edges(env)
     T1, T2, T3, T4 = splits["T1"], splits["T2"], splits["T3"], splits["T4"]
 
@@ -201,6 +215,7 @@ def _rdm1x2_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     Returns dense RDM of shape ``(d, d, d, d)`` in
     ``(s1_ket, s2_ket, s1_bra, s2_bra)``, symmetrised and trace-normalised.
     """
+    _refuse_fermionic_split(A)
     splits = _make_split_edges(env)
     T1, T2, T3, T4 = splits["T1"], splits["T2"], splits["T3"], splits["T4"]
 
@@ -337,6 +352,7 @@ def _rdm2x1_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     Returns dense RDM of shape ``(d, d, d, d)`` in
     ``(s1_ket, s2_ket, s1_bra, s2_bra)``, symmetrised and trace-normalised.
     """
+    _refuse_fermionic_split(A)
     splits = _make_split_edges(env)
     T1, T2, T3, T4 = splits["T1"], splits["T2"], splits["T3"], splits["T4"]
 
@@ -463,6 +479,7 @@ def _rdm_diagonal_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:
     ``(s1_ket, s2_ket, s1_bra, s2_bra)`` (TL=s1, BR=s2),
     symmetrised and trace-normalised.
     """
+    _refuse_fermionic_split(A)
     splits = _make_split_edges(env)
     T1, T2, T3, T4 = splits["T1"], splits["T2"], splits["T3"], splits["T4"]
 
@@ -702,6 +719,7 @@ def _rdm1x2_split_tensor_2site(
     ``(s1_A_ket, s2_B_ket, s1_A_bra, s2_B_bra)``,
     symmetrised and trace-normalised.
     """
+    _refuse_fermionic_split(A, B)
     splits_A = _make_split_edges(env_A)
     splits_B = _make_split_edges(env_B)
     T1, T4_A_split, T2_A_split = splits_A["T1"], splits_A["T4"], splits_A["T2"]
@@ -867,6 +885,7 @@ def _rdm2x1_split_tensor_2site(
     ``(s1_A_ket, s2_B_ket, s1_A_bra, s2_B_bra)``,
     symmetrised and trace-normalised.
     """
+    _refuse_fermionic_split(A, B)
     splits_A = _make_split_edges(env_A)
     splits_B = _make_split_edges(env_B)
     T1, T3, T4 = splits_A["T1"], splits_A["T3"], splits_A["T4"]
@@ -1225,16 +1244,6 @@ def compute_energy_split_ctm_tensor_multisite(
         Scalar energy per site, or ``NaN`` when ``nan_on_invalid_rdm`` is set and a
         bond RDM is not a density matrix (beyond ``psd_tol`` for the PSD arm).
     """
-    from tenax.algorithms._ctm_graded import is_fermionic
-
-    if any(is_fermionic(t) for t in site_tensors.values()):
-        # The split RDM kernels contract sign-free (#1035 step 4): on fermionic
-        # tensors they compute hard-core-boson expectation values.
-        raise NotImplementedError(
-            "split-CTM energy: fermionic tensors are not supported (sign-free "
-            "contraction, #1035); use compute_energy_ctm_tensor_2site / "
-            "compute_energy_ctm_tensor_multisite on the fused Tensor CTM"
-        )
     check_rdm = collapsed_rdm_error = None
     resolved_psd_tol = psd_tol
     if nan_on_invalid_rdm:

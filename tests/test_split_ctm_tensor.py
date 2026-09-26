@@ -251,18 +251,14 @@ class TestSplitCTMTensorInit:
             # interlayer contraction is flow-compatible.
             assert int(ket_I.flow) == -int(bra_I.flow)
 
-    @pytest.mark.parametrize("chi", [6, 8])
-    def test_fermionic_ctm_runs_at_chi_8(self, chi):
-        """Issue #391: ``ctm_split_tensor`` must not crash inside the projector
-        path on a FermionParity site at chi=8/D=2.  Pre-fix this raised
-        ``ValueError: Size of label 'b' for operand 1 (3) does not match
-        previous terms (2)`` from inside ``_split_ctm_move_left``.
-        """
+    def test_fermionic_ctm_is_refused(self):
+        """#1035 step 4: the split CTM's split <-> fused conversions are
+        sign-free, so it refuses fermionic input rather than return a
+        hard-core-boson environment; fermions run on the fused graded Tensor
+        CTM.  (This replaced #391's crash test at chi=6/8.)"""
         A = make_random_fermionic_site(D=2, d=2, seed=70)
-        env = ctm_split_tensor(A, chi=chi, max_iter=2, chi_I=chi)
-        for t in env:
-            arr = t.todense() if hasattr(t, "todense") else t
-            assert jnp.all(jnp.isfinite(arr))
+        with pytest.raises(NotImplementedError, match="split CTM: fermionic"):
+            ctm_split_tensor(A, chi=8, max_iter=2, chi_I=8)
 
 
 # ------------------------------------------------------------------ #
@@ -985,37 +981,17 @@ class TestSplitRDMs:
 
 @pytest.mark.slow
 class TestSplitRDMsFermionic:
-    """Native split-aware energy matches shim on FermionParity sites (#392).
+    """#1035 step 4: the split-aware RDM kernels contract sign-free, so the
+    split energy refuses fermionic sites (it would return a hard-core-boson
+    expectation value).  This replaced #392's split-vs-shim parity test, which
+    compared two sign-free contractions with each other."""
 
-    Pre-#555 the split-aware path absorbed an extra Koszul phase via
-    ``A.bar_super()`` that ``_build_double_layer_open_tensor``'s raw
-    ``fuse_indices`` (used by the standard path) couldn't cancel; the
-    energies disagreed once the bra was non-trivial.  PR #557 removed both
-    the contractor's auto-Koszul and ``bar_super()`` (only ``A.bar()``
-    remains), eliminating the convention mismatch.  The fermionic shim
-    fallback that ``compute_energy_split_ctm_tensor`` used to apply is now
-    gone, so this parity test exercises the native ``chi²·D⁴`` split-aware
-    contraction directly.
-
-    Note on chi choice: with ``FermionParity`` virtual charges (alternating
-    0/1), ``ctm_split_tensor`` converges cleanly at every chi after the
-    fix for issue #391 (canonical SVD-bond charges shared between ket and
-    bra).
-    """
-
-    @pytest.mark.parametrize("D, chi", [(2, 6), (2, 8), (3, 12)])
-    def test_fermionic_energy_matches_shim(self, D, chi, heisenberg_gate):
-        from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+    def test_fermionic_energy_is_refused(self, heisenberg_gate):
         from tenax.algorithms._split_ctm_tensor_energy import (
-            _split_env_to_tensor_standard,
             compute_energy_split_ctm_tensor,
         )
 
-        A = make_random_fermionic_site(D, d=2, seed=70)
-        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
-
-        E_split = compute_energy_split_ctm_tensor(A, env, heisenberg_gate, d=2)
-        E_shim = compute_energy_ctm_tensor(
-            A, _split_env_to_tensor_standard(env), heisenberg_gate, d=2
-        )
-        assert jnp.allclose(E_split, E_shim, atol=1e-10)
+        A = make_random_fermionic_site(2, d=2, seed=70)
+        env = initialize_split_ctm_tensor_env(A, 6, 6)
+        with pytest.raises(NotImplementedError, match="split-CTM energy: fermionic"):
+            compute_energy_split_ctm_tensor(A, env, heisenberg_gate, d=2)
