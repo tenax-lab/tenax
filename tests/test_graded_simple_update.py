@@ -99,10 +99,16 @@ def exact(monkeypatch):
 ONES = np.ones(2)
 
 
-#: All four bonds of the 2x2 cluster.  Each direction needs one whose sites
-#: have interior legs: on the top row both sites' other legs are open
-#: boundary (parity 0 after slicing), which hides most Koszul signs -- a
-#: sign-free ``theta`` passes there and fails on the bottom row.
+#: All four bonds of the 2x2 cluster.  Mutants (each kills the listed cases):
+#: no twist on ``U``, a sign-free ``permute_legs`` in place of
+#: ``graded_reorder``, and the old sign-free update -- all four; a sign-free
+#: ``theta`` -- the two horizontal ones only.  On a vertical bond that mutant
+#: is off by ``(-1)**(p_d * p_u)`` on A (the Koszul move of ``A.d`` past
+#: ``l, r, phys`` times rule 2's pair sign, using that A is even), and A's
+#: ``u`` is open boundary (parity 0) on a 2x2 cluster, so it is invisible
+#: there; a 3x2 cluster would see it.  Equivalent, as predicted: the twist on
+#: ``Vh``'s end instead of ``U``'s (one sign per bond, either end), and the
+#: gate as the right operand (an even operator supercommutes; measured 0.0).
 BONDS = [
     ("h", (0, 0), (0, 1)),
     ("h", (1, 0), (1, 1)),
