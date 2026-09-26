@@ -1161,10 +1161,15 @@ def ctm_tensor(
     # from independent projectors in standard 4-move CTM).  When virtual
     # charges are asymmetric (e.g. after simple update truncation),
     # fall back to DenseTensor since the D^2 leg charges change per
-    # direction.
+    # direction -- for bosons only.  A fermionic site must stay symmetric:
+    # densified, it takes the sign-free double layer and the CTM silently
+    # returns hard-core-boson observables (Codex P1 on #1044).  The 2x2
+    # recipe needs no uniform layout, and the 1x1 recipe refuses fermions.
     use_paired = False
     if isinstance(A, SymmetricTensor):
         import numpy as _np
+
+        from tenax.algorithms._ctm_graded import is_fermionic
 
         virtual_indices = [A.indices[i] for i in range(4)]
         has_nontrivial = any(
@@ -1179,7 +1184,7 @@ def ctm_tensor(
         )
         if has_nontrivial and all_same:
             use_paired = True
-        elif has_nontrivial and not all_same:
+        elif has_nontrivial and not all_same and not is_fermionic(A):
             # Asymmetric virtual charges: densify for compatibility
             A = DenseTensor(A.todense(), A.indices)
 

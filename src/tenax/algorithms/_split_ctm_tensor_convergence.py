@@ -113,6 +113,26 @@ def _renormalize_split_env(env: SplitCTMTensorEnv) -> SplitCTMTensorEnv:
     )
 
 
+def _refuse_fermionic_split_input(*site_tensors: Tensor) -> None:
+    """Refuse fermionic input at the public entry points.
+
+    The split <-> fused conversions (merge, resplit) and the 1x1 split moves
+    are sign-free, so on fermionic tensors the split CTM returns an
+    environment with hard-core-boson signs (#1035 step 4).  The 2x2 sweep
+    checks its environment, but ``recipe="1x1"`` never reaches that sweep
+    (Codex P2 on #1044), so the check has to sit before the recipe dispatch.
+    Fermions run on the fused graded Tensor CTM.
+    """
+    from tenax.algorithms._ctm_graded import is_fermionic
+
+    if any(is_fermionic(t) for t in site_tensors):
+        raise NotImplementedError(
+            "split CTM: fermionic tensors are not supported (the split <-> fused "
+            "conversion is sign-free, #1035); use the fused Tensor CTM "
+            "(ctm_tensor / ctm_tensor_2site / fuse_virtual_legs=True)"
+        )
+
+
 def ctm_split_tensor(
     A: Tensor,
     chi: int,
@@ -184,6 +204,7 @@ def ctm_split_tensor(
     Returns:
         Converged SplitCTMTensorEnv.
     """
+    _refuse_fermionic_split_input(A)
     if chi_I is None:
         chi_I = chi
     if recipe not in ("2x2", "1x1"):
@@ -824,6 +845,7 @@ def ctm_split_tensor_2site(
         ``(env_A, env_B)`` -- the converged split environments at ``(0, 0)``
         and ``(1, 0)``.
     """
+    _refuse_fermionic_split_input(A, B)
     envs = _split_ctm_multisite(
         {(0, 0): A, (1, 0): B},
         CHECKERBOARD_NEIGHBORS,

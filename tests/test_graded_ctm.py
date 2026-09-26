@@ -12,6 +12,7 @@ from __future__ import annotations
 import itertools
 import warnings
 
+import jax
 import numpy as np
 import pytest
 from _graded_cluster import double_layer_value, production_site
@@ -185,3 +186,59 @@ def test_the_fermionic_simple_update_keeps_the_site_flow_convention():
 
     A_new, B_new, _ = _fpeps_simple_update(A, H, max_D=2, dt=0.05, steps=2)
     assert flows(A_new) == flows(A) and flows(B_new) == flows(A)
+
+
+def _asymmetric_fermionic_site(seed: int):
+    """u/d split (2,1), l/r split (1,2): the layout an unpinned simple update
+    leaves behind, and the one ``ctm_tensor`` used to densify."""
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import FermionParity
+    from tenax.core.tensor import SymmetricTensor
+
+    sym = FermionParity()
+
+    def idx(charges, flow, label):
+        return TensorIndex.from_charges(
+            sym, np.array(charges, dtype=np.int32), flow, label=label
+        )
+
+    return SymmetricTensor.random_normal(
+        (
+            idx([0, 0, 1], FlowDirection.OUT, "u"),
+            idx([0, 0, 1], FlowDirection.IN, "d"),
+            idx([0, 1, 1], FlowDirection.OUT, "l"),
+            idx([0, 1, 1], FlowDirection.IN, "r"),
+            idx([0, 1], FlowDirection.IN, "phys"),
+        ),
+        jax.random.PRNGKey(seed),
+    )
+
+
+def test_ctm_tensor_keeps_an_asymmetric_fermionic_site_on_the_graded_path():
+    """``ctm_tensor`` densified a symmetric site whose virtual legs carry
+    different sector layouts, which on a fermionic site silently handed the
+    CTM a sign-free (hard-core-boson) double layer (Codex P1 on #1044).  The
+    2x2 recipe needs no uniform layout, so a fermionic site stays symmetric
+    and graded.  The 1-site energy must then agree with the certified fused
+    2-site path on the same state (``B = A``)."""
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor, ctm_tensor_2site
+    from tenax.algorithms._ctm_tensor_energy import (
+        compute_energy_ctm_tensor,
+        compute_energy_ctm_tensor_2site,
+    )
+    from tenax.algorithms.fermionic_ipeps import FPEPSConfig, spinless_fermion_gate
+    from tenax.core.tensor import SymmetricTensor
+
+    A = _asymmetric_fermionic_site(3)
+    H = spinless_fermion_gate(FPEPSConfig(D=3, t=1.0, V=1.0))
+    chi = 8
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        env, _eps = ctm_tensor(A, chi, max_iter=60, conv_tol=1e-10)
+        eA, eB = ctm_tensor_2site(A, A, chi, max_iter=60, conv_tol=1e-10)
+    assert isinstance(env.C1, SymmetricTensor)
+    assert env.C1.indices[0].symmetry.is_fermionic
+    E1 = float(compute_energy_ctm_tensor(A, env, H, 2))
+    E2 = float(compute_energy_ctm_tensor_2site(A, A, eA, eB, H, 2))
+    assert np.isfinite(E1) and abs(E1) > 1e-3  # regime: a real energy
+    np.testing.assert_allclose(E1, E2, atol=1e-8)

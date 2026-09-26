@@ -260,6 +260,15 @@ class TestSplitCTMTensorInit:
         with pytest.raises(NotImplementedError, match="split CTM: fermionic"):
             ctm_split_tensor(A, chi=8, max_iter=2, chi_I=8)
 
+    def test_fermionic_ctm_is_refused_on_the_1x1_recipe_too(self):
+        """The refusal lives at the entry point, not inside the 2x2 sweep:
+        ``recipe="1x1"`` never reaches that sweep, and before this it ran a
+        sign-free single-site sweep to completion and returned a hard-core-
+        boson environment (Codex P2 on #1044)."""
+        A = make_random_fermionic_site(D=2, d=2, seed=70)
+        with pytest.raises(NotImplementedError, match="split CTM: fermionic"):
+            ctm_split_tensor(A, chi=8, max_iter=2, chi_I=8, recipe="1x1")
+
 
 # ------------------------------------------------------------------ #
 # Phase 2: Single-move tests                                           #

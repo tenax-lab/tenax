@@ -69,3 +69,11 @@ def test_the_fermionic_split_2site_public_path_is_refused():
     A, B = _make_fp_site(seed=1), _make_fp_site(seed=2)
     with pytest.raises(NotImplementedError, match="split CTM: fermionic"):
         ctm_split_tensor_2site(A, B, 6, max_iter=2)
+
+
+def test_the_fermionic_split_2site_1x1_recipe_is_refused_too():
+    """``recipe="1x1"`` bypasses the 2x2 sweep that carried the refusal, so
+    the entry point itself must refuse (Codex P2 on #1044)."""
+    A, B = _make_fp_site(seed=1), _make_fp_site(seed=2)
+    with pytest.raises(NotImplementedError, match="split CTM: fermionic"):
+        ctm_split_tensor_2site(A, B, 6, max_iter=2, recipe="1x1")
