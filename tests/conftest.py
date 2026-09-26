@@ -34,6 +34,7 @@ _FILE_MARKERS = {
     "test_graded_contract_oracle.py": "core",
     "test_graded_double_layer.py": "core",
     "test_graded_ctm.py": "core",
+    "test_graded_simple_update.py": "core",
     "test_dmrg.py": "algorithm",
     "test_idmrg.py": "algorithm",
     "test_itebd.py": "algorithm",

@@ -62,6 +62,12 @@ _HORIZ = np.array([0, 1, 1], dtype=np.int32)
 _VERT_REORDERED = np.array([1, 0, 0], dtype=np.int32)
 
 _CHI = 16
+#: chi for the two full 2x2 split sweeps.  16 made them the dearest tests in
+#: the slow bucket (>40 min for the five on bosonic Z2).  Not 8 or 9:
+#: ``_derive_charges`` tiles ``[0,1,0]`` and ``[1,0,0]`` to different multisets
+#: only when chi % 3 == 1, so below 10 ``reordered-vertical`` goes vacuous --
+#: ``test_the_fixtures_reach_the_cases_they_claim_to`` checks both chis.
+_SWEEP_CHI = 10
 
 #: Each chi bond of the split env, as ``(corner, corner_leg, edge, edge_leg)``.
 #: The four horizontal seams are the ones #1024 breaks.
@@ -134,20 +140,20 @@ def test_the_fixtures_reach_the_cases_they_claim_to():
     """
     from tenax.algorithms._ctm_utils import _derive_charges
 
-    assert _multiset(_derive_charges(_VERT, _CHI)) != _multiset(
-        _derive_charges(_HORIZ, _CHI)
-    ), f"_VERT and _HORIZ tile to the same multiset at chi={_CHI}"
-
     assert _multiset(_VERT) == _multiset(_VERT_REORDERED), (
         "_VERT_REORDERED must be a REORDERING of _VERT, else it is just "
         "another direction-dependent case and tests nothing new"
     )
-    assert _multiset(_derive_charges(_VERT, _CHI)) != _multiset(
-        _derive_charges(_VERT_REORDERED, _CHI)
-    ), (
-        f"_VERT and _VERT_REORDERED tile identically at chi={_CHI}, so the "
-        f"order-sensitivity of _derive_charges is not exercised"
-    )
+    for chi in (_CHI, _SWEEP_CHI):
+        assert _multiset(_derive_charges(_VERT, chi)) != _multiset(
+            _derive_charges(_HORIZ, chi)
+        ), f"_VERT and _HORIZ tile to the same multiset at chi={chi}"
+        assert _multiset(_derive_charges(_VERT, chi)) != _multiset(
+            _derive_charges(_VERT_REORDERED, chi)
+        ), (
+            f"_VERT and _VERT_REORDERED tile identically at chi={chi}, so the "
+            f"order-sensitivity of _derive_charges is not exercised"
+        )
 
 
 @pytest.mark.parametrize(("label", "u", "d", "ll", "r"), _FIXTURES)
@@ -238,7 +244,7 @@ def test_the_2x2_split_ctm_runs_on_every_layout(label, u, d, ll, r):
     is the defect this arm exists to catch.
     """
     A, B = _site(u, d, ll, r, 0), _site(u, d, ll, r, 1)
-    env_A, env_B = ctm_split_tensor_2site(A, B, _CHI, max_iter=4, conv_tol=1e-6)
+    env_A, env_B = ctm_split_tensor_2site(A, B, _SWEEP_CHI, max_iter=4, conv_tol=1e-6)
     assert env_A is not None and env_B is not None
 
 
@@ -252,7 +258,7 @@ def test_the_2x2_split_ctm_runs_when_the_two_cells_seed_differently():
     """
     A = _site(_VERT, _VERT, _VERT, _VERT, 0)
     B = _site(_VERT_REORDERED, _VERT_REORDERED, _VERT, _VERT, 1)
-    env_A, env_B = ctm_split_tensor_2site(A, B, _CHI, max_iter=4, conv_tol=1e-6)
+    env_A, env_B = ctm_split_tensor_2site(A, B, _SWEEP_CHI, max_iter=4, conv_tol=1e-6)
     assert env_A is not None and env_B is not None
 
 
