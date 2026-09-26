@@ -27,6 +27,7 @@ import jax
 import numpy as np
 import pytest
 
+from tenax.core._graded import twist_legs
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import BraidingStyle, FermionParity, U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
@@ -168,3 +169,49 @@ def test_twist_of_no_axes_is_accepted_on_an_anyonic_symmetry():
     T = SymmetricTensor.random_normal(idx, jax.random.PRNGKey(8))
     for key, blk in T.twist(()).blocks.items():
         np.testing.assert_allclose(np.asarray(blk), np.asarray(T.blocks[key]))
+
+
+# ------------------------------------------------------------------ #
+# One implementation, two spellings                                   #
+# ------------------------------------------------------------------ #
+#
+# ``SymmetricTensor.twist`` (by axis) and ``_graded.twist_legs`` (by label)
+# were two separate implementations of the same sign.  They now share
+# ``_graded.twist_axes``.  These pin that they stay one operation -- two
+# spellings of a sign that drift apart is #1035's failure mode in miniature.
+
+
+def test_the_axis_and_label_spellings_agree():
+    T = _fp_tensor(9)
+    labels = T.labels()
+    for picked in ((0,), (1,), (0, 2), (0, 1, 2)):
+        by_axis = T.twist(picked)
+        by_label = twist_legs(T, [labels[i] for i in picked])
+        for key, blk in by_axis.blocks.items():
+            np.testing.assert_allclose(
+                np.asarray(by_label.blocks[key]), np.asarray(blk), atol=0, rtol=0
+            )
+
+
+def test_twist_legs_now_refuses_an_anyonic_symmetry_too():
+    """The behaviour ``twist_legs`` gains from the collapse.
+
+    Before sharing an implementation it returned the tensor unchanged here,
+    which is the silent-wrong class #1035 exists to remove.
+    """
+    sym = _AnyonicStub()
+    ch = np.array([0, 1], dtype=np.int32)
+    idx = tuple(
+        TensorIndex.from_charges(sym, ch.copy(), f, label=lbl)
+        for f, lbl in ((FlowDirection.OUT, "a"), (FlowDirection.IN, "b"))
+    )
+    T = SymmetricTensor.random_normal(idx, jax.random.PRNGKey(10))
+    with pytest.raises(NotImplementedError, match="anyonic"):
+        twist_legs(T, ["a"])
+
+
+def test_twist_legs_still_rejects_an_unknown_label():
+    """The guard that is ``twist_legs``' own must survive the collapse."""
+    T = _fp_tensor(11)
+    with pytest.raises(ValueError, match="no leg labelled"):
+        twist_legs(T, ["not_a_leg"])

@@ -22,6 +22,17 @@
   changes -- pinning only the legacy `_build_double_layer_open_tensor` path
   would stay green while the graded result moved on a tree.
 
+- **The twist has one implementation again** (#1035): `SymmetricTensor.twist`
+  (by axis, #1034) and `_graded.twist_legs` (by label, #1039) were two
+  separate computations of the same sign, landed days apart.  Both now call
+  `_graded.twist_axes`, so the axis and label spellings cannot drift -- two
+  spellings of one sign diverging is exactly the failure #1035 was filed
+  about.  `twist_legs` gains the behaviour it was missing: a symmetry
+  declaring `BraidingStyle.ANYONIC` now raises `NotImplementedError` instead
+  of silently returning the tensor unchanged, since `(-1)**p` cannot carry
+  the ribbon phase such a symmetry declares.  Its own unknown-label guard is
+  unchanged, and `SymmetricTensor.twist`'s public behaviour is unchanged.
+
 - **The implicit-AD CTM forward now measures its own stationarity** (#841):
   `ctm_energy_implicit` runs one extra gauged sweep after the forward loop and
   warns (`RuntimeWarning`) when the literal residual
