@@ -4,6 +4,24 @@
 
 ### Added
 
+- **#1037 is a closed-loop defect, and tree clusters pin its boundary**
+  (`tests/test_fermionic_fock_oracle.py`): on an acyclic cluster the fermionic
+  and hard-core-boson functionals are not merely close but *identically* equal
+  -- a hopping term's fermionic sign can only differ from the bosonic one
+  around a cycle -- so tenax's double layer is already exact there, and the
+  defect switches on with the first plaquette.  Measured against the #1037
+  oracle: 1x3 and 1x4 agree to the last bit (0.8158780672 / 0.8439192202 for
+  all three of fermionic, hard-core-boson and tenax), while 2x2 and 2x3
+  separate by 4.7e-01 and 4.4e-01.  Both tree tests assert a non-trivial
+  energy first, since 1x2 gives exactly 0 and would pass vacuously.  These are
+  the regression guard for the #1035/#1036 fix: a change that corrects the
+  plaquette clusters by moving tree results has introduced a second defect
+  where there was none.  The forward half of that guard lives beside the
+  graded path in `tests/test_graded_contract_oracle.py`, since
+  `build_graded_double_layer` + `graded_contract` is what the fix actually
+  changes -- pinning only the legacy `_build_double_layer_open_tensor` path
+  would stay green while the graded result moved on a tree.
+
 - **The twist has one implementation again** (#1035): `SymmetricTensor.twist`
   (by axis, #1034) and `_graded.twist_legs` (by label, #1039) were two
   separate computations of the same sign, landed days apart.  Both now call
