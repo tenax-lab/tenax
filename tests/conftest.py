@@ -724,6 +724,12 @@ _FILE_MARKERS = {
     # 3 against 11.7s for the 25 the gate does run, and they confirm the same
     # defect the init-time invariant already catches.
     "test_split_ctm_asymmetric_layout_1024.py": "core",
+    # The twist primitive (#555's deferred non-planar operation).  ``core``:
+    # it is pure block algebra with no CTM in it -- 1.1s for all six tests --
+    # and it is the operation a non-planar fermionic reference needs to be
+    # correct at all, so a regression here silently invalidates any periodic
+    # oracle built on it.
+    "test_twist_primitive.py": "core",
 }
 
 
