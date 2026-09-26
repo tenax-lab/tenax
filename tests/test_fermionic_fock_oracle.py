@@ -303,10 +303,23 @@ def test_tenax_double_layer_is_already_exact_on_a_tree(R, C):
     Keep this passing through the #1037 fix.  A fix that corrects the
     plaquette clusters by changing tree results has introduced a second
     defect where there was none.
+
+    Exact for the state the graded contraction defines, ``Fock(z_gauge(As))``
+    (design §9), as every comparison in this file.  On a tree that state's
+    hopping energy is exactly ``-1`` times ``Fock(As)``'s: ``z_gauge`` puts one
+    Z on each bond, flipping the sign of every hopping, and on a bipartite
+    tree that is the sublattice gauge ``c -> -c`` -- the same physics, the
+    opposite expectation value.  The sign-free double layer this replaced
+    happened to sit in the ``Fock(As)`` convention, which is why the first
+    version of this test compared against it without the gauge.
     """
     assert _is_acyclic(R, C), f"{R}x{C} is not a tree"
     rng = np.random.default_rng(2)
     As = random_even_tensors(R, C, rng)
-    E_fock = hop_energy(R, C, fock_psi(R, C, As), fermion=True)
+    E_fock = hop_energy(R, C, fock_psi(R, C, z_gauge(R, C, As)), fermion=True)
     assert abs(E_fock) > 1e-3, f"{R}x{C} energy is trivial ({E_fock})"
     assert _tenax_energy(R, C, As) == pytest.approx(E_fock, abs=1e-10)
+    # The convention gap, pinned so it cannot drift silently: the plain
+    # amplitudes' fermionic energy is the sublattice-gauge partner.
+    E_plain = hop_energy(R, C, fock_psi(R, C, As), fermion=True)
+    assert E_fock == pytest.approx(-E_plain, abs=1e-12)
