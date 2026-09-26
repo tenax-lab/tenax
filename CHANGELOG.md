@@ -16,7 +16,11 @@
   energy first, since 1x2 gives exactly 0 and would pass vacuously.  These are
   the regression guard for the #1035/#1036 fix: a change that corrects the
   plaquette clusters by moving tree results has introduced a second defect
-  where there was none.
+  where there was none.  The forward half of that guard lives beside the
+  graded path in `tests/test_graded_contract_oracle.py`, since
+  `build_graded_double_layer` + `graded_contract` is what the fix actually
+  changes -- pinning only the legacy `_build_double_layer_open_tensor` path
+  would stay green while the graded result moved on a tree.
 
 - **The implicit-AD CTM forward now measures its own stationarity** (#841):
   `ctm_energy_implicit` runs one extra gauged sweep after the forward loop and
