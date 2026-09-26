@@ -338,3 +338,34 @@ def test_regime_the_fuse_needs_its_pair_sign(monkeypatch):
     psi = fock_psi(2, 2, z_gauge(2, 2, As))
     E, _ = double_layer_energy(2, 2, As)
     assert abs(E - hop_energy(2, 2, psi, fermion=True)) > 1e-3
+
+
+# A 1xC cluster is a TREE: |bonds| == |sites| - 1, so it has no plaquette.
+# Every cluster above has one, and the graded path is only ever exercised on
+# cyclic clusters.  #1037's defect in the legacy double layer switches on with
+# the first loop, so the acyclic case is the boundary -- and the boundary is
+# what a fix can silently move.  Keep the graded path pinned on both sides.
+TREE_CLUSTERS = [(1, 3), (1, 4)]
+
+
+@pytest.mark.parametrize("R,C", TREE_CLUSTERS)
+def test_the_graded_double_layer_energy_matches_fock_on_a_tree(R, C):
+    """The forward guard for #1035/#1036 on acyclic clusters.
+
+    ``build_graded_double_layer`` + ``graded_contract`` is the path the fix
+    changes, so the tree case has to be asserted against the oracle *here*
+    -- pinning the legacy ``_build_double_layer_open_tensor`` path instead
+    would stay green while the graded result moved.
+    """
+    assert len(bonds_of(R, C)) == len(sites_of(R, C)) - 1, f"{R}x{C} is not a tree"
+    rng = np.random.default_rng(2)
+    for _ in range(2):
+        As = random_even_tensors(R, C, rng)
+        psi = fock_psi(R, C, z_gauge(R, C, As))
+        E, norm = double_layer_energy(R, C, As)
+        # Guard against a vacuous pass: 1x2 has zero hopping energy and would
+        # satisfy the comparison without exercising a single sign.
+        E_fock = hop_energy(R, C, psi, fermion=True)
+        assert abs(E_fock) > 1e-3, f"{R}x{C} energy is trivial ({E_fock})"
+        assert norm == pytest.approx(np.vdot(psi, psi).real, rel=1e-12)
+        assert E == pytest.approx(E_fock, abs=1e-12)
