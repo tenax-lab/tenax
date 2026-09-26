@@ -31,10 +31,8 @@ import jax
 import numpy as np
 import pytest
 
-from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
-from tenax.algorithms._split_ctm_tensor_energy import (
-    compute_energy_split_ctm_tensor_2site,
-)
+from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
 from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.algorithms.fermionic_ipeps import (
     FPEPSConfig,
@@ -293,10 +291,12 @@ def midgap_pair():
 #: bit-stably, and the file was red on main's full suite for weeks
 #: (platform-alternating, values identical on every failure -- issue #999).
 #:
-#: What *is* a theorem is covariance of the contraction itself: the split
-#: environment carries the site tensors' ket/bra virtual legs explicitly, so a
-#: diagonal bond gauge on the pair is cancelled **exactly** by the inverse
-#: factors on the environment's edge legs (``_counter_gauged_envs``).  Gauged
+#: What *is* a theorem is covariance of the contraction itself: each
+#: environment edge's D² leg is the site's ket and bra virtual legs fused
+#: (ket-slow), so a diagonal bond gauge on the pair is cancelled **exactly** by
+#: ``kron(g, g)`` on that leg (``_counter_gauged_envs``); the graded fuse's
+#: signs are diagonal too, so they commute with it.  (Measured on the split
+#: environment before #1035 step 4 moved fermions to the fused CTM.)  Gauged
 #: pair + counter-gauged environment is the same contraction term by term:
 #: measured invariance residual 0.0 for both ``E`` and the gap, and the same
 #: 2.7e-12 input perturbation now moves them by ~8e-13 -- the response is
@@ -317,7 +317,7 @@ BAR_GAP = 1e-6
 def _env_observables(A, B, env_A, env_B, H):
     """``(E, gap)`` for this pair contracted with the **given** environments."""
     d = A.indices[A.labels().index("phys")].dim
-    E = float(compute_energy_split_ctm_tensor_2site(A, B, env_A, env_B, H, d=d))
+    E = float(compute_energy_ctm_tensor_2site(A, B, env_A, env_B, H, d=d))
     return E, sublattice_gap(A, B, env_A, env_B)
 
 
@@ -327,32 +327,32 @@ def _counter_gauged_envs(env_A, env_B):
     ``_bond_gauge`` puts a diagonal factor on every virtual leg of ``A`` and
     ``B``.  In any contraction those legs meet either the partner site (the
     patch-internal bond, where ``G`` meets ``G^-1`` directly) or an environment
-    edge's ``*_ket``/``*_bra`` leg.  Scaling each edge leg by the inverse of the
-    factor its site leg received therefore reproduces the ungauged contraction
-    term by term -- for *every* observable, which is what makes this pair valid
-    for the energy and the gap at once.
+    edge's fused ket(x)bra D² leg.  Scaling that leg by ``kron(v, v)`` -- the
+    inverse of the factor the site leg received, on the ket and the bra half,
+    in the fuse's ket-slow order -- reproduces the ungauged contraction term by
+    term, for *every* observable, which is what makes this pair valid for the
+    energy and the gap at once.
 
     The mapping mirrors ``_bond_gauge`` leg for leg (site ``u`` meets ``T1``,
     ``r`` meets ``T2``, ``d`` meets ``T3``, ``l`` meets ``T4``); the factors are
     real, so ket and bra halves take the same vector.  Getting any one of the
-    eight wrong un-cancels that leg and the invariance test below fails at
-    O(1e-1) -- that is the guard on this helper itself.
+    four wrong, or the fused order, un-cancels that leg and the invariance test
+    below fails at O(1e-1) -- that is the guard on this helper itself.
     """
     g_hAB, g_hBA, g_vAB, g_vBA = _GAUGE
 
     def counter(env, u, r, d, left):
         reps = {}
-        for edge, site_leg, vec in (
-            ("T1", "u", u),
-            ("T2", "r", r),
-            ("T3", "d", d),
-            ("T4", "l", left),
+        for edge, leg, vec in (
+            ("T1", "u2", u),
+            ("T2", "r2", r),
+            ("T3", "d2", d),
+            ("T4", "l2", left),
         ):
-            for half in ("ket", "bra"):
-                name = f"{edge}_{half}"
-                reps[name] = scale_bond_axis(
-                    getattr(env, name), f"{site_leg}_{half}", jax.numpy.asarray(vec)
-                )
+            v = np.asarray(vec, dtype=float)
+            reps[edge] = scale_bond_axis(
+                getattr(env, edge), leg, jax.numpy.asarray(np.kron(v, v))
+            )
         return env._replace(**reps)
 
     # Inverses of the site factors: A gets r=g_hAB, l=1/g_hBA, d=g_vAB,
@@ -371,7 +371,7 @@ def midgap_baseline(midgap_pair):
     rather than re-converging -- see the note on ``GAUGE_CHI`` above.
     """
     A, B, H = midgap_pair
-    env_A, env_B = ctm_split_tensor_2site(
+    env_A, env_B = ctm_tensor_2site(
         A, B, GAUGE_CHI, max_iter=GAUGE_SWEEPS, conv_tol=1e-10
     )
     E, gap = _env_observables(A, B, env_A, env_B, H)
@@ -550,10 +550,10 @@ def test_the_gap_tracks_the_charge_density_wave(su_pair):
     A, B, lam = _fpeps_simple_update(A0, H, max_D=cfg.D, dt=cfg.dt, steps=8)
     A, B = _to_physical_pair(A, B, lam)
     kw = dict(max_iter=12, conv_tol=1e-10)
-    gap_free = sublattice_gap(A, B, *ctm_split_tensor_2site(A, B, CHI, **kw))
+    gap_free = sublattice_gap(A, B, *ctm_tensor_2site(A, B, CHI, **kw))
 
     A4, B4 = su_pair
-    gap_cdw = sublattice_gap(A4, B4, *ctm_split_tensor_2site(A4, B4, CHI, **kw))
+    gap_cdw = sublattice_gap(A4, B4, *ctm_tensor_2site(A4, B4, CHI, **kw))
 
     assert gap_free < 0.1, (
         f"gap {gap_free:.4f} at V=0, where free spinless fermions have no "
@@ -575,7 +575,7 @@ def test_the_gap_never_densifies_the_site_tensor(su_pair, monkeypatch):
     P1-2, and ``CLAUDE.md``'s standing rule).
     """
     A, B = su_pair
-    envs = ctm_split_tensor_2site(A, B, CHI, max_iter=12, conv_tol=1e-10)
+    envs = ctm_tensor_2site(A, B, CHI, max_iter=12, conv_tol=1e-10)
 
     original = SymmetricTensor.todense
     ranks = []
@@ -622,12 +622,17 @@ def test_fpeps_restarts_from_its_own_returned_pair():
         V=4.0,
         dt=0.05,
         num_imaginary_steps=4,
-        ctm_chi=4,
-        ctm_max_iter=12,
-        ctm_conv_tol=1e-6,
+        # A converged environment: on the fused graded CTM (#1035 step 4)
+        # chi=4 / 12 sweeps leaves two bond RDMs grossly non-PSD (smallest
+        # eigenvalue -0.61), which fpeps()'s #879 gate refuses as NaN.  At
+        # chi=8 every bond RDM is PSD and E is stable (0.1539; chi=16: 0.1521).
+        ctm_chi=8,
+        ctm_max_iter=60,
+        ctm_conv_tol=1e-9,
     )
     H = spinless_fermion_gate(cfg)
     E1, (A1, B1), _ = fpeps(H, cfg, key=jax.random.PRNGKey(5))
+    assert np.isfinite(E1), "the reference run itself was refused (#879)"
 
     # A zero-step restart must reproduce the state it was handed, which is what
     # makes the round trip meaningful: same tensors in, same energy out.

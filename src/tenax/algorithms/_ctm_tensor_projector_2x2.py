@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms import _ctm_graded as G
 from tenax.algorithms._ad_primitives import _unit_phase
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
@@ -357,24 +358,24 @@ def _build_enlarged_corner(
     if position == "top_left":
         # C1.c1_r <-> T1.t1_l
         C_r = C.relabel("c1_r", "t1_l")
-        CT_h = contract(C_r, T_h)  # -> (c1_d, u2, t1_r)
+        CT_h = G.contract(C_r, T_h)  # -> (c1_d, u2, t1_r)
         # C1.c1_d <-> T4.t4_d
         T_v_r = T_v.relabel("t4_d", "c1_d")
-        CTT = contract(CT_h, T_v_r)  # -> (u2, t1_r, l2, t4_u)
+        CTT = G.contract(CT_h, T_v_r)  # -> (u2, t1_r, l2, t4_u)
         # T1.u2 <-> a.u2 ; T4.l2 <-> a.l2
-        Q = contract(CTT, a)  # -> (t1_r, t4_u, d2, r2) free legs
+        Q = G.contract(CTT, a)  # -> (t1_r, t4_u, d2, r2) free legs
         # Relabel seams to chi_R, chi_B; r2 / d2 keep original labels.
         return Q.relabels({"t1_r": "chi_R", "t4_u": "chi_B"})
 
     if position == "top_right":
         # C2.c2_l <-> T1.t1_r
         C_r = C.relabel("c2_l", "t1_r")
-        CT_h = contract(C_r, T_h)  # -> (c2_d, t1_l, u2)
+        CT_h = G.contract(C_r, T_h)  # -> (c2_d, t1_l, u2)
         # C2.c2_d <-> T2.t2_u
         T_v_r = T_v.relabel("t2_u", "c2_d")
-        CTT = contract(CT_h, T_v_r)  # -> (t1_l, u2, r2, t2_d)
+        CTT = G.contract(CT_h, T_v_r)  # -> (t1_l, u2, r2, t2_d)
         # T1.u2 <-> a.u2 ; T2.r2 <-> a.r2
-        Q = contract(CTT, a)  # -> (t1_l, t2_d, l2, d2) free legs
+        Q = G.contract(CTT, a)  # -> (t1_l, t2_d, l2, d2) free legs
         return Q.relabels({"t1_l": "chi_L", "t2_d": "chi_B"})
 
     if position == "bottom_left":
@@ -382,23 +383,23 @@ def _build_enlarged_corner(
         # historically swapped vs geometry; #670/#702.  Valid because the
         # sweep keeps corner labels in the init convention at every point.)
         C_r = C.relabel("c4_r", "t4_u")
-        CT_v = contract(C_r, T_v)  # -> (c4_u, t4_d, l2)
+        CT_v = G.contract(C_r, T_v)  # -> (c4_u, t4_d, l2)
         # C4.c4_u <-> T3.t3_r
         T_h_r = T_h.relabel("t3_r", "c4_u")
-        CTT = contract(CT_v, T_h_r)  # -> (t4_d, l2, d2, t3_l)
+        CTT = G.contract(CT_v, T_h_r)  # -> (t4_d, l2, d2, t3_l)
         # T3.d2 <-> a.d2 ; T4.l2 <-> a.l2
-        Q = contract(CTT, a)  # -> (t4_d, t3_l, u2, r2) free legs
+        Q = G.contract(CTT, a)  # -> (t4_d, t3_l, u2, r2) free legs
         return Q.relabels({"t4_d": "chi_T", "t3_l": "chi_R"})
 
     if position == "bottom_right":
         # C3.c3_l <-> T3.t3_l
         C_r = C.relabel("c3_l", "t3_l")
-        CT_h = contract(C_r, T_h)  # -> (c3_u, t3_r, d2)
+        CT_h = G.contract(C_r, T_h)  # -> (c3_u, t3_r, d2)
         # C3.c3_u <-> T2.t2_d
         T_v_r = T_v.relabel("t2_d", "c3_u")
-        CTT = contract(CT_h, T_v_r)  # -> (t3_r, d2, t2_u, r2)
+        CTT = G.contract(CT_h, T_v_r)  # -> (t3_r, d2, t2_u, r2)
         # T3.d2 <-> a.d2 ; T2.r2 <-> a.r2
-        Q = contract(CTT, a)  # -> (t3_r, t2_u, l2, u2) free legs
+        Q = G.contract(CTT, a)  # -> (t3_r, t2_u, l2, u2) free legs
         return Q.relabels({"t3_r": "chi_L", "t2_u": "chi_T"})
 
     raise ValueError(f"unsupported position={position!r}")
@@ -1049,8 +1050,7 @@ def _compute_2x2_projector_symmetric(
         singular values aren't required explicitly — the block-sparse
         SVD already truncates to ``chi`` (Issue #474).
     """
-    from tenax.contraction.contractor import contract
-    from tenax.linalg import svd as tensor_svd
+    from tenax.algorithms import _ctm_graded as G
 
     if direction not in ("left", "right", "top", "bottom"):
         raise ValueError(f"unsupported direction={direction!r}")
@@ -1061,7 +1061,7 @@ def _compute_2x2_projector_symmetric(
         Q_TR_relab = Q_TR.relabels(
             {"chi_L": "chi_R", "l2": "r2", "chi_B": "chi_B_TR", "d2": "d2_TR"}
         )
-        M1_T = contract(Q_TL_relab, Q_TR_relab)
+        M1_T = G.contract(Q_TL_relab, Q_TR_relab)
         m1_left_labels = ("chi_B_TL", "d2_TL")
         m1_right_labels = ("chi_B_TR", "d2_TR")
 
@@ -1069,7 +1069,7 @@ def _compute_2x2_projector_symmetric(
             {"chi_L": "chi_R", "l2": "r2", "chi_T": "chi_T_BR", "u2": "u2_BR"}
         )
         Q_BL_relab = Q_BL.relabels({"chi_T": "chi_T_BL", "u2": "u2_BL"})
-        M2_T = contract(Q_BR_relab, Q_BL_relab)
+        M2_T = G.contract(Q_BR_relab, Q_BL_relab)
         m2_left_labels = ("chi_T_BR", "u2_BR")
         m2_right_labels = ("chi_T_BL", "u2_BL")
     else:  # "top", "bottom"
@@ -1077,7 +1077,7 @@ def _compute_2x2_projector_symmetric(
             {"chi_T": "chi_B", "u2": "d2", "chi_R": "chi_R_BL", "r2": "r2_BL"}
         )
         Q_TL_relab = Q_TL.relabels({"chi_R": "chi_R_TL", "r2": "r2_TL"})
-        M1_T = contract(Q_BL_relab, Q_TL_relab)
+        M1_T = G.contract(Q_BL_relab, Q_TL_relab)
         m1_left_labels = ("chi_R_BL", "r2_BL")
         m1_right_labels = ("chi_R_TL", "r2_TL")
 
@@ -1085,12 +1085,12 @@ def _compute_2x2_projector_symmetric(
             {"chi_B": "chi_T", "d2": "u2", "chi_L": "chi_L_TR", "l2": "l2_TR"}
         )
         Q_BR_relab = Q_BR.relabels({"chi_L": "chi_L_BR", "l2": "l2_BR"})
-        M2_T = contract(Q_TR_relab, Q_BR_relab)
+        M2_T = G.contract(Q_TR_relab, Q_BR_relab)
         m2_left_labels = ("chi_L_TR", "l2_TR")
         m2_right_labels = ("chi_L_BR", "l2_BR")
 
     # ---- Stage 2: SVDs of M1, M2 with per-sector gauge fix. ----
-    U_M1_T, M1_S, Vh_M1_T, _ = tensor_svd(
+    U_M1_T, M1_S, Vh_M1_T, _ = G.svd(
         M1_T,
         left_labels=m1_left_labels,
         right_labels=m1_right_labels,
@@ -1108,7 +1108,7 @@ def _compute_2x2_projector_symmetric(
     U_M1_T, Vh_M1_T = _gauge_fix_symmetric_svd(U_M1_T, Vh_M1_T)
     M1_S = _fishman_truncate_S(M1_S, eps=1e-12)
 
-    U_M2_T, M2_S, Vh_M2_T, _ = tensor_svd(
+    U_M2_T, M2_S, Vh_M2_T, _ = G.svd(
         M2_T,
         left_labels=m2_left_labels,
         right_labels=m2_right_labels,
@@ -1156,13 +1156,13 @@ def _compute_2x2_projector_symmetric(
     if prime_order == "second_first":
         cut_relabel = dict(zip(m1_left_labels, m2_right_labels))
         first_half_for_mp = first_half.relabels(cut_relabel)
-        M_prime_T = contract(second_half, first_half_for_mp)
+        M_prime_T = G.contract(second_half, first_half_for_mp)
         mp_left_labels = ("m2_bond",)
         mp_right_labels = ("m1_bond",)
     else:
         cut_relabel = dict(zip(m1_right_labels, m2_left_labels))
         first_half_for_mp = first_half.relabels(cut_relabel)
-        M_prime_T = contract(first_half_for_mp, second_half)
+        M_prime_T = G.contract(first_half_for_mp, second_half)
         mp_left_labels = ("m1_bond",)
         mp_right_labels = ("m2_bond",)
 
@@ -1170,7 +1170,7 @@ def _compute_2x2_projector_symmetric(
     # traced path if blocks carry tracers, or the eager+retruncate path
     # otherwise.
     if base_charges is None:
-        U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+        U_Mp_T, S_Mp, Vh_Mp_T, _ = G.svd(
             M_prime_T,
             left_labels=mp_left_labels,
             right_labels=mp_right_labels,
@@ -1196,7 +1196,7 @@ def _compute_2x2_projector_symmetric(
             traced_base = _incoming_chi_charges(Q_TL, Q_TR, Q_BL, Q_BR, direction, chi)
             if traced_base is None:
                 traced_base = base_charges
-            U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+            U_Mp_T, S_Mp, Vh_Mp_T, _ = G.svd(
                 M_prime_T,
                 left_labels=mp_left_labels,
                 right_labels=mp_right_labels,
@@ -1205,7 +1205,7 @@ def _compute_2x2_projector_symmetric(
                 base_charges=traced_base,
             )
         else:
-            U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+            U_Mp_T, S_Mp, Vh_Mp_T, _ = G.svd(
                 M_prime_T,
                 left_labels=mp_left_labels,
                 right_labels=mp_right_labels,
@@ -1256,13 +1256,13 @@ def _compute_2x2_projector_symmetric(
     S_inv_sqrt = jnp.where(mask, 1.0 / jnp.sqrt(S_safe), 0.0)
 
     if prime_order == "second_first":
-        # P_first  = first_half · V_Mp · S^{-1/2}   = contract(first_half, Vh_Mp.bar())
-        # P_second = S^{-1/2} · U_Mp^† · second_half = contract(U_Mp.bar(), second_half)
-        P_first_unscaled = contract(first_half, Vh_Mp_T.bar())
-        P_second_unscaled = contract(U_Mp_T.bar(), second_half)
+        # P_first  = first_half · V_Mp · S^{-1/2}   = G.contract(first_half, Vh_Mp.bar())
+        # P_second = S^{-1/2} · U_Mp^† · second_half = G.contract(U_Mp.bar(), second_half)
+        P_first_unscaled = G.contract(first_half, G.bar(Vh_Mp_T))
+        P_second_unscaled = G.contract(G.bar(U_Mp_T), second_half)
     else:  # "first_second"
-        P_first_unscaled = contract(U_Mp_T.bar(), first_half)
-        P_second_unscaled = contract(second_half, Vh_Mp_T.bar())
+        P_first_unscaled = G.contract(G.bar(U_Mp_T), first_half)
+        P_second_unscaled = G.contract(second_half, G.bar(Vh_Mp_T))
 
     P_first = _scale_bond_by_diag(P_first_unscaled, S_inv_sqrt, bond_label="chi_new")
     P_second = _scale_bond_by_diag(P_second_unscaled, S_inv_sqrt, bond_label="chi_new")

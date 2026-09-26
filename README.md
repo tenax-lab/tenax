@@ -745,13 +745,15 @@ state you landed on; it does not tell you it is the ground state.
 
 `Σ_bonds tr(ρ H)` is bounded by `H`'s spectrum only when every `ρ` is a genuine
 density matrix. When a bond RDM is not one — non-finite, trace collapsed, or
-badly non-PSD — the split-CTM energy path returned the number anyway: finite,
-and an unphysical lie (#879). Both entry points now take an opt-in gate:
+badly non-PSD — the CTM energy path returned the number anyway: finite, and
+an unphysical lie (#879). The 2-site energy functions (fused
+`compute_energy_ctm_tensor_2site`, which `fpeps()` uses, and the split
+`compute_energy_split_ctm_tensor_2site`) take an opt-in gate:
 
 ```python
-from tenax import compute_energy_split_ctm_tensor_2site
+from tenax import compute_energy_ctm_tensor_2site
 
-E = compute_energy_split_ctm_tensor_2site(
+E = compute_energy_ctm_tensor_2site(
     A, B, env_A, env_B, gate, d=2,
     nan_on_invalid_rdm=True,   # default False
     psd_tol=None,              # default None -> RDM_PSD_TOL = 1e-8

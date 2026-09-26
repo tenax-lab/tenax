@@ -506,14 +506,14 @@ def _split_ctm_sweep_multisite_2x2(
     ``renormalize`` for it.
     """
     if _split_env_is_fermionic(next(iter(envs.values()))):
-        return _split_ctm_sweep_multisite_2x2_via_fused(
-            envs,
-            site_tensors,
-            neighbors,
-            chi,
-            chi_I,
-            renormalize=renormalize,
-            projector_backward=projector_backward,
+        # The split <-> fused conversions (merge, resplit) are sign-free, so a
+        # fermionic env comes out of them with hard-core-boson signs and
+        # inconsistent flows (#1035 step 4).  Fermions use the fused graded
+        # Tensor CTM (ctm_tensor_2site / ctm_multisite) instead.
+        raise NotImplementedError(
+            "split CTM: fermionic tensors are not supported (the split <-> fused "
+            "conversion is sign-free, #1035); use the fused Tensor CTM "
+            "(ctm_tensor_2site / fuse_virtual_legs=True)"
         )
     # Function-local import: _split_ctm_tensor_moves imports from this module,
     # so importing the absorb helpers at module scope would form a cycle.

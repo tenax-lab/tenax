@@ -89,6 +89,19 @@ def _renormalize_tensor_env(env: CTMTensorEnv) -> CTMTensorEnv:
     )
 
 
+def _refuse_fermionic_1x1(a: Tensor, where: str) -> None:
+    """The ``"1x1"`` recipe and the paired moves fuse chi and D² legs
+    sign-free and are not on the graded path (#1035, design §5 step 4); a
+    fermionic double layer would get hard-core-boson signs there."""
+    from tenax.algorithms._ctm_graded import is_fermionic
+
+    if is_fermionic(a):
+        raise NotImplementedError(
+            f"{where}: fermionic tensors need recipe='2x2' (the graded Tensor "
+            "CTM); the 1x1 recipe and the paired moves are sign-free"
+        )
+
+
 def _ctm_tensor_sweep(
     env: CTMTensorEnv,
     a: Tensor,
@@ -110,6 +123,7 @@ def _ctm_tensor_sweep(
         ``(env, max_eps)`` where ``max_eps`` is the maximum per-move truncation
         error across the four directional moves in this sweep.
     """
+    _refuse_fermionic_1x1(a, "_ctm_tensor_sweep")
     base_charges = _get_base_charges(a)
     env, eps_left = _ctm_tensor_move_left(
         env,
@@ -173,6 +187,7 @@ def _ctm_tensor_sweep_paired(
         ``(env, max_eps)`` where ``max_eps`` is the maximum per-move truncation
         error across the two paired moves in this sweep.
     """
+    _refuse_fermionic_1x1(a, "_ctm_tensor_sweep_paired")
     env, eps_horiz = _ctm_tensor_move_horizontal(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
@@ -357,6 +372,8 @@ def _ctm_tensor_sweep_multisite(
             return a
 
     if recipe == "1x1":
+        for a in double_layers.values():
+            _refuse_fermionic_1x1(a, "_ctm_tensor_sweep_multisite(recipe='1x1')")
         for direction, move_fn in _DIRECTION_MOVES:
             for coord in _sort_coords_for_direction(all_coords, direction):
                 nb = neighbors[coord][direction]
