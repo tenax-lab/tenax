@@ -1286,26 +1286,12 @@ class SymmetricTensor(Tensor):
         See :meth:`Tensor.twist` for what this is for, and for the
         fermions-only restriction this shares with it.
         """
-        rank = len(self._indices)
-        for ax in axes:
-            if not -rank <= ax < rank:
-                raise IndexError(
-                    f"twist axis {ax} out of range for a rank-{rank} tensor"
-                )
-        sym = self._indices[0].symmetry if self._indices else None
-        if sym is None or not axes:
-            return self
-        _reject_anyonic_twist(sym)
-        if not sym.is_fermionic:
-            return self
-        norm_axes = tuple(ax % rank for ax in axes)
-        new_blocks: dict[BlockKey, jax.Array] = {}
-        for key, block in self.blocks.items():
-            n = 0
-            for ax in norm_axes:
-                n += int(sym.parity(np.array([key[ax]]))[0])
-            new_blocks[key] = -block if n % 2 else block
-        return SymmetricTensor._from_blocks_unchecked(new_blocks, self._indices)
+        # One implementation, two spellings: this is the axis-based name for
+        # ``_graded.twist_legs``.  Imported here rather than at module scope
+        # because ``_graded`` imports this module.
+        from tenax.core._graded import twist_axes
+
+        return twist_axes(self, axes)
 
     def permute_legs(self, axes: tuple[int, ...]) -> SymmetricTensor:
         """Reorder leg storage without any Koszul sign.
