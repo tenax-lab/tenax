@@ -14,6 +14,11 @@ FERMIONIC envs (dispatched from the non-fused function when
 ``_env_is_fermionic`` is true) — carried the OLD swapped pairing
 (``c3_l<->t2_d``).  This is #674.
 
+Since #1035 step 4 the fused twins are gone: fermionic envs take the same
+unfused absorption as bosonic ones, contracted with the graded primitives of
+``_ctm_graded``.  The pairing guard below still applies to that path, and its
+reference now contracts with ``_ctm_graded.contract`` as production does.
+
 Why a unit-level (3b) test and not end-to-end
 ---------------------------------------------
 The swap is a *latent* per-sector block-bookkeeping bug.  On a freshly
@@ -49,12 +54,12 @@ jax.config.update("jax_enable_x64", True)
 FermionicU1 = pytest.importorskip("tenax.core.symmetry").FermionicU1
 _moves = pytest.importorskip("tenax.algorithms._ctm_tensor_moves")
 
+from tenax.algorithms._ctm_graded import contract, is_fermionic
 from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS as NB
 from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
-from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.tensor import SymmetricTensor
 
@@ -62,7 +67,11 @@ _compute_plaquette_projector_pair = _moves._compute_plaquette_projector_pair
 _ctm_tensor_absorb_bottom_2plaq = _moves._ctm_tensor_absorb_bottom_2plaq
 _apply_proj_unfused = _moves._apply_proj_unfused
 _phase_fix_normalize_tensor = _moves._phase_fix_normalize_tensor
-_env_is_fermionic = _moves._env_is_fermionic
+
+
+def _env_is_fermionic(env) -> bool:
+    return is_fermionic(env.C1)
+
 
 CHI = 12
 
@@ -126,11 +135,11 @@ def _bottom_projectors(envs, dl):
     return projectors
 
 
-def test_fermionic_env_dispatches_to_fused_bottom():
-    """Sanity: a FermionicU1 env is recognised as fermionic (fused dispatch)."""
+def test_fermionic_env_is_recognised_as_graded():
+    """Sanity: a FermionicU1 env takes the graded contraction."""
     A, _ = _fermionic_direction_dependent_pair()
     env = initialize_ctm_tensor_env(A, CHI)
-    assert _env_is_fermionic(env), "FermionicU1 env must take the fused CTM path"
+    assert _env_is_fermionic(env), "FermionicU1 env must take the graded path"
 
 
 def test_fused_bottom_c3_uses_authority_c3u_t2d_pairing():
