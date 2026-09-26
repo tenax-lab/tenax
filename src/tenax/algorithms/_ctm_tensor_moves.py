@@ -835,7 +835,13 @@ def _ctm_tensor_absorb_left_2plaq_fused(
     # Unfused contraction can emit the free legs in a different order than the
     # fused path; restore the canonical edge layout so downstream positional
     # uses (e.g. phase-fix ravel order) match the dense/fused result (#605).
-    T4_new = T4_new.transpose(
+    # #994/#995/#997: this is a post-contract axis *restoration* (bookkeeping),
+    # not a physical braid, so it uses the sign-free ``permute_legs``. On a
+    # fermionic tensor ``transpose`` would stamp a Koszul sign here that is gauge
+    # (it cancels in every closed contraction -- verified to 1e-10 by
+    # test_ctm_fermionic_sign_gauge_995 and test_fermionic_split_sweep_matches_fused)
+    # and would make the block data depend on the contractor's private leg order.
+    T4_new = T4_new.permute_legs(
         tuple(T4_new.labels().index(lbl) for lbl in ("t4_d", "l2", "t4_u"))
     )
     T4_new = _flip_leg_flow(T4_new, "l2")  # r2(OUT) -> l2 needs IN
@@ -917,7 +923,9 @@ def _ctm_tensor_absorb_right_2plaq_fused(
     )  # (chi_new, t2_d, d2, l2)
     T2_new = _apply_proj_unfused(P_top_curr, step, "t2_d", "d2", chi_new="chi_new_r")
     T2_new = T2_new.relabels({"chi_new": "t2_u", "chi_new_r": "t2_d", "l2": "r2"})
-    T2_new = T2_new.transpose(
+    # Post-contract axis restoration -> sign-free permute_legs (#994/#995/#997);
+    # the Koszul sign is gauge here. See the left-absorb site for the full note.
+    T2_new = T2_new.permute_legs(
         tuple(T2_new.labels().index(lbl) for lbl in ("t2_u", "r2", "t2_d"))
     )
     T2_new = _flip_leg_flow(T2_new, "r2")  # l2(IN) -> r2 needs OUT
@@ -987,7 +995,9 @@ def _ctm_tensor_absorb_top_2plaq_fused(
     )  # (chi_new, t1_r, d2, r2)
     T1_new = _apply_proj_unfused(P_top_curr, step, "t1_r", "r2", chi_new="chi_new_r")
     T1_new = T1_new.relabels({"chi_new": "t1_l", "chi_new_r": "t1_r", "d2": "u2"})
-    T1_new = T1_new.transpose(
+    # Post-contract axis restoration -> sign-free permute_legs (#994/#995/#997);
+    # the Koszul sign is gauge here. See the left-absorb site for the full note.
+    T1_new = T1_new.permute_legs(
         tuple(T1_new.labels().index(lbl) for lbl in ("t1_l", "u2", "t1_r"))
     )
     T1_new = _flip_leg_flow(T1_new, "u2")  # d2(OUT) -> u2 needs IN
@@ -1038,7 +1048,9 @@ def _ctm_tensor_absorb_bottom_2plaq_fused(
     )  # (chi_new, t3_l, u2, r2)
     T3_new = _apply_proj_unfused(P_bot_curr, step, "t3_l", "r2", chi_new="chi_new_r")
     T3_new = T3_new.relabels({"chi_new": "t3_r", "chi_new_r": "t3_l", "u2": "d2"})
-    T3_new = T3_new.transpose(
+    # Post-contract axis restoration -> sign-free permute_legs (#994/#995/#997);
+    # the Koszul sign is gauge here. See the left-absorb site for the full note.
+    T3_new = T3_new.permute_legs(
         tuple(T3_new.labels().index(lbl) for lbl in ("t3_r", "d2", "t3_l"))
     )
     T3_new = _flip_leg_flow(T3_new, "d2")  # u2(IN) -> d2 needs OUT
