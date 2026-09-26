@@ -165,21 +165,17 @@ def test_checkerboard_rdm_equals_the_exact_patch(
 
 
 def test_the_fermionic_simple_update_keeps_the_site_flow_convention():
-    """The shared SU sweep returns every leg reversed (the gate's output legs
-    and the SVD's new bond); ``_fpeps_simple_update`` restores the input's
-    flows, which the graded CTM is certified on -- by a plain dual, so the
-    numbers are exactly the sweep's."""
+    """The graded bond update (#1035 §5 step 6) returns every leg in the flow
+    it was given: the site convention the graded CTM is certified on.  The
+    sign-free update it replaced reversed every leg (the gate's output legs
+    OUT, the SVD's new bond OUT on ``U``), which crashed the graded CTM."""
     import jax
 
     from tenax.algorithms.fermionic_ipeps import (
         FPEPSConfig,
         _fpeps_simple_update,
         _initialize_fpeps,
-        _trotter_gate,
         spinless_fermion_gate,
-    )
-    from tenax.algorithms.ipeps_simple_update import (
-        _simple_update_checkerboard_sweep,
     )
 
     cfg = FPEPSConfig(D=2, t=1.0, V=1.0)
@@ -187,16 +183,5 @@ def test_the_fermionic_simple_update_keeps_the_site_flow_convention():
     H = spinless_fermion_gate(cfg)
     flows = lambda t: [(i.label, i.flow) for i in t.indices]  # noqa: E731
 
-    A_raw, B_raw, _ = _simple_update_checkerboard_sweep(
-        A, A, _trotter_gate(H, 0.05), 2, 4
-    )
-    assert flows(A_raw) != flows(A)  # regime: the sweep does reverse them
-
-    A_new, B_new, _ = _fpeps_simple_update(A, H, max_D=2, dt=0.05, steps=1)
+    A_new, B_new, _ = _fpeps_simple_update(A, H, max_D=2, dt=0.05, steps=2)
     assert flows(A_new) == flows(A) and flows(B_new) == flows(A)
-    np.testing.assert_array_equal(
-        np.asarray(A_new.todense()), np.asarray(A_raw.todense())
-    )
-    np.testing.assert_array_equal(
-        np.asarray(B_new.todense()), np.asarray(B_raw.todense())
-    )

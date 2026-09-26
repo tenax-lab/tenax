@@ -321,36 +321,7 @@ def _fpeps_simple_update(
     # Four phases per step, so each of the four checkerboard bonds is evolved
     # once per step -- the same imaginary time per bond as the old two-phase
     # loop delivered for its two.
-    A_out, B_out, lambdas = _simple_update_checkerboard_sweep(
-        A, B, gate, max_D, 4 * steps
-    )
-    return _restore_flows(A_out, A), _restore_flows(B_out, B), lambdas
-
-
-def _restore_flows(t: SymmetricTensor, like: SymmetricTensor) -> SymmetricTensor:
-    """``t`` with every leg's flow set back to ``like``'s (#1035 step 4).
-
-    The shared sweep returns every leg reversed: the gate's output legs are
-    OUT, so ``phys`` comes back OUT, and the SVD's new bond is OUT on ``U``
-    and IN on ``Vh``, the opposite of the site convention (``r``/``d`` IN,
-    ``l``/``u`` OUT).  Sign-free ``contract`` never noticed -- parity charges
-    are self-dual -- but the graded CTM reads a leg's flow as part of the
-    state (rule 2), and it is certified on the site convention only.
-
-    Each flip is a plain dual (flow flipped, charges and block keys mapped),
-    with **no** twist, so the data are exactly what the sweep produced.  That
-    is deliberate: the sweep itself contracts sign-free (design §5 step 6), so
-    its output has no graded meaning to preserve yet; this restores the
-    convention the input was given in, and the CTM then measures the same
-    numbers a standard-convention tensor would carry.
-    """
-    from tenax.algorithms._ctm_tensor_moves import _flip_leg_flow
-
-    want = {i.label: i.flow for i in like.indices}
-    for idx in t.indices:
-        if idx.flow != want[idx.label]:
-            t = _flip_leg_flow(t, idx.label)
-    return t
+    return _simple_update_checkerboard_sweep(A, B, gate, max_D, 4 * steps)
 
 
 def sublattice_gap(
