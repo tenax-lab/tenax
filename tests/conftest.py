@@ -88,7 +88,8 @@ _FILE_MARKERS = {
     "test_fermionic_ipeps.py": "algorithm",
     "test_fpeps_ad.py": "algorithm",
     # #1035 follow-up: unpinned 2-site SU + bond_layout; runs the checkerboard
-    # sweep to convergence twice (pinned and unpinned), each ~40 phases.
+    # sweep to convergence twice (pinned and unpinned), each 160 phases (40
+    # cycles).
     "test_frozen_layout_ad.py": "algorithm",
     "test_fermionic_ed_reference.py": "algorithm",
     "test_ipeps_excitations.py": "algorithm",

@@ -33,6 +33,16 @@ def test_bond_layout_counts_even_and_odd_per_bond():
     A0, _ = _su(True, steps=0)
     lay = bond_layout(A0, A0)
     assert len(lay) == 8 and all(sum(p) == 3 for p in lay)
+    # Pin the ORDER (n_even, n_odd), not just the total -- an independent
+    # count straight off A0.u's charges (bypassing bond_layout's own
+    # tuple-building line) must match bond_layout's first entry, or a mutant
+    # that swaps which slot is "even" vs "odd" would be invisible here.
+    u_charges = np.asarray(A0.indices[A0.labels().index("u")].charges)
+    assert lay[0] == (int((u_charges % 2 == 0).sum()), int((u_charges % 2 == 1).sum()))
+    # D=3's alternating virtual-charge tiling ([i % 2 for i in range(3)] ==
+    # [0, 1, 0], set in _build_initial_fpeps_tensor) puts every leg of A0 at
+    # the same split, so pin all eight explicitly too.
+    assert lay == ((2, 1),) * 8
 
 
 def test_the_pinned_su_never_moves_the_layout():
