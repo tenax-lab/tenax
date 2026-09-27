@@ -10,6 +10,14 @@ import numpy as np
 import pytest
 
 import tenax.algorithms.fermionic_ipeps as fi
+from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
+from tenax.algorithms._ctm_tensor_convergence import (
+    CHECKERBOARD_NEIGHBORS,
+    _ctm_tensor_sweep_multisite,
+    ctm_tensor_2site,
+)
+from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
+from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
 from tenax.algorithms.fermionic_ipeps import (
     FPEPSConfig,
     _initialize_fpeps,
@@ -21,6 +29,8 @@ from tenax.algorithms.fermionic_ipeps import (
 from tenax.algorithms.ipeps_simple_update import _simple_update_checkerboard_sweep
 
 jax.config.update("jax_enable_x64", True)
+
+CHI = 12
 
 
 def _su(pin, D=3, seed=6, steps=4 * 40):
@@ -199,3 +209,83 @@ def test_growth_puts_the_new_slot_where_the_discarded_weight_is():
         abs(np.asarray(sigma)[order[2]] - np.asarray(sigma)[order[3]]) > 1e-6
     )  # not degenerate
     assert out.stages[1][3] == (int((par == 0).sum()), int((par == 1).sum()))
+
+
+@pytest.fixture(scope="module")
+def frozen_state():
+    cfg = FPEPSConfig(D=3, t=1.0, V=0.0, dt=0.05)
+    H = spinless_fermion_gate(cfg)
+    out = su_grow_layout(H, cfg, D_start=2, key=jax.random.PRNGKey(2))
+    assert out.frozen
+    return out.A, out.B, H, 2
+
+
+@pytest.fixture(scope="module")
+def eager_envs(frozen_state):
+    # Cost (Ruling R3), measured on this clone (CPU, D=3, key=PRNGKey(2)):
+    # su_grow_layout ~64 s; the eager CTM's per-sweep max-corner-SV diff
+    # (same metric ctm_tensor_2site checks against conv_tol) traced sweep by
+    # sweep: 1.07e-7 at sweep 150 (the brief's original max_iter, which does
+    # NOT reach 1e-10 and would leave eager_envs short of the fixed point the
+    # design assumes), then a monotone tail -- 4.2e-8 (160), 6.5e-9 (180),
+    # 1.0e-9 (200), 3.9e-10 (210) -- crossing 1e-10 at sweep 225, ~443 s
+    # total. max_iter=260 below gives a 35-sweep margin over that measured
+    # crossing while staying at ~510 s (~8.5 min), well under the ~30 min
+    # budget in Decision 1 -- so conv_tol stays at the brief's 1e-10 rather
+    # than being relaxed.
+    A, B, _, _ = frozen_state
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        eA, eB = ctm_tensor_2site(A, B, CHI, max_iter=260, conv_tol=1e-10)
+    assert eA.C1.indices[0].dim == CHI  # regime: the corner is truncated
+    envs = {(0, 0): eA, (1, 0): eB}
+    # YASTN's fixed-point check (fixed_pt.py:369): one more eager sweep must
+    # not move any sector size, or there is no fixed point to hand to AD.
+    dls = {(0, 0): _build_double_layer_tensor(A), (1, 0): _build_double_layer_tensor(B)}
+    again, _, _ = _ctm_tensor_sweep_multisite(
+        envs, dls, CHECKERBOARD_NEIGHBORS, CHI, True
+    )
+    assert jax.tree_util.tree_structure(again) == jax.tree_util.tree_structure(envs)
+    return envs
+
+
+def _E(A, B, envs, H, d):
+    return float(
+        compute_energy_ctm_tensor_2site(A, B, envs[(0, 0)], envs[(1, 0)], H, d)
+    )
+
+
+@pytest.mark.slow
+def test_the_seeded_traced_ctm_keeps_the_layout_and_the_energy(
+    frozen_state, eager_envs
+):
+    A, B, H, d = frozen_state
+    envs, _ = python_loop_ctm_converge(
+        {(0, 0): A, (1, 0): B},
+        CHECKERBOARD_NEIGHBORS,
+        chi=CHI,
+        max_iter=50,
+        conv_tol=1e-10,
+        env_init=eager_envs,
+    )
+    tree = jax.tree_util.tree_structure
+    assert tree(envs) == tree(eager_envs)
+    assert abs(_E(A, B, envs, H, d) - _E(A, B, eager_envs, H, d)) <= 1e-8
+
+
+@pytest.mark.slow
+def test_the_cold_traced_ctm_is_why_the_seed_exists(frozen_state, eager_envs):
+    """Measurement, kept as a regime guard: from the tiled initial
+    environment the traced CTM lands on a different layout.  If this ever
+    fails, the seed is a no-op for this fixture and Task 3's first test
+    certifies nothing -- pick a fixture where it matters."""
+    A, B, _, _ = frozen_state
+    envs, _ = python_loop_ctm_converge(
+        {(0, 0): A, (1, 0): B},
+        CHECKERBOARD_NEIGHBORS,
+        chi=CHI,
+        max_iter=50,
+        conv_tol=1e-10,
+    )
+    tree = jax.tree_util.tree_structure
+    assert tree(envs) != tree(eager_envs)
