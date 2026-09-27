@@ -397,6 +397,7 @@ def _compute_plaquette_projector_pair(
     direction: str,
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
+    incoming_chi_charges: np.ndarray | None = None,
 ) -> tuple[Tensor, Tensor, jax.Array, jax.Array]:
     """Compute the (P_top, P_bot, eps_T, smallest_S) projector quad for a 2x2 plaquette.
 
@@ -427,6 +428,9 @@ def _compute_plaquette_projector_pair(
     For LEFT/RIGHT direction, ``P_top`` projects the BOTTOM face of TL
     (or top face of TR for direction='right') and ``P_bot`` projects the
     TOP face of BL (or bottom face of BR).  See ``_compute_2x2_projector``.
+
+    ``incoming_chi_charges`` names the env leg the new bond replaces, for the
+    traced symmetric path (see ``_ctm_tensor_convergence._seam_chi_charges``).
     """
     Q_TL = _build_enlarged_corner(
         env_TL.C1, env_TL.T1, env_TL.T4, a_TL, position="top_left"
@@ -449,6 +453,7 @@ def _compute_plaquette_projector_pair(
         direction=direction,
         base_charges=base_charges,
         projector_backward=projector_backward,
+        incoming_chi_charges=incoming_chi_charges,
     )
     return (
         _half_to_chi_new_top(P_top_raw),

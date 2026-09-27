@@ -220,3 +220,124 @@ def test_the_root_implicit_layout_is_the_global_top_chi():
     _s2, layout2 = sector_svd(swapped, chi=4, row_axis=0, col_axis=1)
 
     assert (layout2.dim_of(0), layout2.dim_of(1)) == (1, 3)
+
+
+# --------------------------------------------------------------------------- #
+# Multisite: the inherited leg is the destination cell's, not the source's    #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_traced_multisite_sweep_keeps_each_bond_inventory():
+    """On a checkerboard the A->B and B->A bonds keep their own inventories.
+
+    The enlarged corners carry the chi leg of the cell being *absorbed*, but
+    each projector's ``chi_new`` is written into the neighbouring cell's env,
+    which on a 2-site checkerboard is the other sublattice's bond.  Reading the
+    corner's leg (the pre-fix code, i.e. ``traced_base = _incoming_chi_charges(
+    Q_TL, Q_TR, Q_BL, Q_BR, direction, chi)`` with no destination leg supplied)
+    swaps the two inventories on every traced sweep, all four directions, all
+    32 chi legs -- a seeded eager fixed point then flips between two layouts
+    and the energy moves by ~5e-6 (#1035 Task 3).
+
+    Structure only: ``jax.eval_shape`` runs the traced path without computing.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import (
+        CHECKERBOARD_NEIGHBORS as NB,
+    )
+    from tenax.algorithms._ctm_tensor_convergence import (
+        _ctm_tensor_sweep_multisite,
+    )
+    from tenax.algorithms._ctm_tensor_init import (
+        _build_double_layer_tensor,
+        initialize_ctm_tensor_env,
+    )
+    from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
+
+    chi = 4
+    A, B = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+    site = {(0, 0): A, (1, 0): B}
+    envs = {c: initialize_ctm_tensor_env(t, chi) for c, t in site.items()}
+
+    def right(x):
+        return NB[x]["right"]
+
+    def below(x):
+        return NB[x]["bottom"]
+
+    def bonds(x):
+        """The four legs of each bond the projector anchored at ``x`` writes."""
+        rb = below(right(x))
+        return {
+            ("left", x): [
+                (right(x), "C4", "c4_r"),
+                (right(x), "T4", "t4_u"),
+                (rb, "C1", "c1_d"),
+                (rb, "T4", "t4_d"),
+            ],
+            ("right", x): [
+                (x, "C3", "c3_u"),
+                (x, "T2", "t2_d"),
+                (below(x), "C2", "c2_d"),
+                (below(x), "T2", "t2_u"),
+            ],
+            ("top", x): [
+                (below(x), "C2", "c2_l"),
+                (below(x), "T1", "t1_r"),
+                (rb, "C1", "c1_r"),
+                (rb, "T1", "t1_l"),
+            ],
+            ("bottom", x): [
+                (x, "C3", "c3_l"),
+                (x, "T3", "t3_l"),
+                (right(x), "C4", "c4_u"),
+                (right(x), "T3", "t3_r"),
+            ],
+        }
+
+    # Distinct multisets per sublattice, so a swap is visible.
+    inventory = {(0, 0): [-1, 0, 0, 1], (1, 0): [-1, -1, 0, 1]}
+    leg_charges = {}
+    for x in envs:
+        for legs in bonds(x).values():
+            for leg in legs:
+                assert leg not in leg_charges
+                leg_charges[leg] = inventory[x]
+    assert len(leg_charges) == 32  # every chi leg of both envs, exactly once
+
+    seeded = {}
+    for i, (c, env) in enumerate(envs.items()):
+        fields = {}
+        for j, name in enumerate(env._fields):
+            t = getattr(env, name)
+            idx = tuple(
+                TensorIndex.from_charges(
+                    ix.symmetry,
+                    np.asarray(leg_charges[(c, name, ix.label)], np.int32),
+                    ix.flow,
+                    label=ix.label,
+                )
+                if (c, name, ix.label) in leg_charges
+                else ix
+                for ix in t.indices
+            )
+            fields[name] = SymmetricTensor.random_normal(
+                idx, jax.random.PRNGKey(10 * i + j)
+            )
+        seeded[c] = type(env)(**fields)
+
+    dls = {c: _build_double_layer_tensor(t) for c, t in site.items()}
+    out = jax.eval_shape(
+        lambda e: _ctm_tensor_sweep_multisite(e, dls, NB, chi, False)[0], seeded
+    )
+
+    wrong = []
+    for x in envs:
+        for bond, legs in bonds(x).items():
+            for c, name, label in legs:
+                t = getattr(out[c], name)
+                got = sorted(np.asarray(t.indices[t.labels().index(label)].charges))
+                if got != sorted(inventory[x]):
+                    wrong.append((bond, c, name, label, [int(q) for q in got]))
+    assert not wrong, (
+        f"{len(wrong)}/32 chi legs took the other bond's inventory: {wrong[:4]}"
+    )
