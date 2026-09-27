@@ -234,11 +234,17 @@ class TestSweep:
             assert jnp.all(jnp.isfinite(field.todense()))
 
     def test_one_sweep_fpeps_finite(self, fpeps_tensor):
+        """Fermions run on the 2x2 recipe (the graded Tensor CTM); the 1x1
+        sweep refuses them (#1035 step 4)."""
+        from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+
         chi = 4
         a = _build_double_layer_tensor(fpeps_tensor)
         env = initialize_ctm_tensor_env(fpeps_tensor, chi)
-        env, _ = _ctm_tensor_sweep(env, a, chi, renormalize=True)
-        for field in env:
+        envs, _, _ = _ctm_tensor_sweep_multisite(
+            {(0, 0): env}, {(0, 0): a}, SINGLE_SITE_NEIGHBORS, chi, True
+        )
+        for field in envs[(0, 0)]:
             assert jnp.all(jnp.isfinite(field.todense()))
 
 

@@ -11,8 +11,9 @@ reported as if it were valid; this is the mechanism behind the #854 ``E = +0.759
 for two ``S.S`` bonds whose attainable maximum is ``+0.5``.
 
 The fix is an opt-in ``nan_on_invalid_rdm`` gate on
-:func:`compute_energy_split_ctm_tensor_2site` /
-:func:`compute_energy_split_ctm_tensor_multisite`, which ``fpeps()`` sets: when a
+:func:`compute_energy_ctm_tensor_2site` (the fused graded CTM ``fpeps()`` runs
+since #1035 step 4; the split twin has the same gate for bosonic input), which
+``fpeps()`` sets: when a
 bond's concrete RDM fails ``check_rdm``, the returned energy is ``NaN`` rather
 than a plausible-looking lie.  It is **default-off** and only inspected on the
 concrete (non-tracer) path, so the AD/optimizer path and every other caller are
@@ -66,11 +67,11 @@ jax.config.update("jax_enable_x64", True)
 
 from tenax.algorithms import fermionic_ipeps
 from tenax.algorithms._ctm_diagnostics import CollapsedRDMError, check_rdm
-from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
-from tenax.algorithms._split_ctm_tensor_energy import (
-    _rdm1x2_split_tensor_2site,
-    _rdm2x1_split_tensor_2site,
-    compute_energy_split_ctm_tensor_2site,
+from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+from tenax.algorithms._ctm_tensor_energy import (
+    _rdm1x2_tensor_2site,
+    _rdm2x1_tensor_2site,
+    compute_energy_ctm_tensor_2site,
 )
 from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.algorithms.fermionic_ipeps import (
@@ -108,7 +109,7 @@ def valid_cell():
     b = scale_bond_axis(A0, "phys", jnp.array([0.25, 4.0]))
     A, B, lam = _fpeps_simple_update(a, gate, max_D=cfg.D, dt=cfg.dt, steps=20, B=b)
     A, B = _to_physical_pair(A, B, lam)
-    env_A, env_B = ctm_split_tensor_2site(A, B, chi=4, max_iter=30, conv_tol=1e-10)
+    env_A, env_B = ctm_tensor_2site(A, B, chi=4, max_iter=30, conv_tol=1e-10)
     return A, B, env_A, env_B, gate
 
 
@@ -129,8 +130,8 @@ def test_the_gate_nans_an_invalid_rdm_energy(valid_cell):
 
     # Regime pin: the corruption must genuinely invalidate an RDM, or a NaN
     # below would prove nothing about the gate.
-    rdm_h = _rdm2x1_split_tensor_2site(A, B, dead, env_B)
-    rdm_v = _rdm1x2_split_tensor_2site(A, B, dead, env_B)
+    rdm_h = _rdm2x1_tensor_2site(A, B, dead, env_B)
+    rdm_v = _rdm1x2_tensor_2site(A, B, dead, env_B)
     assert _rdm_is_invalid(rdm_h) and _rdm_is_invalid(rdm_v), (
         "zeroing C1 did not invalidate the bond RDMs -- the fixture drifted out "
         "of the regime this test needs (check_rdm no longer fires)"
@@ -138,11 +139,9 @@ def test_the_gate_nans_an_invalid_rdm_energy(valid_cell):
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)  # the check_rdm warnings
-        e_off = float(
-            compute_energy_split_ctm_tensor_2site(A, B, dead, env_B, gate, d=2)
-        )
+        e_off = float(compute_energy_ctm_tensor_2site(A, B, dead, env_B, gate, d=2))
         e_on = float(
-            compute_energy_split_ctm_tensor_2site(
+            compute_energy_ctm_tensor_2site(
                 A, B, dead, env_B, gate, d=2, nan_on_invalid_rdm=True
             )
         )
@@ -150,7 +149,7 @@ def test_the_gate_nans_an_invalid_rdm_energy(valid_cell):
         # PSD tolerance, because C1=0 kills the trace (|tr - 1| = 1) and the
         # trace-collapse arm has its own tolerance, independent of psd_tol.
         e_on_loose = float(
-            compute_energy_split_ctm_tensor_2site(
+            compute_energy_ctm_tensor_2site(
                 A, B, dead, env_B, gate, d=2, nan_on_invalid_rdm=True, psd_tol=1e-2
             )
         )
@@ -180,7 +179,7 @@ def test_the_gate_is_finite_on_a_valid_env(valid_cell):
     """The gate must not false-positive: on the PSD baseline it returns ``-V``."""
     A, B, env_A, env_B, gate = valid_cell
     e = float(
-        compute_energy_split_ctm_tensor_2site(
+        compute_energy_ctm_tensor_2site(
             A, B, env_A, env_B, gate, d=2, nan_on_invalid_rdm=True
         )
     )
@@ -203,7 +202,7 @@ def test_the_gate_tolerance_separates_mild_from_gross_non_psd(valid_cell, monkey
     """
     import numpy as _np
 
-    from tenax.algorithms import _split_ctm_tensor_energy as energy_mod
+    from tenax.algorithms import _ctm_tensor_energy as energy_mod
     from tenax.algorithms._ctm_diagnostics import _as_rdm_matrix, _rdm_negativity
 
     A, B, env_A, env_B, gate = valid_cell
@@ -218,18 +217,18 @@ def test_the_gate_tolerance_separates_mild_from_gross_non_psd(valid_cell, monkey
         f"band -- the mild/gross separation this test asserts is vacuous"
     )
 
-    monkeypatch.setattr(energy_mod, "_rdm2x1_split_tensor_2site", lambda *a, **k: mild)
-    monkeypatch.setattr(energy_mod, "_rdm1x2_split_tensor_2site", lambda *a, **k: mild)
+    monkeypatch.setattr(energy_mod, "_rdm2x1_tensor_2site", lambda *a, **k: mild)
+    monkeypatch.setattr(energy_mod, "_rdm1x2_tensor_2site", lambda *a, **k: mild)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         e_strict = float(
-            energy_mod.compute_energy_split_ctm_tensor_2site(
+            energy_mod.compute_energy_ctm_tensor_2site(
                 A, B, env_A, env_B, gate, d=2, nan_on_invalid_rdm=True
             )
         )  # psd_tol=None -> strict RDM_PSD_TOL (1e-8)
         e_loose = float(
-            energy_mod.compute_energy_split_ctm_tensor_2site(
+            energy_mod.compute_energy_ctm_tensor_2site(
                 A, B, env_A, env_B, gate, d=2, nan_on_invalid_rdm=True, psd_tol=1e-2
             )
         )
@@ -253,18 +252,18 @@ def test_fpeps_opts_into_the_gate(monkeypatch):
     function body), so the spy patches the *source* module it resolves against,
     not the ``fermionic_ipeps`` namespace.
     """
-    from tenax.algorithms import _split_ctm_tensor_energy as energy_mod
+    from tenax.algorithms import _ctm_tensor_energy as energy_mod
     from tenax.algorithms._ctm_diagnostics import RDM_PSD_TOL
 
     recorded: dict = {}
-    real = energy_mod.compute_energy_split_ctm_tensor_2site
+    real = energy_mod.compute_energy_ctm_tensor_2site
 
     def spy(*args, **kwargs):
         recorded["nan_on_invalid_rdm"] = kwargs.get("nan_on_invalid_rdm", False)
         recorded["psd_tol"] = kwargs.get("psd_tol", None)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(energy_mod, "compute_energy_split_ctm_tensor_2site", spy)
+    monkeypatch.setattr(energy_mod, "compute_energy_ctm_tensor_2site", spy)
     cfg = FPEPSConfig(
         D=2, t=1.0, V=1.0, dt=0.05, num_imaginary_steps=1, ctm_chi=2, ctm_max_iter=3
     )

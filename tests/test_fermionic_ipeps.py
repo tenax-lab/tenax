@@ -398,9 +398,17 @@ def test_fpeps_importable_from_tenax():
 
 
 def test_single_phase_full_rank_identity_matches_bosonic_control():
-    """One bond update at max_D = D*d must reconstruct gate*theta, and the
-    fermionic arm must do so exactly as well as the block-identical bosonic
-    Z2 control (#997).
+    """One bond update at max_D = D*d must be the best rank-6 approximation
+    of gate*theta -- its reconstruction fidelity must equal the Eckart-Young
+    optimum ``sqrt(sum_top6 s^2 / sum s^2)`` of that operator -- in the
+    fermionic arm and in the block-identical bosonic Z2 control alike (#997).
+
+    Since #1035 step 6 the fermionic arm is graded: ``gate*theta`` is the
+    graded contraction with the gate as a graded operator, and the
+    comparison reorders with Koszul signs.  The two arms are then different
+    operators (the sign-free one is the hard-core-boson gate), so they no
+    longer share a fidelity; each is held to its own optimum instead, which
+    keeps the test self-calibrating.
 
     Pre-fix, linalg's matricization Koszul signs (640 of 2560 fired in a
     5-step sweep) plus the factor transposes made a single production phase
@@ -415,11 +423,12 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
     state-model fragility (#878/#881, #882 SS5.3).
     """
     import tenax.algorithms.ipeps_simple_update as isu
+    from tenax.algorithms._ctm_graded import contract, is_fermionic, svd
     from tenax.algorithms.ipeps_simple_update import (
         _simple_update_2site_horizontal_tensor,
         _simple_update_2site_vertical_tensor,
     )
-    from tenax.contraction.contractor import contract
+    from tenax.core._graded import graded_reorder
     from tenax.core._tensor_utils import scale_bond_axis
     from tenax.core.symmetry import ZnSymmetry
     from tenax.core.tensor import _koszul_sign
@@ -471,16 +480,47 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
         )
 
     def fid(X, Y):
-        ylab = [
-            "si_out" if lab == "phys" else "sj_out" if lab == "phys_B" else lab
-            for lab in Y.labels()
-        ]
-        xd = np.asarray(X.todense())
-        yd = np.transpose(
-            np.asarray(Y.todense()), tuple(ylab.index(lab) for lab in X.labels())
-        )
-        x, y = xd.ravel(), yd.ravel()
+        Y = Y.relabels({"phys": "si_out", "phys_B": "sj_out"})
+        if is_fermionic(Y):  # a plain transpose is the sign-free move
+            Y = graded_reorder(Y, list(X.labels()))
+            yd = np.asarray(Y.todense())
+        else:
+            yd = np.transpose(
+                np.asarray(Y.todense()),
+                tuple(Y.labels().index(lab) for lab in X.labels()),
+            )
+        x, y = np.asarray(X.todense()).ravel(), yd.ravel()
         return abs(np.vdot(x, y)) / (np.linalg.norm(x) * np.linalg.norm(y))
+
+    def gate_op(G, theta):
+        """The gate as the SU applies it (``_graded_bond_update``): on the
+        fermionic arm a graded operator, the left operand."""
+        if not is_fermionic(theta):
+            return G
+        si = theta.indices[theta.labels().index("si")]
+        sj = theta.indices[theta.labels().index("sj")]
+        g = np.asarray(G.todense()).reshape(si.dim, sj.dim, si.dim, sj.dim)
+        return SymmetricTensor.from_dense(
+            jnp.asarray(np.einsum("ABab->ABba", g), dtype=theta.dtype),
+            (
+                si.relabel("si_out"),
+                sj.relabel("sj_out"),
+                sj.flip_flow(),
+                si.flip_flow(),
+            ),
+        )
+
+    def gated_of(theta, G):
+        theta = theta.relabel("phys", "si").relabel("phys_B", "sj")
+        op = gate_op(G, theta)
+        return contract(op, theta) if op is not G else contract(theta, G)
+
+    def optimum(gated, left, k=6):
+        """Eckart-Young: the best rank-k fidelity to ``gated``."""
+        right = [lab for lab in gated.labels() if lab not in left]
+        _, s, _, _ = svd(gated, left, right, "_b")
+        s2 = np.sort(np.asarray(s) ** 2)[::-1]
+        return float(np.sqrt(s2[:k].sum() / s2.sum()))
 
     # The base_charges pin is fermionic-only, so with it active the two
     # arms run DIFFERENT truncations (per-sector keep counts vs global
@@ -549,12 +589,11 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
             ("FP", A0, B0, gate),
             ("Z2", retype_z2(A0), retype_z2(B0), retype_z2(gate)),
         ):
-            theta = theta_h(A, B)
-            gated = contract(theta.relabel("phys", "si").relabel("phys_B", "sj"), G)
+            gated = gated_of(theta_h(A, B), G)
             if name == "FP":
                 # Regime: the SVD split of THIS theta must braid odd past
                 # odd, or the decomposition applies no sign and the
-                # arm-equality asserts nothing (#997's first reproducer
+                # optimum check asserts nothing (#997's first reproducer
                 # passed that way).
                 split = ("u", "d", "l", "si_out", "u_B", "d_B", "r_B", "sj_out")
                 perm = tuple(gated.labels().index(lab) for lab in split)
@@ -569,16 +608,18 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
             An, Bn, ln = _simple_update_2site_horizontal_tensor(
                 A, B, G, lh, lv, 6, lam_h_far=lhf, lam_v_other=lvo
             )
-            results[name] = fid(gated, rebuild_h(An, Bn, ln))
+            best = optimum(gated, ["u", "d", "l", "si_out"])
+            assert best < 1 - 1e-6, "fixture out of regime: nothing truncated"
+            results[name] = (fid(gated, rebuild_h(An, Bn, ln)), best)
 
-        assert results["FP"] > 0.999, f"fermionic phase not exact: {results['FP']}"
-        np.testing.assert_allclose(
-            results["FP"],
-            results["Z2"],
-            atol=1e-9,
-            err_msg="fermionic single-phase fidelity differs from the "
-            "block-identical bosonic control (#997)",
-        )
+        for name, (got, best) in results.items():
+            np.testing.assert_allclose(
+                got,
+                best,
+                atol=1e-9,
+                err_msg=f"{name} single-phase fidelity is not the rank-6 "
+                "optimum of gate*theta (#997)",
+            )
 
         # Vertical phase, same contract: kills a factor-transpose regression
         # on the path the horizontal test does not touch (U at (0,4,1,2,3)).
@@ -611,20 +652,19 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
             ("FP", A0, B0, gate),
             ("Z2", retype_z2(A0), retype_z2(B0), retype_z2(gate)),
         ):
-            gated = contract(
-                theta_v(A, B, lv).relabel("phys", "si").relabel("phys_B", "sj"), G
-            )
+            gated = gated_of(theta_v(A, B, lv), G)
             An, Bn, lnv = _simple_update_2site_vertical_tensor(
                 A, B, G, lh, lv, 6, lam_v_far=lvo, lam_h_other=lhf
             )
-            vres[name] = fid(gated, theta_v(An, Bn, lnv))
-        assert vres["FP"] > 0.999, f"vertical phase not exact: {vres['FP']}"
-        np.testing.assert_allclose(
-            vres["FP"],
-            vres["Z2"],
-            atol=1e-9,
-            err_msg="vertical single-phase fidelity differs from the "
-            "block-identical bosonic control (#997)",
-        )
+            best = optimum(gated, ["u", "l", "r", "si_out"])
+            vres[name] = (fid(gated, theta_v(An, Bn, lnv)), best)
+        for name, (got, best) in vres.items():
+            np.testing.assert_allclose(
+                got,
+                best,
+                atol=1e-9,
+                err_msg=f"{name} vertical single-phase fidelity is not the "
+                "rank-6 optimum of gate*theta (#997)",
+            )
     finally:
         isu._truncation_base_charges = orig_pin
