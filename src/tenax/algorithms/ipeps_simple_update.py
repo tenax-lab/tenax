@@ -344,6 +344,113 @@ def _simple_update_checkerboard_sweep(
     return A, B, lambdas
 
 
+def _graded_bond_update(
+    A_abs: SymmetricTensor,
+    B_abs: SymmetricTensor,
+    gate: Tensor,
+    leg_A: str,
+    leg_B: str,
+    max_D: int,
+    base_charges: np.ndarray | None,
+) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array]:
+    """Steps 3-8 of a bond update on fermionic tensors, graded (#1035 §5 step 6).
+
+    The recipe Phase 1 certified against the Fock oracle (the truncated
+    two-site update in ``tests/test_graded_contract_oracle.py``):
+
+    * ``theta = graded_contract(A, B)`` over the shared bond;
+    * the gate as a graded operator -- ``g[P_s, P_t, p_s, p_t]`` from the
+      dense gate (``_H2``'s convention, the one the RDM readout is certified
+      in), stored with the annihilation half reversed ``(P_s, P_t, p_t, p_s)``
+      and applied as the *left* operand;
+    * ``graded_svd`` (a Koszul reorder into ``left + right``, then ``svd``);
+    * ``graded_reorder`` back to ``(u, d, l, r, phys)`` -- not ``permute_legs``,
+      which is the sign-free move that made the old update hard-core-boson.
+
+    ``svd`` leaves the new bond OUT on ``U`` and IN on ``Vh``; the site
+    convention is the opposite (``A.r``/``A.d`` IN, ``B.l``/``B.u`` OUT).  Both
+    ends are dualised, and the ``(-1)**p`` that reversing a contracted pair's
+    orientation costs under rule 2 is put back as a twist on ``U``'s end, so
+    ``A_new . B_new`` is still ``gate . theta``.  Flows in == flows out.
+
+    Returns ``(A_new, B_new, sigma)``: bare Gamma tensors in site order, and
+    the singular values of the new bond.
+    """
+    from tenax.algorithms._ctm_tensor_moves import _flip_leg_flow
+    from tenax.core._graded import (
+        graded_contract,
+        graded_reorder,
+        graded_svd,
+        twist_legs,
+    )
+
+    site = list(A_abs.labels())  # (u, d, l, r, phys)
+    a_free = [lab for lab in site if lab not in (leg_A, "phys")]
+    b_free = [lab for lab in site if lab not in (leg_B, "phys")]
+    A_ = A_abs.relabels(
+        {leg_A: "_shared", "phys": "_p_A"} | {x: f"{x}_A" for x in a_free}
+    )
+    B_ = B_abs.relabels(
+        {leg_B: "_shared", "phys": "_p_B"} | {x: f"{x}_B" for x in b_free}
+    )
+    theta = graded_contract(A_, B_)
+
+    phys_A = A_abs.indices[site.index("phys")]
+    phys_B = B_abs.indices[site.index("phys")]
+    d = phys_A.dim
+    g = np.asarray(gate.todense() if isinstance(gate, Tensor) else gate)
+    g = np.einsum("ABab->ABba", g.reshape(d, d, d, d))
+    G = SymmetricTensor.from_dense(
+        jnp.asarray(g, dtype=theta.dtype),
+        (
+            phys_A.relabel("_P_A"),  # new ket legs keep the site flow
+            phys_B.relabel("_P_B"),
+            phys_B.flip_flow().relabel("_p_B"),  # pairs with theta's ket leg
+            phys_A.flip_flow().relabel("_p_A"),
+        ),
+    )
+    M = graded_contract(G, theta)
+
+    left = [f"{x}_A" for x in a_free] + ["_P_A"]
+    right = [f"{x}_B" for x in b_free] + ["_P_B"]
+    U, sigma, Vh, _ = graded_svd(
+        M,
+        left,
+        right,
+        "_bond",
+        max_singular_values=max_D,
+        base_charges=base_charges,
+    )
+    U = twist_legs(_flip_leg_flow(U, "_bond"), ["_bond"])
+    Vh = _flip_leg_flow(Vh, "_bond")
+
+    A_new = U.relabels({"_bond": leg_A, "_P_A": "phys"} | {f"{x}_A": x for x in a_free})
+    B_new = Vh.relabels(
+        {"_bond": leg_B, "_P_B": "phys"} | {f"{x}_B": x for x in b_free}
+    )
+    return graded_reorder(A_new, site), graded_reorder(B_new, site), sigma
+
+
+def _is_fermionic_tensor(t: Tensor) -> bool:
+    return isinstance(t, SymmetricTensor) and t.indices[0].symmetry.is_fermionic
+
+
+def _finish_bond_update(A_new, B_new, lam_new, *, A_inv: dict, B_inv: dict):
+    """Steps 9-10 of a bond update: remove the outer lambdas that steps 1-2
+    absorbed, then normalise each tensor."""
+    for leg, lam in A_inv.items():
+        A_new = scale_bond_axis(A_new, leg, _inv_lambda(lam))
+    for leg, lam in B_inv.items():
+        B_new = scale_bond_axis(B_new, leg, _inv_lambda(lam))
+    norm_A = float(A_new.norm())
+    if norm_A > EPS:
+        A_new = A_new * (1.0 / norm_A)
+    norm_B = float(B_new.norm())
+    if norm_B > EPS:
+        B_new = B_new * (1.0 / norm_B)
+    return A_new, B_new, lam_new
+
+
 def _simple_update_2site_horizontal_tensor(
     A: Tensor,
     B: Tensor,
@@ -410,6 +517,20 @@ def _simple_update_2site_horizontal_tensor(
     B_abs = scale_bond_axis(B, "u", lam_v)
     B_abs = scale_bond_axis(B_abs, "d", lam_v_other)
     B_abs = scale_bond_axis(B_abs, "r", lam_h_far)
+
+    if _is_fermionic_tensor(A_abs):
+        # Steps 3-8, graded (#1035 §5 step 6).
+        A_new, B_new, sigma = _graded_bond_update(
+            A_abs, B_abs, gate, "r", "l", max_D, _truncation_base_charges(A, "r")
+        )
+        lam_h_new = _normalise_lambda(sigma)
+        return _finish_bond_update(
+            A_new,
+            B_new,
+            lam_h_new,
+            A_inv={"u": lam_v_other, "d": lam_v, "l": lam_h_far},
+            B_inv={"u": lam_v, "d": lam_v_other, "r": lam_h_far},
+        )
 
     # 3. Contract A.r with B.l
     A_left = A_abs.relabel("r", "shared")
@@ -540,6 +661,20 @@ def _simple_update_2site_vertical_tensor(
     B_abs = scale_bond_axis(B, "d", lam_v_far)
     B_abs = scale_bond_axis(B_abs, "l", lam_h)
     B_abs = scale_bond_axis(B_abs, "r", lam_h_other)
+
+    if _is_fermionic_tensor(A_abs):
+        # Steps 3-8, graded (#1035 §5 step 6).
+        A_new, B_new, sigma = _graded_bond_update(
+            A_abs, B_abs, gate, "d", "u", max_D, _truncation_base_charges(A, "d")
+        )
+        lam_v_new = _normalise_lambda(sigma)
+        return _finish_bond_update(
+            A_new,
+            B_new,
+            lam_v_new,
+            A_inv={"u": lam_v_far, "l": lam_h_other, "r": lam_h},
+            B_inv={"d": lam_v_far, "l": lam_h, "r": lam_h_other},
+        )
 
     # 3. Contract A.d with B.u
     A_top = A_abs.relabel("d", "shared")

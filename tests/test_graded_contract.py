@@ -200,12 +200,12 @@ def test_a_fermionic_scalar_is_accepted_against_a_fermionic_tensor(order):
         ],
         0,
     )
-    B = _rand(
+    B = _rand(  # every leg the dual of A's: rule 2 pairs one IN with one OUT end
         [
-            _idx(sym, ch, IN, "a"),
-            _idx(sym, ch, OUT, "x"),
-            _idx(sym, ch, IN, "y"),
-            _idx(sym, ch, OUT, "b"),
+            _idx(sym, ch, OUT, "a"),
+            _idx(sym, ch, IN, "x"),
+            _idx(sym, ch, OUT, "y"),
+            _idx(sym, ch, IN, "b"),
         ],
         1,
     )

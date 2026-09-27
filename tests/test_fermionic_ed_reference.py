@@ -511,19 +511,13 @@ def test_tier5_compare_to_ipeps_ctm_energy():
     print both to anchor a baseline; the diff is a metric for how far
     the iPEPS-CTM convention drifts from a direct PBC contraction.
 
-    Also compare against the split-CTM path (which currently falls back
-    to the shim for fermionic A — both shim and split should give the
-    same number here, per PR #394).
+    The split-CTM arm this used to carry is gone: since #1035 step 4 the
+    split CTM refuses fermionic input (its split <-> fused conversions are
+    sign-free), and fermions run on the fused graded Tensor CTM.
     """
     from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
     from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
-    from tenax.algorithms._split_ctm_tensor import (
-        compute_energy_split_ctm_tensor,
-        ctm_split_tensor,
-    )
-    from tenax.algorithms._split_ctm_tensor_energy import (
-        _split_env_to_tensor_standard,
-    )
+    from tenax.algorithms._split_ctm_tensor import ctm_split_tensor
     from tenax.algorithms.fermionic_ipeps import FPEPSConfig, spinless_fermion_gate
 
     A = _make_random_fermionic_site(D=2, d=2, seed=70)
@@ -535,33 +529,13 @@ def test_tier5_compare_to_ipeps_ctm_energy():
     env, _trunc = ctm_tensor(A, chi=chi, max_iter=20, conv_tol=1e-6)
     e_ctm = float(compute_energy_ctm_tensor(A, env, gate, d=2))
 
-    env_split = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
-    e_split = float(compute_energy_split_ctm_tensor(A, env_split, gate, d=2))
-
-    # Also bypass the shim fallback to see the (currently broken) split
-    # path's raw answer.
-    from tenax.algorithms._split_ctm_tensor_energy import (
-        _rdm1x2_split_tensor,
-        _rdm2x1_split_tensor,
-    )
-
-    rdm_h = np.array(_rdm2x1_split_tensor(A, env_split))
-    rdm_v = np.array(_rdm1x2_split_tensor(A, env_split))
-    H_dense = np.array(gate.todense()).reshape(2, 2, 2, 2)
-    e_split_raw = float(
-        np.einsum("ijkl,ijkl->", rdm_h, H_dense)
-        + np.einsum("ijkl,ijkl->", rdm_v, H_dense)
-    )
-
     print(f"\n[Tier 5] reference E (2x2 PBC, contractor):  {e_ref}")
     print(f"[Tier 5] iPEPS-CTM E (infinite, chi={chi}):    {e_ctm:.10f}")
-    print(f"[Tier 5] split-CTM E (via shim fallback):     {e_split:.10f}")
-    print(f"[Tier 5] split-CTM E (raw bar_super path):    {e_split_raw:.10f}")
     print(f"[Tier 5] |e_ref - e_ctm|:    {abs(e_ref - e_ctm):.3e}")
-    print(f"[Tier 5] |e_split - e_ctm|:  {abs(e_split - e_ctm):.3e}")
-    print(f"[Tier 5] |e_split_raw - e_ctm|: {abs(e_split_raw - e_ctm):.3e}")
     assert np.isfinite(e_ref.real) and np.isfinite(e_ctm)
-    assert np.isfinite(e_split) and np.isfinite(e_split_raw)
+
+    with pytest.raises(NotImplementedError, match="split CTM: fermionic"):
+        ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
 
 
 # ============================================================ #

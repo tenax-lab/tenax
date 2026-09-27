@@ -166,6 +166,17 @@ def _site(sym, ch, seed):
 
 # Dimension-2 bonds: a double layer squares every bond, and FermionicU1 at
 # dimension 5 costs minutes of block-sparse compile for a structure check.
+def _sign_free_double_layer(A, monkeypatch, *, open_phys=False):
+    """Production's builders with fermionic routing switched off: the
+    sign-free ``contract(A, A.bar())`` + fuse that #1037 is about."""
+    import tenax.algorithms._ctm_tensor_init as init
+
+    monkeypatch.setattr(init, "_is_fermionic", lambda t: False)
+    if open_phys:
+        return init._build_double_layer_open_tensor(A)
+    return init._build_double_layer_tensor(A)
+
+
 SITE_SYMS = [
     pytest.param(FermionParity(), [0, 1], id="FermionParity"),
     pytest.param(FermionicU1(), [0, 1], id="FermionicU1"),
@@ -174,13 +185,17 @@ SITE_SYMS = [
 
 @pytest.mark.parametrize("sym,ch", SITE_SYMS)
 @pytest.mark.parametrize("open_phys", [False, True])
-def test_the_graded_double_layer_has_productions_structure(sym, ch, open_phys):
+def test_the_graded_double_layer_has_the_sign_free_structure(
+    sym, ch, open_phys, monkeypatch
+):
+    """Same labels, order, flows and charges as the sign-free builder (the
+    production one routes fermions to the graded builder now, so it is no
+    longer an independent reference)."""
     A = _site(sym, ch, 5)
+    prod = _sign_free_double_layer(A, monkeypatch, open_phys=open_phys)
     if open_phys:
-        prod = _build_double_layer_open_tensor(A)
         graded = build_graded_double_layer(A, phys_bra="phys_bra")
     else:
-        prod = _build_double_layer_tensor(A)
         graded = build_graded_double_layer(A)
     assert graded.labels() == prod.labels()
     for g, p in zip(graded.indices, prod.indices):
@@ -188,9 +203,21 @@ def test_the_graded_double_layer_has_productions_structure(sym, ch, open_phys):
         assert list(g.charges) == list(p.charges)
 
 
-def test_regime_the_graded_double_layer_differs_from_productions():
+def test_regime_the_graded_double_layer_differs_from_the_sign_free_one(monkeypatch):
     A = _site(FermionParity(), [0, 1], 5)
-    assert _maxdiff(build_graded_double_layer(A), _build_double_layer_tensor(A)) > 1e-3
+    assert (
+        _maxdiff(build_graded_double_layer(A), _sign_free_double_layer(A, monkeypatch))
+        > 1e-3
+    )
+
+
+def test_production_builds_the_graded_double_layer_for_fermions():
+    """#1035 step 4: the Tensor CTM's builders route fermionic input to the
+    graded double layer."""
+    A = _site(FermionParity(), [0, 1], 5)
+    assert _maxdiff(_build_double_layer_tensor(A), build_graded_double_layer(A)) == 0.0
+    open_ = build_graded_double_layer(A, phys_bra="phys_bra")
+    assert _maxdiff(_build_double_layer_open_tensor(A), open_) == 0.0
 
 
 def test_the_graded_double_layer_traces_under_jit():
