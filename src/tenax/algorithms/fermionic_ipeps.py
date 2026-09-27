@@ -343,7 +343,21 @@ def bond_layout(A: SymmetricTensor, B: SymmetricTensor) -> tuple[tuple[int, int]
 
 
 class FrozenSU(NamedTuple):
-    """The output of :func:`su_grow_layout` (fields in the plan)."""
+    """The output of :func:`su_grow_layout` (fields in the plan).
+
+    Attributes:
+        A:      Physical (lambda-absorbed) site tensor for sublattice A,
+                ready for CTM/AD.
+        B:      Physical (lambda-absorbed) site tensor for sublattice B.
+        layout: :func:`bond_layout` at the end of the run -- the sector
+                split AD is meant to hold fixed.
+        stages: :func:`bond_layout` at the end of each growth stage,
+                ``D_start`` through ``config.D`` inclusive, in that order.
+        frozen: Whether the layout stayed put after the final stage's first
+                cycle.  ``False`` means the sector split kept moving through
+                the rest of that stage, and ``layout``/``stages[-1]`` should
+                not be trusted as a fixed point.
+    """
 
     A: SymmetricTensor
     B: SymmetricTensor
@@ -376,9 +390,32 @@ def su_grow_layout(
     forces a parity-even site into the vacuum, on which hopping does nothing.
     A bond with an empty parity sector is refused rather than frozen -- AD
     could never refill it (#878).
+
+    Args:
+        gate:             2-site Hamiltonian as SymmetricTensor (the bare
+                          Hamiltonian, not yet Trotterized -- this builds
+                          ``exp(-config.dt * gate)`` itself, once).
+        config:           FPEPSConfig.  ``config.D`` is the final bond
+                          dimension the layout is grown to.
+        D_start:          Bond dimension to start relaxing at.  Must be at
+                          least 2 (see above) and at most ``config.D``.
+        cycles_per_stage: Checkerboard cycles (4 phases each) to relax for
+                          at every stage before ``max_D`` is raised, except
+                          the last.
+        final_cycles:     Checkerboard cycles to relax for at ``config.D``,
+                          the stage whose freeze is checked.
+        key:              JAX random key for the initial random fPEPS
+                          tensor.  Defaults to ``PRNGKey(0)``.
+
+    Returns:
+        :class:`FrozenSU`.
     """
     if D_start < 2:
         raise ValueError("su_grow_layout: D_start must be >= 2 (D=1 is the vacuum)")
+    if D_start > config.D:
+        raise ValueError(
+            f"su_grow_layout: D_start ({D_start}) must be <= config.D ({config.D})"
+        )
     key = jax.random.PRNGKey(0) if key is None else key
     A = B = _initialize_fpeps(dataclasses.replace(config, D=D_start), key)
     trotter = _trotter_gate(gate, config.dt)

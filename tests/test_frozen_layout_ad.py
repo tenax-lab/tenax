@@ -134,6 +134,14 @@ def test_d_start_below_two_is_refused():
         fi.su_grow_layout(spinless_fermion_gate(cfg), cfg, D_start=1)
 
 
+def test_d_start_above_config_d_is_refused():
+    # An empty range(D_start, config.D + 1) would otherwise leave `lay`
+    # unbound at the collapse check -- a NameError, not a clear ValueError.
+    cfg = FPEPSConfig(D=3)
+    with pytest.raises(ValueError, match="D_start"):
+        fi.su_grow_layout(spinless_fermion_gate(cfg), cfg, D_start=4)
+
+
 @pytest.mark.slow
 def test_growth_puts_the_new_slot_where_the_discarded_weight_is():
     """The one moment the SU reads the physics: growing D=2 -> 3, the sector
