@@ -3,6 +3,8 @@
 **Platform:** NVIDIA A100-SXM4-80GB · x64 · 2026-06-20
 **Design:** `docs/superpowers/specs/2026-06-19-566-evenD-padded-vmap-ctm-port-spike-design.md`
 **Plan:** `docs/superpowers/plans/2026-06-19-566-evenD-padded-vmap-ctm-port-spike.md`
+(Both removed in #1043 once this spike closed NO-GO; read them from history with
+`git show b16f737:<path>`.)
 **Code:** `examples/spike_evenD_padded_vmap_566.py`
 
 ## Question
