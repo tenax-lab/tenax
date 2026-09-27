@@ -255,30 +255,79 @@ def _E(A, B, envs, H, d):
     )
 
 
+def _layout(envs):
+    """The sector layout of an environment, with basis order quotiented out.
+
+    Controller ruling (#1035 Task 3, debug round 2): the charge ORDER along a
+    chi leg is a basis gauge, not a layout -- the eager cut emits the bond in
+    descending-SV order (sectors interleaved), the traced SVD in sector-block
+    order, and both are the same environment.  The design freezes sector
+    SIZES, so the layout is: per leg (label, flow, sorted {charge: count}),
+    plus the sorted block keys (a key is a per-leg charge tuple, independent
+    of basis order).  All legs are listed; the D^2 legs never move, so this is
+    the chi-leg layout plus a constant.
+    """
+    out = {}
+    for c in sorted(envs):
+        env = envs[c]
+        for name in env._fields:
+            t = getattr(env, name)
+            legs = tuple(
+                (
+                    ix.label,
+                    int(ix.flow),
+                    tuple(
+                        (int(q), int(n))
+                        for q, n in zip(*np.unique(ix.charges, return_counts=True))
+                    ),
+                )
+                for ix in t.indices
+            )
+            keys = tuple(sorted(tuple(int(q) for q in k) for k in t.blocks))
+            out[(c, name)] = (legs, keys)
+    return out
+
+
 @pytest.mark.slow
 def test_the_seeded_traced_ctm_keeps_the_layout_and_the_energy(
     frozen_state, eager_envs
 ):
     A, B, H, d = frozen_state
+    site = {(0, 0): A, (1, 0): B}
     envs, _ = python_loop_ctm_converge(
-        {(0, 0): A, (1, 0): B},
+        site,
         CHECKERBOARD_NEIGHBORS,
         chi=CHI,
         max_iter=50,
         conv_tol=1e-10,
         env_init=eager_envs,
     )
-    tree = jax.tree_util.tree_structure
-    assert tree(envs) == tree(eager_envs)
+    # Layout, not raw tree_structure, against the eager seed: basis order along
+    # a chi leg is a gauge (see ``_layout``; controller ruling, Task 3 round 2).
+    assert _layout(envs) == _layout(eager_envs)
     assert abs(_E(A, B, envs, H, d) - _E(A, B, eager_envs, H, d)) <= 1e-8
+    # The property the jit cache needs is traced->traced stability: one more
+    # traced sweep must reproduce the FULL tree_structure (basis order
+    # included), or every AD step would retrace.
+    again, _ = python_loop_ctm_converge(
+        site,
+        CHECKERBOARD_NEIGHBORS,
+        chi=CHI,
+        max_iter=1,
+        conv_tol=1e-10,
+        env_init=envs,
+    )
+    tree = jax.tree_util.tree_structure
+    assert tree(again) == tree(envs)
 
 
 @pytest.mark.slow
 def test_the_cold_traced_ctm_is_why_the_seed_exists(frozen_state, eager_envs):
     """Measurement, kept as a regime guard: from the tiled initial
-    environment the traced CTM lands on a different layout.  If this ever
-    fails, the seed is a no-op for this fixture and Task 3's first test
-    certifies nothing -- pick a fixture where it matters."""
+    environment the traced CTM lands on a different sector layout (sizes, not
+    basis order -- see ``_layout``).  If this ever fails, the seed is a no-op
+    for this fixture and Task 3's first test certifies nothing -- pick a
+    fixture where it matters."""
     A, B, _, _ = frozen_state
     envs, _ = python_loop_ctm_converge(
         {(0, 0): A, (1, 0): B},
@@ -287,5 +336,4 @@ def test_the_cold_traced_ctm_is_why_the_seed_exists(frozen_state, eager_envs):
         max_iter=50,
         conv_tol=1e-10,
     )
-    tree = jax.tree_util.tree_structure
-    assert tree(envs) != tree(eager_envs)
+    assert _layout(envs) != _layout(eager_envs)
