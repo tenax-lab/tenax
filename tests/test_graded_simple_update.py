@@ -89,13 +89,6 @@ def gate():
     return _trotter_gate(spinless_fermion_gate(FPEPSConfig(D=2, t=1.0, V=0.0)), TAU)
 
 
-@pytest.fixture
-def exact(monkeypatch):
-    """No truncation: lift the fermionic layout pin, so the SVD keeps every
-    singular value and the update is exact."""
-    monkeypatch.setattr(su, "_truncation_base_charges", lambda A, leg: None)
-
-
 ONES = np.ones(2)
 
 
@@ -118,14 +111,18 @@ BONDS = [
 
 
 @pytest.mark.parametrize("kind,s,t", BONDS, ids=[f"{k}{s}{t}" for k, s, t in BONDS])
-def test_a_bond_update_is_the_fermionic_gate(cluster, gate, exact, kind, s, t):
+def test_a_bond_update_is_the_fermionic_gate(cluster, gate, kind, s, t):
     update = (
         su._simple_update_2site_horizontal_tensor
         if kind == "h"
         else su._simple_update_2site_vertical_tensor
     )
     psi0 = _state(cluster)
-    A_new, B_new, lam = update(cluster[s], cluster[t], gate, ONES, ONES, 16)
+    # No truncation: lift the fermionic layout pin, so the SVD keeps every
+    # singular value and the update is exact.
+    A_new, B_new, lam = update(
+        cluster[s], cluster[t], gate, ONES, ONES, 16, pin_sectors=False
+    )
     # Vidal form: the new bond's weight lives in lam; put it back on A.
     A_new = scale_bond_axis(A_new, "r" if kind == "h" else "d", lam)
     psi1 = _state({**cluster, s: A_new, t: B_new})

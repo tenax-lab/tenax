@@ -324,6 +324,22 @@ def _fpeps_simple_update(
     return _simple_update_checkerboard_sweep(A, B, gate, max_D, 4 * steps)
 
 
+def bond_layout(A: SymmetricTensor, B: SymmetricTensor) -> tuple[tuple[int, int], ...]:
+    """``(n_even, n_odd)`` per bond leg of ``A`` then ``B``, legs ``u, d, l, r``.
+
+    The quantity the simple update grows and AD must hold fixed.  ``B``'s legs
+    are included because on the checkerboard they are the far ends of ``A``'s
+    bonds, and a mismatch between them is a broken state, not a layout.
+    """
+    out = []
+    for T in (A, B):
+        for leg in ("u", "d", "l", "r"):
+            ix = T.indices[T.labels().index(leg)]
+            par = np.asarray(ix.symmetry.parity(np.asarray(ix.charges)))
+            out.append((int((par == 0).sum()), int((par == 1).sum())))
+    return tuple(out)
+
+
 def sublattice_gap(
     A: SymmetricTensor,
     B: SymmetricTensor,
