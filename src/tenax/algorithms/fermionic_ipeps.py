@@ -18,7 +18,9 @@ Reference:
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -338,6 +340,72 @@ def bond_layout(A: SymmetricTensor, B: SymmetricTensor) -> tuple[tuple[int, int]
             par = np.asarray(ix.symmetry.parity(np.asarray(ix.charges)))
             out.append((int((par == 0).sum()), int((par == 1).sum())))
     return tuple(out)
+
+
+class FrozenSU(NamedTuple):
+    """The output of :func:`su_grow_layout` (fields in the plan)."""
+
+    A: SymmetricTensor
+    B: SymmetricTensor
+    layout: tuple[tuple[int, int], ...]
+    stages: tuple[tuple[tuple[int, int], ...], ...]
+    frozen: bool
+
+
+def su_grow_layout(
+    gate: SymmetricTensor,
+    config: FPEPSConfig,
+    *,
+    D_start: int = 2,
+    cycles_per_stage: int = 25,
+    final_cycles: int = 50,
+    key: jax.Array | None = None,
+) -> FrozenSU:
+    """Build the bond-sector layout one slot at a time with an eager, unpinned
+    simple update, then stop.
+
+    A global top-D truncation locks the sector sizes at the first truncation
+    and never moves them again (measured in tenax and in YASTN), so the only
+    step that reads the physics into the layout is the one that adds a slot:
+    the new slot goes to the sector with the largest discarded weight.  This
+    relaxes at ``D_start``, raises ``max_D`` by one, relaxes again, up to
+    ``config.D``.  The last stage runs ``final_cycles`` cycles; ``frozen`` is
+    whether the layout stayed put after that stage's first cycle.
+
+    ``D_start`` must be at least 2: a D=1 bond is one even sector, which
+    forces a parity-even site into the vacuum, on which hopping does nothing.
+    A bond with an empty parity sector is refused rather than frozen -- AD
+    could never refill it (#878).
+    """
+    if D_start < 2:
+        raise ValueError("su_grow_layout: D_start must be >= 2 (D=1 is the vacuum)")
+    key = jax.random.PRNGKey(0) if key is None else key
+    A = B = _initialize_fpeps(dataclasses.replace(config, D=D_start), key)
+    trotter = _trotter_gate(gate, config.dt)
+    lam = None
+    stages = []
+    frozen = True
+    for D in range(D_start, config.D + 1):
+        n_cycles = final_cycles if D == config.D else cycles_per_stage
+        first = None
+        for cycle in range(n_cycles):
+            A, B, lam = _simple_update_checkerboard_sweep(
+                A, B, trotter, D, 4, lambdas=lam, pin_sectors=False
+            )
+            lay = bond_layout(A, B)
+            if D == config.D:
+                if cycle == 0:
+                    first = lay
+                elif lay != first:
+                    frozen = False
+        stages.append(lay)
+    if any(0 in pair for pair in lay):
+        raise ValueError(
+            f"su_grow_layout: a bond sector collapsed to zero {lay}; AD cannot "
+            "refill it. Try another key (see #878)."
+        )
+    A_phys, B_phys = _to_physical_pair(A, B, lam)
+    return FrozenSU(A_phys, B_phys, lay, tuple(stages), frozen)
 
 
 def sublattice_gap(

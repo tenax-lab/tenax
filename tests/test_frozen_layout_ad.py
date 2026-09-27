@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 
 import jax
 import numpy as np
 import pytest
 
+import tenax.algorithms.fermionic_ipeps as fi
 from tenax.algorithms.fermionic_ipeps import (
     FPEPSConfig,
     _initialize_fpeps,
     _trotter_gate,
     bond_layout,
     spinless_fermion_gate,
+    su_grow_layout,
 )
 from tenax.algorithms.ipeps_simple_update import _simple_update_checkerboard_sweep
 
@@ -66,3 +69,125 @@ def test_the_unpinned_su_grows_the_layout():
     assert lay != bond_layout(A0, A0)
     # Both ends of each bond agree: A.r/B.l and A.d/B.u (legs u, d, l, r).
     assert lay[3] == lay[4 + 2] and lay[1] == lay[4 + 0]
+
+
+def _scripted(monkeypatch, layouts):
+    """Replace one SU cycle and the layout probe by a script; record max_D."""
+    it = iter(layouts)
+    calls = []
+
+    def fake_sweep(A, B, gate, max_D, steps, lambdas=None, **kw):
+        calls.append((max_D, steps, kw.get("pin_sectors")))
+        return A, B, lambdas
+
+    monkeypatch.setattr(fi, "_simple_update_checkerboard_sweep", fake_sweep)
+    monkeypatch.setattr(fi, "bond_layout", lambda A, B: next(it))
+    monkeypatch.setattr(fi, "_to_physical_pair", lambda A, B, lam: (A, B))
+    return calls
+
+
+def _lay(n_even, n_odd):
+    return ((n_even, n_odd),) * 8
+
+
+def test_it_raises_max_d_one_slot_per_stage(monkeypatch):
+    # stage 2: 3 cycles at (1,1); stage 3: 4 cycles, slot goes odd at cycle 1
+    layouts = [_lay(1, 1)] * 3 + [_lay(1, 2)] * 4
+    calls = _scripted(monkeypatch, layouts)
+    cfg = FPEPSConfig(D=3)
+    out = fi.su_grow_layout(
+        spinless_fermion_gate(cfg), cfg, D_start=2, cycles_per_stage=3, final_cycles=4
+    )
+    assert [c[0] for c in calls] == [2] * 3 + [3] * 4
+    assert all(c[1] == 4 and c[2] is False for c in calls)  # 4 phases, unpinned
+    assert out.stages == (_lay(1, 1), _lay(1, 2))
+    assert out.layout == _lay(1, 2) and out.frozen
+
+
+def test_a_layout_that_moves_after_the_first_cycle_is_not_frozen(monkeypatch):
+    layouts = [_lay(1, 1)] * 3 + [_lay(1, 2), _lay(2, 1), _lay(1, 2), _lay(1, 2)]
+    _scripted(monkeypatch, layouts)
+    cfg = FPEPSConfig(D=3)
+    out = fi.su_grow_layout(
+        spinless_fermion_gate(cfg), cfg, D_start=2, cycles_per_stage=3, final_cycles=4
+    )
+    assert not out.frozen
+
+
+def test_it_refuses_to_freeze_a_collapsed_sector(monkeypatch):
+    layouts = [_lay(1, 1)] * 3 + [_lay(3, 0)] * 4  # the odd sector died at growth
+    _scripted(monkeypatch, layouts)
+    cfg = FPEPSConfig(D=3)
+    with pytest.raises(ValueError, match="collapsed"):
+        fi.su_grow_layout(
+            spinless_fermion_gate(cfg),
+            cfg,
+            D_start=2,
+            cycles_per_stage=3,
+            final_cycles=4,
+        )
+
+
+def test_d_start_below_two_is_refused():
+    cfg = FPEPSConfig(D=3)
+    with pytest.raises(ValueError, match="D_start"):
+        fi.su_grow_layout(spinless_fermion_gate(cfg), cfg, D_start=1)
+
+
+@pytest.mark.slow
+def test_growth_puts_the_new_slot_where_the_discarded_weight_is():
+    """The one moment the SU reads the physics: growing D=2 -> 3, the sector
+    that gains the slot is the sector of the 3rd-largest singular value of the
+    untruncated bond.  Then the layout stays put (YASTN: 0 moves in 300 steps)."""
+    from tenax.algorithms.ipeps_simple_update import (
+        _graded_bond_update,
+        scale_bond_axis,
+    )
+
+    cfg = FPEPSConfig(D=3, t=1.0, V=0.0, dt=0.05)
+    H = spinless_fermion_gate(cfg)
+    out = su_grow_layout(
+        H,
+        cfg,
+        D_start=2,
+        cycles_per_stage=10,
+        final_cycles=20,
+        key=jax.random.PRNGKey(2),
+    )
+    assert out.frozen
+    assert all(sum(p) == 3 for p in out.layout)
+    assert out.layout[3] == out.layout[4 + 2] and out.layout[1] == out.layout[4 + 0]
+    # Regime + mechanism: redo the first growth truncation by hand on the
+    # stage-2 state and read where the 3rd singular value lives.
+    cfg2 = dataclasses.replace(cfg, D=2)
+    A2 = B2 = fi._initialize_fpeps(cfg2, jax.random.PRNGKey(2))
+    lam = None
+    for _ in range(10):
+        A2, B2, lam = _simple_update_checkerboard_sweep(
+            A2, B2, _trotter_gate(H, cfg.dt), 2, 4, lambdas=lam, pin_sectors=False
+        )
+    # first phase of the growth cycle: horizontal A.r -- B.l, lambdas absorbed
+    A_abs = scale_bond_axis(
+        scale_bond_axis(scale_bond_axis(A2, "u", lam.v_BA), "d", lam.v_AB),
+        "l",
+        lam.h_BA,
+    )
+    A_abs = scale_bond_axis(A_abs, "r", lam.h_AB)
+    B_abs = scale_bond_axis(
+        scale_bond_axis(scale_bond_axis(B2, "u", lam.v_AB), "d", lam.v_BA),
+        "r",
+        lam.h_BA,
+    )
+    # _graded_bond_update returns (A_new, B_new, sigma) -- not (U, sigma, Vh):
+    # both A_new and B_new are full site tensors (labels u, d, l, r, phys)
+    # after graded_reorder, and sigma is the new bond's singular values.
+    A_new, _, sigma = _graded_bond_update(
+        A_abs, B_abs, _trotter_gate(H, cfg.dt), "r", "l", None, None
+    )
+    order = np.argsort(-np.asarray(sigma))
+    charges = np.asarray(A_new.indices[A_new.labels().index("r")].charges)[order[:3]]
+    par = np.asarray(A_new.indices[0].symmetry.parity(charges))
+    assert (
+        abs(np.asarray(sigma)[order[2]] - np.asarray(sigma)[order[3]]) > 1e-6
+    )  # not degenerate
+    assert out.stages[1][3] == (int((par == 0).sum()), int((par == 1).sum()))
