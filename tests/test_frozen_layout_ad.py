@@ -6,6 +6,7 @@ import dataclasses
 import warnings
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -337,3 +338,84 @@ def test_the_cold_traced_ctm_is_why_the_seed_exists(frozen_state, eager_envs):
         conv_tol=1e-10,
     )
     assert _layout(envs) != _layout(eager_envs)
+
+
+@pytest.mark.slow
+def test_the_graded_energy_gradient_matches_finite_differences_at_a_fixed_environment(
+    frozen_state, eager_envs
+):
+    """R15 (Task 4, round 6): FD-vs-AD certification of the graded energy
+    *readout's* backward, at a fixed (constant, un-differentiated) CTM
+    environment -- not the full implicit-AD CTM gradient the original Task 4
+    brief targeted.
+
+    Rounds 1-5 (see the Task 4 report) established that the full pipeline
+    cannot be certified this way on current code: no fixture found across a
+    D=3 key and a 16-point D=2 (key, chi) grid has *both* a converged,
+    element-wise phase-gauge CTM fixed point (#841) and a full-rank kept
+    corner spectrum (round 4/5's ``min_sv_ratio`` floor) at the same time --
+    the two failure modes the implicit backward's SVD/fixed-point VJPs are
+    sensitive to. Round 5's conclusion was that this is a design-level gap in
+    the phase-gauge 2x2 recipe on these fixtures, not something a test-body
+    change can route around.
+
+    What *can* be certified without that fixture: the plan's Review Focus 3
+    is specifically about a graded sign the forward applies (in
+    ``dense_rdm``, ``_ctm_graded.py``) but whose backward the AD path could
+    silently drop -- a defect that lives entirely in the energy *readout*
+    (``compute_energy_ctm_tensor_2site`` -> ``_rdm2x1_tensor_2site`` /
+    ``_rdm1x2_tensor_2site`` -> ``G.contract`` for the graded double-layer
+    contractions, then ``G.dense_rdm`` for the bra-leg sign), not in the CTM
+    fixed point. Holding ``eager_envs`` CONSTANT (a plain input, never
+    recomputed or differentiated) removes both round 1-5 failure modes at
+    once: there is no CTM sweep and no SVD anywhere in the differentiated
+    path, so neither the #841 stationarity question nor the corner-rank
+    floor applies here. This does NOT certify the implicit CTM fixed-point
+    backward (the GMRES/Neumann adjoint solve and its own SVD-projector
+    VJPs) -- that remains uncertified by an FD test on current fixtures, per
+    the round 5 finding.
+
+    Real-fixture check (this file's own module-scope ``frozen_state``/
+    ``eager_envs``, D=3, chi=12, key=PRNGKey(2)): seed 0 (below) passed the
+    regime and comparison asserts on the first try, confirmed beforehand
+    against a bit-identical cached copy of the same fixture (Task 3's
+    ``eager_cache.pkl``, same D/chi/key/max_iter/conv_tol -- see the Task 4
+    report round 1) -- so no second ``V`` seed was needed.
+
+    Dtype/pairing note (memory: complex cotangents pair UNCONJUGATED): the
+    site tensors and the Hamiltonian gate here are real (float64) --
+    ``SymmetricTensor.random_normal``'s default dtype -- so ``.real`` after
+    ``jnp.vdot(a, b)`` is a no-op and conjugation does not matter; the
+    ordinary real inner product is used.
+    """
+    A, B, H, d = frozen_state
+
+    def f(A_):
+        # A_.norm() only -- SymmetricTensor has no __truediv__, so multiply
+        # by the reciprocal; mathematically A_ / A_.norm(), as R15 specifies
+        # (no +eps: A's norm stays well away from 0 for every A_ this test
+        # constructs).  B and the environments are constant closure inputs,
+        # never touched by the differentiated argument.
+        A_n = A_ * (1.0 / A_.norm())
+        return compute_energy_ctm_tensor_2site(
+            A_n, B, eager_envs[(0, 0)], eager_envs[(1, 0)], H, d
+        )
+
+    rng = np.random.default_rng(0)
+    V = jax.tree_util.tree_map(lambda x: jnp.asarray(rng.standard_normal(x.shape)), A)
+    g = jax.grad(f)(A)
+    slope = float(
+        sum(
+            jnp.vdot(a, b).real
+            for a, b in zip(jax.tree_util.tree_leaves(g), jax.tree_util.tree_leaves(V))
+        )
+    )
+    fd = {}
+    for h in (1e-3, 3e-4, 1e-4, 3e-5):
+        Ap = jax.tree_util.tree_map(lambda x, v: x + h * v, A, V)
+        Am = jax.tree_util.tree_map(lambda x, v: x - h * v, A, V)
+        fd[h] = float((f(Ap) - f(Am)) / (2 * h))
+    vals = np.array(list(fd.values()))
+    fd_unc = vals.max() - vals.min()  # h-scan spread (memory: FD needs an h scan)
+    assert abs(slope) > 10 * fd_unc, (slope, fd)  # regime: the slope is measurable
+    assert abs(slope - np.median(vals)) <= 3 * fd_unc + 1e-7, (slope, fd)
