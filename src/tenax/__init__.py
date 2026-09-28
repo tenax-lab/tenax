@@ -209,13 +209,14 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # fermionic_ipeps
     "FPEPSConfig": ("tenax.algorithms.fermionic_ipeps", "FPEPSConfig"),
     "fpeps": ("tenax.algorithms.fermionic_ipeps", "fpeps"),
+    "bond_layout": ("tenax.algorithms.fermionic_ipeps", "bond_layout"),
     "spinless_fermion_gate": (
         "tenax.algorithms.fermionic_ipeps",
         "spinless_fermion_gate",
     ),
     "sublattice_gap": ("tenax.algorithms.fermionic_ipeps", "sublattice_gap"),
-    "su_grow_layout": ("tenax.algorithms.fermionic_ipeps", "su_grow_layout"),
     "FrozenSU": ("tenax.algorithms.fermionic_ipeps", "FrozenSU"),
+    "su_grow_layout": ("tenax.algorithms.fermionic_ipeps", "su_grow_layout"),
     # gilt
     "GiltConfig": ("tenax.algorithms.gilt", "GiltConfig"),
     "GiltTNRConfig": ("tenax.algorithms.gilt", "GiltTNRConfig"),
@@ -576,10 +577,11 @@ __all__ = [
     "FPEPSConfig",
     "fpeps",
     "optimize_fpeps_ad",
+    "bond_layout",
     "spinless_fermion_gate",
     "sublattice_gap",
-    "su_grow_layout",
     "FrozenSU",
+    "su_grow_layout",
     # iPEPS Excitations
     "ExcitationConfig",
     "ExcitationResult",
