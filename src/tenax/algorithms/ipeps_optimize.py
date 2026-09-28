@@ -693,8 +693,11 @@ def optimize_gs_ad(
                           (``gs_chi_schedule_steps``); a χ that does not
                           match ``CTMConfig.chi``; the root-implicit AD
                           path (``CTMConfig.ctm_ad_mode="root_implicit"`` /
-                          ``"root_implicit_symmetric"``); or keys other than
-                          ``{(0, 0), (1, 0)}``.
+                          ``"root_implicit_symmetric"``); keys other than
+                          ``{(0, 0), (1, 0)}``; or an edge whose D² leg does
+                          not carry the charges of the matching face of
+                          ``A``'s/``B``'s double layer (a seed built for a
+                          different virtual charge layout).
 
     Returns:
         For 1-site:    ``(A_opt, env, E_gs)``
@@ -2661,6 +2664,70 @@ def _optimize_gs_ad_2site(
     )
 
 
+#: Edge field -> the site leg whose double-layer face it contracts with.
+#: Measured: every edge of ``envs[c]`` carries exactly the charges of
+#: ``double_layer[c]``'s matching face, on a pair whose four legs all differ
+#: (PR #1051 review).
+_EDGE_FACE = (("T1", "u"), ("T2", "r"), ("T3", "d"), ("T4", "l"))
+
+
+def _double_layer_face(site: Tensor, leg: str):
+    """``(charges, flow)`` of ``site``'s double-layer face ``leg + "2"``.
+
+    Index arithmetic only -- the charges ``_build_double_layer_tensor`` would
+    give that face, without contracting anything: the ket leg fused with its
+    bra copy (``bar``: same charges, flipped flow).  The fused flow is the
+    bosonic builder's fixed one, or the bra leg's on the graded builder
+    (``graded_fuse_pair``); the two agree on the fPEPS site flows.
+    """
+    from tenax.algorithms._ctm_tensor_init import IN, OUT, _is_fermionic
+    from tenax.algorithms._tensor_utils import _compute_fused_charges
+
+    ket = site.indices[site.labels().index(leg)]
+    bra = ket.flip_flow()
+    if _is_fermionic(site):
+        flow = bra.flow
+    else:
+        flow = {"u": IN, "d": OUT, "l": IN, "r": OUT}[leg]
+    return _compute_fused_charges(ket, bra, flow, ket.symmetry), flow
+
+
+def _check_envs_init_matches_sites(
+    envs_init: dict[Coord, CTMTensorEnv], sites: dict[Coord, Tensor]
+) -> None:
+    """Refuse an ``envs_init`` whose edge D² legs are not the sites' faces.
+
+    A seed built for a different layout (another ``su_grow_layout`` result)
+    either fails deep inside the first sweep's contraction (different sector
+    counts) or -- same counts, different charge order -- is silently
+    contracted against the wrong in-sector basis.  Compares the ordered
+    charge list and flow of each edge's D² leg with the face the CTM's double
+    layer will have (:func:`_double_layer_face`); index metadata only,
+    nothing is built or densified.
+
+    It cannot see a layout change that leaves the fused D² charges identical
+    (e.g. FermionParity ``(2, 1)`` vs ``(1, 2)`` at D=3 in the same order):
+    there the seed is structurally valid and only its values are stale.
+    """
+    for coord, site in sites.items():
+        for field, leg in _EDGE_FACE:
+            face = f"{leg}2"
+            edge = getattr(envs_init[coord], field)
+            e_ix = edge.indices[edge.labels().index(face)]
+            charges, flow = _double_layer_face(site, leg)
+            e_q = np.asarray(e_ix.charges)
+            # A dense env keeps no flow discipline (measured: its init edges
+            # share the face's flow), so only a block-sparse edge's is read.
+            flow_bad = isinstance(edge, SymmetricTensor) and e_ix.flow == flow
+            if flow_bad or not np.array_equal(e_q, charges):
+                raise ValueError(
+                    f"envs_init[{coord}].{field} leg {face!r} does not match "
+                    f"the site's double layer (charges {e_q.tolist()} vs "
+                    f"{np.asarray(charges).tolist()}): the seed was built for "
+                    "a different virtual charge layout."
+                )
+
+
 def _optimize_gs_ad_tensor_2site(
     hamiltonian_gate: jax.Array,
     AB_init: tuple[Tensor, Tensor],
@@ -2872,6 +2939,7 @@ def _optimize_gs_ad_tensor_2site(
                 f"envs_init has chi {sorted(chi_seen)}, the CTM config "
                 f"chi={ctm_cfg_2s.chi}"
             )
+        _check_envs_init_matches_sites(envs_init, {(0, 0): A, (1, 0): B})
         # The first forward the optimizer runs -- both the differentiated
         # loss (make_ctm_energy_fn reads env_cache["envs"] as env_init, see
         # ipeps_ad_policy._ctm_energy_fn) and the grad-free warm-start

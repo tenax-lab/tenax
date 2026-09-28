@@ -13,6 +13,7 @@ import pytest
 
 import tenax.algorithms._ctm_energy_ad as ea
 import tenax.algorithms.fermionic_ipeps as fi
+import tenax.algorithms.ipeps_optimize as ipo
 from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
 from tenax.algorithms._ctm_tensor_convergence import (
     CHECKERBOARD_NEIGHBORS,
@@ -20,7 +21,10 @@ from tenax.algorithms._ctm_tensor_convergence import (
     ctm_tensor_2site,
 )
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
-from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+from tenax.algorithms._ctm_tensor_init import (
+    _build_double_layer_tensor,
+    initialize_ctm_tensor_env,
+)
 from tenax.algorithms.fermionic_ipeps import (
     FPEPSConfig,
     _initialize_fpeps,
@@ -565,6 +569,42 @@ def light_AB():
     return A0, A0, H
 
 
+@pytest.fixture(scope="module")
+def light_envs(light_AB):
+    """A real (initial, unswept) seed for ``light_AB``: every edge's D² leg
+    carries the double layer's charges, so the envs_init charge check passes
+    (PR #1051 review, finding 2) -- at no CTM cost."""
+    A, B, _ = light_AB
+    envs = {(0, 0): _seed_env(A), (1, 0): _seed_env(B)}
+    ipo._check_envs_init_matches_sites(envs, {(0, 0): A, (1, 0): B})
+    return envs
+
+
+def _seed_env(A):
+    env = initialize_ctm_tensor_env(A, CHI_D2)
+    assert env.C1.indices[0].dim == CHI_D2  # the chi check reads this
+    return env
+
+
+def _site(virt, key):
+    """A FermionParity site ``(u, d, l, r, phys)`` with virtual charges
+    ``virt`` on all four legs, flows as ``_build_initial_fpeps_tensor``."""
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import FermionParity
+    from tenax.core.tensor import SymmetricTensor
+
+    sym, v = FermionParity(), np.array(virt, dtype=np.int32)
+    OUT, IN = FlowDirection.OUT, FlowDirection.IN
+    indices = (
+        TensorIndex.from_charges(sym, v, OUT, label="u"),
+        TensorIndex.from_charges(sym, v, IN, label="d"),
+        TensorIndex.from_charges(sym, v, OUT, label="l"),
+        TensorIndex.from_charges(sym, v, IN, label="r"),
+        TensorIndex.from_charges(sym, np.array([0, 1], np.int32), IN, label="phys"),
+    )
+    return SymmetricTensor.random_normal(indices, jax.random.PRNGKey(key))
+
+
 def _fake_envs(chi):
     """A minimal stand-in for ``{(0, 0): CTMTensorEnv, (1, 0): CTMTensorEnv}``
     for refusal tests whose check either fires before envs_init is ever
@@ -575,7 +615,7 @@ def _fake_envs(chi):
     return {(0, 0): env, (1, 0): env}
 
 
-def test_envs_init_is_the_first_forward_seed(light_AB, monkeypatch):
+def test_envs_init_is_the_first_forward_seed(light_AB, light_envs, monkeypatch):
     """R4: the spy must not pay an AD compile -- it records ``env_init`` and
     aborts via a sentinel exception before the (expensive) implicit-AD
     backward is ever traced/compiled.
@@ -617,7 +657,9 @@ def test_envs_init_is_the_first_forward_seed(light_AB, monkeypatch):
     tracers -- ``env_init is envs`` holds by identity, not merely by value.
     """
     A, B, H = light_AB
-    envs = _fake_envs(CHI_D2)
+    # A real one-sweep seed since PR #1051 (finding 2): the envs_init check
+    # now reads each edge's D² leg, which ``_fake_envs`` does not carry.
+    envs = light_envs
 
     class _Seen(Exception):
         pass
@@ -729,6 +771,84 @@ def test_envs_init_refuses_a_key_mismatch(light_AB):
     bad_envs = {(0, 0): _fake_envs(CHI_D2)[(0, 0)]}  # missing (1, 0)
     with pytest.raises(ValueError, match="envs_init.*keys"):
         optimize_gs_ad(H, (A, B), _ad_config(1), envs_init=bad_envs)
+
+
+@pytest.mark.parametrize(
+    "seed_virt, site_virt",
+    [
+        # same sector counts, different order: the sweep contracts it
+        # silently against the wrong in-sector basis
+        ([0, 1, 0], [0, 0, 1]),
+        # different counts: (2, 2) vs (3, 1) at D=4 fails deep in contract
+        ([0, 1, 0, 1], [0, 0, 0, 1]),
+    ],
+)
+def test_envs_init_refuses_a_seed_from_another_layout(seed_virt, site_virt):
+    """Codex on PR #1051 (finding 2): a seed with the right chi, built for a
+    different virtual charge layout, was accepted and either failed deep in
+    the first sweep's contraction or ran silently on the wrong basis."""
+    H = spinless_fermion_gate(FPEPSConfig(D=len(seed_virt)))
+    A0 = _site(seed_virt, 0)
+    envs = {(0, 0): _seed_env(A0), (1, 0): _seed_env(A0)}
+    # regime: the seed is valid for the layout it was built from, and its chi
+    # matches the config, so only the site charges below can trip the check
+    ipo._check_envs_init_matches_sites(envs, {(0, 0): A0, (1, 0): A0})
+    A1 = _site(site_virt, 1)
+    # regime: the D² faces really differ from the seed's
+    q0, _ = ipo._double_layer_face(A0, "u")
+    q1, _ = ipo._double_layer_face(A1, "u")
+    assert not np.array_equal(q0, q1)
+    with pytest.raises(ValueError, match="envs_init.*does not match"):
+        optimize_gs_ad(H, (A1, A1), _ad_config(1), envs_init=envs)
+
+
+def _mixed_site(sym, u, d, left, r, phys):
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.tensor import SymmetricTensor
+
+    OUT, IN = FlowDirection.OUT, FlowDirection.IN
+    legs = (("u", u, OUT), ("d", d, IN), ("l", left, OUT), ("r", r, IN))
+    indices = tuple(
+        TensorIndex.from_charges(sym, np.array(q, np.int32), f, label=lab)
+        for lab, q, f in legs
+    ) + (TensorIndex.from_charges(sym, np.array(phys, np.int32), IN, label="phys"),)
+    return SymmetricTensor.random_normal(indices, jax.random.PRNGKey(0))
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "u1",
+        # the graded builder's first call compiles ~1900 eager block ops (~30 s)
+        pytest.param("fermion", marks=pytest.mark.slow),
+    ],
+)
+def test_the_seed_check_reads_the_faces_the_builder_makes(kind):
+    """``_double_layer_face`` computes the D² faces by index arithmetic, so
+    it must agree with ``_build_double_layer_tensor`` -- charges in order and
+    flow -- on a site whose four legs all differ."""
+    from tenax.core.symmetry import FermionParity, U1Symmetry
+
+    if kind == "u1":
+        A = _mixed_site(
+            U1Symmetry(), [0, 1, -1], [1, 0, 0], [-1, 0, 1], [0, 0, 1], [1, -1]
+        )
+    else:
+        # D=4: at D=3 FermionParity has only three distinct fused orders
+        A = _mixed_site(
+            FermionParity(),
+            [0, 1, 0, 1],
+            [0, 0, 1, 1],
+            [1, 0, 0, 0],
+            [0, 0, 0, 1],
+            [0, 1],
+        )
+    dl = _build_double_layer_tensor(A)
+    faces = {leg: ipo._double_layer_face(A, leg) for leg in "udlr"}
+    assert len({tuple(q) for q, _ in faces.values()}) == 4  # regime: legs differ
+    for leg, (q, flow) in faces.items():
+        ix = dl.indices[dl.labels().index(f"{leg}2")]
+        assert np.array_equal(np.asarray(ix.charges), q) and ix.flow == flow
 
 
 @pytest.mark.slow
