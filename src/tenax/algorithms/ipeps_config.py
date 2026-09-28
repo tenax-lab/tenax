@@ -67,11 +67,16 @@ class CTMConfig:
                             mechanism.  ``None`` means unbounded.  When
                             set, must satisfy ``chi_max >= chi``.
         fuse_virtual_legs:  When ``True`` (default) the CTM uses the fused
-                            double-layer tensor.  When ``False`` the single-site
-                            (``recipe="1x1"``) AD path uses the split ket/bra
-                            double layer (χ²·D⁴ memory).  Only the single-site
-                            path is supported; other lattices raise
-                            ``NotImplementedError`` (#463 Phase 2).
+                            double-layer tensor.  When ``False`` the AD path
+                            uses the split ket/bra double layer (χ²·D⁴
+                            memory) instead, for both the single-site
+                            (``unit_cell="1x1"``) and 2-site checkerboard
+                            (``unit_cell="2site"``) optimizers.  The split
+                            CTM is dense-bosonic and experimental: a traced
+                            (jit/AD) 2-site sweep on ``SymmetricTensor`` site
+                            tensors is refused rather than fixed (#1048) --
+                            use ``fuse_virtual_legs=True`` for symmetric
+                            multisite AD.
     """
 
     chi: int = 20
@@ -87,9 +92,10 @@ class CTMConfig:
     qr_warmup_steps: int = 3  # eigh warm-up iterations before QR kicks in
     chi_I: int | None = None  # interlayer bond dim for split-CTMRG; None => chi_I = chi
     fuse_virtual_legs: bool = True  # True: fused double-layer (χ²·D⁶, default).
-    # False: single-site (recipe="1x1") split ket/bra double layer (χ²·D⁴).
-    # #463 Phase 2 — multisite/2-site/c4v/honeycomb/PESS raise NotImplementedError
-    # when False (no multisite split forward yet).
+    # False: split ket/bra double layer (χ²·D⁴): single-site (unit_cell="1x1")
+    # and 2-site checkerboard (unit_cell="2site"); other lattices still raise
+    # NotImplementedError.  Dense-bosonic and experimental (frozen by design):
+    # a traced 2-site SymmetricTensor sweep is refused, not fixed (#1048).
     ad_regularize_svd: bool = True  # use Lorentzian-regularized SVD backward in AD
     gmres_precondition: bool = (
         False  # diagonal scaling preconditioner for GMRES backward (experimental)
