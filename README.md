@@ -816,10 +816,19 @@ eA, eB = ctm_tensor_2site(su.A, su.B, 8, max_iter=150, conv_tol=1e-10)  # eager 
 )
 ```
 
-`envs_init` is refused (`ValueError`) with `unit_cell` other than `"2site"`,
-the split CTM (`fuse_virtual_legs=False`), `chi_auto_bump`, a χ schedule
-(`gs_chi_schedule_steps`), or a chi that does not match `CTMConfig.chi` —
-all four change or bypass the layout `envs_init` is meant to freeze. The
+`su_grow_layout` tracks the sector split with
+`bond_layout(A: SymmetricTensor, B: SymmetricTensor) -> tuple[tuple[int, int], ...]`
+internally; call it directly on any checkerboard pair to read the same
+`(n_even, n_odd)` count per bond leg (`u, d, l, r` of `A` then `B`) that
+`su.layout` above already reports.
+
+`envs_init` is refused (`ValueError`) in nine cases: `unit_cell` other than
+`"2site"`; the root-implicit AD path (`ctm_ad_mode="root_implicit"`/
+`"root_implicit_symmetric"`); the split CTM (`fuse_virtual_legs=False`);
+`chi_auto_bump`; `ctmrg_heuristic_increase_chi`; a `chi_ramp`; a χ schedule
+(`gs_chi_schedule_steps`); a chi that does not match `CTMConfig.chi`; and
+keys other than `{(0, 0), (1, 0)}` — each one changes, bypasses, or is
+inconsistent with the layout `envs_init` is meant to freeze. The
 optimizer's own *final* returned environment is always a fresh, cold CTM
 evaluation on the optimized tensors (issue #899) — `envs_init` fixes the
 layout used *during* optimization, not this last re-check.
