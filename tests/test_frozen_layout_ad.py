@@ -162,6 +162,27 @@ def test_d_start_above_config_d_is_refused():
         fi.su_grow_layout(spinless_fermion_gate(cfg), cfg, D_start=4)
 
 
+def test_cycles_per_stage_below_one_is_refused():
+    # Same class as the D_start guard above: a zero-cycle stage leaves
+    # `lay` unbound (first stage) or silently reuses the previous stage's
+    # layout (a later stage) -- final-review finding M5.
+    cfg = FPEPSConfig(D=3)
+    with pytest.raises(ValueError, match="cycles_per_stage"):
+        fi.su_grow_layout(
+            spinless_fermion_gate(cfg), cfg, D_start=2, cycles_per_stage=0
+        )
+
+
+def test_final_cycles_below_two_is_refused():
+    # final_cycles=1 makes `frozen` trivially True: the freeze check
+    # compares cycle 0's layout against every later cycle in the final
+    # stage, so with only one cycle there is nothing to compare against
+    # -- final-review finding M5.
+    cfg = FPEPSConfig(D=3)
+    with pytest.raises(ValueError, match="final_cycles"):
+        fi.su_grow_layout(spinless_fermion_gate(cfg), cfg, D_start=2, final_cycles=1)
+
+
 @pytest.mark.slow
 def test_growth_puts_the_new_slot_where_the_discarded_weight_is():
     """The one moment the SU reads the physics: growing D=2 -> 3, the sector
@@ -500,10 +521,31 @@ def _fake_envs(chi):
     return {(0, 0): env, (1, 0): env}
 
 
-def test_envs_init_is_the_first_forward_seed(seeded_d2, monkeypatch):
+def test_envs_init_is_the_first_forward_seed(light_AB, monkeypatch):
     """R4: the spy must not pay an AD compile -- it records ``env_init`` and
     aborts via a sentinel exception before the (expensive) implicit-AD
     backward is ever traced/compiled.
+
+    Final-review finding I2: uses ``light_AB`` + ``_fake_envs(CHI_D2)`` (no
+    SU sweep, no eager CTM), not the ``seeded_d2`` fixture (~155 s: a real
+    28 s SU growth plus a genuine ~126 s eager CTM to conv_tol=1e-10) the
+    first version of this test paid for a 0.26 s body.  Safe because the
+    spy fires strictly before anything reads ``envs_init`` beyond
+    ``.C1.indices[0].dim`` -- traced by hand through every hop between
+    ``optimize_gs_ad`` and the spy target:
+    ``_optimize_gs_ad_tensor_2site``'s ``envs_init`` validation block reads
+    only ``.keys()`` and ``.C1.indices[0].dim`` (both of which
+    ``_fake_envs``'s ``SimpleNamespace`` supplies) and then stores the dict
+    unread into ``_env_cache_2s["envs"]``; ``make_ctm_energy_fn``'s
+    ``_ctm_energy_fn`` does ``env_cache.get("envs")`` with no read;
+    ``ctm_energy_implicit``'s ``_validate_chi_bump_args`` short-circuits on
+    ``bump_enabled=False`` (``_ad_config``'s default) before ever touching
+    ``env_init``; ``_ctm_energy_implicit_dispatch`` stores it into
+    ``mutables["env_init"]`` with no read; and ``_run_forward`` passes
+    ``mutables["env_init"]`` straight into ``_sigma_gauged_ctm_converge``
+    -- the spy target -- as the very first thing that would read deeper.
+    Confirmed by running this test: it passes against a ``SimpleNamespace``
+    that has no attributes beyond ``C1.indices[0].dim``.
 
     The spy targets ``_ctm_energy_ad._sigma_gauged_ctm_converge``, not
     ``python_loop_ctm_converge`` (the brief's literal target): instrumented
@@ -520,7 +562,8 @@ def test_envs_init_is_the_first_forward_seed(seeded_d2, monkeypatch):
     ``custom_vjp`` forward rule runs with concrete values, not abstract
     tracers -- ``env_init is envs`` holds by identity, not merely by value.
     """
-    A, B, H, _, envs = seeded_d2
+    A, B, H = light_AB
+    envs = _fake_envs(CHI_D2)
 
     class _Seen(Exception):
         pass
@@ -558,13 +601,49 @@ def test_envs_init_refuses_a_mismatched_chi(light_AB):
         optimize_gs_ad(H, (A, B), cfg, envs_init=_fake_envs(CHI_D2))
 
 
+def test_envs_init_refuses_a_ctmrg_heuristic_increase_chi(light_AB):
+    """Final-review finding I1: the in-CTM bump (#512's recommended,
+    non-deprecated chi-growth mode) grows chi *inside* the forward, which
+    defeats the frozen layout and re-opens #518 (the stall-rollback
+    restore, ruling R17, assumes chi is fixed for the whole run).  Needs
+    ``chi_max`` set -- ``CTMConfig.__post_init__`` refuses
+    ``ctmrg_heuristic_increase_chi=True`` without one -- so the config
+    itself constructs cleanly and the ``envs_init``-specific refusal below
+    is the one that actually fires."""
+    A, B, H = light_AB
+    with pytest.raises(ValueError, match="envs_init.*ctmrg_heuristic_increase_chi"):
+        optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(1, ctmrg_heuristic_increase_chi=True, chi_max=CHI_D2 + 2),
+            envs_init=_fake_envs(CHI_D2),
+        )
+
+
+def test_envs_init_refuses_a_chi_ramp(light_AB):
+    """Final-review finding I1: a ``chi_ramp`` schedule changes chi between
+    stages, the same class of hazard ``chi_auto_bump`` is already refused
+    for.  ``CTMConfig`` only warns (``DeprecationWarning``, filtered
+    globally in ``pyproject.toml``) on a bare ``chi_ramp``, so this reaches
+    the ``envs_init``-specific refusal rather than failing at construction."""
+    A, B, H = light_AB
+    with pytest.raises(ValueError, match="envs_init.*chi_ramp"):
+        optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(1, chi_ramp=[(CHI_D2, 5)]),
+            envs_init=_fake_envs(CHI_D2),
+        )
+
+
 def test_envs_init_refuses_a_non_2site_unit_cell():
-    """The refusals the ruling lists: bump, mismatch, non-2site, and (fix
-    round 1, item 4) split-CTM and root-implicit.  All five raise
-    ValueError before any CTM/AD work.  This one and the root-implicit one
-    below fire in ``optimize_gs_ad`` itself, before ``A_init``/
-    ``hamiltonian_gate`` are ever touched -- so they need no real tensors
-    at all, not even the cheap ``light_AB`` stand-in."""
+    """The refusals the ruling lists: bump, mismatch, non-2site, split-CTM,
+    root-implicit, and (fix round 2, I1/M8) ctmrg_heuristic_increase_chi,
+    chi_ramp, and a key mismatch.  All raise ValueError before any CTM/AD
+    work.  This one and the root-implicit one below fire in
+    ``optimize_gs_ad`` itself, before ``A_init``/``hamiltonian_gate`` are
+    ever touched -- so they need no real tensors at all, not even the
+    cheap ``light_AB`` stand-in."""
     cfg = dataclasses.replace(_ad_config(1), unit_cell="1x1")
     with pytest.raises(ValueError, match="envs_init.*2site"):
         optimize_gs_ad(None, None, cfg, envs_init=_fake_envs(CHI_D2))
@@ -584,6 +663,18 @@ def test_envs_init_refuses_the_root_implicit_path():
     )
     with pytest.raises(ValueError, match="envs_init.*root.implicit"):
         optimize_gs_ad(None, None, cfg, envs_init=_fake_envs(CHI_D2))
+
+
+def test_envs_init_refuses_a_key_mismatch(light_AB):
+    """Final-review finding M8: ``envs_init``'s keys must equal the 2-site
+    cell's, ``{(0, 0), (1, 0)}`` (``CHECKERBOARD_NEIGHBORS.keys()`` --
+    what ``make_ctm_energy_fn``/``_energy_fn_2site`` actually index by).  A
+    wrong-keyed dict used to fail deep inside the CTM instead of at this
+    entry point."""
+    A, B, H = light_AB
+    bad_envs = {(0, 0): _fake_envs(CHI_D2)[(0, 0)]}  # missing (1, 0)
+    with pytest.raises(ValueError, match="envs_init.*keys"):
+        optimize_gs_ad(H, (A, B), _ad_config(1), envs_init=bad_envs)
 
 
 @pytest.mark.slow
