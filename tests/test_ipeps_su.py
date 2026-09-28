@@ -3544,9 +3544,15 @@ def test_d2_reaches_the_heisenberg_energy_not_the_product_state(seed, kind):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("kind", ["dense", "symmetric"])
 @pytest.mark.parametrize("seed", _SEEDS)
-@pytest.mark.parametrize("D", [3, 4])
+# The symmetric arm runs at D=3 only.  Its D=4 cells were ~22 min per seed on a
+# quiet local CPU (1321 s / 1350 s measured 2026-09-27) and, with the rest of
+# this file, kept CI's slow shard over its 240 min job cap on every full run --
+# nothing after them in the shard ever ran.  D=4 keeps its dense arm, which is
+# the cell the "D=4 is where the four-lambda baseline diverges" argument below
+# is about; the symmetric arm's D=4 energy (-0.667012) is recorded below, no
+# longer re-measured.
+@pytest.mark.parametrize("D,kind", [(3, "dense"), (3, "symmetric"), (4, "dense")])
 def test_su_evolve_reaches_the_simple_update_reference_energy(D, seed, kind):
     """The D axis of the sweep: D=3 and D=4 against this project's references.
 
@@ -3563,7 +3569,9 @@ def test_su_evolve_reaches_the_simple_update_reference_energy(D, seed, kind):
     warns about.  1600 is used at D=3 too so the two cells differ in one
     variable.
 
-    **All six pass**, and what closed the four that used to fail was the
+    **All six dense cells pass** (the symmetric arm now runs at D=3 only;
+    see the parametrize comment), and what closed the four that used to fail
+    was the
     *starting point*, not a change to the engine.  These cells used to run from
     ``_random_state`` -- the maximally entangled pair ``ipeps()`` builds by
     default -- which at ``D >= 3`` sits inside the product state's basin for

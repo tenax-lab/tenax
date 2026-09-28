@@ -664,7 +664,7 @@ _FILE_MARKERS = {
     # runs only in the slow bucket rather than bloating fast-other (#960).
     "test_split_ctm_chi_frozen_726.py": "slow",  # 164s / 9
     "test_ctm_670_symmetric_2x2.py": "slow",  # 267s / 2
-    "test_ctm_700_env_collapse.py": "slow",  # >900s local CPU / 5
+    "test_ctm_700_env_collapse.py": "slow",  # 102s local 2-core / 1 (was ~2.5h/chi on CI x5)
     "test_pess_3site_multisite_rdm_invariants.py": "slow",  # 375s / 7
     # algorithm: moderate cost; runs push-to-main + nightly.
     "test_ctm_honeycomb_ad.py": "algorithm",  # 15.2s / 2
