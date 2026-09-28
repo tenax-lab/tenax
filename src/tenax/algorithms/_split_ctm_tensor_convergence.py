@@ -42,7 +42,7 @@ from tenax.algorithms._split_ctm_tensor_moves import (
 )
 from tenax.algorithms._tensor_utils import max_abs_normalize
 from tenax.core import EPS
-from tenax.core.tensor import Tensor
+from tenax.core.tensor import SymmetricTensor, Tensor
 
 
 class _SplitCTMInfo(NamedTuple):
@@ -201,6 +201,11 @@ def ctm_split_tensor(
                      *same* projector the fused path used before #723; it is
                      shared verbatim, so this was never a split-CTM defect.
 
+    The split CTM is dense-bosonic and experimental.  This single-site (1x1)
+    entry point runs `DenseTensor` and bosonic `SymmetricTensor` alike, eager
+    or under AD -- source and destination cell coincide here, so the #1048
+    multisite refusal (see :func:`ctm_split_tensor_2site`) does not apply.
+
     Returns:
         Converged SplitCTMTensorEnv.
     """
@@ -336,6 +341,69 @@ def _split_env_is_fermionic(env: SplitCTMTensorEnv) -> bool:
 
     C1 = env.C1
     return isinstance(C1, SymmetricTensor) and C1.indices[0].symmetry.is_fermionic
+
+
+def _refuse_traced_symmetric_multisite_split(
+    site_tensors: dict[Coord, Tensor],
+    envs: dict[Coord, SplitCTMTensorEnv],
+) -> None:
+    """Refuse a traced (jit/AD) multisite split-CTM sweep on symmetric input.
+
+    ``_compute_split_plaquette_projector_pair`` calls the shared
+    ``_compute_2x2_projector`` with ``base_charges`` but no destination-aware
+    ``incoming_chi_charges`` override.  On a *traced* call (blocks carry JAX
+    tracers -- inside ``jax.jit``, under ``jax.grad``/explicit-AD, or inside
+    the ``jax.vjp`` retrace that implicit-AD's Neumann backward uses),
+    ``_compute_2x2_projector_symmetric`` cannot read the singular values to
+    size ``chi_new``, so it falls back to ``_incoming_chi_charges``, which
+    reads the *absorbed* cell's chi leg off the enlarged corner.  Phase 2 of
+    ``_split_ctm_sweep_multisite_2x2`` writes the new edge into the
+    *neighbour's* environment instead, so on more than one cell the traced
+    projector inherits the wrong cell's sector counts whenever the two
+    cells' bond inventories differ (#1048, the split twin of #1035's fused
+    fix).
+
+    A single-cell unit cell is exempt: the absorbed cell and the destination
+    cell coincide there, so the fallback happens to read the right leg.
+
+    Eager (non-traced) symmetric multisite calls are unaffected: they take
+    the full-spectrum-SVD + ``_retruncate_chi_bond`` branch instead of the
+    ``_incoming_chi_charges`` fallback (see
+    ``_compute_2x2_projector_symmetric``), so this only refuses the branch
+    that is actually wrong.  Dense (``DenseTensor``) input is unaffected:
+    ``_compute_2x2_projector`` only dispatches to the symmetric pipeline for
+    ``SymmetricTensor`` input.
+
+    The split CTM is dense-bosonic and experimental (frozen by design); this
+    combination is refused rather than fixed -- see the fused CTM
+    (``fuse_virtual_legs=True``) for symmetric multisite AD.
+    """
+    if len(site_tensors) <= 1:
+        return
+    if not any(isinstance(A, SymmetricTensor) for A in site_tensors.values()):
+        return
+    # The environment is checked too: a caller can trace the environment
+    # while closing over concrete site tensors (``jax.vjp`` with respect to
+    # ``envs``, or a jitted closure), and the enlarged corners -- hence the
+    # projector's fallback -- are traced either way.
+    candidates = [*site_tensors.values()]
+    for env in envs.values():
+        candidates.extend(env)
+    is_traced = any(
+        isinstance(block, jax.core.Tracer)
+        for A in candidates
+        if isinstance(A, SymmetricTensor)
+        for block in A.blocks.values()
+    )
+    if is_traced:
+        raise NotImplementedError(
+            "split CTM (fuse_virtual_legs=False): a traced (jit/AD) multisite "
+            "sweep on SymmetricTensor site tensors is refused (#1048) -- the "
+            "traced 2x2 projector reads the wrong cell's chi-leg sector "
+            "counts when the two cells' bond inventories differ. The split "
+            "CTM is dense-bosonic and experimental; use the fused CTM "
+            "(fuse_virtual_legs=True) for symmetric multisite AD."
+        )
 
 
 # Per-edge spec to re-split a fused ``CTMTensorEnv`` edge into ket/bra halves.
@@ -536,6 +604,9 @@ def _split_ctm_sweep_multisite_2x2(
             "conversion is sign-free, #1035); use the fused Tensor CTM "
             "(ctm_tensor_2site / fuse_virtual_legs=True)"
         )
+    # #1048: refuses a traced multisite sweep on SymmetricTensor input (the
+    # single-cell unit cell is exempt -- see the helper's docstring).
+    _refuse_traced_symmetric_multisite_split(site_tensors, envs)
     # Function-local import: _split_ctm_tensor_moves imports from this module,
     # so importing the absorb helpers at module scope would form a cycle.
     from tenax.algorithms._split_ctm_tensor_moves import (
@@ -840,6 +911,15 @@ def ctm_split_tensor_2site(
         renormalize: Renormalize the environment each sweep.
         recipe:     ``"2x2"`` (default, the genuine joint forward) or ``"1x1"``
                     (single-site-move reuse, for bisection).
+
+    The split CTM is dense-bosonic and experimental.  A plain (eager) call
+    here runs ``DenseTensor`` and bosonic ``SymmetricTensor`` alike.  If the
+    call is *traced* (inside ``jax.jit``, or differentiated with
+    ``jax.grad``/``jax.vjp``) with ``SymmetricTensor`` site tensors, the
+    sweep refuses with ``NotImplementedError`` instead of returning a wrong
+    environment (#1048) -- use ``fuse_virtual_legs=True`` for symmetric
+    multisite AD.  Fermionic input is refused outright, traced or not
+    (#1035).
 
     Returns:
         ``(env_A, env_B)`` -- the converged split environments at ``(0, 0)``

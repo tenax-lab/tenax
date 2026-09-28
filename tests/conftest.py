@@ -94,8 +94,11 @@ _FILE_MARKERS = {
     "test_split_ctm_tensor.py": "algorithm",
     "test_split_ctm_2site.py": "algorithm",
     # 2-site split-CTM SymmetricTensor (#463 Phase 3): forward/energy-parity
-    # tests run in the algorithm bucket; the AD parity tests in this file carry
-    # their own explicit @pytest.mark.slow so they stay out of -m "not slow".
+    # tests run in the algorithm bucket. The former AD parity test (implicit
+    # vs explicit gradient direction/magnitude) is gone: #1048 refuses a
+    # traced multisite SymmetricTensor split sweep outright, so that gradient
+    # comparison is moot and its replacement (asserting the refusal) is cheap
+    # -- no @pytest.mark.slow is carried in this file anymore.
     "test_split_ctm_2site_symmetric.py": "algorithm",
     # 2-site split-CTM fermionic (#463 Phase 4): block-sparse forward parity vs
     # the fused sweep; algorithm bucket like its symmetric/split siblings.
@@ -759,7 +762,7 @@ def pytest_collection_modifyitems(items):
 
     The ``algorithm`` files are deliberately left alone.  Their coexistence of
     ``algorithm`` + explicit ``slow`` is already correct and already relied on
-    (see the ``test_split_ctm_2site_symmetric.py`` note above): the two
+    (e.g. ``test_split_ctm_tensor.py``, which carries both): the two
     non-core buckets select ``not core and not slow``, so a slow test in an
     ``algorithm`` file is excluded from them by the ``slow`` half regardless.
     Measured, this rule moves exactly the two tests it is meant to move —

@@ -13,7 +13,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
+from tenax.algorithms._ctm_tensor_convergence import (
+    CHECKERBOARD_NEIGHBORS,
+    SINGLE_SITE_NEIGHBORS,
+)
 from tenax.algorithms._split_ctm_tensor_convergence import (
     _initialize_split_multisite_env,
     _split_ctm_sweep_multisite_2x2,
@@ -65,6 +68,110 @@ def _build_nontrivial_u1_pair(D=2, d=2):
     A = SymmetricTensor.random_normal(indices, kA)
     B = SymmetricTensor.random_normal(indices, kB)
     return A, B
+
+
+def _traced_sweep_probe(site_tensors, bars, envs, neighbors, chi, chi_I):
+    """A ``jax.eval_shape`` closure over one 2x2 split sweep.
+
+    Scaling every site tensor's blocks by a traced ``alpha`` is enough to make
+    ``isinstance(block, jax.core.Tracer)`` true throughout the sweep, without
+    running any FLOPs: ``jax.eval_shape`` traces abstractly and performs no
+    compile, which is exactly the "before any compile" regime #1048 refuses.
+    """
+
+    def _probe(alpha):
+        traced = {
+            c: SymmetricTensor._from_blocks_unchecked(
+                {k: alpha * b for k, b in t.blocks.items()}, t.indices
+            )
+            for c, t in site_tensors.items()
+        }
+        return _split_ctm_sweep_multisite_2x2(envs, traced, bars, neighbors, chi, chi_I)
+
+    return jax.eval_shape(_probe, jnp.asarray(1.0))
+
+
+def test_2site_symmetric_multisite_split_refuses_traced_sweep_1048():
+    """#1048: a traced (jit/AD) multisite split sweep on SymmetricTensor input
+    is refused, not silently mis-truncated.
+
+    ``_compute_split_plaquette_projector_pair`` hands the shared
+    ``_compute_2x2_projector`` a ``base_charges`` array but no
+    destination-aware ``incoming_chi_charges`` override.  Under tracing (no
+    singular values to read), the symmetric projector falls back to
+    ``_incoming_chi_charges``, which reads the *absorbed* cell's chi leg off
+    the enlarged corner -- but Phase 2 of the multisite sweep writes the new
+    edge into the *neighbour's* environment.  On more than one cell that is
+    the wrong leg whenever the two cells' bond inventories differ.
+
+    Tiny (D=2, chi=4) tensors; the refusal must fire during the
+    ``jax.eval_shape`` trace itself, before any op is lowered, let alone
+    compiled -- so this test pays no compile at all.
+    """
+    A, B = _build_nontrivial_u1_pair(D=2, d=2)
+    site_tensors = {(0, 0): A, (1, 0): B}
+    bars = {c: t.bar() for c, t in site_tensors.items()}
+    chi, chi_I = 4, 4
+    envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
+
+    with pytest.raises(NotImplementedError, match="1048"):
+        _traced_sweep_probe(
+            site_tensors, bars, envs, CHECKERBOARD_NEIGHBORS, chi, chi_I
+        )
+
+
+def test_2site_symmetric_multisite_split_refuses_traced_env_1048():
+    """#1048: the refusal also fires when only the *environment* is traced.
+
+    A caller can close over concrete site tensors and trace the environment
+    (``jax.vjp`` with respect to ``envs``, or a jitted closure); the enlarged
+    corners are still traced, so the projector still takes the wrong-cell
+    fallback.  The guard must look at ``envs`` as well as the sites.
+    """
+    A, B = _build_nontrivial_u1_pair(D=2, d=2)
+    site_tensors = {(0, 0): A, (1, 0): B}
+    bars = {c: t.bar() for c, t in site_tensors.items()}
+    chi, chi_I = 4, 4
+    envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
+    # ``SymmetricTensor.blocks`` is built lazily; build it eagerly here so the
+    # site blocks stay concrete inside the trace and only ``envs`` is traced.
+    for t in site_tensors.values():
+        assert not any(isinstance(b, jax.core.Tracer) for b in t.blocks.values())
+
+    def _probe(alpha):
+        traced_envs = {
+            c: type(env)(
+                *(
+                    SymmetricTensor._from_blocks_unchecked(
+                        {k: alpha * b for k, b in t.blocks.items()}, t.indices
+                    )
+                    for t in env
+                )
+            )
+            for c, env in envs.items()
+        }
+        return _split_ctm_sweep_multisite_2x2(
+            traced_envs, site_tensors, bars, CHECKERBOARD_NEIGHBORS, chi, chi_I
+        )
+
+    with pytest.raises(NotImplementedError, match="1048"):
+        jax.eval_shape(_probe, jnp.asarray(1.0))
+
+
+def test_2site_symmetric_single_cell_split_sweep_is_not_refused_1048():
+    """A single-cell ("1x1") multisite call is exempt (#1048): the absorbed
+    cell and the destination cell are the same cell, so the traced fallback
+    happens to read the right chi leg.  Must trace clean, not raise."""
+    A, _ = _build_nontrivial_u1_pair(D=2, d=2)
+    site_tensors = {(0, 0): A}
+    bars = {c: t.bar() for c, t in site_tensors.items()}
+    chi, chi_I = 4, 4
+    envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
+
+    out = _traced_sweep_probe(
+        site_tensors, bars, envs, SINGLE_SITE_NEIGHBORS, chi, chi_I
+    )
+    assert (0, 0) in out
 
 
 def test_2site_symmetric_charge_sectors_preserved():
@@ -243,35 +350,28 @@ def _xxz_gate(delta=0.3, d=2):
     return H.reshape(d, d, d, d)
 
 
-@pytest.mark.slow
-def test_2site_symmetric_ad_direction_and_stability():
-    """Symmetric 2-site split-CTM AD (XXZ Delta=0.3) is finite, non-collapsing, and
-    direction-consistent -- but NOT machine-exact parity with the dense path.
+def test_2site_symmetric_ad_refuses_traced_multisite_split_1048():
+    """#1048 supersedes the AD direction/stability gate that used to live here.
 
-    Phase 3 lands the symmetric FORWARD (correct at all D); the block-sparse SVD
-    *backward* is a known accuracy limitation (issue #687 / the TODO in
-    ``_svd_split_edge_tensor``): it lacks the Lorentzian regularization the dense
-    path uses, so symmetric ``implicit == explicit`` floors at rel~1.3e-2 (dense
-    reaches 1e-6) even on the non-degenerate XXZ Delta=0.3 spectrum.
+    The split CTM is frozen by design (dense, bosonic, experimental): a
+    traced 2-site SymmetricTensor multisite sweep is refused rather than
+    fixed, so the implicit/explicit AD gradient comparison this test used to
+    run (XXZ Delta=0.3, ``test_2site_symmetric_ad_direction_and_stability``)
+    is moot -- there is no gradient to compare, both public AD entry points
+    raise before any CTM sweep completes.
 
-    What this test DOES gate (all robustly true today):
-      * energy VALUE parity with dense is tight (the forward is correct);
-      * the AD gradient is finite and non-zero (regression against the D>=3
-        collapse, which drove gradients to 0);
-      * symmetric implicit and explicit gradients agree in DIRECTION (cos > 0.999)
-        and to rel < 5e-2 in magnitude (the documented block-sparse floor);
-      * the symmetric gradient agrees in direction with the dense gradient
-        (cos > 0.99) -- a different SVD backend, hence only a loose gate.
+    Implicit AD raises from the ``custom_vjp`` backward's ``jax.vjp`` retrace
+    of the sweep (the forward itself runs eagerly, so ``max_iter`` is kept
+    small to bound that cost); explicit AD raises immediately since the
+    unrolled sweep is traced throughout by ``jax.grad``.
 
-    NOTE: AD-vs-finite-difference is not asserted here, for cost -- FD on a
-    symmetric CTM fixed point is expensive.  The reason previously given (a
-    "pre-existing Wirtinger gap" shared with the dense path, "incl. sign
-    flips") was a misdiagnosis of the #750 SVD-adjoint bug: the computation is
-    real-valued, so Wirtinger cannot apply, and the sign flips were #750's
-    -0.5x off-diagonal term.  The primitive itself is now gated directly
-    against FD in ``tests/test_svd_adjoint_fd_750.py``.  The trusted gate here
-    remains implicit==explicit; its tightening to ~1e-6 for the symmetric path
-    is tracked in #687.
+    Uses the physically-converged trivial-U(1) pair (SU(2) Neel via
+    ``_build_su_neel`` + ``_to_trivial_u1``), not the random nontrivial-charge
+    fixture: at a random state the eager forward's per-sector block shapes can
+    change sweep to sweep (sector reallocation), and that shape churn -- not
+    the #1048 refusal -- is what a small ``max_iter`` would then hit first.
+    A single trivial sector has nothing to reallocate, so the forward is
+    stable and the refusal is what actually fires.
     """
     from tenax.algorithms._split_ctm_energy_ad import (
         ctm_energy_split_explicit_2site,
@@ -279,12 +379,9 @@ def test_2site_symmetric_ad_direction_and_stability():
     )
 
     A_d, B_d = _build_su_neel(D=2)
-    A_s, B_s = _to_trivial_u1(A_d), _to_trivial_u1(B_d)
+    A, B = _to_trivial_u1(A_d), _to_trivial_u1(B_d)
     gate = _xxz_gate(0.3)
     chi = 4  # chi = D*D lossless on the physical low-interlayer-rank state
-
-    def _flat(g):
-        return jnp.concatenate([x.ravel() for x in jax.tree.leaves(g)])
 
     def loss_imp(a, b):
         return ctm_energy_split_implicit_2site(
@@ -293,7 +390,7 @@ def test_2site_symmetric_ad_direction_and_stability():
             gate,
             chi=chi,
             chi_I=chi,
-            max_iter=80,
+            max_iter=5,
             conv_tol=1e-13,
             min_iter=2,
         ).real
@@ -305,39 +402,11 @@ def test_2site_symmetric_ad_direction_and_stability():
             gate,
             chi=chi,
             chi_I=chi,
-            warmup_steps=40,
-            backprop_steps=40,
+            warmup_steps=1,
+            backprop_steps=1,
         ).real
 
-    e_si, g_si = jax.value_and_grad(loss_imp)(A_s, B_s)
-    e_se, g_se = jax.value_and_grad(loss_exp)(A_s, B_s)
-    e_di, g_di = jax.value_and_grad(loss_imp)(A_d, B_d)
-    gsi, gse, gdi = _flat(g_si), _flat(g_se), _flat(g_di)
-
-    # Forward is correct: symmetric energy == dense energy (both AD variants).
-    assert jnp.isfinite(e_si) and jnp.isfinite(e_se)
-    assert jnp.allclose(e_si, e_di, atol=1e-6), f"sym E {e_si} vs dense E {e_di}"
-    assert jnp.allclose(e_si, e_se, atol=1e-6), f"sym imp E {e_si} vs exp E {e_se}"
-
-    # Gradient finite + non-zero (D>=3 collapse regression: it drove grads to 0).
-    assert jnp.all(jnp.isfinite(gsi)) and float(jnp.linalg.norm(gsi)) > 1e-6
-
-    def _cos(a, b):
-        return float(
-            jnp.real(jnp.vdot(a, b)) / (jnp.linalg.norm(a) * jnp.linalg.norm(b))
-        )
-
-    def _rel(a, b):
-        return float(jnp.linalg.norm(a - b) / jnp.linalg.norm(b))
-
-    # Symmetric implicit vs explicit (same block-sparse backend): direction tight,
-    # magnitude at the documented block-sparse-backward floor (#687).
-    cos_ie, rel_ie = _cos(gsi, gse), _rel(gsi, gse)
-    assert cos_ie > 0.999, f"sym implicit/explicit direction: cos={cos_ie}"
-    assert rel_ie < 5e-2, (
-        f"sym implicit/explicit magnitude floor exceeded: rel={rel_ie}"
-    )
-
-    # Symmetric vs dense implicit (different SVD backend): loose direction gate.
-    cos_sd = _cos(gsi, gdi)
-    assert cos_sd > 0.99, f"sym-vs-dense gradient direction: cos={cos_sd}"
+    with pytest.raises(NotImplementedError, match="1048"):
+        jax.value_and_grad(loss_imp)(A, B)
+    with pytest.raises(NotImplementedError, match="1048"):
+        jax.value_and_grad(loss_exp)(A, B)
