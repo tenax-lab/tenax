@@ -401,9 +401,12 @@ def su_grow_layout(
                           least 2 (see above) and at most ``config.D``.
         cycles_per_stage: Checkerboard cycles (4 phases each) to relax for
                           at every stage before ``max_D`` is raised, except
-                          the last.
+                          the last.  Must be at least 1.
         final_cycles:     Checkerboard cycles to relax for at ``config.D``,
-                          the stage whose freeze is checked.
+                          the stage whose freeze is checked.  Must be at
+                          least 2 -- ``frozen`` compares cycle 0's layout
+                          against every later cycle, so one cycle would make
+                          ``frozen`` trivially True.
         key:              JAX random key for the initial random fPEPS
                           tensor.  Defaults to ``PRNGKey(0)``.
 
@@ -415,6 +418,20 @@ def su_grow_layout(
     if D_start > config.D:
         raise ValueError(
             f"su_grow_layout: D_start ({D_start}) must be <= config.D ({config.D})"
+        )
+    if cycles_per_stage < 1:
+        raise ValueError(
+            f"su_grow_layout: cycles_per_stage must be >= 1, got {cycles_per_stage} "
+            "-- a stage with zero cycles leaves `lay` unbound (the D_start "
+            "collapse check reads it) or, for a non-first stage, silently "
+            "reuses the previous stage's layout."
+        )
+    if final_cycles < 2:
+        raise ValueError(
+            f"su_grow_layout: final_cycles must be >= 2, got {final_cycles} -- "
+            "`frozen` is checked by comparing cycle 0's layout against every "
+            "later cycle in the final stage, so final_cycles=1 makes `frozen` "
+            "trivially True (there is nothing to compare cycle 0 against)."
         )
     key = jax.random.PRNGKey(0) if key is None else key
     A = B = _initialize_fpeps(dataclasses.replace(config, D=D_start), key)
