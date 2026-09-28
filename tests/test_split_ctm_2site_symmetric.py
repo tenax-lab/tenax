@@ -133,6 +133,10 @@ def test_2site_symmetric_multisite_split_refuses_traced_env_1048():
     bars = {c: t.bar() for c, t in site_tensors.items()}
     chi, chi_I = 4, 4
     envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
+    # ``SymmetricTensor.blocks`` is built lazily; build it eagerly here so the
+    # site blocks stay concrete inside the trace and only ``envs`` is traced.
+    for t in site_tensors.values():
+        assert not any(isinstance(b, jax.core.Tracer) for b in t.blocks.values())
 
     def _probe(alpha):
         traced_envs = {
