@@ -87,6 +87,15 @@ _FILE_MARKERS = {
     "test_ad_utils.py": "algorithm",
     "test_fermionic_ipeps.py": "algorithm",
     "test_fpeps_ad.py": "algorithm",
+    # #1035 follow-up: unpinned 2-site SU + bond_layout; runs the checkerboard
+    # sweep to convergence twice (pinned and unpinned), each 160 phases (40
+    # cycles). The envs_init seed/refusal tests use ``light_AB``/
+    # ``_fake_envs`` (no SU, no CTM) rather than the module-scope
+    # ``seeded_d2`` fixture (a real 28 s SU growth plus a ~126 s eager CTM),
+    # which only this file's ``slow``-marked tests build (final-review
+    # finding I2 -- an earlier version of this comment predated that fix
+    # and undercounted the not-slow bucket's cost).
+    "test_frozen_layout_ad.py": "algorithm",
     "test_fermionic_ed_reference.py": "algorithm",
     "test_ipeps_excitations.py": "algorithm",
     "test_code_review_regressions.py": "core",

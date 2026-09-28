@@ -53,7 +53,9 @@ def _normalise_lambda(sigma: jax.Array) -> jax.Array:
     return sigma / jnp.where(smax > 0, smax, 1.0)
 
 
-def _truncation_base_charges(A: Tensor, leg: str) -> np.ndarray | None:
+def _truncation_base_charges(
+    A: Tensor, leg: str, pin_sectors: bool = True
+) -> np.ndarray | None:
     """The canonical bond charge layout to impose on the SVD, or ``None``.
 
     ``base_charges`` pins the new bond's per-sector *keep counts* to the old
@@ -71,9 +73,15 @@ def _truncation_base_charges(A: Tensor, leg: str) -> np.ndarray | None:
     87.0%.  Repeated, that drives ``lambda`` to zero and the state with it
     (#865).
 
+    ``pin_sectors=False`` restores the global top-D truncation on a fermionic
+    2-site bond, which lets the SU move weight between sectors; the pin is
+    required only on the 1-site path, where ``A.l``/``A.r`` are one bond.
+
     Returning ``None`` restores the global truncation, which is what minimises
     the 2-norm truncation error and what the dense path has always done.
     """
+    if not pin_sectors:
+        return None
     if not A.indices[A.labels().index(leg)].symmetry.is_fermionic:
         return None
     return np.asarray(A.indices[A.labels().index(leg)].charges)
@@ -245,6 +253,7 @@ def _simple_update_checkerboard_sweep(
     independent_bonds: bool = False,
     *,
     phase0: int = 0,
+    pin_sectors: bool = True,
 ) -> tuple[Tensor, Tensor, BondWeights]:
     """Run ``steps`` phases of the four-bond checkerboard simple-update sweep.
 
@@ -283,6 +292,11 @@ def _simple_update_checkerboard_sweep(
         phase0: Phase to start the cycle on.  A caller resuming a sweep must
                 pass the phase it stopped on, or the first bond is evolved
                 twice and the second never.
+        pin_sectors: Forwarded to every bond update's
+                :func:`_truncation_base_charges`.  ``True`` (default) pins the
+                fermionic bond's per-sector keep counts to its current layout;
+                ``False`` lets the SVD take the globally largest singular
+                values and move weight between sectors.
     """
     if lambdas is None:
         labels = A.labels()
@@ -302,6 +316,7 @@ def _simple_update_checkerboard_sweep(
                 max_D,
                 lam_h_far=lambdas.h_BA,
                 lam_v_other=lambdas.v_BA,
+                pin_sectors=pin_sectors,
             )
             lambdas = _store(lambdas, "h_AB", h_AB, independent_bonds)
         elif phase == 1:
@@ -314,6 +329,7 @@ def _simple_update_checkerboard_sweep(
                 max_D,
                 lam_v_far=lambdas.v_BA,
                 lam_h_other=lambdas.h_BA,
+                pin_sectors=pin_sectors,
             )
             lambdas = _store(lambdas, "v_AB", v_AB, independent_bonds)
         elif phase == 2:
@@ -326,6 +342,7 @@ def _simple_update_checkerboard_sweep(
                 max_D,
                 lam_h_far=lambdas.h_AB,
                 lam_v_other=lambdas.v_AB,
+                pin_sectors=pin_sectors,
             )
             lambdas = _store(lambdas, "h_BA", h_BA, independent_bonds)
         else:
@@ -338,6 +355,7 @@ def _simple_update_checkerboard_sweep(
                 max_D,
                 lam_v_far=lambdas.v_AB,
                 lam_h_other=lambdas.h_AB,
+                pin_sectors=pin_sectors,
             )
             lambdas = _store(lambdas, "v_BA", v_BA, independent_bonds)
 
@@ -461,6 +479,7 @@ def _simple_update_2site_horizontal_tensor(
     *,
     lam_h_far: jax.Array | None = None,
     lam_v_other: jax.Array | None = None,
+    pin_sectors: bool = True,
 ) -> tuple[Tensor, Tensor, jax.Array]:
     """2-site simple update on the horizontal bond (A.r <-> B.l).
 
@@ -488,6 +507,7 @@ def _simple_update_2site_horizontal_tensor(
                      Defaults to ``lam_h``.
         lam_v_other: Spectrum of the *other* vertical bond, ``B.d <-> A.u``.
                      Defaults to ``lam_v``.
+        pin_sectors: Forwarded to :func:`_truncation_base_charges`.
 
     Returns:
         (A_new, B_new, lam_h_new).
@@ -521,7 +541,13 @@ def _simple_update_2site_horizontal_tensor(
     if _is_fermionic_tensor(A_abs):
         # Steps 3-8, graded (#1035 §5 step 6).
         A_new, B_new, sigma = _graded_bond_update(
-            A_abs, B_abs, gate, "r", "l", max_D, _truncation_base_charges(A, "r")
+            A_abs,
+            B_abs,
+            gate,
+            "r",
+            "l",
+            max_D,
+            _truncation_base_charges(A, "r", pin_sectors),
         )
         lam_h_new = _normalise_lambda(sigma)
         return _finish_bond_update(
@@ -558,7 +584,7 @@ def _simple_update_2site_horizontal_tensor(
     #    physical bond and the next step crashes if the layout drifts.  Here
     #    they are different bonds, and imposing it discarded the *largest*
     #    singular value of theta -- see :func:`_truncation_base_charges`.
-    base_charges = _truncation_base_charges(A, "r")
+    base_charges = _truncation_base_charges(A, "r", pin_sectors)
     U, sigma, Vh, s_full = truncated_svd(
         theta,
         left_labels=["u", "d", "l", "si_out"],
@@ -623,6 +649,7 @@ def _simple_update_2site_vertical_tensor(
     *,
     lam_v_far: jax.Array | None = None,
     lam_h_other: jax.Array | None = None,
+    pin_sectors: bool = True,
 ) -> tuple[Tensor, Tensor, jax.Array]:
     """2-site simple update on the vertical bond (A.d <-> B.u).
 
@@ -641,6 +668,7 @@ def _simple_update_2site_vertical_tensor(
                      Defaults to ``lam_v``.
         lam_h_other: Spectrum of the *other* horizontal bond, ``B.r <-> A.l``.
                      Defaults to ``lam_h``.
+        pin_sectors: Forwarded to :func:`_truncation_base_charges`.
 
     Returns:
         (A_new, B_new, lam_v_new).
@@ -665,7 +693,13 @@ def _simple_update_2site_vertical_tensor(
     if _is_fermionic_tensor(A_abs):
         # Steps 3-8, graded (#1035 §5 step 6).
         A_new, B_new, sigma = _graded_bond_update(
-            A_abs, B_abs, gate, "d", "u", max_D, _truncation_base_charges(A, "d")
+            A_abs,
+            B_abs,
+            gate,
+            "d",
+            "u",
+            max_D,
+            _truncation_base_charges(A, "d", pin_sectors),
         )
         lam_v_new = _normalise_lambda(sigma)
         return _finish_bond_update(
@@ -696,7 +730,7 @@ def _simple_update_2site_vertical_tensor(
 
     # 5. Truncated SVD.  See the horizontal counterpart for why the canonical
     #    charge layout is imposed only on the fermionic path (#563, #865).
-    base_charges = _truncation_base_charges(A, "d")
+    base_charges = _truncation_base_charges(A, "d", pin_sectors)
     U, sigma, Vh, s_full = truncated_svd(
         theta,
         left_labels=["u", "l", "r", "si_out"],

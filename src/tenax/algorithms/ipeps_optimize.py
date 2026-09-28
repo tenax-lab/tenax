@@ -17,6 +17,7 @@ import numpy as np
 
 from tenax.algorithms._ctm_energy_ad import invalidate_implicit_ad_warm_start
 from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
+from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.algorithms._ipeps_optimize_shared import (  # noqa: F401
     _build_optimizer,
     _converged_outer,
@@ -644,6 +645,8 @@ def optimize_gs_ad(
     hamiltonian_gate: jax.Array | Tensor,
     A_init: jax.Array | Tensor | tuple | dict | None,
     config: iPEPSConfig,
+    *,
+    envs_init: dict[Coord, CTMTensorEnv] | None = None,
 ):
     """AD-based ground state optimization of iPEPS.
 
@@ -665,12 +668,62 @@ def optimize_gs_ad(
                           ``config.su_init`` is ``True``, the tensor(s) are
                           initialized via simple update (``ipeps()``).
         config:           iPEPSConfig with AD optimization settings.
+        envs_init:        A converged environment to seed the first forward
+                          CTM with.  Under tracing the CTM keeps the
+                          χ-sector layout it is given, and every
+                          optimizer-level rollback restores this seed
+                          (rather than cold-starting) too, so this fixes
+                          the environment layout for the whole
+                          optimisation -- pass the output of an eager
+                          ``ctm_tensor_2site`` on the initial tensors. Its
+                          keys must equal the 2-site cell's,
+                          ``{(0, 0), (1, 0)}``.
+
+                          Also accepted with ``config.gs_implicit_ad=False``
+                          (the explicit-AD path): it seeds that path's first
+                          forward CTM the same way, it just has no special
+                          coupling to the explicit backward -- the seed only
+                          warm-starts the forward.
+
+                          2-site fused only; refused (``ValueError``) with:
+                          a unit cell other than ``"2site"``;
+                          ``gs_c4v=True``; the split CTM
+                          (``CTMConfig.fuse_virtual_legs=False``);
+                          ``chi_auto_bump``; ``ctmrg_heuristic_increase_chi``;
+                          a ``chi_ramp``; a χ schedule
+                          (``gs_chi_schedule_steps``); a χ that does not
+                          match ``CTMConfig.chi``; the root-implicit AD
+                          path (``CTMConfig.ctm_ad_mode="root_implicit"`` /
+                          ``"root_implicit_symmetric"``); keys other than
+                          ``{(0, 0), (1, 0)}``; or an edge whose D² leg does
+                          not carry the charges of the matching face of
+                          ``A``'s/``B``'s double layer (a seed built for a
+                          different virtual charge layout).
 
     Returns:
         For 1-site:    ``(A_opt, env, E_gs)``
         For 2-site:    ``((A_opt, B_opt), (env_A, env_B), E_gs)``
         For multi-site: ``(dict[str, Tensor], dict[str, CTMTensorEnv], E_gs)``
     """
+    if envs_init is not None:
+        if config.unit_cell != "2site":
+            raise ValueError("envs_init is supported on unit_cell='2site' only")
+        if use_root_implicit_path(config):
+            raise ValueError(
+                "envs_init is not supported on the root-implicit AD path "
+                "(config.ctm.ctm_ad_mode='root_implicit'/"
+                "'root_implicit_symmetric'); use the default ctm_ad_mode for "
+                "unit_cell='2site'."
+            )
+        if config.gs_c4v:
+            # The C4v path rebuilds A and B as DenseTensor from C4v
+            # coefficients, so a block-sparse seed cannot meet its first CTM
+            # (PR #1051 review, finding 3).
+            raise ValueError(
+                "envs_init is not supported with gs_c4v=True: the C4v path "
+                "rebuilds the sites as DenseTensor from C4v coefficients, "
+                "which a seed built on the input tensors does not match."
+            )
     if config.gs_log_interval < 1:
         raise ValueError(f"gs_log_interval must be >= 1, got {config.gs_log_interval}")
     if config.gs_num_steps < 0:
@@ -756,7 +809,9 @@ def optimize_gs_ad(
         return _optimize_gs_ad_multisite(hamiltonian_gate, A_init, config)
 
     if config.unit_cell == "2site":
-        return _optimize_gs_ad_2site(hamiltonian_gate, A_init, config)
+        return _optimize_gs_ad_2site(
+            hamiltonian_gate, A_init, config, envs_init=envs_init
+        )
     if _use_reference_c4v_path(config):
         return _optimize_gs_ad_tensor_reference_c4v(hamiltonian_gate, A_init, config)
 
@@ -2551,6 +2606,7 @@ def _optimize_gs_ad_2site(
     hamiltonian_gate: jax.Array,
     AB_init: tuple[jax.Array, jax.Array] | tuple[Tensor, Tensor] | None,
     config: iPEPSConfig,
+    envs_init: dict[Coord, CTMTensorEnv] | None = None,
 ):
     """AD-based ground state optimization for 2-site iPEPS unit cell.
 
@@ -2613,13 +2669,80 @@ def _optimize_gs_ad_2site(
             B = _wrap_as_dense_tensor(B_data)
             AB_init = (A, B)
 
-    return _optimize_gs_ad_tensor_2site(hamiltonian_gate, AB_init, config)
+    return _optimize_gs_ad_tensor_2site(
+        hamiltonian_gate, AB_init, config, envs_init=envs_init
+    )
+
+
+#: Edge field -> the site leg whose double-layer face it contracts with.
+#: Measured: every edge of ``envs[c]`` carries exactly the charges of
+#: ``double_layer[c]``'s matching face, on a pair whose four legs all differ
+#: (PR #1051 review).
+_EDGE_FACE = (("T1", "u"), ("T2", "r"), ("T3", "d"), ("T4", "l"))
+
+
+def _double_layer_face(site: Tensor, leg: str):
+    """``(charges, flow)`` of ``site``'s double-layer face ``leg + "2"``.
+
+    Index arithmetic only -- the charges ``_build_double_layer_tensor`` would
+    give that face, without contracting anything: the ket leg fused with its
+    bra copy (``bar``: same charges, flipped flow).  The fused flow is the
+    bosonic builder's fixed one, or the bra leg's on the graded builder
+    (``graded_fuse_pair``); the two agree on the fPEPS site flows.
+    """
+    from tenax.algorithms._ctm_tensor_init import IN, OUT, _is_fermionic
+    from tenax.algorithms._tensor_utils import _compute_fused_charges
+
+    ket = site.indices[site.labels().index(leg)]
+    bra = ket.flip_flow()
+    if _is_fermionic(site):
+        flow = bra.flow
+    else:
+        flow = {"u": IN, "d": OUT, "l": IN, "r": OUT}[leg]
+    return _compute_fused_charges(ket, bra, flow, ket.symmetry), flow
+
+
+def _check_envs_init_matches_sites(
+    envs_init: dict[Coord, CTMTensorEnv], sites: dict[Coord, Tensor]
+) -> None:
+    """Refuse an ``envs_init`` whose edge D² legs are not the sites' faces.
+
+    A seed built for a different layout (another ``su_grow_layout`` result)
+    either fails deep inside the first sweep's contraction (different sector
+    counts) or -- same counts, different charge order -- is silently
+    contracted against the wrong in-sector basis.  Compares the ordered
+    charge list and flow of each edge's D² leg with the face the CTM's double
+    layer will have (:func:`_double_layer_face`); index metadata only,
+    nothing is built or densified.
+
+    It cannot see a layout change that leaves the fused D² charges identical
+    (e.g. FermionParity ``(2, 1)`` vs ``(1, 2)`` at D=3 in the same order):
+    there the seed is structurally valid and only its values are stale.
+    """
+    for coord, site in sites.items():
+        for field, leg in _EDGE_FACE:
+            face = f"{leg}2"
+            edge = getattr(envs_init[coord], field)
+            e_ix = edge.indices[edge.labels().index(face)]
+            charges, flow = _double_layer_face(site, leg)
+            e_q = np.asarray(e_ix.charges)
+            # A dense env keeps no flow discipline (measured: its init edges
+            # share the face's flow), so only a block-sparse edge's is read.
+            flow_bad = isinstance(edge, SymmetricTensor) and e_ix.flow == flow
+            if flow_bad or not np.array_equal(e_q, charges):
+                raise ValueError(
+                    f"envs_init[{coord}].{field} leg {face!r} does not match "
+                    f"the site's double layer (charges {e_q.tolist()} vs "
+                    f"{np.asarray(charges).tolist()}): the seed was built for "
+                    "a different virtual charge layout."
+                )
 
 
 def _optimize_gs_ad_tensor_2site(
     hamiltonian_gate: jax.Array,
     AB_init: tuple[Tensor, Tensor],
     config: iPEPSConfig,
+    envs_init: dict[Coord, CTMTensorEnv] | None = None,
 ):
     """AD-based ground state optimization for 2-site Tensor-protocol iPEPS.
 
@@ -2799,6 +2922,42 @@ def _optimize_gs_ad_tensor_2site(
     # Env warm-start cache — replaces flat env_leaves threading.
     _env_cache_2s: dict[str, dict] = {}
 
+    if envs_init is not None:
+        if set(envs_init.keys()) != set(CHECKERBOARD_NEIGHBORS.keys()):
+            raise ValueError(
+                f"envs_init keys {sorted(envs_init.keys())} must match the "
+                f"2-site cell {sorted(CHECKERBOARD_NEIGHBORS.keys())}"
+            )
+        if use_split_2s:
+            raise ValueError(
+                "envs_init: the split CTM is not supported; use fuse_virtual_legs=True"
+            )
+        if (
+            ctm_cfg_2s.chi_auto_bump
+            or ctm_cfg_2s.ctmrg_heuristic_increase_chi
+            or ctm_cfg_2s.chi_ramp is not None
+            or config.gs_chi_schedule_steps is not None
+        ):
+            raise ValueError(
+                "envs_init fixes the environment layout; chi_auto_bump, "
+                "ctmrg_heuristic_increase_chi, chi_ramp, and a chi schedule "
+                "all change it. Turn them off."
+            )
+        chi_seen = {e.C1.indices[0].dim for e in envs_init.values()}
+        if chi_seen != {ctm_cfg_2s.chi}:
+            raise ValueError(
+                f"envs_init has chi {sorted(chi_seen)}, the CTM config "
+                f"chi={ctm_cfg_2s.chi}"
+            )
+        _check_envs_init_matches_sites(envs_init, {(0, 0): A, (1, 0): B})
+        # The first forward the optimizer runs -- both the differentiated
+        # loss (make_ctm_energy_fn reads env_cache["envs"] as env_init, see
+        # ipeps_ad_policy._ctm_energy_fn) and the grad-free warm-start
+        # refresh (_update_env_cache_2s below) -- sees this seed, so the
+        # traced CTM keeps the χ-sector layout envs_init was built with
+        # (#1035) instead of cold-starting from a tiled/identity env.
+        _env_cache_2s["envs"] = envs_init
+
     if use_c4v:
         from tenax.algorithms.ipeps import (
             build_c4v_basis,
@@ -2967,6 +3126,33 @@ def _optimize_gs_ad_tensor_2site(
     # the variPEPS §2.8.2 bail-out (config.gs_chi_ceiling_bailout).  Reset
     # on chi bump or when the indicator dips below threshold.
     chi_ceiling_consecutive_2s = 0
+
+    def _reset_env_cache_2s():
+        """Roll back the env cache alongside a ``params = best_params`` revert.
+
+        ``_drop_env_cache_for_reset`` always fires: it invalidates the
+        implicit-AD λ warm start regardless of ``envs_init`` (#501 --
+        after a rollback, the adjoint's cached seed no longer matches
+        ``best_params``).  Without ``envs_init`` it also clears the env
+        cache outright, because of #518: a reactive/scheduled χ bump may
+        have left ``best_env_cache_2s`` at a stale χ, so the next CTM call
+        cold-starts at the current ``ctm_cfg_2s.chi`` rather than risk
+        restoring the wrong shape.
+
+        With ``envs_init`` set that hazard cannot arise -- the validation
+        block above already refuses ``chi_auto_bump`` and
+        ``gs_chi_schedule_steps``, so χ is pinned for the whole run.  A bare
+        clear would then just cold-start the next forward, silently losing
+        the χ-sector layout ``envs_init`` exists to freeze (Task 5 review,
+        ruling R17): restore ``best_env_cache_2s`` (the env that matches
+        ``best_params``, snapshotted at the same moment -- see the
+        ``_should_accept_best`` branch below) instead, or the seed itself
+        if no best snapshot exists yet (a rollback before the first
+        accepted step).
+        """
+        _drop_env_cache_for_reset(_env_cache_2s)
+        if envs_init is not None:
+            _env_cache_2s.update(best_env_cache_2s or {"envs": envs_init})
 
     # Optional trajectory capture (config.return_history).  Always allocated
     # but only populated/returned when the flag is set.
@@ -3356,11 +3542,10 @@ def _optimize_gs_ad_tensor_2site(
                             )
                         break
                     params = best_params
-                    # #518: ``best_env_cache_2s`` may be at a stale χ if a
-                    # reactive/scheduled bump fired after it was last
-                    # snapshotted.  Clear instead of restoring; the next
-                    # CTM call cold-starts at the current ctm_cfg_2s.chi.
-                    _drop_env_cache_for_reset(_env_cache_2s)
+                    # #518 / R17: see _reset_env_cache_2s's docstring -- with
+                    # envs_init set, restore the seed's env instead of a bare
+                    # clear, since envs_init already pins χ.
+                    _reset_env_cache_2s()
                     if is_metric_lbfgs:
                         lbfgs_history.clear()
                         prev_params_flat = None
@@ -3416,7 +3601,8 @@ def _optimize_gs_ad_tensor_2site(
                 spike_floor = max(float(np.median(recent_gnorms_2s)), 1.0)
                 if grad_norm_val > config.gs_grad_spike_ratio * spike_floor:
                     params = best_params
-                    _drop_env_cache_for_reset(_env_cache_2s)
+                    # #518 / R17: see _reset_env_cache_2s's docstring.
+                    _reset_env_cache_2s()
                     # Clear the rolling buffer too (codex PR #524 P1): if a chi
                     # bump or stall recovery has shifted the legitimate
                     # gradient scale upward, the stale median would keep
@@ -3990,11 +4176,8 @@ def _optimize_gs_ad_tensor_2site(
                             )
                         break
                     params = best_params
-                    # #518: ``best_env_cache_2s`` may be at a stale χ if a
-                    # reactive/scheduled bump fired after it was last
-                    # snapshotted.  Clear instead of restoring; the next
-                    # CTM call cold-starts at the current ctm_cfg_2s.chi.
-                    _drop_env_cache_for_reset(_env_cache_2s)
+                    # #518 / R17: see _reset_env_cache_2s's docstring.
+                    _reset_env_cache_2s()
                     if is_cg:
                         cg_direction = None
                         prev_grad = None

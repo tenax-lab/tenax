@@ -18,7 +18,9 @@ Reference:
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -322,6 +324,162 @@ def _fpeps_simple_update(
     # once per step -- the same imaginary time per bond as the old two-phase
     # loop delivered for its two.
     return _simple_update_checkerboard_sweep(A, B, gate, max_D, 4 * steps)
+
+
+def bond_layout(A: SymmetricTensor, B: SymmetricTensor) -> tuple[tuple[int, int], ...]:
+    """``(n_even, n_odd)`` per bond leg of ``A`` then ``B``, legs ``u, d, l, r``.
+
+    The quantity the simple update grows and AD must hold fixed.  ``B``'s legs
+    are included because on the checkerboard they are the far ends of ``A``'s
+    bonds, and a mismatch between them is a broken state, not a layout.
+    """
+    out = []
+    for T in (A, B):
+        for leg in ("u", "d", "l", "r"):
+            ix = T.indices[T.labels().index(leg)]
+            par = np.asarray(ix.symmetry.parity(np.asarray(ix.charges)))
+            out.append((int((par == 0).sum()), int((par == 1).sum())))
+    return tuple(out)
+
+
+class FrozenSU(NamedTuple):
+    """The output of :func:`su_grow_layout` (fields in the plan).
+
+    Attributes:
+        A:      Physical (lambda-absorbed) site tensor for sublattice A,
+                ready for CTM/AD.
+        B:      Physical (lambda-absorbed) site tensor for sublattice B.
+        layout: :func:`bond_layout` at the end of the run -- the sector
+                split AD is meant to hold fixed.
+        stages: :func:`bond_layout` at the end of each growth stage,
+                ``D_start`` through ``config.D`` inclusive, in that order.
+        frozen: Whether the layout stayed put after the final stage's first
+                cycle.  ``False`` means the sector split kept moving through
+                the rest of that stage, and ``layout``/``stages[-1]`` should
+                not be trusted as a fixed point.
+    """
+
+    A: SymmetricTensor
+    B: SymmetricTensor
+    layout: tuple[tuple[int, int], ...]
+    stages: tuple[tuple[tuple[int, int], ...], ...]
+    frozen: bool
+
+
+def su_grow_layout(
+    gate: SymmetricTensor,
+    config: FPEPSConfig,
+    *,
+    D_start: int = 2,
+    cycles_per_stage: int = 25,
+    final_cycles: int = 50,
+    key: jax.Array | None = None,
+) -> FrozenSU:
+    """Build the bond-sector layout one slot at a time with an eager, unpinned
+    simple update, then stop.
+
+    A global top-D truncation locks the sector sizes at the first truncation
+    and never moves them again (measured in tenax and in YASTN), so the only
+    step that reads the physics into the layout is the one that adds a slot:
+    the new slot goes to the sector with the largest discarded weight.  This
+    relaxes at ``D_start``, raises ``max_D`` by one, relaxes again, up to
+    ``config.D``.  The last stage runs ``final_cycles`` cycles; ``frozen`` is
+    whether the layout stayed put after that stage's first cycle.
+
+    ``D_start`` must be at least 2: a D=1 bond is one even sector, which
+    forces a parity-even site into the vacuum, on which hopping does nothing.
+    A bond with an empty parity sector is refused rather than frozen -- AD
+    could never refill it (#878).
+
+    Each of the four bonds keeps its own spectrum (``independent_bonds=True``),
+    unlike :func:`_fpeps_simple_update`.  With the truncation unpinned, a
+    bond's SVD emits its own sector split *and* its own charge order, so the
+    shared-spectrum mirror would scale the partner leg with singular values
+    aligned to a different layout -- permuted between sectors at fixed ``D``,
+    and one element too long on a leg not yet grown.  The pinned path keeps
+    both partners on one layout, which is why sharing is safe there.
+
+    Args:
+        gate:             2-site Hamiltonian as SymmetricTensor (the bare
+                          Hamiltonian, not yet Trotterized -- this builds
+                          ``exp(-config.dt * gate)`` itself, once).
+        config:           FPEPSConfig.  ``config.D`` is the final bond
+                          dimension the layout is grown to.
+        D_start:          Bond dimension to start relaxing at.  Must be at
+                          least 2 (see above) and at most ``config.D``.
+        cycles_per_stage: Checkerboard cycles (4 phases each) to relax for
+                          at every stage before ``max_D`` is raised, except
+                          the last.  Must be at least 1.
+        final_cycles:     Checkerboard cycles to relax for at ``config.D``,
+                          the stage whose freeze is checked.  Must be at
+                          least 2 -- ``frozen`` compares cycle 0's layout
+                          against every later cycle, so one cycle would make
+                          ``frozen`` trivially True.
+        key:              JAX random key for the initial random fPEPS
+                          tensor.  Defaults to ``PRNGKey(0)``.
+
+    Returns:
+        :class:`FrozenSU`.
+    """
+    if D_start < 2:
+        raise ValueError("su_grow_layout: D_start must be >= 2 (D=1 is the vacuum)")
+    if D_start > config.D:
+        raise ValueError(
+            f"su_grow_layout: D_start ({D_start}) must be <= config.D ({config.D})"
+        )
+    if cycles_per_stage < 1:
+        raise ValueError(
+            f"su_grow_layout: cycles_per_stage must be >= 1, got {cycles_per_stage} "
+            "-- a stage with zero cycles leaves `lay` unbound (the D_start "
+            "collapse check reads it) or, for a non-first stage, silently "
+            "reuses the previous stage's layout."
+        )
+    if final_cycles < 2:
+        raise ValueError(
+            f"su_grow_layout: final_cycles must be >= 2, got {final_cycles} -- "
+            "`frozen` is checked by comparing cycle 0's layout against every "
+            "later cycle in the final stage, so final_cycles=1 makes `frozen` "
+            "trivially True (there is nothing to compare cycle 0 against)."
+        )
+    key = jax.random.PRNGKey(0) if key is None else key
+    A = B = _initialize_fpeps(dataclasses.replace(config, D=D_start), key)
+    trotter = _trotter_gate(gate, config.dt)
+    lam = None
+    stages = []
+    frozen = True
+    for D in range(D_start, config.D + 1):
+        n_cycles = final_cycles if D == config.D else cycles_per_stage
+        first = None
+        for cycle in range(n_cycles):
+            # independent_bonds=True: unpinned, each bond's SVD emits its own
+            # sector layout and charge order, so mirroring one bond's spectrum
+            # onto its partner (the shared-spectrum default) scales the
+            # partner's leg with values from a different layout -- and during
+            # growth, a length-D spectrum onto a leg still at D-1 (PR #1051).
+            A, B, lam = _simple_update_checkerboard_sweep(
+                A,
+                B,
+                trotter,
+                D,
+                4,
+                lambdas=lam,
+                independent_bonds=True,
+                pin_sectors=False,
+            )
+            lay = bond_layout(A, B)
+            if D == config.D:
+                if cycle == 0:
+                    first = lay
+                elif lay != first:
+                    frozen = False
+        stages.append(lay)
+    if any(0 in pair for pair in lay):
+        raise ValueError(
+            f"su_grow_layout: a bond sector collapsed to zero {lay}; AD cannot "
+            "refill it. Try another key (see #878)."
+        )
+    A_phys, B_phys = _to_physical_pair(A, B, lam)
+    return FrozenSU(A_phys, B_phys, lay, tuple(stages), frozen)
 
 
 def sublattice_gap(

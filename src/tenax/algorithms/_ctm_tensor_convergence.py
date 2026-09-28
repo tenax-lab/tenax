@@ -30,6 +30,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
@@ -269,6 +270,48 @@ def _get_base_charges(a: Tensor):
     return charges
 
 
+def _seam_chi_charges(
+    envs: dict[Coord, CTMTensorEnv],
+    neighbors: dict[Coord, dict[str, Coord]],
+    anchor: Coord,
+    direction: str,
+    chi: int,
+) -> np.ndarray | None:
+    """Charges of the env leg that the projector anchored at ``anchor`` rewrites.
+
+    The 2x2 sweep writes each projector's ``chi_new`` into the env of the cell
+    on the far side of the absorbed column/row (phase 2 of
+    :func:`_ctm_tensor_sweep_multisite` and the ``_ctm_tensor_absorb_*_2plaq``
+    helpers): its ``"curr"`` use lands on
+
+    * left:   ``T4[anchor.right].t4_u``
+    * right:  ``T2[anchor].t2_d``
+    * top:    ``T1[anchor.bottom].t1_r``
+    * bottom: ``T3[anchor].t3_l``
+
+    The traced SVD inherits its per-sector counts from this leg (#929).  The
+    enlarged corners only carry the *absorbed* cell's leg, which on a
+    checkerboard is the other sublattice's bond (#1035 Task 3).  Returns
+    ``None`` for a dense env or a leg that is not ``chi`` wide.
+    """
+    cell, field, label = {
+        "left": (neighbors[anchor]["right"], "T4", "t4_u"),
+        "right": (anchor, "T2", "t2_d"),
+        "top": (neighbors[anchor]["bottom"], "T1", "t1_r"),
+        "bottom": (anchor, "T3", "t3_l"),
+    }[direction]
+    t = getattr(envs[cell], field)
+    if not isinstance(t, SymmetricTensor):
+        return None
+    labels = t.labels()
+    if label not in labels:
+        return None
+    idx = t.indices[labels.index(label)]
+    if idx.dim != chi:
+        return None
+    return np.asarray(idx.charges, dtype=np.int32)
+
+
 def _sort_coords_for_direction(coords: list[Coord], direction: str) -> list[Coord]:
     """Sort coordinates for correct cascading order in a CTM direction move.
 
@@ -453,6 +496,9 @@ def _ctm_tensor_sweep_multisite(
                         direction,
                         base_charges=base_charges,
                         projector_backward=projector_backward,
+                        incoming_chi_charges=_seam_chi_charges(
+                            envs_old, neighbors, s_anchor, direction, chi
+                        ),
                     )
                 )
                 projectors[s_anchor] = (P_top, P_bot)

@@ -778,6 +778,64 @@ case sits ~80× higher, its smallest eigenvalue 0.8 of the spectral radius below
 zero). **This changes `fpeps()` behaviour**: on such a state it now returns
 `NaN` rather than a finite unphysical energy.
 
+### Seeding the 2-site AD optimizer with a frozen environment layout
+
+`optimize_gs_ad`'s 2-site implicit-AD path re-derives its CTM environment
+from a cold tiled/identity seed unless told otherwise. On a fermionic
+(block-sparse `SymmetricTensor`) state, a cold-started *traced* CTM can
+settle on a different χ-sector layout than an eager `ctm_tensor_2site` run
+on the same tensors finds — a different point to differentiate through, and
+possibly extra retraces. `envs_init` seeds the first forward CTM (and the
+warm-start refresh between steps) with an already-converged environment;
+under tracing the CTM keeps the χ-sector layout it is given (#1035), so the
+layout stays fixed for the run:
+
+```python
+import jax
+from tenax import (
+    CTMConfig,
+    FPEPSConfig,
+    ctm_tensor_2site,
+    iPEPSConfig,
+    optimize_gs_ad,
+    spinless_fermion_gate,
+    su_grow_layout,
+)
+
+cfg = FPEPSConfig(D=2, t=1.0, V=0.0, dt=0.05)
+H = spinless_fermion_gate(cfg)
+su = su_grow_layout(H, cfg, key=jax.random.PRNGKey(4))  # eager SU grows the sectors
+eA, eB = ctm_tensor_2site(su.A, su.B, 8, max_iter=150, conv_tol=1e-10)  # eager CTM picks the chi layout
+
+(A, B), (env_A, env_B), E = optimize_gs_ad(              # traced AD keeps both layouts
+    H, (su.A, su.B),
+    iPEPSConfig(max_bond_dim=2, unit_cell="2site", su_init=False,
+                gs_implicit_ad=True, gs_num_steps=5,
+                ctm=CTMConfig(chi=8, max_iter=50, conv_tol=1e-9)),
+    envs_init={(0, 0): eA, (1, 0): eB},
+)
+```
+
+`su_grow_layout` tracks the sector split with
+`bond_layout(A: SymmetricTensor, B: SymmetricTensor) -> tuple[tuple[int, int], ...]`
+internally; call it directly on any checkerboard pair to read the same
+`(n_even, n_odd)` count per bond leg (`u, d, l, r` of `A` then `B`) that
+`su.layout` above already reports.
+
+`envs_init` is refused (`ValueError`) in eleven cases: `unit_cell` other than
+`"2site"`; `gs_c4v=True` (the C4v path rebuilds the sites as `DenseTensor`);
+the root-implicit AD path (`ctm_ad_mode="root_implicit"`/
+`"root_implicit_symmetric"`); the split CTM (`fuse_virtual_legs=False`);
+`chi_auto_bump`; `ctmrg_heuristic_increase_chi`; a `chi_ramp`; a χ schedule
+(`gs_chi_schedule_steps`); a chi that does not match `CTMConfig.chi`;
+keys other than `{(0, 0), (1, 0)}`; and edge D² legs whose charges do not
+match the double layers of the tensors passed in (a seed built for a
+different virtual charge layout) — each one changes, bypasses, or is
+inconsistent with the layout `envs_init` is meant to freeze. The
+optimizer's own *final* returned environment is always a fresh, cold CTM
+evaluation on the optimized tensors (issue #899) — `envs_init` fixes the
+layout used *during* optimization, not this last re-check.
+
 ## Honeycomb iPEPS CTM (native rank-4)
 
 Native rank-4 CTMRG for honeycomb iPEPS — six corners, three edge

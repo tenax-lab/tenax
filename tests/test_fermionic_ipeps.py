@@ -582,7 +582,7 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
     # written as a present-tense limitation would misdirect the #878 work,
     # which is gated on this and no longer blocked by it.  See #878.
     orig_pin = isu._truncation_base_charges
-    isu._truncation_base_charges = lambda A, leg: None
+    isu._truncation_base_charges = lambda A, leg, pin_sectors=True: None
     try:
         results = {}
         for name, A, B, G in (

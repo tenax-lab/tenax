@@ -457,6 +457,7 @@ def _compute_2x2_projector(
     direction: str = "left",
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
+    incoming_chi_charges: np.ndarray | None = None,
 ) -> tuple[Tensor, Tensor, jax.Array]:
     r"""Fishman 2x2 plaquette cross-projector for the multisite CTM move.
 
@@ -498,6 +499,12 @@ def _compute_2x2_projector(
             AD, a bare sweep); see ``_PROJECTOR_BACKWARD_FLOW`` for why it
             is not yet the default under implicit AD (#983, blocked on
             #841).
+        incoming_chi_charges: Charges of the environment leg that ``chi_new``
+            replaces, supplied by a multisite sweep that knows which cell the
+            new bond is written to.  Consulted only by the traced symmetric
+            path; see :func:`_incoming_chi_charges` for why the enlarged
+            corners cannot name that leg themselves on a multi-cell unit
+            cell.
 
     Returns:
         Triple ``(P_top, P_bot, eps_T)`` of rank-3 :class:`DenseTensor`
@@ -562,6 +569,7 @@ def _compute_2x2_projector(
             direction=direction,
             base_charges=base_charges,
             projector_backward=projector_backward,
+            incoming_chi_charges=incoming_chi_charges,
         )
 
     # ---- Step 1: form the two halves (M1, M2) for the chosen direction. ----
@@ -996,6 +1004,17 @@ def _incoming_chi_charges(
     Returns ``None`` when the leg is missing or is not ``chi`` wide -- during a
     chi ramp the environment is still at the old width, and a stale inventory
     is worse than the tiled guess.
+
+    **Only right on a one-cell unit cell.**  The leg read here belongs to the
+    cell whose column/row is being *absorbed*, but ``chi_new`` is written into
+    the env of the neighbouring cell -- e.g. the bottom projector anchored at
+    ``X`` becomes ``T3[X].t3_l``, while this reads ``T3[X.bottom].t3_l``.  On a
+    2-site checkerboard that is the other sublattice's bond, so every traced
+    sweep swapped the A->B and B->A inventories and a seeded fixed point
+    oscillated between two layouts (#1035 Task 3).  Multisite sweeps therefore
+    pass the destination leg explicitly (``incoming_chi_charges``, built by
+    ``_ctm_tensor_convergence._seam_chi_charges``); this reader is the fallback
+    for callers without a unit-cell map.
     """
     corner, label = {
         "left": (Q_TL, "chi_B"),
@@ -1024,6 +1043,7 @@ def _compute_2x2_projector_symmetric(
     direction: str,
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
+    incoming_chi_charges: np.ndarray | None = None,
 ) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array]:
     """Block-sparse 2x2 Fishman projector for SymmetricTensor inputs.
 
@@ -1193,7 +1213,11 @@ def _compute_2x2_projector_symmetric(
             # values.  Give it the environment's own chi inventory rather than
             # the double-layer charges tiled to chi -- see
             # :func:`_incoming_chi_charges` (#929).
-            traced_base = _incoming_chi_charges(Q_TL, Q_TR, Q_BL, Q_BR, direction, chi)
+            traced_base = incoming_chi_charges
+            if traced_base is None or len(traced_base) != chi:
+                traced_base = _incoming_chi_charges(
+                    Q_TL, Q_TR, Q_BL, Q_BR, direction, chi
+                )
             if traced_base is None:
                 traced_base = base_charges
             U_Mp_T, S_Mp, Vh_Mp_T, _ = G.svd(
