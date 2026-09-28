@@ -670,11 +670,20 @@ def optimize_gs_ad(
         config:           iPEPSConfig with AD optimization settings.
         envs_init:        A converged environment to seed the first forward
                           CTM with.  Under tracing the CTM keeps the
-                          χ-sector layout it is given, so this fixes the
-                          environment layout for the whole optimisation --
-                          pass the output of an eager ``ctm_tensor_2site``
-                          on the initial tensors.  2-site fused only;
-                          refused with ``chi_auto_bump`` or a χ schedule.
+                          χ-sector layout it is given, and every
+                          optimizer-level rollback restores this seed
+                          (rather than cold-starting) too, so this fixes
+                          the environment layout for the whole
+                          optimisation -- pass the output of an eager
+                          ``ctm_tensor_2site`` on the initial tensors.
+                          2-site fused only; refused (``ValueError``) with:
+                          a unit cell other than ``"2site"``; the split CTM
+                          (``CTMConfig.fuse_virtual_legs=False``);
+                          ``chi_auto_bump``; a χ schedule
+                          (``gs_chi_schedule_steps``); a χ that does not
+                          match ``CTMConfig.chi``; or the root-implicit AD
+                          path (``CTMConfig.ctm_ad_mode="root_implicit"`` /
+                          ``"root_implicit_symmetric"``).
 
     Returns:
         For 1-site:    ``(A_opt, env, E_gs)``
@@ -3018,6 +3027,33 @@ def _optimize_gs_ad_tensor_2site(
     # on chi bump or when the indicator dips below threshold.
     chi_ceiling_consecutive_2s = 0
 
+    def _reset_env_cache_2s():
+        """Roll back the env cache alongside a ``params = best_params`` revert.
+
+        ``_drop_env_cache_for_reset`` always fires: it invalidates the
+        implicit-AD λ warm start regardless of ``envs_init`` (#501 --
+        after a rollback, the adjoint's cached seed no longer matches
+        ``best_params``).  Without ``envs_init`` it also clears the env
+        cache outright, because of #518: a reactive/scheduled χ bump may
+        have left ``best_env_cache_2s`` at a stale χ, so the next CTM call
+        cold-starts at the current ``ctm_cfg_2s.chi`` rather than risk
+        restoring the wrong shape.
+
+        With ``envs_init`` set that hazard cannot arise -- the validation
+        block above already refuses ``chi_auto_bump`` and
+        ``gs_chi_schedule_steps``, so χ is pinned for the whole run.  A bare
+        clear would then just cold-start the next forward, silently losing
+        the χ-sector layout ``envs_init`` exists to freeze (Task 5 review,
+        ruling R17): restore ``best_env_cache_2s`` (the env that matches
+        ``best_params``, snapshotted at the same moment -- see the
+        ``_should_accept_best`` branch below) instead, or the seed itself
+        if no best snapshot exists yet (a rollback before the first
+        accepted step).
+        """
+        _drop_env_cache_for_reset(_env_cache_2s)
+        if envs_init is not None:
+            _env_cache_2s.update(best_env_cache_2s or {"envs": envs_init})
+
     # Optional trajectory capture (config.return_history).  Always allocated
     # but only populated/returned when the flag is set.
     _history_energies: list[float] = []
@@ -3406,11 +3442,10 @@ def _optimize_gs_ad_tensor_2site(
                             )
                         break
                     params = best_params
-                    # #518: ``best_env_cache_2s`` may be at a stale χ if a
-                    # reactive/scheduled bump fired after it was last
-                    # snapshotted.  Clear instead of restoring; the next
-                    # CTM call cold-starts at the current ctm_cfg_2s.chi.
-                    _drop_env_cache_for_reset(_env_cache_2s)
+                    # #518 / R17: see _reset_env_cache_2s's docstring -- with
+                    # envs_init set, restore the seed's env instead of a bare
+                    # clear, since envs_init already pins χ.
+                    _reset_env_cache_2s()
                     if is_metric_lbfgs:
                         lbfgs_history.clear()
                         prev_params_flat = None
@@ -3466,7 +3501,8 @@ def _optimize_gs_ad_tensor_2site(
                 spike_floor = max(float(np.median(recent_gnorms_2s)), 1.0)
                 if grad_norm_val > config.gs_grad_spike_ratio * spike_floor:
                     params = best_params
-                    _drop_env_cache_for_reset(_env_cache_2s)
+                    # #518 / R17: see _reset_env_cache_2s's docstring.
+                    _reset_env_cache_2s()
                     # Clear the rolling buffer too (codex PR #524 P1): if a chi
                     # bump or stall recovery has shifted the legitimate
                     # gradient scale upward, the stale median would keep
@@ -4040,11 +4076,8 @@ def _optimize_gs_ad_tensor_2site(
                             )
                         break
                     params = best_params
-                    # #518: ``best_env_cache_2s`` may be at a stale χ if a
-                    # reactive/scheduled bump fired after it was last
-                    # snapshotted.  Clear instead of restoring; the next
-                    # CTM call cold-starts at the current ctm_cfg_2s.chi.
-                    _drop_env_cache_for_reset(_env_cache_2s)
+                    # #518 / R17: see _reset_env_cache_2s's docstring.
+                    _reset_env_cache_2s()
                     if is_cg:
                         cg_direction = None
                         prev_grad = None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import warnings
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -475,6 +476,30 @@ def _ad_config(steps, **ctm):
     )
 
 
+@pytest.fixture(scope="module")
+def light_AB():
+    """Cheap (D=2, no SU sweep, no CTM) site tensors for the refusal tests
+    that call ``A.norm()``/``B.norm()`` before ever raising, but never run
+    any CTM or inspect envs_init's structure.  Building the full
+    ``seeded_d2`` fixture (~155 s: a real 28 s SU growth plus a genuine
+    ~126 s eager CTM to conv_tol=1e-10) for a test that raises before any
+    of that matters would be pure waste (review item 6)."""
+    cfg = FPEPSConfig(D=2, t=1.0, V=0.0, dt=0.05)
+    H = spinless_fermion_gate(cfg)
+    A0 = _initialize_fpeps(cfg, jax.random.PRNGKey(0))
+    return A0, A0, H
+
+
+def _fake_envs(chi):
+    """A minimal stand-in for ``{(0, 0): CTMTensorEnv, (1, 0): CTMTensorEnv}``
+    for refusal tests whose check either fires before envs_init is ever
+    inspected, or reads only ``.C1.indices[0].dim`` from it (the chi-mismatch
+    check) -- avoids building a real, converged environment for a test that
+    never runs any CTM."""
+    env = SimpleNamespace(C1=SimpleNamespace(indices=[SimpleNamespace(dim=chi)]))
+    return {(0, 0): env, (1, 0): env}
+
+
 def test_envs_init_is_the_first_forward_seed(seeded_d2, monkeypatch):
     """R4: the spy must not pay an AD compile -- it records ``env_init`` and
     aborts via a sentinel exception before the (expensive) implicit-AD
@@ -514,36 +539,59 @@ def test_envs_init_is_the_first_forward_seed(seeded_d2, monkeypatch):
     assert seeds and seeds[0] is envs
 
 
-def test_envs_init_refuses_a_chi_bump(seeded_d2):
-    A, B, H, _, envs = seeded_d2
+def test_envs_init_refuses_a_chi_bump(light_AB):
+    A, B, H = light_AB
     with pytest.raises(ValueError, match="envs_init.*chi_auto_bump"):
-        optimize_gs_ad(H, (A, B), _ad_config(1, chi_auto_bump=True), envs_init=envs)
+        optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(1, chi_auto_bump=True),
+            envs_init=_fake_envs(CHI_D2),
+        )
 
 
-def test_envs_init_refuses_a_mismatched_chi(seeded_d2):
-    A, B, H, _, envs = seeded_d2
+def test_envs_init_refuses_a_mismatched_chi(light_AB):
+    A, B, H = light_AB
     cfg = _ad_config(1)
     cfg = dataclasses.replace(cfg, ctm=dataclasses.replace(cfg.ctm, chi=CHI_D2 + 2))
     with pytest.raises(ValueError, match="envs_init.*chi"):
-        optimize_gs_ad(H, (A, B), cfg, envs_init=envs)
+        optimize_gs_ad(H, (A, B), cfg, envs_init=_fake_envs(CHI_D2))
 
 
-def test_envs_init_refuses_a_non_2site_unit_cell(seeded_d2):
-    """The three refusals the ruling lists: bump, mismatch, and (this one,
-    added by the ruling) a non-2site unit cell.  All three raise ValueError
-    before any CTM/AD work -- ``optimize_gs_ad`` checks ``envs_init`` before
-    even ``config.gs_log_interval``, so this needs no real CTM setup."""
-    A, B, H, _, envs = seeded_d2
+def test_envs_init_refuses_a_non_2site_unit_cell():
+    """The refusals the ruling lists: bump, mismatch, non-2site, and (fix
+    round 1, item 4) split-CTM and root-implicit.  All five raise
+    ValueError before any CTM/AD work.  This one and the root-implicit one
+    below fire in ``optimize_gs_ad`` itself, before ``A_init``/
+    ``hamiltonian_gate`` are ever touched -- so they need no real tensors
+    at all, not even the cheap ``light_AB`` stand-in."""
     cfg = dataclasses.replace(_ad_config(1), unit_cell="1x1")
     with pytest.raises(ValueError, match="envs_init.*2site"):
-        optimize_gs_ad(H, (A, B), cfg, envs_init=envs)
+        optimize_gs_ad(None, None, cfg, envs_init=_fake_envs(CHI_D2))
+
+
+def test_envs_init_refuses_the_split_ctm(light_AB):
+    A, B, H = light_AB
+    cfg = _ad_config(1, fuse_virtual_legs=False)
+    with pytest.raises(ValueError, match="envs_init.*split"):
+        optimize_gs_ad(H, (A, B), cfg, envs_init=_fake_envs(CHI_D2))
+
+
+def test_envs_init_refuses_the_root_implicit_path():
+    cfg = dataclasses.replace(
+        _ad_config(1),
+        ctm=dataclasses.replace(_ad_config(1).ctm, ctm_ad_mode="root_implicit"),
+    )
+    with pytest.raises(ValueError, match="envs_init.*root.implicit"):
+        optimize_gs_ad(None, None, cfg, envs_init=_fake_envs(CHI_D2))
 
 
 @pytest.mark.slow
 def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
     seeded_d2, monkeypatch
 ):
-    """R16/R10: 5 AD steps (the brief's 10, halved per the ruling).
+    """R16/R10, fix round 1 (Task 5 review, ruling R17): 5 AD steps (the
+    brief's 10, halved per the ruling).
 
     Deviates from R10's literal ``_layout(envs1) == _layout(seed)`` on the
     optimizer's RETURN value for a reason this task's own probing surfaced
@@ -570,56 +618,46 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
     ``env_init`` it was ever seeded with, across all 5 steps including any
     interior line-search/HZ-probe re-evaluations.
 
-    Two things this task's own probing found, both by running the test and
-    reading the failure, not by inspection alone:
+    Round-1 history (a first implementation of this test, superseded here):
+    an early version tolerated one ``env_init=None`` cold call (an HZ
+    line-search probe failed to converge and triggered the L-BFGS
+    line-search-stall reset -- an HZ ``phi=4 dphi=0 alpha=1.7
+    converged=False`` on step 4-5, which clears ``_env_cache_2s`` via
+    ``_drop_env_cache_for_reset``, *not* the ``CTMRGGradientError``/
+    grad-spike-guard reset paths, neither of which fired) and accepted that
+    every later call landed on a new, self-consistent-with-itself layout.
+    The review adjudicated this as a defect, not a caveat: with
+    ``envs_init`` set, `chi_auto_bump`/`gs_chi_schedule_steps` are already
+    refused, so the reset's own justification (issue #518: a reactive/
+    scheduled χ bump can leave the cached env at a stale χ) cannot apply,
+    and clearing the seed anyway was pure loss of the feature's whole
+    point. Correction to that first version's claim: the stall-reset branch
+    IS gated by ``gs_stall_recovery`` -- ``_normalize_stall_recovery``
+    resolves the unset default to ``"reset"`` for any non-1x1 unit cell
+    (``ipeps_optimize.py`` ``_normalize_stall_recovery``, called with
+    ``unit_cell="2site"``), so it is *on by default* for every 2-site
+    ``envs_init`` caller, not an edge case.
 
-    1. A first attempt asserted layout equality on literally every recorded
-       call and crashed on a ``TypeError`` inside ``_layout(None)``: some
-       interior call legitimately receives ``env_init=None``.
-       ``_sigma_gauged_ctm_converge``/``_run_ctm_loop_with_bump`` treat
-       ``None`` as "cold-start this call" -- a valid input, not an error.
-
-    2. A second attempt (asserting equality on every *non-None* call)
-       failed too, but instructively: 18 consecutive calls (spanning steps
-       1-4 and the start of step 5) matched the seed exactly, then ONE
-       ``env_init=None`` call appeared (logged alongside "stall #1, reset
-       L-BFGS history" -- an HZ line-search probe failed to converge,
-       ``phi=4 dphi=0 alpha=1.7 converged=False``, and the optimizer's own
-       L-BFGS stall recovery rolled back to ``best_params`` and cleared
-       ``_env_cache_2s`` via ``_drop_env_cache_for_reset``), and every call
-       AFTER that point (2 of them, self-consistent with each other) landed
-       on a *different* layout -- the same {0:6,1:2}/{0:6,1:2} split
-       ``probe_final_layout.py`` found for the unrelated cold *final*
-       re-evaluation.  So a legitimate, ``envs_init``-independent optimizer
-       robustness mechanism (L-BFGS's own line-search-failure recovery, not
-       gated by ``gs_stall_recovery`` -- that knob defaults to ``None`` and
-       is unset here) can clear the env cache mid-run and re-anchor the
-       layout to whatever a fresh cold CTM prefers.  This is not a defect
-       in ``envs_init``: the traced CTM still keeps *whatever* layout it is
-       given (confirmed again post-reset: both post-cold calls share the
-       same new layout), and #1035's claim -- a *given* seed's layout is
-       held -- is exactly what holds for every call up to the first reset.
-       So this test asserts the strong (seed-matching) property only for
-       the calls before that first reset (there is always at least one:
-       the very first call, independently pinned by
-       ``test_envs_init_is_the_first_forward_seed``), and separately checks
-       that any post-reset calls are at least self-consistent with each
-       other (the CTM still keeps *a* layout, just not the original one).
+    Fixed (ruling R17): ``_optimize_gs_ad_tensor_2site`` now restores
+    ``best_env_cache_2s or {"envs": envs_init}`` after every
+    ``_drop_env_cache_for_reset`` when ``envs_init`` is set (the
+    ``_reset_env_cache_2s`` helper, used at all three rollback sites: the
+    ``CTMRGGradientError`` reset, the grad-spike guard, and the L-BFGS
+    line-search-stall reset). So this test is now strict: no call is ever
+    cold, and every seeded call's layout equals the original seed's --
+    confirmed to still exercise the L-BFGS stall path on this fixture (see
+    the report's Fix round 1 section for whether it fired and how many
+    calls were recorded).
     """
     A, B, H, d, envs = seeded_d2
     E0 = _E(A, B, envs, H, d)
     real_sigma = ea._sigma_gauged_ctm_converge
-    before_reset, after_reset = [], []
-    saw_cold = [False]
+    seen_layouts = []
 
     def _spy(*a, **kw):
         env_init = kw.get("env_init")
-        if env_init is None:
-            saw_cold[0] = True
-        elif saw_cold[0]:
-            after_reset.append(_layout(env_init))
-        else:
-            before_reset.append(_layout(env_init))
+        assert env_init is not None, "a forward ran cold: the reset lost the seed"
+        seen_layouts.append(_layout(env_init))
         return real_sigma(*a, **kw)
 
     monkeypatch.setattr(ea, "_sigma_gauged_ctm_converge", _spy)
@@ -628,13 +666,8 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
         (A1, B1), (_env_A1, _env_B1), E1 = optimize_gs_ad(
             H, (A, B), _ad_config(5), envs_init=envs
         )
-    print(
-        f"before_reset calls: {len(before_reset)}, after_reset calls: {len(after_reset)}"
-    )
     seed_layout = _layout(envs)
-    assert before_reset and all(lay == seed_layout for lay in before_reset)
-    if after_reset:
-        assert all(lay == after_reset[0] for lay in after_reset)
+    assert seen_layouts and all(lay == seed_layout for lay in seen_layouts)
     tree = jax.tree_util.tree_structure
     assert tree((A1, B1)) == tree((A, B))  # site layout frozen
     assert E1 <= E0 + 1e-6, (E0, E1)
