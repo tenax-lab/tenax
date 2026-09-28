@@ -345,6 +345,7 @@ def _split_env_is_fermionic(env: SplitCTMTensorEnv) -> bool:
 
 def _refuse_traced_symmetric_multisite_split(
     site_tensors: dict[Coord, Tensor],
+    envs: dict[Coord, SplitCTMTensorEnv],
 ) -> None:
     """Refuse a traced (jit/AD) multisite split-CTM sweep on symmetric input.
 
@@ -379,14 +380,19 @@ def _refuse_traced_symmetric_multisite_split(
     """
     if len(site_tensors) <= 1:
         return
-    symmetric_tensors = [
-        A for A in site_tensors.values() if isinstance(A, SymmetricTensor)
-    ]
-    if not symmetric_tensors:
+    if not any(isinstance(A, SymmetricTensor) for A in site_tensors.values()):
         return
+    # The environment is checked too: a caller can trace the environment
+    # while closing over concrete site tensors (``jax.vjp`` with respect to
+    # ``envs``, or a jitted closure), and the enlarged corners -- hence the
+    # projector's fallback -- are traced either way.
+    candidates = [*site_tensors.values()]
+    for env in envs.values():
+        candidates.extend(env)
     is_traced = any(
         isinstance(block, jax.core.Tracer)
-        for A in symmetric_tensors
+        for A in candidates
+        if isinstance(A, SymmetricTensor)
         for block in A.blocks.values()
     )
     if is_traced:
@@ -600,7 +606,7 @@ def _split_ctm_sweep_multisite_2x2(
         )
     # #1048: refuses a traced multisite sweep on SymmetricTensor input (the
     # single-cell unit cell is exempt -- see the helper's docstring).
-    _refuse_traced_symmetric_multisite_split(site_tensors)
+    _refuse_traced_symmetric_multisite_split(site_tensors, envs)
     # Function-local import: _split_ctm_tensor_moves imports from this module,
     # so importing the absorb helpers at module scope would form a cycle.
     from tenax.algorithms._split_ctm_tensor_moves import (

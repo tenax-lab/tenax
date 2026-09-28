@@ -120,6 +120,40 @@ def test_2site_symmetric_multisite_split_refuses_traced_sweep_1048():
         )
 
 
+def test_2site_symmetric_multisite_split_refuses_traced_env_1048():
+    """#1048: the refusal also fires when only the *environment* is traced.
+
+    A caller can close over concrete site tensors and trace the environment
+    (``jax.vjp`` with respect to ``envs``, or a jitted closure); the enlarged
+    corners are still traced, so the projector still takes the wrong-cell
+    fallback.  The guard must look at ``envs`` as well as the sites.
+    """
+    A, B = _build_nontrivial_u1_pair(D=2, d=2)
+    site_tensors = {(0, 0): A, (1, 0): B}
+    bars = {c: t.bar() for c, t in site_tensors.items()}
+    chi, chi_I = 4, 4
+    envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
+
+    def _probe(alpha):
+        traced_envs = {
+            c: type(env)(
+                *(
+                    SymmetricTensor._from_blocks_unchecked(
+                        {k: alpha * b for k, b in t.blocks.items()}, t.indices
+                    )
+                    for t in env
+                )
+            )
+            for c, env in envs.items()
+        }
+        return _split_ctm_sweep_multisite_2x2(
+            traced_envs, site_tensors, bars, CHECKERBOARD_NEIGHBORS, chi, chi_I
+        )
+
+    with pytest.raises(NotImplementedError, match="1048"):
+        jax.eval_shape(_probe, jnp.asarray(1.0))
+
+
 def test_2site_symmetric_single_cell_split_sweep_is_not_refused_1048():
     """A single-cell ("1x1") multisite call is exempt (#1048): the absorbed
     cell and the destination cell are the same cell, so the traced fallback
