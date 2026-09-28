@@ -391,6 +391,14 @@ def su_grow_layout(
     A bond with an empty parity sector is refused rather than frozen -- AD
     could never refill it (#878).
 
+    Each of the four bonds keeps its own spectrum (``independent_bonds=True``),
+    unlike :func:`_fpeps_simple_update`.  With the truncation unpinned, a
+    bond's SVD emits its own sector split *and* its own charge order, so the
+    shared-spectrum mirror would scale the partner leg with singular values
+    aligned to a different layout -- permuted between sectors at fixed ``D``,
+    and one element too long on a leg not yet grown.  The pinned path keeps
+    both partners on one layout, which is why sharing is safe there.
+
     Args:
         gate:             2-site Hamiltonian as SymmetricTensor (the bare
                           Hamiltonian, not yet Trotterized -- this builds
@@ -443,8 +451,20 @@ def su_grow_layout(
         n_cycles = final_cycles if D == config.D else cycles_per_stage
         first = None
         for cycle in range(n_cycles):
+            # independent_bonds=True: unpinned, each bond's SVD emits its own
+            # sector layout and charge order, so mirroring one bond's spectrum
+            # onto its partner (the shared-spectrum default) scales the
+            # partner's leg with values from a different layout -- and during
+            # growth, a length-D spectrum onto a leg still at D-1 (PR #1051).
             A, B, lam = _simple_update_checkerboard_sweep(
-                A, B, trotter, D, 4, lambdas=lam, pin_sectors=False
+                A,
+                B,
+                trotter,
+                D,
+                4,
+                lambdas=lam,
+                independent_bonds=True,
+                pin_sectors=False,
             )
             lay = bond_layout(A, B)
             if D == config.D:

@@ -124,6 +124,60 @@ def test_it_raises_max_d_one_slot_per_stage(monkeypatch):
     assert out.layout == _lay(1, 2) and out.frozen
 
 
+def test_growth_stores_each_bond_its_own_spectrum(monkeypatch):
+    """Codex on PR #1051: the unpinned SU must not mirror a bond's spectrum
+    onto its partner.  Each bond's SVD emits its own sector split and charge
+    order, so a mirrored spectrum is aligned with a different leg -- measured
+    (keys 2 and 4, D=2->3, shared spectra): 25 and 21 phase-steps where a
+    stored spectrum's parity order or length disagreed with its own leg,
+    including a length-3 ``h_BA`` on a leg still at D=2.
+
+    The property: after every sweep call ``su_grow_layout`` makes, each of the
+    four stored spectra is exactly the one the SVD on *that* bond last
+    returned -- and so has that leg's length and layout.
+    """
+    import tenax.algorithms.ipeps_simple_update as su_mod
+
+    last = {}
+    real_store = su_mod._store
+
+    def spy_store(lambdas, bond, value, independent_bonds):
+        last[bond] = value
+        return real_store(lambdas, bond, value, independent_bonds)
+
+    monkeypatch.setattr(su_mod, "_store", spy_store)
+    real_sweep = fi._simple_update_checkerboard_sweep
+    checked = []
+
+    def checking_sweep(*a, **kw):
+        A, B, lam = real_sweep(*a, **kw)
+        ends = {
+            "h_AB": ((A, "r"), (B, "l")),
+            "h_BA": ((B, "r"), (A, "l")),
+            "v_AB": ((A, "d"), (B, "u")),
+            "v_BA": ((B, "d"), (A, "u")),
+        }
+        for bond, legs in ends.items():
+            stored = getattr(lam, bond)
+            assert stored is last[bond], f"{bond} holds another bond's spectrum"
+            for T, leg in legs:
+                assert stored.shape[0] == T.indices[T.labels().index(leg)].dim
+        checked.append(a[3])
+        return A, B, lam
+
+    monkeypatch.setattr(fi, "_simple_update_checkerboard_sweep", checking_sweep)
+    cfg = FPEPSConfig(D=3, t=1.0, V=0.0, dt=0.05)
+    su_grow_layout(
+        spinless_fermion_gate(cfg),
+        cfg,
+        D_start=2,
+        cycles_per_stage=1,
+        final_cycles=2,
+        key=jax.random.PRNGKey(2),
+    )
+    assert checked == [2, 3, 3]  # regime: a growth stage was exercised
+
+
 def test_a_layout_that_moves_after_the_first_cycle_is_not_frozen(monkeypatch):
     layouts = [_lay(1, 1)] * 3 + [_lay(1, 2), _lay(2, 1), _lay(1, 2), _lay(1, 2)]
     _scripted(monkeypatch, layouts)
