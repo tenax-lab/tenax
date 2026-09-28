@@ -203,55 +203,70 @@ def _collapsing_pair():
     return _su_direction_dependent_pair()
 
 
-@pytest.mark.slow
-def test_a_collapsed_corner_is_not_certified_and_the_budget_is_respected():
-    """The behavioural claim: the answer must depend on `max_iter` again.
+#: The two budgets straddle the blind loop's exit.  Measured on this fixture
+#: with both guards disabled (``_spectrum_can_show_change`` -> True and
+#: ``_spectrum_is_uninformative`` -> False, i.e. the pre-#898 criterion): the
+#: loop certifies on sweep 3, so the energy at ``max_iter=4`` is bit-identical
+#: to ``max_iter=3`` (-0.424537656216 both); the guarded loop moves on to
+#: -0.428340678043.  Budgets used to be (4, 12, 30) -- 46 sweeps at ~2 min each
+#: and growing (every new block shape is a fresh XLA compile), 2h37m locally,
+#: which timed the slow shard out at the 240 min cap on every CI run.
+_BUDGETS = (3, 4)
 
-    Before the fix the returned environment was bit-identical at every budget,
-    which is the observable signature of a criterion that exits on a quantity
-    it cannot read. After it, more sweeps must do more work — that is the whole
-    contract of `max_iter`.
-    """
+
+@pytest.fixture(scope="module")
+def collapsed_runs():
+    """One CTM run per budget on the collapsing fixture, shared by the two
+    tests below: the energy each returned and the RuntimeWarnings it raised."""
     import tenax
     from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
     from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
 
     A, B = _collapsing_pair()
     gate = tenax.heisenberg_gate()
-
-    energies = {}
-    for max_iter in (4, 12, 30):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
+    runs = {}
+    for max_iter in _BUDGETS:
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
             eA, eB = ctm_tensor_2site(
                 A, B, chi=12, max_iter=max_iter, conv_tol=1e-9, recipe="2x2"
             )
-        energies[max_iter] = float(
-            compute_energy_ctm_tensor_2site(A, B, eA, eB, gate, 2)
-        )
-
-    print(f"#898 budget response: {energies}")
-    # Strictly monotone in the budget: each extra sweep is still buying
-    # something, which is exactly what the early exit was throwing away.
-    assert energies[4] != energies[12], energies
-    assert energies[12] != energies[30], energies
-    # And it is descending toward the true fixed point, not wandering.
-    assert energies[30] < energies[12] < energies[4], energies
+        energy = float(compute_energy_ctm_tensor_2site(A, B, eA, eB, gate, 2))
+        runtime = [w.message for w in rec if issubclass(w.category, RuntimeWarning)]
+        runs[max_iter] = (energy, runtime)
+    return runs
 
 
 @pytest.mark.slow
-def test_a_collapsed_corner_says_so_out_loud():
+def test_a_collapsed_corner_is_not_certified_and_the_budget_is_respected(
+    collapsed_runs,
+):
+    """The behavioural claim: the answer must depend on `max_iter` again.
+
+    Before the fix the returned environment was bit-identical at every budget
+    past the sweep where the blind comparison certified, which is the
+    observable signature of a criterion that exits on a quantity it cannot
+    read.  After it, one more sweep must do more work -- that is the whole
+    contract of `max_iter`.
+    """
+    energies = {k: e for k, (e, _) in collapsed_runs.items()}
+    print(f"#898 budget response: {energies}")
+    lo, hi = _BUDGETS
+    assert energies[lo] != energies[hi], energies
+    # And it is descending toward the true fixed point, not wandering.
+    assert energies[hi] < energies[lo], energies
+
+
+@pytest.mark.slow
+def test_a_collapsed_corner_says_so_out_loud(collapsed_runs):
     """Silence was the actual damage: the caller had no way to know.
 
     The environment is still returned — the sweeps ran and, on this fixture,
     kept improving — but it must not be mistaken for a fixed point.
     """
-    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
-
-    A, B = _collapsing_pair()
-
-    with pytest.warns(RuntimeWarning, match="could not be certified") as rec:
-        ctm_tensor_2site(A, B, chi=12, max_iter=6, conv_tol=1e-9, recipe="2x2")
+    _, runtime = collapsed_runs[_BUDGETS[-1]]
+    certified = [m for m in runtime if "could not be certified" in str(m)]
+    assert certified, [str(m) for m in runtime]
 
     # The strong diagnosis, and it must be reserved for this case: the corner
     # is *still* rank-1, so "mean-field, will not respond to chi" is a claim
@@ -261,7 +276,7 @@ def test_a_collapsed_corner_says_so_out_loud():
     # the same phrase is absent when the corner recovered -- together they pin
     # that the message says only what that run established (#903 review, P2
     # round 3).
-    text = str(rec[0].message)
+    text = str(certified[0])
     assert "mean-field" in text, text
 
 
