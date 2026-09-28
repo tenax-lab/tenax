@@ -745,6 +745,16 @@ def test_envs_init_refuses_a_non_2site_unit_cell():
         optimize_gs_ad(None, None, cfg, envs_init=_fake_envs(CHI_D2))
 
 
+def test_envs_init_refuses_the_c4v_path():
+    """Codex on PR #1051 (finding 3): ``gs_c4v=True`` rebuilds A and B as
+    DenseTensor from C4v coefficients, so a SymmetricTensor seed reached the
+    first CTM and raised ``TypeError`` there (measured: ``graded_contract
+    needs SymmetricTensor operands``).  Refused before any tensor is read."""
+    cfg = dataclasses.replace(_ad_config(1), gs_c4v=True)
+    with pytest.raises(ValueError, match="envs_init.*gs_c4v"):
+        optimize_gs_ad(None, None, cfg, envs_init=_fake_envs(CHI_D2))
+
+
 def test_envs_init_refuses_the_split_ctm(light_AB):
     A, B, H = light_AB
     cfg = _ad_config(1, fuse_virtual_legs=False)

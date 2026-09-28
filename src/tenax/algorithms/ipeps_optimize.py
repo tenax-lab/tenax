@@ -686,7 +686,8 @@ def optimize_gs_ad(
                           warm-starts the forward.
 
                           2-site fused only; refused (``ValueError``) with:
-                          a unit cell other than ``"2site"``; the split CTM
+                          a unit cell other than ``"2site"``;
+                          ``gs_c4v=True``; the split CTM
                           (``CTMConfig.fuse_virtual_legs=False``);
                           ``chi_auto_bump``; ``ctmrg_heuristic_increase_chi``;
                           a ``chi_ramp``; a χ schedule
@@ -713,6 +714,15 @@ def optimize_gs_ad(
                 "(config.ctm.ctm_ad_mode='root_implicit'/"
                 "'root_implicit_symmetric'); use the default ctm_ad_mode for "
                 "unit_cell='2site'."
+            )
+        if config.gs_c4v:
+            # The C4v path rebuilds A and B as DenseTensor from C4v
+            # coefficients, so a block-sparse seed cannot meet its first CTM
+            # (PR #1051 review, finding 3).
+            raise ValueError(
+                "envs_init is not supported with gs_c4v=True: the C4v path "
+                "rebuilds the sites as DenseTensor from C4v coefficients, "
+                "which a seed built on the input tensors does not match."
             )
     if config.gs_log_interval < 1:
         raise ValueError(f"gs_log_interval must be >= 1, got {config.gs_log_interval}")
