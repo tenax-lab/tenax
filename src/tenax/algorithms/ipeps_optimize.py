@@ -675,15 +675,26 @@ def optimize_gs_ad(
                           (rather than cold-starting) too, so this fixes
                           the environment layout for the whole
                           optimisation -- pass the output of an eager
-                          ``ctm_tensor_2site`` on the initial tensors.
+                          ``ctm_tensor_2site`` on the initial tensors. Its
+                          keys must equal the 2-site cell's,
+                          ``{(0, 0), (1, 0)}``.
+
+                          Also accepted with ``config.gs_implicit_ad=False``
+                          (the explicit-AD path): it seeds that path's first
+                          forward CTM the same way, it just has no special
+                          coupling to the explicit backward -- the seed only
+                          warm-starts the forward.
+
                           2-site fused only; refused (``ValueError``) with:
                           a unit cell other than ``"2site"``; the split CTM
                           (``CTMConfig.fuse_virtual_legs=False``);
-                          ``chi_auto_bump``; a χ schedule
+                          ``chi_auto_bump``; ``ctmrg_heuristic_increase_chi``;
+                          a ``chi_ramp``; a χ schedule
                           (``gs_chi_schedule_steps``); a χ that does not
-                          match ``CTMConfig.chi``; or the root-implicit AD
+                          match ``CTMConfig.chi``; the root-implicit AD
                           path (``CTMConfig.ctm_ad_mode="root_implicit"`` /
-                          ``"root_implicit_symmetric"``).
+                          ``"root_implicit_symmetric"``); or keys other than
+                          ``{(0, 0), (1, 0)}``.
 
     Returns:
         For 1-site:    ``(A_opt, env, E_gs)``
@@ -2835,14 +2846,25 @@ def _optimize_gs_ad_tensor_2site(
     _env_cache_2s: dict[str, dict] = {}
 
     if envs_init is not None:
+        if set(envs_init.keys()) != set(CHECKERBOARD_NEIGHBORS.keys()):
+            raise ValueError(
+                f"envs_init keys {sorted(envs_init.keys())} must match the "
+                f"2-site cell {sorted(CHECKERBOARD_NEIGHBORS.keys())}"
+            )
         if use_split_2s:
             raise ValueError(
                 "envs_init: the split CTM is not supported; use fuse_virtual_legs=True"
             )
-        if ctm_cfg_2s.chi_auto_bump or config.gs_chi_schedule_steps is not None:
+        if (
+            ctm_cfg_2s.chi_auto_bump
+            or ctm_cfg_2s.ctmrg_heuristic_increase_chi
+            or ctm_cfg_2s.chi_ramp is not None
+            or config.gs_chi_schedule_steps is not None
+        ):
             raise ValueError(
-                "envs_init fixes the environment layout; chi_auto_bump and a "
-                "chi schedule change it. Turn them off."
+                "envs_init fixes the environment layout; chi_auto_bump, "
+                "ctmrg_heuristic_increase_chi, chi_ramp, and a chi schedule "
+                "all change it. Turn them off."
             )
         chi_seen = {e.C1.indices[0].dim for e in envs_init.values()}
         if chi_seen != {ctm_cfg_2s.chi}:
