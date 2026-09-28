@@ -341,3 +341,134 @@ def test_a_traced_multisite_sweep_keeps_each_bond_inventory():
     assert not wrong, (
         f"{len(wrong)}/32 chi legs took the other bond's inventory: {wrong[:4]}"
     )
+
+
+def test_a_traced_2x2_sweep_distinguishes_right_from_bottom():
+    """Deferred item 2 (final review, #1035): a right<->bottom destination
+    swap in ``_seam_chi_charges`` is invisible on the 2-site checkerboard
+    above, because ``CHECKERBOARD_NEIGHBORS[x]["right"] is
+    CHECKERBOARD_NEIGHBORS[x]["bottom"]`` for every ``x`` -- there is only
+    one other cell, so reading the wrong neighbour selector still lands on
+    the SAME cell.  A genuine 4-distinct-site 2x2 unit cell breaks that
+    degeneracy: on ``make_neighbors(2, 2)``, ``right(x) != bottom(x)`` for
+    every anchor (checked below), so a swap routes ``_seam_chi_charges`` to
+    the wrong cell's leg.
+
+    Same construction as ``test_a_traced_multisite_sweep_keeps_each_bond_
+    inventory`` above, generalised from 2 anchors (32 chi legs) to 4 (64
+    chi legs), each with its own distinct inventory.  ``jax.eval_shape``
+    only, no numerics -- structure only, same as the test it generalises.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import (
+        _ctm_tensor_sweep_multisite,
+        make_neighbors,
+    )
+    from tenax.algorithms._ctm_tensor_init import (
+        _build_double_layer_tensor,
+        initialize_ctm_tensor_env,
+    )
+    from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
+
+    chi = 4
+    NB = make_neighbors(2, 2)
+    A, B = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+    # Checkerboard colouring on the 2x2 periodic grid: (x + y) even -> A,
+    # so every right/bottom neighbour is still the opposite sublattice.
+    site = {(0, 0): A, (1, 0): B, (0, 1): B, (1, 1): A}
+    envs = {c: initialize_ctm_tensor_env(t, chi) for c, t in site.items()}
+
+    def right(x):
+        return NB[x]["right"]
+
+    def below(x):
+        return NB[x]["bottom"]
+
+    # Regime: the mutation this test targets is invisible unless every
+    # anchor's right- and bottom-neighbour are genuinely different cells
+    # (the property the 2-site checkerboard above does NOT have).
+    for x in envs:
+        assert right(x) != below(x), (x, right(x), below(x))
+
+    def bonds(x):
+        """The four legs of each bond the projector anchored at ``x`` writes."""
+        rb = below(right(x))
+        return {
+            ("left", x): [
+                (right(x), "C4", "c4_r"),
+                (right(x), "T4", "t4_u"),
+                (rb, "C1", "c1_d"),
+                (rb, "T4", "t4_d"),
+            ],
+            ("right", x): [
+                (x, "C3", "c3_u"),
+                (x, "T2", "t2_d"),
+                (below(x), "C2", "c2_d"),
+                (below(x), "T2", "t2_u"),
+            ],
+            ("top", x): [
+                (below(x), "C2", "c2_l"),
+                (below(x), "T1", "t1_r"),
+                (rb, "C1", "c1_r"),
+                (rb, "T1", "t1_l"),
+            ],
+            ("bottom", x): [
+                (x, "C3", "c3_l"),
+                (x, "T3", "t3_l"),
+                (right(x), "C4", "c4_u"),
+                (right(x), "T3", "t3_r"),
+            ],
+        }
+
+    # Four distinct multisets, one per anchor, so a wrong-cell read is
+    # visible no matter which two cells a mutation swaps.
+    inventory = {
+        (0, 0): [-1, 0, 0, 1],
+        (1, 0): [-1, -1, 0, 1],
+        (0, 1): [-1, 0, 1, 1],
+        (1, 1): [-1, -1, -1, 1],
+    }
+    leg_charges = {}
+    for x in envs:
+        for legs in bonds(x).values():
+            for leg in legs:
+                assert leg not in leg_charges
+                leg_charges[leg] = inventory[x]
+    assert len(leg_charges) == 64  # every chi leg of all four envs, exactly once
+
+    seeded = {}
+    for i, (c, env) in enumerate(envs.items()):
+        fields = {}
+        for j, name in enumerate(env._fields):
+            t = getattr(env, name)
+            idx = tuple(
+                TensorIndex.from_charges(
+                    ix.symmetry,
+                    np.asarray(leg_charges[(c, name, ix.label)], np.int32),
+                    ix.flow,
+                    label=ix.label,
+                )
+                if (c, name, ix.label) in leg_charges
+                else ix
+                for ix in t.indices
+            )
+            fields[name] = SymmetricTensor.random_normal(
+                idx, jax.random.PRNGKey(100 * i + j)
+            )
+        seeded[c] = type(env)(**fields)
+
+    dls = {c: _build_double_layer_tensor(t) for c, t in site.items()}
+    out = jax.eval_shape(
+        lambda e: _ctm_tensor_sweep_multisite(e, dls, NB, chi, False)[0], seeded
+    )
+
+    wrong = []
+    for x in envs:
+        for bond, legs in bonds(x).items():
+            for c, name, label in legs:
+                t = getattr(out[c], name)
+                got = sorted(np.asarray(t.indices[t.labels().index(label)].charges))
+                if got != sorted(inventory[x]):
+                    wrong.append((bond, c, name, label, [int(q) for q in got]))
+    assert not wrong, (
+        f"{len(wrong)}/64 chi legs took another anchor's inventory: {wrong[:4]}"
+    )
