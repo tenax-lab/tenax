@@ -17,6 +17,7 @@ import numpy as np
 
 from tenax.algorithms._ctm_energy_ad import invalidate_implicit_ad_warm_start
 from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
+from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.algorithms._ipeps_optimize_shared import (  # noqa: F401
     _build_optimizer,
     _converged_outer,
@@ -644,6 +645,8 @@ def optimize_gs_ad(
     hamiltonian_gate: jax.Array | Tensor,
     A_init: jax.Array | Tensor | tuple | dict | None,
     config: iPEPSConfig,
+    *,
+    envs_init: dict[Coord, CTMTensorEnv] | None = None,
 ):
     """AD-based ground state optimization of iPEPS.
 
@@ -665,12 +668,29 @@ def optimize_gs_ad(
                           ``config.su_init`` is ``True``, the tensor(s) are
                           initialized via simple update (``ipeps()``).
         config:           iPEPSConfig with AD optimization settings.
+        envs_init:        A converged environment to seed the first forward
+                          CTM with.  Under tracing the CTM keeps the
+                          χ-sector layout it is given, so this fixes the
+                          environment layout for the whole optimisation --
+                          pass the output of an eager ``ctm_tensor_2site``
+                          on the initial tensors.  2-site fused only;
+                          refused with ``chi_auto_bump`` or a χ schedule.
 
     Returns:
         For 1-site:    ``(A_opt, env, E_gs)``
         For 2-site:    ``((A_opt, B_opt), (env_A, env_B), E_gs)``
         For multi-site: ``(dict[str, Tensor], dict[str, CTMTensorEnv], E_gs)``
     """
+    if envs_init is not None:
+        if config.unit_cell != "2site":
+            raise ValueError("envs_init is supported on unit_cell='2site' only")
+        if use_root_implicit_path(config):
+            raise ValueError(
+                "envs_init is not supported on the root-implicit AD path "
+                "(config.ctm.ctm_ad_mode='root_implicit'/"
+                "'root_implicit_symmetric'); use the default ctm_ad_mode for "
+                "unit_cell='2site'."
+            )
     if config.gs_log_interval < 1:
         raise ValueError(f"gs_log_interval must be >= 1, got {config.gs_log_interval}")
     if config.gs_num_steps < 0:
@@ -756,7 +776,9 @@ def optimize_gs_ad(
         return _optimize_gs_ad_multisite(hamiltonian_gate, A_init, config)
 
     if config.unit_cell == "2site":
-        return _optimize_gs_ad_2site(hamiltonian_gate, A_init, config)
+        return _optimize_gs_ad_2site(
+            hamiltonian_gate, A_init, config, envs_init=envs_init
+        )
     if _use_reference_c4v_path(config):
         return _optimize_gs_ad_tensor_reference_c4v(hamiltonian_gate, A_init, config)
 
@@ -2551,6 +2573,7 @@ def _optimize_gs_ad_2site(
     hamiltonian_gate: jax.Array,
     AB_init: tuple[jax.Array, jax.Array] | tuple[Tensor, Tensor] | None,
     config: iPEPSConfig,
+    envs_init: dict[Coord, CTMTensorEnv] | None = None,
 ):
     """AD-based ground state optimization for 2-site iPEPS unit cell.
 
@@ -2613,13 +2636,16 @@ def _optimize_gs_ad_2site(
             B = _wrap_as_dense_tensor(B_data)
             AB_init = (A, B)
 
-    return _optimize_gs_ad_tensor_2site(hamiltonian_gate, AB_init, config)
+    return _optimize_gs_ad_tensor_2site(
+        hamiltonian_gate, AB_init, config, envs_init=envs_init
+    )
 
 
 def _optimize_gs_ad_tensor_2site(
     hamiltonian_gate: jax.Array,
     AB_init: tuple[Tensor, Tensor],
     config: iPEPSConfig,
+    envs_init: dict[Coord, CTMTensorEnv] | None = None,
 ):
     """AD-based ground state optimization for 2-site Tensor-protocol iPEPS.
 
@@ -2798,6 +2824,30 @@ def _optimize_gs_ad_tensor_2site(
 
     # Env warm-start cache — replaces flat env_leaves threading.
     _env_cache_2s: dict[str, dict] = {}
+
+    if envs_init is not None:
+        if use_split_2s:
+            raise ValueError(
+                "envs_init: the split CTM is not supported; use fuse_virtual_legs=True"
+            )
+        if ctm_cfg_2s.chi_auto_bump or config.gs_chi_schedule_steps is not None:
+            raise ValueError(
+                "envs_init fixes the environment layout; chi_auto_bump and a "
+                "chi schedule change it. Turn them off."
+            )
+        chi_seen = {e.C1.indices[0].dim for e in envs_init.values()}
+        if chi_seen != {ctm_cfg_2s.chi}:
+            raise ValueError(
+                f"envs_init has chi {sorted(chi_seen)}, the CTM config "
+                f"chi={ctm_cfg_2s.chi}"
+            )
+        # The first forward the optimizer runs -- both the differentiated
+        # loss (make_ctm_energy_fn reads env_cache["envs"] as env_init, see
+        # ipeps_ad_policy._ctm_energy_fn) and the grad-free warm-start
+        # refresh (_update_env_cache_2s below) -- sees this seed, so the
+        # traced CTM keeps the χ-sector layout envs_init was built with
+        # (#1035) instead of cold-starting from a tiled/identity env.
+        _env_cache_2s["envs"] = envs_init
 
     if use_c4v:
         from tenax.algorithms.ipeps import (

@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import tenax.algorithms._ctm_energy_ad as ea
 import tenax.algorithms.fermionic_ipeps as fi
 from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
 from tenax.algorithms._ctm_tensor_convergence import (
@@ -27,11 +28,18 @@ from tenax.algorithms.fermionic_ipeps import (
     spinless_fermion_gate,
     su_grow_layout,
 )
+from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 from tenax.algorithms.ipeps_simple_update import _simple_update_checkerboard_sweep
 
 jax.config.update("jax_enable_x64", True)
 
 CHI = 12
+# Ruling R16 (Task 5): the plumbing/end-to-end tests use their OWN D=2, chi=8
+# fixture (``seeded_d2`` below), not ``frozen_state``/``eager_envs`` (D=3,
+# chi=12): the latter costs ~10 min to build and its implicit-AD forward does
+# not reliably reach a #841 element-wise fixed point (Task 4 rounds 1-5).
+CHI_D2 = 8
 
 
 def _su(pin, D=3, seed=6, steps=4 * 40):
@@ -419,3 +427,215 @@ def test_the_graded_energy_gradient_matches_finite_differences_at_a_fixed_enviro
     fd_unc = vals.max() - vals.min()  # h-scan spread (memory: FD needs an h scan)
     assert abs(slope) > 10 * fd_unc, (slope, fd)  # regime: the slope is measurable
     assert abs(slope - np.median(vals)) <= 3 * fd_unc + 1e-7, (slope, fd)
+
+
+# ------------------------------------------------------------------ #
+# Task 5: envs_init on optimize_gs_ad (2-site)                       #
+# ------------------------------------------------------------------ #
+
+
+@pytest.fixture(scope="module")
+def seeded_d2():
+    """Ruling R16: Task 5's own D=2, chi=8, key=4 fixture -- NOT
+    ``frozen_state``/``eager_envs`` (D=3, chi=12, ~10 min to build, and whose
+    implicit-AD forward does not reliably reach a #841 element-wise fixed
+    point per the Task 4 report).  ``key=4`` is the D=2/chi=8 combination
+    Task 4 round 4 found where the implicit-AD forward genuinely converges
+    (stationarity residual 7.9e-11).
+
+    Cost (measured on this clone, CPU, `taskset -c 0-7`): ``su_grow_layout``
+    ~27-28 s (``D_start == config.D`` makes the stage range one value, no
+    growth to trace).  The eager CTM's own max-corner-SV-diff criterion
+    (Task 4's ``probe_d2_key4.py``) crosses ``conv_tol=1e-10`` between
+    ``max_iter=100`` (still short) and ``130`` (converged); ``max_iter=150``
+    below gives a 20-sweep margin.  Total module-fixture build (both
+    fixtures share it): ~2-3 min.
+    """
+    cfg = FPEPSConfig(D=2, t=1.0, V=0.0, dt=0.05)
+    H = spinless_fermion_gate(cfg)
+    out = su_grow_layout(H, cfg, D_start=2, key=jax.random.PRNGKey(4))
+    assert out.frozen
+    A, B = out.A, out.B
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        eA, eB = ctm_tensor_2site(A, B, CHI_D2, max_iter=150, conv_tol=1e-10)
+    assert eA.C1.indices[0].dim == CHI_D2  # regime: the corner is truncated
+    return A, B, H, 2, {(0, 0): eA, (1, 0): eB}
+
+
+def _ad_config(steps, **ctm):
+    return iPEPSConfig(
+        max_bond_dim=2,
+        unit_cell="2site",
+        su_init=False,
+        gs_implicit_ad=True,
+        gs_num_steps=steps,
+        gs_verbose=False,
+        ctm=CTMConfig(chi=CHI_D2, max_iter=50, conv_tol=1e-9, **ctm),
+    )
+
+
+def test_envs_init_is_the_first_forward_seed(seeded_d2, monkeypatch):
+    """R4: the spy must not pay an AD compile -- it records ``env_init`` and
+    aborts via a sentinel exception before the (expensive) implicit-AD
+    backward is ever traced/compiled.
+
+    The spy targets ``_ctm_energy_ad._sigma_gauged_ctm_converge``, not
+    ``python_loop_ctm_converge`` (the brief's literal target): instrumented
+    with a scratch probe (print timestamps on both names), the DEFAULT
+    2-site implicit-AD forward (``gs_implicit_ad=True``, default
+    ``forward_gauge="phase"``, no ``chi_ramp``) calls
+    ``_sigma_gauged_ctm_converge`` directly from ``_run_forward`` -- that
+    call IS the first forward the design seeds.  ``python_loop_ctm_converge``
+    is reached only via ``chi_ramp`` (unused here) or via the grad-free
+    ``_update_env_cache_2s`` warm-start refresh that runs AFTER the gradient
+    step -- too late to avoid paying for the backward compile, which
+    defeats R4's purpose.  Confirmed eager: ``_run_forward`` is called by
+    ``jax.value_and_grad(loss_fn)`` with no enclosing ``jit``, so its
+    ``custom_vjp`` forward rule runs with concrete values, not abstract
+    tracers -- ``env_init is envs`` holds by identity, not merely by value.
+    """
+    A, B, H, _, envs = seeded_d2
+
+    class _Seen(Exception):
+        pass
+
+    seeds = []
+
+    def _spy(*_a, **kw):
+        seeds.append(kw.get("env_init"))
+        raise _Seen
+
+    monkeypatch.setattr(ea, "_sigma_gauged_ctm_converge", _spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        with pytest.raises(_Seen):
+            optimize_gs_ad(H, (A, B), _ad_config(1), envs_init=envs)
+    assert seeds and seeds[0] is envs
+
+
+def test_envs_init_refuses_a_chi_bump(seeded_d2):
+    A, B, H, _, envs = seeded_d2
+    with pytest.raises(ValueError, match="envs_init.*chi_auto_bump"):
+        optimize_gs_ad(H, (A, B), _ad_config(1, chi_auto_bump=True), envs_init=envs)
+
+
+def test_envs_init_refuses_a_mismatched_chi(seeded_d2):
+    A, B, H, _, envs = seeded_d2
+    cfg = _ad_config(1)
+    cfg = dataclasses.replace(cfg, ctm=dataclasses.replace(cfg.ctm, chi=CHI_D2 + 2))
+    with pytest.raises(ValueError, match="envs_init.*chi"):
+        optimize_gs_ad(H, (A, B), cfg, envs_init=envs)
+
+
+def test_envs_init_refuses_a_non_2site_unit_cell(seeded_d2):
+    """The three refusals the ruling lists: bump, mismatch, and (this one,
+    added by the ruling) a non-2site unit cell.  All three raise ValueError
+    before any CTM/AD work -- ``optimize_gs_ad`` checks ``envs_init`` before
+    even ``config.gs_log_interval``, so this needs no real CTM setup."""
+    A, B, H, _, envs = seeded_d2
+    cfg = dataclasses.replace(_ad_config(1), unit_cell="1x1")
+    with pytest.raises(ValueError, match="envs_init.*2site"):
+        optimize_gs_ad(H, (A, B), cfg, envs_init=envs)
+
+
+@pytest.mark.slow
+def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
+    seeded_d2, monkeypatch
+):
+    """R16/R10: 5 AD steps (the brief's 10, halved per the ruling).
+
+    Deviates from R10's literal ``_layout(envs1) == _layout(seed)`` on the
+    optimizer's RETURN value for a reason this task's own probing surfaced
+    (scratch/probe_final_layout.py): ``optimize_gs_ad``'s 2-site return is
+    always a fresh, COLD CTM re-evaluation on the final tensors
+    (``_eval_fresh_2site`` calls ``python_loop_ctm_converge`` with
+    ``env_init=None`` unconditionally -- issue #899, "the seed was the
+    line-search-reverted cache... evaluated cold for the same reason").
+    Measured directly: even after a single AD step, this fixture's seed
+    ((0,0).C1 chi split {0:4,1:4} on one leg, {0:5,1:3} on the other) and the
+    cold-recomputed return ({0:6,1:2} on both) differ -- a genuine,
+    physics-driven difference in a from-scratch CTM run, not a bug in
+    ``envs_init``. Comparing ``_layout`` (or raw ``tree_structure``) against
+    that return value would therefore fail regardless of whether
+    ``envs_init`` seeding works, so it is not evidence about the property
+    #1035 actually claims.
+
+    That property -- the traced CTM keeps the χ-sector layout it is seeded
+    with -- lives entirely in the environment fed to the real per-step
+    differentiated forward, ``_ctm_energy_ad._sigma_gauged_ctm_converge``
+    (confirmed the actual first-forward call site by the spy tests above,
+    and by direct instrumentation: scratch/probe_spy_order.py). So this test
+    spies on it non-invasively (calls straight through) and records every
+    ``env_init`` it was ever seeded with, across all 5 steps including any
+    interior line-search/HZ-probe re-evaluations.
+
+    Two things this task's own probing found, both by running the test and
+    reading the failure, not by inspection alone:
+
+    1. A first attempt asserted layout equality on literally every recorded
+       call and crashed on a ``TypeError`` inside ``_layout(None)``: some
+       interior call legitimately receives ``env_init=None``.
+       ``_sigma_gauged_ctm_converge``/``_run_ctm_loop_with_bump`` treat
+       ``None`` as "cold-start this call" -- a valid input, not an error.
+
+    2. A second attempt (asserting equality on every *non-None* call)
+       failed too, but instructively: 18 consecutive calls (spanning steps
+       1-4 and the start of step 5) matched the seed exactly, then ONE
+       ``env_init=None`` call appeared (logged alongside "stall #1, reset
+       L-BFGS history" -- an HZ line-search probe failed to converge,
+       ``phi=4 dphi=0 alpha=1.7 converged=False``, and the optimizer's own
+       L-BFGS stall recovery rolled back to ``best_params`` and cleared
+       ``_env_cache_2s`` via ``_drop_env_cache_for_reset``), and every call
+       AFTER that point (2 of them, self-consistent with each other) landed
+       on a *different* layout -- the same {0:6,1:2}/{0:6,1:2} split
+       ``probe_final_layout.py`` found for the unrelated cold *final*
+       re-evaluation.  So a legitimate, ``envs_init``-independent optimizer
+       robustness mechanism (L-BFGS's own line-search-failure recovery, not
+       gated by ``gs_stall_recovery`` -- that knob defaults to ``None`` and
+       is unset here) can clear the env cache mid-run and re-anchor the
+       layout to whatever a fresh cold CTM prefers.  This is not a defect
+       in ``envs_init``: the traced CTM still keeps *whatever* layout it is
+       given (confirmed again post-reset: both post-cold calls share the
+       same new layout), and #1035's claim -- a *given* seed's layout is
+       held -- is exactly what holds for every call up to the first reset.
+       So this test asserts the strong (seed-matching) property only for
+       the calls before that first reset (there is always at least one:
+       the very first call, independently pinned by
+       ``test_envs_init_is_the_first_forward_seed``), and separately checks
+       that any post-reset calls are at least self-consistent with each
+       other (the CTM still keeps *a* layout, just not the original one).
+    """
+    A, B, H, d, envs = seeded_d2
+    E0 = _E(A, B, envs, H, d)
+    real_sigma = ea._sigma_gauged_ctm_converge
+    before_reset, after_reset = [], []
+    saw_cold = [False]
+
+    def _spy(*a, **kw):
+        env_init = kw.get("env_init")
+        if env_init is None:
+            saw_cold[0] = True
+        elif saw_cold[0]:
+            after_reset.append(_layout(env_init))
+        else:
+            before_reset.append(_layout(env_init))
+        return real_sigma(*a, **kw)
+
+    monkeypatch.setattr(ea, "_sigma_gauged_ctm_converge", _spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        (A1, B1), (_env_A1, _env_B1), E1 = optimize_gs_ad(
+            H, (A, B), _ad_config(5), envs_init=envs
+        )
+    print(
+        f"before_reset calls: {len(before_reset)}, after_reset calls: {len(after_reset)}"
+    )
+    seed_layout = _layout(envs)
+    assert before_reset and all(lay == seed_layout for lay in before_reset)
+    if after_reset:
+        assert all(lay == after_reset[0] for lay in after_reset)
+    tree = jax.tree_util.tree_structure
+    assert tree((A1, B1)) == tree((A, B))  # site layout frozen
+    assert E1 <= E0 + 1e-6, (E0, E1)
+    assert E1 >= -8 / np.pi**2 - 1e-3  # V=0 free-fermion bound, one-sided only
