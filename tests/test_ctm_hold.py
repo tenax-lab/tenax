@@ -697,7 +697,12 @@ def test_a_saddle_at_max_iter_is_reported_not_converged(monkeypatch):
     # (150 - 22) // 2 sweeps, rejects the saddle and exhausts max_iter.
     envs, s_B, s_of, not_conv = _run_mocked(monkeypatch, 0.1, max_iter=150)
     assert not_conv
-    assert "saddle" in str(not_conv[0].message)
+    msg = str(not_conv[0].message)
+    assert "saddle" in msg
+    # Codex P2 on #1058: the criterion DID pass here; the warning must blame
+    # the hold, not claim conv_tol was never reached.
+    assert "without reaching conv_tol" not in msg
+    assert "the hold rejected the point where it was met" in msg
 
 
 def test_an_attractor_is_returned_as_is(monkeypatch):

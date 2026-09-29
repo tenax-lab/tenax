@@ -1675,10 +1675,25 @@ def _ctm_tensor_multisite(
                 "spectra were compared, so no measurement of it exists"
             )
         )
+        # Codex P2 on #1058: after a hold rejection the criterion may sit
+        # below conv_tol; saying "without reaching conv_tol" then points the
+        # caller at the wrong setting.
+        met = ever_measured and final_diff <= conv_tol
+        if hold_note and met:
+            outcome = (
+                f"reaching conv_tol={conv_tol:g} ({criterion}) only at points "
+                f"the hold test rejected"
+            )
+        elif hold_note:
+            outcome = (
+                f"ending away from conv_tol={conv_tol:g} ({criterion}) after "
+                f"the hold rejected the point where it was met"
+            )
+        else:
+            outcome = f"without reaching conv_tol={conv_tol:g} ({criterion})"
         warnings.warn(
             f"CTM did not converge in ctm_tensor_multisite(): ran the full "
-            f"max_iter={budget} sweeps at chi={chi} without reaching "
-            f"conv_tol={conv_tol:g} ({criterion}){hold_note}. The "
+            f"max_iter={budget} sweeps at chi={chi} {outcome}{hold_note}. The "
             f"returned environment is not a fixed point and any observable "
             f"read from it can move with max_iter -- on a limit cycle it will "
             f"move without ever settling, so raising max_iter is not always a "
