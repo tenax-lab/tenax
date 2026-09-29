@@ -315,8 +315,19 @@ def perturb_env(envs: dict[Any, Any], rel: float, key: jax.Array) -> dict[Any, A
     """Add ``rel * max|leaf| * N(0, 1)`` to every numeric leaf of every env.
 
     Deterministic in ``key``.  Block-sparse structure is preserved: on a
-    ``SymmetricTensor`` the leaves are the stored blocks.
+    ``SymmetricTensor`` the leaves are the stored blocks.  A leaf that is
+    exactly zero takes its env's largest leaf scale instead (or the largest
+    over all envs), so a direction living in a zero block is still excited
+    (Codex P1 on #1058).
     """
+
+    def _max(x):
+        return float(np.max(np.abs(np.asarray(x)))) if x.size else 0.0
+
+    env_scale = {
+        c: max((_max(x) for x in jax.tree.leaves(envs[c])), default=0.0) for c in envs
+    }
+    global_scale = max(env_scale.values(), default=0.0)
     out = {}
     for c in sorted(envs):
         leaves, tdef = jax.tree.flatten(envs[c])
@@ -324,7 +335,7 @@ def perturb_env(envs: dict[Any, Any], rel: float, key: jax.Array) -> dict[Any, A
         key = keys[0]
         new = []
         for x, k in zip(leaves, keys[1:]):
-            scale = float(np.max(np.abs(np.asarray(x)))) if x.size else 0.0
+            scale = _max(x) or env_scale[c] or global_scale
             noise = jax.random.normal(k, x.shape, dtype=x.real.dtype)
             if jax.numpy.iscomplexobj(x):
                 k2 = jax.random.fold_in(k, 1)

@@ -847,3 +847,26 @@ def test_a_drift_rejection_is_not_reported_as_a_saddle():
     assert ">= 1" not in note and "saddle" not in note
     # Regime: a genuine unstable-rate rejection keeps the saddle wording.
     assert ">= 1" in conv._hold_failure_note([("fail", 200, 1.05, False)])
+
+
+def test_a_saddle_hiding_in_a_zero_leaf_is_excited():
+    """Codex P1 on #1058: an exactly-zero leaf got perturbation scale 0, so
+    an unstable direction living there was never excited and the stable
+    leaf alone passed the hold."""
+
+    class _Two(NamedTuple):
+        a: jax.Array
+        b: jax.Array
+
+    def step(envs):
+        e = envs[(0, 0)]
+        return {(0, 0): _Two(0.5 * e.a + 0.5 * jnp.ones(3), 1.1 * e.b)}
+
+    def inv(envs):
+        e = envs[(0, 0)]
+        return {"a": np.asarray(e.a), "b": np.asarray(e.b)}
+
+    point = {(0, 0): _Two(jnp.ones(3), jnp.zeros(3))}  # b = 0 is a saddle
+    held = hold_test(step, point, sweeps=40, invariants=inv)
+    assert not held.passed
+    assert held.rate > 1.0
