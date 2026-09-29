@@ -97,6 +97,81 @@ class TestSpinlessFermionGate:
         np.testing.assert_allclose(dense, expected, atol=1e-14)
 
 
+class TestSpinlessFermionGateChemicalPotential:
+    """Tests for ``FPEPSConfig.mu`` and its ``-(mu/4)(n_i+n_j)`` bond term."""
+
+    def test_default_mu_is_zero(self):
+        assert FPEPSConfig().mu == 0.0
+
+    def test_mu_zero_bit_identical_to_original_gate(self):
+        """mu=0.0 (the default) must reproduce the pre-mu gate exactly, not
+        just to floating-point tolerance.
+        """
+        cfg = FPEPSConfig(t=1.3, V=0.7, mu=0.0)
+        H = spinless_fermion_gate(cfg)
+        dense = np.array(H.todense()).reshape(4, 4)
+        expected = np.zeros((4, 4), dtype=np.float64)
+        expected[2, 1] = -cfg.t
+        expected[1, 2] = -cfg.t
+        expected[3, 3] = cfg.V
+        assert np.array_equal(dense, expected), (
+            "spinless_fermion_gate(mu=0.0) is not bit-identical to the "
+            "original (pre-#1035-mu) gate"
+        )
+
+    def test_half_filling_bond_diagonal(self):
+        """At V=1, mu=2 (mu = 2V, the particle-hole-symmetric half-filling
+        point), the bond diagonal is (0, -0.5, -0.5, 0): |00> and |11>
+        become degenerate, and off-diagonal hopping is untouched.
+        """
+        cfg = FPEPSConfig(t=1.0, V=1.0, mu=2.0)
+        H = spinless_fermion_gate(cfg)
+        dense = np.array(H.todense()).reshape(4, 4)
+        np.testing.assert_allclose(np.diag(dense), [0.0, -0.5, -0.5, 0.0], atol=1e-14)
+        assert dense[2, 1] == -cfg.t and dense[1, 2] == -cfg.t, (
+            "the mu term must leave the off-diagonal hopping matrix elements "
+            "untouched -- it is purely diagonal in the occupation basis"
+        )
+
+    def test_mu_term_is_parity_even(self):
+        """The mu term must not mix the even-occupation (|00>, |11>) and
+        odd-occupation (|01>, |10>) sectors -- it is diagonal, so it cannot,
+        but a wrong index into the diagonal could smuggle weight across the
+        parity blocks that FermionParity forbids.  (Constructing the
+        SymmetricTensor at all already enforces this: ``from_dense`` raises
+        if any element outside a valid charge sector is nonzero.)
+        """
+        cfg = FPEPSConfig(t=1.0, V=1.0, mu=3.0)
+        H = spinless_fermion_gate(cfg)  # would raise ValueError if not block-sparse
+        dense = np.array(H.todense()).reshape(4, 4)
+        even, odd = (0, 3), (1, 2)
+        for i in even:
+            for j in odd:
+                assert dense[i, j] == 0.0
+                assert dense[j, i] == 0.0
+
+    def test_hermitian_with_nonzero_mu(self):
+        cfg = FPEPSConfig(t=1.0, V=1.0, mu=2.5)
+        H = spinless_fermion_gate(cfg)
+        dense = H.todense().reshape(4, 4)
+        np.testing.assert_allclose(dense, dense.T.conj(), atol=1e-14)
+
+    def test_mu_normalization_gives_minus_mu_n_per_site(self):
+        """4 bonds touch every square-lattice site; reading the per-bond
+        ``-(mu/4)*n_i`` contribution off the built gate (with ``t=V=0`` so
+        only the mu term is nonzero) and multiplying by those 4 bonds must
+        recover exactly ``-mu * n_i`` -- the physics
+        :func:`spinless_fermion_gate`'s ``z=4`` normalization is for.
+        """
+        mu = 3.7
+        cfg = FPEPSConfig(t=0.0, V=0.0, mu=mu)
+        H = np.array(spinless_fermion_gate(cfg).todense()).reshape(4, 4)
+        # |10> (index 2): site i occupied (n_i=1), site j empty (n_j=0).
+        per_bond_contribution_site_i = H[2, 2]
+        z = 4
+        assert z * per_bond_contribution_site_i == pytest.approx(-mu * 1)
+
+
 # ------------------------------------------------------------------ #
 # Task 2: _trotter_gate                                                #
 # ------------------------------------------------------------------ #

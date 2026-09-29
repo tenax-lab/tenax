@@ -5,7 +5,7 @@ The state is represented as a PEPS with fermionic tensor structure, where
 Koszul signs are automatically handled by SymmetricTensor operations.
 
 Currently supports:
-- Spinless fermion Hamiltonian: H = -t(c†c + h.c.) + V(n_i n_j)
+- Spinless fermion Hamiltonian: H = -t(c†c + h.c.) + V(n_i n_j) - mu*sum_i n_i
 - Trotter decomposition for imaginary time evolution
 - fPEPS site tensor initialization with FermionParity
 - Simple update (horizontal and vertical bonds)
@@ -91,6 +91,15 @@ class FPEPSConfig:
         ctm_chi:              Bond dimension for CTM environment.
         ctm_max_iter:         Maximum CTM iterations.
         ctm_conv_tol:         CTM convergence tolerance.
+        mu:                   Chemical potential.  ``H`` gains a ``-mu * sum_i
+                              n_i`` term, distributed over the bonds as
+                              ``-(mu / z) * (n_i + n_j)`` per bond with
+                              ``z = 4`` (the square lattice's coordination
+                              number), so the four bonds touching a site sum to
+                              exactly ``-mu * n_i`` there.  ``mu = 2 * V`` is
+                              the particle-hole-symmetric half-filling point of
+                              the t-V model.  Default ``0.0`` reproduces the
+                              original gate exactly.
     """
 
     D: int = 2
@@ -101,17 +110,28 @@ class FPEPSConfig:
     ctm_chi: int = 8
     ctm_max_iter: int = 50
     ctm_conv_tol: float = 1e-6
+    mu: float = 0.0
 
 
 def spinless_fermion_gate(config: FPEPSConfig) -> SymmetricTensor:
-    """Build the 2-site Hamiltonian H = -t(c†c + h.c.) + V(n_i n_j).
+    """Build the 2-site Hamiltonian H = -t(c†c + h.c.) + V(n_i n_j) - mu*(n_i+n_j)/z.
 
     The Hamiltonian acts on two spinless fermion sites with local
     Hilbert space ``{|0>, |1>}`` (empty, occupied). The fermionic
     anti-commutation relations are encoded via FermionParity symmetry.
 
+    The chemical-potential term is distributed over the bonds as
+    ``-(config.mu / z) * (n_i + n_j)`` with ``z = 4``, the coordination
+    number of the square lattice this gate is built for (verified: every
+    caller in ``src/`` -- :func:`fpeps`, :func:`su_grow_layout`,
+    :func:`optimize_fpeps_ad` -- applies it on the 2-site bipartite/
+    checkerboard square lattice, where each site touches exactly 4 bonds).
+    Summed over the 4 bonds of a site, that gives exactly ``-mu * n_i`` per
+    site. ``config.mu = 0.0`` (the default) leaves the gate unchanged.
+
     Args:
-        config: FPEPSConfig with hopping t and interaction V.
+        config: FPEPSConfig with hopping t, interaction V, and chemical
+            potential mu.
 
     Returns:
         SymmetricTensor with 4 legs (si, sj, si_out, sj_out),
@@ -119,6 +139,7 @@ def spinless_fermion_gate(config: FPEPSConfig) -> SymmetricTensor:
     """
     t = config.t
     V = config.V
+    mu = config.mu
 
     # Build the dense 4x4 Hamiltonian matrix in the basis
     # |00>, |01>, |10>, |11> (site i tensor site j)
@@ -136,6 +157,13 @@ def spinless_fermion_gate(config: FPEPSConfig) -> SymmetricTensor:
 
     # Interaction: V * n_i * n_j
     H[3, 3] = V  # <11|H|11>
+
+    # Chemical potential: -(mu/z) * (n_i + n_j), z=4 bonds per square-lattice
+    # site. n_i + n_j is 0, 1, 1, 2 on |00>, |01>, |10>, |11>. Guarded on
+    # mu != 0.0 so the mu=0 default adds nothing (bit-identical to the
+    # pre-mu gate), rather than relying on 0.0 * mu rounding to 0.0.
+    if mu != 0.0:
+        H += np.diag(-(mu / 4.0) * np.array([0.0, 1.0, 1.0, 2.0]))
 
     # Reshape to (2, 2, 2, 2): (si, sj, si_out, sj_out)
     H_4leg = H.reshape(2, 2, 2, 2)
@@ -687,13 +715,19 @@ def fpeps(
 
     .. warning::
         The **absolute energy is not certified** (#392), and this fix does not
-        change that.  ``H`` carries no chemical potential, so both the empty
-        state and the fully polarised checkerboard are exact ``E = 0``
+        change that.  ``H`` carries a chemical potential only if the caller
+        sets ``config.mu`` (default ``0.0``, see :class:`FPEPSConfig` and
+        :func:`spinless_fermion_gate`); at the default both the empty state
+        and the fully polarised checkerboard are exact ``E = 0``
         eigenstates -- fixed points of imaginary time that are not the ground
         state -- and the sweep is observed to settle on them: at 200 steps,
         D=2, ``V=0``, it reports ``E = -6e-05`` where the half-filled answer is
         ``-8t/pi**2 = -0.8106``.  :func:`sublattice_gap` tells you *which* state
-        you landed on; it does not tell you it is the ground state.
+        you landed on; it does not tell you it is the ground state.  Setting
+        ``mu = 2 * V`` restores particle-hole symmetry at half filling and
+        lifts that degeneracy -- the point where the CDW energy anchor
+        ``E = -V`` per site holds -- but it does not by itself certify
+        convergence to the ground state.
 
         That reference is the **spinless** one, which is what this model is:
         the local space is ``{|0>, |1>}`` (``d = 2``).  At ``V = 0`` the
