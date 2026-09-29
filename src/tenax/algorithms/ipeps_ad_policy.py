@@ -236,6 +236,14 @@ def ctm_converge_kwargs(
         # (1×1 recipe, dense envs). Composes with device_mesh (÷N·K total).
         # None (default) → single monolithic contraction, unchanged.
         "ctm_chunk_size": ctm_cfg.ctm_chunk_size,
+        # #841 (Codex P2 on #1057): the implicit-AD loss applies the paired
+        # per-bond gauge; the warm-start / probe / final-evaluation forwards
+        # must converge under the same gauge, or they keep the period-2 sign
+        # cycle and hand the loss an env that is not bond-gauged.  Other
+        # gauges keep the historical behaviour (these forwards apply none).
+        "forward_gauge": "bond_phase"
+        if ctm_cfg.forward_gauge == "bond_phase"
+        else None,
     }
 
 

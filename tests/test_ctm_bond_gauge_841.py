@@ -602,3 +602,102 @@ def test_a_weak_gram_component_keeps_its_per_index_phases():
     # Regime: the weak component's true phases are not all equal, so a
     # w = 1 fallback would fail the assertion above.
     assert np.ptp(np.angle(w_true[comps[1]] / w_true[comps[1]][0])) > 0.5
+
+
+# --------------------------------------------------------------------------
+# 8. Codex P2 on #1057: every optimizer forward uses the loss's gauge
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "gauge,expected", [("bond_phase", "bond_phase"), ("phase", None)]
+)
+def test_ctm_converge_kwargs_threads_only_the_bond_gauge(gauge, expected):
+    from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
+    from tenax.algorithms.ipeps_config import CTMConfig
+
+    kw = ctm_converge_kwargs(CTMConfig(chi=4, forward_gauge=gauge))
+    assert kw["forward_gauge"] == expected
+    kw = ctm_converge_kwargs(CTMConfig(chi=4, forward_gauge=gauge), for_probe=True)
+    assert kw["forward_gauge"] == expected
+
+
+def test_python_loop_applies_the_paired_bond_gauge_every_sweep(
+    dense_2site, monkeypatch
+):
+    """``forward_gauge='bond_phase'`` routes every sweep of the forward-only
+    loop through the reference-aligned bond gauge, and ``None`` through none."""
+    import tenax.algorithms.ad_utils as au
+    from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
+
+    sites, nb, envs, _gate = dense_2site
+    calls = []
+    orig = au._bond_phase_fix_envs_jit
+
+    def spy(new, old, fams):
+        calls.append(fams)
+        return orig(new, old, fams)
+
+    monkeypatch.setattr(au, "_bond_phase_fix_envs_jit", spy)
+    kw = dict(
+        chi=CHI,
+        max_iter=5,
+        min_iter=5,
+        conv_tol=0.0,
+        renormalize=True,
+        env_init=envs,
+        plateau_patience=None,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        python_loop_ctm_converge(sites, nb, **kw, forward_gauge="bond_phase")
+    assert len(calls) == 5
+    assert calls[0] == _bond_gauge_families(tuple(sites), nb)
+    calls.clear()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        python_loop_ctm_converge(sites, nb, **kw)
+    assert calls == []
+    with pytest.raises(NotImplementedError, match="chi_ramp"):
+        python_loop_ctm_converge(
+            sites,
+            nb,
+            chi=CHI,
+            chi_ramp=[(4, 2), (CHI, None)],
+            forward_gauge="bond_phase",
+        )
+
+
+@pytest.mark.parametrize("gauge", ["bond_phase", "phase"])
+def test_optimizer_forwards_receive_the_loss_gauge(gauge, dense_2site, monkeypatch):
+    """Spy every ``python_loop_ctm_converge`` call ``optimize_gs_ad`` makes
+    (warm start, line-search probes, final evaluation): each must carry the
+    bond gauge exactly when the loss uses it (Codex P2 on #1057)."""
+    import tenax.algorithms._ctm_python_loop as pl
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+    from tenax.algorithms.ipeps_optimize import optimize_gs_ad
+
+    sites, _nb, envs, gate = dense_2site
+    seen = []
+    orig = pl.python_loop_ctm_converge
+
+    def spy(*a, **k):
+        seen.append(k.get("forward_gauge"))
+        return orig(*a, **k)
+
+    monkeypatch.setattr(pl, "python_loop_ctm_converge", spy)
+    cfg = iPEPSConfig(
+        max_bond_dim=2,
+        unit_cell="2site",
+        su_init=False,
+        gs_implicit_ad=True,
+        gs_num_steps=1,
+        gs_verbose=False,
+        ctm=CTMConfig(chi=CHI, max_iter=20, conv_tol=1e-8, forward_gauge=gauge),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optimize_gs_ad(gate, (sites[(0, 0)], sites[(1, 0)]), cfg, envs_init=envs)
+    assert len(seen) >= 2  # regime: warm start + at least one more forward
+    expected = "bond_phase" if gauge == "bond_phase" else None
+    assert all(g == expected for g in seen), seen

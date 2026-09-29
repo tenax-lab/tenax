@@ -176,6 +176,7 @@ def python_loop_ctm_converge(
     recipe: str = "2x2",
     device_mesh=None,
     ctm_chunk_size: int | None = None,
+    forward_gauge: str | None = None,
     _recipe_warning_emitted: bool = False,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM to convergence using a Python for-loop over JIT'd sweeps.
@@ -234,9 +235,35 @@ def python_loop_ctm_converge(
                            ``None`` to restore the pre-2026-05-11 "run to
                            ``max_iter``" behavior.
 
+        forward_gauge:     ``None`` (default): only ``gauge_fix_fn`` applies,
+                           as before.  ``"bond_phase"``: the paired,
+                           reference-aligned per-bond gauge of the
+                           implicit-AD loss (``ad_utils._bond_phase_fix_envs``,
+                           #841), so optimizer forwards (warm start,
+                           line-search probe, final evaluation) converge to
+                           the same element-wise fixed point the loss
+                           linearizes.  Exclusive with ``gauge_fix_fn`` and
+                           with ``chi_ramp``.
+
     Returns:
         ``(envs, CTMConvergeInfo)`` — converged environments and info.
     """
+    if forward_gauge not in (None, "bond_phase"):
+        raise ValueError(
+            f"python_loop_ctm_converge: forward_gauge={forward_gauge!r}; "
+            "only None or 'bond_phase' (other gauges go through gauge_fix_fn)"
+        )
+    if forward_gauge == "bond_phase" and gauge_fix_fn is not None:
+        raise ValueError(
+            "python_loop_ctm_converge: forward_gauge='bond_phase' and "
+            "gauge_fix_fn are exclusive"
+        )
+    if forward_gauge == "bond_phase" and chi_ramp is not None:
+        raise NotImplementedError(
+            "forward_gauge='bond_phase' is not supported with chi_ramp "
+            "(the per-stage chi change has no index-by-index reference); "
+            "use ctmrg_heuristic_increase_chi, or forward_gauge='phase'."
+        )
     # #911: warned here rather than in ``_make_jit_ctm_step`` or
     # ``_python_loop_chi_ramp`` -- this is the once-per-convergence boundary,
     # those are once-per-sweep and once-per-ramp-stage.  Before the chi_ramp
@@ -314,7 +341,17 @@ def python_loop_ctm_converge(
     )
 
     # Build gauge_fix_fn pair adapter
-    if gauge_fix_fn is not None:
+    if forward_gauge == "bond_phase":
+        from tenax.algorithms.ad_utils import (
+            _bond_gauge_families,
+            _bond_phase_fix_envs_jit,
+        )
+
+        _bond_families = _bond_gauge_families(tuple(site_tensors), neighbors)
+
+        def _gauge_pair(envs_new, envs_old):
+            return _bond_phase_fix_envs_jit(envs_new, envs_old, _bond_families)
+    elif gauge_fix_fn is not None:
         _user_gauge = gauge_fix_fn
 
         def _gauge_pair(envs_new, envs_old):
