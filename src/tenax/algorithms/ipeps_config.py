@@ -26,7 +26,10 @@ class CTMConfig:
                             broadening to prevent NaN from degenerate singular
                             values (Francuz et al., PRR 7, 013237).
         forward_gauge:      Gauge fix applied after each CTM sweep.  One of
-                            ``"phase"`` (default), ``"qr"``, ``"sigma"``, or
+                            ``"phase"`` (default), ``"bond_phase"``
+                            (implicit-AD path only: ``"phase"`` plus a
+                            per-chi-index bond gauge aligned to the previous
+                            env, #841), ``"qr"``, ``"sigma"``, or
                             ``"none"``.  Explicit user choice is preserved —
                             no silent promotion in AD paths.  See
                             ``docs/guide/algorithms/ipeps_ad_paths.md`` for
@@ -141,7 +144,9 @@ class CTMConfig:
     ctm_conv_method: str = "elementwise"
     # forward_gauge: "phase" (default — Frobenius-norm phase fix per CTM
     # absorption; works for both implicit and explicit AD, 1-site and
-    # 2-site).  "sigma" (transfer-matrix eigenvector alignment, 1-site
+    # 2-site).  "bond_phase" (opt-in, implicit AD only: phase + per-chi-
+    # index bond signs/phases aligned to the previous env, #841).  "sigma"
+    # (transfer-matrix eigenvector alignment, 1-site
     # only), "qr" (legacy), or "none" (diagnostic).  No silent promotion
     # — explicit user choice is preserved.  See ipeps_ad_paths.md.
     forward_gauge: str = "phase"

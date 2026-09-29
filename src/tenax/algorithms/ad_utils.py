@@ -108,7 +108,7 @@ def _config_to_tuple(config) -> tuple:
         int(getattr(config, "gmres_precondition", True)),
         {"vjp": 0, "gmres": 1}.get(getattr(config, "ad_backward_method", "vjp"), 0),
         _CONV_METHOD_STR_TO_INT.get(getattr(config, "ctm_conv_method", "sv"), 0),
-        {"qr": 0, "sigma": 1, "phase": 2, "none": 3}.get(
+        {"qr": 0, "sigma": 1, "phase": 2, "none": 3, "bond_phase": 4}.get(
             getattr(config, "forward_gauge", "qr"), 0
         ),
         _PB_STR_TO_INT.get(getattr(config, "projector_backward", "auto"), 0),
@@ -130,7 +130,7 @@ def _config_from_tuple(config_tuple: tuple):
     conv_method_int = config_tuple[9] if len(config_tuple) > 9 else 0
     ctm_conv_method = _CONV_METHOD_INT_TO_STR.get(conv_method_int, "sv")
     forward_gauge_int = config_tuple[10] if len(config_tuple) > 10 else 0
-    forward_gauge = {0: "qr", 1: "sigma", 2: "phase", 3: "none"}.get(
+    forward_gauge = {0: "qr", 1: "sigma", 2: "phase", 3: "none", 4: "bond_phase"}.get(
         forward_gauge_int, "qr"
     )
     pb_int = config_tuple[11] if len(config_tuple) > 11 else 0
@@ -613,6 +613,339 @@ def _phase_fix_split_ctm_tensor(env):
     )
 
 
+# ---------------------------------------------------------------------------
+# Per-bond (per-chi-index) phase gauge, referenced to the previous env (#841)
+# ---------------------------------------------------------------------------
+
+# The two chi legs of every env tensor as ``(out_label, in_label)``.  Every
+# chi contraction in the CTM energy and sweep pairs one out-leg with one
+# in-leg (their flows are OUT / IN on the symmetric path), so "multiply the
+# out-leg by w and the in-leg by conj(w)" is an exact gauge transform on
+# each contracted pair: w_i * conj(w_i) = 1 for a unit-modulus w.
+_BOND_CHI_LEGS: dict[str, tuple[str, str]] = {
+    "C1": ("c1_r", "c1_d"),
+    "C2": ("c2_d", "c2_l"),
+    "C3": ("c3_l", "c3_u"),
+    "C4": ("c4_r", "c4_u"),
+    "T1": ("t1_r", "t1_l"),
+    "T2": ("t2_d", "t2_u"),
+    "T3": ("t3_r", "t3_l"),
+    "T4": ("t4_d", "t4_u"),
+}
+_BOND_LABEL_FIELD = {lab: f for f, pair in _BOND_CHI_LEGS.items() for lab in pair}
+_BOND_OUT_LABELS = frozenset(pair[0] for pair in _BOND_CHI_LEGS.values())
+
+# Within one site's environment ring (the ``_rdm2x1_tensor`` connectivity,
+# also the ``_sigma_gauge_fix_env`` bond map): (out_label, in_label).
+_BOND_RING_PAIRS = (
+    ("c1_r", "t1_l"),
+    ("t1_r", "c2_l"),
+    ("c2_d", "t2_u"),
+    ("t2_d", "c3_u"),
+    ("c3_l", "t3_l"),
+    ("t3_r", "c4_u"),
+    ("c4_r", "t4_u"),
+    ("t4_d", "c1_d"),
+)
+
+# Power-iteration steps in :func:`_bond_leading_phase`.  In the exact case
+# the phases are already exact after one step for every index within
+# ``_BOND_POWER_STEPS + 1`` hops of the anchor, so this only has to cover
+# the family's connectivity diameter, not converge an eigenvector.
+_BOND_POWER_STEPS = 6
+# An index whose power-iteration weight is below this fraction of the
+# anchor's is left unrotated (w = 1).  Its weight is a fourth power of the
+# env amplitudes on that index (G = S S^H with S ~ |X|^2), so 1e-24 leaves
+# indices of relative amplitude ~1e-6 and above fully aligned and only
+# touches entries that are already at the 1e-12 level.
+_BOND_WEIGHT_FLOOR = 1e-24
+
+
+def _bond_gauge_families(coords, neighbors) -> tuple:
+    """Group every chi leg of a multisite env into bond families.
+
+    A *family* is a set of ``(coord, label)`` legs that must carry the same
+    per-index gauge for the transform to be exact: the union of every chi
+    contraction the CTM energy performs.  Two kinds of pair:
+
+    * within one site's ring (``_BOND_RING_PAIRS``: c1_r<->t1_l, ...), and
+    * across sites, from the mixed 2-site RDMs
+      (``_rdm2x1_tensor_2site`` / ``_rdm1x2_tensor_2site``):
+      horizontal ``T1[x].t1_r <-> T1[right].t1_l`` and
+      ``T3[x].t3_l <-> T3[right].t3_r``; vertical
+      ``T4[x].t4_u <-> T4[bottom].t4_d`` and
+      ``T2[x].t2_d <-> T2[bottom].t2_u``.
+
+    On the 1-site cell the cross pairs join each edge's two legs, giving the
+    four families of the sigma gauge (s1..s4).  On the 2-site checkerboard
+    they join legs of *different* coords: 8 families of 4 legs, e.g.
+    ``{C1[A].c1_r, T1[A].t1_l, T1[B].t1_r, C2[B].c2_l}``.  A gauge applied
+    per coord only (16 families) is NOT exact for the mixed RDMs.
+
+    Every pair joins one out-label and one in-label, which is what makes the
+    out/in (w / conj(w)) assignment consistent on the whole family.
+
+    Returns a tuple of families, each a sorted tuple of ``(coord, label)``.
+    """
+    coords = tuple(coords)
+    parent: dict = {}
+
+    def find(a):
+        parent.setdefault(a, a)
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    pairs = []
+    for x in coords:
+        for out_l, in_l in _BOND_RING_PAIRS:
+            pairs.append(((x, out_l), (x, in_l)))
+        r = neighbors[x]["right"]
+        b = neighbors[x]["bottom"]
+        pairs += [
+            ((x, "t1_r"), (r, "t1_l")),
+            ((r, "t3_r"), (x, "t3_l")),
+            ((b, "t4_d"), (x, "t4_u")),
+            ((x, "t2_d"), (b, "t2_u")),
+        ]
+    for a, b in pairs:
+        if (a[1] in _BOND_OUT_LABELS) == (b[1] in _BOND_OUT_LABELS):
+            raise AssertionError(f"bond pair {a}<->{b} is not out<->in")
+        union(a, b)
+    for x in coords:
+        for lab in _BOND_LABEL_FIELD:
+            find((x, lab))
+    groups: dict = {}
+    for leg in parent:
+        groups.setdefault(find(leg), []).append(leg)
+    return tuple(
+        sorted((tuple(sorted(g, key=repr)) for g in groups.values()), key=repr)
+    )
+
+
+def _bond_leg_signature(tensor, label):
+    idx = _index_by_label(tensor, label)
+    charges = getattr(idx, "charges", None)
+    return (idx.dim, None if charges is None else tuple(int(q) for q in charges))
+
+
+def _bond_structures_match(envs_new, envs_ref) -> bool:
+    """Static check: same coords and identical chi-leg dims and charges.
+
+    Charges and dims are static metadata (pytree aux data), so this is a
+    Python-level branch that is safe under ``jit`` / ``vjp`` tracing.  A
+    mismatch means the step changed the chi inventory (chi bump, sector
+    reshuffle), where index-by-index alignment is undefined.
+    """
+    if set(envs_new) != set(envs_ref):
+        return False
+    for c in envs_new:
+        for f, labs in _BOND_CHI_LEGS.items():
+            t_new = getattr(envs_new[c], f)
+            t_ref = getattr(envs_ref[c], f)
+            if t_new.ndim != t_ref.ndim:
+                return False
+            for lab in labs:
+                if _bond_leg_signature(t_new, lab) != _bond_leg_signature(t_ref, lab):
+                    return False
+    return True
+
+
+def _bond_leading_phase(G):
+    """Unit-modulus per-index phases from a family Gram matrix ``G``.
+
+    In the exact case ``G[i, k] = w_i conj(w_k) W[i, k]`` with ``W >= 0``, so
+    ``G^n e_i0 = conj(w_i0) * w ⊙ (W^n e_i0)`` carries the phases ``w`` (up
+    to one global phase, absorbed later by the per-tensor phase) wherever
+    ``W^n e_i0 > 0``.  The anchor ``i0`` is the heaviest index; indices the
+    iteration leaves at (relative) zero weight are left unrotated.
+    """
+    diag = jnp.real(jnp.diagonal(G))
+    i0 = jnp.argmax(diag)
+    v = G[:, i0]
+    for _ in range(_BOND_POWER_STEPS):
+        v = G @ v
+        scale = jnp.max(jnp.abs(v))
+        v = v / jnp.where(scale > 0, scale, 1.0)
+    absv = jnp.abs(v)
+    keep = absv > _BOND_WEIGHT_FLOOR * jnp.max(absv)
+    # Fence the ARGUMENT (not just the output) so an unkept index never
+    # divides by zero in either the primal or the VJP.
+    v_safe = jnp.where(keep, v, jnp.ones_like(v))
+    return v_safe / jnp.abs(v_safe)
+
+
+def _bond_phase_fix_envs(envs_new, envs_ref, families):
+    """Per-bond phase gauge: align ``envs_new`` to ``envs_ref`` index by index.
+
+    ``forward_gauge="bond_phase"`` (#841).  Three stages, all on the small
+    env tensors (densified like :func:`_phase_fix_ctm_tensor`):
+
+    1. Reference-free per-tensor Frobenius normalisation + global phase
+       (:func:`_frob_phase_fix`; the ``"phase"`` gauge, kept as stage 1 so
+       ``"bond_phase"`` strictly extends it).
+    2. One unit-modulus factor per chi index of every bond family (see
+       :func:`_bond_gauge_families`), ``w`` on out-legs and ``conj(w)`` on
+       in-legs, so every contracted pair is unchanged: an exact gauge
+       transform of the energy, every RDM, and the CTM sweep.  ``w`` is read
+       off the family Gram matrix of the overlaps ``conj(ref) * new``
+       (:func:`_bond_leading_phase`), which is independent of the other
+       legs' signs and of each tensor's global phase, so recovering a pure
+       gauge ``new = g . ref`` is exact, not a local-optimum search.
+    3. One global phase per tensor, the phase of ``<ref, new>`` after stage
+       2 (a per-tensor scalar; the energy normalises every RDM, so it is a
+       gauge too).  Exactly zero overlap keeps phase 1.
+
+    The per-tensor global phase of stage 1 cannot absorb the per-chi-index
+    Z2 signs the 2x2 projector SVD re-draws each sweep (#841: at D=3 the M'
+    anchor makes those signs a period-2 map), which is why ``"phase"``
+    leaves an exact 2-cycle; this gauge removes it because the reference
+    pins every index.
+
+    Differentiation: the reference is always ``stop_gradient`` (the implicit
+    backward linearizes ``fix(step(env), env_ref)`` with a frozen reference,
+    which has the same fixed point).  For real envs the factors are +-1, a
+    piecewise-constant function whose derivative is zero wherever it is
+    defined, so they are computed from ``stop_gradient`` inputs -- exact,
+    and free of the ``0/0`` VJP at a sign boundary.  For complex envs the
+    phases vary smoothly with the step output and are differentiated.
+
+    Falls back to stage 1 alone when the chi inventory of ``envs_new`` and
+    ``envs_ref`` differs (static check; e.g. the sweep after a chi bump).
+    """
+    coords = tuple(envs_new)
+    fields = tuple(_BOND_CHI_LEGS)
+    labels = {
+        (c, f): tuple(i.label for i in getattr(envs_new[c], f).indices)
+        for c in coords
+        for f in fields
+    }
+    dense = {
+        (c, f): _frob_phase_fix(getattr(envs_new[c], f).todense())
+        for c in coords
+        for f in fields
+    }
+
+    def _wrap_all(arrs):
+        out = {}
+        for c in coords:
+            out[c] = CTMTensorEnv(
+                **{
+                    f: _wrap_tensor(arrs[(c, f)], getattr(envs_new[c], f))
+                    for f in fields
+                }
+            )
+        return out
+
+    if not _bond_structures_match(envs_new, envs_ref):
+        return _wrap_all(dense)
+
+    ref = {}
+    for c in coords:
+        for f in fields:
+            t_ref = getattr(envs_ref[c], f)
+            ref_labels = tuple(i.label for i in t_ref.indices)
+            perm = tuple(ref_labels.index(lab) for lab in labels[(c, f)])
+            ref[(c, f)] = jax.lax.stop_gradient(jnp.transpose(t_ref.todense(), perm))
+
+    is_complex = jnp.iscomplexobj(next(iter(dense.values())))
+
+    def _probe(x):
+        return x if is_complex else jax.lax.stop_gradient(x)
+
+    # S[X] = overlap conj(ref) * new summed over the D^2 leg, arranged as
+    # (out-leg, in-leg).  Exact case: S = t * conj(w_out) ⊗ w_in ⊙ (>= 0).
+    S = {}
+    axes = {}
+    for key, X in dense.items():
+        out_l, in_l = _BOND_CHI_LEGS[key[1]]
+        labs = labels[key]
+        a, b = labs.index(out_l), labs.index(in_l)
+        axes[key] = (a, b)
+        M = jnp.conj(ref[key]) * _probe(X)
+        rest = tuple(k for k in range(M.ndim) if k not in (a, b))
+        if rest:
+            M = jnp.sum(M, axis=rest)
+            a_r = a - sum(1 for k in rest if k < a)
+            b_r = b - sum(1 for k in rest if k < b)
+        else:
+            a_r, b_r = a, b
+        S[key] = M if a_r < b_r else M.T
+
+    # Per-family index phases w: a pure family gauge makes the new/ref ratio
+    # conj(w) on out-legs and w on in-legs, and both Gram forms below are
+    # then w_i conj(w_k) * (>= 0), independent of every other leg and of the
+    # tensor's global phase.
+    w_leg = {}
+    for fam in families:
+        G = None
+        for c, lab in fam:
+            key = (c, _BOND_LABEL_FIELD[lab])
+            Sk = S[key]
+            term = (
+                jnp.conj(Sk) @ Sk.T if lab in _BOND_OUT_LABELS else Sk.T @ jnp.conj(Sk)
+            )
+            G = term if G is None else G + term
+        w = _bond_leading_phase(G)
+        for c, lab in fam:
+            w_leg[(c, lab)] = w
+
+    fixed = {}
+    for key, X in dense.items():
+        c, f = key
+        out_l, in_l = _BOND_CHI_LEGS[f]
+        a, b = axes[key]
+        # The family phase w enters as w on the out-leg, conj(w) on the
+        # in-leg: each contracted (out, in) pair picks up w_i conj(w_i) = 1.
+        shape_a = [1] * X.ndim
+        shape_a[a] = -1
+        shape_b = [1] * X.ndim
+        shape_b[b] = -1
+        Xg = (
+            X
+            * w_leg[(c, out_l)].reshape(shape_a)
+            * jnp.conj(w_leg[(c, in_l)]).reshape(shape_b)
+        )
+        ov = jnp.sum(jnp.conj(ref[key]) * _probe(Xg))
+        aov = jnp.abs(ov)
+        ov_safe = jnp.where(aov > 0, ov, jnp.ones_like(ov))
+        fixed[key] = Xg * (jnp.conj(ov_safe) / jnp.abs(ov_safe))
+    return _wrap_all(fixed)
+
+
+_BOND_FIX_JIT_CACHE: dict = {}
+
+
+def _bond_phase_fix_envs_jit(envs_new, envs_ref, families):
+    """JIT-compiled :func:`_bond_phase_fix_envs` for the eager forward loop.
+
+    The eager loop would otherwise dispatch a few hundred tiny ops per sweep.
+    ``families`` is static (hashable tuple); the env structure is pytree aux
+    data, so a new chi inventory retraces rather than mis-aligning.
+    """
+    fn = _BOND_FIX_JIT_CACHE.get(families)
+    if fn is None:
+        fn = jax.jit(partial(_bond_phase_fix_envs, families=families))
+        _BOND_FIX_JIT_CACHE[families] = fn
+    return fn(envs_new, envs_ref)
+
+
+def _refuse_bond_phase_on_legacy_path(gauge_mode) -> None:
+    """The ``ad_utils`` CTM paths treat every unknown gauge as QR; say so
+    instead of silently running a different gauge than the one requested."""
+    if gauge_mode == "bond_phase":
+        raise NotImplementedError(
+            "forward_gauge='bond_phase' is implemented on the implicit-AD path "
+            "(ctm_energy_implicit) only, not on the legacy ad_utils CTM paths."
+        )
+
+
 def _needs_paired_sweep(A) -> bool:
     """Check if A is a SymmetricTensor with non-trivial virtual charges."""
     from tenax.core.tensor import SymmetricTensor
@@ -829,6 +1162,7 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         site_leaves = site_leaves + tuple(jax.tree.leaves(site_tensors[c]))
     env_leaves = _flatten_envs(envs)
 
+    _refuse_bond_phase_on_legacy_path(getattr(config, "forward_gauge", "qr"))
     use_sigma = getattr(config, "forward_gauge", "qr") == "sigma"
 
     if use_sigma:
@@ -1069,6 +1403,7 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
 
     use_elementwise = getattr(config, "ctm_conv_method", "sv") == "elementwise"
     gauge_mode = getattr(config, "forward_gauge", "qr")
+    _refuse_bond_phase_on_legacy_path(gauge_mode)
     use_sigma = gauge_mode == "sigma"
     use_none = gauge_mode == "none"
     use_phase = gauge_mode == "phase"
@@ -1236,6 +1571,7 @@ def ctm_tensor_converge_explicit(
     )
 
     gauge_mode = getattr(config, "forward_gauge", "qr")
+    _refuse_bond_phase_on_legacy_path(gauge_mode)
     use_sigma = gauge_mode == "sigma"
     use_phase = gauge_mode == "phase"
     use_none = gauge_mode == "none"

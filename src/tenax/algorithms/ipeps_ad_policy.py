@@ -27,8 +27,11 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
         errors.append(
             f"projector_method={ctm_cfg.projector_method!r} (expected 'svd' or 'qr')"
         )
-    if ctm_cfg.forward_gauge != "phase":
-        errors.append(f"forward_gauge={ctm_cfg.forward_gauge!r} (expected 'phase')")
+    if ctm_cfg.forward_gauge not in ("phase", "bond_phase"):
+        errors.append(
+            f"forward_gauge={ctm_cfg.forward_gauge!r} "
+            "(expected 'phase' or 'bond_phase')"
+        )
     if ctm_cfg.ctm_conv_method != "elementwise":
         errors.append(
             f"ctm_conv_method={ctm_cfg.ctm_conv_method!r} (expected 'elementwise')"
@@ -36,7 +39,8 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
     if errors:
         raise ValueError(
             "Implicit AD requires CTM settings "
-            "(projector_method in ('svd', 'qr'), forward_gauge='phase', "
+            "(projector_method in ('svd', 'qr'), forward_gauge in "
+            "('phase', 'bond_phase'), "
             "ctm_conv_method='elementwise'). Got: " + ", ".join(errors)
         )
 
@@ -99,7 +103,8 @@ def resolve_projector_backward(
     No silent promotion is applied. For the implicit-AD path we enforce the
     empirically stable CTM combination:
     - ``projector_method == "svd"``
-    - ``forward_gauge == "phase"`` (Frobenius + phase fixing path)
+    - ``forward_gauge in ("phase", "bond_phase")`` (Frobenius + phase fixing
+      path, optionally with the per-bond gauge of #841)
     - ``ctm_conv_method == "elementwise"``
 
     Explicit-AD keeps user choices unchanged.
