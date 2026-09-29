@@ -321,6 +321,10 @@ _FILE_MARKERS = {
     # regression, and the production default phase gauge is one of the four
     # sites. The whole file runs in ~6s.
     "test_phase_fix_nan_vjp_789.py": "core",
+    # #841: the 2x2 projector SVD gauge must survive the exact ket<->bra swap
+    # ties of M1/M2.  Small matrices, a few seconds; ``core`` because a
+    # regression silently breaks the CTM fixed point and the implicit adjoint.
+    "test_projector_svd_sign_ties_841.py": "core",
     # #834: block-sparse contract() silently disagreeing with the densified
     # contraction on legs whose charges do not line up. ``core`` because the
     # defect is representation-dependent arithmetic in the contraction engine
