@@ -274,6 +274,98 @@ def test_the_default_metric_is_blind_to_a_period_two_sign_cycle():
     assert held.passed
 
 
+class _Edge(NamedTuple):
+    T: jax.Array
+
+
+def _rotation_saddle():
+    """An edge tensor ``T[a, m, b]`` whose unstable mode is a pure rotation of
+    the middle (D^2) leg: ``T -> T* x_2 R(theta)`` with ``theta <- 1.05
+    theta``, while every other displacement decays at 0.8/sweep.  A rotation
+    of the D^2 leg leaves every per-leg singular-value spectrum unchanged,
+    but it is NOT a gauge -- that leg contracts against the fixed double
+    layer -- so this is a saddle (Codex P1 on #1058, _ctm_hold.py:92)."""
+    import jax.scipy.linalg as jsl
+
+    rng = np.random.default_rng(7)
+    Tstar = jnp.asarray(rng.standard_normal((4, 4, 4)))
+    K = np.zeros((4, 4))
+    K[0, 1], K[1, 0] = 1.0, -1.0
+    K = jnp.asarray(K)
+    u = jnp.einsum("amb,mn->anb", Tstar, K)  # tangent of the rotation at T*
+
+    def rot(theta):
+        return jnp.einsum("amb,mn->anb", Tstar, jsl.expm(theta * K))
+
+    def step(envs):
+        T = envs[(0, 0)].T
+        theta = jnp.vdot(u, T - Tstar) / jnp.vdot(u, u)
+        rest = T - rot(theta)
+        return {(0, 0): _Edge(rot(1.05 * theta) + 0.8 * rest)}
+
+    return step, {(0, 0): _Edge(Tstar)}, rot
+
+
+def test_a_rotation_of_the_d2_leg_is_seen():
+    """The per-leg spectra alone are blind to the rotation (regime, asserted
+    first); the hold must still reject the saddle."""
+    step, start, rot = _rotation_saddle()
+    blind = env_spectral_invariants(start)
+    moved = {(0, 0): _Edge(rot(0.3))}
+    per_leg = {
+        k: v for k, v in env_spectral_invariants(moved).items() if "d2gram" not in k
+    }
+    per_leg0 = {k: v for k, v in blind.items() if "d2gram" not in k}
+    assert env_invariant_distance(per_leg, per_leg0) < 1e-12  # regime: spectra blind
+    assert env_invariant_distance(env_spectral_invariants(moved), blind) > 1e-2
+    held = hold_test(step, start, sweeps=40)
+    assert not held.passed
+    assert all(r > 1.0 for r in held.rates)
+
+
+def test_the_block_sparse_d2_gram_sees_a_rotation_within_a_sector():
+    """Same blind spot on the ``SymmetricTensor`` path: rotate two D^2 slots
+    of equal charge (a unitary within the sector -- all a symmetric map can
+    do).  Per-leg spectra do not move; the block-sparse D^2 Gram does."""
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import SymmetricTensor
+
+    sym = U1Symmetry()
+    chi = np.array([0, 0, 1, 1, -1], dtype=np.int32)
+    d2 = np.array([0, 0, 0, 1, -1], dtype=np.int32)
+    idx = (
+        TensorIndex.from_charges(sym, chi, FlowDirection.IN, label="a"),
+        TensorIndex.from_charges(sym, d2, FlowDirection.IN, label="m"),
+        TensorIndex.from_charges(sym, chi, FlowDirection.OUT, label="b"),
+    )
+    T = SymmetricTensor.random_normal(idx, jax.random.PRNGKey(3))
+    c, sn = np.cos(0.3), np.sin(0.3)
+    R = np.eye(5)
+    R[:2, :2] = [[c, -sn], [sn, c]]  # slots 0 and 1 are both charge 0
+    Td = np.einsum("amb,mn->anb", np.asarray(T.todense()), R)
+    T2 = SymmetricTensor.from_dense(jnp.asarray(Td), idx)
+    a = env_spectral_invariants({(0, 0): _Edge(T)})
+    b = env_spectral_invariants({(0, 0): _Edge(T2)})
+    legs_a = {k: v for k, v in a.items() if "d2gram" not in k}
+    legs_b = {k: v for k, v in b.items() if "d2gram" not in k}
+    assert env_invariant_distance(legs_a, legs_b) < 1e-12  # regime: spectra blind
+    assert env_invariant_distance(a, b) > 1e-2
+
+
+def test_the_d2_gram_is_blind_to_chi_gauges():
+    """Separate orthogonal maps on the two chi legs of an edge tensor, and
+    the global scale, are gauges: the D^2 Gram must not move."""
+    rng = np.random.default_rng(8)
+    T = rng.standard_normal((5, 4, 6))
+    Qa, _ = np.linalg.qr(rng.standard_normal((5, 5)))
+    Qb, _ = np.linalg.qr(rng.standard_normal((6, 6)))
+    T2 = -3.0 * np.einsum("xa,amb,yb->xmy", Qa, T, Qb)
+    a = env_spectral_invariants({(0, 0): _Edge(jnp.asarray(T))})
+    b = env_spectral_invariants({(0, 0): _Edge(jnp.asarray(T2))})
+    assert env_invariant_distance(a, b) < 1e-12
+
+
 def test_the_invariant_distance_is_gauge_blind_and_continuous():
     rng = np.random.default_rng(1)
     C = jnp.asarray(rng.standard_normal((4, 4)))

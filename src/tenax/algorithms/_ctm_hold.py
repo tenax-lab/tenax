@@ -82,6 +82,36 @@ def _leg_gram_spectra(t) -> dict[Hashable, np.ndarray]:
     return out
 
 
+#: The fixed (non-gauge) leg of a 3-leg edge tensor ``T[chi, D^2, chi]``.
+_D2_LEG = 1
+
+
+def _d2_grams(t) -> dict[Hashable, np.ndarray]:
+    """Per charge sector, the full Gram matrix of an edge tensor's D^2 leg.
+
+    ``G[m, m'] = sum_{a, b} T[a, m, b] conj(T[a, m', b])``.  A unitary on
+    either chi leg cancels in the sum, so ``G`` is blind to every chi-bond
+    gauge (order, signs, the period-2 sign cycle); but unlike its spectrum it
+    keeps the D^2 basis, which is NOT a gauge -- that leg contracts against
+    the fixed double layer.  ``D^2 x D^2`` per sector; block-sparse on
+    ``SymmetricTensor`` (sum over the blocks with that D^2 charge).
+    """
+    out: dict[Hashable, np.ndarray] = {}
+    if isinstance(t, SymmetricTensor):
+        for key, v in t.blocks.items():
+            q = key[_D2_LEG]
+            q = q.item() if hasattr(q, "item") else q
+            b = np.asarray(v)
+            m = np.moveaxis(b, _D2_LEG, 0).reshape(b.shape[_D2_LEG], -1)
+            g = m @ m.conj().T
+            out[q] = out[q] + g if q in out else g
+        return out
+    a = np.asarray(t.todense() if isinstance(t, DenseTensor) else t)
+    m = np.moveaxis(a, _D2_LEG, 0).reshape(a.shape[_D2_LEG], -1)
+    out[None] = m @ m.conj().T
+    return out
+
+
 def env_spectral_invariants(envs: dict[Any, Any]) -> Invariants:
     """Gauge-invariant fingerprint of a CTM environment.
 
@@ -92,11 +122,22 @@ def env_spectral_invariants(envs: dict[Any, Any]) -> Invariants:
     chi-bond gauge -- slot permutation, signs, a unitary within a sector --
     have identical invariants.
 
+    Per-leg spectra are ALSO blind to a unitary on an edge tensor's D^2 leg,
+    which is not a gauge (Codex P1 on #1058): an unstable mode that only
+    rotates that leg would be invisible.  So every 3-leg (edge) tensor also
+    contributes its full D^2 Gram matrix per sector (:func:`_d2_grams`),
+    normalised by the same leg's largest singular value squared, as its real
+    and imaginary parts.  It fixes the D^2 basis and quotients only the chi
+    legs: under ``T -> T x_2 U`` it moves as ``U G U^dagger``, so a rotation
+    is seen unless ``U`` commutes with ``G`` (only a phase within a
+    degenerate eigenspace of ``G`` stays invisible).
+
     Args:
         envs: ``{coord: CTMTensorEnv}`` (or any NamedTuple of tensors).
 
     Returns:
-        ``{(coord, field, leg, charge): descending singular values}``.
+        ``{(coord, field, leg, charge): descending singular values}`` plus
+        ``{(coord, field, "d2gram", charge): [Re G, Im G] flattened}``.
     """
     inv: Invariants = {}
     for c in sorted(envs):
@@ -112,6 +153,16 @@ def env_spectral_invariants(envs: dict[Any, Any]) -> Invariants:
             for (leg, q), s in spectra.items():
                 top = by_leg[leg]
                 inv[(c, f, leg, q)] = s / top if top > 0 or math.isnan(top) else s
+            t = getattr(env, f)
+            ndim = len(t.indices) if hasattr(t, "indices") else np.ndim(t)
+            if ndim == 3:
+                top = by_leg.get(_D2_LEG, 0.0)
+                scale = top * top if top > 0 or math.isnan(top) else 1.0
+                for q, g in _d2_grams(t).items():
+                    g = np.asarray(g) / scale
+                    inv[(c, f, "d2gram", q)] = np.concatenate(
+                        [g.real.ravel(), g.imag.ravel()]
+                    )
     return inv
 
 
