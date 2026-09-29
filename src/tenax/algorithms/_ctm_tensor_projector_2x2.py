@@ -31,27 +31,37 @@ __all__ = ["_build_enlarged_corner", "_compute_2x2_projector"]
 # default, and the "none" spelling #983 proposed for the explicit freeze --
 # keeps the projectors as ``stop_gradient`` constants.
 #
-# Opt-in rather than default, and the reason is measured, not cautious: the
-# implicit-AD backward solves ``(I - J^T) λ = dE/denv``, and restoring
-# ``dP/denv`` puts the CTM gauge mode back into ``J``.  On the D=2 chi=4
-# fixture of ``tests/test_adjoint_convergence_gate.py``, with restart=200 and
-# gmres_maxiter=600, the flowing adjoint residual goes 4.2e-13 / 4.5e-15 /
-# 5.1e-01 / 8.1e-02 / 7.9e-01 at ctm_max_iter 20/40/80/150/300 under
-# forward_gauge="phase" (and 5.6e-13 / 2.0e-02 / 7.2e-01 / 9.2e-01 / 4.2e-12
-# under "sigma"); the frozen control is 1e-16 at every one of those points.
-# That is not a Krylov-budget stall -- it is flat in both restart and maxiter
-# -- it is a system that sometimes has no solution, depending on where the
-# forward iterate happened to land.  Which is #841: the 2x2 forward does not
-# reach an element-wise fixed point, so linearizing the TRUE step map around
-# it is ill-posed.  Freezing the projectors hides that by substituting a
-# different, artificially contracting operator.
+# Opt-in rather than default.  The original reason, measured before #841 was
+# fixed: the implicit-AD backward solves ``(I - J^T) λ = dE/denv``, and
+# restoring ``dP/denv`` puts the CTM gauge mode back into ``J``.  On the D=2
+# chi=4 fixture of ``tests/test_adjoint_convergence_gate.py``, with
+# restart=200 and gmres_maxiter=600, the flowing adjoint residual went
+# 4.2e-13 / 4.5e-15 / 5.1e-01 / 8.1e-02 / 7.9e-01 at ctm_max_iter
+# 20/40/80/150/300 under forward_gauge="phase" (and 5.6e-13 / 2.0e-02 /
+# 7.2e-01 / 9.2e-01 / 4.2e-12 under "sigma"); the frozen control was 1e-16 at
+# every one of those points.  Not a Krylov-budget stall -- flat in both
+# restart and maxiter -- but a system with no solution, because the 2x2
+# forward had no element-wise fixed point (#841): the M1/M2 SVD gauge read the
+# sign of the largest-|U| entry, which the exact ket<->bra swap symmetry ties
+# between swapped D^2 rows, so the chi signs flipped at random every sweep.
 #
-# So on the implicit path the frozen default is wrong-but-solvable and the
-# flowing one is right-but-unsolvable; #841 has to land before "flow" can
-# become the default there.  Paths with no adjoint solve (explicit AD, a bare
-# sweep) have no such obstruction and should pass "flow" today -- measured
-# AD/FD on ctm_energy_explicit at this fixture: 0.229..0.928 frozen against
-# 0.944..0.994 flowing.
+# #841 is fixed (``_swap_robust_phases``).  Re-measured after the fix, phase
+# gauge, same restart/maxiter, gmres_tol=1e-12, on fixtures whose forward
+# converges: D=2 chi=6 flowing residual 6.0e-15, then 1.6e-14 at 40..300
+# (before: 2.1e-02, then 1.5e-02 flat), forward stationarity 3.3e-08 (before
+# 0.41); chi=8 1.3e-11, then 3.5e-13 (before 1.4e-02, then 4.4e-02).  At chi=6,
+# ctm_max_iter=150, conv_tol=1e-10 the flowing implicit gradient matches
+# central FD of the energy to AD/FD = 0.9999..1.0001 on three directions; the
+# frozen one is off by 1.023..1.051.  The chi=4 fixture above is a genuine
+# period-3 limit cycle of the forward (the corner spectrum itself does not
+# converge; stationarity 0.02-0.16), so its adjoint -- now 2e-15..5e-13 --
+# linearizes around a point that is not a fixed point and certifies nothing.
+#
+# So "flow" is now solvable where the forward converges; whether it becomes
+# the implicit-path default is a separate decision.  Paths with no adjoint
+# solve (explicit AD, a bare sweep) had no such obstruction and should pass
+# "flow" regardless -- measured AD/FD on ctm_energy_explicit at the chi=4
+# fixture before #841: 0.229..0.928 frozen against 0.944..0.994 flowing.
 _PROJECTOR_BACKWARD_FLOW = "flow"
 
 
@@ -95,17 +105,114 @@ def _regularized_dense_svd_bwd(residuals, g):
 _regularized_dense_svd.defvjp(_regularized_dense_svd_fwd, _regularized_dense_svd_bwd)
 
 
+# Golden-ratio Weyl step of the gauge reference vector (#841).
+_GAUGE_REF_STEP = (np.sqrt(5.0) - 1.0) / 2.0
+# Relative |<w, u>| below which the in-block reference phase is undefined.
+_GAUGE_REF_FLOOR = 1e-8
+
+
+def _gauge_reference_vector(n_rows: int) -> np.ndarray:
+    """Fixed, generic reference weights ``w`` for the swap-robust gauge (#841).
+
+    ``w_i = 1/2 + frac((i + 1) * g)`` with ``g = (sqrt(5) - 1) / 2``: a Weyl
+    sequence in ``(1/2, 3/2)`` whose entries are pairwise DISTINCT (``g`` is
+    irrational; in float64 the three-gap theorem keeps them ~1/n apart, far
+    above rounding).  It depends only on the static row count, so it is a
+    trace-time constant -- jit-safe, and the gauge fix stays a pure function
+    of its input with no memory of a previous iterate.
+    """
+    i = np.arange(1, n_rows + 1, dtype=np.float64)
+    return 0.5 + np.mod(i * _GAUGE_REF_STEP, 1.0)
+
+
+def _swap_robust_phases(U: jax.Array, row_group: np.ndarray | None) -> jax.Array:
+    """Per-column gauge phase of ``U``, robust to the ket<->bra swap tie (#841).
+
+    ``row_group=None`` is the variPEPS / YASTN rule this file always used: the
+    phase of the largest-``|U|`` entry of each column.
+
+    ``row_group`` (a static int array, one group id per row) switches on the
+    #841 rule for matrices whose rows are ``(chi, D^2)``, grouped by ``chi``:
+    take the group holding the largest-``|U|`` entry, as before, but read the
+    phase off the overlap ``<w_g, u_g>`` of the column with the fixed weights
+    :func:`_gauge_reference_vector` over the rows of THAT GROUP only.
+
+    Why the argmax entry alone is ill-posed there: the double corners
+    ``M1``/``M2`` carry an EXACT ket<->bra swap symmetry ``S M T = M``, ``S`` =
+    (+-1 per chi index) x (ket<->bra permutation ``P`` of the ``D^2`` leg)
+    (double-layer Hermiticity, measured to 3e-16).  Each singular vector obeys
+    ``S u = e u`` (``e = +-1``), so ``|u_i| = |u_{P i}|`` EXACTLY on every
+    swapped pair -- with opposite signs on half of them.  The argmax between
+    two exactly tied rows is decided by rounding, so the column sign was a coin
+    flip per sweep: the forward had no element-wise fixed point, the
+    stationarity guard fired, and the flowing implicit adjoint had no solution.
+
+    Why the in-group overlap breaks that tie for BOTH parities: ``S`` maps a
+    chi group to itself (its chi action is diagonal), so on the chosen group
+    ``u_g`` obeys ``tau_g P u_g = e u_g`` and ``<w_g, u_g> = <Pi w_g, u_g>``
+    with ``Pi = (1 + e tau_g P) / 2``.  That vanishes for every such ``u_g``
+    only if ``P w_g = -e tau_g w_g``, i.e. ``|w_i| = |w_{P i}|`` on a swapped
+    pair ``i != P i`` -- impossible, the entries of ``w`` are distinct.  What
+    remains is the generic codimension-1 set ``<w_g, u_g> = 0``, which no
+    symmetry selects.  The swapped partners of the argmax row sit in the same
+    chi group, so the CHOICE of group is tie-free too.
+
+    Why only within the group, not ``<w, u>`` over the whole column: the input
+    environment's chi legs carry a +-1 gauge ``sigma_a`` per chi index, which
+    multiplies group ``a`` of ``u``.  With the group choice the output sign
+    copies exactly one ``sigma_a`` -- the covariance of the old argmax rule,
+    under which the chi basis can align with itself at the fixed point.  A
+    whole-column overlap makes the output sign ``sign(sum_a sigma_a x_a)``, a
+    threshold function of the input gauge, and was measured to lock the dense
+    D=2 chi=6 forward into an exact period-2 chi-sign cycle (env residual
+    0.60 at every sweep, env(t) = env(t-2) to 1e-14).
+
+    Fallback: where ``|<w_g, u_g>| <= _GAUGE_REF_FLOOR |w_g| |u_g|`` the
+    overlap phase is rounding noise; the argmax entry's phase is used instead.
+    That keeps the result a deterministic function of ``U`` and is reached
+    only on a 1e-8-thin slab around a generic hyperplane (a zero column falls
+    through to phase 1).  Both branches go through :func:`_unit_phase`, so
+    neither poisons the VJP (#789).
+
+    Returns ``p`` with ``|p| = 1`` (real +-1 for real ``U``); the caller puts
+    ``conj(p)`` on the column of ``U`` and ``p`` on the row of ``Vh``, which
+    preserves ``U diag(s) Vh``.
+    """
+    cols = jnp.arange(U.shape[1])
+    max_idx = jnp.argmax(jnp.abs(U), axis=0)  # (k,)
+    at_max = U[max_idx, cols]
+    if row_group is None:
+        return _unit_phase(at_max)
+    row_group = np.asarray(row_group)
+    if row_group.shape != (U.shape[0],):
+        raise ValueError(
+            f"row_group has shape {row_group.shape}, expected ({U.shape[0]},)"
+        )
+    groups = jnp.asarray(row_group)
+    in_group = groups[:, None] == groups[max_idx][None, :]  # (R, k)
+    w = jnp.asarray(_gauge_reference_vector(U.shape[0]), dtype=jnp.real(U).dtype)
+    w_g = jnp.where(in_group, w[:, None], 0.0)
+    overlap = jnp.sum(w_g * U, axis=0)  # (k,)
+    w_norm = jnp.sqrt(jnp.sum(w_g**2, axis=0))
+    u_norm = jnp.sqrt(jnp.sum(jnp.where(in_group, jnp.abs(U) ** 2, 0.0), axis=0))
+    defined = jnp.abs(overlap) > _GAUGE_REF_FLOOR * w_norm * u_norm
+    return jnp.where(defined, _unit_phase(overlap), _unit_phase(at_max))
+
+
 def _gauge_fixed_svd(
     M: jax.Array,
     *,
     regularized: bool = False,
+    swap_block: int | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Reconstruction-preserving gauge-fixed SVD for the 2x2 projector.
 
     Returns ``(U, s, Vh)`` with each column of ``U`` and matching row of
-    ``Vh`` rephased so the row of largest ``|U|`` is real-positive. Uses the
-    variPEPS / YASTN convention of putting ``conj(phase)`` on ``U`` and the
-    *bare* ``phase`` on ``Vh``, which preserves the SVD reconstruction
+    ``Vh`` rephased so the row of largest ``|U|`` is real-positive -- or, with
+    ``swap_block``, so the overlap of the column with fixed generic weights
+    over that row's chi group is (#841, see :func:`_swap_robust_phases`).
+    Uses the variPEPS / YASTN convention of putting ``conj(phase)`` on ``U``
+    and the *bare* ``phase`` on ``Vh``, which preserves the SVD reconstruction
     ``U @ diag(s) @ Vh == M`` even for complex inputs.
 
     The shared :func:`tenax.algorithms._ad_primitives._fix_svd_signs` used to
@@ -127,21 +234,35 @@ def _gauge_fixed_svd(
             either way; set this whenever the projectors are actually
             differentiated (#983), since the Fishman halves are routinely
             rank deficient.
+        swap_block: Rows of ``M`` are ``(chi, D^2)`` row-major with
+            ``swap_block = D^2``: the ket<->bra swap permutes rows within each
+            consecutive block of this many rows.  Pass it for the double
+            corners ``M1``/``M2`` (#841).  ``None`` (default) keeps the plain
+            largest-``|U|`` rule, right for ``M_prime``, whose rows are Fishman
+            bonds on which the swap acts diagonally.
     """
     if regularized:
         U, s, Vh = _regularized_dense_svd(M)
     else:
         U, s, Vh = _dense_svd(M, full_matrices=False)
-    max_idx = jnp.argmax(jnp.abs(U), axis=0)  # (k,)
-    diag = U[max_idx, jnp.arange(U.shape[1])]
-    phases = _unit_phase(diag)
+    row_group = None
+    if swap_block is not None:
+        if swap_block < 1 or U.shape[0] % swap_block:
+            raise ValueError(
+                f"swap_block={swap_block} does not divide the {U.shape[0]} rows"
+            )
+        row_group = np.arange(U.shape[0]) // swap_block
+    phases = _swap_robust_phases(U, row_group)  # (k,)
     U = U * jnp.conj(phases)[None, :]
     Vh = Vh * phases[:, None]
     return U, s, Vh
 
 
 def _gauge_fix_symmetric_svd(
-    U_T: SymmetricTensor, Vh_T: SymmetricTensor
+    U_T: SymmetricTensor,
+    Vh_T: SymmetricTensor,
+    *,
+    swap_outer_legs: int | None = None,
 ) -> tuple[SymmetricTensor, SymmetricTensor]:
     """Per-sector gauge fix for SymmetricTensor SVD outputs.
 
@@ -152,6 +273,17 @@ def _gauge_fix_symmetric_svd(
     ``U @ diag(s) @ Vh == M`` is preserved.  Critical for the 2x2 closure
     ``P_bot · P_top = I`` (no intervening matrix to absorb a ``conj(phase)**2``
     factor — see the docstring of :func:`_gauge_fixed_svd`).
+
+    With ``swap_outer_legs`` the phase is instead read off the overlap with
+    fixed generic weights over the chi group of that entry (#841, see
+    :func:`_swap_robust_phases`): the leading ``swap_outer_legs`` legs of ``U``
+    are the chi legs, the remaining row legs (all but the last, the bond) the
+    ``D^2`` rows the ket<->bra swap permutes.  Pass ``1`` for the double
+    corners ``M1``/``M2``; ``None`` (default) keeps the plain largest-``|U|``
+    rule, right for ``M_prime``.  A chi element's rows may span several
+    U-blocks of the sector (when the swapped legs carry separate charges); the
+    groups are keyed by chi charge and in-sector position, so they do.  The
+    stacking order is static, so groups and weights are trace-time constants.
 
     Vectorized over bond-charge sectors (#566): instead of looping over every
     bond column, we process each (static) bond charge once — stacking that
@@ -200,14 +332,27 @@ def _gauge_fix_symmetric_svd(
         M_q = jnp.concatenate(
             [jnp.reshape(new_u_blocks[key], (-1, n_q)) for key in u_keys], axis=0
         )
-        idx = jnp.argmax(jnp.abs(M_q), axis=0)  # (n_q,)
-        best = M_q[idx, jnp.arange(n_q)]  # (n_q,)
-        abs_best = jnp.abs(best)
-        phase = jnp.where(
-            abs_best > 0,
-            best / jnp.maximum(abs_best, jnp.asarray(1e-30, dtype=abs_best.dtype)),
-            jnp.ones_like(best),
-        )
+        row_group = None
+        if swap_outer_legs is not None:
+            # Row-major reshape of a (*chi, *D2, n_q) block: each chi element
+            # owns a contiguous run of prod(D2) rows.  A chi element is named
+            # by its chi charges (the key's leading entries) and its position
+            # inside that charge sector, which is the same in every block, so
+            # the id below is shared by all blocks the element's rows span.
+            group_id: dict[tuple, int] = {}
+            parts = []
+            for key in u_keys:
+                shape = new_u_blocks[key].shape[:-1]
+                n_outer = int(np.prod(shape[:swap_outer_legs], dtype=np.int64))
+                n_inner = int(np.prod(shape[swap_outer_legs:], dtype=np.int64))
+                outer_q = tuple(int(c) for c in key[:swap_outer_legs])
+                ids = [
+                    group_id.setdefault((outer_q, a), len(group_id))
+                    for a in range(n_outer)
+                ]
+                parts.append(np.repeat(np.asarray(ids, dtype=np.int64), n_inner))
+            row_group = np.concatenate(parts)
+        phase = _swap_robust_phases(M_q, row_group)  # (n_q,)
         if is_complex:
             conj_phase = jnp.conj(phase)
             bare_phase = phase
@@ -659,7 +804,9 @@ def _compute_2x2_projector(
     # ---- Step 2: Fishman SVD on both halves. ----
     # Gauge-fix each SVD via _gauge_fixed_svd: rotates U/Vh columns so the
     # row of largest |U| is real-positive (variPEPS convention, preserves
-    # reconstruction even for complex inputs).  This is critical for AD —
+    # reconstruction even for complex inputs) -- on M1/M2 read through the
+    # swap-robust in-group overlap (#841: their rows are (chi, D^2) and the
+    # exact ket<->bra swap symmetry ties |U| between swapped D^2 rows).  This is critical for AD —
     # raw jnp.linalg.svd's gauge has tiny sign flips across iterations
     # which produce non-smooth gradients (mirrors the 1x1 path in
     # _ctm_projector.py, which uses _fix_svd_signs there).
@@ -667,9 +814,9 @@ def _compute_2x2_projector(
     # #983: when the projectors are differentiated, the halves' SVD backward
     # must be regularized -- these matrices are routinely rank deficient.
     _reg = projector_backward == _PROJECTOR_BACKWARD_FLOW
-    M1_U, M1_S, M1_Vh = _gauge_fixed_svd(M1, regularized=_reg)
+    M1_U, M1_S, M1_Vh = _gauge_fixed_svd(M1, regularized=_reg, swap_block=D2_M1_row)
     M1_S = _fishman_truncate_S(M1_S, eps)
-    M2_U, M2_S, M2_Vh = _gauge_fixed_svd(M2, regularized=_reg)
+    M2_U, M2_S, M2_Vh = _gauge_fixed_svd(M2, regularized=_reg, swap_block=D2_M2_row)
     M2_S = _fishman_truncate_S(M2_S, eps)
 
     # ---- Step 3: pick which side of each Fishman SVD becomes the half. ----
@@ -1125,7 +1272,7 @@ def _compute_2x2_projector_symmetric(
         direction=direction,
         matrix_name="M1 (upper double-corner)",
     )
-    U_M1_T, Vh_M1_T = _gauge_fix_symmetric_svd(U_M1_T, Vh_M1_T)
+    U_M1_T, Vh_M1_T = _gauge_fix_symmetric_svd(U_M1_T, Vh_M1_T, swap_outer_legs=1)
     M1_S = _fishman_truncate_S(M1_S, eps=1e-12)
 
     U_M2_T, M2_S, Vh_M2_T, _ = G.svd(
@@ -1143,7 +1290,7 @@ def _compute_2x2_projector_symmetric(
         direction=direction,
         matrix_name="M2 (lower double-corner)",
     )
-    U_M2_T, Vh_M2_T = _gauge_fix_symmetric_svd(U_M2_T, Vh_M2_T)
+    U_M2_T, Vh_M2_T = _gauge_fix_symmetric_svd(U_M2_T, Vh_M2_T, swap_outer_legs=1)
     M2_S = _fishman_truncate_S(M2_S, eps=1e-12)
 
     M1_sqrtS = jnp.sqrt(M1_S)
