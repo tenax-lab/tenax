@@ -42,9 +42,15 @@ from tenax.algorithms._ctm_tensor_init import (
 from tenax.algorithms._gmres_lax import gmres_pytree, gmres_pytree_jax
 from tenax.algorithms.ad_utils import (
     CTMRGGradientError,
+    _bond_gauge_families,
+    _bond_phase_fix_envs,
+    _bond_phase_fix_envs_jit,
     _phase_fix_ctm_tensor,
     _sigma_gauge_fix_env,
 )
+
+# Every ``forward_gauge`` value the implicit-AD path accepts.
+_IMPLICIT_FORWARD_GAUGES = ("phase", "bond_phase", "sigma", "none")
 
 _GMRES_LOGGER = logging.getLogger("tenax.ctm.gmres")
 
@@ -451,6 +457,17 @@ def ctm_energy_implicit(
                            ``"sigma"`` (direction inverted), so ``"sigma"`` is
                            NOT a repair for #841; prefer the default
                            ``"phase"`` and heed the stationarity warning.
+
+                           ``"bond_phase"`` (opt-in, #841): ``"phase"`` plus
+                           one unit-modulus factor per chi index of every
+                           bond family, aligned to the previous environment
+                           (``ad_utils._bond_phase_fix_envs``).  An exact
+                           gauge transform that pins exactly those
+                           per-bond-index Z2 signs; on the D=3 chi=12
+                           fermionic t-V state it removes the period-2 sign
+                           cycle that holds ``"phase"`` at a stationarity
+                           residual of 0.805.  Not supported with
+                           ``chi_ramp``.
         conv_method:       Convergence criterion: ``"sv"`` (corner singular
                            values, default) or ``"elementwise"`` (max element-wise
                            difference across all env tensors).
@@ -673,6 +690,11 @@ def _sigma_gauged_ctm_converge(
 
         def _gauge_pair(envs_new, _envs_old):
             return {c: _phase_fix_ctm_tensor(envs_new[c]) for c in envs_new}
+    elif forward_gauge == "bond_phase":
+        _bond_families = _bond_gauge_families(tuple(site_tensors), neighbors)
+
+        def _gauge_pair(envs_new, envs_old):
+            return _bond_phase_fix_envs_jit(envs_new, envs_old, _bond_families)
     elif forward_gauge == "sigma":
 
         def _gauge_pair(envs_new, envs_old):
@@ -680,7 +702,10 @@ def _sigma_gauged_ctm_converge(
     elif forward_gauge == "none":
         _gauge_pair = None
     else:
-        raise ValueError(f"Unknown forward_gauge={forward_gauge!r}")
+        raise ValueError(
+            f"Unknown forward_gauge={forward_gauge!r}; use one of "
+            f"{_IMPLICIT_FORWARD_GAUGES}"
+        )
 
     # ---- delegate to shared helper ----
     result = _run_ctm_loop_with_bump(
@@ -997,11 +1022,17 @@ def _make_implicit_vjp_fn(
         _gauge_fix_fn = _phase_fix_ctm_tensor
     elif forward_gauge == "sigma":
         _gauge_fix_fn = None  # sigma gauge handled by _sigma_gauge_fix_env (pair)
+    elif forward_gauge == "bond_phase":
+        # Reference-based pair gauge: the chi_ramp forward's single-argument
+        # gauge hook cannot carry it (refused in _run_forward below).
+        _gauge_fix_fn = None
+        _bond_families = _bond_gauge_families(tuple(coords), neighbors)
     elif forward_gauge == "none":
         _gauge_fix_fn = None
     else:
         raise ValueError(
-            f"Unknown forward_gauge={forward_gauge!r}; use 'phase', 'sigma', or 'none'"
+            f"Unknown forward_gauge={forward_gauge!r}; use one of "
+            f"{_IMPLICIT_FORWARD_GAUGES}"
         )
 
     # Mutable cache for treedef from forward (needed in backward).
@@ -1048,6 +1079,14 @@ def _make_implicit_vjp_fn(
         """
         chi_ramp = mutables["chi_ramp"]
         env_init = mutables["env_init"]
+        if chi_ramp is not None and forward_gauge == "bond_phase":
+            raise NotImplementedError(
+                "forward_gauge='bond_phase' is not supported with chi_ramp: "
+                "the chi-ramp forward (python_loop_ctm_converge) applies a "
+                "single-argument per-site gauge and has no reference env to "
+                "align to. Use ctmrg_heuristic_increase_chi, or "
+                "forward_gauge='phase'."
+            )
         if chi_ramp is not None:
             envs, _loop_info = python_loop_ctm_converge(
                 site_tensors,
@@ -1235,6 +1274,8 @@ def _make_implicit_vjp_fn(
         """Apply the same gauge fix used in the forward pass."""
         if forward_gauge == "phase":
             return {c: _phase_fix_ctm_tensor(e_out[c]) for c in coords}
+        elif forward_gauge == "bond_phase":
+            return _bond_phase_fix_envs(e_out, e_in, _bond_families)
         elif forward_gauge == "sigma":
             return {c: _sigma_gauge_fix_env(e_out[c], e_in[c]) for c in coords}
         else:
