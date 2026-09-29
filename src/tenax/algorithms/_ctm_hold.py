@@ -124,45 +124,86 @@ def _edge_blocks(t) -> list[tuple[tuple, np.ndarray]]:
     return [((None, None, None), a)]
 
 
-def _d2_quartic(t) -> dict[Hashable, np.ndarray]:
-    """Fourth-order slice invariant of an edge tensor, per sector quadruple.
+#: Number of random probes in the fourth-order sketch (per sector pair).
+_SKETCH_R = 32
 
-    With the D^2 slices ``T_m = T[:, m, :]`` (chi x chi),
-    ``K[m, m', n, n'] = Tr(T_m T_m'^dagger T_n T_n'^dagger)``.  Separate
-    unitaries on the two chi legs, ``T_m -> U T_m V^dagger``, cancel inside
-    every factor ``T_m T_m'^dagger`` and then in the trace, so ``K`` is blind
-    to every chi-bond gauge (order, signs, the period-2 sign cycle).  It moves
-    as ``R x R* x R x R*`` under a D^2 rotation ``R``, and unlike the Gram it
-    does so even where ``G`` is degenerate (Codex P1 on #1058,
-    _ctm_hold.py:165): orthonormal but non-commuting slices have ``G = I``
-    yet a basis-sensitive ``K``.
+#: Fixed seed of the sketch coefficients (the fingerprint must be a function
+#: of the environment alone, identical on every call).
+_SKETCH_SEED = 1035
 
-    Block-sparse: ``P[m, m'] = T_m T_m'^dagger`` is assembled per
-    ``(q_m, q_m', q_a, q_a')`` by summing blocks that share ``q_b``, and the
-    trace pairs ``P[(q_m, q_m', q_a, q_a')]`` with ``P[(q_n, q_n', q_a',
-    q_a)]`` -- the chi-leg charge closes around the trace.  Output: one array
-    ``(d_m, d_m', d_n, d_n')`` per sector quadruple; D^8 numbers in total per
-    edge tensor (6561 at D=3).
+
+def _sketch_coeffs(role: int, q: Hashable, d: int) -> np.ndarray:
+    """Deterministic ``(R, d)`` Gaussian coefficients for one D^2 sector.
+
+    ``role`` (0..3) gives A, B, C, E their own independent draws.  Seeded from
+    the role, a stable hash of the sector charge and its size -- never from
+    Python's salted ``hash`` -- so every call and every process agrees.
     """
-    by_b: dict[Hashable, list] = {}
+    import zlib
+
+    seed = [_SKETCH_SEED, role, zlib.crc32(repr(q).encode()), d]
+    return np.random.default_rng(seed).standard_normal((_SKETCH_R, d))
+
+
+def _d2_sketch(t) -> dict[Hashable, np.ndarray]:
+    """Random sketch of the fourth-order slice invariant, bounded in size.
+
+    With the D^2 slices ``T_m = T[:, m, :]``, the full fourth-order invariant
+    ``Tr(T_m T_m'^+ T_n T_n'^+)`` is D^8 numbers per edge (256 MiB at D=8;
+    Codex P2 on #1058).  Instead, for R fixed random coefficient vectors per
+    D^2 sector and role, form ``A_r = sum_m a_rm T_m`` (likewise ``B_r``,
+    ``C_r``, ``E_r``) and keep ``s_r = Tr(A_r B_r^+ C_r E_r^+)``.
+
+    * ``T_m -> U T_m V^+`` maps every ``A_r -> U A_r V^+``: each ``s_r`` is
+      blind to both chi-leg gauges (order, signs, the period-2 sign cycle).
+    * A D^2 rotation ``R`` maps ``a_r -> R^T a_r``: ``s_r`` is a generic
+      quartic form in the coefficients, so a generic rotation moves it even
+      where the Gram ``G`` is degenerate (``G = I``).
+    * Size: ``R`` complex numbers per sector pair ``(q, p)`` with
+      ``A, B`` in sector ``q`` and ``C, E`` in sector ``p`` -- independent of
+      D.  Rotations of a symmetric tensor stay inside a sector, so the
+      ``(q, q)`` pairs see them; the ``(q, p)`` pairs add cross-sector
+      correlations.  Cost ``O(R chi^3)`` per pair.
+
+    Block-sparse: ``A_r`` is built per ``(q_a, q_b)`` block; ``A_r B_r^+`` is
+    summed over the shared ``q_b`` into ``(q_a, q_a')`` blocks, and the trace
+    pairs ``(q_a, q_a')`` with ``(q_a', q_a)`` so the chi charge closes.
+    """
+    # Per D^2 sector: its (q_a, q_b) blocks as (d_a, d_m, d_b) arrays.
+    sectors: dict[Hashable, list] = {}
     for (qa, qm, qb), x in _edge_blocks(t):
-        by_b.setdefault(qb, []).append((qa, qm, x))
-    P: dict[tuple, np.ndarray] = {}
-    for lst in by_b.values():
-        for qa, qm, x in lst:
-            for qa2, qn, y in lst:
-                p = np.einsum("xmb,ynb->mnxy", x, y.conj())
-                key = (qm, qn, qa, qa2)
-                P[key] = P[key] + p if key in P else p
-    K: dict[Hashable, np.ndarray] = {}
-    for (qm, qm2, qa, qa2), p1 in P.items():
-        for (qn, qn2, qc, qc2), p2 in P.items():
-            if qc != qa2 or qc2 != qa:
-                continue
-            k = np.einsum("mpxy,nqyx->mpnq", p1, p2)
-            key = (qm, qm2, qn, qn2)
-            K[key] = K[key] + k if key in K else k
-    return K
+        sectors.setdefault(qm, []).append((qa, qb, x))
+
+    def combos(q, role):
+        c = _sketch_coeffs(role, q, sectors[q][0][2].shape[1])
+        return [(qa, qb, np.einsum("xmb,rm->rxb", x, c)) for qa, qb, x in sectors[q]]
+
+    def pair(q, r1, r2):
+        """``A_r B_r^+`` per (q_a, q_a'), summed over the shared q_b."""
+        out: dict[tuple, np.ndarray] = {}
+        left, right = combos(q, r1), combos(q, r2)
+        for qa, qb, a in left:
+            for qa2, qb2, b in right:
+                if qb2 != qb:
+                    continue
+                p = np.einsum("rxb,ryb->rxy", a, b.conj())
+                out[(qa, qa2)] = out[(qa, qa2)] + p if (qa, qa2) in out else p
+        return out
+
+    ab = {q: pair(q, 0, 1) for q in sectors}
+    ce = {q: pair(q, 2, 3) for q in sectors}
+    out: dict[Hashable, np.ndarray] = {}
+    for q, P1 in ab.items():
+        for p, P2 in ce.items():
+            acc = None
+            for (qa, qa2), m1 in P1.items():
+                m2 = P2.get((qa2, qa))
+                if m2 is not None:
+                    term = np.einsum("rxy,ryx->r", m1, m2)
+                    acc = term if acc is None else acc + term
+            if acc is not None:
+                out[(q, p)] = acc
+    return out
 
 
 def env_spectral_invariants(envs: dict[Any, Any]) -> Invariants:
@@ -185,20 +226,23 @@ def env_spectral_invariants(envs: dict[Any, Any]) -> Invariants:
     is seen unless ``U`` commutes with ``G`` -- which ANY unitary within a
     degenerate eigenspace of ``G`` does (e.g. orthonormal equal-norm slices,
     ``G = I``; SU(2)-symmetric states can have a degenerate ``G`` by
-    symmetry).  So each edge tensor also contributes the fourth-order slice
-    invariant ``K[m,m',n,n'] = Tr(T_m T_m'^+ T_n T_n'^+)``
-    (:func:`_d2_quartic`), normalised by the leg scale to the fourth power,
+    symmetry).  So each edge tensor also contributes a bounded random sketch
+    of the fourth-order slice invariant ``Tr(T_m T_m'^+ T_n T_n'^+)``
+    (:func:`_d2_sketch`: ``R`` = 32 fixed random probes per sector pair,
+    independent of D), normalised by the leg scale to the fourth power,
     which is basis-sensitive where ``G`` is not.
 
-    **Known limit.**  Spectra, ``G`` and ``K`` are trace invariants of the
-    slices of degree <= 4; they do not separate orbits of the chi-leg gauge
-    group in general.  Still invisible: a D^2 rotation ``R`` with ``R x R* x
-    R x R*`` fixing ``K`` and ``R x R*`` fixing ``G`` that is not realised by
-    chi-leg unitaries -- in particular any ``R`` whose action on the slice
-    algebra is only detected by trace words of degree >= 6.  (A rotation that
-    IS realised by chi-leg unitaries, ``sum_k R_mk T_k = U T_m V^+``, is a
+    **Known limits.**  (1) The sketch detects a *generic* D^2 rotation with
+    probability 1 over its fixed random coefficients, but not every one: a
+    rotation that happens to leave all ``R`` probes of a sector unchanged is
+    invisible, and the probes are fixed, so that is a fixed (measure-zero)
+    set, not a per-call chance.  (2) Even the full fourth-order tensor would
+    not be complete: spectra, ``G`` and degree-4 trace words do not separate
+    orbits of the chi-leg gauge group in general, so a rotation detected only
+    by trace words of degree >= 6 stays invisible.  (A rotation that IS
+    realised by chi-leg unitaries, ``sum_k R_mk T_k = U T_m V^+``, is a
     gauge-equivalent environment, and no invariant should see it.)  RDM-based
-    invariants would close this, at about one extra CTM contraction per
+    invariants would close both, at about one extra CTM contraction per
     sweep per trajectory; not used.
 
     Args:
@@ -207,8 +251,7 @@ def env_spectral_invariants(envs: dict[Any, Any]) -> Invariants:
     Returns:
         ``{(coord, field, leg, charge): descending singular values}`` plus,
         per edge tensor, ``{(coord, field, "d2gram", charge): [Re G, Im G]}``
-        and ``{(coord, field, "d2quartic", charges): [Re K, Im K]}``,
-        flattened.
+        and ``{(coord, field, "d2sketch", (q, p)): [Re s, Im s]}``, flattened.
     """
     inv: Invariants = {}
     for c in sorted(envs):
@@ -234,9 +277,9 @@ def env_spectral_invariants(envs: dict[Any, Any]) -> Invariants:
                     inv[(c, f, "d2gram", q)] = np.concatenate(
                         [g.real.ravel(), g.imag.ravel()]
                     )
-                for q, k in _d2_quartic(t).items():
+                for q, k in _d2_sketch(t).items():
                     k = np.asarray(k) / (scale * scale)
-                    inv[(c, f, "d2quartic", q)] = np.concatenate(
+                    inv[(c, f, "d2sketch", q)] = np.concatenate(
                         [k.real.ravel(), k.imag.ravel()]
                     )
     return inv
@@ -351,6 +394,14 @@ DEFAULT_HOLD_CONTRACTION = 1e-3
 #: times ``sweeps``, before the point is rejected.
 DEFAULT_HOLD_EXTENSION = 3
 
+#: A displacement at or below this fraction of ``d_0`` has collapsed onto the
+#: reference trajectory (float noise); the direction is re-seeded.
+_COLLAPSE = 1e-9
+
+#: The contraction recorded for a collapse step (``log`` of this, relative to
+#: ``d_0``): large, since the true factor is unbounded.
+_COLLAPSE_LOG = 1e-12
+
 #: Independent perturbation directions (deterministic keys); all must pass.
 DEFAULT_HOLD_DIRECTIONS = 2
 
@@ -384,7 +435,11 @@ def hold_test(
     direction comes to dominate, and ``d`` never sinks into float noise on a
     fast attractor.  A rescale is skipped when the element-wise difference is
     far larger than the invariant one suggests (the two trajectories took
-    different chi-bond gauges) or the pytrees differ.
+    different chi-bond gauges) or the pytrees differ.  A displacement that
+    collapses onto the reference trajectory (``d_k <= 1e-9 d_0``, float
+    noise; e.g. a locally constant step) cannot be rescaled: the step is
+    recorded as a contraction by 1e-12 and the direction is re-seeded with a
+    fresh deterministic perturbation, keeping its accumulated log growth.
 
     **Verdict.**  No early acceptance: a displacement that contracts early
     is exactly what a weakly excited saddle does while its stable components
@@ -443,7 +498,9 @@ def hold_test(
     per = 1 + directions
     x = envs
     Ix = invariants(x)
-    ys = [perturb_env(envs, perturbation, k) for k in jax.random.split(key, directions)]
+    dir_keys = list(jax.random.split(key, directions))
+    reseeds = [0] * directions
+    ys = [perturb_env(envs, perturbation, k) for k in dir_keys]
     d0 = [env_invariant_distance(invariants(y), Ix) for y in ys]
     e0 = [_diff_norm(y, x) for y in ys]
     dcur = list(d0)
@@ -466,6 +523,22 @@ def hold_test(
             if not math.isfinite(dk) or not d0[i] > 0:
                 rates[i] = math.inf
                 return _result(False, k)
+            if dk <= _COLLAPSE * d0[i]:
+                # Codex P2 on #1058: the step mapped y onto x (to float
+                # noise).  ``y - x`` is gone, so no rescale can restore it,
+                # and log(tiny / tiny) = 0 would read as a flat tail -- a
+                # false rejection of the strongest attractor there is.
+                # Count the step as a collapse by at least 1/_COLLAPSE_LOG,
+                # then re-seed the direction with a fresh deterministic
+                # perturbation, keeping the accumulated log growth.
+                floor = _COLLAPSE_LOG * d0[i]
+                logs[i].append(logs[i][-1] + math.log(floor / max(dcur[i], tiny)))
+                reseeds[i] += 1
+                fresh = jax.random.fold_in(dir_keys[i], reseeds[i])
+                ys[i] = perturb_env(x, perturbation, fresh)
+                e0[i] = _diff_norm(ys[i], x)
+                dcur[i] = env_invariant_distance(invariants(ys[i]), Ix)
+                continue
             logs[i].append(logs[i][-1] + math.log(max(dk, tiny) / max(dcur[i], tiny)))
             dcur[i] = dk
             if dk < contraction * d0[i] or dk > d0[i] / contraction:

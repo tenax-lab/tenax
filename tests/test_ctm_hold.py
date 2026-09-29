@@ -244,6 +244,21 @@ def test_a_fast_attractor_passes_at_the_first_window():
     assert all(abs(r - 0.1) < 1e-3 for r in held.rates)
 
 
+def test_a_locally_constant_step_is_an_attractor():
+    """Codex P2 on #1058 (_ctm_hold.py:472): a step that maps every nearby
+    point exactly onto the fixed point collapses the displacement to 0.  The
+    rescale cannot restore ``y - x = 0``; the direction must be re-seeded and
+    the collapse counted as a large contraction, not as a flat log (rate 1,
+    a false rejection of the most attracting map there is)."""
+
+    def step(envs):
+        return _vec_env(XSTAR)
+
+    held = hold_test(step, _vec_env(XSTAR), sweeps=40, invariants=_identity_invariants)
+    assert held.passed
+    assert all(r < 1e-3 for r in held.rates)
+
+
 def test_the_default_metric_is_blind_to_a_period_two_sign_cycle():
     """An attractor whose step flips the sign of alternate rows every sweep --
     the gauge-covariant env's +-1 period-2 cycle.  Element-wise, the
@@ -403,8 +418,7 @@ def test_a_rotation_inside_a_degenerate_d2_gram_is_seen():
     a, b = env_spectral_invariants(start), env_spectral_invariants(moved)
     # Regime: spectra and the D^2 Gram are blind to this rotation.
     assert (
-        env_invariant_distance(_without(a, "d2quartic"), _without(b, "d2quartic"))
-        < 1e-12
+        env_invariant_distance(_without(a, "d2sketch"), _without(b, "d2sketch")) < 1e-12
     )
     assert env_invariant_distance(a, b) > 1e-2
 
@@ -453,8 +467,7 @@ def test_a_rotation_inside_a_degenerate_block_sparse_d2_gram_is_seen():
     moved = {(0, 0): _Edge(sym(rot(0.3)))}
     a, b = env_spectral_invariants(start), env_spectral_invariants(moved)
     assert (
-        env_invariant_distance(_without(a, "d2quartic"), _without(b, "d2quartic"))
-        < 1e-12
+        env_invariant_distance(_without(a, "d2sketch"), _without(b, "d2sketch")) < 1e-12
     )
     assert env_invariant_distance(a, b) > 1e-3
 
@@ -466,24 +479,32 @@ def test_a_rotation_inside_a_degenerate_block_sparse_d2_gram_is_seen():
     assert all(r > 1.0 for r in held.rates)
 
 
-def test_the_block_sparse_quartic_matches_the_dense_trace():
-    """The sector bookkeeping (``P`` summed over ``q_b``, the trace closing
-    ``q_a -> q_a' -> q_a``) must reproduce the dense ``Tr(T_m T_m'^+ T_n
-    T_n'^+)`` block for block, and every quadruple it omits must be zero."""
-    from tenax.algorithms._ctm_hold import _d2_quartic
+def test_the_block_sparse_sketch_matches_the_dense_trace():
+    """The sector bookkeeping (``A_r B_r^+`` summed over ``q_b``, the trace
+    closing ``q_a -> q_a' -> q_a``) must reproduce the dense
+    ``Tr(A_r B_r^+ C_r E_r^+)`` built from the same coefficients, embedded in
+    their D^2 sectors, for every sector pair."""
+    from tenax.algorithms._ctm_hold import _SKETCH_R, _d2_sketch, _sketch_coeffs
     from tenax.core.tensor import SymmetricTensor
 
     idx, Td = _symmetric_isotropic()
     T = SymmetricTensor.from_dense(jnp.asarray(Td), idx)
-    full = np.einsum("amb,cnb,cpd,aqd->mnpq", Td, Td.conj(), Td, Td.conj())
     q = np.asarray(idx[1].charges)
-    seen = np.zeros(full.shape, dtype=bool)
-    for (qm, qn, qp, qq), k in _d2_quartic(T).items():
-        sel = np.ix_(q == qm, q == qn, q == qp, q == qq)
-        np.testing.assert_allclose(k, full[sel], atol=1e-12)
-        seen[sel] = True
-    assert np.max(np.abs(full[~seen]), initial=0.0) < 1e-12
-    assert seen.any() and not seen.all()  # regime: some sectors are absent
+
+    def dense_combo(role, sector):
+        c = np.zeros((_SKETCH_R, q.size))
+        sl = np.flatnonzero(q == sector)
+        c[:, sl] = _sketch_coeffs(role, sector, sl.size)
+        return np.einsum("amb,rm->rab", Td, c)
+
+    got = _d2_sketch(T)
+    assert set(got) == {(a, b) for a in np.unique(q) for b in np.unique(q)}
+    for (qs, ps), s in got.items():
+        A, B = dense_combo(0, qs), dense_combo(1, qs)
+        C, E = dense_combo(2, ps), dense_combo(3, ps)
+        ref = np.einsum("rab,rcb,rcd,rad->r", A, B.conj(), C, E.conj())
+        np.testing.assert_allclose(s, ref, atol=1e-12)
+        assert np.max(np.abs(ref)) > 1e-3  # regime: not trivially zero
 
 
 def test_the_block_sparse_invariants_are_blind_to_symmetric_chi_gauges():
@@ -511,8 +532,27 @@ def test_the_block_sparse_invariants_are_blind_to_symmetric_chi_gauges():
     b = env_spectral_invariants(
         {(0, 0): _Edge(SymmetricTensor.from_dense(jnp.asarray(T2), idx))}
     )
-    assert any("d2quartic" in k for k in a)  # regime: the quartic is present
+    assert any("d2sketch" in k for k in a)  # regime: the quartic is present
     assert env_invariant_distance(a, b) < 1e-12
+
+
+@pytest.mark.parametrize("D", [2, 6, 8])
+def test_the_fingerprint_beyond_the_gram_does_not_grow_with_d(D):
+    """Codex P2 on #1058 (_ctm_hold.py:240): the full fourth-order tensor is
+    D^8 per edge (256 MiB at D=8).  Beyond the D^2 x D^2 Gram, an edge's
+    fingerprint must be bounded independently of D."""
+    rng = np.random.default_rng(D)
+    chi = 3
+    T = jnp.asarray(rng.standard_normal((chi, D * D, chi)))
+    inv = env_spectral_invariants({(0, 0): _Edge(T)})
+    beyond = sum(
+        v.size for k, v in inv.items() if isinstance(k[2], str) and k[2] != "d2gram"
+    )
+    assert beyond <= 2 * 64  # one sector combination: R <= 64 complex numbers
+    spectra = sum(v.size for k, v in inv.items() if not isinstance(k[2], str))
+    assert spectra == chi + min(D * D, chi * chi) + chi  # D^2 leg rank <= chi^2
+    gram = sum(v.size for k, v in inv.items() if k[2] == "d2gram")
+    assert gram == 2 * D**4
 
 
 def test_the_d2_gram_is_blind_to_chi_gauges():
