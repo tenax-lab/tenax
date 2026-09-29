@@ -649,16 +649,11 @@ _BOND_RING_PAIRS = (
     ("t4_d", "c1_d"),
 )
 
-# Power-iteration steps in :func:`_bond_leading_phase`.  In the exact case
-# the phases are already exact after one step for every index within
-# ``_BOND_POWER_STEPS + 1`` hops of the anchor, so this only has to cover
-# the family's connectivity diameter, not converge an eigenvector.
-_BOND_POWER_STEPS = 6
-# An index whose power-iteration weight is below this fraction of the
-# anchor's is left unrotated (w = 1).  Its weight is a fourth power of the
-# env amplitudes on that index (G = S S^H with S ~ |X|^2), so 1e-24 leaves
-# indices of relative amplitude ~1e-6 and above fully aligned and only
-# touches entries that are already at the 1e-12 level.
+# An index whose weight in its component's Gram power is below this fraction
+# of the component's largest is left unrotated (w = 1).  Its weight is a
+# fourth power of the env amplitudes on that index (G = S S^H with S ~ |X|^2),
+# so 1e-24 leaves indices of relative amplitude ~1e-6 and above fully aligned
+# and only touches entries that are already at the 1e-12 level.
 _BOND_WEIGHT_FLOOR = 1e-24
 
 
@@ -758,29 +753,216 @@ def _bond_structures_match(envs_new, envs_ref) -> bool:
     return True
 
 
-def _bond_leading_phase(G):
+def _bond_component_phases(G, components):
     """Unit-modulus per-index phases from a family Gram matrix ``G``.
 
     In the exact case ``G[i, k] = w_i conj(w_k) W[i, k]`` with ``W >= 0``, so
-    ``G^n e_i0 = conj(w_i0) * w ⊙ (W^n e_i0)`` carries the phases ``w`` (up
-    to one global phase, absorbed later by the per-tensor phase) wherever
-    ``W^n e_i0 > 0``.  The anchor ``i0`` is the heaviest index; indices the
-    iteration leaves at (relative) zero weight are left unrotated.
+    ``G^n = D_w W^n D_w^H`` and column ``k`` of ``G^n`` carries ``w_i conj(w_k)``
+    wherever ``(W^n)[i, k] > 0``.  ``W`` can be block-diagonal (Codex P2 on
+    #1057): then an index outside the anchor's block gets no phase from it.
+    So every connected component (static, :func:`_bond_static_components`)
+    gets its own anchor, its heaviest index, and ``n = 2^m >= dim`` (by
+    repeated squaring) covers any component's diameter.  The phases are
+    exact up to ONE phase per component; :func:`_bond_phase_fix_envs` fixes
+    those from the block overlaps.  Indices at (relative) zero weight in
+    their component are left unrotated.
     """
-    diag = jnp.real(jnp.diagonal(G))
-    i0 = jnp.argmax(diag)
-    v = G[:, i0]
-    for _ in range(_BOND_POWER_STEPS):
-        v = G @ v
+    n = G.shape[0]
+    P = G
+    for _ in range(max(1, math.ceil(math.log2(max(n, 2)))) + 1):
+        P = P @ P
         # A positive rescale changes no phase: keep it out of the VJP.
-        scale = jax.lax.stop_gradient(jnp.max(jnp.abs(v)))
-        v = v / jnp.where(scale > 0, scale, 1.0)
-    absv = jnp.abs(v)
-    keep = absv > _BOND_WEIGHT_FLOOR * jnp.max(absv)
-    # Fence the ARGUMENT (not just the output) so an unkept index never
-    # divides by zero in either the primal or the VJP.
-    v_safe = jnp.where(keep, v, jnp.ones_like(v))
-    return v_safe / jnp.abs(v_safe)
+        scale = jax.lax.stop_gradient(jnp.max(jnp.abs(P)))
+        P = P / jnp.where(scale > 0, scale, 1.0)
+    diag = jnp.real(jnp.diagonal(G))
+    w = jnp.ones((n,), dtype=G.dtype)
+    for comp in components:
+        comp_j = jnp.asarray(comp)
+        anchor = comp_j[jnp.argmax(diag[comp_j])]
+        v = P[comp_j, anchor]
+        absv = jnp.abs(v)
+        keep = absv > _BOND_WEIGHT_FLOOR * jnp.max(absv)
+        # Fence the ARGUMENT (not just the output) so an unkept index never
+        # divides by zero in either the primal or the VJP.
+        v_safe = jnp.where(keep, v, jnp.ones_like(v))
+        w = w.at[comp].set(v_safe / jnp.abs(v_safe))
+    return w
+
+
+def _bond_static_components(families, blocks, axes, fam_of, dims):
+    """Connected components of every family's Gram pattern, from charges only.
+
+    ``G_F`` couples chi indices ``i, k`` of family ``F`` iff some tensor on
+    the family has overlap entries in rows (or columns) ``i`` and ``k`` of
+    one column (row).  Each stored block is dense, so the pattern -- and its
+    components -- is fixed by the block structure: static under ``jit``.
+    A DenseTensor is one full block, i.e. one component per family.
+
+    Families are referred to by their position in ``families``; ``dims``
+    gives each family's chi dimension.  Returns ``(comps, comp_of)``:
+    ``comps[f]`` is the list of index arrays of family ``f``'s components
+    (an index no block touches is its own, dead, component) and
+    ``comp_of[(f, i)]`` the component of index ``i``.
+    """
+    parent: dict = {}
+
+    def find(a):
+        parent.setdefault(a, a)
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for key, blks in blocks.items():
+        c, f = key
+        out_l, in_l = _BOND_CHI_LEGS[f]
+        fa, fb = fam_of[(c, out_l)], fam_of[(c, in_l)]
+        a, b = axes[key]
+        for _bk, _blk, pos in blks:
+            ia, ib = pos[a], pos[b]
+            if len(ia) == 0 or len(ib) == 0:
+                continue
+            # rows of S (out-leg family) are coupled through shared columns
+            for i in ia:
+                union(("f", fa, int(i)), ("col", key, int(ib[0])))
+            for j in ib:
+                union(("col", key, int(j)), ("f", fa, int(ia[0])))
+            # columns of S (in-leg family) are coupled through shared rows
+            for j in ib:
+                union(("f", fb, int(j)), ("row", key, int(ia[0])))
+            for i in ia:
+                union(("row", key, int(i)), ("f", fb, int(ib[0])))
+
+    comps: dict = {}
+    comp_of: dict = {}
+    for fi in range(len(families)):
+        groups: dict = {}
+        for i in range(dims[fi]):
+            groups.setdefault(find(("f", fi, i)), []).append(i)
+        lst = sorted((np.asarray(g) for g in groups.values()), key=lambda g: g[0])
+        comps[fi] = lst
+        for ci, g in enumerate(lst):
+            for i in g:
+                comp_of[(fi, int(i))] = ci
+    return comps, comp_of
+
+
+def _bond_component_sync(families, S, w_fam, comps, comp_of, blocks, axes, fam_of):
+    """Residual phase per (family, component) after level-1 alignment.
+
+    Relations (one per tensor ``X`` and (out-component, in-component) patch
+    its blocks touch): ``B = t_X conj(sigma_a) sigma_b |B|``, with ``B`` the
+    level-1-aligned overlap summed over the patch.  The schedule of which
+    unknown each round determines, and from which candidate relations, is
+    static (block structure only); which candidate is used is the heaviest
+    ``|B|`` at run time.  Unknowns no relation reaches keep phase 1.
+    Returns ``{(family, component): phase}``.
+    """
+    multi = {fi for fi in range(len(families)) if len(comps[fi]) > 1}
+    sig = {
+        (fi, ci): None for fi in range(len(families)) for ci in range(len(comps[fi]))
+    }
+    one = jnp.ones((), dtype=next(iter(w_fam.values())).dtype)
+    if not multi:
+        return {k: one for k in sig}
+
+    # Static relations: (tensor key, sigma_a node, sigma_b node, rows, cols).
+    rel_keys = {}
+    for key, blks in blocks.items():
+        c, f = key
+        out_l, in_l = _BOND_CHI_LEGS[f]
+        fa, fb = fam_of[(c, out_l)], fam_of[(c, in_l)]
+        a, b = axes[key]
+        for _bk, _blk, pos in blks:
+            if len(pos[a]) == 0 or len(pos[b]) == 0:
+                continue
+            ca = comp_of[(fa, int(pos[a][0]))]
+            cb = comp_of[(fb, int(pos[b][0]))]
+            rel_keys[(key, (fa, ca), (fb, cb))] = (comps[fa][ca], comps[fb][cb])
+    relations = list(rel_keys.items())
+
+    # Pin the largest component of every family (a uniform family phase is a
+    # per-tensor phase, which stage 3 sets).
+    known = set()
+    for fi in range(len(families)):
+        big = max(range(len(comps[fi])), key=lambda ci: len(comps[fi][ci]))
+        known.add(("s", (fi, big)))
+    rounds = []
+    while True:
+        newly: dict = {}
+        for r, ((key, na, nb), _idx) in enumerate(relations):
+            vars_ = {("t", key)} if na == nb else {("t", key), ("s", na), ("s", nb)}
+            unknown = [v for v in vars_ if v not in known]
+            if len(unknown) == 1:
+                newly.setdefault(unknown[0], []).append(r)
+        if not newly:
+            # Every remaining relation has >= 2 unknowns.  The relations then
+            # admit a phase family that preserves every relation value, and a
+            # transformation preserving every patch's t conj(sigma_a) sigma_b
+            # leaves every block of the env unchanged: pinning one unknown is
+            # exact.  (Measured case: sectors a D^2 leg never couples, where
+            # flipping one sector on every family is the identity.)
+            pend = [
+                v
+                for (key, na, nb), _idx in relations
+                for v in (
+                    {("t", key)} if na == nb else {("t", key), ("s", na), ("s", nb)}
+                )
+                if v not in known
+            ]
+            if not pend:
+                break
+            pin = min(pend, key=repr)
+            rounds.append({pin: []})
+            known.add(pin)
+            continue
+        rounds.append(newly)
+        known |= set(newly)
+
+    # Patch overlaps after level 1: S' = S * (w_a (x) conj(w_b)).
+    beta, weight = [], []
+    for (key, na, nb), (ra, cb_idx) in relations:
+        wa = w_fam[na[0]][ra]
+        wb = w_fam[nb[0]][cb_idx]
+        Bv = jnp.sum(S[key][np.ix_(ra, cb_idx)] * wa[:, None] * jnp.conj(wb)[None, :])
+        aB = jnp.abs(Bv)
+        B_safe = jnp.where(aB > 0, Bv, jnp.ones_like(Bv))
+        beta.append(B_safe / jnp.abs(B_safe))
+        weight.append(jax.lax.stop_gradient(aB))
+
+    # Every sigma starts at 1 (the pinned ones stay there; unreached ones
+    # keep it); each round only reads values set by earlier rounds.
+    val = {("s", k): one for k in sig}
+    for newly in rounds:
+        updates = {}
+        for u, rs in newly.items():
+            if not rs:  # pinned
+                updates[u] = one
+                continue
+            cands, wts = [], []
+            for r in rs:
+                (key, na, nb), _idx = relations[r]
+                be = beta[r]
+                if na == nb:
+                    cand = be  # t_X
+                elif u == ("t", key):
+                    cand = be * val[("s", na)] * jnp.conj(val[("s", nb)])
+                elif u == ("s", na):
+                    cand = jnp.conj(be) * val[("t", key)] * val[("s", nb)]
+                else:
+                    cand = be * jnp.conj(val[("t", key)]) * val[("s", na)]
+                cands.append(cand)
+                wts.append(weight[r])
+            wts = jnp.stack(wts)
+            pick = jnp.stack(cands)[jnp.argmax(wts)]
+            updates[u] = jnp.where(jnp.max(wts) > 0, pick, one)
+        val.update(updates)
+    return {k: val[("s", k)] for k in sig}
 
 
 def _bond_blocks(tensor, data=None):
@@ -932,12 +1114,18 @@ def _bond_phase_fix_envs(envs_new, envs_ref, families):
             Sk = jnp.zeros((dim_a, dim_b), dtype=first.dtype)
         S[key] = Sk
 
-    # Per-family index phases w: a pure family gauge makes the new/ref ratio
-    # conj(w) on out-legs and w on in-legs, and both Gram forms below are
-    # then w_i conj(w_k) * (>= 0), independent of every other leg and of the
-    # tensor's global phase.
-    w_leg = {}
-    for fam in families:
+    # Level 1 -- per-index phases w within each Gram component.  A pure
+    # family gauge makes the new/ref ratio conj(w) on out-legs and w on
+    # in-legs, and both Gram forms below are then w_i conj(w_k) * (>= 0),
+    # independent of every other leg and of the tensor's global phase.
+    fam_of = {leg: fi for fi, fam in enumerate(families) for leg in fam}
+    dims = {}
+    for fi, fam in enumerate(families):
+        c0, lab0 = fam[0]
+        dims[fi] = _index_by_label(tensors[(c0, _BOND_LABEL_FIELD[lab0])], lab0).dim
+    comps, comp_of = _bond_static_components(families, blocks, axes, fam_of, dims)
+    w_fam = {}
+    for fi, fam in enumerate(families):
         G = None
         for c, lab in fam:
             Sk = S[(c, _BOND_LABEL_FIELD[lab])]
@@ -945,9 +1133,32 @@ def _bond_phase_fix_envs(envs_new, envs_ref, families):
                 jnp.conj(Sk) @ Sk.T if lab in _BOND_OUT_LABELS else Sk.T @ jnp.conj(Sk)
             )
             G = term if G is None else G + term
-        w = _bond_leading_phase(G)
-        for c, lab in fam:
-            w_leg[(c, lab)] = w
+        w_fam[fi] = _bond_component_phases(G, comps[fi])
+
+    # Level 2 -- one residual phase sigma per (family, component).  Where a
+    # family's Gram is block-diagonal (e.g. charge sectors a D^2 leg does not
+    # couple), level 1 leaves each component's phase free, and no single
+    # per-tensor phase absorbs a relative sector sign.  After level 1 the
+    # overlap summed over a (component_a, component_b) patch of tensor X is
+    # B = t_X conj(sigma_a) sigma_b |B|; propagate the sigmas (and t) through
+    # these relations along a static schedule, picking the heaviest patch at
+    # each step.  One component per family is pinned (a uniform family phase
+    # is absorbed by the per-tensor phases).  With one component per family
+    # -- every real CTM env measured -- all sigmas are pinned and this is
+    # the identity.
+    sigma = _bond_component_sync(
+        families, S, w_fam, comps, comp_of, blocks, axes, fam_of
+    )
+    w_leg = {}
+    for fi, fam in enumerate(families):
+        w = w_fam[fi]
+        if len(comps[fi]) > 1:
+            fac = jnp.ones_like(w)
+            for ci, g in enumerate(comps[fi]):
+                fac = fac.at[g].set(sigma[(fi, ci)])
+            w = w * fac
+        for leg in fam:
+            w_leg[leg] = w
 
     out = {c: {} for c in coords}
     for key, blks in blocks.items():

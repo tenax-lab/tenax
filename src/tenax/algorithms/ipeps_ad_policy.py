@@ -448,6 +448,18 @@ def make_ctm_energy_fn(
         # validate the combination (chi_max required, step_size > 0, etc.)
         # so we don't re-check here.
         if use_explicit:
+            # ``ctm_energy_explicit`` takes no ``forward_gauge`` and applies no
+            # gauge fix, so ``bond_phase`` (a reference-aligned gauge for the
+            # implicit fixed point, #841) would be silently ignored here
+            # (Codex P2 on #1057).  Refuse, as on the split path.
+            if ctm_cfg.forward_gauge == "bond_phase":
+                raise NotImplementedError(
+                    "forward_gauge='bond_phase' is only implemented on the "
+                    "implicit-AD path (gs_implicit_ad=True); the explicit-AD "
+                    "path (ctm_energy_explicit) applies no forward gauge and "
+                    "would silently ignore it. Use gs_implicit_ad=True, or "
+                    "forward_gauge='phase'."
+                )
             # #755: ``ctm_energy_explicit`` takes no ``recipe`` and always runs
             # the 2x2 step.  Threading "1x1" here returned the 2x2 answer under
             # a ``gs_recipe="1x1"`` label — measured identical to 2x2+explicit

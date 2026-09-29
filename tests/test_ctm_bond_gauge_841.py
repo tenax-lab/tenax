@@ -475,3 +475,87 @@ def test_bond_phase_is_refused_on_split_ctm():
     validate_split_ctm_config(
         CTMConfig(chi=4, fuse_virtual_legs=False, forward_gauge="phase"), "2x2"
     )
+
+
+# --------------------------------------------------------------------------
+# 7. Codex P2s on #1057: disconnected Gram components; explicit AD refused
+# --------------------------------------------------------------------------
+
+
+def _sector_decoupled_env(ferm_2site, seed=0):
+    """The fermionic env's structure with every D^2 leg made all-even and
+    random blocks: each chi index then couples only to its own parity sector,
+    so every family's Gram matrix is block-diagonal (2 components).  On a real
+    CTM env the odd D^2 states couple the sectors (measured: |G_even,odd| ~
+    1e-2 max|G|, one component per family), which is why this needs a
+    synthetic env."""
+    from tenax.core.index import TensorIndex
+    from tenax.core.tensor import SymmetricTensor
+
+    _sites, _nb, envs, _gate = ferm_2site
+    rng = np.random.default_rng(seed)
+    out = {}
+    for c, env in envs.items():
+        tensors = {}
+        for f in FIELDS:
+            t = getattr(env, f)
+            idxs = tuple(
+                idx
+                if idx.label in _BOND_CHI_LEGS[f]
+                else TensorIndex.from_charges(
+                    idx.symmetry,
+                    np.zeros(idx.dim, dtype=np.int32),
+                    idx.flow,
+                    label=idx.label,
+                )
+                for idx in t.indices
+            )
+            dense = jnp.asarray(rng.standard_normal(tuple(i.dim for i in idxs)))
+            t_new = SymmetricTensor.from_dense(dense, idxs, tol=float("inf"))
+            # Frobenius-normalised, as every gauged env is.
+            tensors[f] = t_new * (1.0 / float(jnp.linalg.norm(t_new._data)))
+        out[c] = CTMTensorEnv(**tensors)
+    return out
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_independently_flipped_sectors_are_recovered_when_the_gram_is_disconnected(
+    seed, ferm_2site
+):
+    sites, nb, _envs, _gate = ferm_2site
+    fams = _bond_gauge_families(tuple(sites), nb)
+    env = _sector_decoupled_env(ferm_2site, seed)
+    # Regime: at least two charge sectors on every chi leg ...
+    for f in FIELDS:
+        for lab in _BOND_CHI_LEGS[f]:
+            idx = next(i for i in getattr(env[(0, 0)], f).indices if i.label == lab)
+            assert len(set(np.asarray(idx.charges) % 2)) == 2
+    rng = np.random.default_rng(200 + seed)
+    scrambled = _random_family_gauge(env, fams, rng)
+    assert _env_dist(env, scrambled) > 0.1
+    fixed = _bond_phase_fix_envs(scrambled, env, fams)
+    assert _env_dist(env, fixed) < 1e-12
+
+
+def test_bond_phase_is_refused_on_explicit_ad(dense_2site):
+    from tenax.algorithms.ipeps_ad_policy import make_ctm_energy_fn
+    from tenax.algorithms.ipeps_config import CTMConfig
+
+    sites, nb, _envs, gate = dense_2site
+
+    def build(gauge):
+        cfg = CTMConfig(chi=CHI, forward_gauge=gauge)
+        return make_ctm_energy_fn(
+            neighbors=nb,
+            gate=gate,
+            get_ctm_cfg=lambda: cfg,
+            env_cache={},
+            use_explicit=True,
+            explicit_warmup=1,
+            explicit_steps=1,
+        )
+
+    with pytest.raises(NotImplementedError, match="bond_phase"):
+        build("bond_phase")(sites)
+    # Regime: the same explicit dispatch with the default gauge runs.
+    assert np.isfinite(float(build("phase")(sites)))
