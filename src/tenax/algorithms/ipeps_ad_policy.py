@@ -74,6 +74,16 @@ def validate_split_ctm_config(
     # is kept in the signature because callers pass it and it documents which
     # branch is being validated; both branches now accept both recipes.
     del single_site
+    if ctm_cfg.forward_gauge == "bond_phase":
+        # The split forwards never read ``forward_gauge``, so accepting it
+        # would silently run a different gauge than the one requested (Codex
+        # P1 on #1057).  Split CTM is frozen (dense bosonic, experimental):
+        # refuse rather than port it.
+        raise NotImplementedError(
+            "forward_gauge='bond_phase' is not supported on the split-CTM path "
+            "(fuse_virtual_legs=False), which ignores forward_gauge; use "
+            "fuse_virtual_legs=True, or forward_gauge='phase'."
+        )
     if ctm_cfg.ctmrg_heuristic_increase_chi:
         raise NotImplementedError(
             "in-CTM chi auto-bump (ctmrg_heuristic_increase_chi) is not "

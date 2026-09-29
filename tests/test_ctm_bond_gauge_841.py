@@ -432,3 +432,46 @@ def test_complex_gradient_is_finite_with_a_dead_chi_index(dense_2site):
 
     g = jax.grad(f)(leaves)
     assert all(bool(jnp.all(jnp.isfinite(x))) for x in g)
+
+
+# --------------------------------------------------------------------------
+# 6. Codex P1s on #1057: block-sparse, and refused on split CTM
+# --------------------------------------------------------------------------
+
+
+def test_symmetric_path_never_densifies(ferm_2site, monkeypatch):
+    """The gauge works on the charge blocks of a SymmetricTensor env: the
+    per-index factors are diagonal on each sector, so no ``todense`` is
+    needed (CLAUDE.md: avoid densifying on the symmetric path).  The only
+    dense objects are the chi x chi overlap/Gram matrices of each bond."""
+    from tenax.core.tensor import SymmetricTensor
+
+    sites, nb, envs, _gate = ferm_2site
+    assert isinstance(envs[(0, 0)].T1, SymmetricTensor)  # regime
+    fams = _bond_gauge_families(tuple(sites), nb)
+    scrambled = _random_family_gauge(envs, fams, np.random.default_rng(11))
+    assert _env_dist(envs, scrambled) > 0.1  # regime: not a no-op
+
+    def _no_todense(self):
+        raise AssertionError("bond_phase densified a SymmetricTensor")
+
+    monkeypatch.setattr(SymmetricTensor, "todense", _no_todense)
+    fixed = _bond_phase_fix_envs(scrambled, envs, fams)
+    monkeypatch.undo()
+    assert _env_dist(envs, fixed) < 1e-12
+
+
+def test_bond_phase_is_refused_on_split_ctm():
+    """The split forwards never read ``forward_gauge``; accepting
+    ``bond_phase`` there would silently run another gauge."""
+    from tenax.algorithms.ipeps_ad_policy import validate_split_ctm_config
+    from tenax.algorithms.ipeps_config import CTMConfig
+
+    cfg = CTMConfig(chi=4, fuse_virtual_legs=False, forward_gauge="bond_phase")
+    for recipe in ("1x1", "2x2"):
+        with pytest.raises(NotImplementedError, match="bond_phase"):
+            validate_split_ctm_config(cfg, recipe)
+    # Regime: the same split config with the default gauge is accepted.
+    validate_split_ctm_config(
+        CTMConfig(chi=4, fuse_virtual_legs=False, forward_gauge="phase"), "2x2"
+    )

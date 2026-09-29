@@ -18,6 +18,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.scipy.sparse.linalg import gmres as jax_gmres
 
 from tenax.algorithms._ad_primitives import (
@@ -782,15 +783,74 @@ def _bond_leading_phase(G):
     return v_safe / jnp.abs(v_safe)
 
 
+def _bond_blocks(tensor, data=None):
+    """``[(key, block, per-leg index arrays)]`` for a Dense or Symmetric tensor.
+
+    A ``DenseTensor`` is one block covering every index.  A
+    ``SymmetricTensor`` yields its stored blocks with the chi positions of
+    each block's charge on every leg (static numpy, from the charges), so the
+    bond gauge never materialises the dense tensor (#841, Codex P1 on #1057).
+    ``data`` optionally replaces the stored array (same layout).
+    """
+    from tenax.core.tensor import SymmetricTensor
+
+    if isinstance(tensor, SymmetricTensor):
+        flat = tensor._data if data is None else data
+        out = []
+        for i, key in enumerate(tensor._block_keys):
+            shape = tensor._block_shapes[i]
+            off = tensor._block_offsets[i]
+            size = math.prod(shape)
+            blk = flat[off : off + size].reshape(shape)
+            pos = tuple(
+                np.where(np.asarray(idx.charges) == q)[0]
+                for idx, q in zip(tensor.indices, key)
+            )
+            out.append((key, blk, pos))
+        return out
+    arr = tensor.todense() if data is None else data
+    return [(None, arr, tuple(np.arange(n) for n in arr.shape))]
+
+
+def _bond_rebuild(tensor, blocks):
+    """Inverse of :func:`_bond_blocks`: same indices, same block layout."""
+    from tenax.core.tensor import SymmetricTensor
+
+    if isinstance(tensor, SymmetricTensor):
+        data = jnp.concatenate([b.ravel() for b in blocks]) if blocks else tensor._data
+        return SymmetricTensor._raw(
+            indices=tensor.indices,
+            data=data,
+            block_keys=tensor._block_keys,
+            block_shapes=tensor._block_shapes,
+            block_offsets=tensor._block_offsets,
+        )
+    return type(tensor)(blocks[0], tensor.indices)
+
+
+def _bond_ref_blocks(t_new, t_ref):
+    """The reference's blocks in ``t_new``'s leg order, keyed like ``t_new``."""
+    new_labels = tuple(i.label for i in t_new.indices)
+    ref_labels = tuple(i.label for i in t_ref.indices)
+    perm = tuple(ref_labels.index(lab) for lab in new_labels)
+    out = {}
+    for key, blk, _pos in _bond_blocks(t_ref):
+        new_key = None if key is None else tuple(key[p] for p in perm)
+        out[new_key] = jax.lax.stop_gradient(jnp.transpose(blk, perm))
+    return out
+
+
 def _bond_phase_fix_envs(envs_new, envs_ref, families):
     """Per-bond phase gauge: align ``envs_new`` to ``envs_ref`` index by index.
 
-    ``forward_gauge="bond_phase"`` (#841).  Three stages, all on the small
-    env tensors (densified like :func:`_phase_fix_ctm_tensor`):
+    ``forward_gauge="bond_phase"`` (#841).  Three stages, block-sparse on a
+    ``SymmetricTensor`` env (no ``todense``; the only dense objects are the
+    chi x chi overlap and Gram matrices of each bond):
 
-    1. Reference-free per-tensor Frobenius normalisation + global phase
-       (:func:`_frob_phase_fix`; the ``"phase"`` gauge, kept as stage 1 so
-       ``"bond_phase"`` strictly extends it).
+    1. Per-tensor Frobenius normalisation (as :func:`_frob_phase_fix`, norm
+       under ``stop_gradient``).  Its reference-free phase is not applied:
+       stage 3 replaces every tensor's global phase anyway, so it would
+       cancel exactly.
     2. One unit-modulus factor per chi index of every bond family (see
        :func:`_bond_gauge_families`), ``w`` on out-legs and ``conj(w)`` on
        in-legs, so every contracted pair is unchanged: an exact gauge
@@ -798,16 +858,18 @@ def _bond_phase_fix_envs(envs_new, envs_ref, families):
        off the family Gram matrix of the overlaps ``conj(ref) * new``
        (:func:`_bond_leading_phase`), which is independent of the other
        legs' signs and of each tensor's global phase, so recovering a pure
-       gauge ``new = g . ref`` is exact, not a local-optimum search.
+       gauge ``new = g . ref`` is exact, not a local-optimum search.  A
+       per-index factor is diagonal on each charge sector of the chi leg, so
+       it is one broadcast multiply per block.
     3. One global phase per tensor, the phase of ``<ref, new>`` after stage
        2 (a per-tensor scalar; the energy normalises every RDM, so it is a
        gauge too).  Exactly zero overlap keeps phase 1.
 
-    The per-tensor global phase of stage 1 cannot absorb the per-chi-index
-    Z2 signs the 2x2 projector SVD re-draws each sweep (#841: at D=3 the M'
-    anchor makes those signs a period-2 map), which is why ``"phase"``
-    leaves an exact 2-cycle; this gauge removes it because the reference
-    pins every index.
+    The per-tensor global phase of ``"phase"`` cannot absorb the
+    per-chi-index Z2 signs the 2x2 projector SVD re-draws each sweep (#841:
+    at D=3 the M' anchor makes those signs a period-2 map), which is why
+    ``"phase"`` leaves an exact 2-cycle; this gauge removes it because the
+    reference pins every index.
 
     Differentiation: the reference is always ``stop_gradient`` (the implicit
     backward linearizes ``fix(step(env), env_ref)`` with a frozen reference,
@@ -817,67 +879,58 @@ def _bond_phase_fix_envs(envs_new, envs_ref, families):
     and free of the ``0/0`` VJP at a sign boundary.  For complex envs the
     phases vary smoothly with the step output and are differentiated.
 
-    Falls back to stage 1 alone when the chi inventory of ``envs_new`` and
-    ``envs_ref`` differs (static check; e.g. the sweep after a chi bump).
+    Falls back to the ``"phase"`` gauge (:func:`_phase_fix_ctm_tensor`) when
+    the chi inventory of ``envs_new`` and ``envs_ref`` differs (static
+    check; e.g. the sweep after a chi bump).
     """
     coords = tuple(envs_new)
     fields = tuple(_BOND_CHI_LEGS)
-    labels = {
-        (c, f): tuple(i.label for i in getattr(envs_new[c], f).indices)
-        for c in coords
-        for f in fields
-    }
-    dense = {
-        (c, f): _frob_phase_fix(getattr(envs_new[c], f).todense())
-        for c in coords
-        for f in fields
-    }
-
-    def _wrap_all(arrs):
-        out = {}
-        for c in coords:
-            out[c] = CTMTensorEnv(
-                **{
-                    f: _wrap_tensor(arrs[(c, f)], getattr(envs_new[c], f))
-                    for f in fields
-                }
-            )
-        return out
-
     if not _bond_structures_match(envs_new, envs_ref):
-        return _wrap_all(dense)
+        return {c: _phase_fix_ctm_tensor(envs_new[c]) for c in coords}
 
-    ref = {}
-    for c in coords:
-        for f in fields:
-            t_ref = getattr(envs_ref[c], f)
-            ref_labels = tuple(i.label for i in t_ref.indices)
-            perm = tuple(ref_labels.index(lab) for lab in labels[(c, f)])
-            ref[(c, f)] = jax.lax.stop_gradient(jnp.transpose(t_ref.todense(), perm))
+    tensors = {(c, f): getattr(envs_new[c], f) for c in coords for f in fields}
+    blocks, refs, axes = {}, {}, {}
+    for key, t in tensors.items():
+        blks = _bond_blocks(t)
+        norm = jnp.sqrt(sum(jnp.sum(jnp.abs(b) ** 2) for _k, b, _p in blks))
+        inv = 1.0 / jax.lax.stop_gradient(norm + 1e-30)
+        blocks[key] = [(k, b * inv, p) for k, b, p in blks]
+        refs[key] = _bond_ref_blocks(t, getattr(envs_ref[key[0]], key[1]))
+        labs = tuple(i.label for i in t.indices)
+        out_l, in_l = _BOND_CHI_LEGS[key[1]]
+        axes[key] = (labs.index(out_l), labs.index(in_l))
 
-    is_complex = jnp.iscomplexobj(next(iter(dense.values())))
+    first = next(iter(blocks.values()))[0][1]
+    is_complex = jnp.iscomplexobj(first)
 
     def _probe(x):
         return x if is_complex else jax.lax.stop_gradient(x)
 
-    # S[X] = overlap conj(ref) * new summed over the D^2 leg, arranged as
-    # (out-leg, in-leg).  Exact case: S = t * conj(w_out) ⊗ w_in ⊙ (>= 0).
+    # S[X] = overlap conj(ref) * new summed over the D^2 leg, as a chi x chi
+    # (out-leg, in-leg) matrix assembled block by block.
+    # Exact case: S = t * conj(w_out) ⊗ w_in ⊙ (>= 0).
     S = {}
-    axes = {}
-    for key, X in dense.items():
-        out_l, in_l = _BOND_CHI_LEGS[key[1]]
-        labs = labels[key]
-        a, b = labs.index(out_l), labs.index(in_l)
-        axes[key] = (a, b)
-        M = jnp.conj(ref[key]) * _probe(X)
-        rest = tuple(k for k in range(M.ndim) if k not in (a, b))
-        if rest:
-            M = jnp.sum(M, axis=rest)
-            a_r = a - sum(1 for k in rest if k < a)
-            b_r = b - sum(1 for k in rest if k < b)
-        else:
-            a_r, b_r = a, b
-        S[key] = M if a_r < b_r else M.T
+    for key, blks in blocks.items():
+        a, b = axes[key]
+        t = tensors[key]
+        dim_a, dim_b = t.indices[a].dim, t.indices[b].dim
+        Sk = None
+        for bk, blk, pos in blks:
+            rblk = refs[key].get(bk)
+            if rblk is None:
+                continue
+            M = jnp.conj(rblk) * _probe(blk)
+            rest = tuple(k for k in range(M.ndim) if k not in (a, b))
+            if rest:
+                M = jnp.sum(M, axis=rest)
+            if a > b:
+                M = M.T
+            if Sk is None:
+                Sk = jnp.zeros((dim_a, dim_b), dtype=M.dtype)
+            Sk = Sk.at[np.ix_(pos[a], pos[b])].add(M)
+        if Sk is None:
+            Sk = jnp.zeros((dim_a, dim_b), dtype=first.dtype)
+        S[key] = Sk
 
     # Per-family index phases w: a pure family gauge makes the new/ref ratio
     # conj(w) on out-legs and w on in-legs, and both Gram forms below are
@@ -887,8 +940,7 @@ def _bond_phase_fix_envs(envs_new, envs_ref, families):
     for fam in families:
         G = None
         for c, lab in fam:
-            key = (c, _BOND_LABEL_FIELD[lab])
-            Sk = S[key]
+            Sk = S[(c, _BOND_LABEL_FIELD[lab])]
             term = (
                 jnp.conj(Sk) @ Sk.T if lab in _BOND_OUT_LABELS else Sk.T @ jnp.conj(Sk)
             )
@@ -897,27 +949,32 @@ def _bond_phase_fix_envs(envs_new, envs_ref, families):
         for c, lab in fam:
             w_leg[(c, lab)] = w
 
-    fixed = {}
-    for key, X in dense.items():
+    out = {c: {} for c in coords}
+    for key, blks in blocks.items():
         c, f = key
         out_l, in_l = _BOND_CHI_LEGS[f]
         a, b = axes[key]
         # The family phase w enters as w on the out-leg, conj(w) on the
         # in-leg: each contracted (out, in) pair picks up w_i conj(w_i) = 1.
-        shape_a = [1] * X.ndim
-        shape_a[a] = -1
-        shape_b = [1] * X.ndim
-        shape_b[b] = -1
-        Xg = (
-            X
-            * w_leg[(c, out_l)].reshape(shape_a)
-            * jnp.conj(w_leg[(c, in_l)]).reshape(shape_b)
-        )
-        ov = jnp.sum(jnp.conj(ref[key]) * _probe(Xg))
+        w_a = w_leg[(c, out_l)]
+        w_b = jnp.conj(w_leg[(c, in_l)])
+        scaled = []
+        ov = jnp.zeros((), dtype=jnp.result_type(first.dtype, w_a.dtype))
+        for bk, blk, pos in blks:
+            sh_a = [1] * blk.ndim
+            sh_a[a] = -1
+            sh_b = [1] * blk.ndim
+            sh_b[b] = -1
+            g = blk * w_a[pos[a]].reshape(sh_a) * w_b[pos[b]].reshape(sh_b)
+            scaled.append(g)
+            rblk = refs[key].get(bk)
+            if rblk is not None:
+                ov = ov + jnp.sum(jnp.conj(rblk) * _probe(g))
         aov = jnp.abs(ov)
         ov_safe = jnp.where(aov > 0, ov, jnp.ones_like(ov))
-        fixed[key] = Xg * (jnp.conj(ov_safe) / jnp.abs(ov_safe))
-    return _wrap_all(fixed)
+        phase = jnp.conj(ov_safe) / jnp.abs(ov_safe)
+        out[c][f] = _bond_rebuild(tensors[key], [g * phase for g in scaled])
+    return {c: CTMTensorEnv(**out[c]) for c in coords}
 
 
 _BOND_FIX_JIT_CACHE: dict = {}
