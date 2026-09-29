@@ -397,3 +397,38 @@ def test_policy_accepts_bond_phase_and_the_packed_config_keeps_it():
     validate_ctm_for_implicit_ad(cfg)
     # The packed config must not silently turn "bond_phase" into "qr".
     assert _config_from_tuple(_config_to_tuple(cfg)).forward_gauge == "bond_phase"
+
+
+def test_complex_gradient_is_finite_with_a_dead_chi_index(dense_2site):
+    """Complex envs differentiate the phases, and symmetric/rank-deficient
+    envs carry chi indices with exactly zero weight (v_i = 0 in the power
+    iteration).  ``abs`` has a 0/0 VJP at 0, which a ``where`` on the output
+    does not fence -- the backward must still be finite there."""
+    sites, nb, envs, _gate = dense_2site
+    fams = _bond_gauge_families(tuple(sites), nb)
+    dead = 2  # zero chi index 2 on every leg of every tensor
+
+    def kill(t):
+        X = t.todense().astype(complex)
+        for ax, idx in enumerate(t.indices):
+            if idx.label in _BOND_OUT_LABELS or any(
+                idx.label == p[1] for p in _BOND_CHI_LEGS.values()
+            ):
+                sl = [slice(None)] * X.ndim
+                sl[ax] = dead
+                X = X.at[tuple(sl)].set(0.0)
+        return _wrap_tensor(X, t)
+
+    ref = {
+        c: CTMTensorEnv(**{f: kill(getattr(e, f)) for f in FIELDS})
+        for c, e in envs.items()
+    }
+    new = _random_family_gauge(ref, fams, np.random.default_rng(5), complex_=True)
+    leaves, treedef = jax.tree.flatten(new)
+
+    def f(ls):
+        fixed = _bond_phase_fix_envs(jax.tree.unflatten(treedef, ls), ref, fams)
+        return sum(jnp.sum(jnp.real(x)) for x in jax.tree.leaves(fixed))
+
+    g = jax.grad(f)(leaves)
+    assert all(bool(jnp.all(jnp.isfinite(x))) for x in g)

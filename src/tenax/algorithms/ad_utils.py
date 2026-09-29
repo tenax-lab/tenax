@@ -771,7 +771,8 @@ def _bond_leading_phase(G):
     v = G[:, i0]
     for _ in range(_BOND_POWER_STEPS):
         v = G @ v
-        scale = jnp.max(jnp.abs(v))
+        # A positive rescale changes no phase: keep it out of the VJP.
+        scale = jax.lax.stop_gradient(jnp.max(jnp.abs(v)))
         v = v / jnp.where(scale > 0, scale, 1.0)
     absv = jnp.abs(v)
     keep = absv > _BOND_WEIGHT_FLOOR * jnp.max(absv)
