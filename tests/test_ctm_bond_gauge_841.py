@@ -576,3 +576,29 @@ def test_bond_phase_is_refused_on_engines_that_own_their_ctm(mode):
     # bond_phase with the default engine constructs.
     CTMConfig(chi=4, forward_gauge="phase", ctm_ad_mode=mode)
     CTMConfig(chi=4, forward_gauge="bond_phase", ctm_ad_mode=None)
+
+
+def test_a_weak_gram_component_keeps_its_per_index_phases():
+    """Codex P2 on #1057: squaring the whole Gram with one shared rescale
+    underflowed a component 1e-12 below the dominant one, leaving its
+    indices unrotated.  Each component is now squared on its own."""
+    from tenax.algorithms.ad_utils import _bond_component_phases
+
+    rng = np.random.default_rng(7)
+    n = 12
+    comps = [np.arange(6), np.arange(6, 12)]
+    W = np.zeros((n, n))
+    for c, amp in zip(comps, (1.0, 1e-12)):
+        X = rng.uniform(0.5, 1.0, (6, 6))
+        W[np.ix_(c, c)] = amp * (X @ X.T)
+    w_true = np.exp(1j * rng.uniform(0, 2 * np.pi, n))
+    G = jnp.asarray(w_true[:, None] * W * np.conj(w_true)[None, :])
+
+    w = np.asarray(_bond_component_phases(G, comps))
+    for c in comps:
+        # Exact up to one phase per component.
+        ratio = w[c] / w_true[c]
+        np.testing.assert_allclose(ratio, ratio[0], atol=1e-10)
+    # Regime: the weak component's true phases are not all equal, so a
+    # w = 1 fallback would fail the assertion above.
+    assert np.ptp(np.angle(w_true[comps[1]] / w_true[comps[1]][0])) > 0.5

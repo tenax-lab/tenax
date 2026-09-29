@@ -762,24 +762,28 @@ def _bond_component_phases(G, components):
     #1057): then an index outside the anchor's block gets no phase from it.
     So every connected component (static, :func:`_bond_static_components`)
     gets its own anchor, its heaviest index, and ``n = 2^m >= dim`` (by
-    repeated squaring) covers any component's diameter.  The phases are
+    repeated squaring of that component alone, so a weak component cannot
+    underflow against a strong one) covers any component's diameter.  The phases are
     exact up to ONE phase per component; :func:`_bond_phase_fix_envs` fixes
     those from the block overlaps.  Indices at (relative) zero weight in
     their component are left unrotated.
     """
     n = G.shape[0]
-    P = G
-    for _ in range(max(1, math.ceil(math.log2(max(n, 2)))) + 1):
-        P = P @ P
-        # A positive rescale changes no phase: keep it out of the VJP.
-        scale = jax.lax.stop_gradient(jnp.max(jnp.abs(P)))
-        P = P / jnp.where(scale > 0, scale, 1.0)
-    diag = jnp.real(jnp.diagonal(G))
     w = jnp.ones((n,), dtype=G.dtype)
     for comp in components:
-        comp_j = jnp.asarray(comp)
-        anchor = comp_j[jnp.argmax(diag[comp_j])]
-        v = P[comp_j, anchor]
+        # Square each component on its own, with its own rescale: a shared
+        # rescale lets a weak component (e.g. 1e-12 of the dominant one)
+        # underflow to zero after ~5 squarings, and its indices would then
+        # be left unrotated (Codex P2 on #1057).
+        Gc = G[np.ix_(comp, comp)]
+        Pc = Gc
+        for _ in range(max(1, math.ceil(math.log2(max(len(comp), 2)))) + 1):
+            Pc = Pc @ Pc
+            # A positive rescale changes no phase: keep it out of the VJP.
+            scale = jax.lax.stop_gradient(jnp.max(jnp.abs(Pc)))
+            Pc = Pc / jnp.where(scale > 0, scale, 1.0)
+        anchor = jnp.argmax(jnp.real(jnp.diagonal(Gc)))
+        v = Pc[:, anchor]
         absv = jnp.abs(v)
         keep = absv > _BOND_WEIGHT_FLOOR * jnp.max(absv)
         # Fence the ARGUMENT (not just the output) so an unkept index never
