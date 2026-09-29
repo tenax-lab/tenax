@@ -349,6 +349,7 @@ def _saddle_sweep(env0, a, contract=0.5):
 
 
 def _run_mocked(monkeypatch, a, verdicts=None, **kw):
+    kw.setdefault("hold_sweeps", 40)  # the hold is opt-in
     A = _site()
     sites = {(0, 0): A, (1, 0): A}
     env0 = {c: initialize_ctm_tensor_env(t, CHI) for c, t in sites.items()}
@@ -455,7 +456,27 @@ def test_a_converged_dense_d2_environment_holds():
     B = DenseTensor(B.todense(), B.indices)
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
-        held = ctm_tensor_2site(A, B, 12, max_iter=200, conv_tol=1e-10)
+        held = ctm_tensor_2site(A, B, 12, max_iter=200, conv_tol=1e-10, hold_sweeps=40)
     plain = ctm_tensor_2site(A, B, 12, max_iter=200, conv_tol=1e-10, hold_sweeps=0)
     for x, y in zip(jax.tree.leaves(held), jax.tree.leaves(plain)):
         np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_the_hold_is_off_by_default(monkeypatch):
+    """Opt-in: without ``hold_sweeps`` the loop never calls the hold and
+    certifies the saddle on successive-sweep agreement, as before #1058."""
+    calls = []
+    monkeypatch.setattr(
+        conv, "hold_test", lambda *a, **k: calls.append(1) or pytest.fail("ran")
+    )
+    A = _site()
+    sites = {(0, 0): A, (1, 0): A}
+    env0 = {c: initialize_ctm_tensor_env(t, CHI) for c, t in sites.items()}
+    fake, _s_B, s_of = _saddle_sweep(env0, 0.1)
+    monkeypatch.setattr(conv, "_ctm_tensor_sweep_multisite", fake)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        envs = _ctm_tensor_multisite(sites, CHECKERBOARD_NEIGHBORS, CHI, max_iter=2000)
+    assert not calls
+    # Regime: the run did converge (on the saddle), so the hold was reachable.
+    assert abs(s_of(envs)) < 1e-12

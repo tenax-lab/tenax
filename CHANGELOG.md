@@ -25,8 +25,8 @@
   `max_iter` it warns not converged, and a criterion that passes with too
   little budget left for the hold stops and warns UNVERIFIED with the sweeps
   actually run (Codex P2).  `ctm_hold_test` runs the same test
-  on any environment.  Default on for the eager path; not run inside the
-  implicit-AD forward (it would cost about one extra forward per optimizer
+  on any environment.  Opt-in (`hold_sweeps=40`; default `0` keeps the old
+  behaviour) on the eager path; not run inside the implicit-AD forward (it would cost about one extra forward per optimizer
   step there -- use `ctm_hold_test` as the diagnostic).
 
 - **#1037 is a closed-loop defect, and tree clusters pin its boundary**

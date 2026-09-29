@@ -663,8 +663,9 @@ if not info.converged:
 from a saddle: at a saddle successive sweeps agree to 1e-10 while a small
 displacement grows every sweep (#1035 measured one on a fermionic D=3 χ=12
 state, escaping at ×1.041/sweep to a stable fixed point 1.4e-2 away).
-`ctm_tensor_2site` and `ctm_multisite` therefore run a **hold test** by
-default once the criterion passes: two copies perturbed by
+`ctm_tensor_2site` and `ctm_multisite` can therefore run a **hold test**
+once the criterion passes (opt-in: pass `hold_sweeps=40`; the default `0` is
+off): two copies perturbed by
 `hold_perturbation` (relative, default 1e-6; independent deterministic
 directions) and the point itself are stepped side by side, and each
 displacement is measured in a gauge-invariant metric (per-leg, per-sector
@@ -681,7 +682,8 @@ perturbed point and walks on to the attractor. If `max_iter` runs out first
 environment is not converged; if the criterion passes with fewer than
 `3 * hold_sweeps` steps left, it stops, reports the sweeps actually run, and
 warns that the point is unverified. It never returns the saddle as
-converged. `hold_sweeps=0` restores successive-sweep agreement alone.
+converged. With the default `hold_sweeps=0` the loop uses successive-sweep
+agreement alone, as before.
 
 `ctm_hold_test` runs the same test on any environment, e.g. a seed before it
 goes to `optimize_gs_ad(envs_init=...)` or the environment an implicit-AD
@@ -854,7 +856,8 @@ from tenax import (
 cfg = FPEPSConfig(D=2, t=1.0, V=0.0, dt=0.05)
 H = spinless_fermion_gate(cfg)
 su = su_grow_layout(H, cfg, key=jax.random.PRNGKey(4))  # eager SU grows the sectors
-eA, eB = ctm_tensor_2site(su.A, su.B, 8, max_iter=300, conv_tol=1e-10)  # eager CTM picks the chi layout
+eA, eB = ctm_tensor_2site(su.A, su.B, 8, max_iter=300, conv_tol=1e-10,
+                          hold_sweeps=40)  # eager CTM picks the chi layout; hold: not a saddle
 
 (A, B), (env_A, env_B), E = optimize_gs_ad(              # traced AD keeps both layouts
     H, (su.A, su.B),
@@ -865,8 +868,8 @@ eA, eB = ctm_tensor_2site(su.A, su.B, 8, max_iter=300, conv_tol=1e-10)  # eager 
 )
 ```
 
-The eager CTM's hold test (on by default, see "A converged CTM can be a
-saddle" above) is what makes this seed an attractor rather than a point the
+The eager CTM's hold test (opt-in via `hold_sweeps=40`, see "A converged
+CTM can be a saddle" above) is what makes this seed an attractor rather than a point the
 CTM merely paused at; budget `max_iter` for it — a hold spends `3 *
 hold_sweeps` extra steps at an attractor (up to `9 * hold_sweeps` to reject
 a saddle), and walking off a saddle takes as many sweeps as it takes: about

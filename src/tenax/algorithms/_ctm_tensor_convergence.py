@@ -1381,7 +1381,7 @@ def _ctm_tensor_multisite(
     projector_backward: str = "auto",
     recipe: str = "2x2",
     _deprecation_stacklevel: int = 3,
-    hold_sweeps: int = DEFAULT_HOLD_SWEEPS,
+    hold_sweeps: int = 0,
     hold_perturbation: float = DEFAULT_HOLD_PERTURBATION,
 ) -> dict[Coord, CTMTensorEnv]:
     """Run multisite CTM to convergence using the Tensor protocol.
@@ -1402,7 +1402,7 @@ def _ctm_tensor_multisite(
                       truncates each bond with two inequivalent projectors on
                       alternating sweeps, so no environment is stationary under
                       both and there is no fixed point to converge to.
-        hold_sweeps:  See :func:`ctm_tensor_2site`.  ``0`` disables the hold.
+        hold_sweeps:  See :func:`ctm_tensor_2site`.  Default ``0`` (off).
         hold_perturbation: See :func:`ctm_tensor_2site`.
 
     Returns:
@@ -1721,7 +1721,7 @@ def ctm_tensor_2site(
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
     recipe: str = "2x2",
-    hold_sweeps: int = DEFAULT_HOLD_SWEEPS,
+    hold_sweeps: int = 0,
     hold_perturbation: float = DEFAULT_HOLD_PERTURBATION,
 ) -> tuple[CTMTensorEnv, CTMTensorEnv]:
     """Run 2-site checkerboard CTM to convergence using the Tensor protocol.
@@ -1738,7 +1738,8 @@ def ctm_tensor_2site(
         qr_warmup_steps:  Number of eigh warm-up sweeps before QR kicks in.
         recipe:       ``"2x2"`` (default) or ``"1x1"`` projector recipe;
                       see :func:`_ctm_tensor_sweep_multisite`.
-        hold_sweeps:  Hold test (#1035), default 40; ``0`` turns it off.
+        hold_sweeps:  Hold test (#1035), opt-in: default ``0`` (off); pass
+                      e.g. ``DEFAULT_HOLD_SWEEPS`` (40) to turn it on.
                       ``conv_tol`` compares SUCCESSIVE sweeps, which cannot
                       tell an attractor from a saddle: at a saddle successive
                       sweeps agree to 1e-10 while a displacement grows every
@@ -1810,8 +1811,8 @@ def ctm_hold_test(
 ) -> HoldResult:
     """Diagnostic: is a converged CTM environment an attractor or a saddle?
 
-    Runs the hold test that :func:`ctm_tensor_2site` applies by default
-    (``hold_sweeps``) on an environment from anywhere -- a seed you are about
+    Runs the hold test that :func:`ctm_tensor_2site` applies when
+    ``hold_sweeps > 0`` on an environment from anywhere -- a seed you are about
     to pass as ``optimize_gs_ad(envs_init=...)``, or the environment the
     implicit-AD forward returned.  The environment is perturbed by
     ``perturbation`` (relative), stepped ``sweeps`` times with the eager
@@ -1867,7 +1868,7 @@ def ctm_multisite(
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
     recipe: str = "2x2",
-    hold_sweeps: int = DEFAULT_HOLD_SWEEPS,
+    hold_sweeps: int = 0,
     hold_perturbation: float = DEFAULT_HOLD_PERTURBATION,
 ) -> dict[str, CTMTensorEnv]:
     """Run multisite CTM to convergence for an arbitrary lattice.
