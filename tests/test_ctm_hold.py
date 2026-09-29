@@ -870,3 +870,19 @@ def test_a_saddle_hiding_in_a_zero_leaf_is_excited():
     held = hold_test(step, point, sweeps=40, invariants=inv)
     assert not held.passed
     assert held.rate > 1.0
+
+
+def test_a_nonfinite_hold_is_not_resumed_from(monkeypatch):
+    """Codex P2 on #1058: a perturbed copy that blew up was installed as the
+    loop's next environment and would crash the next projector SVD."""
+    from tenax.algorithms._ctm_hold import HoldResult
+
+    def blown(step, envs, **kw):
+        bad = {c: jax.tree.map(lambda a: a * jnp.nan, e) for c, e in envs.items()}
+        return HoldResult(False, math.inf, (math.inf, math.inf), (1.0,), bad, 3)
+
+    monkeypatch.setattr(conv, "hold_test", blown)
+    envs, _s_B, _s_of, not_conv = _run_mocked(monkeypatch, -0.1, max_iter=2000)
+    leaves = [np.asarray(x) for e in envs.values() for x in jax.tree.leaves(e)]
+    assert all(np.isfinite(x).all() for x in leaves)
+    assert not_conv and "non-finite" in str(not_conv[0].message)

@@ -1617,9 +1617,17 @@ def _ctm_tensor_multisite(
                 status, stat = "pass", held.rate
             elif held.rate < 1.0 and math.isfinite(held.drift):
                 status, stat = "drift", held.drift
+            elif not math.isfinite(held.rate):
+                status, stat = "nonfinite", held.rate
             else:
                 status, stat = "fail", held.rate
             hold_log.append((status, used, stat, capped))
+            if status == "nonfinite":
+                # Codex P2 on #1058: the perturbed copy blew up; resuming from
+                # it would feed NaN/inf into the next projector SVD.  Keep the
+                # finite claimed point and stop, reported UNVERIFIED below.
+                converged = False
+                break
             if not held.passed:
                 # A saddle.  Continue from the perturbed trajectory: it has
                 # already been pushed off the saddle along the unstable
@@ -1639,6 +1647,17 @@ def _ctm_tensor_multisite(
         warnings.warn(
             _blind_corner_message(blind_coords, collapsed_coords),
             RuntimeWarning,
+            stacklevel=2,
+        )
+    elif hold_log and hold_log[-1][0] == "nonfinite":
+        warnings.warn(
+            f"CTM not verified in ctm_tensor_multisite(): the successive-sweep "
+            f"criterion reached conv_tol={conv_tol:g} at chi={chi}, but a "
+            f"hold-test perturbation diverged to non-finite values, so the "
+            f"point could not be told apart from a saddle.  The returned "
+            f"environment is the finite claimed point, UNVERIFIED (#1035).  "
+            f"Try a smaller hold_perturbation, or hold_sweeps=0.",
+            UserWarning,
             stacklevel=2,
         )
     elif hold_log and hold_log[-1][0] == "budget":
