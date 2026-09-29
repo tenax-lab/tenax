@@ -390,8 +390,8 @@ def _require_svd_connected(
     internal bond -- the SVD bond has dimension zero: ``U_T`` has no blocks and
     the singular-value vector is length zero.  Left unguarded this surfaces far
     from its cause -- a ``StopIteration`` in :func:`_gauge_fix_symmetric_svd`
-    (``next(iter(U_T.blocks))`` on an empty tensor) or an ``IndexError`` in
-    :func:`_fishman_truncate_S` (``S[0]`` on a size-0 array).
+    (``next(iter(U_T.blocks))`` on an empty tensor) or a zero-size reduction
+    in :func:`_fishman_truncate_S` (``max`` of a size-0 array).
 
     On the symmetric CTM path this is the confined-environment limitation of
     #905 -- the corners occupy a charge sector that cannot connect the two
@@ -560,8 +560,16 @@ def _fishman_truncate_S(S: jnp.ndarray, eps: float = 1e-12) -> jnp.ndarray:
 
     Mirrors the Fishman SVD truncation used in the 1x1 projector path
     (`_ctm_projector.py`).
+
+    The reference is the GLOBAL maximum, not ``S[0]``.  A dense SVD returns
+    ``S`` sorted descending, so the two agree there, but the symmetric path
+    passes the block-sparse SVD's singular values concatenated sector by
+    sector, where ``S[0]`` is the largest value of the lowest-charge sector
+    only.  With ``S[0]`` a spectrum whose leading sector is weak kept values
+    far below ``eps`` times the true maximum (and, if the leading sector's max
+    were tiny, kept everything).
     """
-    s_max = S[0]
+    s_max = jnp.max(S)
     return jnp.where(S / (s_max + 1e-30) >= eps, S, 0.0)
 
 
