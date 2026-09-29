@@ -158,6 +158,11 @@ _FILE_MARKERS = {
     # on the default path -- so it belongs in the required gate for the same
     # reason.  Shares one D=2 chi=8 module fixture across every case (~9s).
     "test_ctm_tensor_return_info.py": "core",
+    # #1035 hold test: mechanism tests on maps of known stability (~3 s) plus
+    # one real dense D=2 CTM (~25 s).  Core because the hold is on by default
+    # in ctm_tensor_2site / ctm_multisite: a regression that certifies a
+    # saddle again, or rejects an attractor, changes every eager seed.
+    "test_ctm_hold.py": "core",
     # The #911 ``recipe="1x1"`` deprecation contract.  ``core`` rather than the
     # ``_UNBUCKETED_LEGACY`` set the older deprecation files sit in: a warning
     # that silently stops firing is indistinguishable from one nobody hit, and
