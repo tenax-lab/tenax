@@ -516,3 +516,36 @@ def test_svd_adjoint_keeps_the_live_to_null_coupling(kernel):
     spectrum = np.array([1.0, 0.5, 0.3, 0.2, 0.1, 0.05, 0.0])
     err = _reconstruction_error(svd_fn, spectrum, _rng(32))
     assert err < 1e-10, f"{kernel}: rank-(n-1) reconstruction gradient off by {err:.2e}"
+
+
+@pytest.mark.parametrize("kernel", ["truncated_svd_ad", "regularized_dense_svd"])
+def test_svd_adjoint_is_finite_on_a_small_float32_sector(kernel):
+    """The relative width must not underflow in float32.
+
+    Forming the width as ``eps * s_max**2`` and then squaring it gives
+    ``1e-24 * s_max**4``, which is 0 in float32 once ``s_max`` is below ~1e-5.
+    The zero-gap diagonal of ``F`` is then 0/0 = NaN, which ``diag``
+    subtraction does not remove, and the whole gradient goes non-finite.
+    A float32 input reaches the backward in float32 even under x64 mode (this
+    test is RED on the pre-normalization code), so the case is reachable.
+    Normalizing the gaps by ``s_max**2`` before squaring avoids it.
+    """
+    svd_fn = _svd_kernels()[kernel]
+    rng = _rng(33)
+    n = 5
+    Ug, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    Vg, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    M = (Ug @ np.diag(1e-6 * np.array([1.0, 0.5, 0.3, 0.2, 0.1])) @ Vg.T).astype(
+        np.float32
+    )
+    W = rng.standard_normal((n, n)).astype(np.float32)
+
+    def loss(A):
+        U, s, Vh = svd_fn(A)
+        return jnp.sum(W * ((U * s) @ Vh))
+
+    g = np.asarray(jax.grad(loss)(jnp.asarray(M)))
+    assert np.all(np.isfinite(g)), f"{kernel}: non-finite float32 SVD gradient"
+    # The SVD round trip is the identity, so the gradient is W itself.
+    err = float(np.linalg.norm(g - W) / np.linalg.norm(W))
+    assert err < 1e-3, f"{kernel}: float32 reconstruction gradient off by {err:.2e}"

@@ -397,10 +397,17 @@ def _svd_sector_backward(
     # ~1e-8, where the absolute width put the reconstruction gradient 11-26%
     # off; the same matrix scaled up by 1e3 was exact.  For s_max ~ 1 (the
     # regime the tests were written in) nothing moves.
+    #
+    # The gaps are normalized by ``s_max**2`` BEFORE squaring: forming the
+    # width as ``eps * s_max**2`` and then squaring it underflows to 0 in
+    # float32 once ``s_max`` is below ~1e-5 (``1e-24 * s_max**4``), turning
+    # the zero-gap diagonal into 0/0 = NaN that ``diag`` subtraction cannot
+    # remove.  ``scale`` is floored at the dtype's ``tiny`` so an all-zero
+    # sector gives F = 0 rather than 0/0.
     s2 = s_k**2
-    diff = s2[None, :] - s2[:, None]
-    eps_F = eps * jnp.maximum(s[0], 1e-30) ** 2
-    F = diff / (diff**2 + eps_F**2)
+    scale = jnp.maximum(s[0] ** 2, jnp.finfo(s2.dtype).tiny)
+    diff = (s2[None, :] - s2[:, None]) / scale
+    F = diff / (diff**2 + eps**2) / scale
     F = F - jnp.diag(jnp.diag(F))
 
     # Antisymmetric parts of projected cotangents.  These are the FULL
