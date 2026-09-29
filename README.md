@@ -681,8 +681,10 @@ perturbed point and walks on to the attractor. If `max_iter` runs out first
 — hold steps count toward it, three per hold sweep — it warns that the
 environment is not converged; if the criterion passes with fewer than
 `3 * hold_sweeps` steps left, it stops, reports the sweeps actually run, and
-warns that the point is unverified. It never returns the saddle as
-converged. With the default `hold_sweeps=0` the loop uses successive-sweep
+warns that the point is unverified. A pass means no growth was seen
+within the window, not a proof: a weakly excited unstable mode that grows
+only slightly faster than slowly decaying stable modes can need more sweeps
+than the window to show (e.g. ×1.01 against ×0.99 takes ~230). With the default `hold_sweeps=0` the loop uses successive-sweep
 agreement alone, as before.
 
 `ctm_hold_test` runs the same test on any environment, e.g. a seed before it

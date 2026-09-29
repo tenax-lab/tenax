@@ -451,6 +451,18 @@ def hold_test(
     amplifies a perturbation until k~35 -- and the point is rejected only if
     some direction still grows there.
 
+    **Known limit: a pass is "no growth seen in the window", not a proof.**
+    Any fixed-length hold can pass a saddle whose unstable mode is weakly
+    excited and barely faster than slowly decaying stable modes: the
+    unstable share must grow by ``1 / (initial share)`` before it dominates,
+    which takes ``~ log(1/share) / log(lambda_u / lambda_s)`` sweeps.  Codex
+    (P1 on #1058): 9,999 modes at x0.99 plus one at x1.01 pass at
+    ``sweeps=40`` (it needs ~230).  Renormalisation does not help while the
+    total displacement has not shrunk.  A leading-eigenvalue estimate of the
+    linearised step (Arnoldi on gauge-aligned finite-difference JVPs) would
+    isolate such an outlier; not implemented.  The measured #1035 saddle is
+    rejected (rates 1.006/1.045) because its unstable mode is well excited.
+
     Measured on #1035 (fermionic t-V D=3 chi=12 V=1 mu=2, perturbation
     1e-6, one direction, no renormalisation), fitted over ``[K/2, K]``: at
     K=20/30/40/60 the saddle S reads 1.026/1.037/1.053/1.057 and the
