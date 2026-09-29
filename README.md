@@ -27,7 +27,7 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 - **Split-CTM AD ground-state optimization** — `optimize_gs_ad` with `CTMConfig(fuse_virtual_legs=False)` drives the single-site optimizer (`unit_cell="1x1"`) **and** the 2-site checkerboard optimizer (`unit_cell="2site"`), both on the default `gs_recipe="2x2"` (single-site since #746; `gs_recipe="1x1"` remains reachable but collapses the environment to rank-1 corners and is bisection-only — see #726) through the split χ²·D⁴ forward instead of the fused χ²·D⁶ double layer: implicit AD via a Γ-gauge-fixed fixed-point `custom_vjp` (Neumann backward; the 2-site case differentiates the coupled `(env_A, env_B)` fixed point), with the line-search probe, warm-start, and final environment all routed through the same split forward (returns `SplitCTMTensorEnv`). The implicit gradient matches the trusted explicit-AD gradient to machine precision in the non-degenerate regime (~1e-15; the SU(2)-symmetric Heisenberg point carries a degenerate-SV SVD-backward floor on the explicit reference). The split CTM is dense-bosonic and experimental (frozen by design): `DenseTensor` and bosonic `SymmetricTensor` (U(1)/Z_n) both run on the eager forward and on single-site (`unit_cell="1x1"`) AD, but a *traced* 2-site `SymmetricTensor` multisite sweep is refused rather than fixed — use `fuse_virtual_legs=True` for symmetric multisite AD (#1048). Fermionic input is refused outright (#1035). Fixed χ (the χ-changing knobs are rejected on this path); the memory win over fused is a large-D effect (D≳16) — measured at `recipe="2x2"` on one A100-80GB it reaches χ=96/48/32 at D=8/10/12 against the fused path's χ=64/48/16, i.e. 1.5× / 1.0× / 2.0× in χ, and the per-cell peak advantage shrinks from 2.66× at χ=16 to 1.02× at the ceiling (#825). References: Naumann et al., arXiv:2502.10298
 - **Honeycomb iPEPS CTM (native)** — rank-4, 6-corner, 3-direction, 2-sublattice CTMRG for honeycomb iPEPS (replaces the dummy-bond brick-wall workaround). Public entry `honeycomb_ctm_energy_implicit` provides `jax.custom_vjp` with a JIT-fused GMRES backward; default Corboz biorthogonal projector + per-column phase fix; configurable `energy_fn` hook for kagome iPESS triangle energies. References: Lukin & Sotnikov, PRB 107, 054424 (2023) for the 6-corner CTMRG and the bipartite extension in PRE 109, 045305 (2024) §II.C.
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
-- **Model gate helpers** — pre-built 2-site Hamiltonian tensors: `heisenberg_gate` (dense DenseTensor with trivial charges), `heisenberg_gate_u1sz` (U(1)-Sz block-sparse SymmetricTensor with charges `[+1, −1]` for spin-↑/↓), `xxz_gate` (XXZ anisotropy), `spinless_fermion_gate` (fPEPS hopping + interaction with FermionParity symmetry)
+- **Model gate helpers** — pre-built 2-site Hamiltonian tensors: `heisenberg_gate` (dense DenseTensor with trivial charges), `heisenberg_gate_u1sz` (U(1)-Sz block-sparse SymmetricTensor with charges `[+1, −1]` for spin-↑/↓), `xxz_gate` (XXZ anisotropy), `spinless_fermion_gate` (fPEPS hopping + interaction + chemical potential, `FPEPSConfig.mu`, with FermionParity symmetry)
 - **Polymorphic tensor arithmetic** — `+`, `-`, `*`, `-T`, `max_abs`, `inner()`, `conj()`, `dagger()`, `bar()` work identically on `DenseTensor` and `SymmetricTensor`, enabling algorithm code that is agnostic to the underlying storage
 - **Block-sparse SVD, QR, and eigh** — native symmetry-aware decompositions in `tenax.linalg` for `SymmetricTensor`
 - **Sector-based TensorIndex** — legs store sorted charge sectors and multiplicities for O(n_sectors) lookups; `FuseInfo` tracks parent legs so `split_index` can reverse `fuse_indices`
@@ -735,11 +735,23 @@ seeds 0–4 at 600 steps, the fraction whose bond spectrum survives is 4/5 at D=
 2/5 at D=3, 4/5 at D=4 and 4/5 at D=6 — every bond dimension has both surviving
 and dying seeds, so check the result rather than assuming it (#869 is the same
 basin behaviour on the bosonic path). And the **absolute energy is not
-certified** (#392): with no chemical potential in `H`, both the empty state and
-the fully polarised checkerboard are `E = 0` eigenstates, and the sweep is
-observed to settle on them — measured at 200 steps, D=2, `E ≈ -6e-05` at `V=0`
-where the half-filled answer is ≈ `-1.6t`. `sublattice_gap` tells you *which*
-state you landed on; it does not tell you it is the ground state.
+certified** (#392): at the default `FPEPSConfig.mu = 0.0`, `H` carries no
+chemical potential, so both the empty state and the fully polarised
+checkerboard are `E = 0` eigenstates, and the sweep is observed to settle on
+them — measured at 200 steps, D=2, `E ≈ -6e-05` at `V=0` where the half-filled
+answer is ≈ `-1.6t`. `sublattice_gap` tells you *which* state you landed on;
+it does not tell you it is the ground state.
+
+`FPEPSConfig.mu` adds a chemical potential to `H`, distributed over the bonds
+as `-(mu / 4) * (n_i + n_j)` per bond (4 bonds per square-lattice site, so the
+per-site total is `-mu * n_i`). `mu = 2 * V` is the particle-hole-symmetric
+half-filling point of the t-V model, where the CDW energy anchor
+`E = -V` per site holds:
+
+```python
+config = FPEPSConfig(D=2, t=1.0, V=1.0, mu=2.0, dt=0.05, num_imaginary_steps=200)
+H = spinless_fermion_gate(config)  # -t(c†c+h.c.) + V n_i n_j - (mu/4)(n_i+n_j)
+```
 
 ### Refusing an energy built from an invalid RDM
 
