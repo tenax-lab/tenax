@@ -816,3 +816,23 @@ def test_a_violently_unstable_saddle_fails_closed_not_overflow():
     assert not held.passed
     # Regime: the unwrapped growth really did leave float range.
     assert math.isinf(max(held.distances))
+
+
+def test_a_stable_two_cycle_is_not_certified_as_a_fixed_point():
+    """Codex P1 on #1058: perturbed copies contract onto a stable MOVING
+    orbit too, so every rate is < 1; the reference's own motion must veto."""
+    p, q = np.zeros(4), np.zeros(4)
+    p[0], q[1] = 1.0, 1.0
+
+    def step(envs):
+        v = np.asarray(envs[(0, 0)].x)
+        near, other = (
+            (p, q) if np.linalg.norm(v - p) <= np.linalg.norm(v - q) else (q, p)
+        )
+        return _vec_env(other + 0.5 * (v - near))
+
+    held = hold_test(step, _vec_env(p), sweeps=40, invariants=_identity_invariants)
+    assert not held.passed
+    assert held.drift >= 0.5  # the reference visited q
+    # Regime: the copies did contract -- the rates alone would have passed.
+    assert all(r < 1.0 for r in held.rates)

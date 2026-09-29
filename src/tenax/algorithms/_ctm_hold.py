@@ -369,6 +369,13 @@ class HoldResult(NamedTuple):
                    off the saddle along the (renormalised) unstable
                    direction.
         sweeps:    CTM steps spent -- ``1 + directions`` per hold sweep.
+        drift:     Largest invariant distance of the unperturbed reference
+                   from the claimed point during the hold (``nan`` if no
+                   contracting verdict was reached).
+                   A pass also needs this below ``_DRIFT_FACTOR`` times the
+                   perturbation's size: a stable orbit that is not a fixed
+                   point attracts the perturbed copies too (Codex P1 on
+                   #1058).
     """
 
     passed: bool
@@ -377,7 +384,12 @@ class HoldResult(NamedTuple):
     distances: tuple[float, ...]
     envs: dict[Any, Any]
     sweeps: int
+    drift: float = math.nan
 
+
+#: The reference may drift at most this multiple of the perturbation's
+#: invariant size before a contracting verdict is refused as a moving orbit.
+_DRIFT_FACTOR = 10.0
 
 #: Default first-verdict window (hold sweeps per trajectory).
 DEFAULT_HOLD_SWEEPS = 40
@@ -521,6 +533,8 @@ def hold_test(
     per = 1 + directions
     x = envs
     Ix = invariants(x)
+    I_claimed = Ix
+    drift_max = 0.0
     dir_keys = list(jax.random.split(key, directions))
     reseeds = [0] * directions
     ys = [perturb_env(envs, perturbation, k) for k in dir_keys]
@@ -532,18 +546,23 @@ def hold_test(
     rates = [math.nan] * directions
     tiny = np.finfo(float).tiny
 
-    def _result(passed, k):
+    def _result(passed, k, drift=math.nan):
         worst = int(np.nanargmax(rates)) if not all(map(math.isnan, rates)) else 0
         # Saturate: renormalisation keeps the trajectories finite while the
         # accumulated log growth can pass exp's range (Codex P2 on #1058).
         dist = tuple(
             d0[worst] * math.exp(v) if v < 700.0 else math.inf for v in logs[worst]
         )
-        return HoldResult(passed, rates[worst], tuple(rates), dist, ys[worst], per * k)
+        return HoldResult(
+            passed, rates[worst], tuple(rates), dist, ys[worst], per * k, drift
+        )
 
     for k in range(1, max_sweeps + 1):
         x = step(x)
         Ix = invariants(x)
+        # Max over the whole hold, not the last sweep: a two-cycle is back on
+        # the claimed point at every even sweep.
+        drift_max = max(drift_max, env_invariant_distance(Ix, I_claimed))
         for i in range(directions):
             ys[i] = step(ys[i])
             dk = env_invariant_distance(invariants(ys[i]), Ix)
@@ -581,5 +600,8 @@ def hold_test(
             for i in range(directions):
                 rates[i] = float(np.exp(np.polyfit(ks, np.asarray(logs[i])[ks], 1)[0]))
             if all(r < 1.0 for r in rates):
-                return _result(True, k)
+                # Codex P1 on #1058: every copy also contracts onto a stable
+                # MOVING orbit (e.g. a two-cycle with unchanged corner
+                # spectra).  Only a reference that stayed put is a fixed point.
+                return _result(drift_max <= _DRIFT_FACTOR * max(d0), k, drift_max)
     return _result(False, max_sweeps)
