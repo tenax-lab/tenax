@@ -800,3 +800,19 @@ def test_ctm_hold_test_infers_single_site_neighbors(monkeypatch):
         conv.ctm_hold_test(
             {(0, 0): A, (0, 1): A}, {(0, 0): envs[(0, 0)], (0, 1): envs[(0, 0)]}, CHI
         )
+
+
+def test_a_violently_unstable_saddle_fails_closed_not_overflow():
+    """Codex P2 on #1058: growth x1000/sweep keeps the renormalised
+    trajectories finite, but the unwrapped log distance passes exp's range;
+    the result must be a rejection, not an OverflowError."""
+    J = np.diag([0.5, 0.5, 1000.0])
+    held = hold_test(
+        _linear_step(J, np.ones(3)),
+        _vec_env(np.ones(3)),
+        sweeps=40,
+        invariants=_identity_invariants,
+    )
+    assert not held.passed
+    # Regime: the unwrapped growth really did leave float range.
+    assert math.isinf(max(held.distances))

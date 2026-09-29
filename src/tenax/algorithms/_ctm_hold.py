@@ -534,7 +534,11 @@ def hold_test(
 
     def _result(passed, k):
         worst = int(np.nanargmax(rates)) if not all(map(math.isnan, rates)) else 0
-        dist = tuple(d0[worst] * math.exp(v) for v in logs[worst])
+        # Saturate: renormalisation keeps the trajectories finite while the
+        # accumulated log growth can pass exp's range (Codex P2 on #1058).
+        dist = tuple(
+            d0[worst] * math.exp(v) if v < 700.0 else math.inf for v in logs[worst]
+        )
         return HoldResult(passed, rates[worst], tuple(rates), dist, ys[worst], per * k)
 
     for k in range(1, max_sweeps + 1):
