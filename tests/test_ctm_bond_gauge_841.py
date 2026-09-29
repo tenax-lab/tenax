@@ -559,3 +559,20 @@ def test_bond_phase_is_refused_on_explicit_ad(dense_2site):
         build("bond_phase")(sites)
     # Regime: the same explicit dispatch with the default gauge runs.
     assert np.isfinite(float(build("phase")(sites)))
+
+
+@pytest.mark.parametrize(
+    "mode", ["c4v_reference", "root_implicit", "root_implicit_symmetric"]
+)
+def test_bond_phase_is_refused_on_engines_that_own_their_ctm(mode):
+    """The c4v-reference and root-implicit engines never read
+    ``forward_gauge`` (Codex P2 on #1057); ``bond_phase`` there would be
+    silently dropped."""
+    from tenax.algorithms.ipeps_config import CTMConfig
+
+    with pytest.raises(NotImplementedError, match="bond_phase"):
+        CTMConfig(chi=4, forward_gauge="bond_phase", ctm_ad_mode=mode)
+    # Regime: the same engine with the default gauge constructs, and
+    # bond_phase with the default engine constructs.
+    CTMConfig(chi=4, forward_gauge="phase", ctm_ad_mode=mode)
+    CTMConfig(chi=4, forward_gauge="bond_phase", ctm_ad_mode=None)

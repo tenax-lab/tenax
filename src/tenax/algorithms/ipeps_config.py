@@ -332,6 +332,17 @@ class CTMConfig:
             raise ValueError(
                 f"ctm_ad_mode must be one of {valid_modes}, got {self.ctm_ad_mode!r}"
             )
+        if self.ctm_ad_mode is not None and self.forward_gauge == "bond_phase":
+            # The c4v-reference and root-implicit engines own their CTM and
+            # never read ``forward_gauge``, so ``bond_phase`` (#841) would be
+            # silently ignored there (Codex P2 on #1057).  Refuse, as on the
+            # explicit and split paths.
+            raise NotImplementedError(
+                "forward_gauge='bond_phase' is not supported with "
+                f"ctm_ad_mode={self.ctm_ad_mode!r}: that engine owns its CTM "
+                "and applies no forward gauge. Use ctm_ad_mode=None, or "
+                "forward_gauge='phase'."
+            )
         valid_solvers = {"bicgstab", "gmres"}
         if self.adjoint_solver not in valid_solvers:
             raise ValueError(
