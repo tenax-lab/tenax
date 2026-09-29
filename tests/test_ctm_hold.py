@@ -480,3 +480,24 @@ def test_the_hold_is_off_by_default(monkeypatch):
     assert not calls
     # Regime: the run did converge (on the saddle), so the hold was reachable.
     assert abs(s_of(envs)) < 1e-12
+
+
+def test_ctm_hold_test_infers_single_site_neighbors(monkeypatch):
+    """Codex P2 on #1058: a one-site env with ``neighbors`` omitted used the
+    checkerboard map and raised KeyError on (1, 0) at the first sweep."""
+    A = _site()
+    envs = {(0, 0): initialize_ctm_tensor_env(A, CHI)}
+    stepped = []
+
+    def fake_hold(step, e, **kw):
+        stepped.append(step(e))  # one real sweep with the inferred map
+        return "held"
+
+    monkeypatch.setattr(conv, "hold_test", fake_hold)
+    assert conv.ctm_hold_test({(0, 0): A}, envs, CHI) == "held"
+    assert set(stepped[0]) == {(0, 0)}
+    # Regime: a cell with no default topology must pass neighbors.
+    with pytest.raises(ValueError, match="neighbors"):
+        conv.ctm_hold_test(
+            {(0, 0): A, (0, 1): A}, {(0, 0): envs[(0, 0)], (0, 1): envs[(0, 0)]}, CHI
+        )

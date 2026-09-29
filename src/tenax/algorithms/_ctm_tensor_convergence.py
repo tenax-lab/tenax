@@ -1823,7 +1823,9 @@ def ctm_hold_test(
         site_tensors: ``{coord: site tensor}``, e.g. ``{(0, 0): A, (1, 0): B}``.
         envs:         ``{coord: CTMTensorEnv}`` to test.
         chi:          Environment bond dimension.
-        neighbors:    Neighbour map; default ``CHECKERBOARD_NEIGHBORS``.
+        neighbors:    Neighbour map.  Default: ``SINGLE_SITE_NEIGHBORS`` for
+                      ``{(0, 0)}``, ``CHECKERBOARD_NEIGHBORS`` for
+                      ``{(0, 0), (1, 0)}``; any other cell must pass it.
         sweeps:       Hold budget (default 40).
         perturbation: Relative perturbation (default 1e-6).
         key:          PRNG key for the perturbation (default ``PRNGKey(0)``).
@@ -1838,7 +1840,19 @@ def ctm_hold_test(
     """
     if recipe == "1x1":
         _warn_recipe_1x1_deprecated("ctm_hold_test")
-    nbrs = CHECKERBOARD_NEIGHBORS if neighbors is None else neighbors
+    if neighbors is not None:
+        nbrs = neighbors
+    elif set(envs) == {(0, 0)}:
+        nbrs = SINGLE_SITE_NEIGHBORS
+    elif set(envs) == {(0, 0), (1, 0)}:
+        nbrs = CHECKERBOARD_NEIGHBORS
+    else:
+        # Codex P2 on #1058: guessing a topology for any other cell sends
+        # neighbour lookups to coordinates the envs do not have.
+        raise ValueError(
+            f"ctm_hold_test: cannot infer neighbors for coordinates "
+            f"{sorted(envs)}; pass neighbors= explicitly"
+        )
     double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
 
     def _step(e):
