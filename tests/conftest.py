@@ -321,6 +321,9 @@ _FILE_MARKERS = {
     # regression, and the production default phase gauge is one of the four
     # sites. The whole file runs in ~6s.
     "test_phase_fix_nan_vjp_789.py": "core",
+    # The Fishman floor of the 2x2 projector is relative to the global max,
+    # not S[0] (sector-concatenated on the symmetric path).  Pure unit test.
+    "test_fishman_truncate_global_max.py": "core",
     # #841: the 2x2 projector SVD gauge must survive the exact ket<->bra swap
     # ties of M1/M2.  Small matrices, a few seconds; ``core`` because a
     # regression silently breaks the CTM fixed point and the implicit adjoint.
