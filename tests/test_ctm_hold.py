@@ -836,3 +836,14 @@ def test_a_stable_two_cycle_is_not_certified_as_a_fixed_point():
     assert held.drift >= 0.5  # the reference visited q
     # Regime: the copies did contract -- the rates alone would have passed.
     assert all(r < 1.0 for r in held.rates)
+
+
+def test_a_drift_rejection_is_not_reported_as_a_saddle():
+    """Codex P2 on #1058: a contracting verdict vetoed by the reference's
+    drift used to be logged as a generic failure, and the warning then said
+    the perturbation "did not contract (rate 0.5000 >= 1)"."""
+    note = conv._hold_failure_note([("drift", 200, 1.0, False)])
+    assert "not fixed" in note and "drift 1" in note
+    assert ">= 1" not in note and "saddle" not in note
+    # Regime: a genuine unstable-rate rejection keeps the saddle wording.
+    assert ">= 1" in conv._hold_failure_note([("fail", 200, 1.05, False)])

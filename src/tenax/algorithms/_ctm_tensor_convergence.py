@@ -1611,9 +1611,15 @@ def _ctm_tensor_multisite(
             )
             used += held.sweeps
             capped = cap < DEFAULT_HOLD_EXTENSION * hold_sweeps
-            hold_log.append(
-                ("pass" if held.passed else "fail", used, held.rate, capped)
-            )
+            # Codex P2 on #1058: a contracting verdict vetoed by the
+            # reference's own drift (a stable moving orbit) is not a saddle.
+            if held.passed:
+                status, stat = "pass", held.rate
+            elif held.rate < 1.0 and math.isfinite(held.drift):
+                status, stat = "drift", held.drift
+            else:
+                status, stat = "fail", held.rate
+            hold_log.append((status, used, stat, capped))
             if not held.passed:
                 # A saddle.  Continue from the perturbed trajectory: it has
                 # already been pushed off the saddle along the unstable
@@ -1721,6 +1727,16 @@ def _hold_failure_note(hold_log: list) -> str:
             f"perturbation did not contract (fitted growth rate/sweep {rates} "
             f">= 1){cut}; the loop walked on from the perturbed point, and the "
             f"budget ran out before it reached an attractor"
+        )
+    drifts = [h for h in hold_log if h[0] == "drift"]
+    if drifts:
+        ds = ", ".join(f"{h[2]:.3g}" for h in drifts[-3:])
+        parts.append(
+            f"; the successive-sweep criterion passed {len(drifts)} time(s) at "
+            f"a point that is not fixed -- every perturbation contracted, but "
+            f"the unperturbed reference itself moved away from it during the "
+            f"hold (invariant drift {ds}), as on a stable limit cycle whose "
+            f"corner spectra do not change"
         )
     return "".join(parts)
 
