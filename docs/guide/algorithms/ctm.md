@@ -79,11 +79,12 @@ re-initialized when chi changes between stages. Benchmarks show
 ### Forward gauge
 
 The ``forward_gauge`` parameter controls how gauge ambiguity is resolved
-after each CTM sweep. Four modes are supported:
+after each CTM sweep. Five modes are supported:
 
 | Value | Description |
 |-------|-------------|
 | ``"phase"`` (default) | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. **Recommended for both implicit and explicit AD** (1-site and 2-site). |
+| ``"bond_phase"`` | Implicit-AD path only (``ctm_energy_implicit``): ``"phase"`` plus one sign/phase per chi index of every bond family, aligned to the previous environment (#841). An exact gauge transform that pins the per-bond-index signs the projector SVD re-draws each sweep. Opt-in. |
 | ``"qr"`` | Legacy QR decomposition on corners with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
 | ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for element-wise CTM convergence at large chi (1-site path). |
 | ``"none"`` | No gauge fix. Diagnostic / benchmark mode only — isolates the cost of gauge fixing from the rest of the sweep. Not recommended for production runs. |

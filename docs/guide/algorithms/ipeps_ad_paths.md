@@ -76,7 +76,7 @@ or better energy.
 
 The `eigh + sigma (GMRES implicit)` row is a historical measurement and its
 configuration **no longer runs**: `validate_ctm_for_implicit_ad` accepts
-`forward_gauge="phase"` and nothing else, and rejects `projector_method="eigh"`
+`forward_gauge="phase"` or the opt-in `"bond_phase"` and nothing else, and rejects `projector_method="eigh"`
 outright. The number is kept because it was measured; do not copy the config.
 Sigma gauge remains a first-class **explicit**-AD mode (#808).
 
@@ -172,10 +172,11 @@ graph in memory).
   a tighter CTM fixed point. Tracked by issue #292.
 
 **Configuration (for the VJP path only)**:
-- `forward_gauge="phase"` — the only value this path accepts, and the
-  `CTMConfig` default. `validate_ctm_for_implicit_ad`
-  (`ipeps_ad_policy.py:30`) raises `ValueError` for anything else, `"sigma"`
-  included; there is no `sigma` branch in the check at all.
+- `forward_gauge="phase"` — the `CTMConfig` default. The only other value
+  this path accepts is the opt-in `"bond_phase"` (#841, below);
+  `validate_ctm_for_implicit_ad` (`ipeps_ad_policy.py:30`) raises
+  `ValueError` for anything else, `"sigma"` included; there is no `sigma`
+  branch in the check at all.
 - `ad_backward_method="vjp"` — the supported implicit backward.
 - `gs_implicit_ad=True` — use implicit differentiation. This is the
   `iPEPSConfig` default, so Path 2 is what you get without asking.
@@ -464,18 +465,19 @@ SVD/eigh VJP compile wall (#566, #687).
 
 ## Forward Gauge Mode Matrix
 
-Tenax supports four ``forward_gauge`` modes. Their intended use is
+Tenax supports five ``forward_gauge`` modes. Their intended use is
 summarized below:
 
 | Mode | Explicit AD (Path 1) | Implicit AD (Path 2, VJP) | Notes |
 |------|----------------------|----------------------------|-------|
-| ``"phase"`` (default) | **Recommended** | **The only accepted value** | Cheapest gauge fix; Frobenius + differentiable phase fix. Works for 1-site and 2-site. |
+| ``"phase"`` (default) | **Recommended** | **Accepted (default)** | Cheapest gauge fix; Frobenius + differentiable phase fix. Works for 1-site and 2-site. |
+| ``"bond_phase"`` | Not supported | Accepted (opt-in, #841) | ``"phase"`` plus one sign/phase per chi index of every bond family, aligned to the previous env. Exact gauge transform. Removes the per-bond-index Z2 sign cycle that keeps ``"phase"`` from an element-wise fixed point (D=3 fermionic t-V, chi=12: stationarity residual 0.805 → ~5e-9). Not with ``chi_ramp``, split CTM, or ``ctm_ad_mode`` set (those engines own their CTM); explicit AD refuses it too. Charge sectors are grouped by block structure, not values: a bond whose stored blocks are numerically disconnected (exact zeros from rank deficiency) is only partly aligned, and the #841 stationarity guard then warns. |
 | ``"qr"`` | Legacy QR gauge | Refused (`ValueError`) | Forward-only CTM, notebooks, diagnostics. |
 | ``"sigma"`` | Historical — still correct but ~6–9× slower than phase | Refused (`ValueError`) | Power iteration (30 steps) per sweep. |
 | ``"none"`` | Benchmark / diagnostic only | Refused (`ValueError`) | Isolates gauge-fix cost from projector cost. |
 
 The Path 2 column is a hard gate, not a preference: `validate_ctm_for_implicit_ad`
-accepts `forward_gauge="phase"` and nothing else, and it narrows by neither
+accepts `forward_gauge="phase"` or `"bond_phase"` and nothing else, and it narrows by neither
 `chi` nor unit cell — so the older "at large chi (1-site only)" qualifier on
 the `sigma` row described a configuration that never ran (#808).
 

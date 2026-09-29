@@ -27,8 +27,11 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
         errors.append(
             f"projector_method={ctm_cfg.projector_method!r} (expected 'svd' or 'qr')"
         )
-    if ctm_cfg.forward_gauge != "phase":
-        errors.append(f"forward_gauge={ctm_cfg.forward_gauge!r} (expected 'phase')")
+    if ctm_cfg.forward_gauge not in ("phase", "bond_phase"):
+        errors.append(
+            f"forward_gauge={ctm_cfg.forward_gauge!r} "
+            "(expected 'phase' or 'bond_phase')"
+        )
     if ctm_cfg.ctm_conv_method != "elementwise":
         errors.append(
             f"ctm_conv_method={ctm_cfg.ctm_conv_method!r} (expected 'elementwise')"
@@ -36,7 +39,8 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
     if errors:
         raise ValueError(
             "Implicit AD requires CTM settings "
-            "(projector_method in ('svd', 'qr'), forward_gauge='phase', "
+            "(projector_method in ('svd', 'qr'), forward_gauge in "
+            "('phase', 'bond_phase'), "
             "ctm_conv_method='elementwise'). Got: " + ", ".join(errors)
         )
 
@@ -70,6 +74,16 @@ def validate_split_ctm_config(
     # is kept in the signature because callers pass it and it documents which
     # branch is being validated; both branches now accept both recipes.
     del single_site
+    if ctm_cfg.forward_gauge == "bond_phase":
+        # The split forwards never read ``forward_gauge``, so accepting it
+        # would silently run a different gauge than the one requested (Codex
+        # P1 on #1057).  Split CTM is frozen (dense bosonic, experimental):
+        # refuse rather than port it.
+        raise NotImplementedError(
+            "forward_gauge='bond_phase' is not supported on the split-CTM path "
+            "(fuse_virtual_legs=False), which ignores forward_gauge; use "
+            "fuse_virtual_legs=True, or forward_gauge='phase'."
+        )
     if ctm_cfg.ctmrg_heuristic_increase_chi:
         raise NotImplementedError(
             "in-CTM chi auto-bump (ctmrg_heuristic_increase_chi) is not "
@@ -99,7 +113,8 @@ def resolve_projector_backward(
     No silent promotion is applied. For the implicit-AD path we enforce the
     empirically stable CTM combination:
     - ``projector_method == "svd"``
-    - ``forward_gauge == "phase"`` (Frobenius + phase fixing path)
+    - ``forward_gauge in ("phase", "bond_phase")`` (Frobenius + phase fixing
+      path, optionally with the per-bond gauge of #841)
     - ``ctm_conv_method == "elementwise"``
 
     Explicit-AD keeps user choices unchanged.
@@ -221,6 +236,14 @@ def ctm_converge_kwargs(
         # (1×1 recipe, dense envs). Composes with device_mesh (÷N·K total).
         # None (default) → single monolithic contraction, unchanged.
         "ctm_chunk_size": ctm_cfg.ctm_chunk_size,
+        # #841 (Codex P2 on #1057): the implicit-AD loss applies the paired
+        # per-bond gauge; the warm-start / probe / final-evaluation forwards
+        # must converge under the same gauge, or they keep the period-2 sign
+        # cycle and hand the loss an env that is not bond-gauged.  Other
+        # gauges keep the historical behaviour (these forwards apply none).
+        "forward_gauge": "bond_phase"
+        if ctm_cfg.forward_gauge == "bond_phase"
+        else None,
     }
 
 
@@ -433,6 +456,18 @@ def make_ctm_energy_fn(
         # validate the combination (chi_max required, step_size > 0, etc.)
         # so we don't re-check here.
         if use_explicit:
+            # ``ctm_energy_explicit`` takes no ``forward_gauge`` and applies no
+            # gauge fix, so ``bond_phase`` (a reference-aligned gauge for the
+            # implicit fixed point, #841) would be silently ignored here
+            # (Codex P2 on #1057).  Refuse, as on the split path.
+            if ctm_cfg.forward_gauge == "bond_phase":
+                raise NotImplementedError(
+                    "forward_gauge='bond_phase' is only implemented on the "
+                    "implicit-AD path (gs_implicit_ad=True); the explicit-AD "
+                    "path (ctm_energy_explicit) applies no forward gauge and "
+                    "would silently ignore it. Use gs_implicit_ad=True, or "
+                    "forward_gauge='phase'."
+                )
             # #755: ``ctm_energy_explicit`` takes no ``recipe`` and always runs
             # the 2x2 step.  Threading "1x1" here returned the 2x2 answer under
             # a ``gs_recipe="1x1"`` label — measured identical to 2x2+explicit

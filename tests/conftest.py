@@ -333,6 +333,10 @@ _FILE_MARKERS = {
     # ties of M1/M2.  Small matrices, a few seconds; ``core`` because a
     # regression silently breaks the CTM fixed point and the implicit adjoint.
     "test_projector_svd_sign_ties_841.py": "core",
+    # #841: the opt-in per-bond gauge (forward_gauge="bond_phase").  Needs a
+    # few real CTM sweeps and eager fermionic RDMs (~1-2 min), and the gauge
+    # is not the default, so ``algorithm`` rather than the required gate.
+    "test_ctm_bond_gauge_841.py": "algorithm",
     # #834: block-sparse contract() silently disagreeing with the densified
     # contraction on legs whose charges do not line up. ``core`` because the
     # defect is representation-dependent arithmetic in the contraction engine
