@@ -802,6 +802,16 @@ def _bond_static_components(families, blocks, axes, fam_of, dims):
     components -- is fixed by the block structure: static under ``jit``.
     A DenseTensor is one full block, i.e. one component per family.
 
+    Known limit (Codex P2 on #1057): components come from the block
+    STRUCTURE, not the values.  A stored block whose entries split a family
+    into numerically disconnected pieces (e.g. a dense env with diagonal
+    chi x chi slices, or exact zeros from rank deficiency) is still one
+    component here, so only the anchor's piece is aligned.  The components
+    must be static under ``jit``; a value-dependent split would need a
+    traced connectivity pass.  The failure is loud, not silent: the leftover
+    per-piece sign keeps the forward from an element-wise fixed point, and
+    the #841 stationarity guard warns.
+
     Families are referred to by their position in ``families``; ``dims``
     gives each family's chi dimension.  Returns ``(comps, comp_of)``:
     ``comps[f]`` is the list of index arrays of family ``f``'s components
