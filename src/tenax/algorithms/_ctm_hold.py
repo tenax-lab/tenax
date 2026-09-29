@@ -164,33 +164,52 @@ def perturb_env(envs: dict[Any, Any], rel: float, key: jax.Array) -> dict[Any, A
     return out
 
 
+def _diff_norm(y: dict[Any, Any], x: dict[Any, Any]) -> float:
+    """Element-wise 2-norm of ``y - x`` (``inf`` if the pytrees differ)."""
+    tot = 0.0
+    for c in x:
+        lx, tx = jax.tree.flatten(x[c])
+        ly, ty = jax.tree.flatten(y[c])
+        if tx != ty or any(a.shape != b.shape for a, b in zip(lx, ly)):
+            return math.inf
+        for a, b in zip(lx, ly):
+            tot += float(np.sum(np.abs(np.asarray(b) - np.asarray(a)) ** 2))
+    return math.sqrt(tot)
+
+
+def _rescale(x: dict[Any, Any], y: dict[Any, Any], s: float) -> dict[Any, Any]:
+    """``x + s (y - x)``, leaf by leaf (same pytree structure required)."""
+    return {c: jax.tree.map(lambda a, b: a + s * (b - a), x[c], y[c]) for c in x}
+
+
 class HoldResult(NamedTuple):
     """Outcome of :func:`hold_test`.
 
     Attributes:
-        passed:    True iff the point held (see :func:`hold_test`).
-        rate:      Fitted per-sweep growth factor of the displacement over the
-                   tail window (``< 1`` contracting, ``> 1`` escaping);
+        passed:    True iff every perturbation direction's tail contracted.
+        rate:      The worst direction's fitted per-sweep growth factor over
+                   its last window (``< 1`` contracting, ``> 1`` escaping);
                    ``inf`` on a non-finite environment.
-        distances: Invariant distance between the perturbed and the
-                   unperturbed trajectory after ``k = 0..K`` sweeps each.
-        envs:      The perturbed trajectory's last environment.  On failure
-                   this is the natural place to continue iterating from: it
-                   has already been pushed off the saddle along the unstable
+        rates:     The same, per direction.
+        distances: The worst direction's displacement from the unperturbed
+                   trajectory after ``k = 0..K`` sweeps, with renormalisation
+                   undone (``d_0 * exp(cumulative log growth)``).
+        envs:      The worst direction's last environment.  On failure this
+                   is the natural place to continue iterating from: it sits
+                   off the saddle along the (renormalised) unstable
                    direction.
-        sweeps:    CTM steps spent -- two per hold sweep (both trajectories).
-                   A rejection spends ``2 * max_sweeps``.
+        sweeps:    CTM steps spent -- ``1 + directions`` per hold sweep.
     """
 
     passed: bool
     rate: float
+    rates: tuple[float, ...]
     distances: tuple[float, ...]
     envs: dict[Any, Any]
     sweeps: int
 
 
-#: Default number of hold sweeps (each runs both trajectories, so the cost is
-#: twice this in CTM steps).  See :func:`hold_test` for the measurement.
+#: Default first-verdict window (hold sweeps per trajectory).
 DEFAULT_HOLD_SWEEPS = 40
 
 #: Default relative size of the perturbation.  Small enough to stay linear
@@ -198,12 +217,15 @@ DEFAULT_HOLD_SWEEPS = 40
 #: large enough to sit orders above float noise.
 DEFAULT_HOLD_PERTURBATION = 1e-6
 
-#: Early pass: the displacement fell to this fraction of its running peak.
+#: Renormalise a displacement once it has shrunk (or grown) by this factor.
 DEFAULT_HOLD_CONTRACTION = 1e-3
 
 #: A growing fit is re-tested every ``sweeps // 2`` sweeps, up to this many
 #: times ``sweeps``, before the point is rejected.
 DEFAULT_HOLD_EXTENSION = 3
+
+#: Independent perturbation directions (deterministic keys); all must pass.
+DEFAULT_HOLD_DIRECTIONS = 2
 
 
 def hold_test(
@@ -216,63 +238,61 @@ def hold_test(
     contraction: float = DEFAULT_HOLD_CONTRACTION,
     invariants: Callable[[dict[Any, Any]], Invariants] = env_spectral_invariants,
     max_sweeps: int | None = None,
+    directions: int = DEFAULT_HOLD_DIRECTIONS,
 ) -> HoldResult:
     """Is ``envs`` an attractor of ``step``, or only a point it passes through?
 
-    Runs two trajectories for up to ``max_sweeps`` sweeps each: the claimed point
-    ``x_k`` and a copy ``y_k`` perturbed by ``perturbation`` (relative,
-    deterministic ``key``), and tracks their gauge-invariant distance
-    ``d_k = d(y_k, x_k)`` -- a finite-difference estimate of how the step's
-    linearisation acts on a random direction.  At an attractor ``d_k`` decays
-    geometrically; at a saddle its unstable component grows geometrically.
+    Runs the claimed point ``x_k`` and ``directions`` copies ``y_k``, each
+    perturbed by ``perturbation`` (relative; independent deterministic keys
+    split from ``key``), side by side, and tracks each gauge-invariant
+    distance ``d_k = d(y_k, x_k)`` -- a finite-difference estimate of how the
+    step's linearisation acts on that direction.
 
-    Verdict:
+    **Renormalisation (power iteration).**  Whenever ``d_k`` has shrunk below
+    ``contraction * d_0`` (or grown above ``d_0 / contraction``) the
+    displacement is rescaled back to its initial size, ``y <- x + s (y -
+    x)``, and the log-growth is accumulated across the rescale.  This is
+    Benettin's Lyapunov estimate: stable components are deflated each time
+    while an unstable one keeps its share, so even a weakly excited unstable
+    direction comes to dominate, and ``d`` never sinks into float noise on a
+    fast attractor.  A rescale is skipped when the element-wise difference is
+    far larger than the invariant one suggests (the two trajectories took
+    different chi-bond gauges) or the pytrees differ.
 
-    * **pass early** as soon as ``d_k <= contraction * max(d_0..d_k)``: the
-      displacement collapsed by orders of magnitude, which an unstable
-      component cannot do;
-    * at ``k = sweeps`` fit ``log d_k`` over the last ``sweeps // 2`` sweeps
-      and **pass iff the per-sweep rate is < 1**.  The earlier sweeps are
-      discarded because the step is non-normal: the #1035 attractor B
-      amplifies the perturbation ~25x before it decays;
-    * a fit that still grows is not yet a rejection: a transient can outlast
-      the first window (measured: B, perturbed from a point 3e-8 off it,
-      peaks at k~35 and fits 1.019 at K=40, 0.959 at K=60).  The fit is
-      repeated every ``sweeps // 2`` sweeps on the latest window, and the
-      point is **rejected only if it still grows at** ``max_sweeps`` (default
-      ``3 * sweeps``).  A saddle's growth does not saturate; a transient's
-      does.
+    **Verdict.**  No early acceptance: a displacement that contracts early
+    is exactly what a weakly excited saddle does while its stable components
+    decay (Codex P1 on #1058).  At ``k = sweeps`` fit the accumulated log
+    growth over the last ``sweeps // 2`` sweeps; **pass iff every direction's
+    rate is < 1**.  A fit that still grows is re-tested every ``sweeps // 2``
+    sweeps, on the latest window, up to ``max_sweeps`` (default ``3 *
+    sweeps``) -- the #1035 attractor B, perturbed from a point 3e-8 off it,
+    amplifies a perturbation until k~35 -- and the point is rejected only if
+    some direction still grows there.
 
     Measured on #1035 (fermionic t-V D=3 chi=12 V=1 mu=2, perturbation
-    1e-6), fitted over ``[K/2, K]``: at K=20/30/40/60 the saddle S reads
-    1.026/1.037/1.053/1.057 and the attractor B 0.993/0.971/0.946/0.971; a
-    dense D=2 chi=12 Heisenberg environment passes early at sweep 4-5.
+    1e-6, one direction, no renormalisation), fitted over ``[K/2, K]``: at
+    K=20/30/40/60 the saddle S reads 1.026/1.037/1.053/1.057 and the
+    attractor B 0.993/0.971/0.946/0.971.
 
-    Three statistics that were measured and rejected:
-
-    * ``d_K < d_0`` -- B is still at 1.35 d_0 after 100 sweeps (transient).
-    * distance to the *claimed* point instead of the co-evolved one -- the
-      claimed point is converged only to the loop's ``conv_tol``, so at an
-      attractor the perturbed trajectory plateaus at that residual and the
-      fitted rate reads ~1: a false saddle (seen on the mocked saddle map in
-      ``tests/test_ctm_hold.py``).
-    * successive steps ``d(y_k, y_{k-1})`` -- no floor, but the saddle's
-      drift enters a step only as ``(lambda - 1) ~ 0.04`` of the displacement
-      and the stable decay swamps it: S still reads 0.988 at K=40, while B
-      reads 1.027 (per-sweep spectral jitter).
+    Statistics measured and rejected: ``d_K < d_0`` (B is still at 1.35 d_0
+    after 100 sweeps); distance to the *claimed* point (plateaus at the
+    point's own ``conv_tol`` residual and fits ~1 -- a false saddle); and
+    successive steps ``d(y_k, y_{k-1})`` (S reads 0.988, B 1.027 at K=40).
 
     Args:
         step:          One CTM sweep, ``envs -> envs``.
         envs:          The claimed fixed point.
         sweeps:        First verdict at ``K`` sweeps (>= 4) per trajectory.
         perturbation:  Relative perturbation size (> 0).
-        key:           PRNG key for the perturbation (default ``PRNGKey(0)``).
-        contraction:   Early-pass threshold, see above.
+        key:           PRNG key for the perturbations (default ``PRNGKey(0)``).
+        contraction:   Renormalisation threshold (0 < contraction < 1).
         invariants:    Gauge-invariant fingerprint; default
                        :func:`env_spectral_invariants`.
         max_sweeps:    Longest hold before rejecting a still-growing fit
-                       (default ``3 * sweeps``; >= ``sweeps``).  A saddle
-                       costs ``2 * max_sweeps`` steps.
+                       (default ``3 * sweeps``; >= ``sweeps``).
+        directions:    Independent perturbations, all of which must pass
+                       (>= 1, default 2).  Cost ``(1 + directions)`` steps
+                       per hold sweep.
 
     Returns:
         :class:`HoldResult`.
@@ -287,29 +307,52 @@ def hold_test(
         )
     if not perturbation > 0:
         raise ValueError(f"hold_test: perturbation must be > 0, got {perturbation}")
+    if not 0 < contraction < 1:
+        raise ValueError(f"hold_test: contraction must be in (0, 1), got {contraction}")
+    if directions < 1:
+        raise ValueError(f"hold_test: directions must be >= 1, got {directions}")
     if key is None:
         key = jax.random.PRNGKey(0)
+    per = 1 + directions
     x = envs
-    y = perturb_env(envs, perturbation, key)
-    d = [env_invariant_distance(invariants(y), invariants(x))]
-    peak = d[0]
+    Ix = invariants(x)
+    ys = [perturb_env(envs, perturbation, k) for k in jax.random.split(key, directions)]
+    d0 = [env_invariant_distance(invariants(y), Ix) for y in ys]
+    e0 = [_diff_norm(y, x) for y in ys]
+    dcur = list(d0)
+    logs = [[0.0] for _ in ys]
     half = sweeps // 2
-    rate = math.nan
+    rates = [math.nan] * directions
+    tiny = np.finfo(float).tiny
+
+    def _result(passed, k):
+        worst = int(np.nanargmax(rates)) if not all(map(math.isnan, rates)) else 0
+        dist = tuple(d0[worst] * math.exp(v) for v in logs[worst])
+        return HoldResult(passed, rates[worst], tuple(rates), dist, ys[worst], per * k)
+
     for k in range(1, max_sweeps + 1):
         x = step(x)
-        y = step(y)
-        dk = env_invariant_distance(invariants(y), invariants(x))
-        d.append(dk)
-        if not math.isfinite(dk):
-            return HoldResult(False, math.inf, tuple(d), y, 2 * k)
-        peak = max(peak, dk)
-        if dk <= contraction * peak:
-            rate = (dk / d[0]) ** (1.0 / k) if d[0] > 0 else 0.0
-            return HoldResult(True, rate, tuple(d), y, 2 * k)
+        Ix = invariants(x)
+        for i in range(directions):
+            ys[i] = step(ys[i])
+            dk = env_invariant_distance(invariants(ys[i]), Ix)
+            if not math.isfinite(dk) or not d0[i] > 0:
+                rates[i] = math.inf
+                return _result(False, k)
+            logs[i].append(logs[i][-1] + math.log(max(dk, tiny) / max(dcur[i], tiny)))
+            dcur[i] = dk
+            if dk < contraction * d0[i] or dk > d0[i] / contraction:
+                s = d0[i] / max(dk, tiny)
+                ek = _diff_norm(ys[i], x)
+                # Linear regime: e scales with d.  An element-wise difference
+                # far above that is a gauge mismatch -- do not amplify it.
+                if math.isfinite(ek) and ek * s <= 100.0 * e0[i]:
+                    ys[i] = _rescale(x, ys[i], s)
+                    dcur[i] = env_invariant_distance(invariants(ys[i]), Ix)
         if k >= sweeps and ((k - sweeps) % half == 0 or k == max_sweeps):
             ks = np.arange(k - half, k + 1)
-            logs = np.log(np.maximum(np.asarray(d)[ks], np.finfo(float).tiny))
-            rate = float(np.exp(np.polyfit(ks, logs, 1)[0]))
-            if rate < 1.0:
-                return HoldResult(True, rate, tuple(d), y, 2 * k)
-    return HoldResult(False, rate, tuple(d), y, 2 * max_sweeps)
+            for i in range(directions):
+                rates[i] = float(np.exp(np.polyfit(ks, np.asarray(logs[i])[ks], 1)[0]))
+            if all(r < 1.0 for r in rates):
+                return _result(True, k)
+    return _result(False, max_sweeps)

@@ -34,6 +34,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._ctm_hold import (
+    DEFAULT_HOLD_DIRECTIONS,
     DEFAULT_HOLD_EXTENSION,
     DEFAULT_HOLD_PERTURBATION,
     DEFAULT_HOLD_SWEEPS,
@@ -1583,17 +1584,23 @@ def _ctm_tensor_multisite(
         if ever_measured:
             final_diff = sweep_diff
         if converged and hold_sweeps:
-            if used + 2 * hold_sweeps > max_iter:
-                # Not enough budget left to certify: fail closed.  The point
-                # may be an attractor, but nothing has shown it.
-                hold_log.append(("budget", used, None, True))
+            per = 1 + DEFAULT_HOLD_DIRECTIONS  # CTM steps per hold sweep
+            if used + per * hold_sweeps > max_iter:
+                # Not enough budget left to certify: fail closed, and stop
+                # here (Codex P2 on #1058, ruling): a hold cut below
+                # ``hold_sweeps`` has no measured window to fit -- K=40 is the
+                # smallest that separated the #1035 saddle from its attractor
+                # -- and plain sweeps past the criterion cannot certify
+                # anything either.  The warning below reports the sweeps that
+                # actually ran and says the point is unverified.
+                hold_log.append(("budget", used, max_iter - used, per * hold_sweeps))
                 converged = False
                 break
             hold_key, sub = jax.random.split(hold_key)
             # A still-growing fit is re-tested up to 3 * hold_sweeps (a
             # transient can outlast the first window), but never past the
             # caller's budget.
-            cap = min(DEFAULT_HOLD_EXTENSION * hold_sweeps, (max_iter - used) // 2)
+            cap = min(DEFAULT_HOLD_EXTENSION * hold_sweeps, (max_iter - used) // per)
             held = hold_test(
                 _step,
                 envs,
@@ -1626,6 +1633,27 @@ def _ctm_tensor_multisite(
         warnings.warn(
             _blind_corner_message(blind_coords, collapsed_coords),
             RuntimeWarning,
+            stacklevel=2,
+        )
+    elif hold_log and hold_log[-1][0] == "budget":
+        # Codex P2 on #1058: this exit is early, so "ran the full max_iter"
+        # would be false.  Report the sweeps that ran, and why they stopped.
+        _, at, left, need = hold_log[-1]
+        swept = budget - max_iter + at  # + any QR warm-up
+        warnings.warn(
+            f"CTM not verified in ctm_tensor_multisite(): stopped after "
+            f"{swept} of max_iter={budget} sweeps at chi={chi}.  The "
+            f"successive-sweep criterion reached conv_tol={conv_tol:g} at "
+            f"sweep {swept}, but the hold test that tells an attractor from a "
+            f"saddle needs at least {need} more CTM steps (hold_sweeps="
+            f"{hold_sweeps} x {1 + DEFAULT_HOLD_DIRECTIONS} trajectories) and "
+            f"only {left} were left, so it did not run.  The returned "
+            f"environment is UNVERIFIED -- it may be a saddle that more "
+            f"sweeps would leave (#1035)"
+            f"{_hold_failure_note(hold_log[:-1])}.  Raise max_iter by at "
+            f"least {need - left}, or pass hold_sweeps=0 to accept "
+            f"successive-sweep agreement alone.",
+            UserWarning,
             stacklevel=2,
         )
     elif not converged:
@@ -1679,14 +1707,6 @@ def _hold_failure_note(hold_log: list) -> str:
             f">= 1){cut}; the loop walked on from the perturbed point, and the "
             f"budget ran out before it reached an attractor"
         )
-    if hold_log[-1][0] == "budget":
-        parts.append(
-            f"; the criterion passed at sweep {hold_log[-1][1]} but fewer "
-            f"sweeps were left than the hold test needs (2 * hold_sweeps), so "
-            f"that point is "
-            f"uncertified (raise max_iter, or pass hold_sweeps=0 to accept "
-            f"successive-sweep agreement alone)"
-        )
     return "".join(parts)
 
 
@@ -1722,26 +1742,29 @@ def ctm_tensor_2site(
                       ``conv_tol`` compares SUCCESSIVE sweeps, which cannot
                       tell an attractor from a saddle: at a saddle successive
                       sweeps agree to 1e-10 while a displacement grows every
-                      sweep.  Once the criterion passes, a copy perturbed by
-                      ``hold_perturbation`` and the point itself are both
-                      stepped up to ``hold_sweeps`` more times; the point is
-                      accepted only if their gauge-invariant distance
-                      (per-leg, per-sector singular values of every
+                      sweep.  Once the criterion passes, two copies perturbed
+                      by ``hold_perturbation`` (independent deterministic
+                      directions) and the point itself are stepped side by
+                      side; each displacement is measured in a gauge-invariant
+                      metric (per-leg, per-sector singular values of every
                       environment tensor; blind to chi-bond order and signs)
-                      contracts -- early if it falls 1e-3 below its peak,
-                      else by a fitted growth rate < 1 over the second half.
-                      On a saddle the loop continues from the perturbed
-                      point, so it walks on to the attractor; if ``max_iter``
-                      runs out first (hold steps count toward it, two per
-                      hold sweep) the result is reported NOT converged, never
-                      the saddle as converged.  A fit that still grows at
-                      ``hold_sweeps`` is re-tested every ``hold_sweeps // 2``
-                      sweeps up to ``3 * hold_sweeps`` (a non-normal
-                      transient can outlast the first window) before the
-                      point is rejected.  Cost: ~10 steps on a
-                      fast-contracting point (dense D=2 chi=12 Heisenberg),
-                      ``2 * hold_sweeps`` on a slow attractor, ``6 *
-                      hold_sweeps`` to reject a saddle; see
+                      and renormalised whenever it shrinks 1e-3 (a power
+                      iteration, so a weakly excited unstable direction still
+                      surfaces).  The point is accepted only if every
+                      direction's fitted growth rate over the last
+                      ``hold_sweeps // 2`` sweeps is < 1 -- never on early
+                      contraction alone.  A fit that still grows is re-tested
+                      every ``hold_sweeps // 2`` sweeps up to ``3 *
+                      hold_sweeps`` before the point is rejected.  On a
+                      saddle the loop continues from the perturbed point and
+                      walks on to the attractor; if ``max_iter`` runs out
+                      first (hold steps count toward it, three per hold
+                      sweep) it warns NOT converged, and if the criterion
+                      passes with fewer than ``3 * hold_sweeps`` steps left it
+                      stops and warns that the point is UNVERIFIED -- the
+                      saddle is never returned as converged.  Cost: ``3 *
+                      hold_sweeps`` steps to accept, up to ``9 *
+                      hold_sweeps`` to reject; see
                       :func:`tenax.algorithms._ctm_hold.hold_test`.
         hold_perturbation: Relative size of the hold's perturbation (default
                       1e-6).  Keep it well above the point's residual

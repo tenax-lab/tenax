@@ -664,18 +664,24 @@ from a saddle: at a saddle successive sweeps agree to 1e-10 while a small
 displacement grows every sweep (#1035 measured one on a fermionic D=3 χ=12
 state, escaping at ×1.041/sweep to a stable fixed point 1.4e-2 away).
 `ctm_tensor_2site` and `ctm_multisite` therefore run a **hold test** by
-default once the criterion passes: a copy perturbed by `hold_perturbation`
-(relative, default 1e-6) and the point itself are both stepped up to
-`hold_sweeps` more times (default 40), and the point is accepted only if
-their gauge-invariant distance (per-leg, per-sector singular values of every
-environment tensor, blind to χ-bond order and signs) contracts; a fit that
-still grows is re-tested on later windows up to `3 * hold_sweeps` before the
-point is rejected, since a stable point can amplify a perturbation for a
+default once the criterion passes: two copies perturbed by
+`hold_perturbation` (relative, default 1e-6; independent deterministic
+directions) and the point itself are stepped side by side, and each
+displacement is measured in a gauge-invariant metric (per-leg, per-sector
+singular values of every environment tensor, blind to χ-bond order and
+signs) and renormalised whenever it shrinks 1e-3 — a power iteration, so a
+weakly excited unstable direction still surfaces. The point is accepted only
+if every direction's fitted growth rate over the last `hold_sweeps // 2`
+sweeps (default window at 40) is below 1 — never on early contraction alone;
+a fit that still grows is re-tested on later windows up to
+`3 * hold_sweeps`, since a stable point can amplify a perturbation for a
 while before contracting it. On a saddle the loop keeps iterating from the
-perturbed point and walks on to the attractor; if `max_iter` runs out first — hold steps count toward it, two
-per hold sweep — it warns that the environment is not converged instead of
-returning the saddle. A fast-contracting point passes in a few sweeps;
-`hold_sweeps=0` restores successive-sweep agreement alone.
+perturbed point and walks on to the attractor. If `max_iter` runs out first
+— hold steps count toward it, three per hold sweep — it warns that the
+environment is not converged; if the criterion passes with fewer than
+`3 * hold_sweeps` steps left, it stops, reports the sweeps actually run, and
+warns that the point is unverified. It never returns the saddle as
+converged. `hold_sweeps=0` restores successive-sweep agreement alone.
 
 `ctm_hold_test` runs the same test on any environment, e.g. a seed before it
 goes to `optimize_gs_ad(envs_init=...)` or the environment an implicit-AD
@@ -861,11 +867,11 @@ eA, eB = ctm_tensor_2site(su.A, su.B, 8, max_iter=300, conv_tol=1e-10)  # eager 
 
 The eager CTM's hold test (on by default, see "A converged CTM can be a
 saddle" above) is what makes this seed an attractor rather than a point the
-CTM merely paused at; budget `max_iter` for it — a hold spends `2 *
-hold_sweeps` extra steps at an attractor (up to `6 * hold_sweeps` to reject
-a saddle), and walking off a saddle takes as many sweeps as it takes: 928 in
-total on the #1035 D=3 χ=12 V=1 state, where `max_iter=260` returned the
-saddle before the hold existed.
+CTM merely paused at; budget `max_iter` for it — a hold spends `3 *
+hold_sweeps` extra steps at an attractor (up to `9 * hold_sweeps` to reject
+a saddle), and walking off a saddle takes as many sweeps as it takes: about
+1100 in total on the #1035 D=3 χ=12 V=1 state (use `max_iter=1500`), where
+`max_iter=260` returned the saddle before the hold existed.
 
 `su_grow_layout` tracks the sector split with
 `bond_layout(A: SymmetricTensor, B: SymmetricTensor) -> tuple[tuple[int, int], ...]`

@@ -528,10 +528,11 @@ def seeded_d2():
     growth to trace).  The eager CTM's own max-corner-SV-diff criterion
     (Task 4's ``probe_d2_key4.py``) crosses ``conv_tol=1e-10`` between
     ``max_iter=100`` (still short) and ``130`` (converged).  The hold test
-    (#1035, on by default) then spends up to ``2 * 40`` more steps: measured,
-    the criterion passed at sweep 116 and the hold accepted the point (rate
-    0.90) after 72 steps, 188 in total -- ``max_iter=250`` below keeps a
-    ~60-step margin.  Total module-fixture build (both fixtures share it):
+    (#1035, on by default) then spends at least ``3 * 40`` more steps (the
+    point plus two perturbed directions): measured, the criterion passed at
+    sweep 116 and the hold accepted the point (rate 0.84) at the first
+    window, 236 in total -- ``max_iter=400`` below leaves room for a re-test
+    window (up to ``3 * 120`` steps) should the fit ever need one.  Total module-fixture build (both fixtures share it):
     ~3-5 min.
     """
     cfg = FPEPSConfig(D=2, t=1.0, V=0.0, dt=0.05)
@@ -541,7 +542,7 @@ def seeded_d2():
     A, B = out.A, out.B
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        eA, eB = ctm_tensor_2site(A, B, CHI_D2, max_iter=250, conv_tol=1e-10)
+        eA, eB = ctm_tensor_2site(A, B, CHI_D2, max_iter=400, conv_tol=1e-10)
     assert eA.C1.indices[0].dim == CHI_D2  # regime: the corner is truncated
     return A, B, H, 2, {(0, 0): eA, (1, 0): eB}
 

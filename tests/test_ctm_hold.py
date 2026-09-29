@@ -24,6 +24,7 @@ from tenax.algorithms._ctm_hold import (
     env_invariant_distance,
     env_spectral_invariants,
     hold_test,
+    perturb_env,
 )
 from tenax.algorithms._ctm_tensor_convergence import (
     CHECKERBOARD_NEIGHBORS,
@@ -77,8 +78,9 @@ def test_a_saddle_fails_the_hold():
     assert not held.passed
     assert held.rate > 1.0
     # A saddle never passes a re-test either: it runs the full 3*K extension,
-    # two CTM steps per sweep.
-    assert held.sweeps == 2 * 3 * 40
+    # three CTM steps per sweep (the point and two perturbed directions).
+    assert held.sweeps == 3 * 3 * 40
+    assert all(r > 1.0 for r in held.rates)
 
 
 def test_an_attractor_with_a_transient_passes_where_d_k_below_d_0_would_not():
@@ -97,9 +99,18 @@ def test_an_attractor_with_a_transient_passes_where_d_k_below_d_0_would_not():
     )
     assert held.passed
     assert held.rate < 1.0
-    d = np.asarray(held.distances)
-    assert d.max() > 10 * d[0]  # regime: the transient is real
-    assert d[40] > d[0]  # regime: d_K < d_0 would have failed this attractor
+    # Regime, on a plain (un-renormalised) perturbed trajectory: the
+    # transient is real, and d_K < d_0 would have failed this attractor.
+    step = _linear_step(J, XSTAR)
+    x, y = _vec_env(XSTAR), perturb_env(_vec_env(XSTAR), 1e-6, jax.random.PRNGKey(0))
+    d = [env_invariant_distance(_identity_invariants(y), _identity_invariants(x))]
+    for _ in range(40):
+        x, y = step(x), step(y)
+        d.append(
+            env_invariant_distance(_identity_invariants(y), _identity_invariants(x))
+        )
+    assert max(d) > 10 * d[0]
+    assert d[40] > d[0]
 
 
 def test_a_claimed_point_off_by_its_residual_still_holds():
@@ -141,7 +152,86 @@ def test_a_transient_that_outlasts_the_first_window_is_not_a_saddle():
     assert 2 * 40 < held.sweeps < 2 * 3 * 40
 
 
-def test_a_fast_attractor_passes_early():
+class _Two(NamedTuple):
+    a: jax.Array
+    b: jax.Array
+
+
+def test_a_weakly_excited_saddle_that_contracts_first_still_fails():
+    """Codex P1 on #1058.  The unstable direction lives in a leaf whose scale
+    is 1e-6, so a relative perturbation excites it at ~1e-12 while the stable
+    leaf moves at ~1e-6.  The stable part decays at 0.3/sweep: the
+    displacement contracts by 1e-3 within ~6 sweeps -- and then the unstable
+    part, growing at 1.05/sweep, takes over.  Accepting on early contraction
+    passed this saddle."""
+    astar = jnp.linspace(1.0, 0.5, 5)
+    bstar = jnp.full(3, 1e-6)
+
+    def step(envs):
+        e = envs[(0, 0)]
+        return {(0, 0): _Two(astar + 0.3 * (e.a - astar), bstar + 1.05 * (e.b - bstar))}
+
+    def inv(envs):
+        e = envs[(0, 0)]
+        return {"a": np.asarray(e.a), "b": np.asarray(e.b)}
+
+    start = {(0, 0): _Two(astar, bstar)}
+    # Regime: without renormalisation the displacement really does contract
+    # by 1e-3 of its peak before the unstable part shows (the old early pass).
+    y = perturb_env(start, 1e-6, jax.random.PRNGKey(0))
+    x, d = start, []
+    for _ in range(12):
+        x, y = step(x), step(y)
+        d.append(env_invariant_distance(inv(y), inv(x)))
+    assert min(d) < 1e-3 * max(d)
+    held = hold_test(step, start, sweeps=40, invariants=inv)
+    assert not held.passed
+    assert held.rate > 1.0
+
+
+def test_every_direction_must_contract_not_just_one():
+    """Codex P1 on #1058 asked for >= 2 independent directions, accepted only
+    if ALL tails contract.  A one-sided instability makes that observable:
+    the ``b[0]`` coordinate escapes at 1.05/sweep when displaced upward and
+    contracts at 0.5 when displaced downward, so a perturbation that happens
+    to land on the stable side sees an attractor.  The key is chosen so the
+    two split directions land on opposite sides and the unsplit key on the
+    stable side -- one direction, or ``any`` instead of ``all``, passes it."""
+    astar = jnp.linspace(1.0, 0.5, 5)
+    bstar = jnp.full(3, 0.5)
+
+    def step(envs):
+        e = envs[(0, 0)]
+        db = e.b - bstar
+        g = jnp.where(db[0] > 0, 1.05, 0.5)
+        return {(0, 0): _Two(astar + 0.3 * (e.a - astar), bstar + g * db)}
+
+    def inv(envs):
+        e = envs[(0, 0)]
+        return {"a": np.asarray(e.a), "b": np.asarray(e.b)}
+
+    start = {(0, 0): _Two(astar, bstar)}
+
+    def side(k):
+        return float(perturb_env(start, 1e-6, k)[(0, 0)].b[0] - bstar[0]) > 0
+
+    for n in range(100):
+        key = jax.random.PRNGKey(n)
+        k0, k1 = jax.random.split(key, 2)
+        if side(k0) != side(k1) and not side(key):
+            break
+    else:
+        pytest.fail("no key splits the two directions across the fold")
+
+    held = hold_test(step, start, sweeps=40, invariants=inv, key=key)
+    assert not held.passed
+    assert sorted(r > 1.0 for r in held.rates) == [False, True]
+
+
+def test_a_fast_attractor_passes_at_the_first_window():
+    """No early exit any more (Codex P1): even a fast attractor is judged on
+    its tail.  Renormalisation keeps the displacement off the float floor, so
+    the fit reads the true rate."""
     J = np.eye(6) * 0.1
     held = hold_test(
         _linear_step(J, XSTAR),
@@ -150,7 +240,8 @@ def test_a_fast_attractor_passes_early():
         invariants=_identity_invariants,
     )
     assert held.passed
-    assert held.sweeps < 10
+    assert held.sweeps == 3 * 40
+    assert all(abs(r - 0.1) < 1e-3 for r in held.rates)
 
 
 def test_the_default_metric_is_blind_to_a_period_two_sign_cycle():
@@ -275,7 +366,11 @@ def _run_mocked(monkeypatch, a, verdicts=None, **kw):
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
         envs = _ctm_tensor_multisite(sites, CHECKERBOARD_NEIGHBORS, CHI, **kw)
-    not_conv = [w for w in rec if "did not converge" in str(w.message)]
+    not_conv = [
+        w
+        for w in rec
+        if "did not converge" in str(w.message) or "not verified" in str(w.message)
+    ]
     blind = [w for w in rec if "could not be certified" in str(w.message)]
     assert not blind  # regime: the criterion can see these corners
     return envs, s_B, s_of, not_conv
@@ -294,7 +389,7 @@ def test_regime_without_the_hold_the_loop_certifies_the_saddle(monkeypatch):
 def test_the_loop_walks_off_a_saddle_to_the_attractor(monkeypatch):
     verdicts = []
     envs, s_B, s_of, not_conv = _run_mocked(monkeypatch, 0.1, verdicts, max_iter=2000)
-    assert abs(abs(s_of(envs)) - s_B) < 1e-6 * s_B
+    assert abs(abs(s_of(envs)) - s_B) < 1e-5 * s_B
     assert not not_conv
     # One hold rejects the saddle, the next accepts the attractor -- the
     # attractor is not rejected for sitting conv_tol off its own fixed point
@@ -316,12 +411,22 @@ def test_an_attractor_is_returned_as_is(monkeypatch):
     assert not not_conv
 
 
-def test_no_budget_left_for_the_hold_is_not_converged(monkeypatch):
-    """The criterion passes at sweep ~22; 22 + 2*40 > max_iter=45, so nothing
-    certified the point -- fail closed rather than skip the hold."""
+def test_no_budget_left_for_the_hold_is_reported_honestly(monkeypatch):
+    """The criterion passes at sweep ~22; 22 + 3*40 > max_iter=45, so nothing
+    can certify the point.  Ruling (Codex P2 on #1058): stop there and say so
+    -- the sweeps that actually ran, and UNVERIFIED -- rather than claim the
+    loop "ran the full max_iter", or run a hold cut below its measured
+    window."""
     _, _, _, not_conv = _run_mocked(monkeypatch, -0.1, max_iter=45)
-    assert not_conv
-    assert "uncertified" in str(not_conv[0].message)
+    assert len(not_conv) == 1
+    msg = str(not_conv[0].message)
+    assert "ran the full" not in msg
+    import re
+
+    m = re.search(r"stopped after (\d+) of max_iter=45 sweeps", msg)
+    assert m and int(m.group(1)) < 45
+    assert "UNVERIFIED" in msg
+    assert "120 more CTM steps" in msg
 
 
 def test_hold_sweeps_below_four_is_refused():
