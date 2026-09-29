@@ -313,9 +313,11 @@ def test_a_rotation_of_the_d2_leg_is_seen():
     blind = env_spectral_invariants(start)
     moved = {(0, 0): _Edge(rot(0.3))}
     per_leg = {
-        k: v for k, v in env_spectral_invariants(moved).items() if "d2gram" not in k
+        k: v
+        for k, v in env_spectral_invariants(moved).items()
+        if not isinstance(k[2], str)
     }
-    per_leg0 = {k: v for k, v in blind.items() if "d2gram" not in k}
+    per_leg0 = {k: v for k, v in blind.items() if not isinstance(k[2], str)}
     assert env_invariant_distance(per_leg, per_leg0) < 1e-12  # regime: spectra blind
     assert env_invariant_distance(env_spectral_invariants(moved), blind) > 1e-2
     held = hold_test(step, start, sweeps=40)
@@ -347,10 +349,170 @@ def test_the_block_sparse_d2_gram_sees_a_rotation_within_a_sector():
     T2 = SymmetricTensor.from_dense(jnp.asarray(Td), idx)
     a = env_spectral_invariants({(0, 0): _Edge(T)})
     b = env_spectral_invariants({(0, 0): _Edge(T2)})
-    legs_a = {k: v for k, v in a.items() if "d2gram" not in k}
-    legs_b = {k: v for k, v in b.items() if "d2gram" not in k}
+    legs_a = {k: v for k, v in a.items() if not isinstance(k[2], str)}
+    legs_b = {k: v for k, v in b.items() if not isinstance(k[2], str)}
     assert env_invariant_distance(legs_a, legs_b) < 1e-12  # regime: spectra blind
     assert env_invariant_distance(a, b) > 1e-2
+
+
+def _isotropic_slices(chi=4, n=4, seed=11):
+    """``T[a, m, b]`` whose D^2 slices are Frobenius-orthonormal: ``G = I``,
+    so every D^2 rotation leaves ``G`` -- and every per-leg spectrum --
+    unchanged.  The slices are generic (non-commuting), so the rotation still
+    changes the state: it is not a gauge."""
+    rng = np.random.default_rng(seed)
+    V = rng.standard_normal((n, chi * chi))
+    Q, _ = np.linalg.qr(V.T)  # columns: orthonormal vectorised slices
+    return np.transpose(Q.T.reshape(n, chi, chi), (1, 0, 2))
+
+
+def _rotation_saddle_in(Tstar, plane=(0, 1)):
+    """``theta <- 1.05 theta`` along a D^2 rotation in ``plane``; the rest of
+    the displacement decays at 0.8/sweep (dense arrays)."""
+    import jax.scipy.linalg as jsl
+
+    Tstar = jnp.asarray(Tstar)
+    n = Tstar.shape[1]
+    K = np.zeros((n, n))
+    K[plane[0], plane[1]], K[plane[1], plane[0]] = 1.0, -1.0
+    K = jnp.asarray(K)
+    u = jnp.einsum("amb,mn->anb", Tstar, K)
+
+    def rot(theta):
+        return jnp.einsum("amb,mn->anb", Tstar, jsl.expm(theta * K))
+
+    def advance(T):
+        theta = jnp.vdot(u, T - Tstar) / jnp.vdot(u, u)
+        return rot(1.05 * theta) + 0.8 * (T - rot(theta))
+
+    return advance, rot
+
+
+def _without(inv, tag):
+    return {k: v for k, v in inv.items() if tag not in k}
+
+
+def test_a_rotation_inside_a_degenerate_d2_gram_is_seen():
+    """Codex P1 on #1058 (_ctm_hold.py:165): with ``G = I`` a D^2 rotation
+    moves neither ``G`` nor any spectrum.  The fourth-order slice invariant
+    ``Tr(T_m T_m'^+ T_n T_n'^+)`` sees it; the hold must reject the saddle."""
+    Tstar = _isotropic_slices()
+    advance, rot = _rotation_saddle_in(Tstar)
+    start = {(0, 0): _Edge(jnp.asarray(Tstar))}
+    moved = {(0, 0): _Edge(rot(0.3))}
+    a, b = env_spectral_invariants(start), env_spectral_invariants(moved)
+    # Regime: spectra and the D^2 Gram are blind to this rotation.
+    assert (
+        env_invariant_distance(_without(a, "d2quartic"), _without(b, "d2quartic"))
+        < 1e-12
+    )
+    assert env_invariant_distance(a, b) > 1e-2
+
+    def step(envs):
+        return {(0, 0): _Edge(advance(envs[(0, 0)].T))}
+
+    held = hold_test(step, start, sweeps=40)
+    assert not held.passed
+    assert all(r > 1.0 for r in held.rates)
+
+
+def _symmetric_isotropic():
+    """U(1) edge tensor; its two charge-0 D^2 slots carry orthonormal
+    equal-norm slices, so the charge-0 block of ``G`` is proportional to I
+    and a rotation of those two slots is invisible to ``G``."""
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import SymmetricTensor
+
+    sym = U1Symmetry()
+    chi = np.array([0, 0, 1, 1, -1], dtype=np.int32)
+    d2 = np.array([0, 0, 1, -1], dtype=np.int32)
+    idx = (
+        TensorIndex.from_charges(sym, chi, FlowDirection.IN, label="a"),
+        TensorIndex.from_charges(sym, d2, FlowDirection.IN, label="m"),
+        TensorIndex.from_charges(sym, chi, FlowDirection.OUT, label="b"),
+    )
+    T = np.array(SymmetricTensor.random_normal(idx, jax.random.PRNGKey(5)).todense())
+    s0, s1 = T[:, 0, :].copy(), T[:, 1, :].copy()
+    s1 -= np.sum(s0 * s1) / np.sum(s0 * s0) * s0
+    T[:, 0, :] = s0 / np.linalg.norm(s0)
+    T[:, 1, :] = s1 / np.linalg.norm(s1)
+    return idx, T
+
+
+def test_a_rotation_inside_a_degenerate_block_sparse_d2_gram_is_seen():
+    from tenax.core.tensor import SymmetricTensor
+
+    idx, Tstar = _symmetric_isotropic()
+    advance, rot = _rotation_saddle_in(Tstar, plane=(0, 1))
+
+    def sym(x):
+        return SymmetricTensor.from_dense(jnp.asarray(x), idx)
+
+    start = {(0, 0): _Edge(sym(Tstar))}
+    moved = {(0, 0): _Edge(sym(rot(0.3)))}
+    a, b = env_spectral_invariants(start), env_spectral_invariants(moved)
+    assert (
+        env_invariant_distance(_without(a, "d2quartic"), _without(b, "d2quartic"))
+        < 1e-12
+    )
+    assert env_invariant_distance(a, b) > 1e-3
+
+    def step(envs):
+        return {(0, 0): _Edge(sym(advance(envs[(0, 0)].T.todense())))}
+
+    held = hold_test(step, start, sweeps=40)
+    assert not held.passed
+    assert all(r > 1.0 for r in held.rates)
+
+
+def test_the_block_sparse_quartic_matches_the_dense_trace():
+    """The sector bookkeeping (``P`` summed over ``q_b``, the trace closing
+    ``q_a -> q_a' -> q_a``) must reproduce the dense ``Tr(T_m T_m'^+ T_n
+    T_n'^+)`` block for block, and every quadruple it omits must be zero."""
+    from tenax.algorithms._ctm_hold import _d2_quartic
+    from tenax.core.tensor import SymmetricTensor
+
+    idx, Td = _symmetric_isotropic()
+    T = SymmetricTensor.from_dense(jnp.asarray(Td), idx)
+    full = np.einsum("amb,cnb,cpd,aqd->mnpq", Td, Td.conj(), Td, Td.conj())
+    q = np.asarray(idx[1].charges)
+    seen = np.zeros(full.shape, dtype=bool)
+    for (qm, qn, qp, qq), k in _d2_quartic(T).items():
+        sel = np.ix_(q == qm, q == qn, q == qp, q == qq)
+        np.testing.assert_allclose(k, full[sel], atol=1e-12)
+        seen[sel] = True
+    assert np.max(np.abs(full[~seen]), initial=0.0) < 1e-12
+    assert seen.any() and not seen.all()  # regime: some sectors are absent
+
+
+def test_the_block_sparse_invariants_are_blind_to_symmetric_chi_gauges():
+    """Per-sector orthogonal maps and signs on each chi leg (all a symmetric
+    gauge can do), plus a global scale: no invariant may move."""
+    from tenax.core.tensor import SymmetricTensor
+
+    idx, Td = _symmetric_isotropic()
+    chi = np.asarray(idx[0].charges)
+    rng = np.random.default_rng(9)
+
+    def sector_orthogonal():
+        Q = np.zeros((chi.size, chi.size))
+        for c in np.unique(chi):
+            sl = np.flatnonzero(chi == c)
+            orth, _ = np.linalg.qr(rng.standard_normal((sl.size, sl.size)))
+            Q[np.ix_(sl, sl)] = orth
+        return Q
+
+    Qa, Qb = sector_orthogonal(), sector_orthogonal()
+    T2 = -2.5 * np.einsum("xa,amb,yb->xmy", Qa, Td, Qb)
+    a = env_spectral_invariants(
+        {(0, 0): _Edge(SymmetricTensor.from_dense(jnp.asarray(Td), idx))}
+    )
+    b = env_spectral_invariants(
+        {(0, 0): _Edge(SymmetricTensor.from_dense(jnp.asarray(T2), idx))}
+    )
+    assert any("d2quartic" in k for k in a)  # regime: the quartic is present
+    assert env_invariant_distance(a, b) < 1e-12
 
 
 def test_the_d2_gram_is_blind_to_chi_gauges():

@@ -112,6 +112,59 @@ def _d2_grams(t) -> dict[Hashable, np.ndarray]:
     return out
 
 
+def _edge_blocks(t) -> list[tuple[tuple, np.ndarray]]:
+    """``[((q_a, q_m, q_b), block)]`` of a 3-leg tensor; one block if dense."""
+    if isinstance(t, SymmetricTensor):
+        out = []
+        for key, v in t.blocks.items():
+            q = tuple(k.item() if hasattr(k, "item") else k for k in key)
+            out.append((q, np.asarray(v)))
+        return out
+    a = np.asarray(t.todense() if isinstance(t, DenseTensor) else t)
+    return [((None, None, None), a)]
+
+
+def _d2_quartic(t) -> dict[Hashable, np.ndarray]:
+    """Fourth-order slice invariant of an edge tensor, per sector quadruple.
+
+    With the D^2 slices ``T_m = T[:, m, :]`` (chi x chi),
+    ``K[m, m', n, n'] = Tr(T_m T_m'^dagger T_n T_n'^dagger)``.  Separate
+    unitaries on the two chi legs, ``T_m -> U T_m V^dagger``, cancel inside
+    every factor ``T_m T_m'^dagger`` and then in the trace, so ``K`` is blind
+    to every chi-bond gauge (order, signs, the period-2 sign cycle).  It moves
+    as ``R x R* x R x R*`` under a D^2 rotation ``R``, and unlike the Gram it
+    does so even where ``G`` is degenerate (Codex P1 on #1058,
+    _ctm_hold.py:165): orthonormal but non-commuting slices have ``G = I``
+    yet a basis-sensitive ``K``.
+
+    Block-sparse: ``P[m, m'] = T_m T_m'^dagger`` is assembled per
+    ``(q_m, q_m', q_a, q_a')`` by summing blocks that share ``q_b``, and the
+    trace pairs ``P[(q_m, q_m', q_a, q_a')]`` with ``P[(q_n, q_n', q_a',
+    q_a)]`` -- the chi-leg charge closes around the trace.  Output: one array
+    ``(d_m, d_m', d_n, d_n')`` per sector quadruple; D^8 numbers in total per
+    edge tensor (6561 at D=3).
+    """
+    by_b: dict[Hashable, list] = {}
+    for (qa, qm, qb), x in _edge_blocks(t):
+        by_b.setdefault(qb, []).append((qa, qm, x))
+    P: dict[tuple, np.ndarray] = {}
+    for lst in by_b.values():
+        for qa, qm, x in lst:
+            for qa2, qn, y in lst:
+                p = np.einsum("xmb,ynb->mnxy", x, y.conj())
+                key = (qm, qn, qa, qa2)
+                P[key] = P[key] + p if key in P else p
+    K: dict[Hashable, np.ndarray] = {}
+    for (qm, qm2, qa, qa2), p1 in P.items():
+        for (qn, qn2, qc, qc2), p2 in P.items():
+            if qc != qa2 or qc2 != qa:
+                continue
+            k = np.einsum("mpxy,nqyx->mpnq", p1, p2)
+            key = (qm, qm2, qn, qn2)
+            K[key] = K[key] + k if key in K else k
+    return K
+
+
 def env_spectral_invariants(envs: dict[Any, Any]) -> Invariants:
     """Gauge-invariant fingerprint of a CTM environment.
 
@@ -129,15 +182,33 @@ def env_spectral_invariants(envs: dict[Any, Any]) -> Invariants:
     normalised by the same leg's largest singular value squared, as its real
     and imaginary parts.  It fixes the D^2 basis and quotients only the chi
     legs: under ``T -> T x_2 U`` it moves as ``U G U^dagger``, so a rotation
-    is seen unless ``U`` commutes with ``G`` (only a phase within a
-    degenerate eigenspace of ``G`` stays invisible).
+    is seen unless ``U`` commutes with ``G`` -- which ANY unitary within a
+    degenerate eigenspace of ``G`` does (e.g. orthonormal equal-norm slices,
+    ``G = I``; SU(2)-symmetric states can have a degenerate ``G`` by
+    symmetry).  So each edge tensor also contributes the fourth-order slice
+    invariant ``K[m,m',n,n'] = Tr(T_m T_m'^+ T_n T_n'^+)``
+    (:func:`_d2_quartic`), normalised by the leg scale to the fourth power,
+    which is basis-sensitive where ``G`` is not.
+
+    **Known limit.**  Spectra, ``G`` and ``K`` are trace invariants of the
+    slices of degree <= 4; they do not separate orbits of the chi-leg gauge
+    group in general.  Still invisible: a D^2 rotation ``R`` with ``R x R* x
+    R x R*`` fixing ``K`` and ``R x R*`` fixing ``G`` that is not realised by
+    chi-leg unitaries -- in particular any ``R`` whose action on the slice
+    algebra is only detected by trace words of degree >= 6.  (A rotation that
+    IS realised by chi-leg unitaries, ``sum_k R_mk T_k = U T_m V^+``, is a
+    gauge-equivalent environment, and no invariant should see it.)  RDM-based
+    invariants would close this, at about one extra CTM contraction per
+    sweep per trajectory; not used.
 
     Args:
         envs: ``{coord: CTMTensorEnv}`` (or any NamedTuple of tensors).
 
     Returns:
-        ``{(coord, field, leg, charge): descending singular values}`` plus
-        ``{(coord, field, "d2gram", charge): [Re G, Im G] flattened}``.
+        ``{(coord, field, leg, charge): descending singular values}`` plus,
+        per edge tensor, ``{(coord, field, "d2gram", charge): [Re G, Im G]}``
+        and ``{(coord, field, "d2quartic", charges): [Re K, Im K]}``,
+        flattened.
     """
     inv: Invariants = {}
     for c in sorted(envs):
@@ -162,6 +233,11 @@ def env_spectral_invariants(envs: dict[Any, Any]) -> Invariants:
                     g = np.asarray(g) / scale
                     inv[(c, f, "d2gram", q)] = np.concatenate(
                         [g.real.ravel(), g.imag.ravel()]
+                    )
+                for q, k in _d2_quartic(t).items():
+                    k = np.asarray(k) / (scale * scale)
+                    inv[(c, f, "d2quartic", q)] = np.concatenate(
+                        [k.real.ravel(), k.imag.ravel()]
                     )
     return inv
 
