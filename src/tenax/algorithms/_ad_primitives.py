@@ -298,7 +298,8 @@ def _svd_sector_backward(
         dU:  Gradient w.r.t. truncated U, shape ``(m, k)``.
         ds:  Gradient w.r.t. truncated s, shape ``(k,)``.
         dVh: Gradient w.r.t. truncated Vh, shape ``(k, n)``.
-        eps: Lorentzian broadening parameter.
+        eps: Lorentzian broadening width, RELATIVE to ``s[0]**2`` (the
+             F-matrix is built from squared singular values).
 
     Returns:
         dM: Gradient w.r.t. the input matrix, shape ``(m, n)``.
@@ -348,11 +349,19 @@ def _svd_sector_backward(
     s_k = s[:k]
     V_k = Vh[:k, :].conj().T  # (n, k)
 
-    # Rank-aware F-matrix mask: zero F[i, j] where sigma_i or sigma_j is below
-    # the rank threshold *and the corresponding cotangent is meaningful*. The
-    # unregularized F entry for (sigma>0, sigma=0) pairs evaluates to
-    # ~1/sigma^2 — a gauge artifact that pumps arbitrary upstream cotangent
-    # components on the KEPT-but-zero columns of U/Vh into the gradient.
+    # Rank-aware cotangent mask.  The columns of U/Vh that belong to a
+    # KEPT-but-zero singular value (below the rank threshold) are an arbitrary
+    # basis of the null space, so any upstream cotangent on them is a gauge
+    # artifact and must not reach the gradient: zero it here.
+    #
+    # Mask the COTANGENT, not F.  This used to zero the whole row and column of
+    # F for such a mode, which also dropped the (live j, zero i) coupling
+    # ``u_i (u_i^H dU_j) / s_j`` -- the rotation of a LIVE singular vector into
+    # the null space.  That term is finite (F_ij -> 1/s_j^2, times s_j) and is
+    # needed: without it a rank-(n-1) reconstruction gradient was 51% wrong,
+    # and the fermionic 2x2 projector, whose M1/M2 sectors are routinely rank
+    # deficient, lost a piece of every flowing gradient.  Pairs of two zero
+    # modes need no mask either: their Lorentzian F is 0/(0 + eps^2) = 0.
     #
     # Discarded indices (>= the original chi) are deliberately NOT masked: their
     # padded cotangents are identically zero, so they inject nothing arbitrary,
@@ -369,6 +378,8 @@ def _svd_sector_backward(
     eps_rank = 1e-12 * jnp.maximum(s[0], 1e-30)
     is_kept = jnp.arange(k) < k_kept
     keep_mask = jnp.where(is_kept, (s_k > eps_rank).astype(s.dtype), 1.0)
+    dU = dU * keep_mask[None, :]
+    dVh = dVh * keep_mask[:, None]
 
     # --- Lorentzian-regularized F-matrix ---
     #
@@ -377,11 +388,20 @@ def _svd_sector_backward(
     # orientation, and transposing it flips the sign of the whole off-diagonal
     # contribution (#750).  `regularized_eigh` below carries the same warning
     # for `w_i - w_j` after the identical bug was fixed there in #316.
+    #
+    # The broadening is RELATIVE: ``eps`` is a width in units of ``s_max**2``.
+    # An absolute width is not scale covariant -- it declares every pair whose
+    # squared gap is below 1e-12 degenerate, whatever the matrix's scale -- and
+    # CTM sector matrices have no fixed scale.  On the fermionic D=2 chi=8
+    # fixture the 2x2 projector's M1/M2 sectors have s_max 0.05-0.2 and s_min
+    # ~1e-8, where the absolute width put the reconstruction gradient 11-26%
+    # off; the same matrix scaled up by 1e3 was exact.  For s_max ~ 1 (the
+    # regime the tests were written in) nothing moves.
     s2 = s_k**2
     diff = s2[None, :] - s2[:, None]
-    F = diff / (diff**2 + eps**2)
+    eps_F = eps * jnp.maximum(s[0], 1e-30) ** 2
+    F = diff / (diff**2 + eps_F**2)
     F = F - jnp.diag(jnp.diag(F))
-    F = F * keep_mask[:, None] * keep_mask[None, :]
 
     # Antisymmetric parts of projected cotangents.  These are the FULL
     # `J - J^H`, not `(J - J^H)/2`: the 1/2 belongs to the symmetric/
