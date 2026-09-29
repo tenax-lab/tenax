@@ -684,7 +684,9 @@ environment is not converged; if the criterion passes with fewer than
 warns that the point is unverified. A pass means no growth was seen
 within the window, not a proof: a weakly excited unstable mode that grows
 only slightly faster than slowly decaying stable modes can need more sweeps
-than the window to show (e.g. ×1.01 against ×0.99 takes ~230). With the default `hold_sweeps=0` the loop uses successive-sweep
+than the window to show (e.g. ×1.01 against ×0.99 takes ~230). The metric is
+also per tensor, so a mode that rotates one side of a shared χ bond relative
+to the other is invisible to it. With the default `hold_sweeps=0` the loop uses successive-sweep
 agreement alone, as before.
 
 `ctm_hold_test` runs the same test on any environment, e.g. a seed before it

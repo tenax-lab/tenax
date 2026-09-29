@@ -463,6 +463,17 @@ def hold_test(
     isolate such an outlier; not implemented.  The measured #1035 saddle is
     rejected (rates 1.006/1.045) because its unstable mode is well excited.
 
+    **Known limit: the metric's gauge quotient is too large.**  Every
+    invariant is per tensor, so it quotients an independent unitary on each
+    chi leg of each tensor.  A real CTM gauge applies INVERSE rotations to
+    the two tensors sharing a bond.  A mode that rotates one side of a bond
+    (e.g. only ``C1``'s right leg) changes the contractions observables use,
+    yet leaves every per-tensor invariant unchanged, so it is invisible
+    (Codex P1 on #1058).  Closing this needs closed-network invariants that
+    keep each bond's relative orientation (e.g. reduced density matrices, or
+    corner-edge rings), at about one extra contraction per sweep per
+    trajectory; not implemented.
+
     Measured on #1035 (fermionic t-V D=3 chi=12 V=1 mu=2, perturbation
     1e-6, one direction, no renormalisation), fitted over ``[K/2, K]``: at
     K=20/30/40/60 the saddle S reads 1.026/1.037/1.053/1.057 and the
