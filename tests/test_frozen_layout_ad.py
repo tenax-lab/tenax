@@ -947,3 +947,83 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
     assert tree((A1, B1)) == tree((A, B))  # site layout frozen
     assert E1 <= E0 + 1e-6, (E0, E1)
     assert E1 >= -8 / np.pi**2 - 1e-3  # V=0 free-fermion bound, one-sided only
+
+
+@pytest.mark.slow
+def test_one_flowing_graded_sweep_matches_finite_differences(seeded_d2):
+    """One fermionic CTM sweep under ``projector_backward="flow"`` must
+    differentiate exactly: AD against a central difference of the SAME traced
+    sweep, at a fixed (constant) seed environment.
+
+    One sweep has no fixed-point premise, so neither #841 (stationarity) nor
+    #1028 (adjoint solvability) can contaminate it -- the dense and bosonic
+    U(1) versions of this check agree to 1e-8 / 1e-10.  On this fixture the
+    graded path did not: 5.1e-03 and 3.7e-03 relative error in these two
+    directions, while the h-scan plateau is flat to ~2e-7.  The cause was the
+    SVD adjoint shared by every traced sector SVD (``_svd_sector_backward``):
+    an absolute Lorentzian width, which mis-treats the small-scale M1/M2
+    sectors of the 2x2 projector (s_max 0.05-0.2, s_min ~1e-8), and a rank
+    mask that cut live modes off from exact-zero ones.  That bias is what the
+    implicit- and explicit-AD "flow" gradients carried as their ~1% residual.
+
+    FD uses the jitted sweep so it measures the traced function (static,
+    inherited chi inventory) that AD differentiates; on this seed the eager
+    sweep happens to be the same function, but on a forced-inventory seed it
+    is not.
+    """
+    A, B, H, d, envs = seeded_d2
+    envs = jax.tree.map(jax.lax.stop_gradient, envs)
+
+    # B and the seed are jit ARGUMENTS, not closure constants: a
+    # SymmetricTensor fills its lazy block cache on first access, and a first
+    # access inside a trace would leak a tracer into the closed-over object.
+    def energy_after_one_sweep(A_, B_, envs_):
+        A_ = A_ * (1.0 / A_.norm())
+        dl = {
+            (0, 0): _build_double_layer_tensor(A_),
+            (1, 0): _build_double_layer_tensor(B_),
+        }
+        out, _, _ = _ctm_tensor_sweep_multisite(
+            envs_,
+            dl,
+            CHECKERBOARD_NEIGHBORS,
+            CHI_D2,
+            True,
+            "svd",
+            projector_backward="flow",
+        )
+        return compute_energy_ctm_tensor_2site(A_, B_, out[(0, 0)], out[(1, 0)], H, d)
+
+    f_jit = jax.jit(energy_after_one_sweep)
+    g = jax.jit(jax.grad(energy_after_one_sweep))(A, B, envs)
+
+    def f(A_):
+        return f_jit(A_, B, envs)
+
+    for seed in (0, 4):
+        rng = np.random.default_rng(seed)
+        V = jax.tree_util.tree_map(
+            lambda x: jnp.asarray(rng.standard_normal(x.shape)), A
+        )
+        slope = float(
+            sum(
+                jnp.vdot(a, b).real
+                for a, b in zip(
+                    jax.tree_util.tree_leaves(g), jax.tree_util.tree_leaves(V)
+                )
+            )
+        )
+        fd = []
+        for h in (1e-5, 1e-6):
+            Ap = jax.tree_util.tree_map(lambda x, v: x + h * v, A, V)
+            Am = jax.tree_util.tree_map(lambda x, v: x - h * v, A, V)
+            fd.append(float((f(Ap) - f(Am)) / (2 * h)))
+        # Regime: the FD reference is a derivative (flat in h to 1e-6) and the slope is
+        # far from zero, so a 1e-5 relative gate can see a 4e-3 defect.
+        assert abs(fd[0] - fd[1]) < 1e-6 * abs(fd[1]), (seed, fd)
+        assert abs(fd[1]) > 1e-3, (seed, fd)
+        rel = abs(slope - fd[1]) / abs(fd[1])
+        assert rel < 1e-5, (
+            f"seed={seed}: flowing one-sweep AD {slope:.9e} vs FD {fd[1]:.9e} "
+            f"(rel {rel:.2e}) -- the graded 2x2 projector backward is inexact"
+        )

@@ -421,3 +421,131 @@ def test_eigh_eigenvalue_gradient_matches_finite_differences(complex_):
     H = A + A.conj().T
     rel, cos = _agreement(lambda M: jnp.sum(regularized_eigh(M)[0]), H)
     assert cos > 1 - 1e-9 and rel < 1e-6, f"rel={rel:.3e} cos={cos:.9f}"
+
+
+# ---------------------------------------------------------------------------
+# 5. The adjoint must not depend on the matrix's absolute scale, and must keep
+#    the coupling between a live mode and a kept-but-zero one.
+# ---------------------------------------------------------------------------
+#
+# Both tests use the reconstruction loss ``sum(W * U diag(s) Vh)``.  The forward
+# returns ``M`` itself (up to the sub-1e-12 floor), so the exact gradient is
+# ``W`` -- an analytic reference, no finite differences needed.  Both kernels
+# that ship this adjoint are checked: ``truncated_svd_ad`` (every traced
+# symmetric SVD, per charge sector) and ``_regularized_dense_svd`` (the dense
+# 2x2 projector under ``projector_backward="flow"``).
+
+
+def _reconstruction_error(svd_fn, svals, rng, complex_=False):
+    n = len(svals)
+    Ug, _ = np.linalg.qr(_mat(rng, (n, n), complex_))
+    Vg, _ = np.linalg.qr(_mat(rng, (n, n), complex_))
+    M = Ug @ np.diag(svals) @ Vg.conj().T
+    W = _mat(rng, (n, n), complex_)
+
+    def loss(A):
+        U, s, Vh = svd_fn(A)
+        return jnp.real(jnp.sum(jnp.conj(W) * ((U * s) @ Vh)))
+
+    def reference(A):  # the same loss with the SVD round trip removed
+        return jnp.real(jnp.sum(jnp.conj(W) * A))
+
+    g = np.asarray(jax.grad(loss)(jnp.asarray(M)))
+    g_ref = np.asarray(jax.grad(reference)(jnp.asarray(M)))
+    return float(np.linalg.norm(g - g_ref) / np.linalg.norm(g_ref))
+
+
+def _svd_kernels():
+    from tenax.algorithms._ctm_tensor_projector_2x2 import _regularized_dense_svd
+
+    return {
+        "truncated_svd_ad": lambda A: truncated_svd_ad(A, A.shape[0]),
+        "regularized_dense_svd": _regularized_dense_svd,
+    }
+
+
+@pytest.mark.parametrize("kernel", ["truncated_svd_ad", "regularized_dense_svd"])
+@pytest.mark.parametrize("complex_", [False, True], ids=["real", "complex"])
+def test_svd_adjoint_is_independent_of_the_matrix_scale(kernel, complex_):
+    """The Lorentzian width must be RELATIVE to the spectrum, not absolute.
+
+    ``F_ij = d / (d**2 + eps**2)`` with ``d = s_j**2 - s_i**2`` and an absolute
+    ``eps = 1e-12`` treats every pair whose squared gap is below 1e-12 as
+    degenerate, so the same matrix differentiates correctly at one scale and
+    wrongly at another.  CTM sector matrices have no fixed scale: on the D=2
+    chi=8 fermionic fixture of ``test_frozen_layout_ad.py`` the 2x2 projector's
+    M1/M2 sectors have ``s_max`` 0.05-0.2 and ``s_min`` ~1e-8, and this very
+    loss measured 11% and 26% gradient error on two of them.  That bias is the
+    ~1% implicit-AD vs finite-difference residual that ``projector_backward=
+    "flow"`` showed there.
+
+    Measured before the fix, both kernels: real 3.3e-09 / 1.6e-01 / 4.1e-01 and
+    complex 2.1e-09 / 1.1e-01 / 3.7e-01 at scales 1 / 1e-2 / 1e-4.  After it the
+    error is the scale-1 value at every scale.
+    """
+    svd_fn = _svd_kernels()[kernel]
+    spectrum = np.array([1.0, 0.3, 0.05, 1e-2, 1e-3, 1e-4, 1e-5])
+    errs = {
+        c: _reconstruction_error(svd_fn, c * spectrum, _rng(31), complex_)
+        for c in (1.0, 1e-2, 1e-4)
+    }
+    for c, err in errs.items():
+        assert err < 1e-7, (
+            f"{kernel}: reconstruction gradient off by {err:.2e} at scale {c:g} "
+            f"(all scales: { {k: f'{v:.1e}' for k, v in errs.items()} }) -- the "
+            "SVD adjoint's Lorentzian width is not relative to the spectrum"
+        )
+
+
+@pytest.mark.parametrize("kernel", ["truncated_svd_ad", "regularized_dense_svd"])
+def test_svd_adjoint_keeps_the_live_to_null_coupling(kernel):
+    """A kept-but-zero mode must not cut the live modes off from the null space.
+
+    For a rank-(n-1) matrix the derivative of a live singular vector ``u_j``
+    has a component ``u_0 (u_0^T dM v_j) / s_j`` along the zero mode ``u_0``;
+    it is finite and it is needed.  The rank-aware mask used to zero the whole
+    row and column of ``F`` for the zero mode, which dropped that term along
+    with the gauge-arbitrary cotangent it was aimed at.  Zeroing the cotangent
+    on the zero mode instead keeps the intent (nothing arbitrary is pumped in)
+    without dropping the coupling.  Rank-deficient sectors are routine in the
+    fermionic 2x2 projector (exact zeros in M1/M2 on the D=2 fixture).
+
+    Measured before the fix: 5.1e-01 on both kernels.
+    """
+    svd_fn = _svd_kernels()[kernel]
+    spectrum = np.array([1.0, 0.5, 0.3, 0.2, 0.1, 0.05, 0.0])
+    err = _reconstruction_error(svd_fn, spectrum, _rng(32))
+    assert err < 1e-10, f"{kernel}: rank-(n-1) reconstruction gradient off by {err:.2e}"
+
+
+@pytest.mark.parametrize("kernel", ["truncated_svd_ad", "regularized_dense_svd"])
+def test_svd_adjoint_is_finite_on_a_small_float32_sector(kernel):
+    """The relative width must not underflow in float32.
+
+    Forming the width as ``eps * s_max**2`` and then squaring it gives
+    ``1e-24 * s_max**4``, which is 0 in float32 once ``s_max`` is below ~1e-5.
+    The zero-gap diagonal of ``F`` is then 0/0 = NaN, which ``diag``
+    subtraction does not remove, and the whole gradient goes non-finite.
+    A float32 input reaches the backward in float32 even under x64 mode (this
+    test is RED on the pre-normalization code), so the case is reachable.
+    Normalizing the gaps by ``s_max**2`` before squaring avoids it.
+    """
+    svd_fn = _svd_kernels()[kernel]
+    rng = _rng(33)
+    n = 5
+    Ug, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    Vg, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    M = (Ug @ np.diag(1e-6 * np.array([1.0, 0.5, 0.3, 0.2, 0.1])) @ Vg.T).astype(
+        np.float32
+    )
+    W = rng.standard_normal((n, n)).astype(np.float32)
+
+    def loss(A):
+        U, s, Vh = svd_fn(A)
+        return jnp.sum(W * ((U * s) @ Vh))
+
+    g = np.asarray(jax.grad(loss)(jnp.asarray(M)))
+    assert np.all(np.isfinite(g)), f"{kernel}: non-finite float32 SVD gradient"
+    # The SVD round trip is the identity, so the gradient is W itself.
+    err = float(np.linalg.norm(g - W) / np.linalg.norm(W))
+    assert err < 1e-3, f"{kernel}: float32 reconstruction gradient off by {err:.2e}"
