@@ -109,6 +109,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     ),
     "ctm_tensor": ("tenax.algorithms._ctm_tensor", "ctm_tensor"),
     "ctm_tensor_2site": ("tenax.algorithms._ctm_tensor", "ctm_tensor_2site"),
+    "ctm_hold_test": ("tenax.algorithms._ctm_tensor", "ctm_hold_test"),
     "ctm_tensor_c4v": ("tenax.algorithms._ctm_tensor", "ctm_tensor_c4v"),
     # _ctm_tensor_convergence
     "ctm_multisite": ("tenax.algorithms._ctm_tensor_convergence", "ctm_multisite"),
@@ -563,6 +564,7 @@ __all__ = [
     "ctm_tensor",
     "ctm_tensor_c4v",
     "ctm_tensor_2site",
+    "ctm_hold_test",
     "ctm_multisite",
     "compute_energy_ctm_tensor",
     "compute_energy_ctm_tensor_2site",

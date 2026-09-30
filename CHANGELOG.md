@@ -4,6 +4,31 @@
 
 ### Added
 
+- **CTM hold test: a saddle is not converged** (#1035): `ctm_tensor_2site`
+  and `ctm_multisite` compared successive sweeps only, and that cannot tell
+  an attractor from a saddle.  On the fermionic t-V D=3 chi=12 V=1 mu=2
+  state they certified a saddle S (successive corner diff < 1e-10) that
+  escapes at x1.041/sweep to a stable fixed point B 1.4e-2 away (E_B - E_S =
+  -4.6e-7), and implicit AD seeded from S linearised around a
+  non-attractor.  Once the criterion passes, two copies perturbed by
+  `hold_perturbation` (1e-6, independent directions) and the point are now
+  stepped side by side, and the point is accepted only if every
+  displacement -- measured in a gauge-invariant metric (per-leg, per-sector
+  singular values -- blind to chi-bond order and signs, so the bond-sign
+  period-2 cycle does not read as instability) and renormalised whenever it
+  shrinks 1e-3 (power iteration) -- has a fitted tail growth rate < 1: 1.053
+  on S vs 0.946 on B at 40 sweeps (a still-growing fit is re-tested up to
+  120 sweeps, since B can amplify a perturbation for ~35 sweeps first).
+  There is no early acceptance: a weakly excited saddle contracts first
+  (Codex P1 on #1058).  On a saddle the loop walks on from the perturbed
+  point -- the standard recipe now lands on B (E - E_B = 1e-12); at
+  `max_iter` it warns not converged, and a criterion that passes with too
+  little budget left for the hold stops and warns UNVERIFIED with the sweeps
+  actually run (Codex P2).  `ctm_hold_test` runs the same test
+  on any environment.  Opt-in (`hold_sweeps=40`; default `0` keeps the old
+  behaviour) on the eager path; not run inside the implicit-AD forward (it would cost about one extra forward per optimizer
+  step there -- use `ctm_hold_test` as the diagnostic).
+
 - **#1037 is a closed-loop defect, and tree clusters pin its boundary**
   (`tests/test_fermionic_fock_oracle.py`): on an acyclic cluster the fermionic
   and hard-core-boson functionals are not merely close but *identically* equal
