@@ -206,7 +206,7 @@ def test_real_hz_reuses_accepted_probe_and_matches_no_reuse(spy, su_2site, varia
 # ---------------------------------------------------------------------------
 
 
-def _scripted_hz(monkeypatch, plan):
+def _scripted_hz(monkeypatch, plan, *, absolute=False):
     """Replace HZ with ``plan[i]`` for the i-th line search.
 
     Each entry is ``(probe_alpha_factor, return_alpha_factor, accept)``:
@@ -214,13 +214,17 @@ def _scripted_hz(monkeypatch, plan):
     ``ret * alpha_init`` (φ is evaluated there first if it differs), and
     ``accept`` decides the reported φ: below ``phi0`` (taken) or ``phi0``
     (no decrease, so the step counts as a stall).
-    ``probe=None`` skips dφ entirely.
+    ``probe=None`` skips dφ entirely.  ``absolute=True`` takes the factors
+    as α itself (the same α in every search, as when ``alpha_init`` caps at
+    1.0 in production).
     """
     calls = {"n": 0}
 
     def _hz(phi, dphi, phi0, _slope, *, alpha_init, **_kw):
         probe, ret, accept = plan[min(calls["n"], len(plan) - 1)]
         calls["n"] += 1
+        if absolute:
+            alpha_init = 1.0
         if probe is not None:
             phi(probe * alpha_init)
             dphi(probe * alpha_init)
@@ -278,9 +282,14 @@ def test_dphi_at_a_different_alpha_is_not_reused(spy, su_2site, monkeypatch):
 
 
 def test_probe_from_an_earlier_line_search_is_not_reused(spy, su_2site, monkeypatch):
-    # LS 1 rejects after dφ at 0.5·α0; LS 2 accepts 0.5·α0 having run φ only.
-    # The LS-1 probe has the same α factor but belongs to another search.
-    _scripted_hz(monkeypatch, [_REJECT, (None, 0.5, True), (None, 0.5, True)])
+    # LS 1 rejects after dφ at α=0.01; LS 2 accepts the same α=0.01 having
+    # run φ only.  The LS-1 probe matches α exactly but belongs to another
+    # search (at the pre-noise params), so it must not be carried.
+    _scripted_hz(
+        monkeypatch,
+        [(0.01, 0.01, False), (None, 0.01, True), (None, 0.01, True)],
+        absolute=True,
+    )
     c = spy()
     _run(*_scripted_2site(su_2site, 3, gs_stall_recovery="noise"))
     assert c.takes == [False, False, False]
