@@ -373,6 +373,4 @@ def test_scan_ctm_config_uses_the_gauge_invariant_criterion():
     assert cfg.chi == 32
     # The knobs the scan does NOT deviate on, so the deviation stays minimal.
     assert cfg.projector_method == "svd"
-    from tenax import CTMConfig
-
-    assert cfg.forward_gauge == CTMConfig().forward_gauge
+    assert cfg.forward_gauge == "phase"
