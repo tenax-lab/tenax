@@ -253,6 +253,41 @@ def test_mixing_reaches_the_implicit_ad_forward_per_value(monkeypatch):
     assert seen == [0.25, 0.5]
 
 
+def test_sigma_gauged_forward_hands_mixing_to_the_loop(monkeypatch):
+    """The implicit-AD forward passes mixing on to the shared loop."""
+    import tenax.algorithms._ctm_energy_ad as ead
+    from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
+
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    def _spy(*args, **kwargs):
+        seen.append(kwargs["mixing"])
+        raise _Stop
+
+    monkeypatch.setattr(ead, "_run_ctm_loop_with_bump", _spy)
+    site = _dense_site()
+    with pytest.raises(_Stop):
+        ead._sigma_gauged_ctm_converge(
+            {(0, 0): site, (1, 0): site},
+            CHECKERBOARD_NEIGHBORS,
+            chi=4,
+            max_iter=5,
+            conv_tol=1e-10,
+            projector_method="svd",
+            renormalize=True,
+            projector_backward="auto",
+            qr_warmup_steps=0,
+            env_init=None,
+            forward_gauge="bond_phase",
+            conv_method="elementwise",
+            mixing=0.35,
+        )
+    assert seen == [0.35]
+
+
 def test_mixing_reaches_the_ad_loss(monkeypatch):
     """make_ctm_energy_fn forwards CTMConfig.ctm_mixing to the implicit loss."""
     import tenax.algorithms._ctm_energy_ad as ead
