@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import math
 
+import jax
+import numpy as np
+
 __all__ = [
     "CTMLoopResult",
     "_run_ctm_loop_with_bump",
@@ -28,6 +31,7 @@ from tenax.algorithms._ctm_tensor_convergence import (
     _max_env_leaf_diff,
     _max_virtual_bond_dim,
     _nan_safe_max,
+    _tensor_leaf_data,
 )
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
@@ -124,6 +128,62 @@ class CTMLoopResult(NamedTuple):
     # sweep count and so inflated every ``total_s / iterations`` per-sweep
     # timing derived from a bailed run.
     best_iteration: int = 0
+    # Signed estimate of the dominant multiplier of the gauged CTM step on the
+    # last two sweeps, ``Re<d_n, d_{n-1}> / |d_{n-1}|^2`` with
+    # ``d_n = gauge(step(e_n)) - e_n`` (#1060).  Near ``+rho`` (0 < rho < 1)
+    # for a slow contraction; near ``-1`` for a two-state cycle around an
+    # unstable fixed point, which ``mixing`` can stabilize.  NaN when it is
+    # not measurable (``conv_method="sv"``, fewer than two measured sweeps,
+    # or a block-layout change between sweeps).
+    step_multiplier: float = float("nan")
+
+
+def _env_leaf_data(envs: dict) -> list:
+    """Numeric buffers of every env leaf, in a fixed coordinate order."""
+    return [
+        _tensor_leaf_data(leaf)
+        for c in sorted(envs)
+        for leaf in jax.tree.leaves(envs[c])
+    ]
+
+
+def _step_multiplier(start_n, fixed_n, start_prev, fixed_prev) -> float:
+    """Signed multiplier ``Re<d_n, d_{n-1}> / |d_{n-1}|^2`` (#1060).
+
+    ``d_k = fixed_k - start_k`` is the undamped residual of sweep ``k``.  With
+    ``d_n = rho d_{n-1}`` this returns ``rho`` exactly; its sign separates a
+    two-state cycle (rho near -1) from a slow contraction (0 < rho < 1),
+    which the unsigned element-wise residual cannot.  Returns NaN when the
+    four environments do not share one leaf layout.
+    """
+    try:
+        cur = [
+            np.asarray(f) - np.asarray(s)
+            for f, s in zip(
+                _env_leaf_data(fixed_n), _env_leaf_data(start_n), strict=True
+            )
+        ]
+        prev = [
+            np.asarray(f) - np.asarray(s)
+            for f, s in zip(
+                _env_leaf_data(fixed_prev), _env_leaf_data(start_prev), strict=True
+            )
+        ]
+        num = sum(float(np.real(np.vdot(p, c))) for p, c in zip(prev, cur, strict=True))
+        den = sum(float(np.real(np.vdot(p, p))) for p in prev)
+    except (ValueError, TypeError):
+        return float("nan")
+    return num / den if den > 0.0 else float("nan")
+
+
+def _mix_envs(fixed: dict, start: dict, mixing: float) -> dict:
+    """``(1 - mixing) * fixed + mixing * start``, leaf by leaf (#1060)."""
+    return {
+        c: jax.tree.map(
+            lambda a, b: (1.0 - mixing) * a + mixing * b, fixed[c], start[c]
+        )
+        for c in fixed
+    }
 
 
 def _run_ctm_loop_with_bump(
@@ -145,6 +205,7 @@ def _run_ctm_loop_with_bump(
     conv_tol: float,
     conv_method: str,
     plateau_patience: int | None,
+    mixing: float = 0.0,
 ) -> CTMLoopResult:
     """Run CTM sweeps with optional variPEPS-style in-CTM chi-bump.
 
@@ -155,7 +216,34 @@ def _run_ctm_loop_with_bump(
     gauge_fix_fn:
         Callable (envs_new, envs_old) -> envs, or None.  Phase gauge wraps a
         single-arg phase fix; sigma gauge uses both args.  None disables.
+
+    mixing:
+        Linear mixing ``beta`` in ``[0, 1)`` (#1060).  ``0`` (default) is the
+        plain iteration.  ``beta > 0`` iterates
+        ``e <- (1 - beta) * gauge(step(e)) + beta * e``, which has the same
+        fixed points as the plain map but turns a step multiplier ``lambda``
+        into ``(1 - beta) * lambda + beta``: a two-state cycle around an
+        unstable fixed point (``lambda < -1``) contracts once ``beta`` is
+        large enough.  Convergence is still certified on the *undamped*
+        residual ``|gauge(step(e)) - e|``, so a converged result is a fixed
+        point of the plain gauged step, the premise of the implicit adjoint.
+        Requires ``conv_method="elementwise"`` and a ``gauge_fix_fn``: mixing
+        is element-wise, so it is meaningful only between gauge-aligned
+        environments.
     """
+    if not 0.0 <= mixing < 1.0:
+        raise ValueError(f"mixing must be in [0, 1), got {mixing!r}")
+    if mixing > 0.0 and conv_method != "elementwise":
+        raise ValueError(
+            "mixing > 0 requires conv_method='elementwise': the convergence "
+            "test must measure the undamped element-wise residual"
+        )
+    if mixing > 0.0 and gauge_fix_fn is None:
+        raise ValueError(
+            "mixing > 0 requires a gauge fix (e.g. forward_gauge='bond_phase'): "
+            "element-wise mixing of environments in unrelated gauges is "
+            "meaningless"
+        )
     # Compute base_charges for the symmetric env-pad path; ignored by dense
     # envs.  Cost is one D⁴ contraction per CTM-converge invocation — same
     # total work as before the helper consolidation (was previously done
@@ -181,6 +269,23 @@ def _run_ctm_loop_with_bump(
     best_iter = 0
     iters_since_best = 0
     bump_extra_sweeps = 0
+    # (start, gauge(step(start))) of the last two measured sweeps, for the
+    # signed step multiplier (#1060).
+    last_pair: tuple[dict, dict] | None = None
+    prev_pair: tuple[dict, dict] | None = None
+    # Last gauge(step(start)).  With mixing the loop variable ``envs`` holds
+    # the mixed iterate, so an exhausted budget returns this instead: a plain
+    # CTM output, not a blend no step produced.
+    envs_fixed = envs_init
+
+    def _multiplier() -> float:
+        if last_pair is None or prev_pair is None:
+            return float("nan")
+        mu = _step_multiplier(*last_pair, *prev_pair)
+        # Under mixing the residual ratio is the mixed map's multiplier
+        # (1 - beta) lam + beta; report the plain step's lam, so the number
+        # means the same thing whether or not mixing is on.
+        return (mu - mixing) / (1.0 - mixing)
 
     for i in range(remaining):
         if i + bump_extra_sweeps >= remaining:
@@ -231,12 +336,19 @@ def _run_ctm_loop_with_bump(
             best_diff = float("inf")
             best_envs = None
             iters_since_best = 0
+            # The bump changes chi: residuals across it share no layout.
+            last_pair = prev_pair = None
+            envs_fixed = envs
             continue
 
         if gauge_fix_fn is not None:
             envs = gauge_fix_fn(envs_new, envs_at_iter_start)
         else:
             envs = envs_new
+        # ``envs`` is now gauge(step(start)); keep the pair for the multiplier.
+        envs_fixed = envs
+        if conv_method == "elementwise":
+            prev_pair, last_pair = last_pair, (envs_at_iter_start, envs_fixed)
 
         total_iter = i + 1 + bump_extra_sweeps
         if total_iter < min_iter:
@@ -245,17 +357,24 @@ def _run_ctm_loop_with_bump(
                     prev_svs[c] = _corner_singular_values(envs[c].C1)
             else:
                 prev_envs = {c: envs[c] for c in envs}
+            if mixing > 0.0:
+                envs = _mix_envs(envs_fixed, envs_at_iter_start, mixing)
             continue
 
         plateau_metric_valid = False
         if conv_method == "elementwise":
-            if prev_envs is None:
+            if prev_envs is None and mixing == 0.0:
                 prev_envs = {c: envs[c] for c in envs}
                 continue
+            # With mixing the stored iterate is not gauge(step(start)), so the
+            # residual is measured directly against this sweep's start: the
+            # undamped |gauge(step(e)) - e|.  Without mixing ``prev_envs`` is
+            # that same start, so both branches measure one quantity.
+            reference = envs_at_iter_start if mixing > 0.0 else prev_envs
             max_diff = 0.0
             for c in sorted(envs):
                 max_diff = _nan_safe_max(
-                    max_diff, _max_env_leaf_diff(prev_envs[c], envs[c])
+                    max_diff, _max_env_leaf_diff(reference[c], envs[c])
                 )
             converged = max_diff < conv_tol
             final_diff = max_diff
@@ -318,6 +437,7 @@ def _run_ctm_loop_with_bump(
                 final_chi=chi_current,
                 bump_extra_sweeps=bump_extra_sweeps,
                 best_iteration=total_iter,
+                step_multiplier=_multiplier(),
             )
 
         if plateau_patience is not None and plateau_metric_valid:
@@ -343,10 +463,14 @@ def _run_ctm_loop_with_bump(
                         final_chi=chi_current,
                         bump_extra_sweeps=bump_extra_sweeps,
                         best_iteration=best_iter or total_iter,
+                        step_multiplier=_multiplier(),
                     )
 
+        if mixing > 0.0:
+            envs = _mix_envs(envs_fixed, envs_at_iter_start, mixing)
+
     return CTMLoopResult(
-        envs=envs,
+        envs=envs_fixed if mixing > 0.0 else envs,
         converged=False,
         iterations=remaining,
         sv_diff=final_diff,
@@ -355,4 +479,5 @@ def _run_ctm_loop_with_bump(
         final_chi=chi_current,
         bump_extra_sweeps=bump_extra_sweeps,
         best_iteration=remaining,
+        step_multiplier=_multiplier(),
     )
