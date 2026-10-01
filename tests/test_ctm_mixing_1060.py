@@ -142,6 +142,21 @@ def test_step_multiplier_reports_the_plain_map_under_mixing():
     assert res.step_multiplier == pytest.approx(lam, rel=1e-9)
 
 
+def test_exhausted_budget_returns_a_plain_step_output():
+    """Out of budget under mixing, the env returned is gauge(step(e)), not a blend.
+
+    One sweep from ``s`` gives ``F(s)``; the mixed iterate
+    ``(1 - beta) F(s) + beta s`` is a point no CTM step produced.
+    """
+    res = _run(-1.5, mixing=0.5, max_iter=1, conv_tol=0.0)
+    expected, _, _ = _linear_step(-1.5)({}, _start())
+    for c in COORDS:
+        for a, b in zip(
+            jax.tree.leaves(res.envs[c]), jax.tree.leaves(expected[c]), strict=True
+        ):
+            np.testing.assert_allclose(np.asarray(a), np.asarray(b), atol=1e-14)
+
+
 def test_step_multiplier_is_nan_without_two_measured_sweeps():
     res = _run(0.5, mixing=0.0, max_iter=1, conv_tol=0.0)
     assert np.isnan(res.step_multiplier)
