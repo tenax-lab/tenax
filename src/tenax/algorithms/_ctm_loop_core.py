@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 
 import jax
-import numpy as np
+import jax.numpy as jnp
 
 __all__ = [
     "CTMLoopResult",
@@ -156,23 +156,21 @@ def _step_multiplier(start_n, fixed_n, start_prev, fixed_prev) -> float:
     which the unsigned element-wise residual cannot.  Returns NaN when the
     four environments do not share one leaf layout.
     """
-    try:
-        cur = [
-            np.asarray(f) - np.asarray(s)
-            for f, s in zip(
-                _env_leaf_data(fixed_n), _env_leaf_data(start_n), strict=True
-            )
-        ]
-        prev = [
-            np.asarray(f) - np.asarray(s)
-            for f, s in zip(
-                _env_leaf_data(fixed_prev), _env_leaf_data(start_prev), strict=True
-            )
-        ]
-        num = sum(float(np.real(np.vdot(p, c))) for p, c in zip(prev, cur, strict=True))
-        den = sum(float(np.real(np.vdot(p, p))) for p in prev)
-    except (ValueError, TypeError):
+    legs = [_env_leaf_data(e) for e in (fixed_n, start_n, fixed_prev, start_prev)]
+    if len({len(x) for x in legs}) != 1 or any(
+        len({jnp.shape(a) for a in group}) != 1 for group in zip(*legs)
+    ):
         return float("nan")
+    # Reduce on device and move only the two scalars to the host: this runs
+    # on every loop exit, mixing or not (Codex P2 on #1061).
+    num = jnp.zeros(())
+    den = jnp.zeros(())
+    for fn, sn, fp, sp in zip(*legs):
+        cur = fn - sn
+        prev = fp - sp
+        num = num + jnp.real(jnp.vdot(prev, cur))
+        den = den + jnp.real(jnp.vdot(prev, prev))
+    num, den = float(num), float(den)
     return num / den if den > 0.0 else float("nan")
 
 
@@ -426,9 +424,15 @@ def _run_ctm_loop_with_bump(
                 # budget runs on and ``max_iter`` decides.
                 plateau_metric_valid = math.isfinite(max_diff)
 
+        # The residual just measured belongs to this sweep's start.  Without
+        # mixing that start is the previous output and ``envs`` is its own
+        # contraction, so returning ``envs`` is conventional; with mixing the
+        # plain step may expand (|lam| > 1 is what mixing is for), so return
+        # the iterate that was actually certified (Codex P2 on #1061).
+        certified = envs_at_iter_start if mixing > 0.0 else envs
         if converged:
             return CTMLoopResult(
-                envs=envs,
+                envs=certified,
                 converged=True,
                 iterations=total_iter,
                 sv_diff=final_diff,
@@ -443,7 +447,7 @@ def _run_ctm_loop_with_bump(
         if plateau_patience is not None and plateau_metric_valid:
             if final_diff < best_diff:
                 best_diff = final_diff
-                best_envs = {c: envs[c] for c in envs}
+                best_envs = {c: certified[c] for c in certified}
                 best_iter = total_iter
                 iters_since_best = 0
             else:

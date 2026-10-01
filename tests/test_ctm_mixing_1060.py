@@ -17,7 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tenax.algorithms._ctm_loop_core import _run_ctm_loop_with_bump
+from tenax.algorithms._ctm_loop_core import _run_ctm_loop_with_bump, _step_multiplier
 
 jax.config.update("jax_enable_x64", True)
 
@@ -110,15 +110,22 @@ def test_mixing_converges_a_flip_unstable_fixed_point():
             np.testing.assert_allclose(np.asarray(a), np.asarray(b), atol=1e-9)
 
 
-@pytest.mark.parametrize("mixing", [0.0, 0.5, 0.9])
-def test_convergence_is_certified_on_the_undamped_residual(mixing):
+@pytest.mark.parametrize(
+    "lam, mixing", [(0.5, 0.0), (0.5, 0.5), (0.5, 0.9), (-9.0, 0.85)]
+)
+def test_convergence_is_certified_on_the_undamped_residual(lam, mixing):
     """A converged result is a fixed point of the plain map, at any mixing.
 
     With mixing 0.9 consecutive *mixed* iterates differ by only a tenth of
     the undamped residual, so a loop that tested the mixed difference would
     certify an environment ten times further from stationary than conv_tol.
+
+    lam = -9 under mixing 0.85 (mixed multiplier -0.5) is the expanding case
+    mixing exists for: the certified iterate e has |F(e) - e| < tol, but F(e)
+    itself has 9x that, so returning the plain step's output instead of the
+    certified iterate fails here (Codex P2 on #1061).
     """
-    lam, tol = 0.5, 1e-8
+    tol = 1e-8
     res = _run(lam, mixing=mixing, conv_tol=tol, max_iter=2000)
     assert res.converged
     assert _undamped_residual(lam, res.envs) < tol
@@ -160,6 +167,17 @@ def test_exhausted_budget_returns_a_plain_step_output():
 def test_step_multiplier_is_nan_without_two_measured_sweeps():
     res = _run(0.5, mixing=0.0, max_iter=1, conv_tol=0.0)
     assert np.isnan(res.step_multiplier)
+
+
+def test_step_multiplier_is_nan_across_a_layout_change():
+    """Residuals measured at different chi share no layout: NaN, not a raise
+    or a broadcast product (the reduction runs on device, unguarded by
+    numpy's object-array fallbacks)."""
+    small = _start()
+    big = {c: {"C": jnp.zeros(4), "T": jnp.zeros((2, 2))} for c in COORDS}
+    assert np.isnan(_step_multiplier(small, small, big, big))
+    row = {c: {"C": jnp.zeros((1, 3)), "T": jnp.zeros((2, 2))} for c in COORDS}
+    assert np.isnan(_step_multiplier(small, small, row, row))
 
 
 @pytest.mark.parametrize(
