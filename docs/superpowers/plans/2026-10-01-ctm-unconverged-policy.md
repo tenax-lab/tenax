@@ -447,11 +447,9 @@ def test_site1_missing_diagnostic_skips_check(monkeypatch):
     """Review Focus 2: no forward_converged key -> no check, no stale reuse."""
     monkeypatch.setattr(_cea, "get_last_implicit_ad_diagnostics", lambda: {})
     cfg = _cfg("2site", "raise", max_iter=200, steps=2)
-    cfg.ctm.conv_tol  # noqa: B018  (config is frozen-ish; just exercise)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        out = _opt.optimize_gs_ad(_heisenberg_gate(), _init("2site"), _cfg(
-            "2site", "raise", max_iter=200, steps=2))
+        out = _opt.optimize_gs_ad(_heisenberg_gate(), _init("2site"), cfg)
     assert out[-1]["ctm_converged"] == []
 
 
@@ -766,13 +764,18 @@ git commit -m "feat(#1059): reject unconverged line-search trials (phi=+inf) unl
 
 ```python
 def _final_eval_unconverged(monkeypatch):
-    """Make every COLD (env_init=None) forward after the loop report unconverged."""
+    """Make every COLD (env_init=None) forward that comes AFTER at least one
+    warm forward report unconverged: the loop's warm calls precede the cold
+    final evaluations (#899 removed env_init from the final evaluation only)."""
     real = _cpl.python_loop_ctm_converge
-    state = {"in_final": False}
+    state = {"warm_seen": False, "armed_seen": False}
 
     def spy(*a, **k):
         envs, info = real(*a, **k)
-        if state["in_final"] and k.get("env_init") is None:
+        if k.get("env_init") is not None:
+            state["warm_seen"] = True
+        elif state["warm_seen"]:
+            state["armed_seen"] = True
             return envs, info._replace(converged=False)
         return envs, info
 
@@ -782,29 +785,16 @@ def _final_eval_unconverged(monkeypatch):
 
 def test_site4_falls_back_to_warm(monkeypatch):
     state = _final_eval_unconverged(monkeypatch)
-    real_save = _opt.save_checkpoint if hasattr(_opt, "save_checkpoint") else None
-    # flip into "final" mode when the loop ends: the 2-site loop flushes a
-    # force_last checkpoint right before the fresh evaluation, so hook that
-    import tenax.algorithms._checkpoint as _ck
-    orig = _ck.save_checkpoint
-
-    def hook(*a, **k):
-        state["in_final"] = True
-        return orig(*a, **k)
-
-    monkeypatch.setattr(_ck, "save_checkpoint", hook)
     cfg = _cfg("2site", "raise", max_iter=300, steps=1)
-    cfg = cfg.__class__(**{**cfg.__dict__, "gs_checkpoint_path": None})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         out = _opt.optimize_gs_ad(_heisenberg_gate(), _init("2site"), cfg)
+    assert state["armed_seen"], "final cold evaluation was never reached"
     assert out[-1]["final_env_source"] == "warm_fallback"
     assert math.isfinite(out[2])
 ```
 
-> **Implementer note:** the "enter final mode" hook above is fragile (it depends on the checkpoint flush ordering). Prefer a direct seam: factor the end-of-run block into a nested helper and expose a module-level flag. Or, simpler: spy on `_cpl.python_loop_ctm_converge` and flip `in_final` the first time `env_init is None` occurs **after** at least one call with `env_init is not None` has happened (the loop's warm calls precede the cold final ones; #899 removed `env_init` from the final evaluation only). Write it that way and delete the checkpoint hook.
->
-> Also add:
+> **Implementer note:** if the first step's own forward is cold (no `envs_init`), it precedes every warm call, so the spy only arms after a warm call has been seen. That is intended. Also add:
 > - `test_site4_raises_without_converged_warm`: patch so that the best-env snapshot is empty (`steps=0` is invalid; use `gs_num_steps=1` with a monkeypatched `_should_restore_best_env` returning `False`), and assert `CTMNotConvergedError` with `site == "final_energy"`;
 > - `test_site4_warn_legacy`: same as above under `"warn"`; assert `pytest.warns(CTMNotConvergedWarning)` and `final_env_source == "fresh"`.
 
