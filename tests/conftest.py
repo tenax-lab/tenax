@@ -163,6 +163,7 @@ _FILE_MARKERS = {
     # in ctm_tensor_2site / ctm_multisite: a regression that certifies a
     # saddle again, or rejects an attractor, changes every eager seed.
     "test_ctm_hold.py": "core",
+    "test_ctm_unconverged_policy.py": "core",
     # The #911 ``recipe="1x1"`` deprecation contract.  ``core`` rather than the
     # ``_UNBUCKETED_LEGACY`` set the older deprecation files sit in: a warning
     # that silently stops firing is indistinguishable from one nobody hit, and

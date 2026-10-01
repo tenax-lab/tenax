@@ -271,6 +271,11 @@ class CTMConfig:
     # (or when the CTM actually converges) for strict variational
     # gradients.
     plateau_patience: int | None = 20
+    # What to do when a CTM forward feeding a gradient or a reported energy
+    # returns converged=False (#1059/#1060): "raise" (default) fails loudly;
+    # "warn" keeps the legacy control flow and emits CTMNotConvergedWarning.
+    # See tenax.algorithms._ctm_convergence_policy.
+    on_unconverged: str = "raise"
     # Issue #503: line-search φ probes don't need a fully converged env.
     # When set, these override ``max_iter`` / ``conv_tol`` only on the
     # forward-only ``loss_fn_fwd`` path used by ``hager_zhang_line_search``
@@ -322,6 +327,11 @@ class CTMConfig:
     rel_floor: float | None = None
 
     def __post_init__(self):
+        if self.on_unconverged not in ("raise", "warn"):
+            raise ValueError(
+                f"CTMConfig.on_unconverged must be 'raise' or 'warn', "
+                f"got {self.on_unconverged!r}"
+            )
         valid_modes = {
             None,
             "c4v_reference",
