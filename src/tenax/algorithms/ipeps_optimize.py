@@ -132,6 +132,9 @@ class _AcceptedProbeEval:
         energy, grads = jax.value_and_grad(loss_fn)(trial)
         grads = _euclidean_grads(grads)
         if self._enabled:
+            # Async backends (CUDA/TPU) return once the work is enqueued; sync
+            # so ``dt`` is evaluation time, like the fresh path's step timer.
+            jax.block_until_ready((energy, grads))
             dt = _time.perf_counter() - t0
             self._probe = (alpha, trial, cfg, energy, grads, dt)
         return grads

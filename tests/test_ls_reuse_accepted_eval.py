@@ -393,3 +393,24 @@ def test_carry_requires_identical_params_and_cfg():
     E, g, dt = ev.take(new, cfg)
     assert float(E) == float(jnp.sum(trial**2)) and dt >= 0.0
     assert ev.take(new, cfg) is None  # a carry is used at most once
+
+
+def test_probe_timer_waits_for_the_evaluation(monkeypatch):
+    """On async backends value_and_grad returns before the work is done; the
+    recorded probe time must cover a sync on the probe's own outputs."""
+    synced = []
+    real_block = jax.block_until_ready
+
+    def _spy_block(x):
+        synced.append(x)
+        return real_block(x)
+
+    monkeypatch.setattr(_opt.jax, "block_until_ready", _spy_block)
+    ev = _opt._AcceptedProbeEval(enabled=True)
+    trial = jnp.arange(3.0)
+    ev.start()
+    grads = ev.probe(lambda x: jnp.sum(x**2), 0.5, trial, CTMConfig(chi=4))
+    assert len(synced) == 1
+    energy, synced_grads = synced[0]
+    assert float(energy) == float(jnp.sum(trial**2))
+    assert synced_grads is grads
