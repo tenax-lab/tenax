@@ -861,6 +861,14 @@ def get_last_implicit_ad_diagnostics() -> dict:
     return dict(_F3_LAST_DIAGNOSTICS)
 
 
+def reset_forward_diagnostics() -> None:
+    """Drop the forward-verdict keys so a later read cannot see a stale
+    value from a previous call (the optimizer calls this before each
+    value_and_grad; a missing key afterwards means no forward ran)."""
+    _F3_LAST_DIAGNOSTICS.pop("forward_converged", None)
+    _F3_LAST_DIAGNOSTICS.pop("forward_stationarity_residual", None)
+
+
 def _ctm_energy_implicit_dispatch(
     params_data_tuple,
     coords,

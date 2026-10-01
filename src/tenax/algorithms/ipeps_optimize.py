@@ -80,6 +80,77 @@ def _drop_env_cache_for_reset(env_cache: dict) -> None:
     invalidate_implicit_ad_warm_start()
 
 
+def _should_restore_best_env(best_envs, chi) -> bool:
+    """CTMNotConvergedError reset: restore the converged best env only when it
+    exists and its chi matches the current chi (else the #518 clear path)."""
+    if not best_envs:
+        return False
+    from tenax.algorithms.ad_utils import _env_chi
+
+    return _env_chi(best_envs) == chi
+
+
+def _site1_forward_info(step_index: int, ctm_cfg, history: tuple | None):
+    """Site 1 of #1059: check the gradient forward's convergence verdict.
+
+    Reads the implicit-AD forward diagnostics through the module attribute at
+    call time (so tests can monkeypatch it).  A missing ``forward_converged``
+    key means no forward wrote one this call (the caller popped it before
+    ``value_and_grad``): skip the check rather than reuse a stale value.
+    Raises ``CTMNotConvergedError`` under ``on_unconverged="raise"``; warns
+    under ``"warn"``.  When ``history`` is given (``(converged, sv_diff,
+    multiplier)`` lists), appends one entry per checked step.
+    """
+    import tenax.algorithms._ctm_energy_ad as _cea
+    from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
+    from tenax.algorithms._ctm_python_loop import CTMConvergeInfo
+
+    d = _cea.get_last_implicit_ad_diagnostics()
+    if "forward_converged" not in d:
+        return
+    info = CTMConvergeInfo(
+        converged=bool(d["forward_converged"]),
+        iterations=-1,
+        sv_diff=float(d.get("forward_stationarity_residual", float("nan"))),
+    )
+    ok = check_ctm_converged(
+        info,
+        site="gradient",
+        policy=ctm_cfg.on_unconverged,
+        step=step_index,
+        conv_tol=ctm_cfg.conv_tol,
+        chi=ctm_cfg.chi,
+    )
+    if history is not None:
+        conv_list, sv_list, mult_list = history
+        conv_list.append(bool(ok))
+        sv_list.append(float(info.sv_diff))
+        # The gradient-forward diagnostics carry no step multiplier.
+        mult_list.append(None)
+
+
+def _log_ctm_not_converged_reset(
+    exc, *, conv_tol, n_reset: int, retries: int, verbose: bool
+) -> None:
+    """Spec section 3 reset log line (logger always; stdout when verbose)."""
+    from tenax.algorithms._ctm_convergence_policy import (
+        _fmt,
+        format_step_multiplier,
+    )
+
+    info = exc.info
+    msg = (
+        f"[iPEPS-AD] CTM forward not converged at step {exc.step} "
+        f"(sweeps {_fmt(getattr(info, 'iterations', None), 'd')}, sv_diff "
+        f"{_fmt(getattr(info, 'sv_diff', None), '.3g')} vs tol "
+        f"{_fmt(conv_tol, 'g')}, step multiplier {format_step_multiplier(info)}) "
+        f"— reset to best (#{n_reset}/{retries})"
+    )
+    _logger.warning(msg)
+    if verbose:
+        print(msg, flush=True)
+
+
 def _apply_chi_bump(
     ctm_cfg: CTMConfig,
     env_cache: dict,
@@ -1142,6 +1213,7 @@ def _optimize_gs_ad_tensor(
     _warn_implicit_ad_variational_caveat(config, path="1-site Tensor-protocol")
     import optax
 
+    import tenax.algorithms._ctm_energy_ad as _cea
     from tenax.algorithms._checkpoint import (
         _config_to_dict,
         cg_gates_fingerprint,
@@ -1151,6 +1223,7 @@ def _optimize_gs_ad_tensor(
         save_checkpoint,
         validate_config,
     )
+    from tenax.algorithms._ctm_convergence_policy import CTMNotConvergedError
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
@@ -1520,6 +1593,21 @@ def _optimize_gs_ad_tensor(
     _jit_compile_time: float = 0.0
     _first_step = True
     _converged = False
+    # Site 1 of #1059: per-step gradient-forward convergence verdicts.
+    _hist_ctm_converged: list[bool] = []
+    _hist_ctm_sv_diff: list[float] = []
+    _hist_ctm_mult: list = []
+    # The implicit-AD fused forward writes ``forward_converged``; the split
+    # and explicit-AD paths do not, so skip the check (and the pop) there.
+    _site1_check = config.gs_implicit_ad and not use_split
+
+    def _restore_best_env():
+        """Reset for CTMNotConvergedError: restore the converged best env
+        when its chi matches; otherwise clear it (#518)."""
+        best = best_env_cache.get("envs") if best_env_cache else None
+        _drop_env_cache_for_reset(_env_cache)
+        if _should_restore_best_env(best, ctm_cfg.chi):
+            _env_cache.update(best_env_cache)
 
     # CTM conv_tol schedule: update ctm_cfg when tolerance changes
     _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
@@ -1788,9 +1876,51 @@ def _optimize_gs_ad_tensor(
         if config.return_history:
             _step_t0 = _time.perf_counter()
         try:
+            if _site1_check:
+                _cea.reset_forward_diagnostics()
             energy_val, grads = jax.value_and_grad(loss_fn)(params)
             grads = _euclidean_grads(grads)
-        except CTMRGGradientError as exc:
+            if _site1_check:
+                _site1_forward_info(
+                    step + 1,
+                    ctm_cfg,
+                    (_hist_ctm_converged, _hist_ctm_sv_diff, _hist_ctm_mult),
+                )
+        except (CTMRGGradientError, CTMNotConvergedError) as exc:
+            if isinstance(exc, CTMNotConvergedError):
+                # #1059 section 3: restore the converged best env rather than
+                # cold-start; checkpoint and re-raise when recovery is
+                # impossible (the reset target is the failing point, no best
+                # accepted yet, budget spent, or not "reset").
+                if (
+                    params is best_params
+                    or best_energy == float("inf")
+                    or config.gs_stall_recovery != "reset"
+                    or stall_count + 1 > config.gs_stall_recovery_retries
+                ):
+                    _maybe_save_1s_checkpoint(
+                        step, ctm_cfg.chi, best_energy, force_last=True
+                    )
+                    raise
+                _log_ctm_not_converged_reset(
+                    exc,
+                    conv_tol=ctm_cfg.conv_tol,
+                    n_reset=stall_count + 1,
+                    retries=config.gs_stall_recovery_retries,
+                    verbose=config.gs_verbose,
+                )
+                stall_count += 1
+                params = best_params
+                _restore_best_env()
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_A_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                continue
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
                 "skipping, triggering stall recovery",
@@ -2586,6 +2716,9 @@ def _optimize_gs_ad_tensor(
             "jit_compile_time": _jit_compile_time,
             "num_steps": len(_history_energies),
             "converged": _converged,
+            "ctm_converged": _hist_ctm_converged,
+            "ctm_sv_diff": _hist_ctm_sv_diff,
+            "ctm_step_multiplier": _hist_ctm_mult,
         }
         return A_final, env, E_gs, history
     return A_final, env, E_gs
@@ -2815,6 +2948,7 @@ def _optimize_gs_ad_tensor_2site(
             )
     import optax
 
+    import tenax.algorithms._ctm_energy_ad as _cea
     from tenax.algorithms._checkpoint import (
         _config_to_dict,
         checkpoint_exists,
@@ -2823,6 +2957,7 @@ def _optimize_gs_ad_tensor_2site(
         save_checkpoint,
         validate_config,
     )
+    from tenax.algorithms._ctm_convergence_policy import CTMNotConvergedError
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor import (
         compute_energy_ctm_tensor_2site,
@@ -3154,6 +3289,16 @@ def _optimize_gs_ad_tensor_2site(
         if envs_init is not None:
             _env_cache_2s.update(best_env_cache_2s or {"envs": envs_init})
 
+    def _restore_best_env_2s():
+        """Reset for CTMNotConvergedError: restore the converged best env
+        when its chi matches; otherwise fall back to _reset_env_cache_2s."""
+        best = best_env_cache_2s.get("envs") if best_env_cache_2s else None
+        if _should_restore_best_env(best, ctm_cfg_2s.chi):
+            _drop_env_cache_for_reset(_env_cache_2s)
+            _env_cache_2s.update(best_env_cache_2s)
+        else:
+            _reset_env_cache_2s()
+
     # Optional trajectory capture (config.return_history).  Always allocated
     # but only populated/returned when the flag is set.
     _history_energies: list[float] = []
@@ -3161,6 +3306,13 @@ def _optimize_gs_ad_tensor_2site(
     _jit_compile_time: float = 0.0
     _first_step = True
     _converged = False
+    # Site 1 of #1059: per-step gradient-forward convergence verdicts.
+    _hist_ctm_converged: list[bool] = []
+    _hist_ctm_sv_diff: list[float] = []
+    _hist_ctm_mult: list = []
+    # The implicit-AD fused forward writes ``forward_converged``; the split
+    # and explicit-AD paths do not, so skip the check (and the pop) there.
+    _site1_check_2s = config.gs_implicit_ad and not use_split_2s
 
     # CTM conv_tol schedule (shared helper with 1-site optimizer)
     _conv_tol_schedule_2s = config.gs_ctm_conv_tol_schedule
@@ -3481,9 +3633,55 @@ def _optimize_gs_ad_tensor_2site(
             if config.return_history:
                 _step_t0 = _time.perf_counter()
             try:
+                if _site1_check_2s:
+                    _cea.reset_forward_diagnostics()
                 energy_val, grads = jax.value_and_grad(loss_fn)(params)
                 grads = _euclidean_grads(grads)
-            except CTMRGGradientError as exc:
+                if _site1_check_2s:
+                    _site1_forward_info(
+                        step + 1,
+                        ctm_cfg_2s,
+                        (_hist_ctm_converged, _hist_ctm_sv_diff, _hist_ctm_mult),
+                    )
+            except (CTMRGGradientError, CTMNotConvergedError) as exc:
+                if isinstance(exc, CTMNotConvergedError):
+                    # #1059 section 3: restore the converged best env rather
+                    # than cold-start; checkpoint and re-raise when recovery
+                    # is impossible (the reset target is the failing point,
+                    # no best accepted yet, budget spent, or not "reset").
+                    if (
+                        params is best_params
+                        or best_energy == float("inf")
+                        or config.gs_stall_recovery != "reset"
+                        or stall_count + 1 > config.gs_stall_recovery_retries
+                    ):
+                        _maybe_save_2s_checkpoint(
+                            step, ctm_cfg_2s.chi, best_energy, force_last=True
+                        )
+                        raise
+                    _log_ctm_not_converged_reset(
+                        exc,
+                        conv_tol=ctm_cfg_2s.conv_tol,
+                        n_reset=stall_count + 1,
+                        retries=config.gs_stall_recovery_retries,
+                        verbose=config.gs_verbose,
+                    )
+                    stall_count += 1
+                    params = best_params
+                    _restore_best_env_2s()
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                        prev_params_flat = None
+                        prev_grad_flat = None
+                    if is_cg:
+                        cg_direction = None
+                        prev_grad = None
+                        prev_precond_grad = None
+                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                        opt_state = optimizer.init(params)
+                    # Same streak contract as the CTMRGGradientError branch.
+                    chi_ceiling_consecutive_2s = 0
+                    continue
                 _logger.warning(
                     "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
                     "skipping, triggering stall recovery",
@@ -4406,6 +4604,9 @@ def _optimize_gs_ad_tensor_2site(
                 "jit_compile_time": _jit_compile_time,
                 "num_steps": len(_history_energies),
                 "converged": _converged,
+                "ctm_converged": _hist_ctm_converged,
+                "ctm_sv_diff": _hist_ctm_sv_diff,
+                "ctm_step_multiplier": _hist_ctm_mult,
             }
             return (A_final, B_final), (env_A, env_B), E_gs, history
         return (A_final, B_final), (env_A, env_B), E_gs
