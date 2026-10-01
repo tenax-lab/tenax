@@ -64,6 +64,7 @@ def _run(
     conv_tol=1e-10,
     gauge=_identity_gauge,
     conv_method="elementwise",
+    plateau_patience=None,
 ):
     return _run_ctm_loop_with_bump(
         _linear_step(lam),
@@ -82,7 +83,7 @@ def _run(
         min_iter=0,
         conv_tol=conv_tol,
         conv_method=conv_method,
-        plateau_patience=None,
+        plateau_patience=plateau_patience,
         mixing=mixing,
     )
 
@@ -167,6 +168,17 @@ def test_exhausted_budget_returns_a_plain_step_output():
 def test_step_multiplier_is_nan_without_two_measured_sweeps():
     res = _run(0.5, mixing=0.0, max_iter=1, conv_tol=0.0)
     assert np.isnan(res.step_multiplier)
+
+
+def test_plateau_bail_under_mixing_returns_the_certified_best():
+    """A plateau bail must return the iterate its best residual was measured
+    on.  lam = -9 expands 9x, so the plain step output of that sweep would
+    carry ~9x the reported residual (at the float64 floor: 2.0e-14 against
+    2.2e-15)."""
+    lam = -9.0
+    res = _run(lam, mixing=0.85, conv_tol=0.0, max_iter=2000, plateau_patience=5)
+    assert not res.converged and res.sv_diff > 0.0
+    assert _undamped_residual(lam, res.envs) <= 2.0 * res.sv_diff
 
 
 def test_step_multiplier_is_nan_across_a_layout_change():
