@@ -170,6 +170,22 @@ def test_step_multiplier_is_nan_without_two_measured_sweeps():
     assert np.isnan(res.step_multiplier)
 
 
+def test_without_mixing_the_loop_returns_its_last_step_output():
+    """Default off means unchanged: with mixing 0 a converged loop still
+    returns F applied ``iterations`` times to the start, bit for bit."""
+    lam = 0.5
+    res = _run(lam, mixing=0.0, conv_tol=1e-8)
+    assert res.converged
+    x = _start()
+    for _ in range(res.iterations):
+        x, _, _ = _linear_step(lam)({}, x)
+    for c in COORDS:
+        for a, b in zip(
+            jax.tree.leaves(res.envs[c]), jax.tree.leaves(x[c]), strict=True
+        ):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
 def test_plateau_bail_under_mixing_returns_the_certified_best():
     """A plateau bail must return the iterate its best residual was measured
     on.  lam = -9 expands 9x, so the plain step output of that sweep would
