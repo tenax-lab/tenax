@@ -22,6 +22,19 @@ Production evidence (spinless t-V, D=3, 2-site checkerboard; see #1060 and its c
 
 The implicit-AD gradient is only valid at an element-wise fixed point (#841, #1057). A non-converged forward silently invalidates both the gradient and any energy reported from it.
 
+### No single forward fix covers every failure
+
+Two distinct non-convergence modes have been measured with `bond_phase` and element-wise convergence. Both come from a V=1 D=3 checkerboard state starting from a converged env (#1060 comment 5926626429, plus an independent check on the production r5 step-3 point):
+
+| Mode | Signature | Where seen | Damping (#1061 `ctm_mixing`) |
+|---|---|---|---|
+| **Period-2 cycle** | Sweeps two apart agree to 5e-13 while consecutive sweeps differ by 3.9e-2. The spectra differ, so it is not a gauge rotation. Slow-mode multiplier λ ≈ −1 | χ=20 on the V=1 state; V=1 r5 step 3 at α=1e-6, χ=21 | β=0.3 converges (572 iterations) |
+| **Slow wander** | Gauge-invariant spectra drift about 1.6e-3 per sweep. No 2-cycle | χ=14 on the V=1 state; V=2 seed at χ=12, where E+V wanders between −0.24 and −0.31 (below ED) | Does not cure it (β=0.3, 0.5 leave residuals of 8e-3 and 0.19) |
+
+The within-sector singular-value gap at the χ cut does **not** predict failure: χ=16 converges with 0.39%, χ=14 fails with 0.67%, and the r5 step-3 failure has a clean 10.6% gap.
+
+So there is no cheap pre-check that tells a caller whether a forward can be trusted. Damping helps one mode, and nothing yet fixes the other. That is why every consumer of a forward must check `converged`, independently of any improvement to the forward itself.
+
 ## Goal
 
 Make every CTM forward that feeds a gradient or a reported energy act on `converged=False`. What it does depends on the site (below). The default is to fail loudly. An explicit opt-out keeps today's control flow but still warns.
@@ -42,7 +55,8 @@ New module `src/tenax/algorithms/_ctm_convergence_policy.py`:
 class CTMNotConvergedError(RuntimeError):
     """A CTM forward feeding a gradient or a reported energy did not reach its fixed point."""
     def __init__(self, info: CTMConvergeInfo, site: str, step: int | None = None): ...
-    # attributes: info, site, step; message: site, step, iterations, sv_diff, conv_tol, chi
+    # attributes: info, site, step; message: site, step, iterations, sv_diff, conv_tol, chi,
+    # and the signed step multiplier when available (see below)
 
 class CTMNotConvergedWarning(UserWarning): ...
 
@@ -53,6 +67,7 @@ def check_ctm_converged(info, *, site: str, policy: str, step: int | None = None
     policy "warn"  -> warnings.warn(..., CTMNotConvergedWarning), once per (site, step)."""
 ```
 
+- **Mode in the message.** The message includes `step_multiplier = getattr(info, "step_multiplier", None)`. That field is added by #1061, so this PR does not depend on #1061 landing first. A `None` or NaN value (fewer than two comparable steps, e.g. right after a χ bump, or #1061 absent) is printed as `n/a`. Read it as: ≈ −1 is a flip cycle (damping helps), ≈ +1 is slow monotone convergence (damping hurts; raise `max_iter`), anything else is a wander. The same value is recorded in history as `ctm_step_multiplier`.
 - `CTMConfig` gains `on_unconverged: Literal["raise", "warn"] = "raise"`, validated in `__post_init__`. It does not change `conv_method`, `conv_tol` or `max_iter`.
 - `CTMNotConvergedError` and `CTMNotConvergedWarning` are exported in `src/tenax/__init__.py` `__all__` and noted in `README.md`, per CLAUDE.md.
 
@@ -78,7 +93,7 @@ Add `CTMNotConvergedError` to the existing `except CTMRGGradientError` clauses a
 1. **Restore the best env, don't clear it.** On reset, restore `best_env_cache` when it exists and matches the current χ (the #518 condition). Otherwise clear it, as today. Clearing forces the cold start that produced the V=0 and V=2 failures.
 2. **Checkpoint and raise when recovery is impossible.** That is: the error occurs at `best_params` itself, the stall budget (`gs_stall_recovery_retries`) is spent, or `gs_stall_recovery != "reset"`. In each case write `ckpt.last.pkl` (if `gs_checkpoint_path` is set) and re-raise `CTMNotConvergedError` with step and diagnostics. Do not `break` and return the best energy silently.
 
-History entries gain `ctm_converged` and `ctm_sv_diff`. Each reset logs `[iPEPS-AD] CTM forward not converged at step k (sweeps n, sv_diff x vs tol y) — reset to best (#n/N)`.
+History entries gain `ctm_converged`, `ctm_sv_diff` and `ctm_step_multiplier` (`None` when unavailable). Each reset logs `[iPEPS-AD] CTM forward not converged at step k (sweeps n, sv_diff x vs tol y, step multiplier m|n/a) — reset to best (#n/N)`.
 
 ### 4. Tests
 
@@ -86,7 +101,7 @@ New file `tests/test_ctm_unconverged_policy.py`. Add it to the explicit filename
 
 Non-convergence is forced for real with a small D=2 state and `CTMConfig(max_iter=2, conv_tol=1e-14)`. A one-call monkeypatch of `python_loop_ctm_converge` returning `converged=False` is used only where a specific step must fail (marked ★).
 
-1. `check_ctm_converged`: passes when converged; raises with site/step/iterations/sv_diff; warns under `"warn"`.
+1. `check_ctm_converged`: passes when converged; raises with site/step/iterations/sv_diff; warns under `"warn"`. The message shows a numeric step multiplier when the info carries one, and `n/a` when it is missing or NaN.
 2. `CTMConfig(on_unconverged="bogus")` raises `ValueError`.
 3. Site 1: 2-site and 1-site `optimize_gs_ad` with `max_iter=2` raise `CTMNotConvergedError` after writing `ckpt.last.pkl` to a tmp path. Under `"warn"` the run completes with `ctm_converged=False` in history.
 4. ★ Reset restores `best_env_cache` (the next forward's `env_init` is the best env, not `None`). A χ mismatch clears the cache (the #518 path).
@@ -107,5 +122,7 @@ Regression inventory: run the full suite with the default `"raise"`. Each newly 
 
 - The same helper in multisite, PESS and root-implicit optimizers.
 - Split-CTM forwards surfacing a convergence flag.
-- #1060: masking near-degenerate multiplets at a sector's cut (fixes the χ=18 case).
-- The non-degenerate failure mode (V=1 step 3, V=2 χ=12), once its spike lands.
+- **Period-2 mode:** #1061 `ctm_mixing` (default off) is the fix. It should not become the default, because damping hurts when the multiplier is ≈ +1.
+- **Wander mode:** open, with no known fix; damping does not cure it.
+- **#1060 near-degenerate masking:** deprioritised. The within-sector gap at the cut does not predict failure.
+- **Adjoint cost (not convergence detection):** near ρ ≈ +1 the adjoint `(I − Jᵀ)` is ill-conditioned, so Neumann and GMRES slow down under any gauge. Separately, `bond_phase` appears to cost the adjoint its warm start (about 2.3× iterations on a well-converged Heisenberg D=2 forward). Both are performance issues. The adjoint already has its own residual check and the Arnoldi pre-check (`CTMRGGradientError`).
