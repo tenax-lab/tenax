@@ -80,6 +80,78 @@ def _drop_env_cache_for_reset(env_cache: dict) -> None:
     invalidate_implicit_ad_warm_start()
 
 
+class _AcceptedProbeEval:
+    """Hand the HZ ``dφ`` probe's ``value_and_grad`` to the next step.
+
+    Hager-Zhang accepts an α right after ``dφ(α)`` checked Wolfe at it, and
+    ``dφ`` runs a full ``value_and_grad(loss_fn)`` there (CTM forward plus
+    implicit-AD backward).  The next step's top-of-step ``value_and_grad``
+    then recomputed the same (energy, gradient) at the same parameters —
+    one wasted forward+backward per step.  This carries the probe's result
+    across instead.
+
+    Reuse requires an exact match, checked by object identity rather than
+    by value:
+
+    * ``params is trial`` — on a match ``accept`` returns the very object
+      the probe evaluated as the new ``params``, so anything that moves the
+      parameters afterwards (noise, rollback to ``best_params``, ...) breaks
+      the match without having to be listed here.
+    * ``ctm_cfg is cfg`` — every χ bump and every conv_tol / max_iter /
+      plateau-patience schedule change rebinds ``ctm_cfg`` to a new object,
+      and ``loss_fn`` reads the live binding, so a changed loss breaks it.
+
+    Only the implicit-AD loss is reused: it lands on the CTM fixed point
+    whatever env it is warm-started from, so the probe (seeded from the φ
+    probe at the same α) and a fresh call (seeded from the pre-line-search
+    env) agree to the CTM tolerance.  The explicit-AD loss runs a fixed
+    number of sweeps from the seed, so its value depends on the seed.
+
+    The env cache needs nothing: the differentiated loss only *reads*
+    ``env_cache["envs"]``, so the skipped call would have left it exactly
+    as ``_restore_env_cache_after_line_search`` does (the pre-line-search
+    env), and the ``_update_env_cache*`` refresh that follows still runs.
+    The implicit-AD λ seed and ``get_last_implicit_ad_diagnostics()`` are
+    those of the probe's backward — the last backward run, at the same
+    parameters.
+    """
+
+    def __init__(self, enabled: bool):
+        self._enabled = enabled
+        self._probe = None
+        self._carry = None
+
+    def start(self) -> None:
+        """Drop any probe left by an earlier line search."""
+        self._probe = None
+
+    def probe(self, loss_fn, alpha, trial, cfg):
+        """``value_and_grad`` at the ``dφ`` trial point; returns the grads."""
+        self._probe = None  # only the latest successful probe can match
+        t0 = _time.perf_counter()
+        energy, grads = jax.value_and_grad(loss_fn)(trial)
+        grads = _euclidean_grads(grads)
+        if self._enabled:
+            dt = _time.perf_counter() - t0
+            self._probe = (alpha, trial, cfg, energy, grads, dt)
+        return grads
+
+    def accept(self, alpha, params, direction):
+        """New params for an accepted α — the probe's own trial on a match."""
+        probe, self._probe = self._probe, None
+        if probe is not None and probe[0] == alpha:
+            self._carry = probe
+            return probe[1]
+        return _normalize_params(_tree_add(params, _tree_scale(direction, alpha)))
+
+    def take(self, params, cfg):
+        """``(energy, grads, probe_seconds)`` if the carry matches, else None."""
+        carry, self._carry = self._carry, None
+        if carry is None or carry[1] is not params or carry[2] is not cfg:
+            return None
+        return carry[3], carry[4], carry[5]
+
+
 def _apply_chi_bump(
     ctm_cfg: CTMConfig,
     env_cache: dict,
@@ -1508,6 +1580,8 @@ def _optimize_gs_ad_tensor(
         return float(compute_energy_ctm_tensor(A_norm, envs[(0, 0)], gate, d_phys))
 
     stall_count = 0  # noise recovery: consecutive line search failures
+    # HZ dφ evaluation carried into the next step (see _AcceptedProbeEval).
+    _ls_eval = _AcceptedProbeEval(enabled=config.gs_implicit_ad)
     current_stage_idx = 0
     stage_start_step = 0
 
@@ -1788,8 +1862,14 @@ def _optimize_gs_ad_tensor(
         if config.return_history:
             _step_t0 = _time.perf_counter()
         try:
-            energy_val, grads = jax.value_and_grad(loss_fn)(params)
-            grads = _euclidean_grads(grads)
+            _reused = _ls_eval.take(params, ctm_cfg)
+            if _reused is not None:
+                energy_val, grads, _probe_dt = _reused
+                if config.return_history:
+                    _step_t0 -= _probe_dt  # step_times = this point's grad eval
+            else:
+                energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                grads = _euclidean_grads(grads)
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -2201,6 +2281,7 @@ def _optimize_gs_ad_tensor(
                         lbfgs_history.clear()
 
                 hz_counter = {"phi": 0, "dphi": 0}
+                _ls_eval.start()
 
                 def _phi(alpha):
                     hz_counter["phi"] += 1
@@ -2214,8 +2295,10 @@ def _optimize_gs_ad_tensor(
                     trial = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
-                    _, g = jax.value_and_grad(loss_fn)(trial)
-                    return _tree_dot(_euclidean_grads(g), direction)
+                    # Keeps the energy too: on acceptance at this α the next step
+                    # reuses this evaluation instead of repeating it.
+                    g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg)
+                    return _tree_dot(g, direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                 param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -2241,9 +2324,7 @@ def _optimize_gs_ad_tensor(
                         flush=True,
                     )
                 if _is_real_decrease(f_alpha, energy_float):
-                    params = _normalize_params(
-                        _tree_add(params, _tree_scale(direction, alpha))
-                    )
+                    params = _ls_eval.accept(alpha, params, direction)
                     stall_count = 0
                 else:
                     stall_count += 1
@@ -3114,6 +3195,8 @@ def _optimize_gs_ad_tensor_2site(
     prev_params_flat: jnp.ndarray | None = None
     prev_grad_flat: jnp.ndarray | None = None
     stall_count = 0  # noise recovery: consecutive line search failures
+    # HZ dφ evaluation carried into the next step (see _AcceptedProbeEval).
+    _ls_eval = _AcceptedProbeEval(enabled=config.gs_implicit_ad)
     current_stage_idx = 0
     stage_start_step = 0
     # Rolling buffer of accepted ``||grad||_2`` for the gradient-spike
@@ -3481,8 +3564,14 @@ def _optimize_gs_ad_tensor_2site(
             if config.return_history:
                 _step_t0 = _time.perf_counter()
             try:
-                energy_val, grads = jax.value_and_grad(loss_fn)(params)
-                grads = _euclidean_grads(grads)
+                _reused = _ls_eval.take(params, ctm_cfg_2s)
+                if _reused is not None:
+                    energy_val, grads, _probe_dt = _reused
+                    if config.return_history:
+                        _step_t0 -= _probe_dt  # step_times = this point's grad eval
+                else:
+                    energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                    grads = _euclidean_grads(grads)
             except CTMRGGradientError as exc:
                 _logger.warning(
                     "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -3978,6 +4067,7 @@ def _optimize_gs_ad_tensor_2site(
                             lbfgs_history.clear()
 
                     hz_counter = {"phi": 0, "dphi": 0}
+                    _ls_eval.start()
 
                     def _phi(alpha):
                         hz_counter["phi"] += 1
@@ -3991,8 +4081,10 @@ def _optimize_gs_ad_tensor_2site(
                         trial = _normalize_params(
                             _tree_add(params, _tree_scale(direction, alpha))
                         )
-                        _, g = jax.value_and_grad(loss_fn)(trial)
-                        return _tree_dot(_euclidean_grads(g), direction)
+                        # Keeps the energy too: on acceptance at this α the next step
+                        # reuses this evaluation instead of repeating it.
+                        g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg_2s)
+                        return _tree_dot(g, direction)
 
                     dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                     param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -4018,9 +4110,7 @@ def _optimize_gs_ad_tensor_2site(
                             flush=True,
                         )
                     if _is_real_decrease(f_alpha, energy_float):
-                        params = _normalize_params(
-                            _tree_add(params, _tree_scale(direction, alpha))
-                        )
+                        params = _ls_eval.accept(alpha, params, direction)
                         stall_count = 0
                     else:
                         stall_count += 1
@@ -4587,6 +4677,8 @@ def _optimize_gs_ad_multisite(
     prev_params_flat: jnp.ndarray | None = None
     prev_grad_flat: jnp.ndarray | None = None
     stall_count = 0
+    # HZ dφ evaluation carried into the next step (see _AcceptedProbeEval).
+    _ls_eval = _AcceptedProbeEval(enabled=config.gs_implicit_ad)
     current_stage_idx = 0
     stage_start_step = 0
 
@@ -4681,8 +4773,14 @@ def _optimize_gs_ad_multisite(
         if config.return_history:
             _step_t0 = _time.perf_counter()
         try:
-            energy_val, grads = jax.value_and_grad(loss_fn)(params)
-            grads = _euclidean_grads(grads)
+            _reused = _ls_eval.take(params, ctm_cfg)
+            if _reused is not None:
+                energy_val, grads, _probe_dt = _reused
+                if config.return_history:
+                    _step_t0 -= _probe_dt  # step_times = this point's grad eval
+            else:
+                energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                grads = _euclidean_grads(grads)
         except CTMRGGradientError as exc:
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -5031,6 +5129,7 @@ def _optimize_gs_ad_multisite(
                         lbfgs_history.clear()
 
                 hz_counter = {"phi": 0, "dphi": 0}
+                _ls_eval.start()
 
                 def _phi(alpha):
                     hz_counter["phi"] += 1
@@ -5044,8 +5143,10 @@ def _optimize_gs_ad_multisite(
                     trial = _normalize_params(
                         _tree_add(params, _tree_scale(direction, alpha))
                     )
-                    _, g = jax.value_and_grad(loss_fn)(trial)
-                    return _tree_dot(_euclidean_grads(g), direction)
+                    # Keeps the energy too: on acceptance at this α the next step
+                    # reuses this evaluation instead of repeating it.
+                    g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg)
+                    return _tree_dot(g, direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
                 param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
@@ -5071,9 +5172,7 @@ def _optimize_gs_ad_multisite(
                         flush=True,
                     )
                 if _is_real_decrease(f_alpha, energy_float):
-                    params = _normalize_params(
-                        _tree_add(params, _tree_scale(direction, alpha))
-                    )
+                    params = _ls_eval.accept(alpha, params, direction)
                     stall_count = 0
                 else:
                     stall_count += 1
