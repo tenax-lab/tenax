@@ -67,7 +67,7 @@ from tenax.algorithms._split_ctm_tensor import (
     _split_ctm_tensor_sweep,
     ctm_split_tensor,
 )
-from tenax.algorithms.ipeps_config import CTMConfig
+from tenax.algorithms.ipeps_config import CTMConfig, resolve_forward_gauge
 from tenax.contraction.contractor import contract
 from tenax.linalg import _dense_svd
 
@@ -96,6 +96,29 @@ _PB_STR_TO_INT = {"auto": 0, "standard": 1, "lorentzian": 2, "flow": 3}
 _PB_INT_TO_STR = {0: "auto", 1: "standard", 2: "lorentzian", 3: "flow"}
 
 
+# The legacy ``ad_utils`` CTM paths (``ctm_tensor_converge``,
+# ``ctm_tensor_converge_explicit``) are not the implicit-AD fixed point, so the
+# ``forward_gauge="auto"`` default resolves to "phase" here -- never to
+# "bond_phase", which these paths refuse, and never to "qr": the int encoding
+# below sends every unknown spelling to 0 == "qr" via ``.get(..., 0)``, so an
+# unresolved "auto" reaching it would silently switch a default run from the
+# phase gauge to QR.
+_FG_STR_TO_INT = {"qr": 0, "sigma": 1, "phase": 2, "none": 3, "bond_phase": 4}
+_FG_INT_TO_STR = {v: k for k, v in _FG_STR_TO_INT.items()}
+
+
+def _legacy_forward_gauge(config) -> str:
+    """The concrete gauge a legacy ``ad_utils`` path runs for ``config``.
+
+    Resolves ``"auto"`` as a non-implicit path (-> ``"phase"``); explicit
+    values pass through.  Duck-typed configs without the attribute keep the
+    historical ``"qr"``.
+    """
+    return resolve_forward_gauge(
+        getattr(config, "forward_gauge", "qr"), implicit_ad=False
+    )
+
+
 def _config_to_tuple(config) -> tuple:
     """Pack CTMConfig into a hashable tuple for JAX tracing."""
     return (
@@ -109,9 +132,7 @@ def _config_to_tuple(config) -> tuple:
         int(getattr(config, "gmres_precondition", True)),
         {"vjp": 0, "gmres": 1}.get(getattr(config, "ad_backward_method", "vjp"), 0),
         _CONV_METHOD_STR_TO_INT.get(getattr(config, "ctm_conv_method", "sv"), 0),
-        {"qr": 0, "sigma": 1, "phase": 2, "none": 3, "bond_phase": 4}.get(
-            getattr(config, "forward_gauge", "qr"), 0
-        ),
+        _FG_STR_TO_INT.get(_legacy_forward_gauge(config), 0),
         _PB_STR_TO_INT.get(getattr(config, "projector_backward", "auto"), 0),
         int(getattr(config, "adjoint_arnoldi_precheck", True)),
         tuple(tuple(x) for x in config.chi_ramp)
@@ -131,9 +152,7 @@ def _config_from_tuple(config_tuple: tuple):
     conv_method_int = config_tuple[9] if len(config_tuple) > 9 else 0
     ctm_conv_method = _CONV_METHOD_INT_TO_STR.get(conv_method_int, "sv")
     forward_gauge_int = config_tuple[10] if len(config_tuple) > 10 else 0
-    forward_gauge = {0: "qr", 1: "sigma", 2: "phase", 3: "none", 4: "bond_phase"}.get(
-        forward_gauge_int, "qr"
-    )
+    forward_gauge = _FG_INT_TO_STR.get(forward_gauge_int, "qr")
     pb_int = config_tuple[11] if len(config_tuple) > 11 else 0
     projector_backward = _PB_INT_TO_STR.get(pb_int, "auto")
     adjoint_arnoldi_precheck = (
@@ -1445,8 +1464,8 @@ def _ctm_tensor_converge_bwd(neighbors, config_tuple, residuals, g):
         site_leaves = site_leaves + tuple(jax.tree.leaves(site_tensors[c]))
     env_leaves = _flatten_envs(envs)
 
-    _refuse_bond_phase_on_legacy_path(getattr(config, "forward_gauge", "qr"))
-    use_sigma = getattr(config, "forward_gauge", "qr") == "sigma"
+    _refuse_bond_phase_on_legacy_path(_legacy_forward_gauge(config))
+    use_sigma = _legacy_forward_gauge(config) == "sigma"
 
     if use_sigma:
         # --- YASTN-style backward: relative sigma-gauged step function ---
@@ -1685,7 +1704,7 @@ def _ctm_tensor_multisite_fixed_point(site_tensors, neighbors, config, envs_init
     )
 
     use_elementwise = getattr(config, "ctm_conv_method", "sv") == "elementwise"
-    gauge_mode = getattr(config, "forward_gauge", "qr")
+    gauge_mode = _legacy_forward_gauge(config)
     _refuse_bond_phase_on_legacy_path(gauge_mode)
     use_sigma = gauge_mode == "sigma"
     use_none = gauge_mode == "none"
@@ -1853,7 +1872,7 @@ def ctm_tensor_converge_explicit(
         }
     )
 
-    gauge_mode = getattr(config, "forward_gauge", "qr")
+    gauge_mode = _legacy_forward_gauge(config)
     _refuse_bond_phase_on_legacy_path(gauge_mode)
     use_sigma = gauge_mode == "sigma"
     use_phase = gauge_mode == "phase"

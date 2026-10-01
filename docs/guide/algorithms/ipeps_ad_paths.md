@@ -27,7 +27,8 @@ config = iPEPSConfig(
         max_iter=80,
         conv_tol=1e-8,
         projector_method="qr",  # fastest, best energy, scales to chi=64+
-        # forward_gauge defaults to "phase" (AD-correct for 1-site and 2-site)
+        # forward_gauge defaults to "auto": "bond_phase" on implicit AD
+        # (#841), "phase" on explicit AD -- both AD-correct, 1-site and 2-site
     ),
     # Path 2, implicit AD -- the default, so this line only makes it explicit.
     # Swap to False for Path 1 (explicit AD through the unrolled sweeps) and
@@ -76,7 +77,7 @@ or better energy.
 
 The `eigh + sigma (GMRES implicit)` row is a historical measurement and its
 configuration **no longer runs**: `validate_ctm_for_implicit_ad` accepts
-`forward_gauge="phase"` or the opt-in `"bond_phase"` and nothing else, and rejects `projector_method="eigh"`
+`forward_gauge="phase"` or `"bond_phase"` (the `"auto"` default resolves to the latter) and nothing else, and rejects `projector_method="eigh"`
 outright. The number is kept because it was measured; do not copy the config.
 Sigma gauge remains a first-class **explicit**-AD mode (#808).
 
@@ -112,10 +113,11 @@ gauge for equal or better energy.
 **Configuration**:
 - `gs_implicit_ad=False` — backprop through unrolled steps (explicit AD; opt-in, the default is `True` / implicit diff).
 - `gs_projector_method="qr"` — QR projectors (recommended for explicit AD).
-- `forward_gauge="phase"` (config default, AD-correct).  Users can
-  override with `forward_gauge="sigma"` (historical path), `"qr"`
-  (legacy), or `"none"` (diagnostic); see the mode table below.  No
-  silent promotion — explicit user choice is preserved.
+- `forward_gauge="auto"` (config default) runs `"phase"` on this path
+  (AD-correct).  Users can override with `forward_gauge="sigma"`
+  (historical path), `"qr"` (legacy), or `"none"` (diagnostic); see the
+  mode table below.  `"bond_phase"` is refused here.  No silent
+  promotion — explicit user choice is preserved.
 - `projector_backward="auto"` (config default) — when `projector_method="eigh"`
   and `gs_implicit_ad=False`, `optimize_gs_ad` auto-promotes to `"lorentzian"`,
   routing the projector VJP through the Francuz–Schuch–Vanhecke
@@ -144,8 +146,9 @@ Frobenius + phase fix is what variPEPS uses in `_post_process_CTM_tensors`.
 first-class mode **on this path**. It is slower (~40% per sweep from power
 iteration) but remains available when you want the exact transfer-matrix
 alignment. It is *not* available on the implicit path below, which refuses
-every value but ``"phase"`` — this paragraph used to say the opposite (#808).
-There is no silent promotion either way: ``optimize_gs_ad`` passes
+every value but ``"phase"`` / ``"bond_phase"`` — this paragraph used to say
+the opposite (#808).  There is no silent promotion either way: only the
+``"auto"`` default is resolved; ``optimize_gs_ad`` passes an explicit
 ``ctm.forward_gauge`` through unchanged.
 
 ### Path 2: Implicit AD (Recommended — the default)
@@ -155,7 +158,7 @@ implicit-differentiation linear system at the fixed point → gradients flow
 back to the tensor without unrolling.
 
 ```
-Forward:  A → CTM sweeps (phase gauge) → converged env → energy
+Forward:  A → CTM sweeps (bond_phase gauge by default) → converged env → energy
 Backward: dE/dA via (I - J^T) λ = g  (VJP iteration or GMRES)
 ```
 
@@ -172,9 +175,14 @@ graph in memory).
   a tighter CTM fixed point. Tracked by issue #292.
 
 **Configuration (for the VJP path only)**:
-- `forward_gauge="phase"` — the `CTMConfig` default. The only other value
-  this path accepts is the opt-in `"bond_phase"` (#841, below);
-  `validate_ctm_for_implicit_ad` (`ipeps_ad_policy.py:30`) raises
+- `forward_gauge="auto"` — the `CTMConfig` default, which on this path
+  (fused virtual legs, no `chi_ramp`, `ctm_ad_mode=None`) runs
+  `"bond_phase"` (#841, below) in the loss and in every warm-start /
+  line-search / final-evaluation forward; with `chi_ramp`, split CTM
+  (`fuse_virtual_legs=False`) or a `ctm_ad_mode` engine it silently runs
+  `"phase"` instead.  Set `forward_gauge="phase"` explicitly to opt out of
+  the bond gauge.  These two are the only concrete values this path
+  accepts; `validate_ctm_for_implicit_ad` (`ipeps_ad_policy.py`) raises
   `ValueError` for anything else, `"sigma"` included; there is no `sigma`
   branch in the check at all.
 - `ad_backward_method="vjp"` — the supported implicit backward.
@@ -465,13 +473,15 @@ SVD/eigh VJP compile wall (#566, #687).
 
 ## Forward Gauge Mode Matrix
 
-Tenax supports five ``forward_gauge`` modes. Their intended use is
-summarized below:
+Tenax supports five concrete ``forward_gauge`` modes plus the ``"auto"``
+default, which resolves per path (``ipeps_config.resolve_forward_gauge``).
+Their intended use is summarized below:
 
 | Mode | Explicit AD (Path 1) | Implicit AD (Path 2, VJP) | Notes |
 |------|----------------------|----------------------------|-------|
-| ``"phase"`` (default) | **Recommended** | **Accepted (default)** | Cheapest gauge fix; Frobenius + differentiable phase fix. Works for 1-site and 2-site. |
-| ``"bond_phase"`` | Not supported | Accepted (opt-in, #841) | ``"phase"`` plus one sign/phase per chi index of every bond family, aligned to the previous env. Exact gauge transform. Removes the per-bond-index Z2 sign cycle that keeps ``"phase"`` from an element-wise fixed point (D=3 fermionic t-V, chi=12: stationarity residual 0.805 → ~5e-9). Not with ``chi_ramp``, split CTM, or ``ctm_ad_mode`` set (those engines own their CTM); explicit AD refuses it too. Charge sectors are grouped by block structure, not values: a bond whose stored blocks are numerically disconnected (exact zeros from rank deficiency) is only partly aligned, and the #841 stationarity guard then warns. |
+| ``"auto"`` (default) | Runs ``"phase"`` | Runs ``"bond_phase"`` (``"phase"`` with ``chi_ramp``, split CTM, or ``ctm_ad_mode``) | Resolved silently at the path entry; never reaches a CTM. The legacy ``ad_utils`` paths run ``"phase"``. |
+| ``"phase"`` | **Recommended** (what ``"auto"`` runs) | Accepted (explicit opt-out of the bond gauge) | Cheapest gauge fix; Frobenius + differentiable phase fix. Works for 1-site and 2-site. |
+| ``"bond_phase"`` | Not supported | **Accepted (what ``"auto"`` runs)**, #841 | ``"phase"`` plus one sign/phase per chi index of every bond family, aligned to the previous env. Exact gauge transform. Removes the per-bond-index Z2 sign cycle that keeps ``"phase"`` from an element-wise fixed point (D=3 fermionic t-V, chi=12: stationarity residual 0.805 → ~5e-9). Not with ``chi_ramp``, split CTM, or ``ctm_ad_mode`` set (those engines own their CTM); explicit AD refuses it too. Charge sectors are grouped by block structure, not values: a bond whose stored blocks are numerically disconnected (exact zeros from rank deficiency) is only partly aligned, and the #841 stationarity guard then warns. |
 | ``"qr"`` | Legacy QR gauge | Refused (`ValueError`) | Forward-only CTM, notebooks, diagnostics. |
 | ``"sigma"`` | Historical — still correct but ~6–9× slower than phase | Refused (`ValueError`) | Power iteration (30 steps) per sweep. |
 | ``"none"`` | Benchmark / diagnostic only | Refused (`ValueError`) | Isolates gauge-fix cost from projector cost. |
@@ -481,12 +491,15 @@ accepts `forward_gauge="phase"` or `"bond_phase"` and nothing else, and it narro
 `chi` nor unit cell — so the older "at large chi (1-site only)" qualifier on
 the `sigma` row described a configuration that never ran (#808).
 
-**No silent gauge promotion**: ``optimize_gs_ad`` passes
-``ctm.forward_gauge`` through unchanged.  An explicit user choice
-(``"qr"``, ``"sigma"``, ``"phase"``, or ``"none"``) is always
-respected.  This was previously achieved through an auto-promotion of
-``"qr"`` → ``"phase"``; the promotion was removed in PR #343 in favor
-of a sensible static default.
+**No silent gauge promotion**: only the ``"auto"`` default is resolved;
+``optimize_gs_ad`` passes an explicit ``ctm.forward_gauge`` through
+unchanged.  An explicit user choice (``"qr"``, ``"sigma"``, ``"phase"``,
+``"bond_phase"``, or ``"none"``) is always respected, and an explicit
+``"bond_phase"`` on a path that cannot honour it raises.  This was
+previously achieved through an auto-promotion of ``"qr"`` → ``"phase"``;
+the promotion was removed in PR #343 in favor of a static ``"phase"``
+default, which ``"auto"`` replaced once ``"bond_phase"`` (#841) made the
+implicit path's best gauge differ from the explicit path's.
 
 The GMRES backward (``ad_backward_method="gmres"``) is tracked as an open
 gap — see issue #292 and the ``xfail``-marked regression test in
@@ -517,8 +530,9 @@ transfer matrix eigenvectors, making element-wise convergence monotonic.
 
 **It is not available on the implicit-diff path.** This section used to say the
 opposite — "required for the implicit-diff backward" — and that was stale:
-`validate_ctm_for_implicit_ad` accepts `forward_gauge="phase"` and raises
-`ValueError` for every other value, `"sigma"` included (#808). What the implicit
+`validate_ctm_for_implicit_ad` accepts `forward_gauge="phase"` /
+`"bond_phase"` (and the `"auto"` default that resolves to one of them) and
+raises `ValueError` for every other value, `"sigma"` included (#808). What the implicit
 backward actually needs from the forward pass is element-wise convergence to a
 well-conditioned fixed point, and phase gauge delivers that at a fraction of the
 cost — no power iteration, no eigensolve.

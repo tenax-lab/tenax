@@ -48,7 +48,7 @@ ctm_config = CTMConfig(
     max_iter=100,        # maximum CTM iterations
     conv_tol=1e-8,       # convergence tolerance on corner singular values
     renormalize=True,
-    forward_gauge="phase",  # "phase" (default), "qr", "sigma", or "none"
+    forward_gauge="auto",   # "auto" (default), "phase", "bond_phase", "qr", "sigma", or "none"
 )
 
 config = iPEPSConfig(
@@ -63,22 +63,26 @@ config = iPEPSConfig(
 ### Forward gauge
 
 The ``forward_gauge`` option in ``CTMConfig`` controls how gauge ambiguity is
-fixed after each CTM sweep during the forward pass. Four modes are supported:
+fixed after each CTM sweep during the forward pass. Five modes are supported,
+plus the ``"auto"`` default that picks one per path:
 
 | Value | Description |
 |-------|-------------|
-| ``"phase"`` (default) | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. **Recommended for both implicit and explicit AD** (1-site and 2-site). |
+| ``"auto"`` (default) | Resolved per path: ``"bond_phase"`` on the fused implicit-AD path (no ``chi_ramp``, ``ctm_ad_mode=None``), ``"phase"`` everywhere else. |
+| ``"phase"`` | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. What ``"auto"`` runs on explicit AD (1-site and 2-site). |
+| ``"bond_phase"`` | ``"phase"`` plus a per-chi-index sign/phase aligned to the previous environment (#841); removes the per-index Z2 sign 2-cycle the SVD projectors re-draw each sweep. Implicit AD only; what ``"auto"`` runs there. |
 | ``"qr"`` | Legacy QR decomposition on each corner with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
 | ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for element-wise convergence at large chi (1-site path). |
 | ``"none"`` | No gauge fix. Diagnostic / benchmark mode only. |
 
-**Forward gauge default**: ``forward_gauge`` defaults to ``"phase"`` (the
-variPEPS-style Frobenius + phase fix), which is AD-correct for both the
-implicit and explicit paths — the implicit-AD path in fact *requires*
-``"phase"`` and validates it (``projector_method`` in ``("svd", "qr")``,
-``forward_gauge="phase"``, ``ctm_conv_method="elementwise"``). There is **no
-silent gauge promotion**: if you set ``forward_gauge="sigma"`` or ``"none"``
-explicitly, that choice is respected as-is.
+**Forward gauge default**: ``forward_gauge`` defaults to ``"auto"``, which
+runs ``"bond_phase"`` on the implicit-AD path and ``"phase"`` (the
+variPEPS-style Frobenius + phase fix) on the explicit path — the implicit-AD
+path in fact *requires* one of those two and validates it
+(``projector_method`` in ``("svd", "qr")``, ``forward_gauge`` in
+``("phase", "bond_phase")``, ``ctm_conv_method="elementwise"``). There is **no
+silent gauge promotion**: if you set ``forward_gauge="phase"``, ``"sigma"`` or
+``"none"`` explicitly, that choice is respected as-is.
 
 See {doc}`ipeps_ad_paths` for the complete post-PR-#291 recommended
 configuration, benchmark results, and the split between the explicit-AD
@@ -300,9 +304,10 @@ manageable, and the backward pass avoids the implicit-diff linear solve
 entirely.
 
 ```{note}
-``forward_gauge`` defaults to ``"phase"`` (no promotion needed). Phase gauge
-is 6–9× faster than sigma gauge with equal or better energy and is the
-post-PR-#291 recommended gauge for both explicit and implicit AD. See
+``forward_gauge`` defaults to ``"auto"``, which runs ``"phase"`` on this
+explicit path (no promotion needed). Phase gauge is 6–9× faster than sigma
+gauge with equal or better energy and is the post-PR-#291 recommended gauge
+for explicit AD. See
 {doc}`ipeps_ad_paths` for the full benchmark table.
 ```
 

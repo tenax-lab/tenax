@@ -160,16 +160,18 @@ differentiation (AD) to variationally optimize the iPEPS tensors directly.
 Tenax supports two AD paths:
 
 1. **Implicit AD** (default, recommended): differentiates through the CTM
-   fixed point via VJP iteration (Francuz et al., PRR 7, 013237).  Uses
-   the AD-correct ``forward_gauge="phase"`` default.  Memory-efficient
-   and variational.
+   fixed point via VJP iteration (Francuz et al., PRR 7, 013237).  The
+   ``forward_gauge="auto"`` default runs ``"bond_phase"`` here (phase fix
+   plus a per-chi-index bond gauge, #841; ``"phase"`` with ``chi_ramp``).
+   Memory-efficient and variational.
 2. **Explicit AD**: backpropagates through unrolled CTM steps.  Uses QR
-   projectors with the same ``"phase"`` gauge.  Faster per step but
-   uses more memory.  Set `gs_implicit_ad=False` to enable.
+   projectors; the ``"auto"`` default runs the ``"phase"`` gauge here.
+   Faster per step but uses more memory.  Set `gs_implicit_ad=False` to
+   enable.
 
-No silent gauge promotion in either path — the user's
-``ctm.forward_gauge`` choice (``"phase"``, ``"qr"``, ``"sigma"``,
-``"none"``) is preserved as-is.
+No silent gauge promotion in either path — only the ``"auto"`` default
+is resolved; an explicit ``ctm.forward_gauge`` (``"phase"``,
+``"bond_phase"``, ``"qr"``, ``"sigma"``, ``"none"``) is preserved as-is.
 
 ### Recommended AD configuration
 
@@ -181,8 +183,8 @@ config = iPEPSConfig(
     ctm=CTMConfig(
         chi=16,
         max_iter=60,
-        # forward_gauge="phase" is the default — AD-correct for both
-        # implicit and explicit, 1-site and 2-site.
+        # forward_gauge="auto" is the default: "bond_phase" on implicit,
+        # "phase" on explicit AD, 1-site and 2-site.
     ),
     # gs_implicit_ad=True is the default (implicit diff + VJP backward)
     gs_optimizer="lbfgs",
@@ -260,14 +262,16 @@ prefer `ctmrg_heuristic_increase_chi`.
 
 ### Key AD tips
 
-- **Default `forward_gauge="phase"` works for both implicit and explicit
-  AD.** variPEPS-style Frobenius normalization + phase fix.  Stable
-  for 1-site and 2-site at chi up to 32+.  No silent promotion: the
-  user's explicit choice is preserved.
+- **Default `forward_gauge="auto"`** runs `"bond_phase"` on implicit AD
+  and `"phase"` (variPEPS-style Frobenius normalization + phase fix,
+  stable for 1-site and 2-site at chi up to 32+) on explicit AD.  Set
+  `forward_gauge="phase"` explicitly to opt the implicit path out of the
+  bond gauge.  No silent promotion: the user's explicit choice is
+  preserved.
 - **Sigma gauge (`forward_gauge="sigma"`)** is required for strict
   element-wise convergence at large chi (1-site path).  Aligns CTM
   environments via power iteration of the transfer matrix.
-- **Explicit AD (`gs_implicit_ad=False`)** uses the same `"phase"` gauge.
+- **Explicit AD (`gs_implicit_ad=False`)** runs the `"phase"` gauge.
   Use `projector_method="qr"` for best performance with explicit AD.
 - **Start with SU init (`su_init=True`).** The simple update provides a good
   starting tensor that avoids bad local minima. Without it, random

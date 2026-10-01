@@ -84,19 +84,26 @@ which AD path pairs with which gauge.
 
 ### `CTMConfig.forward_gauge`
 
-Values: `"phase"` (default), `"qr"`, `"sigma"`, `"none"`
+Values: `"auto"` (default), `"phase"`, `"bond_phase"`, `"qr"`, `"sigma"`,
+`"none"`
 
-- `"phase"`: AD-correct default. variPEPS-style Frobenius normalization
-  + phase fix per absorption.  Stable for both implicit and explicit
-  AD (1-site and 2-site).
+- `"auto"`: resolves per path — `"bond_phase"` on the fused implicit-AD
+  path (no `chi_ramp`, `ctm_ad_mode=None`), `"phase"` everywhere else.
+- `"phase"`: variPEPS-style Frobenius normalization + phase fix per
+  absorption.  Stable for both implicit and explicit AD (1-site and
+  2-site); set it explicitly to opt the implicit path out of the bond
+  gauge.
+- `"bond_phase"`: `"phase"` plus a per-chi-index sign/phase aligned to
+  the previous environment (#841).  Implicit AD only.
 - `"qr"`: legacy QR gauge.  Forward-only CTM, notebooks, diagnostics.
   Explicit user choice is preserved — no silent promotion.
 - `"sigma"`: transfer-matrix eigenvector alignment, required for
   element-wise CTM convergence at large chi.  1-site path only.
 - `"none"`: diagnostic only.  Expect instabilities.
 
-**No silent gauge promotion** in AD paths: if you pass `"qr"` you get
-`"qr"`.  Set `forward_gauge` explicitly to override the default.
+**No silent gauge promotion** in AD paths: only `"auto"` is resolved; if
+you pass `"qr"` you get `"qr"`.  Set `forward_gauge` explicitly to
+override the default.
 
 ### `CTMConfig.ad_regularize_svd` (default `True`)
 

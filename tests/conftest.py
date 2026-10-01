@@ -659,6 +659,9 @@ _FILE_MARKERS = {
     # now closed and the file passes.
     "test_architecture_imports.py": "core",
     "test_ipeps_ad_policy.py": "core",
+    # #841 follow-up: forward_gauge="auto" resolution -- spies on the
+    # hand-off to the CTM, plus one tiny optimize_gs_ad run per AD path.
+    "test_forward_gauge_auto.py": "core",
     "test_ipeps_checkpoint.py": "core",
     "test_ipeps_config_chi_ceiling_bailout.py": "core",
     "test_ipeps_config_grad_spike.py": "core",
