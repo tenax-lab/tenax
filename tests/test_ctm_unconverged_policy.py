@@ -452,9 +452,12 @@ def _probe_loss(monkeypatch, unit_cell, policy, *, probe_max_iter=None):
     real_cpl = _cpl.python_loop_ctm_converge
     in_phi = {"on": False}
 
+    phi_calls = []  # (env_init seen, envs returned) per forward inside phi
+
     def unconverged_in_phi(*a, **k):
         envs, info = real_cpl(*a, **k)
         if in_phi["on"]:
+            phi_calls.append((k.get("env_init"), envs))
             return envs, info._replace(converged=False)
         return envs, info
 
@@ -463,6 +466,9 @@ def _probe_loss(monkeypatch, unit_cell, policy, *, probe_max_iter=None):
     def spy_hz(phi, dphi, phi0, slope, **kw):
         in_phi["on"] = True
         try:
+            # Two probes: the second one's env_init reveals whether the first
+            # wrote its (unconverged) env to the cache.
+            phis.append(phi(1e-3))
             phis.append(phi(1e-3))
         finally:
             in_phi["on"] = False
@@ -492,26 +498,35 @@ def _probe_loss(monkeypatch, unit_cell, policy, *, probe_max_iter=None):
             _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
         except CTMNotConvergedError:
             pass  # the real gradient forward may not reach conv_tol
-    return phis, w
+    return phis, w, phi_calls
 
 
 @pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
 def test_site3_unconverged_probe_is_inf(monkeypatch, unit_cell):
-    phis, _ = _probe_loss(monkeypatch, unit_cell, "raise")
+    phis, _, calls = _probe_loss(monkeypatch, unit_cell, "raise")
     assert phis and all(math.isinf(p) for p in phis)
+    # An unconverged probe must not poison the env cache: no later forward is
+    # seeded with an env a rejected probe returned.
+    assert len(calls) >= 2
+    rejected = [envs for _, envs in calls]
+    assert all(seed is not r for seed, _ in calls[1:] for r in rejected)
 
 
 @pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
 def test_site3_warn_returns_energy(monkeypatch, unit_cell):
-    phis, w = _probe_loss(monkeypatch, unit_cell, "warn")
+    phis, w, _ = _probe_loss(monkeypatch, unit_cell, "warn")
     assert phis and all(math.isfinite(p) for p in phis)
-    assert any(issubclass(x.category, CTMNotConvergedWarning) for x in w)
+    assert any(
+        issubclass(x.category, CTMNotConvergedWarning)
+        and "line_search" in str(x.message)
+        for x in w
+    )
 
 
 @pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
 def test_site3_probe_override_keeps_legacy(monkeypatch, unit_cell):
     """Review Focus 1: probe_max_iter set -> truncated probes are expected."""
-    phis, w = _probe_loss(monkeypatch, unit_cell, "raise", probe_max_iter=7)
+    phis, w, _ = _probe_loss(monkeypatch, unit_cell, "raise", probe_max_iter=7)
     assert phis and all(math.isfinite(p) for p in phis)
     assert not any(
         issubclass(x.category, CTMNotConvergedWarning)
