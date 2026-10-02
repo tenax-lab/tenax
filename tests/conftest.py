@@ -763,6 +763,11 @@ _FILE_MARKERS = {
     # correct at all, so a regression here silently invalidates any periodic
     # oracle built on it.
     "test_twist_primitive.py": "core",
+    # The HZ dφ probe's value_and_grad at the accepted α is carried into the
+    # next step instead of recomputed.  ``core``: it changes what every
+    # L-BFGS + Hager-Zhang optimizer step evaluates.  Mechanism tests only
+    # (spied evaluation counts, a scripted line search) at D=2, chi<=6.
+    "test_ls_reuse_accepted_eval.py": "core",
 }
 
 
