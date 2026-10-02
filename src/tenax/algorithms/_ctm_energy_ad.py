@@ -620,6 +620,7 @@ def _sigma_gauged_ctm_converge(
     recipe: str = "2x2",
     device_mesh=None,
     ctm_chunk_size: int | None = None,
+    return_info: bool = False,
 ):
     """CTM convergence with sigma gauge fixing for element-wise fixed point.
 
@@ -637,6 +638,9 @@ def _sigma_gauged_ctm_converge(
     custom_vjp residuals for the chi-lock backward (#516), and ``converged``
     is the loop's own verdict (#841 — previously discarded here, so a
     max_iter-starved forward was indistinguishable from a converged one).
+    With ``return_info=True`` the third element is instead the loop's full
+    ``CTMConvergeInfo`` (sweeps incl. warmup, the loop's own ``sv_diff``,
+    ``best_iteration``), so the #1059 site-1 error can report them.
     """
     # ---- validation (mirror python_loop_ctm_converge) ----
     chi_current = _validate_chi_bump_args(
@@ -732,6 +736,22 @@ def _sigma_gauged_ctm_converge(
     # ``result.envs``; swallowing ``converged`` here is how a max_iter-starved
     # (or coincidentally-dipped) forward used to reach the backward with no
     # diagnostic at all.
+    if return_info:
+        from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
+
+        return (
+            result.envs,
+            result.final_chi,
+            CTMConvergeInfo(
+                converged=result.converged,
+                iterations=warmup + result.iterations,
+                sv_diff=result.sv_diff,
+                max_truncation_error=result.max_truncation_error,
+                max_smallest_S=result.max_smallest_S,
+                final_chi=result.final_chi,
+                best_iteration=warmup + result.best_iteration,
+            ),
+        )
     return result.envs, result.final_chi, result.converged
 
 
@@ -854,6 +874,12 @@ def get_last_implicit_ad_diagnostics() -> dict:
       configured ``conv_method``.  Independent of the residual above: 'sv'
       certifies spectra only, and the element-wise criterion can exit on a
       coincidental dip of a bond-sign limit cycle.
+    * ``forward_iterations`` / ``forward_sv_diff`` / ``forward_best_iteration``
+      -- the same loop's sweep count, its own convergence metric (the number
+      it compared with ``conv_tol``) and the sweep whose env it returned
+      (trails ``forward_iterations`` on the ``plateau_patience`` bail).
+    * ``forward_stationarity_threshold`` -- the #841 threshold the residual
+      above is compared with, ``max(100 * conv_tol, 1e-8)``.
 
     Returns a shallow copy so the caller cannot mutate internal state.
     Empty dict if no backward has run yet.
@@ -861,12 +887,23 @@ def get_last_implicit_ad_diagnostics() -> dict:
     return dict(_F3_LAST_DIAGNOSTICS)
 
 
+# Keys written per forward by ``_check_forward_stationarity``.
+_FORWARD_DIAGNOSTIC_KEYS = (
+    "forward_converged",
+    "forward_stationarity_residual",
+    "forward_stationarity_threshold",
+    "forward_iterations",
+    "forward_sv_diff",
+    "forward_best_iteration",
+)
+
+
 def reset_forward_diagnostics() -> None:
     """Drop the forward-verdict keys so a later read cannot see a stale
     value from a previous call (the optimizer calls this before each
     value_and_grad; a missing key afterwards means no forward ran)."""
-    _F3_LAST_DIAGNOSTICS.pop("forward_converged", None)
-    _F3_LAST_DIAGNOSTICS.pop("forward_stationarity_residual", None)
+    for key in _FORWARD_DIAGNOSTIC_KEYS:
+        _F3_LAST_DIAGNOSTICS.pop(key, None)
 
 
 def _ctm_energy_implicit_dispatch(
@@ -1120,9 +1157,8 @@ def _make_implicit_vjp_fn(
             # chi_post is the final ramp stage's chi, which equals ``chi`` for
             # the implicit-AD entry point that uses ramp only.
             chi_post = chi
-            forward_converged = bool(_loop_info.converged)
         else:
-            envs, chi_post, forward_converged = _sigma_gauged_ctm_converge(
+            envs, chi_post, _loop_info = _sigma_gauged_ctm_converge(
                 site_tensors,
                 neighbors,
                 chi=chi,
@@ -1144,11 +1180,12 @@ def _make_implicit_vjp_fn(
                 recipe=recipe,
                 device_mesh=device_mesh,
                 ctm_chunk_size=ctm_chunk_size,
+                return_info=True,
             )
-        _check_forward_stationarity(site_tensors, envs, chi_post, forward_converged)
+        _check_forward_stationarity(site_tensors, envs, chi_post, _loop_info)
         return envs, chi_post
 
-    def _check_forward_stationarity(site_tensors, envs, chi_post, forward_converged):
+    def _check_forward_stationarity(site_tensors, envs, chi_post, loop_info):
         """#841 honesty guard: measure ``||gauge_fix(step(env*)) - env*||``.
 
         The implicit backward linearizes the gauged CTM step around ``envs``
@@ -1206,8 +1243,13 @@ def _make_implicit_vjp_fn(
         for c in coords:
             residual = max(residual, _max_env_leaf_diff(envs[c], gauged[c]))
         threshold = max(100.0 * conv_tol, 1e-8)
+        forward_converged = bool(loop_info.converged)
         _F3_LAST_DIAGNOSTICS["forward_stationarity_residual"] = residual
+        _F3_LAST_DIAGNOSTICS["forward_stationarity_threshold"] = threshold
         _F3_LAST_DIAGNOSTICS["forward_converged"] = forward_converged
+        _F3_LAST_DIAGNOSTICS["forward_iterations"] = int(loop_info.iterations)
+        _F3_LAST_DIAGNOSTICS["forward_sv_diff"] = float(loop_info.sv_diff)
+        _F3_LAST_DIAGNOSTICS["forward_best_iteration"] = int(loop_info.best_iteration)
         # Fails closed: a NaN residual is not <= threshold, so it warns.
         if not (residual <= threshold) and not _cached["stationarity_warned"]:
             _cached["stationarity_warned"] = True

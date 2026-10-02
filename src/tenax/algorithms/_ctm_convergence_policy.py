@@ -37,6 +37,38 @@ class CTMConvergeInfo(NamedTuple):
     best_iteration: int = 0
 
 
+class GradientForwardInfo(NamedTuple):
+    """What site 1 (the implicit-AD gradient forward) knows about its forward.
+
+    ``iterations`` / ``sv_diff`` / ``best_iteration`` are the CTM loop's own
+    (``sv_diff`` is the number it compared with ``conv_tol``).  The #841
+    one-sweep stationarity residual is a different quantity with a different
+    threshold, so it travels in its own fields and is printed under its own
+    label.
+    """
+
+    converged: bool
+    iterations: int
+    sv_diff: float
+    best_iteration: int = 0
+    stationarity_residual: float | None = None
+    stationarity_threshold: float | None = None
+
+
+def _plateau_bailed(info) -> bool:
+    """True when the loop stopped on the ``plateau_patience`` bail: it hands
+    back the best-metric env, whose sweep index trails the sweep count.  On
+    budget exhaustion the two are equal; 0 means the caller did not say."""
+    if bool(getattr(info, "converged", False)):
+        return False
+    try:
+        best = int(getattr(info, "best_iteration", 0) or 0)
+        total = int(getattr(info, "iterations", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 < best < total
+
+
 def format_step_multiplier(info) -> str:
     """Signed slow-mode multiplier from #1061, or ``"n/a"``.
 
@@ -67,15 +99,32 @@ def _fmt(x, spec: str) -> str:
 
 def _describe(info, site, step, conv_tol, chi) -> str:
     where = f"site={site}" + (f", step {step}" if step is not None else "")
-    return (
+    msg = (
         f"CTM forward did not converge ({where}): sweeps "
         f"{_fmt(getattr(info, 'iterations', None), 'd')}, sv_diff "
         f"{_fmt(getattr(info, 'sv_diff', None), '.3g')} vs conv_tol "
         f"{_fmt(conv_tol, 'g')}, chi={_fmt(chi, 'd')}, step multiplier "
-        f"{format_step_multiplier(info)}. An unconverged environment invalidates "
-        f"the implicit-AD gradient and can report a sub-variational energy. Set "
-        f"CTMConfig(on_unconverged='warn') to continue anyway."
+        f"{format_step_multiplier(info)}"
     )
+    residual = getattr(info, "stationarity_residual", None)
+    if residual is not None:
+        msg += (
+            f", stationarity residual {_fmt(residual, '.3g')} (#841 threshold "
+            f"{_fmt(getattr(info, 'stationarity_threshold', None), '.3g')})"
+        )
+    msg += (
+        ". An unconverged environment invalidates the implicit-AD gradient and "
+        "can report a sub-variational energy."
+    )
+    if _plateau_bailed(info):
+        msg += (
+            f" The loop stopped on the plateau bail (no sv_diff improvement for "
+            f"plateau_patience sweeps after sweep {info.best_iteration}), not "
+            f"on max_iter, so raising max_iter alone will not help: try a "
+            f"larger CTMConfig(plateau_patience=...) (None disables the bail) "
+            f"or a different chi."
+        )
+    return msg + " Set CTMConfig(on_unconverged='warn') to continue anyway."
 
 
 class CTMNotConvergedError(RuntimeError):

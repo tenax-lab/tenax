@@ -222,19 +222,27 @@ def _site1_forward_info(step_index: int, ctm_cfg, history: tuple | None):
     ``value_and_grad``): skip the check rather than reuse a stale value.
     Raises ``CTMNotConvergedError`` under ``on_unconverged="raise"``; warns
     under ``"warn"``.  When ``history`` is given (``(converged, sv_diff,
-    multiplier)`` lists), appends one entry per checked step.
+    multiplier, stationarity)`` lists), appends one entry per checked step:
+    ``sv_diff`` is the CTM loop's own metric, ``stationarity`` the #841
+    one-sweep residual (a different quantity with its own threshold).
     """
     import tenax.algorithms._ctm_energy_ad as _cea
-    from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
-    from tenax.algorithms._ctm_python_loop import CTMConvergeInfo
+    from tenax.algorithms._ctm_convergence_policy import (
+        GradientForwardInfo,
+        check_ctm_converged,
+    )
 
     d = _cea.get_last_implicit_ad_diagnostics()
     if "forward_converged" not in d:
         return
-    info = CTMConvergeInfo(
+    nan = float("nan")
+    info = GradientForwardInfo(
         converged=bool(d["forward_converged"]),
-        iterations=-1,
-        sv_diff=float(d.get("forward_stationarity_residual", float("nan"))),
+        iterations=int(d.get("forward_iterations", -1)),
+        sv_diff=float(d.get("forward_sv_diff", nan)),
+        best_iteration=int(d.get("forward_best_iteration", 0)),
+        stationarity_residual=float(d.get("forward_stationarity_residual", nan)),
+        stationarity_threshold=d.get("forward_stationarity_threshold"),
     )
     ok = check_ctm_converged(
         info,
@@ -245,11 +253,12 @@ def _site1_forward_info(step_index: int, ctm_cfg, history: tuple | None):
         chi=ctm_cfg.chi,
     )
     if history is not None:
-        conv_list, sv_list, mult_list = history
+        conv_list, sv_list, mult_list, stat_list = history
         conv_list.append(bool(ok))
         sv_list.append(float(info.sv_diff))
         # The gradient-forward diagnostics carry no step multiplier.
         mult_list.append(None)
+        stat_list.append(float(info.stationarity_residual))
 
 
 def _site3_reject(info, ctm_cfg) -> bool:
@@ -1749,6 +1758,7 @@ def _optimize_gs_ad_tensor(
     _hist_ctm_converged: list[bool] = []
     _hist_ctm_sv_diff: list[float] = []
     _hist_ctm_mult: list = []
+    _hist_ctm_stationarity: list[float] = []
     # The implicit-AD fused forward writes ``forward_converged``; the split
     # and explicit-AD paths do not, so skip the check (and the pop) there.
     _site1_check = config.gs_implicit_ad and not use_split
@@ -2036,7 +2046,12 @@ def _optimize_gs_ad_tensor(
                 _site1_forward_info(
                     step + 1,
                     ctm_cfg,
-                    (_hist_ctm_converged, _hist_ctm_sv_diff, _hist_ctm_mult),
+                    (
+                        _hist_ctm_converged,
+                        _hist_ctm_sv_diff,
+                        _hist_ctm_mult,
+                        _hist_ctm_stationarity,
+                    ),
                 )
         except (CTMRGGradientError, CTMNotConvergedError) as exc:
             if isinstance(exc, CTMNotConvergedError):
@@ -2914,6 +2929,7 @@ def _optimize_gs_ad_tensor(
             "ctm_converged": _hist_ctm_converged,
             "ctm_sv_diff": _hist_ctm_sv_diff,
             "ctm_step_multiplier": _hist_ctm_mult,
+            "ctm_stationarity": _hist_ctm_stationarity,
             "final_env_source": _final_env_source,
         }
         return A_final, env, E_gs, history
@@ -3506,6 +3522,7 @@ def _optimize_gs_ad_tensor_2site(
     _hist_ctm_converged: list[bool] = []
     _hist_ctm_sv_diff: list[float] = []
     _hist_ctm_mult: list = []
+    _hist_ctm_stationarity: list[float] = []
     # The implicit-AD fused forward writes ``forward_converged``; the split
     # and explicit-AD paths do not, so skip the check (and the pop) there.
     _site1_check_2s = config.gs_implicit_ad and not use_split_2s
@@ -3839,7 +3856,12 @@ def _optimize_gs_ad_tensor_2site(
                     _site1_forward_info(
                         step + 1,
                         ctm_cfg_2s,
-                        (_hist_ctm_converged, _hist_ctm_sv_diff, _hist_ctm_mult),
+                        (
+                            _hist_ctm_converged,
+                            _hist_ctm_sv_diff,
+                            _hist_ctm_mult,
+                            _hist_ctm_stationarity,
+                        ),
                     )
             except (CTMRGGradientError, CTMNotConvergedError) as exc:
                 if isinstance(exc, CTMNotConvergedError):
@@ -4839,6 +4861,7 @@ def _optimize_gs_ad_tensor_2site(
                 "ctm_converged": _hist_ctm_converged,
                 "ctm_sv_diff": _hist_ctm_sv_diff,
                 "ctm_step_multiplier": _hist_ctm_mult,
+                "ctm_stationarity": _hist_ctm_stationarity,
                 "final_env_source": _final_env_source,
             }
             return (A_final, B_final), (env_A, env_B), E_gs, history

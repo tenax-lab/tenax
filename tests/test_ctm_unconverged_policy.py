@@ -6,6 +6,7 @@ Spec: docs/superpowers/specs/2026-10-01-ctm-unconverged-policy-design.md
 from __future__ import annotations
 
 import math
+import re
 import warnings
 
 import jax.numpy as jnp
@@ -81,6 +82,38 @@ def test_message_shows_na_when_multiplier_missing_or_nan(value):
         check_ctm_converged(info, site="g", policy="raise")
 
 
+def test_message_reports_stationarity_separately():
+    """Final-review I3: the #841 stationarity residual is printed under its own
+    label and its own threshold, never as the loop's sv_diff."""
+    info = _info(False, stationarity_residual=7e-8, stationarity_threshold=1e-7)
+    with pytest.raises(CTMNotConvergedError) as ei:
+        check_ctm_converged(info, site="gradient", policy="raise", conv_tol=1e-9)
+    msg = str(ei.value)
+    assert "sweeps 500, sv_diff 3.9e-07 vs conv_tol 1e-09" in msg, msg
+    assert "stationarity residual 7e-08 (#841 threshold 1e-07)" in msg, msg
+    # absent -> not printed at all
+    with pytest.raises(CTMNotConvergedError) as ei:
+        check_ctm_converged(_info(False), site="gradient", policy="raise")
+    assert "stationarity" not in str(ei.value)
+
+
+def test_message_names_the_plateau_bail():
+    """Final-review I3: a plateau bail (the returned env trails the last sweep)
+    says so, and that raising max_iter alone will not help."""
+    bailed = _info(False, iterations=45, best_iteration=25)
+    with pytest.raises(CTMNotConvergedError) as ei:
+        check_ctm_converged(bailed, site="gradient", policy="raise")
+    msg = str(ei.value)
+    assert "plateau" in msg and "max_iter alone will not help" in msg, msg
+    for hint in ("plateau_patience", "on_unconverged='warn'", "chi"):
+        assert hint in msg, (hint, msg)
+    # budget exhausted (best_iteration == iterations) -> no plateau claim
+    spent = _info(False, iterations=500, best_iteration=500)
+    with pytest.raises(CTMNotConvergedError) as ei:
+        check_ctm_converged(spent, site="gradient", policy="raise")
+    assert "plateau" not in str(ei.value)
+
+
 def test_ctmconfig_default_and_validation():
     assert CTMConfig().on_unconverged == "raise"
     assert CTMConfig(on_unconverged="warn").on_unconverged == "warn"
@@ -150,6 +183,12 @@ def test_site1_raises_and_checkpoints(unit_cell, tmp_path):
             _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
     assert ei.value.site == "gradient"
     assert (tmp_path / "ck" / "ckpt.last.pkl").exists()
+    # Final-review I3: the loop's own sweep count and sv_diff, not "n/a" and
+    # not the #841 residual; the residual comes separately with its threshold.
+    msg = str(ei.value)
+    assert "sweeps n/a" not in msg and "sweeps 3," in msg, msg
+    assert ei.value.info.iterations == 3
+    assert "stationarity residual" in msg and "#841 threshold 1e-08" in msg, msg
 
 
 @pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
@@ -163,6 +202,42 @@ def test_site1_warn_completes_and_records(unit_cell):
     assert all(c is False for c in history["ctm_converged"])
     assert len(history["ctm_sv_diff"]) == len(history["ctm_converged"])
     assert len(history["ctm_step_multiplier"]) == len(history["ctm_converged"])
+    assert len(history["ctm_stationarity"]) == len(history["ctm_converged"])
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_site1_history_sv_diff_is_the_loops(unit_cell, monkeypatch):
+    """Final-review I3: history ctm_sv_diff holds the CTM loop's own metric
+    (what the loop compared with conv_tol), and ctm_stationarity the #841
+    residual, not the other way round."""
+    real = _cea._run_ctm_loop_with_bump
+    loop_sv = []
+
+    def spy(*a, **k):
+        res = real(*a, **k)
+        loop_sv.append(float(res.sv_diff))
+        return res
+
+    monkeypatch.setattr(_cea, "_run_ctm_loop_with_bump", spy)
+    real_diag = _cea.get_last_implicit_ad_diagnostics
+    residuals = []
+
+    def diag_spy():
+        d = real_diag()
+        if "forward_converged" in d:
+            residuals.append(d["forward_stationarity_residual"])
+        return d
+
+    monkeypatch.setattr(_cea, "get_last_implicit_ad_diagnostics", diag_spy)
+    cfg = _cfg(unit_cell, "warn")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        out = _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+    history = out[-1]
+    assert history["ctm_sv_diff"] and loop_sv
+    for v in history["ctm_sv_diff"]:
+        assert v in loop_sv, (v, loop_sv)
+    assert history["ctm_stationarity"] == residuals
 
 
 def test_site1_missing_diagnostic_skips_check(monkeypatch):
@@ -247,7 +322,7 @@ def test_unconverged_after_best_resets_and_recovers(unit_cell, monkeypatch, capl
         out = _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
     assert calls["n"] == 3
     assert any(
-        "CTM forward not converged at step 2 (sweeps n/a" in r.getMessage()
+        re.search(r"CTM forward not converged at step 2 \(sweeps \d+,", r.getMessage())
         and "reset to best (#1/2)" in r.getMessage()
         for r in caplog.records
     ), [r.getMessage() for r in caplog.records]
