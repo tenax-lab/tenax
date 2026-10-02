@@ -140,6 +140,21 @@ def test_env_rescale_invariance_real(su_state, c):
     _assert_close(out, ref, 1e-10)
 
 
+@pytest.mark.parametrize("c", [complex(np.exp(0.7j)), -1j])
+def test_real_state_in_a_complex_phased_env(su_state, c):
+    """Codex P2 on #1068: a real state whose environment carries a complex
+    overall phase.  The normalisation cancels the phase but left N-hat with
+    a complex dtype, so GMRES met a real RHS with a complex matvec and raised
+    a dtype TypeError.  g' must be the real-env result, and stay real."""
+    k = (0, 0)
+    A, g, env = su_state["sites"][k], su_state["grads"][k], su_state["phase"][k]
+    assert not jnp.iscomplexobj(A.todense())  # regime: a real state
+    ref = mp.precondition_gradient(A, env, g, DELTA, CFG)
+    out = mp.precondition_gradient(A, _scale_env(env, c), g, DELTA, CFG)
+    assert not jnp.iscomplexobj(out)
+    _assert_close(out, ref, 1e-10)
+
+
 @pytest.mark.parametrize("c", [-1.0, 0.3])
 @pytest.mark.parametrize("field", ["C1", "T2"])
 def test_single_env_tensor_rescale_invariance(su_state, field, c):
