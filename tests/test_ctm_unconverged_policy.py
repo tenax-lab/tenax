@@ -437,3 +437,84 @@ def test_refresh_warn_call_is_pinned_in_optimizer(monkeypatch):
         issubclass(x.category, CTMNotConvergedWarning) and "env_cache" in str(x.message)
         for x in w
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 4: site 3 (line-search phi) rejects unconverged trial points.
+# ---------------------------------------------------------------------------
+
+
+def _probe_loss(monkeypatch, unit_cell, policy, *, probe_max_iter=None):
+    """Run a tiny optimization whose line-search forwards report unconverged
+    and return what the line search's phi returned (plus the caught warnings)."""
+    import tenax.algorithms._line_search as _ls
+
+    real_cpl = _cpl.python_loop_ctm_converge
+    in_phi = {"on": False}
+
+    def unconverged_in_phi(*a, **k):
+        envs, info = real_cpl(*a, **k)
+        if in_phi["on"]:
+            return envs, info._replace(converged=False)
+        return envs, info
+
+    phis = []
+
+    def spy_hz(phi, dphi, phi0, slope, **kw):
+        in_phi["on"] = True
+        try:
+            phis.append(phi(1e-3))
+        finally:
+            in_phi["on"] = False
+        return 0.0, phi0, False
+
+    monkeypatch.setattr(_cpl, "python_loop_ctm_converge", unconverged_in_phi)
+    monkeypatch.setattr(_ls, "hager_zhang_line_search", spy_hz)
+    ctm = CTMConfig(
+        chi=4,
+        max_iter=300,
+        min_iter=1,
+        conv_tol=1e-8,
+        on_unconverged=policy,
+        probe_max_iter=probe_max_iter,
+    )
+    cfg = iPEPSConfig(
+        unit_cell=unit_cell,
+        max_bond_dim=2,
+        ctm=ctm,
+        gs_num_steps=1,
+        su_init=False,
+        gs_conv_criterion="grad_norm",
+    )
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        try:
+            _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+        except CTMNotConvergedError:
+            pass  # the real gradient forward may not reach conv_tol
+    return phis, w
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_site3_unconverged_probe_is_inf(monkeypatch, unit_cell):
+    phis, _ = _probe_loss(monkeypatch, unit_cell, "raise")
+    assert phis and all(math.isinf(p) for p in phis)
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_site3_warn_returns_energy(monkeypatch, unit_cell):
+    phis, w = _probe_loss(monkeypatch, unit_cell, "warn")
+    assert phis and all(math.isfinite(p) for p in phis)
+    assert any(issubclass(x.category, CTMNotConvergedWarning) for x in w)
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_site3_probe_override_keeps_legacy(monkeypatch, unit_cell):
+    """Review Focus 1: probe_max_iter set -> truncated probes are expected."""
+    phis, w = _probe_loss(monkeypatch, unit_cell, "raise", probe_max_iter=7)
+    assert phis and all(math.isfinite(p) for p in phis)
+    assert not any(
+        issubclass(x.category, CTMNotConvergedWarning)
+        and "line_search" in str(x.message)
+        for x in w
+    )

@@ -190,6 +190,33 @@ def _site1_forward_info(step_index: int, ctm_cfg, history: tuple | None):
         mult_list.append(None)
 
 
+def _site3_reject(info, ctm_cfg) -> bool:
+    """Site 3 of #1059: should a line-search probe forward be rejected?
+
+    Returns True (caller returns ``+inf`` without caching the env) for an
+    unconverged probe under ``on_unconverged="raise"``.  Under ``"warn"`` the
+    warning is emitted and False is returned (legacy path).  Probes with
+    ``probe_max_iter`` / ``probe_conv_tol`` set are designed to stop early
+    (#503): legacy path, no warning.
+    """
+    from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
+
+    if info.converged:
+        return False
+    if ctm_cfg.probe_max_iter is not None or ctm_cfg.probe_conv_tol is not None:
+        return False
+    if ctm_cfg.on_unconverged == "raise":
+        return True
+    check_ctm_converged(
+        info,
+        site="line_search",
+        policy="warn",
+        conv_tol=ctm_cfg.conv_tol,
+        chi=ctm_cfg.chi,
+    )
+    return False
+
+
 def _log_ctm_not_converged_reset(
     exc, *, conv_tol, n_reset: int, retries: int, verbose: bool
 ) -> None:
@@ -1619,7 +1646,7 @@ def _optimize_gs_ad_tensor(
             _env_cache["envs"] = {(0, 0): env}
             return float(compute_energy_split_ctm_tensor(A_norm, env, gate))
         site_tensors = {(0, 0): A_norm}
-        envs, _ = python_loop_ctm_converge(
+        envs, info = python_loop_ctm_converge(
             site_tensors,
             SINGLE_SITE_NEIGHBORS,
             **ctm_converge_kwargs(
@@ -1628,6 +1655,8 @@ def _optimize_gs_ad_tensor(
                 for_probe=True,
             ),
         )
+        if _site3_reject(info, ctm_cfg):
+            return float("inf")
         # Issue #502: share the just-converged env with the subsequent
         # ``_dphi(α)`` call (and any nearby ``_phi(α')`` probe).  The
         # implicit-AD ``loss_fn`` warm-starts from the same ``_env_cache``
@@ -3434,7 +3463,7 @@ def _optimize_gs_ad_tensor_2site(
             envs = _split_forward_2s(site_tensors, _env_cache_2s.get("envs", None))
             _env_cache_2s["envs"] = envs
             return float(_forward_energy_2s(A_norm, B_norm, envs))
-        envs, _ = python_loop_ctm_converge(
+        envs, info = python_loop_ctm_converge(
             site_tensors,
             CHECKERBOARD_NEIGHBORS,
             **ctm_converge_kwargs(
@@ -3443,6 +3472,8 @@ def _optimize_gs_ad_tensor_2site(
                 for_probe=True,
             ),
         )
+        if _site3_reject(info, ctm_cfg_2s):
+            return float("inf")
         # Issue #502: see 1-site loss_fn_fwd above for rationale.
         _env_cache_2s["envs"] = envs
         return float(
