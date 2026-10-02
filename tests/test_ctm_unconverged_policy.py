@@ -255,6 +255,67 @@ def test_unconverged_after_best_resets_and_recovers(unit_cell, monkeypatch, capl
     assert out[-1]["ctm_converged"] == [True, True]
 
 
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_reset_does_not_false_converge_under_de(unit_cell, monkeypatch):
+    """Final-review I1: a reset puts params back on best_params, which the
+    step before evaluated from a converged env.  The re-evaluation therefore
+    reproduces the previous energy to ~1e-16, and with the default "dE"
+    criterion the run used to stop right there reporting converged=True.
+    The reset must forget prev_energy so the run carries on."""
+    import dataclasses
+
+    calls = _fail_forwards(monkeypatch, {2})
+    cfg = dataclasses.replace(
+        _cfg(unit_cell, "raise", max_iter=200, steps=6, retries=2),
+        gs_conv_criterion="dE",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        out = _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+    history = out[-1]
+    # forward 1 = step 1, forward 2 = the failing step, forward 3 = the
+    # re-evaluation of best_params straight after the reset.  Stopping there
+    # is the false convergence.
+    assert calls["n"] > 3, (calls["n"], history["converged"], history["energies"])
+
+
+def test_1site_reset_reinits_optax_lbfgs_state(monkeypatch):
+    """Final-review I2: the 1-site CTMNotConvergedError reset re-initialises
+    the optax L-BFGS state, as the 2-site reset does."""
+    import dataclasses
+
+    import optax
+
+    init_calls = {"n": 0}
+    real_build = _opt._build_optimizer
+
+    def counting_build(cfg):
+        optimizer = real_build(cfg)
+        if optimizer is None:
+            return None
+        real_init = optimizer.init
+
+        def counting_init(params):
+            init_calls["n"] += 1
+            return real_init(params)
+
+        return optax.GradientTransformation(init=counting_init, update=optimizer.update)
+
+    monkeypatch.setattr(_opt, "_build_optimizer", counting_build)
+    calls = _fail_forwards(monkeypatch, {2})
+    cfg = dataclasses.replace(
+        _cfg("1x1", "raise", max_iter=200, steps=3, retries=2),
+        gs_optimizer="lbfgs",
+        gs_metric_precond=False,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        _opt.optimize_gs_ad(_heisenberg_gate(), _init("1x1"), cfg)
+    assert calls["n"] >= 2, "the failing forward never ran"
+    # once at set-up, once from the reset
+    assert init_calls["n"] >= 2, init_calls
+
+
 # ---------------------------------------------------------------------------
 # Task 2 fix round 1: the raise-and-checkpoint branches and the restore
 # closure's chi-mismatch fallback, pinned on the 2-site loop.
