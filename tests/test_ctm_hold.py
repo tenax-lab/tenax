@@ -260,6 +260,28 @@ def test_a_locally_constant_step_is_an_attractor():
     assert all(r < 1e-3 for r in held.rates)
 
 
+def test_a_collapse_does_not_overwrite_the_measured_floor():
+    """Codex P2 on #1067: the collapse branch wrote its synthetic distance
+    into ``floor``, the running max of the reference's one-sweep motion, so
+    one collapsed direction rewrote the floor every other direction's re-seed
+    is gated on, and ``HoldResult.floor`` stopped being that maximum.  Here
+    the reference moves once (the claimed point's residual, onto XSTAR) and
+    then never again, while every perturbation collapses every sweep."""
+
+    def step(envs):
+        return _vec_env(XSTAR)
+
+    start = _vec_env(XSTAR + 1e-7)
+    held = hold_test(step, start, sweeps=40, invariants=_identity_invariants)
+    assert held.passed
+    expected = env_invariant_distance(
+        _identity_invariants(_vec_env(XSTAR)), _identity_invariants(start)
+    )
+    # Regime: the residual move is the whole floor, and it is non-zero.
+    assert expected > 0
+    assert held.floor == expected
+
+
 def test_the_default_metric_is_blind_to_a_period_two_sign_cycle():
     """An attractor whose step flips the sign of alternate rows every sweep --
     the gauge-covariant env's +-1 period-2 cycle.  Element-wise, the

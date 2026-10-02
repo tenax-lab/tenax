@@ -660,8 +660,8 @@ def hold_test(
                 # Count the step as a collapse by at least 1/_COLLAPSE_LOG,
                 # then re-seed the direction with a fresh deterministic
                 # perturbation, keeping the accumulated log growth.
-                floor = _COLLAPSE_LOG * d0[i]
-                logs[i].append(logs[i][-1] + math.log(floor / max(dcur[i], tiny)))
+                collapsed = _COLLAPSE_LOG * d0[i]
+                logs[i].append(logs[i][-1] + math.log(collapsed / max(dcur[i], tiny)))
                 reseeds[i] += 1
                 fresh = jax.random.fold_in(dir_keys[i], reseeds[i])
                 ys[i] = perturb_env(x, perturbation, fresh)
