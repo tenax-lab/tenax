@@ -44,7 +44,10 @@ def _cfg(mesh, chi):
         # value_and_grad.
         ctm=CTMConfig(
             chi=chi,
-            max_iter=60,
+            # 60 (and 200) sweeps stopped short of conv_tol=1e-10, so the
+            # "true fixed point" premise above did not hold; 500 reach it
+            # (#1059).
+            max_iter=500,
             conv_tol=1e-10,
             plateau_patience=None,
             device_mesh=mesh,

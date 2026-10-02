@@ -551,7 +551,7 @@ def _ad_config(steps, **ctm):
         gs_implicit_ad=True,
         gs_num_steps=steps,
         gs_verbose=False,
-        ctm=CTMConfig(chi=CHI_D2, max_iter=50, conv_tol=1e-9, **ctm),
+        ctm=CTMConfig(chi=CHI_D2, **{"max_iter": 50, "conv_tol": 1e-9, **ctm}),
     )
 
 
@@ -938,8 +938,11 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
     monkeypatch.setattr(ea, "_sigma_gauged_ctm_converge", _spy)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
+        # max_iter 50 (the helper's default) left a forward unconverged, so
+        # the #1059 reset fired and E1 (-0.53714) ended above E0 (-0.53767);
+        # 150 still ended above E0 (-0.537567 vs -0.537672); 400 passes.
         (A1, B1), (_env_A1, _env_B1), E1 = optimize_gs_ad(
-            H, (A, B), _ad_config(5), envs_init=envs
+            H, (A, B), _ad_config(5, max_iter=400), envs_init=envs
         )
     seed_layout = _layout(envs)
     assert seen_layouts and all(lay == seed_layout for lay in seen_layouts)

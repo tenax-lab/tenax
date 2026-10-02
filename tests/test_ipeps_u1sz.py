@@ -128,7 +128,14 @@ class TestU1SzSymmetricMatchesDense:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=8, max_iter=20),
+            # needs an unconverged forward: from this init neither the
+            # symmetric nor the dense gradient forward converges (residual:
+            # sym 7.3e-3 at both max_iter=100 and 300; dense 0.64 / 0.78 at
+            # max_iter=20 / 100), so the
+            # comparison below is between two unconverged energies -- it pins
+            # the #602 no-collapse guard, not a converged value.  Follow-up:
+            # find a converging init and drop this pin; see #1059.
+            ctm=CTMConfig(chi=8, max_iter=20, on_unconverged="warn"),
             gs_num_steps=1,
             unit_cell="2site",
         )

@@ -451,7 +451,9 @@ def test_resume_rejects_plain_to_cg(tmp_path):
     plain_cfg = iPEPSConfig(
         unit_cell="1x1",
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=20, min_iter=5),
+        # 20 sweeps left the gradient forward unconverged (residual 1.2e-7 vs
+        # 1e-8); 100 converge, so phase A completes and checkpoints (#1059).
+        ctm=CTMConfig(chi=4, max_iter=100, min_iter=5),
         gs_num_steps=2,
         gs_checkpoint_path=str(tmp_path),
         gs_checkpoint_every=1,
@@ -490,7 +492,9 @@ def _ferro_gate():
 def _converged_1site_cfg(ckpt_path, **overrides):
     kwargs = dict(
         max_bond_dim=1,
-        ctm=CTMConfig(chi=1, max_iter=5),
+        # max_iter=5 < min_iter=10 never measured the CTM, which the default
+        # on_unconverged="raise" refuses; 20 sweeps certify it (#1059).
+        ctm=CTMConfig(chi=1, max_iter=20),
         gs_num_steps=3,
         gs_implicit_ad=False,
         gs_explicit_ad_steps=2,

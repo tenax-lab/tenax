@@ -72,7 +72,8 @@ class TestOptimizeGsAd:
         """AD optimization should run without crashing."""
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=5),
+            # 5 sweeps left the forward unconverged; 300 converge (#1059).
+            ctm=CTMConfig(chi=4, max_iter=300),
             gs_num_steps=3,
             gs_learning_rate=1e-2,
         )
@@ -84,7 +85,10 @@ class TestOptimizeGsAd:
         """Heisenberg D=2 should give E < 0 after some optimization steps."""
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            # needs an unconverged forward: 20 steps from a random init reach
+            # a state whose 1-site CTM cycles (step 13 residual 1.2e-4 even at
+            # max_iter=300); the assertion is a loose sign check; see #1059.
+            ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
             gs_num_steps=20,
             gs_learning_rate=1e-2,
         )
@@ -98,7 +102,8 @@ class TestOptimizeGsAd:
             max_bond_dim=2,
             num_imaginary_steps=10,
             dt=0.1,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            # 10 sweeps left the forward unconverged; 50 converge (#1059).
+            ctm=CTMConfig(chi=4, max_iter=50),
             gs_num_steps=3,
             gs_learning_rate=1e-2,
             su_init=True,
@@ -117,7 +122,10 @@ class TestOptimizeGsAd:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            # needs an unconverged forward: this A_init's 1-site CTM never
+            # converges (residual 7.6e-6, flat for max_iter 50..300); the
+            # test checks su_init is ignored, not convergence; see #1059.
+            ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
             gs_num_steps=3,
             gs_learning_rate=1e-2,
             su_init=True,

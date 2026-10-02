@@ -630,7 +630,7 @@ class TestOptimizeGsAd2Site:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=3,
             gs_learning_rate=1e-3,
             unit_cell="2site",
@@ -662,7 +662,7 @@ class TestOptimizeGsAd2Site:
         """gs_num_steps=0 should return initial energy without crashing."""
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=0,
             unit_cell="2site",
         )
@@ -698,7 +698,7 @@ class TestOptimizeGsAd2Site:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=1,
             unit_cell="2site",
         )
@@ -786,7 +786,7 @@ class TestOptimizeGsAd2Site:
         """
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=5,
             gs_learning_rate=1e-2,
             unit_cell="2site",
@@ -812,7 +812,7 @@ class TestOptimizeGsAd2Site:
         """
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=5,
             gs_learning_rate=1e-2,
             unit_cell="2site",
@@ -888,7 +888,7 @@ class TestOptimizeGsAdLogging:
     def test_verbose_prints_progress(self, heisenberg_gate, capsys):
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=5),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=2,
             gs_learning_rate=1e-3,
             gs_verbose=True,
@@ -935,7 +935,7 @@ class TestOptimizeGsAdDenseOnly:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=5),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=1,
             unit_cell="2site",
         )
@@ -970,7 +970,7 @@ class TestOptimizeGsAdOptimizers:
         """
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=2, max_iter=3),
+            ctm=CTMConfig(chi=2, max_iter=100),
             gs_optimizer="lbfgs",
             gs_num_steps=1,
             gs_line_search=True,
@@ -988,7 +988,7 @@ class TestOptimizeGsAdOptimizers:
         """
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=2, max_iter=3),
+            ctm=CTMConfig(chi=2, max_iter=100),
             gs_optimizer="cg",
             gs_num_steps=1,
         )
@@ -1077,7 +1077,11 @@ class TestADSymmetric:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            # needs an unconverged forward: this init's 1-site CTM never
+            # converges (stationarity residual 0.24, flat for max_iter
+            # 10..300), and the test checks the type round-trip, not
+            # convergence; see #1059.
+            ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
             gs_num_steps=2,
             gs_learning_rate=0.01,
         )
@@ -1108,7 +1112,10 @@ class TestADSymmetric:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=5),
+            # needs an unconverged forward: same init as
+            # test_optimize_gs_ad_symmetric_runs, whose 1-site CTM never
+            # converges (residual 0.24 at any max_iter up to 300); see #1059.
+            ctm=CTMConfig(chi=4, max_iter=5, on_unconverged="warn"),
             gs_num_steps=1,
             gs_learning_rate=0.01,
         )
@@ -1176,7 +1183,7 @@ class TestADSymmetric:
         gate = self._heisenberg_gate()
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=0,
             gs_learning_rate=0.01,
         )
@@ -1780,7 +1787,7 @@ def test_noise_floor_does_not_gate_healthy_optimization():
 
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=10),
+        ctm=CTMConfig(chi=4, max_iter=100),
         gs_num_steps=5,
         gs_learning_rate=1e-2,
         unit_cell="1x1",
@@ -1856,7 +1863,7 @@ def test_loss_fn_fwd_updates_env_cache_for_hz_dphi_reuse():
 
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=10),
+        ctm=CTMConfig(chi=4, max_iter=100),
         gs_num_steps=1,
         gs_optimizer="lbfgs",
         gs_line_search_method="hager_zhang",
@@ -1928,7 +1935,7 @@ def test_loss_fn_fwd_probe_envs_dont_leak_past_line_search():
     # 2 steps so we observe step-2 reading the cache restored at step-1 end.
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=10),
+        ctm=CTMConfig(chi=4, max_iter=100),
         gs_num_steps=2,
         gs_optimizer="lbfgs",
         gs_line_search_method="hager_zhang",
@@ -2000,7 +2007,7 @@ def test_2site_implicit_ad_ctmrg_heuristic_increase_chi_grows_env():
         max_bond_dim=2,
         ctm=CTMConfig(
             chi=4,
-            max_iter=8,
+            max_iter=100,
             ctmrg_heuristic_increase_chi=True,
             ctmrg_heuristic_increase_chi_threshold=1e-12,  # force bump every call
             ctmrg_heuristic_increase_chi_step_size=2,
@@ -2057,7 +2064,9 @@ def test_gs_ctm_max_iter_schedule_caps_late_step_ctm():
 
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=75),
+        # needs an unconverged forward: the schedule deliberately caps late
+        # steps at 5 sweeps; see #1059.
+        ctm=CTMConfig(chi=4, max_iter=75, on_unconverged="warn"),
         gs_num_steps=5,
         gs_optimizer="lbfgs",
         gs_line_search_method="hager_zhang",
@@ -2114,7 +2123,7 @@ def test_gs_ctm_max_iter_schedule_default_none_unchanged():
 
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=12),
+        ctm=CTMConfig(chi=4, max_iter=100),
         gs_num_steps=3,
         unit_cell="1x1",
         su_init=True,
@@ -2124,8 +2133,8 @@ def test_gs_ctm_max_iter_schedule_default_none_unchanged():
     with patch.object(ctm_mod, "python_loop_ctm_converge", side_effect=_spy):
         optimize_gs_ad(gate, None, config)
 
-    assert set(seen_max_iter) == {12}, (
-        f"unscheduled run must always pass max_iter=12; got {set(seen_max_iter)}"
+    assert set(seen_max_iter) == {100}, (
+        f"unscheduled run must always pass max_iter=100; got {set(seen_max_iter)}"
     )
 
 
@@ -2309,7 +2318,9 @@ def test_stall_reset_reinits_optax_lbfgs_state(monkeypatch):
         gs_verbose=False,
         unit_cell="1x1",
         su_init=False,
-        ctm=CTMConfig(chi=3, max_iter=5, min_iter=2, conv_tol=1e-3),
+        # 5 sweeps left the step-1 forward unconverged, which now raises before
+        # any stall can happen; 50 converge (#1059).
+        ctm=CTMConfig(chi=3, max_iter=50, min_iter=2, conv_tol=1e-3),
     )
 
     with contextlib.suppress(Exception):
