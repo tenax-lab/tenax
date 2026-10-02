@@ -71,6 +71,31 @@ Returns a `DenseTensor` with legs `("up", "down", "left", "right")`.
 Computes the exact 2D Ising free energy per site via numerical integration of
 the Onsager formula. Useful as a benchmark for TRG convergence.
 
+(gilt-tnr)=
+## Gilt-TNR
+
+GILT (graph-independent local truncation, Hauru-Delcamp-Mizera PRB 97, 045111)
+removes corner-double-line short-range entanglement from the plaquette before
+each TRG step. At the Ising critical point this breaks through the plain-TRG
+accuracy plateau: at chi=8 the free-energy error drops from ~2e-3 to ~5e-5,
+and unlike plain TRG it keeps improving with chi.
+
+```python
+from tenax import GiltConfig, GiltTNRConfig, gilt_tnr, compute_ising_tensor
+
+beta_c = 0.44068679350977147  # Onsager critical point
+T = compute_ising_tensor(beta_c, symmetric=True)  # dense also works
+
+config = GiltTNRConfig(max_bond_dim=8, num_steps=20, gilt=GiltConfig(gilt_eps=1e-6))
+log_z_per_n = gilt_tnr(T, config)
+```
+
+`gilt_eps` is measured against the sum-normalized environment spectrum (the
+convention of Hauru et al.'s reference code); `gilt_plaquette` is also exported
+standalone for use in other coarse-graining schemes.
+
+For the HOTRG counterpart (`gilt_hotrg`) see {ref}`gilt-hotrg`.
+
 ## Convergence
 
 TRG accuracy improves with `max_bond_dim`. Typical values:
@@ -82,4 +107,5 @@ TRG accuracy improves with `max_bond_dim`. Typical values:
 | 16 | ~1e-5 |
 | 32 | ~1e-7 |
 
-For better accuracy at the same bond dimension, consider {doc}`hotrg`.
+For better accuracy at the same bond dimension, consider {doc}`hotrg` or
+{ref}`gilt-tnr` above.

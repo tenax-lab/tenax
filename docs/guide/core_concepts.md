@@ -56,6 +56,11 @@ sum_i  flow_i * charge_i  ==  identity
 
 where `flow_i` is +1 for `IN` and -1 for `OUT`.
 
+Extension code should evaluate this through the symmetry object
+(`flow_charge`, `net_charge`, `is_conserved`) rather than hand-rolled integer
+arithmetic; see {doc}`symmetry` for that, `ProductSymmetry`, fermionic swap
+gates and twists, and which legs may be contracted.
+
 ## Indices
 
 A `TensorIndex` attaches metadata to one leg of a tensor:
