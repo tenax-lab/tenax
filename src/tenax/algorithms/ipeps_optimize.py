@@ -127,6 +127,59 @@ def _refresh_env_cache(cache: dict, envs, info, ctm_cfg) -> None:
         )
 
 
+def _cache_env_known_converged(cache: dict | None) -> bool:
+    """True only if ``cache`` holds an env whose verdict says it converged.
+
+    A missing or stale verdict ("unknown") and an unconverged one both
+    disqualify it: the final evaluation must not report a warm env that
+    was not positively certified (#1059 site 4, ruling R9).
+    """
+    return bool(cache) and _cached_env_state(cache) == "converged"
+
+
+def _final_eval_use_warm(
+    info, warm_cache: dict | None, ctm_cfg, *, skippable: bool = False
+) -> str:
+    """Site 4 of #1059: decide how to handle an unconverged final evaluation.
+
+    Returns ``"fresh"`` when the fresh forward converged, or when it did not
+    but ``on_unconverged="warn"`` (the warning is emitted; legacy result).
+    Returns ``"warm"`` when the caller should recompute the energy from the
+    certified-converged warm env in ``warm_cache``.  Returns ``"skip"`` when
+    unconverged under ``"raise"`` with no warm env but ``skippable`` (the
+    caller has another certified candidate and drops this one).  Otherwise
+    raises ``CTMNotConvergedError`` under ``"raise"``.
+    """
+    if info.converged:
+        return "fresh"
+    if (
+        warm_cache is not None
+        and _cache_env_known_converged(warm_cache)
+        and _should_restore_best_env(warm_cache["envs"], ctm_cfg.chi)
+    ):
+        _logger.warning(
+            "[iPEPS-AD] fresh final CTM did not converge; "
+            "reporting the converged warm env's energy"
+        )
+        return "warm"
+    if skippable and ctm_cfg.on_unconverged == "raise":
+        _logger.warning(
+            "[iPEPS-AD] fresh final CTM at the last iterate did not converge "
+            "and has no converged warm env; reporting the best params instead"
+        )
+        return "skip"
+    from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
+
+    check_ctm_converged(
+        info,
+        site="final_energy",
+        policy=ctm_cfg.on_unconverged,
+        conv_tol=ctm_cfg.conv_tol,
+        chi=ctm_cfg.chi,
+    )
+    return "fresh"
+
+
 def _drop_env_cache_for_reset(env_cache: dict) -> None:
     """Clear the env warm-start cache AND the implicit-AD λ warm-start seed.
 
@@ -2748,8 +2801,13 @@ def _optimize_gs_ad_tensor(
     # (non-variational at finite chi), so we compare fresh evaluations only.
     # Match in-loop CTM tolerances (#317) by reusing ctm_cfg directly.
 
-    def _eval_fresh(p, env_init=None):
-        """Evaluate energy with fully converged fresh CTM."""
+    def _eval_fresh(p, env_init=None, warm_cache=None, skippable=False):
+        """Evaluate energy with fully converged fresh CTM.
+
+        Returns ``(A, env, E, source)``; ``source`` is ``"warm_fallback"`` when
+        the fresh forward did not converge and ``warm_cache`` (the cache dict
+        holding the env converged at exactly ``p``) supplied the energy.
+        """
         A_t = _params_to_A_norm(p)
         if use_split:
             # Final env is the split fixed point used by the gradient; return
@@ -2757,18 +2815,25 @@ def _optimize_gs_ad_tensor(
             # from the passed env_init dict when available.
             env_ = _split_forward(A_t, env_init=_split_env_seed(env_init))
             E_ = float(compute_energy_split_ctm_tensor(A_t, env_, gate))
-            return A_t, env_, E_
-        envs, _ = python_loop_ctm_converge(
+            return A_t, env_, E_, "fresh"
+        envs, info = python_loop_ctm_converge(
             {(0, 0): A_t},
             SINGLE_SITE_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg, env_init=env_init),
         )
+        verdict = _final_eval_use_warm(info, warm_cache, ctm_cfg, skippable=skippable)
+        source = "fresh"
+        if verdict == "warm":
+            envs = warm_cache["envs"]
+            source = "warm_fallback"
         env_ = envs[(0, 0)]
-        if _use_cg:
+        if verdict == "skip":
+            E_ = float("inf")
+        elif _use_cg:
             E_ = float(compute_energy_cg(A_t, env_, cg_gates, _cg_d_eff))
         else:
             E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
-        return A_t, env_, E_
+        return A_t, env_, E_, source
 
     # #899: NO env_init.  The block comment above says these evaluations are
     # fresh, and the code then seeded them from ``_env_cache["envs"]`` -- which
@@ -2784,18 +2849,32 @@ def _optimize_gs_ad_tensor(
     # This also retires the #469 chi-padding of the best-env snapshot: it
     # existed solely to make that snapshot shape-compatible as a SEED, and
     # nothing is seeded now.
-    A_final, env_final, E_final = _eval_fresh(params)
-
+    #
+    # #1059 site 4: an unconverged cold evaluation falls back to the warm env
+    # converged at exactly these params.  After the line search ``_env_cache``
+    # was restored to the previous params' env, so it is params' env only when
+    # ``params is best_params``; ``best_env_cache`` is always best_params' env.
+    #
+    # The best point is evaluated first: when the last iterate is unconverged
+    # with no converged warm env of its own, it is dropped (E = +inf) in favour
+    # of the certified best point rather than failing the whole run.
     if best_params is not params:
-        _, env_best, E_best_fresh = _eval_fresh(best_params)
-    else:
+        A_best, env_best, E_best_fresh, src_best = _eval_fresh(
+            best_params, warm_cache=best_env_cache
+        )
+    A_final, env_final, E_final, src_final = _eval_fresh(
+        params,
+        warm_cache=_env_cache if params is best_params else None,
+        skippable=params is not best_params,
+    )
+    if best_params is params:
         E_best_fresh = E_final
 
     if E_final <= E_best_fresh:
-        env, E_gs = env_final, E_final
+        env, E_gs, _final_env_source = env_final, E_final, src_final
     else:
-        A_final, _, _ = _eval_fresh(best_params)
-        env, E_gs = env_best, E_best_fresh
+        A_final = A_best
+        env, E_gs, _final_env_source = env_best, E_best_fresh, src_best
     if config.gs_verbose:
         print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
 
@@ -2809,6 +2888,7 @@ def _optimize_gs_ad_tensor(
             "ctm_converged": _hist_ctm_converged,
             "ctm_sv_diff": _hist_ctm_sv_diff,
             "ctm_step_multiplier": _hist_ctm_mult,
+            "final_env_source": _final_env_source,
         }
         return A_final, env, E_gs, history
     return A_final, env, E_gs
@@ -4640,8 +4720,11 @@ def _optimize_gs_ad_tensor_2site(
         # unphysical values, so we compare fresh evaluations only.
         # Match in-loop CTM tolerances (#317) by reusing ctm_cfg_2s directly.
 
-        def _eval_fresh_2site(p, env_init=None):
-            """Evaluate energy with fully converged fresh CTM."""
+        def _eval_fresh_2site(p, env_init=None, warm_cache=None, skippable=False):
+            """Evaluate energy with fully converged fresh CTM.
+
+            Returns ``(A, B, envs, E, source)``; see the 1-site ``_eval_fresh``.
+            """
             if use_c4v:
                 A_t, B_t = _c4v_AB(p)
             else:
@@ -4652,40 +4735,61 @@ def _optimize_gs_ad_tensor_2site(
                 # return the SplitCTMTensorEnv dict (not the fused envs).
                 envs = _split_forward_2s(st, env_init)
                 E_ = float(_forward_energy_2s(A_t, B_t, envs))
-                return A_t, B_t, envs, E_
-            envs, _ = python_loop_ctm_converge(
+                return A_t, B_t, envs, E_, "fresh"
+            envs, info = python_loop_ctm_converge(
                 st,
                 CHECKERBOARD_NEIGHBORS,
                 **ctm_converge_kwargs(ctm_cfg_2s, env_init=env_init),
             )
-            E_ = float(
-                compute_energy_ctm_tensor_2site(
-                    A_t, B_t, envs[(0, 0)], envs[(1, 0)], gate, d_phys
-                )
+            verdict = _final_eval_use_warm(
+                info, warm_cache, ctm_cfg_2s, skippable=skippable
             )
-            return A_t, B_t, envs, E_
+            source = "fresh"
+            if verdict == "warm":
+                envs = warm_cache["envs"]
+                source = "warm_fallback"
+            if verdict == "skip":
+                E_ = float("inf")
+            else:
+                E_ = float(
+                    compute_energy_ctm_tensor_2site(
+                        A_t, B_t, envs[(0, 0)], envs[(1, 0)], gate, d_phys
+                    )
+                )
+            return A_t, B_t, envs, E_, source
 
         # #899: NO env_init -- see the 1-site path for the full reasoning.
         # The seed was the line-search-reverted cache, i.e. a different
         # state's environment, and ``best_params`` is evaluated cold for the
         # same reason so the comparison below compares like with like.
-        A_last, B_last, envs_last, E_last = _eval_fresh_2site(params)
-        env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
-
+        # #1059 site 4: warm fallback only from a cache certified converged at
+        # exactly these params (see the 1-site path).
+        # The best point goes first: an unconverged last iterate with no
+        # converged warm env of its own is dropped (E = +inf) in favour of it.
         if best_params is not params:
-            A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(best_params)
+            A_best, B_best, envs_best, E_best_fresh, src_best = _eval_fresh_2site(
+                best_params, warm_cache=best_env_cache_2s
+            )
             env_A_best = envs_best[(0, 0)]
             env_B_best = envs_best[(1, 0)]
-        else:
+        A_last, B_last, envs_last, E_last, src_last = _eval_fresh_2site(
+            params,
+            warm_cache=_env_cache_2s if params is best_params else None,
+            skippable=params is not best_params,
+        )
+        env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
+        if best_params is params:
             E_best_fresh = E_last
 
         # Pick whichever fresh evaluation is lower
         if E_last <= E_best_fresh:
             A_final, B_final = A_last, B_last
             env_A, env_B, E_gs = env_A_last, env_B_last, E_last
+            _final_env_source = src_last
         else:
             A_final, B_final = A_best, B_best
             env_A, env_B, E_gs = env_A_best, env_B_best, E_best_fresh
+            _final_env_source = src_best
         if config.gs_verbose:
             print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
 
@@ -4699,6 +4803,7 @@ def _optimize_gs_ad_tensor_2site(
                 "ctm_converged": _hist_ctm_converged,
                 "ctm_sv_diff": _hist_ctm_sv_diff,
                 "ctm_step_multiplier": _hist_ctm_mult,
+                "final_env_source": _final_env_source,
             }
             return (A_final, B_final), (env_A, env_B), E_gs, history
         return (A_final, B_final), (env_A, env_B), E_gs

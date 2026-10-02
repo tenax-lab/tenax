@@ -46,7 +46,10 @@ def _cfg() -> iPEPSConfig:
     reversion has something to revert to."""
     return iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=6, max_iter=12, conv_tol=1e-9),
+        # max_iter=12 is deliberately too few to converge (cheap fixture); this
+        # test is about WHICH env seeds the final evaluation, not convergence,
+        # so keep the legacy report-anyway behaviour (#1059).
+        ctm=CTMConfig(chi=6, max_iter=12, conv_tol=1e-9, on_unconverged="warn"),
         gs_num_steps=4,
         gs_learning_rate=1e-2,
         gs_implicit_ad=False,

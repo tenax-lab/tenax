@@ -533,3 +533,96 @@ def test_site3_probe_override_keeps_legacy(monkeypatch, unit_cell):
         and "line_search" in str(x.message)
         for x in w
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 5: site 4 (fresh final evaluation) falls back to the converged warm env.
+# ---------------------------------------------------------------------------
+
+
+def _final_eval_unconverged(monkeypatch):
+    """Make every COLD (env_init=None) forward that comes AFTER at least one
+    warm forward report unconverged: the loop's warm calls precede the cold
+    final evaluations (#899 removed env_init from the final evaluation only)."""
+    real = _cpl.python_loop_ctm_converge
+    state = {"warm_seen": False, "armed_seen": False}
+
+    def spy(*a, **k):
+        envs, info = real(*a, **k)
+        if k.get("env_init") is not None:
+            state["warm_seen"] = True
+        elif state["warm_seen"]:
+            state["armed_seen"] = True
+            return envs, info._replace(converged=False)
+        return envs, info
+
+    monkeypatch.setattr(_cpl, "python_loop_ctm_converge", spy)
+    return state
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_site4_falls_back_to_warm(monkeypatch, unit_cell):
+    state = _final_eval_unconverged(monkeypatch)
+    cfg = _cfg(unit_cell, "raise", max_iter=300, steps=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        out = _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+    assert state["armed_seen"], "final cold evaluation was never reached"
+    assert out[-1]["final_env_source"] == "warm_fallback"
+    assert math.isfinite(out[2])
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_site4_raises_without_converged_warm(monkeypatch, unit_cell):
+    state = _final_eval_unconverged(monkeypatch)
+    monkeypatch.setattr(_opt, "_should_restore_best_env", lambda *a, **k: False)
+    cfg = _cfg(unit_cell, "raise", max_iter=300, steps=1)
+    with pytest.raises(CTMNotConvergedError) as ei:
+        _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+    assert state["armed_seen"]
+    assert ei.value.site == "final_energy"
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_site4_warn_legacy(monkeypatch, unit_cell):
+    state = _final_eval_unconverged(monkeypatch)
+    monkeypatch.setattr(_opt, "_should_restore_best_env", lambda *a, **k: False)
+    cfg = _cfg(unit_cell, "warn", max_iter=300, steps=1)
+    with pytest.warns(CTMNotConvergedWarning, match="final_energy"):
+        out = _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+    assert state["armed_seen"]
+    assert out[-1]["final_env_source"] == "fresh"
+    assert math.isfinite(out[2])
+
+
+def test_site4_converged_fresh_is_tagged_fresh():
+    cfg = _cfg("2site", "raise", max_iter=300, steps=1)
+    out = _opt.optimize_gs_ad(_heisenberg_gate(), _init("2site"), cfg)
+    assert out[-1]["final_env_source"] == "fresh"
+
+
+def test_site4_warm_requires_certified_converged_verdict(monkeypatch):
+    """R9: only a cache whose verdict is identity-matched AND converged may
+    supply the fallback; unconverged / missing / stale verdicts must raise."""
+    monkeypatch.setattr(_opt, "_should_restore_best_env", lambda *a, **k: True)
+    cfg = CTMConfig(chi=4, conv_tol=1e-9, on_unconverged="raise")
+    bad = _fake_info(False)
+    env, other = {"e": 1}, {"e": 2}
+
+    def use(cache):
+        return _opt._final_eval_use_warm(bad, cache, cfg)
+
+    assert use({"envs": env, _opt._VERDICT_KEY: (env, True)}) == "warm"
+    assert _opt._final_eval_use_warm(_fake_info(True), None, cfg) == "fresh"
+    assert _opt._final_eval_use_warm(bad, None, cfg, skippable=True) == "skip"
+    for cache in (
+        {"envs": env, _opt._VERDICT_KEY: (env, False)},  # unconverged
+        {"envs": env},  # missing verdict
+        {"envs": env, _opt._VERDICT_KEY: (other, True)},  # stale verdict
+        {},
+        None,
+    ):
+        assert not _opt._cache_env_known_converged(cache)
+        with pytest.raises(CTMNotConvergedError) as ei:
+            use(cache)
+        assert ei.value.site == "final_energy"
