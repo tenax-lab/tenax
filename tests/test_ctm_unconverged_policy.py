@@ -713,6 +713,8 @@ def test_site5_ctm_tensor_2site_strict():
         with pytest.raises(CTMNotConvergedError) as ei:
             ctm_tensor_2site(A, B, chi=4, max_iter=2, conv_tol=1e-14, strict=True)
     assert ei.value.site == "ctm_tensor_2site"
+    assert ei.value.info.converged is False
+    assert math.isfinite(ei.value.info.sv_diff)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         ctm_tensor_2site(

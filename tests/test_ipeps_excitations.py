@@ -85,11 +85,13 @@ class TestOptimizeGsAd:
         """Heisenberg D=2 should give E < 0 after some optimization steps."""
         config = iPEPSConfig(
             max_bond_dim=2,
-            # needs an unconverged forward: 20 steps from a random init reach
-            # a state whose 1-site CTM cycles (step 13 residual 1.2e-4 even at
-            # max_iter=300); the assertion is a loose sign check; see #1059.
-            ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
-            gs_num_steps=20,
+            # max_iter=10 left forwards unconverged.  20 steps reach a point
+            # whose gradient forward does not converge (step 14 plateau-bails
+            # at max_iter 300 and 1000; with plateau_patience=None, step 13 is
+            # still unconverged after 1000 sweeps), so run 10 steps, every one
+            # of which converges at max_iter=300 (#1059).
+            ctm=CTMConfig(chi=4, max_iter=300),
+            gs_num_steps=10,
             gs_learning_rate=1e-2,
         )
         _, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
@@ -122,9 +124,10 @@ class TestOptimizeGsAd:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            # needs an unconverged forward: this A_init's 1-site CTM never
-            # converges (residual 7.6e-6, flat for max_iter 50..300); the
-            # test checks su_init is ignored, not convergence; see #1059.
+            # needs an unconverged forward: this A_init's step-1 and step-2
+            # forwards are still unconverged at max_iter=1000 with
+            # plateau_patience=None (residual 7.5e-6, 7.4e-6); the test checks
+            # su_init is ignored, not convergence; see #1059.
             ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
             gs_num_steps=3,
             gs_learning_rate=1e-2,

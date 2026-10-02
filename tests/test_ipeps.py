@@ -1077,9 +1077,10 @@ class TestADSymmetric:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            # needs an unconverged forward: this init's 1-site CTM never
-            # converges (stationarity residual 0.24, flat for max_iter
-            # 10..300), and the test checks the type round-trip, not
+            # needs an unconverged forward: this init's 1-site CTM is still
+            # unconverged at max_iter=1000 with plateau_patience=None (step 1
+            # stationarity residual 0.24, step 2 1.5e-4; dense and symmetric
+            # alike), and the test checks the type round-trip, not
             # convergence; see #1059.
             ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
             gs_num_steps=2,
@@ -1113,8 +1114,9 @@ class TestADSymmetric:
         config = iPEPSConfig(
             max_bond_dim=2,
             # needs an unconverged forward: same init as
-            # test_optimize_gs_ad_symmetric_runs, whose 1-site CTM never
-            # converges (residual 0.24 at any max_iter up to 300); see #1059.
+            # test_optimize_gs_ad_symmetric_runs, whose 1-site CTM is still
+            # unconverged at max_iter=1000 with plateau_patience=None; the test
+            # checks the type round-trip, not convergence; see #1059.
             ctm=CTMConfig(chi=4, max_iter=5, on_unconverged="warn"),
             gs_num_steps=1,
             gs_learning_rate=0.01,

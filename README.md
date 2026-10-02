@@ -689,6 +689,9 @@ than the window to show (e.g. ×1.01 against ×0.99 takes ~230). The metric is
 also per tensor, so a mode that rotates one side of a shared χ bond relative
 to the other is invisible to it. With the default `hold_sweeps=0` the loop uses successive-sweep
 agreement alone, as before.
+Pass `ctm_tensor_2site(..., strict=True)` to raise `CTMNotConvergedError`
+instead of warning when the environment is not converged (or the hold left it
+unverified); the default `strict=False` warns and returns it (#1059).
 
 `ctm_hold_test` runs the same test on any environment, e.g. a seed before it
 goes to `optimize_gs_ad(envs_init=...)` or the environment an implicit-AD

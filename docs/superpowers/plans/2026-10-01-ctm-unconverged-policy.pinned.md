@@ -18,9 +18,12 @@ Buckets:
   was an unconverged one before.
 - **(c) genuine regression**: the implementation was fixed.
 
-"Flat in max_iter" means the forward's residual did not move when the budget
-grew. Such a forward cycles rather than converging slowly, so raising
-`max_iter` cannot fix it.
+"Still unconverged at max_iter=1000 with plateau_patience=None" is the strongest
+statement measured below. The CTM loop's default `plateau_patience=20` stops a
+stalled forward early, so residuals that look identical across `max_iter`
+reflect that bail, not the dynamics. Each "cannot converge" pin was therefore
+re-run once with the bail off and a 1000-sweep budget. Per-sweep trajectories
+were not recorded, so no pin claims a confirmed cycle.
 
 ## (c) Genuine regression
 
@@ -34,11 +37,10 @@ grew. Such a forward cycles rather than converging slowly, so raising
 |---|---|
 | `test_ipeps_final_energy_is_fresh_899.py` (module fixture, pinned in Task 5) | `max_iter=12` is deliberately too few to converge (cheap fixture). The test is about which env seeds the final evaluation, not about convergence. |
 | `test_ipeps.py::test_gs_ctm_max_iter_schedule_caps_late_step_ctm` | The schedule deliberately caps late steps at 5 CTM sweeps. Truncation is the feature under test. |
-| `test_ipeps.py::TestADSymmetric::test_optimize_gs_ad_symmetric_runs` | **Cannot converge, not deliberate.** This init's 1-site CTM cycles: stationarity residual 0.238 at step 1, identical at max_iter 10, 100 and 300, with dense and symmetric agreeing. The test checks the SymmetricTensor round-trip. |
-| `test_ipeps.py::TestADSymmetric::test_optimize_gs_ad_symmetric_matches_dense` | Same init as the previous row: cannot converge. Type round-trip plus finiteness only. |
-| `test_ipeps_excitations.py::TestOptimizeGsAd::test_heisenberg_negative_energy` | **Cannot converge.** 20 steps from a random init reach a state whose 1-site CTM cycles: the step-13 residual is 1.2e-4 even at max_iter=300. The assertion is a loose `E < 1.0`. |
-| `test_ipeps_excitations.py::TestOptimizeGsAd::test_su_init_ignored_when_A_init_provided` | **Cannot converge.** This `A_init`'s step-1 forward residual is 7.6e-6 at max_iter 50, 100 and 300 alike. The test checks that `su_init` is ignored. |
-| `test_ipeps_u1sz.py::TestU1SzSymmetricMatchesDense::test_one_step_symmetric_charged_ctm_no_collapse` | **Encoded the bug, and the budget cannot fix it.** Its docstring already says the CTM "is not fully converged". Neither forward converges: symmetric residual 7.3e-3 at max_iter 100 and 300; dense 0.64 at 20 and 0.78 at 100. The `E_sym ≈ E_dense (2e-2)` check therefore compares two unconverged energies. Pinned to keep the #602 no-collapse guard. **Follow-up:** find a converging init and drop the pin. |
+| `test_ipeps.py::TestADSymmetric::test_optimize_gs_ad_symmetric_runs` | **Does not converge; not deliberate.** With the default plateau bail, the forward stops at ~30 sweeps with stationarity residual 0.238 (step 1) / 1.47e-4 (step 2), identical at max_iter 100 and 300. With `plateau_patience=None, max_iter=1000`, it is still unconverged: 0.238 / 1.51e-4, dense and symmetric alike. The test checks the SymmetricTensor round-trip. |
+| `test_ipeps.py::TestADSymmetric::test_optimize_gs_ad_symmetric_matches_dense` | Same init as the previous row: still unconverged at `max_iter=1000` with `plateau_patience=None`. Checks type round-trip and finiteness only. |
+| `test_ipeps_excitations.py::TestOptimizeGsAd::test_su_init_ignored_when_A_init_provided` | **Does not converge.** The step-1 residual sits at 7.6e-6 at max_iter 50, 100 and 300 (plateau bail on). With `plateau_patience=None, max_iter=1000`, steps 1 and 2 are still unconverged (7.5e-6, 7.4e-6); step 3 converges. The test checks that `su_init` is ignored. |
+| `test_ipeps_u1sz.py::TestU1SzSymmetricMatchesDense::test_one_step_symmetric_charged_ctm_no_collapse` | **Encoded the bug, and the budget cannot fix it.** With the default bail, the symmetric residual is 7.3e-3 at max_iter 100 and 300, and dense is 0.64 / 0.78 at 20 / 100. With `plateau_patience=None, max_iter=1000`, both are still unconverged: symmetric 1.7e-5, dense 0.85. **Its `assert_allclose(E_sym, E_dense, atol=2e-2)` parity check was removed**, because it compared two unconverged energies; the dense run went with it. The pin keeps only the #602 no-collapse guard (`E_sym < -0.05`). **Follow-up:** restoring the parity check needs an init whose forwards converge. |
 
 ## (b) Encoded the bug: budget raised until the forward converges
 
@@ -54,6 +56,7 @@ grew. Such a forward cycles rather than converging slowly, so raising
 | `test_ipeps_chi_bump_integration.py` (all 4) | 10 → 60 | Final and gradient forwards were short of `conv_tol`=1e-3. Passes at 60 and 200. |
 | `test_ipeps_chi_schedule_wiring.py::test_chi_schedule_bumps_between_stages`, `::test_reactive_plus_scheduled_compose_2site_smoke` | 10 → 60 | Step-1 gradient forward unconverged. Passes at 60 and 200. |
 | `test_ipeps_excitations.py::TestOptimizeGsAd::test_runs_without_error` | 5 → 300 | Step-3 forward unconverged at 50 and 100 (residual ~4e-8 vs 1e-8). At 300, every step converges. The run's energy was 0.295 at 100 (unconverged, warn mode) against 0.4547 converged. |
+| `test_ipeps_excitations.py::TestOptimizeGsAd::test_heisenberg_negative_energy` | max_iter 10 → 300, gs_num_steps 20 → 10 (moved from (a) in fix round 1) | 20 steps reach a point whose gradient forward does not converge. At max_iter 300 and 1000, step 14 plateau-bails at residual 7.05e-1. With `plateau_patience=None, max_iter=1000` under `"raise"`, step 13 is still unconverged (1.33e-6). The first 10 steps all converge at 300 and pass under `"raise"`, as do 5. The assertion is the loose `E < 1.0`. |
 | `test_ipeps_excitations.py::TestOptimizeGsAd::test_su_init_runs_without_error` | 10 → 50 | Passes at 50, 100 and 300. |
 | `test_ipeps.py`: 15 tests (`TestOptimizeGsAd2Site::test_2site_ad_runs`, `::test_2site_ad_zero_steps_returns_energy`, `::test_2site_ad_mixed_init_types_work`, `::test_2site_noc4v_ad_stays_variational_issue_328`, `::test_2site_noc4v_ad_norms_stay_unit`; `TestOptimizeGsAdLogging::test_verbose_prints_progress`; `TestOptimizeGsAdDenseOnly::test_symmetric_tensor_2site_runs`; `TestOptimizeGsAdOptimizers::test_lbfgs_optimizer_runs`, `::test_cg_optimizer_runs`; `TestADSymmetric::test_optimize_gs_ad_nontrivial_u1_preserves_symmetric_type`; `test_noise_floor_does_not_gate_healthy_optimization`; `test_loss_fn_fwd_updates_env_cache_for_hz_dphi_reuse`; `test_loss_fn_fwd_probe_envs_dont_leak_past_line_search`; `test_2site_implicit_ad_ctmrg_heuristic_increase_chi_grows_env`; `test_gs_ctm_max_iter_schedule_default_none_unchanged`) | 3, 5, 8, 10 or 12 → 100 | All were unconverged at the old budget, and all pass at 100. `default_none_unchanged` asserts that the unscheduled `max_iter` passes through unchanged, so its expected value moved from `{12}` to `{100}` with the config. |
 | `test_ipeps.py::test_stall_reset_reinits_optax_lbfgs_state` | 5 → 50 | The step-1 forward was unconverged, so the run raised before any stall could happen (`contextlib.suppress` hid it). Passes at 50. |
