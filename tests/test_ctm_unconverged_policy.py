@@ -689,3 +689,32 @@ def test_site4_warn_keeps_legacy_even_with_certified_warm(monkeypatch, unit_cell
     assert any(seen), "no certified warm env was present; test is vacuous"
     # whichever evaluation was picked, no evaluation may have used the warm env
     assert "warm" not in verdicts, verdicts
+
+
+# ---------------------------------------------------------------------------
+# Task 6: site 5 -- ctm_tensor_2site(strict=) is opt-in; the default keeps the
+# legacy warn-and-return behaviour for direct callers.
+# ---------------------------------------------------------------------------
+
+
+def test_site5_ctm_tensor_2site_strict():
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+    from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
+
+    # ctm_tensor_2site takes Tensors, not raw arrays (the plan's snippet passed
+    # raw arrays, which fail in the double-layer build before CTM runs).
+    A = _wrap_as_dense_tensor(_rand(2, 2, 0))
+    B = _wrap_as_dense_tensor(_rand(2, 2, 1))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        eA, eB = ctm_tensor_2site(
+            A, B, chi=4, max_iter=2, conv_tol=1e-14
+        )  # default: no raise
+        with pytest.raises(CTMNotConvergedError) as ei:
+            ctm_tensor_2site(A, B, chi=4, max_iter=2, conv_tol=1e-14, strict=True)
+    assert ei.value.site == "ctm_tensor_2site"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        ctm_tensor_2site(
+            A, B, chi=4, max_iter=400, conv_tol=1e-6, strict=True
+        )  # converges: no raise
