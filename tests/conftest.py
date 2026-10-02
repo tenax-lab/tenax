@@ -765,6 +765,11 @@ _FILE_MARKERS = {
     # L-BFGS + Hager-Zhang optimizer step evaluates.  Mechanism tests only
     # (spied evaluation counts, a scripted line search) at D=2, chi<=6.
     "test_ls_reuse_accepted_eval.py": "core",
+    # The metric preconditioner normalises N by <A|N|A> so g' is invariant to
+    # the CTM environment's arbitrary overall scale (phase vs bond_phase
+    # differed by ~40%).  ``core``: it shapes every default (gs_metric_precond
+    # =True) L-BFGS/CG direction.  D=2 chi=8 SU fixture, no AD.
+    "test_metric_precond_env_norm.py": "core",
 }
 
 
