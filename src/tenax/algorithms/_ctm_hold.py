@@ -387,6 +387,15 @@ class HoldResult(NamedTuple):
                    perturbation's size: a stable orbit that is not a fixed
                    point attracts the perturbed copies too (Codex P1 on
                    #1058).
+        floor:     The measured noise floor: the largest invariant distance
+                   the unperturbed reference moved in one sweep during the
+                   hold, ``max_k d(x_k, x_{k-1})`` (#1063).  ``0`` for a step
+                   that holds its fixed point exactly.
+        floor_reseeds: Per direction, how often the displacement sank to
+                   ``noise_floor`` times ``floor`` with the rescale refused,
+                   and was re-seeded (#1063).  Non-zero means the fitted
+                   rates are contraction measured down to the floor, not
+                   fitted on it.
     """
 
     passed: bool
@@ -396,6 +405,8 @@ class HoldResult(NamedTuple):
     envs: dict[Any, Any]
     sweeps: int
     drift: float = math.nan
+    floor: float = math.nan
+    floor_reseeds: tuple[int, ...] = ()
 
 
 #: The reference may drift at most this multiple of the perturbation's
@@ -428,6 +439,15 @@ _COLLAPSE_LOG = 1e-12
 #: Independent perturbation directions (deterministic keys); all must pass.
 DEFAULT_HOLD_DIRECTIONS = 2
 
+#: A shrinking displacement that the rescale cannot restore (gauge guard) is
+#: re-seeded once it is within this factor of the measured noise floor
+#: (#1063).  Measured on the dense D=2 Heisenberg pair at chi=12: once on the
+#: floor, ``d_k`` stays below 0.18x the floor (2.3x its steady per-sweep
+#: jitter, excluding the claimed point's residual first step), and an
+#: attractor reaches 10x the floor at sweep 5-6 -- so 10 leaves a >= 4x margin
+#: either way, while a saddle's displacement grows away from it.
+DEFAULT_HOLD_NOISE_FLOOR = 10.0
+
 
 def hold_test(
     step: Callable[[dict[Any, Any]], dict[Any, Any]],
@@ -440,6 +460,7 @@ def hold_test(
     invariants: Callable[[dict[Any, Any]], Invariants] = env_spectral_invariants,
     max_sweeps: int | None = None,
     directions: int = DEFAULT_HOLD_DIRECTIONS,
+    noise_floor: float = DEFAULT_HOLD_NOISE_FLOOR,
 ) -> HoldResult:
     """Is ``envs`` an attractor of ``step``, or only a point it passes through?
 
@@ -464,6 +485,29 @@ def hold_test(
     recorded as a contraction by 1e-12 and the direction is re-seeded with a
     fresh deterministic perturbation, keeping its accumulated log growth.
 
+    **Noise floor (#1063).**  ``d_k`` cannot resolve anything below the
+    reference trajectory's own sweep-to-sweep motion: a real CTM step does not
+    hold its fixed point to the last bit (roundoff, amplified where kept
+    degenerate multiplets reshuffle their basis every sweep), so two copies
+    on the same attractor still differ by that jitter.  The hold measures it
+    as ``floor = max_k d(x_k, x_{k-1})`` (running max over the hold, the
+    claimed point's residual first step included) and reports it in
+    :attr:`HoldResult.floor`.  A shrinking displacement that the rescale
+    refused (gauge guard, or differing pytrees) and that has sunk to
+    ``d_k <= noise_floor * floor`` is re-seeded like a collapse, keeping its
+    log growth; the contraction down to that point is logged as measured, so
+    the fitted rate is the attractor's real contraction rate, not a fit to
+    the floor.  Without this, on a fast attractor whose rescale is vetoed
+    (measured: dense D=2 Heisenberg SU pair at chi=12, ``d_k`` falls to
+    ~1e-6 ``d_0`` by sweep 8 and then sits on a ~3e-11 floor) every window
+    was fitted on white noise, 1.00 +- 0.018, and the verdict flipped with
+    the PRNG key and with 1e-14 roundoff.  The re-seed is gated on a refused
+    rescale: where the rescale works it keeps the displacement far above the
+    floor and keeps amplifying a weak unstable component, which a re-seed
+    would discard.  A saddle's displacement grows away from the floor and is
+    unaffected.  ``noise_floor = 0`` disables this; with a step that holds
+    its fixed point exactly (``floor = 0``) it never fires.
+
     **Verdict.**  No early acceptance: a displacement that contracts early
     is exactly what a weakly excited saddle does while its stable components
     decay (Codex P1 on #1058).  At ``k = sweeps`` fit the accumulated log
@@ -485,6 +529,17 @@ def hold_test(
     linearised step (Arnoldi on gauge-aligned finite-difference JVPs) would
     isolate such an outlier; not implemented.  The measured #1035 saddle is
     rejected (rates 1.006/1.045) because its unstable mode is well excited.
+
+    **Known limit: the gauge guard disables the power iteration on states
+    with degenerate kept multiplets.**  Kept degenerate singular-value pairs
+    pick a new basis every sweep, so the element-wise difference between the
+    perturbed and reference copies is O(1) even when their invariant distance
+    is tiny (measured on the D=2 chi=12 pair: ``e_k s / e_0 ~ 1e8`` against
+    the guard's 100), and every Benettin rescale is refused.  The hold then
+    measures each fresh perturbation only until it reaches the noise floor
+    (5-6 sweeps on that pair) and re-seeds; a weakly excited unstable
+    component must become visible above ``noise_floor * floor`` within that
+    stretch, rather than being amplified across the whole hold.
 
     **Known limit: the metric's gauge quotient is too large.**  Every
     invariant is per tensor, so it quotients an independent unitary on each
@@ -521,6 +576,8 @@ def hold_test(
         directions:    Independent perturbations, all of which must pass
                        (>= 1, default 2).  Cost ``(1 + directions)`` steps
                        per hold sweep.
+        noise_floor:   Re-seed factor over the measured noise floor (>= 0,
+                       default 10; 0 disables the floor re-seed).
 
     Returns:
         :class:`HoldResult`.
@@ -539,6 +596,8 @@ def hold_test(
         raise ValueError(f"hold_test: contraction must be in (0, 1), got {contraction}")
     if directions < 1:
         raise ValueError(f"hold_test: directions must be >= 1, got {directions}")
+    if not noise_floor >= 0:
+        raise ValueError(f"hold_test: noise_floor must be >= 0, got {noise_floor}")
     if key is None:
         key = jax.random.PRNGKey(0)
     per = 1 + directions
@@ -546,6 +605,10 @@ def hold_test(
     Ix = invariants(x)
     I_claimed = Ix
     drift_max = 0.0
+    # The reference's own per-sweep invariant motion: the resolution of every
+    # d_k below (#1063).  Running max, so one quiet sweep cannot lower it.
+    floor = 0.0
+    floor_reseeds = [0] * directions
     dir_keys = list(jax.random.split(key, directions))
     reseeds = [0] * directions
     ys = [perturb_env(envs, perturbation, k) for k in dir_keys]
@@ -565,12 +628,21 @@ def hold_test(
             d0[worst] * math.exp(v) if v < 700.0 else math.inf for v in logs[worst]
         )
         return HoldResult(
-            passed, rates[worst], tuple(rates), dist, ys[worst], per * k, drift
+            passed,
+            rates[worst],
+            tuple(rates),
+            dist,
+            ys[worst],
+            per * k,
+            drift,
+            floor,
+            tuple(floor_reseeds),
         )
 
     for k in range(1, max_sweeps + 1):
         x = step(x)
-        Ix = invariants(x)
+        Ix_prev, Ix = Ix, invariants(x)
+        floor = max(floor, env_invariant_distance(Ix, Ix_prev))
         # Max over the whole hold, not the last sweep: a two-cycle is back on
         # the claimed point at every even sweep.
         drift_max = max(drift_max, env_invariant_distance(Ix, I_claimed))
@@ -605,6 +677,20 @@ def hold_test(
                 # far above that is a gauge mismatch -- do not amplify it.
                 if math.isfinite(ek) and ek * s <= 100.0 * e0[i]:
                     ys[i] = _rescale(x, ys[i], s)
+                    dcur[i] = env_invariant_distance(invariants(ys[i]), Ix)
+                elif dk < contraction * d0[i] and dk <= noise_floor * floor:
+                    # #1063: no rescale, and the displacement has sunk into
+                    # the reference's own sweep-to-sweep jitter -- every
+                    # further d_k measures that noise, and a fit on it is
+                    # white noise around 1.  The contraction down to here is
+                    # already logged (as measured: a lower bound, since d_k
+                    # is noise-inflated); re-seed a fresh displacement, as
+                    # the collapse branch does, keeping the log growth.
+                    floor_reseeds[i] += 1
+                    reseeds[i] += 1
+                    fresh = jax.random.fold_in(dir_keys[i], reseeds[i])
+                    ys[i] = perturb_env(x, perturbation, fresh)
+                    e0[i] = _diff_norm(ys[i], x)
                     dcur[i] = env_invariant_distance(invariants(ys[i]), Ix)
         if k >= sweeps and ((k - sweeps) % half == 0 or k == max_sweeps):
             ks = np.arange(k - half, k + 1)
