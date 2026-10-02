@@ -131,7 +131,7 @@ def _assert_close(a, b, rtol):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("c", [0.1, 0.57, 10.0])
+@pytest.mark.parametrize("c", [0.1, 0.57, 10.0, -1.0])
 def test_env_rescale_invariance_real(su_state, c):
     k = (0, 0)
     A, g, env = su_state["sites"][k], su_state["grads"][k], su_state["phase"][k]
