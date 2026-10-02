@@ -66,6 +66,67 @@ def _restore_env_cache_after_line_search(env_cache: dict, snapshot: tuple) -> No
         env_cache.pop("envs", None)
 
 
+_VERDICT_KEY = "refresh_verdict"
+
+
+def _cached_env_state(cache: dict) -> str:
+    """Convergence of the env currently in ``cache``: none/converged/unconverged/unknown.
+
+    Only :func:`_refresh_env_cache` records a verdict, as ``(env, converged)``.
+    Other writers (line-search probes, checkpoint restore, resets) replace
+    ``cache["envs"]`` without touching it, so the verdict only counts while it
+    is about the very env object still cached -- it cannot go stale.
+    """
+    envs = cache.get("envs")
+    if envs is None:
+        return "none"
+    verdict = cache.get(_VERDICT_KEY)
+    if verdict is None or verdict[0] is not envs:
+        return "unknown"
+    return "converged" if verdict[1] else "unconverged"
+
+
+def _refresh_env_cache(cache: dict, envs, info, ctm_cfg) -> None:
+    """Store a warm-start refresh result in ``cache`` unless it is unconverged.
+
+    An unconverged refresh never replaces an existing env (#1059 site 2); it
+    is cached only on a cold start, where readers need *an* env.  Never
+    raises: site 1 (the gradient forward) is authoritative.  Under
+    ``on_unconverged="warn"`` it also emits :class:`CTMNotConvergedWarning`.
+    """
+    prev = _cached_env_state(cache)
+    if info.converged or prev == "none":
+        cache["envs"] = envs
+        cache[_VERDICT_KEY] = (envs, bool(info.converged))
+    if info.converged:
+        return
+    if prev == "none":
+        outcome = "no previous env, so caching it anyway"
+    elif prev == "converged":
+        outcome = "keeping the previous (converged) env"
+    elif prev == "unconverged":
+        outcome = "keeping the previous env, which was also unconverged"
+    else:
+        outcome = "keeping the previous env (its convergence is unknown)"
+    _logger.warning(
+        "[iPEPS-AD] warm-start CTM refresh did not converge "
+        "(sweeps %d, sv_diff %.3g); %s",
+        info.iterations,
+        info.sv_diff,
+        outcome,
+    )
+    if ctm_cfg.on_unconverged == "warn":
+        from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
+
+        check_ctm_converged(
+            info,
+            site="env_cache",
+            policy="warn",
+            conv_tol=ctm_cfg.conv_tol,
+            chi=ctm_cfg.chi,
+        )
+
+
 def _drop_env_cache_for_reset(env_cache: dict) -> None:
     """Clear the env warm-start cache AND the implicit-AD λ warm-start seed.
 
@@ -1418,29 +1479,7 @@ def _optimize_gs_ad_tensor(
             SINGLE_SITE_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
-        if info.converged or _env_cache.get("envs") is None:
-            # An unconverged env is cached only when there is no previous
-            # env to keep (cold start): downstream readers need *an* env.
-            _env_cache["envs"] = envs
-        if not info.converged:
-            _logger.warning(
-                "[iPEPS-AD] warm-start CTM refresh did not converge "
-                "(sweeps %d, sv_diff %.3g); not replacing a converged cached env",
-                info.iterations,
-                info.sv_diff,
-            )
-            if ctm_cfg.on_unconverged == "warn":
-                from tenax.algorithms._ctm_convergence_policy import (
-                    check_ctm_converged,
-                )
-
-                check_ctm_converged(
-                    info,
-                    site="env_cache",
-                    policy="warn",
-                    conv_tol=ctm_cfg.conv_tol,
-                    chi=ctm_cfg.chi,
-                )
+        _refresh_env_cache(_env_cache, envs, info, ctm_cfg)
         # ``info.max_truncation_error`` comes from the JIT-compiled CTM step,
         # which sets eps_T = 0.0 for any input that is a JAX tracer during
         # JIT compilation.  For the auto-bump path we need a real eps_T from
@@ -3216,29 +3255,7 @@ def _optimize_gs_ad_tensor_2site(
             CHECKERBOARD_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg_2s, env_init=_env_cache_2s.get("envs", None)),
         )
-        if info.converged or _env_cache_2s.get("envs") is None:
-            # An unconverged env is cached only when there is no previous
-            # env to keep (cold start): downstream readers need *an* env.
-            _env_cache_2s["envs"] = envs
-        if not info.converged:
-            _logger.warning(
-                "[iPEPS-AD] warm-start CTM refresh did not converge "
-                "(sweeps %d, sv_diff %.3g); not replacing a converged cached env",
-                info.iterations,
-                info.sv_diff,
-            )
-            if ctm_cfg_2s.on_unconverged == "warn":
-                from tenax.algorithms._ctm_convergence_policy import (
-                    check_ctm_converged,
-                )
-
-                check_ctm_converged(
-                    info,
-                    site="env_cache",
-                    policy="warn",
-                    conv_tol=ctm_cfg_2s.conv_tol,
-                    chi=ctm_cfg_2s.chi,
-                )
+        _refresh_env_cache(_env_cache_2s, envs, info, ctm_cfg_2s)
         # Capture ``info.max_truncation_error`` so the end-of-step
         # ``_maybe_bump_chi`` reactive trigger (#472) has an ε_T to
         # compare against.  As of #474 the 2x2 plaquette projector

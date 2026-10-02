@@ -372,7 +372,7 @@ def test_site2_refuses_to_cache_unconverged(monkeypatch, policy, unit_cell):
     def spy(*a, **k):
         seen.append(k.get("env_init"))
         envs, info = real(*a, **k)
-        in_refresh = any(f.function == refresh for f in inspect.stack())
+        in_refresh = any(f.function == refresh for f in inspect.stack(0))
         if poisoned["armed"] and in_refresh and k.get("env_init") is not None:
             poisoned["armed"] = False
             poisoned["env"] = envs
@@ -387,4 +387,53 @@ def test_site2_refuses_to_cache_unconverged(monkeypatch, policy, unit_cell):
     assert poisoned["env"] is not None, "spy never saw a warm refresh"
     assert all(e is not poisoned["env"] for e in seen), (
         "unconverged env was used as a seed"
+    )
+
+
+def _fake_info(converged):
+    return CTMConvergeInfo(converged=converged, iterations=3, sv_diff=1.4)
+
+
+@pytest.mark.parametrize("policy", ["raise", "warn"])
+def test_refresh_env_cache_cases(policy, caplog):
+    """Cold start caches; a later unconverged refresh keeps the previous env;
+    the log names which case; warn mode emits CTMNotConvergedWarning."""
+    cfg = CTMConfig(chi=4, conv_tol=1e-9, on_unconverged=policy)
+    cache: dict = {}
+    first, second, third, good = object(), object(), object(), object()
+
+    def refresh(envs, converged):
+        caplog.clear()
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            with caplog.at_level("WARNING"):
+                _opt._refresh_env_cache(cache, envs, _fake_info(converged), cfg)
+        n_warn = sum(issubclass(x.category, CTMNotConvergedWarning) for x in w)
+        assert n_warn == (1 if policy == "warn" and not converged else 0)
+        return caplog.text
+
+    assert "caching it anyway" in refresh(first, False)  # cold start
+    assert cache["envs"] is first
+    assert "also unconverged" in refresh(second, False)
+    assert cache["envs"] is first
+    assert refresh(good, True) == ""
+    assert cache["envs"] is good
+    assert "previous (converged) env" in refresh(third, False)
+    assert cache["envs"] is good
+    # a probe-style write leaves the verdict stale -> reported as unknown
+    cache["envs"] = second
+    assert "unknown" in refresh(third, False)
+    assert cache["envs"] is second
+
+
+def test_refresh_warn_call_is_pinned_in_optimizer(monkeypatch):
+    """Under warn, a real optimizer run surfaces CTMNotConvergedWarning from
+    the env-cache site (guards deleting the check_ctm_converged call)."""
+    cfg = _cfg("2site", "warn")
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        _opt.optimize_gs_ad(_heisenberg_gate(), _init("2site"), cfg)
+    assert any(
+        issubclass(x.category, CTMNotConvergedWarning) and "env_cache" in str(x.message)
+        for x in w
     )
