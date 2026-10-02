@@ -164,7 +164,9 @@ def _final_eval_use_warm(
         ctm_cfg.on_unconverged == "raise"
         and warm_cache is not None
         and _cache_env_known_converged(warm_cache, params)
-        and _should_restore_best_env(warm_cache["envs"], ctm_cfg.chi)
+        and _should_restore_best_env(
+            warm_cache["envs"], ctm_cfg.chi, **_restore_chi_kwargs(ctm_cfg)
+        )
     ):
         _logger.warning(
             "[iPEPS-AD] fresh final CTM did not converge; "
@@ -203,14 +205,35 @@ def _drop_env_cache_for_reset(env_cache: dict) -> None:
     invalidate_implicit_ad_warm_start()
 
 
-def _should_restore_best_env(best_envs, chi) -> bool:
-    """CTMNotConvergedError reset: restore the converged best env only when it
-    exists and its chi matches the current chi (else the #518 clear path)."""
+def _should_restore_best_env(
+    best_envs, chi, *, chi_max: int | None = None, in_ctm_growth: bool = False
+) -> bool:
+    """CTMNotConvergedError reset (and the site-4 warm check): is the converged
+    best env usable at the current chi?  Else the #518 clear path.
+
+    Without in-CTM growth the env must sit at exactly ``chi``.  With
+    ``ctmrg_heuristic_increase_chi`` the forward grows the env inside the
+    loop but ``ctm_cfg.chi`` is never synced, so the env legitimately
+    carries any chi the forward itself accepts as a seed
+    (``_validate_chi_bump_args``): ``chi <= chi(env) <= chi_max``.  An env
+    below ``chi`` is still stale -- an outer bump moved past it (#518).
+    """
     if not best_envs:
         return False
     from tenax.algorithms.ad_utils import _env_chi
 
-    return _env_chi(best_envs) == chi
+    env_chi = _env_chi(best_envs)
+    if env_chi == chi:
+        return True
+    return in_ctm_growth and chi_max is not None and chi < env_chi <= chi_max
+
+
+def _restore_chi_kwargs(ctm_cfg) -> dict:
+    """The in-CTM growth window of ``ctm_cfg`` for ``_should_restore_best_env``."""
+    return {
+        "chi_max": ctm_cfg.chi_max,
+        "in_ctm_growth": bool(ctm_cfg.ctmrg_heuristic_increase_chi),
+    }
 
 
 def _site1_forward_info(step_index: int, ctm_cfg, history: tuple | None):
@@ -1768,7 +1791,7 @@ def _optimize_gs_ad_tensor(
         when its chi matches; otherwise clear it (#518)."""
         best = best_env_cache.get("envs") if best_env_cache else None
         _drop_env_cache_for_reset(_env_cache)
-        if _should_restore_best_env(best, ctm_cfg.chi):
+        if _should_restore_best_env(best, ctm_cfg.chi, **_restore_chi_kwargs(ctm_cfg)):
             _env_cache.update(best_env_cache)
 
     # CTM conv_tol schedule: update ctm_cfg when tolerance changes
@@ -3505,7 +3528,9 @@ def _optimize_gs_ad_tensor_2site(
         """Reset for CTMNotConvergedError: restore the converged best env
         when its chi matches; otherwise fall back to _reset_env_cache_2s."""
         best = best_env_cache_2s.get("envs") if best_env_cache_2s else None
-        if _should_restore_best_env(best, ctm_cfg_2s.chi):
+        if _should_restore_best_env(
+            best, ctm_cfg_2s.chi, **_restore_chi_kwargs(ctm_cfg_2s)
+        ):
             _drop_env_cache_for_reset(_env_cache_2s)
             _env_cache_2s.update(best_env_cache_2s)
         else:

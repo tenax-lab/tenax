@@ -296,6 +296,15 @@ def test_should_restore_best_env():
     assert _should_restore_best_env(envs, 4) is True
     assert _should_restore_best_env(envs, 6) is False
     assert _should_restore_best_env(None, 4) is False
+    # Final-review I4: with in-CTM chi growth the env may carry any chi the
+    # forward accepts as a seed, ctm_cfg.chi <= chi(env) <= chi_max, while
+    # ctm_cfg.chi itself is never synced.
+    grow = {"chi_max": 8, "in_ctm_growth": True}
+    assert _should_restore_best_env(envs, 2, **grow) is True  # grew 2 -> 4
+    assert _should_restore_best_env(envs, 4, **grow) is True
+    assert _should_restore_best_env(envs, 6, **grow) is False  # stale (#518)
+    assert _should_restore_best_env(envs, 2, chi_max=3, in_ctm_growth=True) is False
+    assert _should_restore_best_env(envs, 2, chi_max=8) is False  # growth off
 
 
 @pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
@@ -413,6 +422,45 @@ def _fail_forwards(monkeypatch, failing):
 
     monkeypatch.setattr(_cea, "get_last_implicit_ad_diagnostics", fake)
     return calls
+
+
+def test_reset_restores_best_env_after_in_ctm_chi_growth(monkeypatch):
+    """Final-review I4: after the in-CTM heuristic grew the env above
+    ctm_cfg.chi, a CTMNotConvergedError reset (and the site-4 warm check)
+    still accepts the converged best env instead of cold-starting."""
+    import dataclasses
+
+    from tenax.algorithms.ad_utils import _env_chi
+
+    real = _opt._should_restore_best_env
+    decisions = []
+
+    def spy(envs, chi, **kw):
+        out = real(envs, chi, **kw)
+        decisions.append((_env_chi(envs) if envs else None, chi, out))
+        return out
+
+    monkeypatch.setattr(_opt, "_should_restore_best_env", spy)
+    _fail_forwards(monkeypatch, {2})
+    base = _cfg("2site", "raise", max_iter=200, steps=3, retries=2)
+    cfg = dataclasses.replace(
+        base,
+        ctm=dataclasses.replace(
+            base.ctm,
+            conv_tol=1e-10,
+            ctmrg_heuristic_increase_chi=True,
+            ctmrg_heuristic_increase_chi_threshold=1e-12,  # bump every sweep
+            ctmrg_heuristic_increase_chi_step_size=2,
+            chi_max=8,
+        ),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        _opt.optimize_gs_ad(_heisenberg_gate(), _init("2site"), cfg)
+    assert decisions, "no reset consulted the restore check"
+    env_chi, cfg_chi, restored = decisions[0]
+    assert env_chi > cfg_chi == 4, decisions  # the env really grew
+    assert restored, decisions
 
 
 def test_2site_stall_budget_exhausted_raises_and_checkpoints(
