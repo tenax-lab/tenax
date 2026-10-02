@@ -77,7 +77,7 @@ from tenax import U1Symmetry, TensorIndex, FlowDirection
 sym = U1Symmetry()
 
 # A physical spin-1/2 leg: up = +1, down = -1
-phys = TensorIndex(
+phys = TensorIndex.from_charges(
     symmetry=sym,
     charges=np.array([1, -1], dtype=np.int32),
     flow=FlowDirection.IN,
@@ -85,7 +85,7 @@ phys = TensorIndex(
 )
 
 # A virtual bond with 3 sectors
-bond = TensorIndex(
+bond = TensorIndex.from_charges(
     symmetry=sym,
     charges=np.array([-1, 0, 1], dtype=np.int32),
     flow=FlowDirection.OUT,
@@ -130,10 +130,10 @@ symmetry has many sectors.
 import jax
 from tenax import SymmetricTensor
 
-bond_in = TensorIndex(sym, np.array([-1, 0, 1], dtype=np.int32),
-                       FlowDirection.IN, label="left")
-bond_out = TensorIndex(sym, np.array([1, 0, -1], dtype=np.int32),
-                        FlowDirection.OUT, label="right")
+bond_in = TensorIndex.from_charges(sym, np.array([-1, 0, 1], dtype=np.int32),
+                                    FlowDirection.IN, label="left")
+bond_out = TensorIndex.from_charges(sym, np.array([1, 0, -1], dtype=np.int32),
+                                     FlowDirection.OUT, label="right")
 
 st = SymmetricTensor.random_normal(
     indices=(phys, bond_in, bond_out),

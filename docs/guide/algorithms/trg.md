@@ -107,5 +107,8 @@ TRG accuracy improves with `max_bond_dim`. Typical values:
 | 16 | ~1e-5 |
 | 32 | ~1e-7 |
 
+See `examples/ising_trg.py` and `examples/ising_hotrg.py` for full TRG and HOTRG
+examples at multiple temperatures compared against the Onsager exact solution.
+
 For better accuracy at the same bond dimension, consider {doc}`hotrg` or
 {ref}`gilt-tnr` above.

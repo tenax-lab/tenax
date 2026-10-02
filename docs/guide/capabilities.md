@@ -23,7 +23,7 @@ research.
 - **Sector-based indices** -- `TensorIndex` keeps sorted charge sectors and
   multiplicities for O(n_sectors) lookups; `FuseInfo` records parent legs so
   `split_index` exactly reverses `fuse_indices`.
-- **Polymorphic arithmetic** -- `+`, `-`, `*`, transpose, `inner()`, `conj()`,
+- **Polymorphic arithmetic** -- `+`, `-`, `*`, `-T`, transpose, `inner()`, `conj()`,
   `dagger()`, `bar()`, and `max_abs()` behave identically on `DenseTensor` and
   `SymmetricTensor`, so algorithm code is agnostic to the storage backend.
 - **Label-based contraction** -- legs are identified by string/integer labels;
