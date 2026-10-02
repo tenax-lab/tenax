@@ -258,6 +258,23 @@ def test_ctm_energy_implicit_resolves_auto_before_the_cache_key(
     assert seen == [expected]
 
 
+@pytest.mark.parametrize("chi_ramp,expected", [(None, "bond_phase"), (_RAMP, "phase")])
+def test_ctm_energy_implicit_called_without_a_gauge_defaults_like_the_config(
+    chi_ramp, expected, monkeypatch
+):
+    """A direct call that names no gauge gets what ``CTMConfig()`` would:
+    one meaning of "the default" whether or not a config is in the way."""
+    seen = []
+
+    def spy(*args):
+        seen.append(args[13])
+        return jnp.zeros(())
+
+    monkeypatch.setattr(ead, "_ctm_energy_implicit_dispatch", spy)
+    ead.ctm_energy_implicit({(0, 0): None}, {}, None, chi=4, chi_ramp=chi_ramp)
+    assert seen == [expected]
+
+
 # --------------------------------------------------------------------------
 # 6. Legacy ad_utils paths: "auto" is phase, never qr
 # --------------------------------------------------------------------------

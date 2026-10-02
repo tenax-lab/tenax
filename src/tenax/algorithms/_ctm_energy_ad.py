@@ -381,7 +381,7 @@ def ctm_energy_implicit(
     qr_warmup_steps: int = 3,
     chi_ramp=None,
     env_init=None,
-    forward_gauge: str = "phase",
+    forward_gauge: str = "auto",
     conv_method: str = "sv",
     min_iter: int = 4,
     gmres_tol: float = 1e-6,
@@ -439,13 +439,13 @@ def ctm_energy_implicit(
         gmres_tol:         GMRES relative tolerance.
         gmres_maxiter:     GMRES maximum iterations.
         gmres_restart:     GMRES restart parameter.
-        forward_gauge:     Gauge fixing in forward/backward: ``"phase"`` (default
-                           of this function), ``"bond_phase"`` (see below),
-                           ``"sigma"`` (transfer-matrix eigenvector alignment),
-                           ``"none"`` (no gauge fixing), or ``"auto"`` -- the
-                           ``CTMConfig`` default, resolved here to
+        forward_gauge:     Gauge fixing in forward/backward: ``"auto"``
+                           (default, as in ``CTMConfig``) -- resolved here to
                            ``"bond_phase"`` (``"phase"`` when ``chi_ramp`` is
-                           set) by ``ipeps_config.resolve_forward_gauge``.
+                           set) by ``ipeps_config.resolve_forward_gauge`` --
+                           or explicitly ``"phase"``, ``"bond_phase"`` (see
+                           below), ``"sigma"`` (transfer-matrix eigenvector
+                           alignment) or ``"none"`` (no gauge fixing).
 
                            Measured on the 2x2 recipe (#841/#798, near-optimal
                            D=3 state, chi=27): all three converge to the same
@@ -562,8 +562,8 @@ def ctm_energy_implicit(
         bump_step_size=ctmrg_heuristic_increase_chi_step_size,
     )
 
-    # ``CTMConfig.forward_gauge`` defaults to the ``"auto"`` sentinel, which
-    # config-driven callers (e.g. ``pess_optimize``) hand straight through.
+    # ``"auto"`` is this function's default and ``CTMConfig.forward_gauge``'s,
+    # which config-driven callers (e.g. ``pess_optimize``) hand straight through.
     # Resolve it here, before ``forward_gauge`` enters the VJP cache key:
     # ``chi_ramp`` is a per-call mutable, not part of that key, so the
     # resolution must see it now.  An explicit value is returned unchanged.
