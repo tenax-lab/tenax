@@ -10,31 +10,42 @@ The name **Tenax** combines **Ten**sor network + J**ax**, and is also Latin for 
 
 ## Features
 
-- **Block-sparse symmetric tensors** — only symmetry-allowed charge sectors stored (U(1), Z_n)
-- **Label-based contraction** — legs are identified by string/integer labels; shared labels are automatically contracted (Cytnx-style)
-- **opt_einsum integration** — optimal contraction path finding for multi-tensor contractions
-- **Network class** — graph-based tensor network container with contraction caching
-- **`.net` file support** — cytnx-style declarative network topology; parse once, load tensors, contract repeatedly (template pattern)
-- **Algorithms** — DMRG, iDMRG (1D chain & infinite cylinder), iTEBD (numerically stable infinite TEBD, incl. inversion-free Hastings update), TRG, Gilt-TNR (TRG with graph-independent local truncation), HOTRG, Gilt-HOTRG (HOTRG with GILT bond filtering), iPEPS (simple update with 1-site or 2-site unit cell & AD optimization), fermionic iPEPS (fPEPS), quasiparticle excitations
-- **GPU/TPU-accelerated DMRG** — JIT-compiled sweeps via `jax.lax.scan` for dense tensors and per-operation JIT for block-sparse symmetric tensors; automatic warmup-to-JIT transition when bond dimensions are growing; multi-GPU sharding via GSPMD for large bond dimensions (`DMRGConfig(accelerator="jit"|"sharded")`)
-- **AutoMPO** — build Hamiltonian MPOs from symbolic operator descriptions (custom couplings, NNN, arbitrary spin); supports `symmetric=True` for U(1) block-sparse MPOs
-- **AD-based iPEPS optimization** — gradient optimization via implicit differentiation through CTM fixed point, supporting 1-site and 2-site unit cells (Francuz et al. PRR 7, 013237); L-BFGS with Hager-Zhang line search and metric preconditioning (Rader et al.), Adam (with cosine lr decay), and conjugate gradient optimizers; implicit AD via iterative VJP (default) and optional GMRES route; explicit AD through unrolled CTM iterations for 1-site C4v path; **2-site shared-tensor C4v path** (`unit_cell="2site"` + `gs_c4v=True`) where a single C4v tensor is optimized and the second sublattice is derived by spin-π rotation, stable across χ=8–24 for spin-1/2 AFMs; opt-in reference-mode dense C4v Appendix C-F mode (`ctm_ad_mode="c4v_reference"`) with Krylov implicit backward (`bicgstab` + `gmres` fallback); **root implicit AD** (`ctm_ad_mode="root_implicit"`, dense 1x1 and 2-site checkerboard cells — `unit_cell="2site"`, #894; Burgelman et al. arXiv:2607.15030) driving the characteristic equations rather than back-propagating the CTM sweep, so no SVD/eigh backward appears in the gradient path — an accuracy/stability lever, not a speed one (~63x slower than explicit AD at D=2 χ=6, reproducing the paper's §VI.3), whose reason to exist is that explicit backprop NaNs on every entry at D=3 χ=4 where this path stays finite and FD-correct. Its gradient accuracy is state-dependent and **no diagnostic predicts it** (#785) — measure it with `measure_gradient_error` rather than reading the root residual, which is anti-correlated with it; sigma gauge fixing (`forward_gauge="sigma"`) on the explicit-AD path — the implicit path validates `forward_gauge="phase"` (or the opt-in per-bond `"bond_phase"`, #841) and refuses every other value; C4v symmetry enforcement via explicit basis parameterization; chi-ramping schedule (`optimize_gs_ad_chi_schedule`) for progressive refinement
-- **In-CTM χ-bump (variPEPS §2.8.2)** — recommended reactive growth of the CTM bond dimension *inside* CTM convergence (`CTMConfig.ctmrg_heuristic_increase_chi=True` with `chi_max` set); the env is always converged at the new χ before the optimizer sees it, avoiding the zero-padded-env cliff-edge artifact that the legacy end-of-outer-step `chi_auto_bump` and scheduled `chi_ramp` introduce between L-BFGS steps. Both legacy knobs still work but emit `DeprecationWarning` (see issue #512) and will be removed in a future release. References: Naumann et al., SciPost Phys. Lect. Notes 86, 2024
-- **SVD and QR CTMRG projectors** — SVD (Fishman) projectors (`projector_method="svd"`, default) and `eigh` projectors, plus a reduced-corner QR-CTMRG projector (`projector_method="qr"`, arXiv:2505.00494) on the dense single-site path (Phase 2, dense; block-sparse is a later phase). **`projector_method` is consulted only on the `1x1` recipe, which is deprecated** — for any state with D > 1 it reaches no fixed point in any reachable configuration (#911; D=1 is the one exception, where rank 1 is the maximum reachable corner rank, but the removal still applies), so `gs_recipe="1x1"` + `gs_projector_method="qr"` is no longer the way in. `recipe="2x2"` hardcodes Fishman SVD and ignores the parameter; for `qr` or `eigh` on a C4v-symmetric state use `ctm_tensor_c4v`, which runs all three methods at full rank and agrees with `2x2` to 1e-12
-- **2x2 projector response in the gradient** — `CTMConfig(projector_backward="flow")` lets the 2x2 plaquette projectors' `dP/dA` reach the gradient instead of returning them as `stop_gradient` constants. Every other value (`"auto"` default, `"standard"`, `"lorentzian"`) freezes them, which is the historical behaviour and stays the default. **Explicit AD only** (`gs_implicit_ad=False`), on both the fused and split paths: measured AD-vs-finite-difference on `ctm_energy_explicit` goes from 0.229–0.928 frozen to 0.944–0.994 flowing, and on a single CTM sweep from ratios spanning −7.98…+14.95 (wrong by up to 15×, sometimes wrong in sign) to 1.000000. It is **not** safe under implicit AD: restoring `dP/denv` puts the CTM gauge mode back into `J`, and the fixed-point adjoint `(I − Jᵀ)λ = dE/denv` stops being reliably solvable (issue #1028, blocked on #841). The eager CTM forward is bit-identical either way — only the VJP changes
-- **Split-CTMRG** — ket/bra-separated CTM environment tensors for O(χ³D³) *projector* cost instead of O(χ³D⁶); works with both `DenseTensor` and `SymmetricTensor` via the Tensor protocol (Naumann et al., arXiv:2502.10298). Note this is a projector **cost** bound, not a peak-memory one: the realized `value_and_grad` peak is 1.02–2.7× below the fused path depending on χ, and converges to ~1× at the memory ceiling (#825)
-- **Split-CTM energy entry points** — `compute_energy_split_ctm_tensor_2site` and `compute_energy_split_ctm_tensor_multisite` for 2-site checkerboard and multisite unit cells (kagome PESS, etc.) at large D
-- **Split-CTM AD ground-state optimization** — `optimize_gs_ad` with `CTMConfig(fuse_virtual_legs=False)` drives the single-site optimizer (`unit_cell="1x1"`) **and** the 2-site checkerboard optimizer (`unit_cell="2site"`), both on the default `gs_recipe="2x2"` (single-site since #746; `gs_recipe="1x1"` remains reachable but collapses the environment to rank-1 corners and is bisection-only — see #726) through the split χ²·D⁴ forward instead of the fused χ²·D⁶ double layer: implicit AD via a Γ-gauge-fixed fixed-point `custom_vjp` (Neumann backward; the 2-site case differentiates the coupled `(env_A, env_B)` fixed point), with the line-search probe, warm-start, and final environment all routed through the same split forward (returns `SplitCTMTensorEnv`). The implicit gradient matches the trusted explicit-AD gradient to machine precision in the non-degenerate regime (~1e-15; the SU(2)-symmetric Heisenberg point carries a degenerate-SV SVD-backward floor on the explicit reference). The split CTM is dense-bosonic and experimental (frozen by design): `DenseTensor` and bosonic `SymmetricTensor` (U(1)/Z_n) both run on the eager forward and on single-site (`unit_cell="1x1"`) AD, but a *traced* 2-site `SymmetricTensor` multisite sweep is refused rather than fixed — use `fuse_virtual_legs=True` for symmetric multisite AD (#1048). Fermionic input is refused outright (#1035). Fixed χ (the χ-changing knobs are rejected on this path); the memory win over fused is a large-D effect (D≳16) — measured at `recipe="2x2"` on one A100-80GB it reaches χ=96/48/32 at D=8/10/12 against the fused path's χ=64/48/16, i.e. 1.5× / 1.0× / 2.0× in χ, and the per-cell peak advantage shrinks from 2.66× at χ=16 to 1.02× at the ceiling (#825). References: Naumann et al., arXiv:2502.10298
-- **Honeycomb iPEPS CTM (native)** — rank-4, 6-corner, 3-direction, 2-sublattice CTMRG for honeycomb iPEPS (replaces the dummy-bond brick-wall workaround). Public entry `honeycomb_ctm_energy_implicit` provides `jax.custom_vjp` with a JIT-fused GMRES backward; default Corboz biorthogonal projector + per-column phase fix; configurable `energy_fn` hook for kagome iPESS triangle energies. References: Lukin & Sotnikov, PRB 107, 054424 (2023) for the 6-corner CTMRG and the bipartite extension in PRE 109, 045305 (2024) §II.C.
-- **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary Brillouin-zone momenta (Ponsioen et al. 2022)
-- **Model gate helpers** — pre-built 2-site Hamiltonian tensors: `heisenberg_gate` (dense DenseTensor with trivial charges), `heisenberg_gate_u1sz` (U(1)-Sz block-sparse SymmetricTensor with charges `[+1, −1]` for spin-↑/↓), `xxz_gate` (XXZ anisotropy), `spinless_fermion_gate` (fPEPS hopping + interaction + chemical potential, `FPEPSConfig.mu`, with FermionParity symmetry)
-- **Polymorphic tensor arithmetic** — `+`, `-`, `*`, `-T`, `max_abs`, `inner()`, `conj()`, `dagger()`, `bar()` work identically on `DenseTensor` and `SymmetricTensor`, enabling algorithm code that is agnostic to the underlying storage
-- **Block-sparse SVD, QR, and eigh** — native symmetry-aware decompositions in `tenax.linalg` for `SymmetricTensor`
-- **Sector-based TensorIndex** — legs store sorted charge sectors and multiplicities for O(n_sectors) lookups; `FuseInfo` tracks parent legs so `split_index` can reverse `fuse_indices`
-- **Cython BLAS fast path** — fused Cython Lanczos solver and block-sparse contractions via direct BLAS calls with zero Python reentry for high-performance CPU DMRG
-- **iDMRG transfer matrix environments** — fixed-point environment computation for self-consistent infinite boundary conditions
-- **Extensible symmetry system** — non-Abelian symmetry interface for future SU(2) support
-- **Benchmark suite** — CLI-driven performance benchmarks for all algorithms across CPU, CUDA, TPU, and Metal backends
+Each entry links to its guide page; the full documentation is at [tenax.readthedocs.io](https://tenax.readthedocs.io).
+
+**Tensors and contraction**
+
+- **Block-sparse symmetric tensors** — only allowed charge sectors stored: U(1), Z_n, products, fermion parity ([symmetry](docs/guide/symmetry.md))
+- **Label-based contraction** — shared labels contract automatically (Cytnx-style), with opt_einsum path finding ([contraction](docs/guide/contraction.md))
+- **Block-sparse SVD, QR and eigh** — native symmetry-aware decompositions in `tenax.linalg` ([contraction](docs/guide/contraction.md))
+- **Polymorphic arithmetic** — the same algorithm code runs on `DenseTensor` and `SymmetricTensor` ([core concepts](docs/guide/core_concepts.md))
+- **Tensor networks and `.net` files** — cached graph container and declarative topologies ([tensor networks](docs/guide/tensor_networks.md))
+
+**1D algorithms**
+
+- **DMRG** — finite DMRG with a Cython BLAS CPU path and JIT / multi-GPU sharded sweeps ([DMRG](docs/guide/algorithms/dmrg.md))
+- **iDMRG** — infinite chains and infinite cylinders ([iDMRG](docs/guide/algorithms/idmrg.md))
+- **TDVP and iTEBD** — time evolution; iTEBD with the inversion-free Hastings update ([TDVP](docs/guide/algorithms/tdvp.md), [capabilities](docs/guide/capabilities.md))
+- **AutoMPO** — Hamiltonian MPOs from symbolic operator terms, dense or U(1) block-sparse ([AutoMPO](docs/guide/algorithms/auto_mpo.md))
+
+**2D quantum algorithms**
+
+- **iPEPS simple update** — 1-site and 2-site unit cells, with a belief-propagation gauge for the bond weights ([iPEPS](docs/guide/algorithms/ipeps.md))
+- **AD ground-state optimization** — implicit, explicit, C4v and root-implicit AD through CTM ([AD paths](docs/guide/algorithms/ipeps_ad_paths.md))
+- **CTM environments** — SVD/eigh/QR projectors, in-CTM χ growth, convergence and saddle checks, split-CTMRG ([CTM](docs/guide/algorithms/ctm.md))
+- **Fermionic iPEPS (fPEPS)** — graded tensors for spinless fermions / the t-V model ([fPEPS](docs/guide/algorithms/fpeps.md))
+- **Honeycomb and kagome** — native honeycomb CTM and kagome iPESS with AD ([guide](docs/guide/algorithms/honeycomb_kagome.md))
+- **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary momenta ([AD excitations](docs/guide/algorithms/ad_excitations.md))
+
+**Classical statistical mechanics**
+
+- **TRG and Gilt-TNR** — coarse-graining of 2D partition functions ([TRG](docs/guide/algorithms/trg.md))
+- **HOTRG and Gilt-HOTRG** — with multi-GPU sharding and the q-state Potts model ([HOTRG](docs/guide/algorithms/hotrg.md))
+
+**Tooling**
+
+- **Hardware backends and benchmarks** — CPU, CUDA, TPU and Metal via JAX; CLI benchmark suite ([benchmarks](docs/guide/benchmarks.md))
+
+See [capabilities](docs/guide/capabilities.md) for a map of what each path is (and is not) the right tool for.
 
 ## Installation
 
@@ -70,7 +81,10 @@ pip install -U "jax[tpu]"
 pip install jax-metal
 ```
 
-See the [JAX installation guide](https://docs.jax.dev/en/latest/installation.html) for the latest accelerator options.
+See the [installation guide](docs/guide/installation.md) and the
+[JAX installation guide](https://docs.jax.dev/en/latest/installation.html) for
+more accelerator options. Importing `tenax` enables float64; see
+[gotchas](docs/guide/gotchas.md) if you import JAX first.
 
 ## Quick Start
 
@@ -95,17 +109,17 @@ key = jax.random.PRNGKey(0)
 
 A = SymmetricTensor.random_normal(
     indices=(
-        TensorIndex(u1, phys_charges, FlowDirection.IN, label="p0"),
-        TensorIndex(u1, bond_charges, FlowDirection.IN, label="left"),
-        TensorIndex(u1, bond_charges, FlowDirection.OUT, label="bond"),
+        TensorIndex.from_charges(u1, phys_charges, FlowDirection.IN, label="p0"),
+        TensorIndex.from_charges(u1, bond_charges, FlowDirection.IN, label="left"),
+        TensorIndex.from_charges(u1, bond_charges, FlowDirection.OUT, label="bond"),
     ),
     key=key,
 )
 B = SymmetricTensor.random_normal(
     indices=(
-        TensorIndex(u1, phys_charges, FlowDirection.IN, label="p1"),
-        TensorIndex(u1, bond_charges, FlowDirection.IN, label="bond"),  # shared label
-        TensorIndex(u1, bond_charges, FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(u1, phys_charges, FlowDirection.IN, label="p1"),
+        TensorIndex.from_charges(u1, bond_charges, FlowDirection.IN, label="bond"),  # shared label
+        TensorIndex.from_charges(u1, bond_charges, FlowDirection.OUT, label="right"),
     ),
     key=jax.random.PRNGKey(1),
 )
@@ -122,82 +136,29 @@ tn.connect_by_shared_label("A", "B")
 result = tn.contract()
 ```
 
-## Network Blueprint (`.net` file) Example
+## Examples
+
+One short example per algorithm family. Each guide page has the full
+version, the options, and the caveats.
+
+### DMRG
 
 ```python
-from tenax import NetworkBlueprint
-
-# Define network topology as a string (or read from a .net file)
-bp = NetworkBlueprint("""
-L: a, b, c
-M: a, p, q, d
-A: b, p, s, e
-M2: e, q, t, f
-R: d, f, g
-TOUT: c, s, t, g
-""")
-
-# Load tensors (can be DenseTensor or SymmetricTensor)
-bp.put_tensors({"L": L, "M": M, "A": A, "M2": M2, "R": R})
-result = bp.launch()  # contracts the full network
-
-# Reuse with different tensors (e.g. in a DMRG sweep)
-bp.put_tensor("A", new_A)
-result2 = bp.launch()
-```
-
-## DMRG Example
-
-> **Performance note:** Tenax's DMRG uses a fused Cython BLAS pipeline on CPU for high-throughput block-sparse contractions. GPU/TPU acceleration is available via `DMRGConfig(accelerator="jit")` for dense tensors and `accelerator="sharded"` for multi-GPU runs.
-
-```python
-from tenax.algorithms.dmrg import dmrg, build_mpo_heisenberg, DMRGConfig
-from tenax.network.network import build_mps
+from tenax import DMRGConfig, build_mpo_heisenberg, build_random_symmetric_mps, dmrg
 
 L = 10  # chain length
-mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
-
-# Build random initial MPS
-# ...
+mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)  # U(1) block-sparse MPO
+mps = build_random_symmetric_mps(L, bond_dim=8)  # matching block-sparse MPS
 
 config = DMRGConfig(max_bond_dim=50, num_sweeps=10)
-result = dmrg(mpo, initial_mps, config)
+result = dmrg(mpo, mps, config)
 print(f"Ground state energy: {result.energy:.8f}")
 ```
 
-## 2D Cylinder DMRG Example
+2D cylinders map onto a chain through AutoMPO; see the
+[DMRG guide](docs/guide/algorithms/dmrg.md).
 
-```python
-from tenax import AutoMPO, DMRGConfig, build_random_mps, dmrg
-
-# Build Heisenberg Hamiltonian on a 6x3 cylinder via AutoMPO
-Lx, Ly, N = 6, 3, 18
-auto = AutoMPO(L=N, d=2)
-for x in range(Lx):
-    for y in range(Ly):
-        # Within-ring bond (periodic y)
-        i, j = x * Ly + y, x * Ly + (y + 1) % Ly
-        auto += (1.0, "Sz", min(i, j), "Sz", max(i, j))
-        auto += (0.5, "Sp", min(i, j), "Sm", max(i, j))
-        auto += (0.5, "Sm", min(i, j), "Sp", max(i, j))
-        # Between-ring bond (open x)
-        if x < Lx - 1:
-            i, j = x * Ly + y, (x + 1) * Ly + y
-            auto += (1.0, "Sz", i, "Sz", j)
-            auto += (0.5, "Sp", i, "Sm", j)
-            auto += (0.5, "Sm", i, "Sp", j)
-
-mpo = auto.to_mpo(compress=True)
-mps = build_random_mps(N, physical_dim=2, bond_dim=16)
-config = DMRGConfig(max_bond_dim=100, num_sweeps=10, verbose=True)
-result = dmrg(mpo, mps, config)
-print(f"E/N = {result.energy / N:.8f}")  # converges in a few sweeps
-```
-
-See `examples/heisenberg_cylinder.py` for a full working example with
-4x2, 6x3, and 8x4 cylinders.
-
-## iDMRG Example
+### iDMRG
 
 ```python
 from tenax import idmrg, build_bulk_mpo_heisenberg, iDMRGConfig
@@ -209,24 +170,9 @@ print(f"Energy per site: {result.energy_per_site:.6f}")  # ~ -0.4431
 print(f"Converged: {result.converged}")
 ```
 
-## Infinite Cylinder iDMRG Example
+Infinite cylinders: see the [iDMRG guide](docs/guide/algorithms/idmrg.md).
 
-```python
-from tenax import build_bulk_mpo_heisenberg_cylinder, iDMRGConfig, idmrg
-
-# Ly=4 cylinder: each super-site is a ring of 4 spins (d=16, D_w=14)
-# Only even Ly is supported (odd Ly frustrates AFM order).
-W = build_bulk_mpo_heisenberg_cylinder(Ly=4)
-config = iDMRGConfig(max_bond_dim=200, max_iterations=200, convergence_tol=1e-4)
-result = idmrg(W, config, d=16)
-e_per_spin = result.energy_per_site / 4
-print(f"Energy per spin: {e_per_spin:.6f}")
-```
-
-See `examples/heisenberg_infinite_cylinder.py` for Ly=2 and Ly=4 cylinders
-with ED cross-checks.
-
-## TRG Example
+### TRG
 
 ```python
 from tenax import TRGConfig, trg, compute_ising_tensor, ising_free_energy_exact
@@ -242,75 +188,14 @@ print(f"TRG:   {f_trg:.8f}")
 print(f"Exact: {f_exact:.8f}")
 ```
 
-See `examples/ising_trg.py` and `examples/ising_hotrg.py` for full TRG and HOTRG
-examples at multiple temperatures compared against the Onsager exact solution.
+HOTRG, Gilt-TNR and the Potts model follow the same pattern
+([TRG](docs/guide/algorithms/trg.md), [HOTRG](docs/guide/algorithms/hotrg.md)).
 
-## Gilt-TNR Example
-
-GILT (graph-independent local truncation, Hauru-Delcamp-Mizera PRB 97, 045111)
-removes corner-double-line short-range entanglement from the plaquette before
-each TRG step. At the Ising critical point this breaks through the plain-TRG
-accuracy plateau: at chi=8 the free-energy error drops from ~2e-3 to ~5e-5,
-and unlike plain TRG it keeps improving with chi.
+### AutoMPO
 
 ```python
-from tenax import GiltConfig, GiltTNRConfig, gilt_tnr, compute_ising_tensor
+from tenax import AutoMPO
 
-beta_c = 0.44068679350977147  # Onsager critical point
-T = compute_ising_tensor(beta_c, symmetric=True)  # dense also works
-
-config = GiltTNRConfig(max_bond_dim=8, num_steps=20, gilt=GiltConfig(gilt_eps=1e-6))
-log_z_per_n = gilt_tnr(T, config)
-```
-
-`gilt_eps` is measured against the sum-normalized environment spectrum (the
-convention of Hauru et al.'s reference code); `gilt_plaquette` is also exported
-standalone for use in other coarse-graining schemes.
-
-`gilt_hotrg` applies the same GILT filter before every **HOTRG** move (a
-drop-in counterpart of `hotrg`; `gilt_eps=0.0` recovers plain HOTRG exactly).
-Because HOTRG's HOSVD already suppresses most corner-double-line entanglement,
-GILT does not improve the smooth *free energy* here — its payoff shows in the
-*critical data*: the estimated `beta_c` lands closer to Onsager than plain
-HOTRG at the same bond dimension. It reuses the same χ⁶ sharding via
-`GiltHOTRGConfig(device_mesh=mesh)`. See `examples/gilt_hotrg_ising.py`.
-
-```python
-from tenax import GiltConfig, GiltHOTRGConfig, gilt_hotrg, compute_ising_tensor
-
-T = compute_ising_tensor(0.44068679350977147, symmetric=True)
-config = GiltHOTRGConfig(max_bond_dim=16, num_steps=18, gilt=GiltConfig(gilt_eps=1e-3))
-log_z_per_n = gilt_hotrg(T, config)
-```
-
-For large-χ dense HOTRG, set `HOTRGConfig(device_mesh=mesh)` (a 1-D
-`jax.sharding.Mesh`) to shard the dominant χ⁶ intermediate across multiple GPUs —
-~1/N per-device peak memory and a higher reachable χ, at the same free energy.
-Since HOTRG is forward-only there is no autodiff-through-SVD barrier, so GSPMD
-sharding is effective here (unlike the CTM-AD path). See
-`examples/probe_hotrg_multigpu.py`.
-
-The same coarse-graining works for the **q-state Potts model**
-(`compute_potts_tensor` produces any `q >= 2`; `q = 2` reduces to Ising):
-
-```python
-from tenax import HOTRGConfig, hotrg, compute_potts_tensor, potts_critical_beta
-
-q = 3
-beta_c = potts_critical_beta(q)  # ln(1 + sqrt(q)), the self-dual critical point
-T = compute_potts_tensor(beta_c, q=q)
-
-config = HOTRGConfig(max_bond_dim=16, num_steps=20)
-log_z_per_n = hotrg(T, config)
-print(f"Potts q={q} at beta_c={beta_c:.5f}:  ln(Z)/N = {float(log_z_per_n):.6f}")
-```
-
-## AutoMPO Example
-
-```python
-from tenax import AutoMPO, build_auto_mpo
-
-# Class-based interface: build a Heisenberg chain
 L = 10
 auto = AutoMPO(L)
 for i in range(L - 1):
@@ -318,36 +203,16 @@ for i in range(L - 1):
     auto += (0.5, "Sp", i, "Sm", i + 1)
     auto += (0.5, "Sm", i, "Sp", i + 1)
 mpo = auto.to_mpo()
-
-# Or use the functional interface with custom operators
-import numpy as np
-
-custom_ops = {
-    "X": np.array([[0.0, 1.0], [1.0, 0.0]]),
-    "Z": np.array([[1.0, 0.0], [0.0, -1.0]]),
-    "Id": np.eye(2),
-}
-terms = [(1.0, "Z", i, "Z", i + 1) for i in range(L - 1)]
-terms += [(0.5, "X", i) for i in range(L)]
-mpo = build_auto_mpo(terms, L=L, site_ops=custom_ops)
-
-# Build a symmetric (U(1) block-sparse) MPO
-mpo_sym = auto.to_mpo(symmetric=True)
+mpo_sym = auto.to_mpo(symmetric=True)  # U(1) block-sparse MPO
 ```
 
-## iPEPS Simple Update (2-site unit cell)
+Custom operators and the functional interface: see the
+[AutoMPO guide](docs/guide/algorithms/auto_mpo.md).
+
+### iPEPS simple update
 
 ```python
-import jax.numpy as jnp
-from tenax import iPEPSConfig, CTMConfig, ipeps
-
-# Build a 2-site Heisenberg gate
-Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
-Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
-Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
-gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
-    jnp.einsum("ij,kl->ikjl", Sp, Sm) + jnp.einsum("ij,kl->ikjl", Sm, Sp)
-)
+from tenax import iPEPSConfig, CTMConfig, heisenberg_gate, ipeps
 
 # 2-site checkerboard iPEPS — captures Neel order
 config = iPEPSConfig(
@@ -357,733 +222,59 @@ config = iPEPSConfig(
     ctm=CTMConfig(chi=10, max_iter=40),
     unit_cell="2site",
 )
-energy, peps, (env_A, env_B) = ipeps(gate, None, config)
+energy, peps, (env_A, env_B) = ipeps(heisenberg_gate(), None, config)
 print(f"Energy per site: {energy:.6f}")  # ~ -0.63
 ```
 
-The checkerboard has **four** inequivalent bonds — `A.r<->B.l`, `B.r<->A.l`,
-`A.d<->B.u`, `B.d<->A.u` — and by default each pair shares one Schmidt
-spectrum. On a translation-invariant Hamiltonian that is exact at the fixed
-point (the paired bonds agree to ~1e-6), and it is the more robust choice: it
-constrains the two horizontal bonds to be equal, which projects out a
-dimerising direction that four free bonds can follow. Measured at D=3 from a
-random start, four free bonds converged to a dimerised state on 3 of 8 seeds
-against 1 of 8 when shared.
+The energy `ipeps()` reports is a quick estimate; for an accurate number, and
+for the bond-weight options, see the [iPEPS guide](docs/guide/algorithms/ipeps.md).
 
-Give each bond its own spectrum when the *state* may genuinely break the
-AB↔BA symmetry — a spontaneously dimerised or valence-bond phase, where two
-spectra cannot represent the answer — and prefer a physical initial state with
-it:
+### iPEPS AD optimization
 
 ```python
-config = iPEPSConfig(..., su_independent_bond_lambdas=True)
-```
-
-This does **not** make the bonds inequivalent in the *Hamiltonian*: `ipeps()`
-takes a single `hamiltonian_gate` and applies it to all four bonds, so an
-anisotropic model (`Jx != Jy`) cannot be expressed today regardless of this
-flag — setting it would silently evolve the uniform model. Per-bond gates are
-#883.
-
-The energy `ipeps()` reports comes from the legacy 2-site CTM, which does not
-converge on a genuinely entangled state — it sits ~0.02 above the truth. For an
-accurate number, measure the returned state with `ctm_tensor(recipe="2x2")`
-(D=2 gives −0.65933, χ-converged).
-
-When you want only the simple-update state — as a warm start or fixture — skip
-that measurement entirely:
-
-```python
-_, (A, B), _ = ipeps(gate, None, config, compute_energy=False)
-# returns (None, (A, B), None): no CTM is run, no energy is computed
-```
-
-Simple update itself was fixed in #667; if
-you have results from before that, note it converged to the product state and
-that *smaller* `dt` made it worse — see the changelog.
-
-See `examples/heisenberg_ipeps_su.py` for 1-site and 2-site unit cell examples.
-
-### Belief-propagation gauge (correct bond weights)
-
-Simple update stores each bond's Schmidt spectrum straight from the SVD that
-produced it. A *non-unitary* gate on a neighbouring bond changes this bond's
-Schmidt values, and they are never recomputed, so the stored weights drift away
-from the spectra they are taken to be. `bp_gauge_checkerboard` re-derives all
-four of them by solving the belief-propagation fixed point (bond weights on a
-PEPS *are* BP messages) and re-gauges the tensors to match:
-
-```python
-from tenax import BondWeights, bp_gauge_checkerboard
-
-# A, B are bare Vidal Gamma tensors; lam_h, lam_v are the weights they carry.
-stored = BondWeights(h_AB=lam_h, h_BA=lam_h, v_AB=lam_v, v_BA=lam_v)
-A, B, weights, info = bp_gauge_checkerboard(A, B, stored)
-print(info.converged, info.iterations)
-print(weights.h_AB, weights.h_BA)   # the two horizontal bonds, resolved separately
-```
-
-The weights are required, and are not an initial guess: in Vidal form the state
-is `... Γ_A λ Γ_B ...`, so `λ` is half of what you are handing over. A fresh
-random pair whose bonds really are unweighted passes `BondWeights.ones(D, D)`.
-
-Every step is a gauge transformation, so the physical state is unchanged to
-machine precision — only the weights move. Measured on simple update's own
-converged D=3 output, the stored spectrum is `[1, 0.16586, 0.01564]` where the
-BP-consistent one is `[1, 0.14243, 0.01130]`: 15% off on the second Schmidt
-value and ~35% on the tail. Use this before reading `lambda` as a Schmidt
-spectrum — entanglement entropy, truncation-error estimates, or the symmetric
-gauge handed to a CTM.
-
-This corrects the *weights*, not simple update's dynamics; it does not change
-the state `ipeps()` converges to.
-
-## iPEPS AD Optimization and Excitations
-
-```python
-import jax.numpy as jnp
 from tenax import (
-    iPEPSConfig,
-    CTMConfig,
-    optimize_gs_ad,
-    optimize_gs_ad_chi_schedule,
-    ExcitationConfig,
-    compute_excitations,
-    make_momentum_path,
+    iPEPSConfig, CTMConfig, heisenberg_gate, optimize_gs_ad, sublattice_rotate_gate,
 )
 
-# Build a 2-site Heisenberg gate
-Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
-Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
-Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
-gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
-    jnp.einsum("ij,kl->ikjl", Sp, Sm) + jnp.einsum("ij,kl->ikjl", Sm, Sp)
-)
-
-# Explicit-AD configuration: L-BFGS + explicit AD + QR projectors.
-# forward_gauge defaults to "phase" (variPEPS-style Frobenius + phase
-# fix), correct for both implicit and explicit AD. Reaches E=-0.6628
-# at D=2, chi=16 (literature: -0.6548 at D=2).
+# 1-site unit cell: rotate one sublattice so the Neel state is translation invariant
+H = sublattice_rotate_gate(heisenberg_gate())
 config = iPEPSConfig(
     max_bond_dim=2,
-    ctm=CTMConfig(
-        chi=16,
-        max_iter=80,
-        projector_method="qr",  # recommended projector for explicit AD
-        # Explicit AD has no fixed-point adjoint solve, so the 2x2 projector
-        # response can flow; do NOT use "flow" with gs_implicit_ad=True (#1028).
-        projector_backward="flow",
-    ),
-    gs_implicit_ad=False,  # opt into explicit AD (the default is implicit)
-    gs_projector_method="qr",
-    gs_optimizer="lbfgs",  # L-BFGS with Hager-Zhang line search
-    gs_line_search_method="hager_zhang",
-    gs_metric_precond=True,  # metric preconditioning (Rader et al.)
-    gs_c4v=True,  # C4v basis parameterization
-    su_init=True,
-)
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
-print(f"Ground-state energy: {E_gs:.6f}")
-
-# Chi-ramping schedule: progressively increase chi for faster convergence.
-# Each entry is (chi, num_steps) — run `num_steps` AD steps at logical χ=chi.
-# Internally the schedule runs as a single `optimize_gs_ad` call with envs
-# padded to max(chi) from step 1, so the JIT-compiled CTM / energy / backward
-# kernels never see a shape change (issue #453).
-chi_schedule = [(4, 30), (8, 30), (16, 20)]
-A_opt, env, E_gs = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
-
-# 2-site shared-tensor C4v AD for antiferromagnets (Neel order)
-# A single C4v-parameterized tensor is optimized; B is derived from A via
-# sublattice rotation B = e^{i pi sigma^y/2} on the physical leg.  This
-# ties the two sublattices together and avoids the A/B drift that makes
-# the unconstrained 2-site AD path unstable.  Spin-1/2 (d=2) only.
-config_2site = iPEPSConfig(
-    max_bond_dim=2,
-    ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
-    gs_optimizer="lbfgs",
-    gs_explicit_ad_steps=10,
-    gs_explicit_ad_warmup=2,
-    gs_num_steps=50,
-    gs_line_search=True,
-    unit_cell="2site",
-    gs_c4v=True,
-    su_init=True,
-    num_imaginary_steps=100,
+    num_imaginary_steps=200,
     dt=0.05,
+    ctm=CTMConfig(chi=8, max_iter=40),
+    gs_num_steps=10,  # implicit AD + L-BFGS (Hager-Zhang) by default
+    su_init=True,     # warm-start from simple update
 )
-(A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(gate, None, config_2site)
-
-# SVD (Fishman) projectors — alternative to eigh and QR
-config_svd = iPEPSConfig(
-    max_bond_dim=2,
-    ctm=CTMConfig(chi=16, max_iter=50, projector_method="svd"),
-    gs_num_steps=200,
-    gs_optimizer="lbfgs",
-    gs_line_search_method="hager_zhang",
-)
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config_svd)
-
-# Opt-in reference-mode dense C4v mode (Francuz et al., App. C-F)
-config_reference = iPEPSConfig(
-    max_bond_dim=2,
-    ctm=CTMConfig(
-        chi=16,
-        max_iter=80,
-        projector_method="eigh",
-        ctm_ad_mode="c4v_reference",
-        adjoint_solver="bicgstab",
-        adjoint_maxiter=50,
-        adjoint_tol=1e-8,
-    ),
-    gs_implicit_ad=True,
-    gs_c4v=True,
-    unit_cell="1x1",
-    gs_num_steps=100,
-    gs_optimizer="adam",
-)
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config_reference)
-
-# Root implicit AD (Burgelman et al. arXiv:2607.15030): dense 1x1 (below) and
-# 2-site checkerboard cells via optimize_gs_ad(..., unit_cell="2site") (#894).
-# Drives the characteristic equations instead of back-propagating the CTM
-# sweep, so no SVD/eigh backward appears in the gradient path.
-config_root = iPEPSConfig(
-    max_bond_dim=2,
-    ctm=CTMConfig(
-        chi=6,
-        max_iter=100,
-        conv_tol=1e-10,
-        ctm_ad_mode="root_implicit",
-        # Relative clamp on the retained CTM spectrum. None (the default) uses
-        # the derived eps**(1/3): the covariant equations depend on S cubically,
-        # so a retained direction below that cannot be resolved in working
-        # precision and would produce NaN gradients. Raise it only to diagnose
-        # a state whose environment is rank-deficient -- clamping past the
-        # genuinely-weighted directions breaks the equations rather than
-        # regularising them, which the root-residual gate then rejects.
-        rel_floor=None,
-    ),
-    unit_cell="1x1",
-    gs_num_steps=20,
-    gs_optimizer="adam",
-)
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config_root)
-
-# Root-implicit gradient accuracy is state-dependent and NOT predicted by any
-# diagnostic the engine reports (#785) — the root residual is anti-correlated
-# with it, and `usable_rank`, the retained-spectrum ratios and the site tensor's
-# own conditioning all fail too.  Measured across seeds at one conditioning,
-# gradient error spans 3.4e-06 to 7.7e-03.  So measure it once on a
-# representative state before a long run; it costs a few CTM convergences.
-from functools import partial
-
-from tenax import measure_gradient_error
-from tenax.algorithms._ctm_root_implicit_asym import (
-    asym_root_implicit_energy_and_grad,
-)
-
-report = measure_gradient_error(
-    lambda t: asym_root_implicit_energy_and_grad(t, gate, chi=6)[:2], A_opt
-)
-print(report.summary())
-# `relative_error` is a measurement only when `is_resolved`. When it is not,
-# check `fd_divergence`: only a SMALL value means the gradient is accurate to
-# about `unresolved_bound` (the larger of the two thresholds it is tested
-# against, so `is_resolved` is exactly `relative_error > unresolved_bound`) —
-# the good case.
-# A large one means the differences are still moving — the bound then carries
-# that, so it is honest but wide. NaN means no two steps probed commensurable
-# directions: the scan is indeterminate, and `unresolved_bound` is NaN too,
-# because nothing established a floor to report.
-
-# Quasiparticle excitations (Ponsioen et al. 2022)
-momenta = make_momentum_path("brillouin", num_points=20)
-exc_config = ExcitationConfig(num_excitations=3)
-result = compute_excitations(A_opt, env, gate, E_gs, momenta, exc_config)
-print(result.energies.shape)  # (20, 3)
+A_opt, env, E_gs = optimize_gs_ad(H, None, config)
+print(f"Ground-state energy: {E_gs:.6f}")  # ~ -0.660
 ```
 
-See `examples/heisenberg_ipeps_ad.py` for AD optimization with random vs simple
-update initialization, and `examples/heisenberg_ipeps_excitations.py` for the
-full excitation spectrum along Gamma-X-M-Gamma.
+The [AD paths guide](docs/guide/algorithms/ipeps_ad_paths.md) compares the
+implicit, explicit, C4v and root-implicit paths and gives a recommended
+configuration; excitation spectra are in the
+[excitations guide](docs/guide/algorithms/ad_excitations.md).
 
-## Split-CTMRG
-
-```python
-from tenax import CTMConfig, ctm_split, compute_energy_split_ctm
-
-# Split-CTMRG keeps ket/bra layers separate for O(χ³D³) projector cost
-# instead of O(χ³D⁶). That is a projector-cost bound, not a peak-memory one:
-# measured against the fused path it buys ~1.5x in chi at D=8 and ~2x at D=12
-# on one GPU, and nothing at D=10 (#825).
-config = CTMConfig(chi=20, max_iter=100, chi_I=10)
-env = ctm_split(A, config)
-E = compute_energy_split_ctm(A, env, gate, d=2)
-```
-
-### Checking whether the CTM actually converged
-
-`ctm`, `ctm_2site`, `ctm_split` and `ctm_tensor` return an environment whether
-or not the sweep met `conv_tol` — running out of `max_iter` is not an error.
-Pass `return_meta=True` for a `CTMConvergenceInfo` saying which happened, rather
-than inferring it from an energy that silently moves with `max_iter` (#839):
-
-```python
-from tenax import CTMConfig, ctm_2site
-
-env_A, env_B, info = ctm_2site(A, B, CTMConfig(chi=16), return_meta=True)
-if not bool(info.converged):
-    print(f"stopped at max_iter after {int(info.n_iter)} sweeps, "
-          f"criterion still {float(info.diff):.2e}")
-```
-
-`info.diff` is the convergence criterion — the change in the corner singular
-values, not in the energy. `ipeps()` performs this check itself and warns.
-
-`ctm_tensor` takes the same flag, and returns the info as a *third* element
-after `(env, max_truncation_error)`:
-
-```python
-from tenax import ctm_tensor
-from tenax.algorithms._ctm_diagnostics import env_is_collapsed
-
-env, eps_T, info = ctm_tensor(A, chi=16, max_iter=100, return_meta=True)
-if not info.converged:
-    # inf means the criterion never produced a value: either fewer than two
-    # sweeps ran, or the corner collapsed to rank 1 and the criterion refused
-    # to certify it (#898).  Only the second is unfixable by more sweeps.
-    reason = "collapsed" if env_is_collapsed(env) else "budget"
-    print(f"not a fixed point ({reason}): {info.n_iter} sweeps, diff {info.diff:.2e}")
-```
-
-### A converged CTM can be a saddle: the hold test
-
-`conv_tol` compares *successive* sweeps, and that cannot tell an attractor
-from a saddle: at a saddle successive sweeps agree to 1e-10 while a small
-displacement grows every sweep (#1035 measured one on a fermionic D=3 χ=12
-state, escaping at ×1.041/sweep to a stable fixed point 1.4e-2 away).
-`ctm_tensor_2site` and `ctm_multisite` can therefore run a **hold test**
-once the criterion passes (opt-in: pass `hold_sweeps=40`; the default `0` is
-off): two copies perturbed by
-`hold_perturbation` (relative, default 1e-6; independent deterministic
-directions) and the point itself are stepped side by side, and each
-displacement is measured in a gauge-invariant metric (per-leg, per-sector
-singular values of every environment tensor, blind to χ-bond order and
-signs) and renormalised whenever it shrinks 1e-3 — a power iteration, so a
-weakly excited unstable direction still surfaces. The point is accepted only
-if every direction's fitted growth rate over the last `hold_sweeps // 2`
-sweeps (default window at 40) is below 1 — never on early contraction alone;
-a fit that still grows is re-tested on later windows up to
-`3 * hold_sweeps`, since a stable point can amplify a perturbation for a
-while before contracting it. On a saddle the loop keeps iterating from the
-perturbed point and walks on to the attractor. If `max_iter` runs out first
-— hold steps count toward it, three per hold sweep — it warns that the
-environment is not converged; if the criterion passes with fewer than
-`3 * hold_sweeps` steps left, it stops, reports the sweeps actually run, and
-warns that the point is unverified. A pass means no growth was seen
-within the window, not a proof: a weakly excited unstable mode that grows
-only slightly faster than slowly decaying stable modes can need more sweeps
-than the window to show (e.g. ×1.01 against ×0.99 takes ~230). The metric is
-also per tensor, so a mode that rotates one side of a shared χ bond relative
-to the other is invisible to it. With the default `hold_sweeps=0` the loop uses successive-sweep
-agreement alone, as before.
-
-`ctm_hold_test` runs the same test on any environment, e.g. a seed before it
-goes to `optimize_gs_ad(envs_init=...)` or the environment an implicit-AD
-forward returned:
-
-```python
-from tenax import ctm_hold_test
-
-held = ctm_hold_test({(0, 0): A, (1, 0): B}, {(0, 0): env_A, (1, 0): env_B}, chi=12)
-print(held.passed, held.rate)  # rate: fitted per-sweep growth, < 1 = attractor
-```
-
-## Fermionic iPEPS (fPEPS)
-
-Spinless fermions on the square lattice — `H = -t(c†c + h.c.) + V n n` — with
-`FermionParity` block-sparse tensors, so the exchange signs come from the graded
-tensor algebra rather than from hand-placed swap gates. The convention (#555,
-#994): the graded `transpose` and the matricization inside `svd`/`qr`/`eigh`
-carry Koszul signs; label-based `contract` is sign-free (correct for the planar
-networks every tenax algorithm uses), and `permute_legs` reorders leg *storage*
-with no sign — it, not `transpose`, is how code restores an axis order after
-`contract`. Non-planar diagrams are the exception and need the explicit
-[`twist`](#the-twist-non-planar-diagrams).
+### Fermionic iPEPS (fPEPS)
 
 ```python
 import jax
 from tenax import FPEPSConfig, fpeps, spinless_fermion_gate, sublattice_gap
 
-config = FPEPSConfig(D=2, t=1.0, V=4.0, dt=0.05, num_imaginary_steps=200,
+# mu = 2V is the half-filling point of the t-V model
+config = FPEPSConfig(D=2, t=1.0, V=4.0, mu=8.0, dt=0.05, num_imaginary_steps=200,
                      ctm_chi=8, ctm_max_iter=60, ctm_conv_tol=1e-8)
 H = spinless_fermion_gate(config)
 
 energy, (A, B), (env_A, env_B) = fpeps(H, config, key=jax.random.PRNGKey(0))
-print(energy, sublattice_gap(A, B, env_A, env_B))
+print(energy, sublattice_gap(A, B, env_A, env_B))  # -4.0 1.0: CDW, E = -V per site
 ```
 
-**`fpeps()` returns a pair of site tensors, not one** (#878). The t-V ground
-state at finite `V` is a checkerboard charge-density wave, which no single
-tensor can represent; the previous 1-site ansatz also made `A` both ends of
-every bond, so its update kept only `U` from each SVD and gave `A` the left/top
-half of every gate and never the right/bottom half — the state went to a product
-state regardless of `dt`, and then to exactly `0.0`.
+Read the [fPEPS guide](docs/guide/algorithms/fpeps.md) before trusting the
+energy: it covers the sign convention, the chemical potential, and the
+standing caveats.
 
-`sublattice_gap(A, B, env_A, env_B)` measures **charge order** between the two
-sublattices: the trace distance between their one-site reduced density matrices,
-traced out of the two-site RDM the energy already uses. For spinless fermions
-`FermionParity` forbids the off-diagonal entries, so each RDM is diagonal in the
-occupation basis and this is exactly `|<n_A> - <n_B>|`, the CDW order parameter
-— ~0 at `V=0` (free fermions, no charge order) up to 1 for the fully polarised
-occupied/empty checkerboard.
-
-**It is a one-body probe, and a zero does not mean one tensor would do.** A
-`0` says the two *one-site* RDMs coincide; it says nothing about two-site
-structure. A columnar-dimer or bond-ordered state has identical on-site
-densities on both sublattices, reads `0` here, and is still genuinely two-site.
-A nonzero value is positive evidence of charge order; the converse does not
-hold. To rule out two-site order in general, compare a two-site observable
-instead — e.g. the horizontal against the vertical bond energy of the pair.
-
-A value above 1 means the environment's RDM is not PSD (#854) — measured up to
-1.07 at χ=4 on a deliberately under-converged environment, against a few `1e-4`
-once the CTM has settled. It is not clipped: the excess tells you χ or the sweep
-count is too small, and clipping would hide that inside a plausible-looking 1.0.
-
-Do **not** compare the two sublattices with `||A - B||`, or with any fingerprint
-built from `T T†` on a virtual leg. A simple-update tensor is defined only up to
-a bond gauge `T -> G T`, under which that matrix goes to `G M G†` — its spectrum
-moves unless `G` is unitary, and simple update's gauge is not. Measured on a
-provably uniform pair, `||A - B||` sits at ~1.7. A reduced density matrix has no
-such freedom.
-
-The returned pair is in physical (CTM-contractable) form, which is also the form
-`initial_tensor` takes for a warm restart:
-
-```python
-energy, pair, envs = fpeps(H, config, initial_tensor=pair)   # continues
-energy, pair, envs = fpeps(H, config, initial_tensor=A)      # both sites from A
-```
-
-A restart is not a continuation. The sweep always begins from
-`BondWeights.ones`, so its first cycle treats the outer legs as unweighted while
-the tensors you hand back already carry `sqrt(λ)`. `fpeps(N)` is therefore not
-`fpeps(N/2)` fed back for another `N/2` — use a restart to continue annealing,
-not to reproduce a longer single run.
-
-Two standing caveats. Simple update on this path is **seed-dependent**: over
-seeds 0–4 at 600 steps, the fraction whose bond spectrum survives is 4/5 at D=2,
-2/5 at D=3, 4/5 at D=4 and 4/5 at D=6 — every bond dimension has both surviving
-and dying seeds, so check the result rather than assuming it (#869 is the same
-basin behaviour on the bosonic path). And the **absolute energy is not
-certified** (#392): at the default `FPEPSConfig.mu = 0.0`, `H` carries no
-chemical potential, so both the empty state and the fully polarised
-checkerboard are `E = 0` eigenstates, and the sweep is observed to settle on
-them — measured at 200 steps, D=2, `E ≈ -6e-05` at `V=0` where the half-filled
-answer is ≈ `-1.6t`. `sublattice_gap` tells you *which* state you landed on;
-it does not tell you it is the ground state.
-
-`FPEPSConfig.mu` adds a chemical potential to `H`, distributed over the bonds
-as `-(mu / 4) * (n_i + n_j)` per bond (4 bonds per square-lattice site, so the
-per-site total is `-mu * n_i`). `mu = 2 * V` is the particle-hole-symmetric
-half-filling point of the t-V model, where the CDW energy anchor
-`E = -V` per site holds:
-
-```python
-config = FPEPSConfig(D=2, t=1.0, V=1.0, mu=2.0, dt=0.05, num_imaginary_steps=200)
-H = spinless_fermion_gate(config)  # -t(c†c+h.c.) + V n_i n_j - (mu/4)(n_i+n_j)
-```
-
-### Refusing an energy built from an invalid RDM
-
-`Σ_bonds tr(ρ H)` is bounded by `H`'s spectrum only when every `ρ` is a genuine
-density matrix. When a bond RDM is not one — non-finite, trace collapsed, or
-badly non-PSD — the CTM energy path returned the number anyway: finite, and
-an unphysical lie (#879). The 2-site energy functions (fused
-`compute_energy_ctm_tensor_2site`, which `fpeps()` uses, and the split
-`compute_energy_split_ctm_tensor_2site`) take an opt-in gate:
-
-```python
-from tenax import compute_energy_ctm_tensor_2site
-
-E = compute_energy_ctm_tensor_2site(
-    A, B, env_A, env_B, gate, d=2,
-    nan_on_invalid_rdm=True,   # default False
-    psd_tol=None,              # default None -> RDM_PSD_TOL = 1e-8
-)
-```
-
-- **`nan_on_invalid_rdm`** (default `False`) — re-check every bond RDM with
-  `check_rdm(strict=True)` and return `NaN` if any bond fails.
-- **`psd_tol`** (default `None` → `RDM_PSD_TOL = 1e-8`) — negativity tolerance
-  for the **PSD arm only**, relative to the spectral radius. The non-finite and
-  trace-collapse arms keep their own tolerances, so a collapse is refused at
-  *any* `psd_tol`.
-
-The gate is **eager-only**: it is skipped on tracers, so `jit`, `grad` and every
-optimizer path are bit-for-bit unchanged, and leaving it off is the identity on
-existing callers.
-
-`fpeps()` turns the gate on and loosens the PSD arm to `1e-2`. A low-χ CTM leaves
-~1e-3 relative negativity that is convergence noise rather than a collapse, so
-those runs still return a number and only *gross* non-PSD is refused (the #853
-case sits ~80× higher, its smallest eigenvalue 0.8 of the spectral radius below
-zero). **This changes `fpeps()` behaviour**: on such a state it now returns
-`NaN` rather than a finite unphysical energy.
-
-### Seeding the 2-site AD optimizer with a frozen environment layout
-
-`optimize_gs_ad`'s 2-site implicit-AD path re-derives its CTM environment
-from a cold tiled/identity seed unless told otherwise. On a fermionic
-(block-sparse `SymmetricTensor`) state, a cold-started *traced* CTM can
-settle on a different χ-sector layout than an eager `ctm_tensor_2site` run
-on the same tensors finds — a different point to differentiate through, and
-possibly extra retraces. `envs_init` seeds the first forward CTM (and the
-warm-start refresh between steps) with an already-converged environment;
-under tracing the CTM keeps the χ-sector layout it is given (#1035), so the
-layout stays fixed for the run:
-
-```python
-import jax
-from tenax import (
-    CTMConfig,
-    FPEPSConfig,
-    ctm_tensor_2site,
-    iPEPSConfig,
-    optimize_gs_ad,
-    spinless_fermion_gate,
-    su_grow_layout,
-)
-
-cfg = FPEPSConfig(D=2, t=1.0, V=0.0, dt=0.05)
-H = spinless_fermion_gate(cfg)
-su = su_grow_layout(H, cfg, key=jax.random.PRNGKey(4))  # eager SU grows the sectors
-eA, eB = ctm_tensor_2site(su.A, su.B, 8, max_iter=300, conv_tol=1e-10,
-                          hold_sweeps=40)  # eager CTM picks the chi layout; hold: not a saddle
-
-(A, B), (env_A, env_B), E = optimize_gs_ad(              # traced AD keeps both layouts
-    H, (su.A, su.B),
-    iPEPSConfig(max_bond_dim=2, unit_cell="2site", su_init=False,
-                gs_implicit_ad=True, gs_num_steps=5,
-                ctm=CTMConfig(chi=8, max_iter=50, conv_tol=1e-9)),
-    envs_init={(0, 0): eA, (1, 0): eB},
-)
-```
-
-The eager CTM's hold test (opt-in via `hold_sweeps=40`, see "A converged
-CTM can be a saddle" above) is what makes this seed an attractor rather than a point the
-CTM merely paused at; budget `max_iter` for it — a hold spends `3 *
-hold_sweeps` extra steps at an attractor (up to `9 * hold_sweeps` to reject
-a saddle), and walking off a saddle takes as many sweeps as it takes: about
-1100 in total on the #1035 D=3 χ=12 V=1 state (use `max_iter=1500`), where
-`max_iter=260` returned the saddle before the hold existed.
-
-`su_grow_layout` tracks the sector split with
-`bond_layout(A: SymmetricTensor, B: SymmetricTensor) -> tuple[tuple[int, int], ...]`
-internally; call it directly on any checkerboard pair to read the same
-`(n_even, n_odd)` count per bond leg (`u, d, l, r` of `A` then `B`) that
-`su.layout` above already reports.
-
-`envs_init` is refused (`ValueError`) in eleven cases: `unit_cell` other than
-`"2site"`; `gs_c4v=True` (the C4v path rebuilds the sites as `DenseTensor`);
-the root-implicit AD path (`ctm_ad_mode="root_implicit"`/
-`"root_implicit_symmetric"`); the split CTM (`fuse_virtual_legs=False`);
-`chi_auto_bump`; `ctmrg_heuristic_increase_chi`; a `chi_ramp`; a χ schedule
-(`gs_chi_schedule_steps`); a chi that does not match `CTMConfig.chi`;
-keys other than `{(0, 0), (1, 0)}`; and edge D² legs whose charges do not
-match the double layers of the tensors passed in (a seed built for a
-different virtual charge layout) — each one changes, bypasses, or is
-inconsistent with the layout `envs_init` is meant to freeze. The
-optimizer's own *final* returned environment is always a fresh, cold CTM
-evaluation on the optimized tensors (issue #899) — `envs_init` fixes the
-layout used *during* optimization, not this last re-check.
-
-## Honeycomb iPEPS CTM (native rank-4)
-
-Native rank-4 CTMRG for honeycomb iPEPS — six corners, three edge
-directions, two sublattices — without the dummy-bond brick-wall hack.
-Custom `jax.custom_vjp` forward with a JIT-fused GMRES backward.
-
-```python
-import jax
-import jax.numpy as jnp
-import numpy as np
-from tenax import (
-    HONEYCOMB_DIRECTIONS,
-    honeycomb_ctm_energy_implicit,
-    honeycomb_ctm_run,
-)
-from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry
-from tenax.core.tensor import DenseTensor
-
-
-def _make_site(D=2, d=2, key=jax.random.PRNGKey(0)):
-    sym = U1Symmetry()
-    virt = np.zeros(D, dtype=np.int32)
-    phys = np.zeros(d, dtype=np.int32)
-    indices = (
-        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="e0"),
-        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="e1"),
-        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="e2"),
-        TensorIndex.from_charges(sym, phys.copy(), FlowDirection.IN, label="phys"),
-    )
-    re = jax.random.normal(key, (D, D, D, d))
-    im = jax.random.normal(jax.random.fold_in(key, 1), (D, D, D, d))
-    return DenseTensor((re + 1j * im).astype(jnp.complex128), indices)
-
-
-# Spin-1/2 Heisenberg bond operator (4×4)
-sx = 0.5 * np.array([[0, 1], [1, 0]], dtype=np.complex128)
-sy = 0.5 * np.array([[0, -1j], [1j, 0]], dtype=np.complex128)
-sz = 0.5 * np.array([[1, 0], [0, -1]], dtype=np.complex128)
-H_bond = jnp.asarray(np.kron(sx, sx) + np.kron(sy, sy) + np.kron(sz, sz))
-
-# Honeycomb iPEPS uses two rank-4 sites at coords (0,0) and (1,0); legs
-# (e0, e1, e2, phys). All virtuals OUT, phys IN.
-A = _make_site(D=2, d=2, key=jax.random.PRNGKey(0))
-B = _make_site(D=2, d=2, key=jax.random.PRNGKey(1))
-sites = {(0, 0): A, (1, 0): B}
-
-# Forward only: returns the converged per-sublattice env dict + info.
-envs, info = honeycomb_ctm_run(
-    sites, chi=8, max_iter=80, conv_tol=1e-8,
-    projector_method="biorthogonal",  # default; eigh/svd are A=B opt-ins
-    forward_gauge="phase",            # default; sigma reserved for A=B opt-in
-)
-
-# Implicit-AD energy: takes jax.grad through the CTM fixed point via
-# JIT-fused GMRES on (I - dF/denv) lambda = dE/denv.
-energy = honeycomb_ctm_energy_implicit(
-    sites, H_bond, chi=8, max_iter=80, conv_tol=1e-8,
-)
-grad_fn = jax.grad(
-    lambda Ad: honeycomb_ctm_energy_implicit(
-        {(0, 0): DenseTensor(Ad, A.indices), (1, 0): B},
-        H_bond, chi=8, max_iter=40,
-    )
-)
-gA = grad_fn(A.todense())
-```
-
-The default energy is the 3-edge nearest-neighbor bond sum
-`Σ_α Tr(ρ_α · H_bond)`. Pass `energy_fn=compute_honeycomb_triangle_energy`
-for the kagome iPESS use case where each site is a 3-spin triangle and
-the Hamiltonian is the intra-triangle 3-spin operator.
-
-## Kagome iPESS with AD
-
-Differentiable iPESS pipeline for kagome XXZ ground states (Liao et al.,
-PRX 9, 031041, 2019). Two simplex tensors `T_u`, `T_d` and three site
-tensors `R_a`, `R_b`, `R_c` define the variational state; triangle
-simple update gives the SU warm start, then L-BFGS through the exact
-single-supersite CTM (`loss_builder="exact"`, the #991 blocking: `T_d`
-contracted explicitly, no dummy leg) refines all five primitives.
-`T_d` is a real wavefunction tensor in this blocking, so it is
-optimized alongside the rest.
-
-```python
-import jax
-from tenax import (
-    CTMConfig,
-    IPESSState,
-    kagome_triangle_xxz_hamiltonian,
-    kagome_xxz_pess_cg_gates_exact,
-    pess_simple_update,
-    optimize_pess_ad,
-)
-
-D, d = 2, 3  # spin-1
-H = kagome_triangle_xxz_hamiltonian(delta=1.0, d=d)
-cg_gates = kagome_xxz_pess_cg_gates_exact(delta=1.0, d=d)
-
-state = IPESSState.random(D=D, d=d, key=jax.random.PRNGKey(0))
-state = pess_simple_update(state, H,
-                           dt_schedule=[(0.1, 200), (0.01, 200), (0.001, 100)],
-                           D_max=D)
-
-config = CTMConfig(chi=8, max_iter=30, conv_tol=1e-7,
-                   projector_method="svd", forward_gauge="phase",
-                   ctm_conv_method="elementwise")
-state, e_per_site = optimize_pess_ad(state, cg_gates, config, max_iter=30,
-                                     loss_builder="exact")
-print(f"E/site = {e_per_site:.6f}")  # spin-1 D=2 lands around -1.27
-```
-
-`loss_builder` defaults to `"convc"` — the legacy Convention-C loss
-(`kagome_xxz_pess_cg_gates` gates, `T_d` frozen) kept only for backward
-compatibility. **Do not use it for physics results (#1002):** on
-SU-converged states its CTM collapses to rank-1 corners, so the
-converged readout is backend-dependent and is not the kagome energy
-(the spin-1 D=2 "around -1.0" quoted here before #1002 came through
-that broken probe; the exact-path value is -1.270). Each
-`loss_builder` requires its matching gate builder, as above —
-mismatched pairings encode different inter-cell sub-site pairings and
-are rejected at entry.
-
-The full kagome Hamiltonian (3 up-triangle bonds + 3 down-triangle
-bonds per unit cell) is reconstructed via `compute_energy_cg`'s
-intra-cell + horizontal/vertical/diagonal inter-cell 2-site RDMs; see
-`examples/kagome_spin12_pess_ad_benchmark.py` and
-`examples/kagome_spin1_pess_ad_benchmark.py` for full sweeps.
-
-### Exact supersite loss readout
-
-`pess_to_kagome_supersite_exact` blocks all five iPESS primitives
-(`R_a, R_b, R_c, T_u, T_d`) into one rank-5 supersite with four real
-virtual legs and no dummy — the same single-PEPS-site mapping variPEPS
-uses for kagome 3-PESS. `build_pess_loss_exact` runs it through the
-single-site CTM (forward + implicit AD); on control states it agrees
-with variPEPS to 1e-9 and with exact cylinder oracles to ~2e-4 at D=2
-and D=4 (issue #991). This is the loss `optimize_pess_ad(...,
-loss_builder="exact")` optimizes; call it directly for a standalone
-energy readout of an existing state:
-
-```python
-from tenax import (
-    build_pess_loss_exact,
-    kagome_xxz_pess_cg_gates_exact,
-)
-
-loss = build_pess_loss_exact(kagome_xxz_pess_cg_gates_exact(delta=1.0, d=d),
-                             config)
-e_per_site = float(loss(state).real)
-```
-
-### Multisite path (3-site kagome on a square unit cell)
-
-For the multisite encoding `pess_to_kagome_3site_multisite`, where the
-kagome unit cell maps to three sites `(u, v, w)` on a square lattice and
-the energy uses 4 NN bonds + 2 marginalised-3-site contributions, use
-`build_pess_loss_3site_multisite` and `optimize_pess_3site_multisite_ad`.
-**Caution (#991):** the multisite encoding places dim-1 bonds on the CTM
-lattice, where the plaquette environment's fixed point rank-truncates and
-biases per-site energies by ~2.5e-3 in the non-variational direction —
-prefer `build_pess_loss_exact` above for any quantitative energy readout:
-
-```python
-from tenax import (
-    build_pess_loss_3site_multisite,
-    optimize_pess_3site_multisite_ad,
-    pess_to_kagome_3site_multisite,
-)
-from tenax.algorithms._pess_multisite_energy import kagome_3site_bond_gates
-
-bond_gates = kagome_3site_bond_gates(delta=1.0, d=d)
-state, e_per_site = optimize_pess_3site_multisite_ad(
-    state, bond_gates, config, max_iter=30,
-)
-```
-
-The optimizer warm-starts CTM envs across L-BFGS steps via an internal
-`env_cache`, returns the best-seen energy across the trajectory, and
-gates `CTMConfig` at entry on the implicit-AD invariants
-(`projector_method='svd'`, `forward_gauge` in `('phase', 'bond_phase')`,
-`ctm_conv_method='elementwise'`).
-
-## Examples
+### Example scripts
 
 Runnable example scripts are in the `examples/` directory:
 
@@ -1097,6 +288,7 @@ Runnable example scripts are in the `examples/` directory:
 | `spinless_fermion_fpeps.py` | fPEPS simple update | Spinless fermions (free and interacting) |
 | `ising_trg.py` | TRG | 2D Ising vs Onsager exact |
 | `ising_hotrg.py` | HOTRG | 2D Ising vs Onsager exact |
+| `gilt_hotrg_ising.py` | Gilt-HOTRG | 2D Ising critical point |
 | `kagome_spin12_pess_ad_benchmark.py` | iPESS AD | Spin-½ kagome AFM Heisenberg sweep |
 | `kagome_spin1_pess_ad_benchmark.py` | iPESS AD | Spin-1 kagome Heisenberg sweep |
 | `kagome_spin1_xxz_anisotropy_sweep.py` | iPESS AD | Spin-1 kagome XXZ Δ ∈ {0, 0.5, 1, 1.5, 2} |
@@ -1107,352 +299,33 @@ Run any example with:
 uv run python examples/<script>.py
 ```
 
-## Symmetry System
+## Documentation
 
-```python
-from tenax import U1Symmetry, ZnSymmetry, ProductSymmetry, FermionParity
-import numpy as np
-
-# U(1): integer charges, fusion by addition
-u1 = U1Symmetry()
-charges = np.array([-1, 0, 1], dtype=np.int32)
-print(u1.fuse(charges, charges))  # [-2, 0, 2]
-print(u1.dual(charges))  # [1, 0, -1]
-
-# Z_3: charges mod 3
-z3 = ZnSymmetry(3)
-print(
-    z3.fuse(np.array([1, 2], dtype=np.int32), np.array([2, 2], dtype=np.int32))
-)  # [0, 1]
-
-# Product symmetry: combine two symmetries (e.g., charge × S_z)
-sym = ProductSymmetry(U1Symmetry(), U1Symmetry())
-packed = ProductSymmetry.encode_charges(
-    np.array([0, 1, -1], dtype=np.int32),  # charge
-    np.array([1, 0, -1], dtype=np.int32),  # S_z
-)
-q1, q2 = ProductSymmetry.decode_charges(packed)
-```
-
-### Fermionic swap gates
-
-`SymmetricTensor.swap_gate(axes=(i, j))` multiplies each block by
-`(-1)**(p_i * p_j)` — a minus sign exactly when *both* crossing legs carry
-odd parity. This is the Corboz-style build-time encoding of fermionic
-exchange statistics: place the sign where two fermionic lines cross in the
-(fixed) network diagram, and the rest of the contraction needs no graded
-logic. For an adjacent leg exchange it reproduces the Koszul sign of the
-graded `transpose` exactly. The optional `grading=({charge: parity}, ...)`
-override supplies the parity maps explicitly — needed by pipelines that
-retype graded tensors onto bosonic symmetry objects, where `parity()` is
-all-even by definition (see `docs/plans/2026-09-12-fermionic-ctm-ad-swap-gates-design.md`).
-
-```python
-import jax
-import numpy as np
-from tenax import FermionParity, FlowDirection, SymmetricTensor, TensorIndex
-
-fp = FermionParity()
-charges = np.array([0, 0, 1, 1], dtype=np.int32)  # both parities on each leg
-idx = lambda flow, lbl: TensorIndex.from_charges(fp, charges, flow, label=lbl)
-T = SymmetricTensor.random_normal(
-    indices=(idx(FlowDirection.OUT, "a"), idx(FlowDirection.IN, "b")),
-    key=jax.random.PRNGKey(0),
-)
-
-G = T.swap_gate((0, 1))  # odd-odd blocks flip sign, others unchanged
-
-# involution: applying the same gate twice restores the tensor
-assert np.allclose(np.asarray(G.swap_gate((0, 1))._data), np.asarray(T._data))
-
-# adjacent-exchange identity: the graded transpose's Koszul sign IS the
-# swap gate — transpose(T) block-equals sign-free-permute(swap_gate(T))
-graded = T.transpose((1, 0))
-```
-
-### The twist (non-planar diagrams)
-
-`Tensor.twist(axes)` multiplies each block by `(-1)**(sum of the parities of
-that block's charges on `axes`)` — the categorical twist, matching TensorKit's
-`twist(t, i)` and the `twist(F_west, 3)` PEPSKit applies when fusing a ket/bra
-sandwich. It is the primitive #555 deferred when it removed the contractor's
-automatic Koszul tracking:
-
-> For planar networks — the only kind tenax's CTM/RDM/energy code uses — no
-> signs are needed … For future non-planar applications an explicit `twist`
-> primitive can be added.
-
-**Planar networks do not need it.** Reach for it only where a diagram is *not*
-planar, because there `FermionParity`'s R-symbol does contribute: a periodic
-(torus) contraction wraps legs past one another, and the wrap crossings carry
-signs `contract` does not apply. A periodic fermionic reference that skips them
-is not ground truth — on the #995 adjudication the periodic and planar oracles
-disagreed by up to 13x and reversed which CTM convention they favoured.
-
-**Twisting *every* leg of a charge-conserving tensor is the identity**, since
-the total parity is even. The operation can therefore only act through an
-imbalance across a cut, which is what makes it safe to apply to one side of a
-wrap bond — and why applying it to a whole closed diagram does nothing.
-
-```python
-import jax
-import numpy as np
-from tenax import FermionParity, FlowDirection, SymmetricTensor, TensorIndex
-
-fp = FermionParity()
-charges = np.array([0, 1], dtype=np.int32)
-idx = lambda flow, lbl: TensorIndex.from_charges(fp, charges.copy(), flow, label=lbl)
-T = SymmetricTensor.random_normal(
-    indices=(idx(FlowDirection.OUT, "a"), idx(FlowDirection.IN, "b")),
-    key=jax.random.PRNGKey(0),
-)
-
-W = T.twist((0,))  # blocks whose leg-0 charge is odd flip sign
-
-# involution: twisting the same leg twice restores the tensor
-assert all(
-    np.allclose(np.asarray(W.twist((0,)).blocks[k]), np.asarray(v))
-    for k, v in T.blocks.items()
-)
-
-# all legs at once is the identity -- parity is conserved
-assert all(
-    np.allclose(np.asarray(T.twist((0, 1)).blocks[k]), np.asarray(v))
-    for k, v in T.blocks.items()
-)
-```
-
-**This is the fermionic twist only.** The sign `(-1)**p` is the ribbon element
-of a Z2-graded category and nothing more general. A bosonic symmetry — and any
-`DenseTensor` — is returned unchanged, which is correct: with no grading the
-twist *is* the identity. A symmetry declaring `BraidingStyle.ANYONIC` raises
-`NotImplementedError` instead, because its `twist_phase()` is a general complex
-phase that this sign cannot represent, and silently returning the tensor
-unchanged there would be wrong rather than trivial. Supporting it would also
-cost the two properties above: the twist would no longer be its own inverse
-(the inverse is the conjugate), and the all-legs identity rests on Z2 parity
-summing to even.
-
-### Charge arithmetic
-
-`BaseSymmetry` is the sanctioned boundary for every charge operation. Extension
-authors should call these rather than hand-rolling the arithmetic — the
-hand-rolled forms assume the group inverse is integer negation and the group
-operation is integer addition, which is true for U(1), accidentally true for
-`Z_n`, and false for the bit-packed charges of `ProductSymmetry`.
-
-```python
-from tenax import U1Symmetry
-import numpy as np
-
-sym = U1Symmetry()
-charges = np.array([-1, 0, 2], dtype=np.int32)
-
-# Weight a charge by its leg's flow: IN (+1) unchanged, OUT (-1) inverted.
-# Use this instead of `int(flow) * charge`.
-sym.flow_charge(-1, charges)            # [1, 0, -2]
-
-# Reduce to the canonical representative (`% n` for Z_n, identity for U(1)).
-sym.canonicalize_charges(charges)
-
-# Evaluate a conservation law. A block is valid exactly when the net charge
-# equals `identity()`. Use this instead of `sum(flow * q for ...)`.
-sym.net_charge([1, 1], flows=[1, -1])   # 0
-sym.is_conserved([1, 1], flows=[1, -1]) # True
-```
-
-**Charge width.** Charges are *stored* as `int32`. Intermediate arithmetic in
-the conservation law uses `charge_accumulator_dtype`, which is `int64` for U(1)
-and `FermionicU1` — whose charges are unbounded by definition — and `int32`
-elsewhere, since `Z_n` reduces mod `n` and `ProductSymmetry`'s charges are
-bounded by their packing. This puts the overflow ceiling at 2⁶³ rather than
-2³¹; it does not remove it.
-
-**Limitations:** `ProductSymmetry` combines exactly two factors by bit-packing two int16 charges into one int32. Nesting is not supported, so three-factor groups (e.g., U(1)×U(1)×Z₂) require a future `MultiProductSymmetry`. Each factor charge must fit in the int16 range [-32768, 32767].
-
-### Which legs may be contracted
-
-Two symmetric legs may be contracted when they have **opposite flows and
-identical charges** — what `flip_flow()` on a `TensorIndex`, or `bar()` on a
-tensor, produces. This is not the same as `is_dual_of()` / `dual()` / `dagger()`,
-which negate the charges: block-sparse contraction pairs blocks by charge
-*value* while dense contraction pairs by *position*, and negation permutes the
-position→charge map, so the two representations then compute different sums.
-
-```python
-from tenax import FlowDirection, SymmetricTensor, TensorIndex, U1Symmetry, contract
-import jax, numpy as np
-
-sym = U1Symmetry()
-charges = np.array([-1, 0, 1], dtype=np.int32)
-free_a = TensorIndex.from_charges(sym, charges, FlowDirection.OUT, label="i")
-free_b = TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="j")
-shared = TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="k")
-
-A = SymmetricTensor.random_normal((free_a, shared.flip_flow()), jax.random.PRNGKey(0))
-B = SymmetricTensor.random_normal((shared, free_b), jax.random.PRNGKey(1))
-contract(A, B)          # `k` is OUT on A and IN on B, with identical charges
-```
-
-Mixing the conventions makes `contract()` return a representation-dependent
-answer, silently (#834). Set `TENAX_STRICT_CONTRACT=1` to make it raise
-`ValueError` instead — naming both legs — when the two representations would
-disagree:
+The full documentation — user guide, algorithm tutorials and API reference —
+is at [tenax.readthedocs.io](https://tenax.readthedocs.io). The sources are in
+[`docs/`](docs/index.md); build them locally with Sphinx:
 
 ```bash
-TENAX_STRICT_CONTRACT=1 python my_script.py
+uv sync --extra docs
+cd docs && uv run make html
 ```
 
-It is opt-in rather than the default because the checks are structural while the
-disagreement depends on the blocks' values: the CTM initial environment contracts
-non-dual bonds and discards products by the thousand, and is exact anyway because
-those products are all zero. Turn it on when auditing a path, not in production.
+The generated HTML is in `docs/_build/html/`.
 
-While armed it also forces the reference per-block contraction, overriding the
-accelerated block-sparse backends (`TENAX_BATCH_BLOCKSPARSE`,
-`TENAX_STACK_BLOCKSPARSE`, `TENAX_USE_CUTENSOR_BLOCKSPARSE`) for the duration.
-Those paths drop out-of-set output keys without consulting the check, so an
-audit that left them enabled would report clean on the products it never
-inspected — and a diagnostic whose silence is unreliable is worse than none.
-
-### Bond ordering of a block-sparse `eigh`
-
-`tenax.linalg.eigh` returns its eigenvalues **algebraically descending** by
-default — largest first, so a negative eigenvalue sorts below every positive one
-whatever its magnitude — and lays the output bond out in that order. On a
-`SymmetricTensor` that ranking is a comparison *across* charge sectors, so it
-reads the eigenvalues on the host, and that raises under `jax.jit`. It is why a
-block-sparse `eigh` cannot appear in a traced computation.
-
-Pass `bond_order="sector"` to get the bond charge-grouped instead:
-
-```python
-from tenax.linalg import eigh
-
-V, w = eigh(m, ["row"], ["col"], new_bond_label="k", bond_order="sector")
-```
-
-`"sector"` is **not value-ordered at all**: sectors come in ascending charge
-order and each keeps `jnp.linalg.eigh`'s own ascending output, so `w[0]` is not
-the largest and the array is not monotone. On an indefinite operator with
-sectors `{0: [-5, -3], 1: [2, 0.5]}` the default returns `[2, 0.5, -3, -5]` and
-`"sector"` returns `[0.5, 2, -5, -3]`.
-
-The two modes differ only by a permutation of the bond — `V` and `w` are permuted
-together, and `V diag(w) V†` is unchanged — so nothing that pairs the two is
-affected. Anything that reads `w[0]` as "the largest", or assumes the array is
-sorted, is.
-
-Two constraints:
-
-- It is **rejected with `max_eigenvalues`**, because a truncation has to rank the
-  sectors against each other; that is exactly the host read the option exists to
-  avoid. Without a truncation the ranking decides nothing, which is what makes
-  the option safe.
-- It is **ignored on the dense path**, which has no sectors to group by and is
-  traceable already.
-
-The caller this exists for is `ipeps_bp_gauge._sqrt_pinv`, which factors a PSD
-message and never truncates.
-
-### Bond ordering of a block-sparse `svd`
-
-`tenax.linalg.svd` has the same pair of modes, for the same reason: the default
-ranks the whole spectrum on the host, which raises under `jax.jit`, and under a
-tracer the block-sparse path is silently rerouted to a static-allocation
-variant whose per-sector SVD applies a subrank floor — real singular values
-below `1e-12 · (s_max + 1e-30)` come back **exactly zero**, which on a 1×1
-sector makes the `+1e-30` term an absolute ~1e-42 cutoff.
-
-```python
-from tenax.linalg import svd
-
-U, s, Vh, s_full = svd(t, ["row"], ["col"], new_bond_label="k", bond_order="sector")
-```
-
-`"sector"` emits the bond charge-grouped — ascending by the bond charge each
-sector carries, values **descending within** each sector — and takes the same
-code path eager and traced, so no reroute and no floor: a 4.6e-43 singular
-value comes back as itself. The array is not globally monotone, `s[0]` is not
-the largest, and `s_full` **is** `s` (nothing was truncated). As with `eigh`,
-the two modes differ only by a permutation of the bond, with `U`, `s`, `Vh`
-permuted together.
-
-Constraints, one more than `eigh`'s:
-
-- It is **rejected with `max_singular_values` and with `max_truncation_err`** —
-  both truncation knobs rank sectors against each other on the host.
-- It is **ignored on the dense path**, which has no sectors to group by.
-- Reverse-mode AD through sector mode uses the default SVD JVP, not the
-  Lorentzian-regularized `truncated_svd_ad`; do not differentiate it at
-  degenerate spectra.
-
-The caller this exists for is `ipeps_bp_gauge._gauge_bond`, which re-gauges a
-bond at full rank and never truncates.
-
-## Gotchas
-
-### Float64 precision and `JAX_ENABLE_X64`
-
-Tenax defaults to `float64` for all tensors and algorithms. Importing
-`tenax` automatically calls `jax.config.update("jax_enable_x64", True)`,
-so 64-bit arithmetic is enabled out of the box.
-
-If you import JAX *before* `tenax` and create arrays in that window, they
-will still be `float32`. To avoid surprises, either import `tenax` first or
-enable x64 manually:
-
-```python
-import jax
-
-jax.config.update("jax_enable_x64", True)
-
-import tenax
-```
-
-### MPO index convention
-
-The MPO W-tensor uses the convention `W[w_l, ket, bra, w_r]` — the two
-middle indices are physical (ket on top, bra on bottom) and the outer
-indices are bond dimensions.
-
-### NumPy >= 2.0 casting
-
-Adding a Python `complex` scalar (even `1+0j`) into a `float64` array
-raises `UFuncOutputCastingError` under NumPy >= 2.0. Use `.real` or an
-explicit `complex128` dtype instead.
-
-### Local test failures on macOS x86_64
-
-`uv run pytest` may fail on macOS x86_64 if jaxlib has no wheel for that
-platform.
 ## Benchmarks
 
 A CLI-driven benchmark suite measures wall-clock performance of every algorithm
-across hardware backends.
+across hardware backends:
 
 ```bash
 # Quick smoke test (TRG, small size, 1 trial)
 python -m benchmarks.run --backend cpu --algorithm trg --size small --trials 1
 
-# Full CPU baseline
-python -m benchmarks.run --backend cpu -o benchmarks/results/cpu_baseline.json
-
-# GPU comparison
-python -m benchmarks.run --backend cuda -o benchmarks/results/cuda.json
-
-# Specific algorithms and sizes
-python -m benchmarks.run -b cpu -a dmrg idmrg -s small medium -n 5
-
-# CSV output for analysis
-python -m benchmarks.run -b cpu -a all -s all --csv results.csv
-
 # Show available backends
 python -m benchmarks.run --list-backends
 ```
 
-Each run prints a summary table and saves full results (timings, parameters,
-device info) to JSON. See `docs/guide/benchmarks.md` for the complete guide.
+See the [benchmarks guide](docs/guide/benchmarks.md) for every option and output format.
 
 ## Development
 
@@ -1475,17 +348,8 @@ uv run pytest                  # full suite
 uv run ruff check src/ tests/
 ```
 
-Work-in-progress design documents live in `design/`.
-
-## Documentation
-
-Full API documentation is built with Sphinx:
-
-```bash
-cd docs && make html
-```
-
-The generated HTML is in `docs/_build/html/`.
+See the [contributing guide](docs/guide/contributing.md) for the workflow and
+how to document new API. Work-in-progress design documents live in `design/`.
 
 ## References
 
@@ -1494,6 +358,8 @@ The generated HTML is in `docs/_build/html/`.
 - M. Rader, L. Gresista, C. Hubig, S. Montangero, A. Weichselbaum, J. von Delft, arXiv:2511.09546 (2025) — Metric preconditioning and Hager-Zhang line search for iPEPS optimization
 - L. Ponsioen, F. F. Assaad, P. Corboz, *SciPost Phys.* **12**, 006 (2022) — Quasiparticle excitations for iPEPS
 - J. Naumann, E. L. Weerda, J. Eisert, M. Rizzi, P. Schmoll, arXiv:2502.10298 (2025) — Split-CTMRG with factored projectors for efficient iPEPS environments
+
+Algorithm-specific references are listed on each guide page.
 
 ## License
 
