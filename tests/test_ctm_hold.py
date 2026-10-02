@@ -691,8 +691,12 @@ def test_a_weakly_excited_saddle_is_still_rejected_above_the_floor():
         (np.diag([0.87, 0.87, 0.87, 0.87, 0.87, 1.041]), XSTAR),  # saddle
         (np.eye(6) * 0.1, XSTAR),  # fast attractor
         (np.eye(6) * 0.9, XSTAR + 1e-7),  # claimed point off by its residual
+        # Off by its residual and fast enough that the rescale fires inside
+        # the window while the reference's first step (5e-8) puts 10x the
+        # floor above the rescale threshold: only the gate keeps the rescale.
+        (np.eye(6) * 0.5, XSTAR + 1e-7),
     ],
-    ids=["saddle", "fast", "residual"],
+    ids=["saddle", "fast", "residual", "residual-rescaled"],
 )
 def test_the_floor_changes_nothing_where_the_rescale_works(J, start):
     """Exact linear maps: a reference started on the fixed point never moves
