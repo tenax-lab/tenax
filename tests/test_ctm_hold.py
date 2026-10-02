@@ -1012,7 +1012,7 @@ _REJECTING_JITTERS = ((1e-14, 1),)
 )
 def test_the_d2_point_holds_under_roundoff_jitter_of_the_state(eps, rep):
     """#1063: 1e-14 relative jitter of A and B flipped the loop's own verdict
-    (main rejected 3 of these 9) -- the macOS failure, reproduced on Linux."""
+    (main rejected 4 of these 9) -- the macOS failure, reproduced on Linux."""
     step, envs, kw = _loop_hold_call(eps, rep)
     _assert_the_d2_point_holds(hold_test(step, envs, **kw))
 
