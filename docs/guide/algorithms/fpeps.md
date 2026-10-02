@@ -163,7 +163,7 @@ H = spinless_fermion_gate(config)  # -t(c†c+h.c.) + V n_i n_j - (mu/4)(n_i+n_j
   ``FPEPSConfig`` (it reads ``t``, ``V`` and ``mu``).
 - ``compute_energy_ctm_tensor_2site(..., nan_on_invalid_rdm=..., psd_tol=...)``
   — 2-site energy with the opt-in invalid-RDM gate, below.
-- ``su_grow_layout(H, cfg, key)`` / ``bond_layout(A, B)`` — grow and read the
+- ``su_grow_layout(H, cfg, key=key)`` / ``bond_layout(A, B)`` — grow and read the
   χ-sector layout for a frozen-layout AD seed, below.
 - ``FPEPSConfig`` — configuration dataclass.
 - ``optimize_fpeps_ad(hamiltonian_gate, A_init, config, fpeps_config=None)`` —
