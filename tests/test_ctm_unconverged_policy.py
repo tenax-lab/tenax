@@ -348,3 +348,43 @@ def test_2site_restore_closure_chi_mismatch_clears_env_cache(monkeypatch):
     cleared = run(mismatch=True)
     assert len(restored) == len(cleared)
     assert cleared.count(True) > restored.count(True), (restored, cleared)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: site 2 -- the warm-start env cache never keeps an unconverged env.
+# ---------------------------------------------------------------------------
+
+import tenax.algorithms._ctm_python_loop as _cpl  # noqa: E402
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+@pytest.mark.parametrize("policy", ["raise", "warn"])
+def test_site2_refuses_to_cache_unconverged(monkeypatch, policy, unit_cell):
+    """Spy on the env each python_loop call is SEEDED with. An unconverged
+    warm-start refresh must not become the next call's env_init."""
+    import inspect
+
+    real = _cpl.python_loop_ctm_converge
+    refresh = "_update_env_cache_2s" if unit_cell == "2site" else "_update_env_cache"
+    seen = []
+    poisoned = {"env": None, "armed": True}
+
+    def spy(*a, **k):
+        seen.append(k.get("env_init"))
+        envs, info = real(*a, **k)
+        in_refresh = any(f.function == refresh for f in inspect.stack())
+        if poisoned["armed"] and in_refresh and k.get("env_init") is not None:
+            poisoned["armed"] = False
+            poisoned["env"] = envs
+            return envs, info._replace(converged=False)
+        return envs, info
+
+    monkeypatch.setattr(_cpl, "python_loop_ctm_converge", spy)
+    cfg = _cfg(unit_cell, policy, max_iter=300, steps=3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+    assert poisoned["env"] is not None, "spy never saw a warm refresh"
+    assert all(e is not poisoned["env"] for e in seen), (
+        "unconverged env was used as a seed"
+    )
