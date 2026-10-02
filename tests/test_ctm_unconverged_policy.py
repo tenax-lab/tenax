@@ -253,3 +253,98 @@ def test_unconverged_after_best_resets_and_recovers(unit_cell, monkeypatch, capl
     ), [r.getMessage() for r in caplog.records]
     # the failing step is not recorded; the two good steps are
     assert out[-1]["ctm_converged"] == [True, True]
+
+
+# ---------------------------------------------------------------------------
+# Task 2 fix round 1: the raise-and-checkpoint branches and the restore
+# closure's chi-mismatch fallback, pinned on the 2-site loop.
+# ---------------------------------------------------------------------------
+
+
+def _fail_forwards(monkeypatch, failing):
+    """Make the gradient forwards whose 1-based call index is in ``failing``
+    report forward_converged=False."""
+    calls = {"n": 0}
+    real = _cea.get_last_implicit_ad_diagnostics
+
+    def fake():
+        d = real()
+        if "forward_converged" in d:
+            calls["n"] += 1
+            if calls["n"] in failing:
+                d["forward_converged"] = False
+        return d
+
+    monkeypatch.setattr(_cea, "get_last_implicit_ad_diagnostics", fake)
+    return calls
+
+
+def test_2site_stall_budget_exhausted_raises_and_checkpoints(
+    monkeypatch, tmp_path, caplog
+):
+    """With no reset budget (retries=0) a failure away from best exceeds it
+    and must raise (no reset) with the checkpoint written."""
+    import logging
+
+    _fail_forwards(monkeypatch, {2})
+    cfg = _cfg(
+        "2site", "raise", max_iter=200, steps=4, retries=0, ckpt=str(tmp_path / "ck")
+    )
+    with warnings.catch_warnings(), caplog.at_level(logging.WARNING):
+        warnings.simplefilter("ignore", UserWarning)
+        with pytest.raises(CTMNotConvergedError):
+            _opt.optimize_gs_ad(_heisenberg_gate(), _init("2site"), cfg)
+    assert not any("reset to best" in r.getMessage() for r in caplog.records)
+    assert (tmp_path / "ck" / "ckpt.last.pkl").exists()
+
+
+def test_2site_non_reset_recovery_raises_without_reset(monkeypatch, tmp_path, caplog):
+    """gs_stall_recovery != "reset": the first failure away from best raises
+    at once (no reset) and the checkpoint is written."""
+    import logging
+    from dataclasses import replace
+
+    _fail_forwards(monkeypatch, {2})
+    cfg = replace(
+        _cfg("2site", "raise", max_iter=200, steps=4, ckpt=str(tmp_path / "ck")),
+        gs_stall_recovery="noise",
+    )
+    with warnings.catch_warnings(), caplog.at_level(logging.WARNING):
+        warnings.simplefilter("ignore", UserWarning)
+        with pytest.raises(CTMNotConvergedError):
+            _opt.optimize_gs_ad(_heisenberg_gate(), _init("2site"), cfg)
+    assert not any("reset to best" in r.getMessage() for r in caplog.records)
+    assert (tmp_path / "ck" / "ckpt.last.pkl").exists()
+
+
+def test_2site_restore_closure_chi_mismatch_clears_env_cache(monkeypatch):
+    """Through the 2-site closure: a best env at a stale chi is not restored;
+    the reset clears the cache so the next forward cold-starts (env_init None),
+    whereas a matching chi restores it (env_init not None)."""
+    import tenax.algorithms.ad_utils as _adu
+    import tenax.algorithms.ipeps_ad_policy as _pol
+
+    def run(mismatch):
+        seen = []
+        real_kwargs = _pol.ctm_converge_kwargs
+
+        def spy(cfg, env_init=None, **kw):
+            seen.append(env_init is None)
+            return real_kwargs(cfg, env_init=env_init, **kw)
+
+        with monkeypatch.context() as m:
+            m.setattr(_pol, "ctm_converge_kwargs", spy)
+            _fail_forwards(m, {2})
+            if mismatch:
+                real_chi = _adu._env_chi
+                m.setattr(_adu, "_env_chi", lambda envs: real_chi(envs) + 1)
+            cfg = _cfg("2site", "raise", max_iter=200, steps=3, retries=2)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                _opt.optimize_gs_ad(_heisenberg_gate(), _init("2site"), cfg)
+        return seen
+
+    restored = run(mismatch=False)
+    cleared = run(mismatch=True)
+    assert len(restored) == len(cleared)
+    assert cleared.count(True) > restored.count(True), (restored, cleared)
