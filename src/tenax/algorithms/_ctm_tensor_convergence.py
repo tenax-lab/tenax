@@ -1149,14 +1149,14 @@ def ctm_tensor(
         reading this to decide whether to grow ``chi`` -- the variPEPS
         §2.8.2 auto-bump -- is dead on the blind rows:
 
-        =============  ==================  ==========================
+        =============  ====================  ==========================
         ``recipe``     ``projector_method``  ε_T
-        =============  ==================  ==========================
-        ``"2x2"``      *(ignored)*         genuine
-        ``"1x1"``      ``"svd"``           **structurally 0**
-        ``"1x1"``      ``"eigh"``          genuine
-        ``"1x1"``      ``"qr"``            **0, never computed**
-        =============  ==================  ==========================
+        =============  ====================  ==========================
+        ``"2x2"``      *(ignored)*           genuine
+        ``"1x1"``      ``"svd"``             **structurally 0**
+        ``"1x1"``      ``"eigh"``            genuine
+        ``"1x1"``      ``"qr"``              **0, never computed**
+        =============  ====================  ==========================
 
         The ``"1x1"``/``"svd"`` zero is a *shape* artifact, not a
         measurement: ``_ctm_projector.py`` forms ``M = C1g^H C4g``, which is
