@@ -12,8 +12,29 @@ from __future__ import annotations
 
 import math
 import warnings
+from typing import NamedTuple
 
 _VALID_POLICIES = ("raise", "warn")
+
+
+class CTMConvergeInfo(NamedTuple):
+    """Convergence information from python_loop_ctm_converge.
+
+    Lives here, in a module with no tenax imports, so every CTM driver can
+    build one without an import cycle; ``_ctm_python_loop`` re-exports it.
+    """
+
+    converged: bool
+    iterations: int  # CTM sweeps actually performed (#781)
+    sv_diff: float
+    max_truncation_error: float = 0.0  # variPEPS §2.8.2 indicator (last sweep)
+    max_smallest_S: float = 0.0  # variPEPS norm_smallest_S indicator (#492)
+    final_chi: int = 0  # final chi after any in-CTM bumps (#492); 0 ⇒ unchanged
+    # Sweep index whose environment is returned.  Equals ``iterations``
+    # except on the ``plateau_patience`` bail, where the best-metric env is
+    # handed back and this trails ``iterations`` by ``plateau_patience``.
+    # ``sv_diff`` is the metric of *this* sweep, not of ``iterations``.
+    best_iteration: int = 0
 
 
 def format_step_multiplier(info) -> str:

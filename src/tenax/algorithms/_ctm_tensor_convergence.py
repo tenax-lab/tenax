@@ -1735,7 +1735,7 @@ def _ctm_tensor_multisite(
         )
 
     if _return_status:
-        from tenax.algorithms._ctm_python_loop import CTMConvergeInfo
+        from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
 
         return envs, CTMConvergeInfo(
             converged=bool(converged),
