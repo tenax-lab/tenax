@@ -131,12 +131,28 @@ def _assert_close(a, b, rtol):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("c", [0.1, 0.57, 10.0, -1.0])
+@pytest.mark.parametrize("c", [0.1, 0.57, 10.0])
 def test_env_rescale_invariance_real(su_state, c):
     k = (0, 0)
     A, g, env = su_state["sites"][k], su_state["grads"][k], su_state["phase"][k]
     ref = mp.precondition_gradient(A, env, g, DELTA, CFG)
     out = mp.precondition_gradient(A, _scale_env(env, c), g, DELTA, CFG)
+    _assert_close(out, ref, 1e-10)
+
+
+@pytest.mark.parametrize("c", [-1.0, 0.3])
+@pytest.mark.parametrize("field", ["C1", "T2"])
+def test_single_env_tensor_rescale_invariance(su_state, field, c):
+    """CTM normalises each C/T separately; one of them alone may move.
+
+    Scaling *every* tensor by c moves N by c**8, so a sign flip of N is only
+    reachable this way.
+    """
+    k = (0, 0)
+    A, g, env = su_state["sites"][k], su_state["grads"][k], su_state["phase"][k]
+    ref = mp.precondition_gradient(A, env, g, DELTA, CFG)
+    scaled = env._replace(**{field: getattr(env, field) * c})
+    out = mp.precondition_gradient(A, scaled, g, DELTA, CFG)
     _assert_close(out, ref, 1e-10)
 
 
