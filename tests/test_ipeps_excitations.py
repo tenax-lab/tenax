@@ -87,9 +87,9 @@ class TestOptimizeGsAd:
             max_bond_dim=2,
             # max_iter=10 left forwards unconverged.  20 steps reach a point
             # whose gradient forward does not converge (step 14 plateau-bails
-            # at max_iter 300 and 1000; with plateau_patience=None, step 13 is
-            # still unconverged after 1000 sweeps), so run 10 steps, every one
-            # of which converges at max_iter=300 (#1059).
+            # at max_iter 300 and 1000; with plateau_patience=None, under
+            # "raise", step 13 is still unconverged after 1000 sweeps), so run
+            # 10 steps, every one of which converges at max_iter=300 (#1059).
             ctm=CTMConfig(chi=4, max_iter=300),
             gs_num_steps=10,
             gs_learning_rate=1e-2,
