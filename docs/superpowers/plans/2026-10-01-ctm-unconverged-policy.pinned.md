@@ -51,7 +51,7 @@ were not recorded, so no pin claims a confirmed cycle.
 | `test_ipeps_ad_history.py::test_optimize_gs_ad_returns_history_1site`, `::test_optimize_gs_ad_default_no_history` | 5 → 30 (1-site helper only) | Same. Passes at 30 and 60. |
 | `test_ipeps_checkpoint_resume.py::test_first_evaluation_convergence_still_writes_checkpoints`, `::test_normal_completion_flushes_last_checkpoint_despite_cadence`, `::test_final_step_state_is_serialized_once` | chi=1 helper: 5 → 20 | Never measured (5 < `min_iter`). Passes at 20 and 50. |
 | `test_ipeps_checkpoint_resume.py::test_resume_rejects_plain_to_cg` (slow) | 20 → 100 | Gradient forward residual 1.2e-7 vs tol 1e-8 at step 1. Passes at 100 and 300. |
-| `test_ipeps_checkpoint_resume.py::test_resume_1site_continues_from_saved_step` | none | Listed by the Task 2/3 reviews. It **passes on this branch head unchanged**: Task 5's final-energy handling fixed it. A standalone run converges at max_iter 100, 300 and 1000 alike. |
+| `test_ipeps_checkpoint_resume.py::test_resume_1site_continues_from_saved_step` | none | Listed by the Task 2/3 reviews. It **passes on this branch head unchanged**, by trajectory, not by robustness. The failure was `site=gradient, step 4` (a gradient forward), which Task 5's final-energy code cannot reach. Bisected in the final fix pass: it fails at `786ce08` (after Task 3, `sv_diff 0.417 vs conv_tol 1e-08`) and passes at `5849426` (after Task 4, before Task 5). So Task 4's rejection of unconverged line-search trials (φ=+inf) changed the trajectory so that step 4 no longer lands on a non-converging point. A standalone run converges at max_iter 100, 300 and 1000 alike. |
 | `test_coarse_grain.py::TestCGOptimizerGuards::test_user_supplied_raw_params_are_respected` | 20 → 100 | It compared two final energies, each unconverged (`sv_diff` 3.7e-5). Passes at 100 and 300. |
 | `test_ipeps_chi_bump_integration.py` (all 4) | 10 → 60 | Final and gradient forwards were short of `conv_tol`=1e-3. Passes at 60 and 200. |
 | `test_ipeps_chi_schedule_wiring.py::test_chi_schedule_bumps_between_stages`, `::test_reactive_plus_scheduled_compose_2site_smoke` | 10 → 60 | Step-1 gradient forward unconverged. Passes at 60 and 200. |
@@ -71,3 +71,33 @@ were not recorded, so no pin claims a confirmed cycle.
 | Test | Status |
 |---|---|
 | `test_ctm_sharding_backward.py::test_sharded_backward_grad_matches_single_device` | `subprocess.TimeoutExpired` (900 s) at machine load ~600 to 1200, twice. This is load, not the branch. Its subprocess (`ctm_energy_implicit` directly) touches no code this branch changed. Run side by side under the same load, the two clones print identical output (`\|dE\|`=1.39e-17, `grad_max\|delta\|`=1.90e-15) in 2337 s (branch) and 2197 s (baseline). |
+
+## Follow-ups (not in this PR)
+
+- **Bad stationarity under a converged verdict.** The #841 stationarity
+  residual can sit at ~0.7 while the CTM loop reports `converged=True` (the
+  final review saw residuals of 0.68–0.71 on steps 14–17, 19 and 20 of the
+  `test_heisenberg_negative_energy` 20-step re-measurement). Site 1 checks
+  `converged`, as the spec says, so such a gradient passes the policy; only
+  the once-per-cache #841 `RuntimeWarning` fires. Out of spec scope. The
+  history now records the residual per step (`ctm_stationarity`), which makes
+  the case visible. Candidate fix: an opt-in policy that also gates on
+  `stationarity_residual <= max(100*conv_tol, 1e-8)`.
+- **u1sz parity check dropped.**
+  `test_ipeps_u1sz.py::TestU1SzSymmetricMatchesDense::test_one_step_symmetric_charged_ctm_no_collapse`
+  lost its `E_sym ≈ E_dense` assertion because both forwards are unconverged
+  even at `max_iter=1000, plateau_patience=None`. Restoring it needs an init
+  whose symmetric and dense forwards both converge.
+- **Other reset-to-best paths that keep `prev_energy`.** This PR resets
+  `prev_energy` in every branch of the shared `except (CTMRGGradientError,
+  CTMNotConvergedError)` clause of the 1-site and 2-site loops, so the
+  CTMRGGradientError resets there are fixed too. The post-line-search stall
+  resets (`params = best_params` after a failed line search, both loops) do
+  not reset it. When the stalled iterate *is* `best_params`, the next step
+  re-evaluates the same point, and the `"dE"` criterion can read that as
+  convergence. This was found by reading the code; it was not reproduced.
+  The multisite loop's CTMRGGradientError reset relies on its warm-up gate
+  (`stall_count == 0`), not on `prev_energy`, and is not touched here.
+- **Site-1 coverage.** The explicit-AD and split paths write no
+  `forward_converged`, so site 1 does not check them (`_site1_check =
+  gs_implicit_ad and not use_split`).
