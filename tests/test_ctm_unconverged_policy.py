@@ -563,6 +563,16 @@ def _final_eval_unconverged(monkeypatch):
 @pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
 def test_site4_falls_back_to_warm(monkeypatch, unit_cell):
     state = _final_eval_unconverged(monkeypatch)
+    warm = {}
+    real_use = _opt._final_eval_use_warm
+
+    def spy_use(info, cache, cfg, **kw):
+        out = real_use(info, cache, cfg, **kw)
+        if out == "warm":
+            warm["envs"] = cache["envs"]
+        return out
+
+    monkeypatch.setattr(_opt, "_final_eval_use_warm", spy_use)
     cfg = _cfg(unit_cell, "raise", max_iter=300, steps=1)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
@@ -570,6 +580,10 @@ def test_site4_falls_back_to_warm(monkeypatch, unit_cell):
     assert state["armed_seen"], "final cold evaluation was never reached"
     assert out[-1]["final_env_source"] == "warm_fallback"
     assert math.isfinite(out[2])
+    # the returned env IS the warm env (a tag-only mutant must fail this)
+    assert "envs" in warm
+    ret = out[1] if unit_cell == "2site" else (out[1],)
+    assert all(ret[i] is warm["envs"][(i, 0)] for i in range(len(ret)))
 
 
 @pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
@@ -612,13 +626,14 @@ def test_site4_warm_requires_certified_converged_verdict(monkeypatch):
     def use(cache):
         return _opt._final_eval_use_warm(bad, cache, cfg)
 
-    assert use({"envs": env, _opt._VERDICT_KEY: (env, True)}) == "warm"
+    assert use({"envs": env, _opt._VERDICT_KEY: (env, True, None)}) == "warm"
     assert _opt._final_eval_use_warm(_fake_info(True), None, cfg) == "fresh"
     assert _opt._final_eval_use_warm(bad, None, cfg, skippable=True) == "skip"
     for cache in (
-        {"envs": env, _opt._VERDICT_KEY: (env, False)},  # unconverged
+        {"envs": env, _opt._VERDICT_KEY: (env, False, None)},  # unconverged
         {"envs": env},  # missing verdict
-        {"envs": env, _opt._VERDICT_KEY: (other, True)},  # stale verdict
+        {"envs": env, _opt._VERDICT_KEY: (other, True, None)},  # stale verdict
+        {"envs": env, _opt._VERDICT_KEY: (env, True)},  # legacy 2-tuple
         {},
         None,
     ):
@@ -626,3 +641,51 @@ def test_site4_warm_requires_certified_converged_verdict(monkeypatch):
         with pytest.raises(CTMNotConvergedError) as ei:
             use(cache)
         assert ei.value.site == "final_energy"
+
+
+def test_site4_verdict_binds_the_params(monkeypatch):
+    """R11 / I1: a refused refresh keeps the previous env AND its verdict, so a
+    best snapshot taken right after must not qualify for the NEW params."""
+    monkeypatch.setattr(_opt, "_should_restore_best_env", lambda *a, **k: True)
+    cfg = CTMConfig(chi=4, conv_tol=1e-9, on_unconverged="raise")
+    p0, p1 = object(), object()
+    e0, e1 = {"e": 0}, {"e": 1}
+    cache: dict = {}
+    _opt._refresh_env_cache(cache, e0, _fake_info(True), cfg, p0)
+    _opt._refresh_env_cache(cache, e1, _fake_info(False), cfg, p1)  # refused
+    best_snapshot = dict(cache)
+    assert best_snapshot["envs"] is e0
+    assert _opt._cache_env_known_converged(best_snapshot, p0)
+    assert not _opt._cache_env_known_converged(best_snapshot, p1)
+    assert (
+        _opt._final_eval_use_warm(_fake_info(False), best_snapshot, cfg, params=p0)
+        == "warm"
+    )
+    with pytest.raises(CTMNotConvergedError):
+        _opt._final_eval_use_warm(_fake_info(False), best_snapshot, cfg, params=p1)
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_site4_warn_keeps_legacy_even_with_certified_warm(monkeypatch, unit_cell):
+    """R12: under warn the warm fallback is NOT used; legacy cold result,
+    tagged fresh, plus CTMNotConvergedWarning(site=final_energy)."""
+    state = _final_eval_unconverged(monkeypatch)
+    seen, verdicts = [], []
+    real_use = _opt._final_eval_use_warm
+
+    def spy_use(info, cache, cfg, **kw):
+        if not info.converged:
+            seen.append(_opt._cache_env_known_converged(cache, kw.get("params")))
+        out = real_use(info, cache, cfg, **kw)
+        verdicts.append(out)
+        return out
+
+    monkeypatch.setattr(_opt, "_final_eval_use_warm", spy_use)
+    cfg = _cfg(unit_cell, "warn", max_iter=300, steps=1)
+    with pytest.warns(CTMNotConvergedWarning, match="final_energy"):
+        out = _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+    assert state["armed_seen"]
+    assert out[-1]["final_env_source"] == "fresh"
+    assert any(seen), "no certified warm env was present; test is vacuous"
+    # whichever evaluation was picked, no evaluation may have used the warm env
+    assert "warm" not in verdicts, verdicts

@@ -72,7 +72,8 @@ _VERDICT_KEY = "refresh_verdict"
 def _cached_env_state(cache: dict) -> str:
     """Convergence of the env currently in ``cache``: none/converged/unconverged/unknown.
 
-    Only :func:`_refresh_env_cache` records a verdict, as ``(env, converged)``.
+    Only :func:`_refresh_env_cache` records a verdict, as
+    ``(env, converged, params)`` (``params``: what the env was converged FOR).
     Other writers (line-search probes, checkpoint restore, resets) replace
     ``cache["envs"]`` without touching it, so the verdict only counts while it
     is about the very env object still cached -- it cannot go stale.
@@ -86,7 +87,7 @@ def _cached_env_state(cache: dict) -> str:
     return "converged" if verdict[1] else "unconverged"
 
 
-def _refresh_env_cache(cache: dict, envs, info, ctm_cfg) -> None:
+def _refresh_env_cache(cache: dict, envs, info, ctm_cfg, params=None) -> None:
     """Store a warm-start refresh result in ``cache`` unless it is unconverged.
 
     An unconverged refresh never replaces an existing env (#1059 site 2); it
@@ -97,7 +98,7 @@ def _refresh_env_cache(cache: dict, envs, info, ctm_cfg) -> None:
     prev = _cached_env_state(cache)
     if info.converged or prev == "none":
         cache["envs"] = envs
-        cache[_VERDICT_KEY] = (envs, bool(info.converged))
+        cache[_VERDICT_KEY] = (envs, bool(info.converged), params)
     if info.converged:
         return
     if prev == "none":
@@ -127,25 +128,32 @@ def _refresh_env_cache(cache: dict, envs, info, ctm_cfg) -> None:
         )
 
 
-def _cache_env_known_converged(cache: dict | None) -> bool:
-    """True only if ``cache`` holds an env whose verdict says it converged.
+def _cache_env_known_converged(cache: dict | None, params=None) -> bool:
+    """True only if ``cache`` holds an env certified converged FOR ``params``.
 
-    A missing or stale verdict ("unknown") and an unconverged one both
-    disqualify it: the final evaluation must not report a warm env that
-    was not positively certified (#1059 site 4, ruling R9).
+    The verdict must be identity-matched to ``cache["envs"]``, say converged,
+    and carry ``params`` (identity).  A missing, stale, unconverged, legacy
+    2-tuple (e.g. from a checkpoint), or other-params verdict disqualifies it:
+    the final evaluation must not report an env that was not positively
+    certified at exactly these params (#1059 site 4, R9/R11).
     """
-    return bool(cache) and _cached_env_state(cache) == "converged"
+    if not cache or _cached_env_state(cache) != "converged":
+        return False
+    verdict = cache[_VERDICT_KEY]
+    return len(verdict) == 3 and verdict[2] is params
 
 
 def _final_eval_use_warm(
-    info, warm_cache: dict | None, ctm_cfg, *, skippable: bool = False
+    info, warm_cache: dict | None, ctm_cfg, *, params=None, skippable: bool = False
 ) -> str:
     """Site 4 of #1059: decide how to handle an unconverged final evaluation.
 
     Returns ``"fresh"`` when the fresh forward converged, or when it did not
     but ``on_unconverged="warn"`` (the warning is emitted; legacy result).
-    Returns ``"warm"`` when the caller should recompute the energy from the
-    certified-converged warm env in ``warm_cache``.  Returns ``"skip"`` when
+    Returns ``"warm"`` (``"raise"`` policy only; under ``"warn"`` the spec
+    wants the legacy cold result plus a warning, R12) when the caller should
+    recompute the energy from the warm env in ``warm_cache``, certified
+    converged at exactly ``params``.  Returns ``"skip"`` when
     unconverged under ``"raise"`` with no warm env but ``skippable`` (the
     caller has another certified candidate and drops this one).  Otherwise
     raises ``CTMNotConvergedError`` under ``"raise"``.
@@ -153,8 +161,9 @@ def _final_eval_use_warm(
     if info.converged:
         return "fresh"
     if (
-        warm_cache is not None
-        and _cache_env_known_converged(warm_cache)
+        ctm_cfg.on_unconverged == "raise"
+        and warm_cache is not None
+        and _cache_env_known_converged(warm_cache, params)
         and _should_restore_best_env(warm_cache["envs"], ctm_cfg.chi)
     ):
         _logger.warning(
@@ -1559,7 +1568,7 @@ def _optimize_gs_ad_tensor(
             SINGLE_SITE_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
-        _refresh_env_cache(_env_cache, envs, info, ctm_cfg)
+        _refresh_env_cache(_env_cache, envs, info, ctm_cfg, params)
         # ``info.max_truncation_error`` comes from the JIT-compiled CTM step,
         # which sets eps_T = 0.0 for any input that is a JAX tracer during
         # JIT compilation.  For the auto-bump path we need a real eps_T from
@@ -2821,7 +2830,9 @@ def _optimize_gs_ad_tensor(
             SINGLE_SITE_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg, env_init=env_init),
         )
-        verdict = _final_eval_use_warm(info, warm_cache, ctm_cfg, skippable=skippable)
+        verdict = _final_eval_use_warm(
+            info, warm_cache, ctm_cfg, params=p, skippable=skippable
+        )
         source = "fresh"
         if verdict == "warm":
             envs = warm_cache["envs"]
@@ -3364,7 +3375,7 @@ def _optimize_gs_ad_tensor_2site(
             CHECKERBOARD_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg_2s, env_init=_env_cache_2s.get("envs", None)),
         )
-        _refresh_env_cache(_env_cache_2s, envs, info, ctm_cfg_2s)
+        _refresh_env_cache(_env_cache_2s, envs, info, ctm_cfg_2s, params)
         # Capture ``info.max_truncation_error`` so the end-of-step
         # ``_maybe_bump_chi`` reactive trigger (#472) has an ε_T to
         # compare against.  As of #474 the 2x2 plaquette projector
@@ -4742,7 +4753,7 @@ def _optimize_gs_ad_tensor_2site(
                 **ctm_converge_kwargs(ctm_cfg_2s, env_init=env_init),
             )
             verdict = _final_eval_use_warm(
-                info, warm_cache, ctm_cfg_2s, skippable=skippable
+                info, warm_cache, ctm_cfg_2s, params=p, skippable=skippable
             )
             source = "fresh"
             if verdict == "warm":
