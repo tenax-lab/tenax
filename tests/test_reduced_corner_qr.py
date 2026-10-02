@@ -1035,43 +1035,14 @@ def test_implicit_qr_gradient_matches_fd():
     assert rel_err < TOL, f"directional FD off by {rel_err:.3f} (>= {TOL})"
 
 
-@pytest.mark.algorithm
-def test_implicit_qr_gradient_matches_eigh():
-    """QR-AD gradient agrees with the eigh-AD gradient on the same physical state.
-
-    Both ``qr`` and ``eigh`` are isometric projectors under implicit-AD
-    recipe='1x1'.  At finite chi the two schemes are distinct fixed points (the
-    forward energies differ at ~1e-3), so the gradient vectors are NOT identical
-    — they amplify that gap to a ~10-40% difference at chi<=16.  The genuine
-    parity statement is *directional*: each scheme's AD gradient, projected onto
-    the OTHER scheme's gradient direction, reproduces that scheme's directional
-    derivative to within the finite-chi scheme gap.
-    """
-    A0 = _phys_A0()
-    g_qr = np.asarray(
-        jax.grad(
-            lambda a: _implicit_energy_of_A_phys(
-                a, recipe="1x1", projector_method="qr", chi=16
-            )
-        )(A0)
-    ).ravel()
-    g_eigh = np.asarray(
-        jax.grad(
-            lambda a: _implicit_energy_of_A_phys(
-                a, recipe="1x1", projector_method="eigh", chi=16
-            )
-        )(A0)
-    ).ravel()
-
-    # Sign/structure agreement: positively correlated gradients.
-    cos = float(np.dot(g_qr, g_eigh) / (np.linalg.norm(g_qr) * np.linalg.norm(g_eigh)))
-    assert cos > 0.8
-
-    # Directional parity: qr-grad . eigh_dir ~ eigh dir-deriv (and symmetric).
-    u_eigh = g_eigh / np.linalg.norm(g_eigh)
-    u_qr = g_qr / np.linalg.norm(g_qr)
-    np.testing.assert_allclose(np.dot(g_qr, u_eigh), np.dot(g_eigh, u_eigh), rtol=0.2)
-    np.testing.assert_allclose(np.dot(g_eigh, u_qr), np.dot(g_qr, u_qr), rtol=0.2)
+# test_implicit_qr_gradient_matches_eigh was removed: it compared the qr and
+# eigh implicit-AD gradients on recipe='1x1' at chi=16, where BOTH forwards
+# diverge (stationarity residual 1.21 / 0.56 after 7 sweeps, #723) and BOTH
+# adjoint solves fail (relative residual 0.40 / 0.33).  Its rtol=0.2
+# directional "parity" was a coin flip: 17% on Linux, 42% on macOS, where it
+# failed every full run on main.  The question it asked -- does the qr adjoint
+# track the eigh reference? -- is kept, with the reason it cannot be answered
+# on any reachable configuration, by the #858 xfail below.
 
 
 @pytest.mark.algorithm
