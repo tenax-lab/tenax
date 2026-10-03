@@ -112,7 +112,7 @@ after each CTM sweep. Five modes are supported, plus the ``"auto"`` default:
 | ``"phase"`` | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix. Applied by ``ctm_energy_implicit`` (accepted on the implicit path, 1-site and 2-site) and the legacy ``ad_utils`` paths. What ``"auto"`` resolves to off the implicit path, but ``optimize_gs_ad``'s explicit and split energies apply no forward gauge, so there it has no effect (#1074). |
 | ``"bond_phase"`` | Implicit-AD path only (``ctm_energy_implicit``): ``"phase"`` plus one sign/phase per chi index of every bond family, aligned to the previous environment (#841). An exact gauge transform that pins the per-bond-index signs the projector SVD re-draws each sweep. What ``"auto"`` runs on the implicit path; set explicitly elsewhere, it raises. |
 | ``"qr"`` | Legacy QR decomposition on corners with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
-| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for element-wise CTM convergence at large chi (1-site path). |
+| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for element-wise CTM convergence at large chi (1-site path). Under ``optimize_gs_ad`` it is refused on implicit AD and has no effect on explicit AD (#1074). |
 | ``"none"`` | No gauge fix. Diagnostic / benchmark mode only — isolates the cost of gauge fixing from the rest of the sweep. Not recommended for production runs. |
 
 Without a gauge fix, the ``eigh`` projector CTM converges spectrally (corner

@@ -82,7 +82,8 @@ The `eigh + sigma (GMRES implicit)` row is a historical measurement and its
 configuration **no longer runs**: `validate_ctm_for_implicit_ad` accepts
 `forward_gauge="phase"` or `"bond_phase"` (the `"auto"` default resolves to the latter) and nothing else, and rejects `projector_method="eigh"`
 outright. The number is kept because it was measured; do not copy the config.
-Sigma gauge remains a first-class **explicit**-AD mode (#808).
+Sigma gauge is applied only by the legacy ``ad_utils`` explicit-AD paths
+and by ``ctm_energy_implicit`` called directly; under ``optimize_gs_ad`` it is refused on implicit AD and ignored by the explicit-AD energy (#1074).
 
 ## Working AD Paths
 
@@ -109,9 +110,11 @@ Forward:  A → warmup sweeps (stop_gradient) → N CTM sweeps (phase gauge, che
 Backward: dE/dA via backprop through all N sweeps
 ```
 
-**Strengths**: Best reported energy at chi=16 (-0.6628 with qr+phase),
-scales cleanly to chi=64+, never NaNs, and is 6–9× faster than sigma
-gauge for equal or better energy.
+**Strengths** (historical, measured before #1074's routing, under which
+this path applies no forward gauge): best reported energy at chi=16
+(-0.6628 with qr+phase — below the converged D=2 χ=16 optimum −0.66251, so
+not a converged variational value), scales cleanly to chi=64+, never NaNs,
+and was 6–9× faster than sigma gauge.
 
 **Configuration**:
 - `gs_implicit_ad=False` — backprop through unrolled steps (explicit AD; opt-in, the default is `True` / implicit diff).
@@ -164,12 +167,14 @@ removes the gauge ambiguity that causes element-wise CTM convergence to
 drift without introducing the power-iteration cost of sigma gauge. The
 Frobenius + phase fix is what variPEPS uses in `_post_process_CTM_tensors`.
 
-**Sigma gauge as a fallback**: ``forward_gauge="sigma"`` is still a
-first-class mode **on this path**. It is slower (~40% per sweep from power
-iteration) but remains available when you want the exact transfer-matrix
-alignment. It is *not* available on the implicit path below, which refuses
-every value but ``"phase"`` / ``"bond_phase"`` — this paragraph used to say
-the opposite (#808).  There is no silent promotion either way: only the
+**Sigma gauge**: under ``optimize_gs_ad``, ``forward_gauge="sigma"`` has
+**no effect on this path** — the explicit-AD energy applies no forward gauge,
+so it runs the same ungauged sweep as ``"phase"`` / ``"qr"`` / ``"none"``
+(#1074).  Sigma alignment (~40% slower per sweep from power iteration) is
+applied only by the legacy ``ad_utils`` explicit-AD paths and by
+``ctm_energy_implicit`` called directly.  It is *not* available on the
+implicit path below either, which refuses every value but ``"phase"`` /
+``"bond_phase"`` (#808).  There is no silent promotion either way: only the
 ``"auto"`` default is resolved; ``optimize_gs_ad`` passes an explicit
 ``ctm.forward_gauge`` through unchanged.
 
@@ -215,8 +220,9 @@ graph in memory).
 > This block used to read `forward_gauge="sigma"` — "required for stable
 > element-wise convergence". That was stale rather than a second supported
 > mode: transcribed verbatim it raises `ValueError` before the first CTM
-> sweep (#808). Sigma gauge remains reachable on the **explicit** AD path
-> (Path 1).
+> sweep (#808). Under ``optimize_gs_ad`` the explicit AD path (Path 1)
+> accepts it but applies no forward gauge (#1074); only the legacy
+> ``ad_utils`` paths apply sigma alignment.
 
 **Arnoldi spectral-radius precheck** (enabled by default):
 

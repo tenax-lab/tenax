@@ -72,7 +72,7 @@ plus the ``"auto"`` default that picks one per path:
 | ``"phase"`` | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix. What ``"auto"`` resolves to on explicit AD, where ``optimize_gs_ad``'s explicit energy applies no forward gauge, so it has no effect (#1074). |
 | ``"bond_phase"`` | ``"phase"`` plus a per-chi-index sign/phase aligned to the previous environment (#841); removes the per-index Z2 sign 2-cycle the SVD projectors re-draw each sweep. Implicit AD only; what ``"auto"`` runs there. |
 | ``"qr"`` | Legacy QR decomposition on each corner with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
-| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for element-wise convergence at large chi (1-site path). |
+| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for element-wise convergence at large chi (1-site path). Under ``optimize_gs_ad`` it is refused on implicit AD and has no effect on explicit AD (#1074). |
 | ``"none"`` | No gauge fix. Diagnostic / benchmark mode only. |
 
 **Forward gauge default**: ``forward_gauge`` defaults to ``"auto"``, which

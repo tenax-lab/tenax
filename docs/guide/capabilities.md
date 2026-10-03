@@ -88,8 +88,10 @@ research.
     `measure_gradient_error`. The `SymmetricTensor` engine
     (`"root_implicit_symmetric"`) is 1x1 only, and general lattices are refused
     with their reasons. See {doc}`algorithms/ipeps_ad_paths` Path 5.
-  - Stability knobs: sigma gauge fixing (`forward_gauge="sigma"`, on the
-    **explicit**-AD path only -- the implicit path accepts `"phase"` or the
+  - Stability knobs: sigma gauge fixing (`forward_gauge="sigma"`, applied
+    only by the legacy `ad_utils` explicit-AD paths -- `optimize_gs_ad`'s
+    explicit-AD energy applies no forward gauge, #1074 -- and the implicit
+    path accepts `"phase"` or the
     per-bond `"bond_phase"`, #841, which the `forward_gauge="auto"` default
     selects there, and nothing else), the 2x2 projector
     response in the gradient (`projector_backward="flow"`, explicit AD only),

@@ -99,7 +99,9 @@ Values: `"auto"` (default), `"phase"`, `"bond_phase"`, `"qr"`, `"sigma"`,
 - `"qr"`: legacy QR gauge.  Forward-only CTM, notebooks, diagnostics.
   Explicit user choice is preserved — no silent promotion.
 - `"sigma"`: transfer-matrix eigenvector alignment, required for
-  element-wise CTM convergence at large chi.  1-site path only.
+  element-wise CTM convergence at large chi.  1-site path only.  Under
+  `optimize_gs_ad` it is refused on implicit AD and has no effect on
+  explicit AD (#1074).
 - `"none"`: diagnostic only.  Expect instabilities.
 
 **No silent gauge promotion** in AD paths: only `"auto"` is resolved; if

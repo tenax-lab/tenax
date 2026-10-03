@@ -271,9 +271,11 @@ prefer `ctmrg_heuristic_increase_chi`.
   the explicit-AD tip below).  Set `forward_gauge="phase"` explicitly to opt
   the implicit path out of the bond gauge.  No silent promotion: the user's explicit choice is
   preserved.
-- **Sigma gauge (`forward_gauge="sigma"`)** is required for strict
-  element-wise convergence at large chi (1-site path).  Aligns CTM
-  environments via power iteration of the transfer matrix.
+- **Sigma gauge (`forward_gauge="sigma"`)** aligns CTM environments via
+  power iteration of the transfer matrix (1-site).  Under `optimize_gs_ad`
+  it is refused on implicit AD and ignored by the explicit-AD energy
+  (#1074); only the legacy `ad_utils` paths and direct `ctm_energy_implicit`
+  calls apply it.
 - **Explicit AD (`gs_implicit_ad=False`)** applies no forward gauge under
   `optimize_gs_ad`: `"auto"` resolves to `"phase"`, but `ctm_energy_explicit`
   ignores it (#1074).
