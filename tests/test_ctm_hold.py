@@ -10,6 +10,7 @@ dense CTM that must still pass.
 
 from __future__ import annotations
 
+import functools
 import math
 import warnings
 from typing import NamedTuple
@@ -257,6 +258,28 @@ def test_a_locally_constant_step_is_an_attractor():
     held = hold_test(step, _vec_env(XSTAR), sweeps=40, invariants=_identity_invariants)
     assert held.passed
     assert all(r < 1e-3 for r in held.rates)
+
+
+def test_a_collapse_does_not_overwrite_the_measured_floor():
+    """Codex P2 on #1067: the collapse branch wrote its synthetic distance
+    into ``floor``, the running max of the reference's one-sweep motion, so
+    one collapsed direction rewrote the floor every other direction's re-seed
+    is gated on, and ``HoldResult.floor`` stopped being that maximum.  Here
+    the reference moves once (the claimed point's residual, onto XSTAR) and
+    then never again, while every perturbation collapses every sweep."""
+
+    def step(envs):
+        return _vec_env(XSTAR)
+
+    start = _vec_env(XSTAR + 1e-7)
+    held = hold_test(step, start, sweeps=40, invariants=_identity_invariants)
+    assert held.passed
+    expected = env_invariant_distance(
+        _identity_invariants(_vec_env(XSTAR)), _identity_invariants(start)
+    )
+    # Regime: the residual move is the whole floor, and it is non-zero.
+    assert expected > 0
+    assert held.floor == expected
 
 
 def test_the_default_metric_is_blind_to_a_period_two_sign_cycle():
@@ -582,6 +605,154 @@ def test_the_invariant_distance_is_gauge_blind_and_continuous():
 
 
 # --------------------------------------------------------------------------- #
+# The noise floor (#1063): a step that does not hold its fixed point exactly   #
+# --------------------------------------------------------------------------- #
+
+
+class _Noisy(NamedTuple):
+    a: jax.Array  # the displacement's main carrier, sign-gauged
+    b: jax.Array  # a second, weakly excited mode, sign-gauged
+    m: jax.Array  # a correlated wander: the step's "roundoff"
+
+
+_ASTAR = np.linspace(1.0, 0.5, 6)
+_ETA = 1e-11
+
+
+def _noisy_map(lam_b, bstar, rho=0.99, eta=_ETA):
+    """A CTM-like step with a known jitter floor and a gauge that vetoes the
+    rescale -- the two features of the #1063 dense D=2 chi=12 state.
+
+    In the invariants ``|a|``, ``|b|``, ``m``: ``|a|`` contracts onto
+    ``_ASTAR`` at 0.3/sweep, ``|b|`` onto ``bstar`` at ``lam_b``, and every
+    coordinate takes a kick of size ``eta`` drawn from a hash of the input's
+    bits (deterministic, chaotic: two copies one ulp apart get independent
+    kicks, as CTM roundoff does).  ``m`` integrates its kicks at ``rho``, so
+    the reference wanders further between two copies than it moves in one
+    sweep.  The signs of ``a`` and ``b`` are redrawn every sweep (a gauge the
+    invariants do not see), so the element-wise difference of two copies is
+    O(1) and the gauge guard refuses every Benettin rescale.
+    """
+    import hashlib
+
+    def step(envs):
+        a, b, m = (np.asarray(t) for t in envs[(0, 0)])
+        raw = np.concatenate([a, b, m]).astype(np.float64).tobytes()
+        seed = int.from_bytes(hashlib.blake2b(raw, digest_size=8).digest(), "little")
+        rng = np.random.default_rng(seed)
+        ua = _ASTAR + 0.3 * (np.abs(a) - _ASTAR) + eta * rng.uniform(-1, 1, a.size)
+        ub = bstar + lam_b * (np.abs(b) - bstar) + eta * rng.uniform(-1, 1, b.size)
+        m = rho * m + eta * rng.uniform(-1, 1, m.size)
+        sa = rng.choice([-1.0, 1.0], a.size)
+        sb = rng.choice([-1.0, 1.0], b.size)
+        return {
+            (0, 0): _Noisy(jnp.asarray(sa * ua), jnp.asarray(sb * ub), jnp.asarray(m))
+        }
+
+    def inv(envs):
+        e = envs[(0, 0)]
+        return {
+            "a": np.abs(np.asarray(e.a)),
+            "b": np.abs(np.asarray(e.b)),
+            "m": np.asarray(e.m),
+        }
+
+    start = {(0, 0): _Noisy(jnp.asarray(_ASTAR), jnp.full(3, bstar), jnp.full(6, eta))}
+    return step, inv, start
+
+
+def test_a_jittery_attractor_is_judged_above_its_noise_floor():
+    """#1063: a fast attractor (0.3/sweep) whose step jitters at ~1e-11.  The
+    displacement reaches the jitter within ~10 sweeps; a rate fitted on that
+    floor is noise around 1, and here it rejects the attractor (regime).  The
+    hold measures the reference's own per-sweep motion, re-seeds a
+    displacement that sank to 10x it, and fits the real contraction."""
+    step, inv, start = _noisy_map(lam_b=0.3, bstar=0.5)
+    key = jax.random.PRNGKey(1)  # one of 3/16 keys the blind fit rejects
+    # Regime 1: with the floor ignored, the noise fit rejects this attractor.
+    blind = hold_test(step, start, sweeps=40, invariants=inv, key=key, noise_floor=0)
+    assert not blind.passed and blind.rate > 1.0
+    assert blind.floor_reseeds == (0, 0)
+    # Regime 2: once on the floor, the displacement sits ABOVE the reference's
+    # largest one-sweep move (the wander is correlated), but within 10x of
+    # it -- so the factor must exceed 1, and 10 is enough.
+    x, y = start, perturb_env(start, 1e-6, key)
+    floor, ratios = 0.0, []
+    for k in range(1, 61):
+        x_prev, x, y = x, step(x), step(y)
+        floor = max(floor, env_invariant_distance(inv(x), inv(x_prev)))
+        if k > 20:
+            ratios.append(env_invariant_distance(inv(y), inv(x)) / floor)
+    assert np.median(ratios) > 1.0
+    assert max(ratios) < 10.0
+
+    held = hold_test(step, start, sweeps=40, invariants=inv, key=key)
+    assert held.passed
+    assert held.sweeps == 3 * 40
+    assert _ETA / 2 < held.floor < 10 * _ETA  # the reference's jitter, detected
+    assert all(n > 0 for n in held.floor_reseeds)
+    assert all(abs(r - 0.3) < 0.05 for r in held.rates)  # the real contraction
+
+
+def test_a_weakly_excited_saddle_is_still_rejected_above_the_floor():
+    """The same jittery, gauge-vetoed step with one mode ``|b|`` growing at
+    1.03/sweep, excited ~1e-3 as strongly as the stable mode.  The stable part
+    sinks toward the floor, the unstable part rises out of it, and the floor
+    must not swallow it."""
+    step, inv, start = _noisy_map(lam_b=1.03, bstar=1e-3)
+    held = hold_test(step, start, sweeps=40, invariants=inv)
+    assert not held.passed
+    assert all(abs(r - 1.03) < 0.01 for r in held.rates)
+    assert held.sweeps == 3 * 3 * 40
+    assert 0 < held.floor < 1e-6  # regime: a floor exists, far below d_0
+
+
+@pytest.mark.parametrize(
+    "J, start",
+    [
+        (np.diag([0.87, 0.87, 0.87, 0.87, 0.87, 1.041]), XSTAR),  # saddle
+        (np.eye(6) * 0.1, XSTAR),  # fast attractor
+        (np.eye(6) * 0.9, XSTAR + 1e-7),  # claimed point off by its residual
+        # Off by its residual and fast enough that the rescale fires inside
+        # the window while the reference's first step (5e-8) puts 10x the
+        # floor above the rescale threshold: only the gate keeps the rescale.
+        (np.eye(6) * 0.5, XSTAR + 1e-7),
+    ],
+    ids=["saddle", "fast", "residual", "residual-rescaled"],
+)
+def test_the_floor_changes_nothing_where_the_rescale_works(J, start):
+    """Exact linear maps: a reference started on the fixed point never moves
+    (floor 0); one started 1e-7 off it does (floor > 0), but the rescale
+    keeps the displacement far above that motion and keeps amplifying it --
+    a re-seed there would throw the power iteration away.  Either way the
+    verdict, rates and distances are bit-identical to ``noise_floor=0``."""
+    kw = dict(sweeps=40, invariants=_identity_invariants)
+    step = _linear_step(J, XSTAR)
+    held = hold_test(step, _vec_env(start), **kw)
+    off = hold_test(step, _vec_env(start), noise_floor=0, **kw)
+    assert held.floor_reseeds == (0, 0)
+    assert (held.passed, held.rates, held.distances, held.sweeps) == (
+        off.passed,
+        off.rates,
+        off.distances,
+        off.sweeps,
+    )
+    if start is XSTAR:
+        assert held.floor == 0.0
+    else:
+        assert held.floor > 1e-9  # regime: the reference does move
+    with pytest.raises(ValueError, match="noise_floor"):
+        hold_test(step, _vec_env(start), noise_floor=-1.0, **kw)
+
+
+def test_a_rejection_names_the_noise_floor_it_was_fitted_above():
+    note = conv._hold_failure_note([("fail", 200, 1.05, False, 3.1e-11)])
+    assert "noise floor 3.1e-11" in note and ">= 1" in note
+    # A log entry without a floor (older 4-tuple) still renders.
+    assert "noise floor" not in conv._hold_failure_note([("fail", 200, 1.05, False)])
+
+
+# --------------------------------------------------------------------------- #
 # The eager loop: a mocked sweep with a saddle and an attractor                #
 # --------------------------------------------------------------------------- #
 
@@ -743,9 +914,11 @@ def test_hold_sweeps_below_four_is_refused():
 
 
 def test_a_converged_dense_d2_environment_holds():
-    """Dense D=2 Heisenberg SU state, chi=12: the hold passes early (the
-    displacement collapses ~1e-3 in a few sweeps) and hands back exactly the
-    point the hold-free loop returns."""
+    """Dense D=2 Heisenberg SU state, chi=12: the hold passes at its first
+    window and hands back exactly the point the hold-free loop returns.  The
+    displacement falls ~5x per sweep, to ~1e-6 d_0 by sweep 8, onto the
+    reference's own ~3e-11 jitter; the hold re-seeds it there (#1063) rather
+    than fitting a rate to that floor."""
     from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
     from tenax.core.tensor import DenseTensor
     from tests.test_ctm_chi_truncation_policy_922 import _su_pair
@@ -759,6 +932,111 @@ def test_a_converged_dense_d2_environment_holds():
     plain = ctm_tensor_2site(A, B, 12, max_iter=200, conv_tol=1e-10, hold_sweeps=0)
     for x, y in zip(jax.tree.leaves(held), jax.tree.leaves(plain)):
         np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+@functools.cache
+def _dense_d2_pair():
+    from tenax.core.tensor import DenseTensor
+    from tests.test_ctm_chi_truncation_policy_922 import _su_pair
+
+    A, B = _su_pair(D=2)
+    return DenseTensor(A.todense(), A.indices), DenseTensor(B.todense(), B.indices)
+
+
+#: The #1063 investigation's state jitters: relative ``eps`` on every entry of
+#: A and B, drawn in this order from ``default_rng(1063)``, three per ``eps``.
+_JITTERS = [(eps, rep) for eps in (1e-14, 1e-12, 1e-10) for rep in range(3)]
+
+
+def _jittered_pair(eps, rep):
+    from tenax.core.tensor import DenseTensor
+
+    A0, B0 = _dense_d2_pair()
+    if eps == 0:
+        return A0, B0
+    a0, b0 = np.asarray(A0.todense()), np.asarray(B0.todense())
+    rng = np.random.default_rng(1063)
+    for e, r in _JITTERS:
+        a = a0 * (1 + e * rng.standard_normal(a0.shape))
+        b = b0 * (1 + e * rng.standard_normal(b0.shape))
+        if (e, r) == (eps, rep):
+            return DenseTensor(a, A0.indices), DenseTensor(b, B0.indices)
+    raise ValueError((eps, rep))
+
+
+@functools.cache
+def _loop_hold_call(eps=0.0, rep=0):
+    """The ``(step, envs, kw)`` that ``ctm_tensor_2site(..., hold_sweeps=40)``
+    hands to ``hold_test`` on the (jittered) D=2 chi=12 pair -- the loop's own
+    step, claimed point, cap (63) and key.  The hold itself is stubbed."""
+    from tenax.algorithms._ctm_hold import HoldResult
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+
+    A, B = _jittered_pair(eps, rep)
+    got = {}
+
+    def stub(step, envs, **kw):
+        got.update(step=step, envs=envs, kw=kw)
+        return HoldResult(True, 0.0, (0.0,), (), envs, 0, 0.0)
+
+    real, conv.hold_test = conv.hold_test, stub
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ctm_tensor_2site(A, B, 12, max_iter=200, conv_tol=1e-10, hold_sweeps=40)
+    finally:
+        conv.hold_test = real
+    return got["step"], got["envs"], got["kw"]
+
+
+def _assert_the_d2_point_holds(held):
+    assert held.passed, held
+    # Not a coin flip on the floor: the fitted rate is the real contraction
+    # (~5x per sweep), measured down to a floor that was detected.
+    assert all(r < 0.5 for r in held.rates)
+    assert 0 < held.floor < 1e-8
+    assert all(n > 0 for n in held.floor_reseeds)
+
+
+# The keys are the investigation's PRNGKey(1000 + s); s = 12 and 19 rejected
+# this point on main at the loop's cap of 63 sweeps.  ~40 s per hold.
+_REJECTING_KEYS = (12, 19)
+
+
+@pytest.mark.parametrize(
+    "s",
+    [
+        s if s in _REJECTING_KEYS else pytest.param(s, marks=pytest.mark.slow)
+        for s in range(20)
+    ],
+)
+def test_the_d2_point_holds_under_every_hold_key(s):
+    """#1063: the dense D=2 chi=12 point is a strong attractor; its verdict
+    must not depend on the hold's PRNG key (main rejected 2 of these 20)."""
+    step, envs, kw = _loop_hold_call()
+    assert kw["max_sweeps"] == 63  # regime: the test's own cap
+    _assert_the_d2_point_holds(
+        hold_test(step, envs, **{**kw, "key": jax.random.PRNGKey(1000 + s)})
+    )
+
+
+# Main rejected (1e-14, 1), (1e-14, 2), (1e-12, 0) and (1e-10, 1); the first
+# read 1.0261 against the macOS runner's 1.0258.
+_REJECTING_JITTERS = ((1e-14, 1),)
+
+
+@pytest.mark.parametrize(
+    "eps, rep",
+    [
+        j if j in _REJECTING_JITTERS else pytest.param(*j, marks=pytest.mark.slow)
+        for j in _JITTERS
+    ],
+)
+def test_the_d2_point_holds_under_roundoff_jitter_of_the_state(eps, rep):
+    """#1063: 1e-14 relative jitter of A and B flipped the loop's own verdict
+    (main rejected 4 of these 9) -- the macOS failure, reproduced on Linux."""
+    step, envs, kw = _loop_hold_call(eps, rep)
+    _assert_the_d2_point_holds(hold_test(step, envs, **kw))
 
 
 def test_the_hold_is_off_by_default(monkeypatch):
