@@ -219,6 +219,26 @@ if not info.converged:
 ```
 
 (ctm-hold-test)=
+## Mixing for two-state cycles
+
+`CTMConfig(ctm_mixing=β)` (default `0.0`, off) damps the element-wise CTM
+forward, `E ← (1−β)·F(E) + β·E`. That maps a fixed-point multiplier λ to
+`(1−β)λ + β`, so a sweep stuck in an exact two-state cycle (λ ≈ −1, the χ=20
+case of #1060) converges with β ≈ 0.3. The price is slower convergence of
+modes with λ near +1.
+
+- Fixed points are unchanged. Convergence is still certified on the
+  undamped residual `|F(E) − E|`, and the implicit backward linearises the
+  undamped `F`.
+- Requires `forward_gauge="bond_phase"` and `ctm_conv_method="elementwise"`:
+  averaging is only meaningful between environments in one fixed gauge.
+- `CTMConvergeInfo.step_multiplier` reports the signed λ estimate of the last
+  two sweeps: near −1 is a flip cycle mixing cures, near +1 a slow
+  contraction it slows further, NaN fewer than two comparable sweeps. A log
+  therefore names which failure an unconverged forward hit.
+- Mixing does not cure a forward that wanders without a sign pattern (the
+  χ=14 case of #1060).
+
 ## A converged CTM can be a saddle: the hold test
 
 `conv_tol` compares *successive* sweeps, and that cannot tell an attractor
