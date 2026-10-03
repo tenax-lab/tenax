@@ -46,12 +46,12 @@ config = DMRGConfig(
 import jax
 from tenax import (
     DMRGConfig, dmrg,
-    build_mpo_heisenberg, FiniteMPS,
+    build_mpo_heisenberg, build_random_symmetric_mps,
 )
 
 L = 20
-mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0, hz=0.0)
-mps = FiniteMPS.random(L=L, d=2, chi=4, key=jax.random.PRNGKey(0))
+mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0, hz=0.0)  # U(1) block-sparse
+mps = build_random_symmetric_mps(L, bond_dim=4)         # must match the MPO type
 
 config = DMRGConfig(max_bond_dim=64, num_sweeps=30, verbose=True)
 result = dmrg(mpo, mps, config)
@@ -115,7 +115,7 @@ print(f"E/N = {result.energy / N:.8f}")
 ```
 
 See `examples/heisenberg_cylinder.py` for a complete working example with
-multiple cylinder sizes and exact-diagonalisation cross-checks.
+4x2, 6x3, and 8x4 cylinders and exact-diagonalisation cross-checks.
 
 ## Label conventions
 

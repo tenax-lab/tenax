@@ -71,6 +71,15 @@ compression to reduce the MPO bond dimension:
 mpo = auto.to_mpo(compress=True, compress_tol=1e-12)
 ```
 
+### Symmetric (block-sparse) MPOs
+
+`to_mpo(symmetric=True)` builds a U(1) block-sparse MPO of `SymmetricTensor`
+site tensors instead of dense ones:
+
+```python
+mpo_sym = auto.to_mpo(symmetric=True)
+```
+
 ## Functional API
 
 `build_auto_mpo` provides a one-call interface:
@@ -86,6 +95,21 @@ terms = (
 )
 
 mpo = build_auto_mpo(terms, L=L, d=2)
+```
+
+It takes custom operators the same way, through `site_ops`:
+
+```python
+import numpy as np
+
+custom_ops = {
+    "X": np.array([[0.0, 1.0], [1.0, 0.0]]),
+    "Z": np.array([[1.0, 0.0], [0.0, -1.0]]),
+    "Id": np.eye(2),
+}
+terms = [(1.0, "Z", i, "Z", i + 1) for i in range(L - 1)]
+terms += [(0.5, "X", i) for i in range(L)]
+mpo = build_auto_mpo(terms, L=L, site_ops=custom_ops)
 ```
 
 ## Built-in operators

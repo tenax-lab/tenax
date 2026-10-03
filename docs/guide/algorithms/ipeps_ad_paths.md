@@ -135,6 +135,24 @@ gauge for equal or better energy.
 - `gs_explicit_ad_steps=30` — number of backprop CTM sweeps.
 - `gs_explicit_ad_warmup=10` — warmup sweeps (stop_gradient).
 
+#### Projector response in the gradient (`projector_backward="flow"`)
+
+`CTMConfig(projector_backward="flow")` lets the 2x2 plaquette projectors'
+`dP/dA` reach the gradient instead of returning them as `stop_gradient`
+constants (#983). Every other value (`"auto"` default, `"standard"`,
+`"lorentzian"`) freezes them, which is the historical behaviour and stays the
+default.
+
+- **Explicit AD only** (`gs_implicit_ad=False`), on both the fused and split
+  paths. Measured AD-vs-finite-difference on `ctm_energy_explicit` goes from
+  0.229–0.928 frozen to 0.944–0.994 flowing, and on a single CTM sweep from
+  ratios spanning −7.98…+14.95 (wrong by up to 15×, sometimes wrong in sign)
+  to 1.000000.
+- It is **not** safe under implicit AD: restoring `dP/denv` puts the CTM gauge
+  mode back into `J`, and the fixed-point adjoint `(I − Jᵀ)λ = dE/denv` stops
+  being reliably solvable (issue #1028, blocked on #841).
+- The eager CTM forward is bit-identical either way — only the VJP changes.
+
 **Why phase gauge works in backprop**: Each phase-gauge step is a
 Frobenius normalization plus a differentiable global-phase fix on each
 environment tensor. Applied inside the checkpointed unrolled graph, it
@@ -299,7 +317,8 @@ config = iPEPSConfig(
   `ctm.ctm_ad_mode="c4v_reference"`,
 - supports `gs_num_steps>0` optimization with implicit gradients.
 
-### Path 5: Root Implicit AD (Opt-In, dense 1×1)
+(root-implicit-ad)=
+### Path 5: Root Implicit AD (Opt-In; dense 1×1 and 2-site checkerboard)
 
 Root implicit differentiation of the CTMRG fixed point, following
 Burgelman et al., [arXiv:2607.15030](https://arxiv.org/abs/2607.15030).
@@ -340,7 +359,7 @@ config = iPEPSConfig(
 )
 ```
 
-**Current scope: 1×1 unit cells, dense or block-sparse.**
+**Current scope: dense 1×1 and dense 2-site checkerboard cells; block-sparse 1×1.**
 
 - `ctm_ad_mode="root_implicit"` — the dense asymmetric engine. Takes a
   `DenseTensor`; a `SymmetricTensor` is refused and points at the mode
@@ -362,11 +381,17 @@ config = iPEPSConfig(
   the loop descended — measured 4.7e-04 apart at D=2, χ=4. Both are
   legitimate variational energies of the same `A_opt`.
 
-- **`unit_cell` other than `"1x1"` raises `NotImplementedError`,** and not
-  because the wiring is pending. The multisite engine differentiates a
-  *one-site observable* `tr(ρ₁ₛᵢₜₑ · op)`, not an energy, and a two-site
-  Hamiltonian gate cannot be passed as that `op`. A physical multisite
-  energy needs a two-site ring spanning adjacent cells — tracked as #894.
+- **`unit_cell="2site"` is supported on the dense engine** (#894): with
+  `ctm_ad_mode="root_implicit"`, `optimize_gs_ad(..., unit_cell="2site")`
+  runs the multisite (cell) engine on the 2x2 checkerboard tie
+  `a=(0,0)=(1,1)`, `b=(0,1)=(1,0)` — the bipartite square lattice. It
+  differentiates the *physical* two-site energy, whose RDMs span adjacent
+  cells so the inter-cell bond gauge cancels. (Before #894 this raised
+  `NotImplementedError`: the multisite engine then differentiated only a
+  one-site observable `tr(ρ₁ₛᵢₜₑ · op)`, and a two-site Hamiltonian gate
+  could not be passed as that `op`.) A general `Lattice` (kagome, honeycomb,
+  ...) is not a rectangular periodic grid and is refused rather than silently
+  optimising the wrong model. `root_implicit_symmetric` stays 1×1 only.
 
 - **Rejected rather than silently ignored:** `chi_auto_bump`, `chi_ramp`,
   `ctmrg_heuristic_increase_chi`, `fuse_virtual_legs=False`,
@@ -377,6 +402,64 @@ config = iPEPSConfig(
 - **Warns and falls back:** `gs_metric_precond` and `gs_line_search`. Both
   are effectively default-on, so refusing them would reject this path's own
   default configuration.
+
+#### Configuration with the rank clamp spelled out
+
+```python
+config_root = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(
+        chi=6,
+        max_iter=100,
+        conv_tol=1e-10,
+        ctm_ad_mode="root_implicit",
+        # Relative clamp on the retained CTM spectrum. None (the default) uses
+        # the derived eps**(1/3): the covariant equations depend on S cubically,
+        # so a retained direction below that cannot be resolved in working
+        # precision and would produce NaN gradients. Raise it only to diagnose
+        # a state whose environment is rank-deficient -- clamping past the
+        # genuinely-weighted directions breaks the equations rather than
+        # regularising them, which the root-residual gate then rejects.
+        rel_floor=None,
+    ),
+    unit_cell="1x1",          # or "2site" for the checkerboard cell (#894)
+    gs_num_steps=20,
+    gs_optimizer="adam",
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_root)
+```
+
+(measure-gradient-error)=
+#### Measuring the gradient error
+
+Root-implicit gradient accuracy is state-dependent and **not** predicted by any
+diagnostic the engine reports (#785) — the root residual is anti-correlated
+with it, and `usable_rank`, the retained-spectrum ratios and the site tensor's
+own conditioning all fail too. Measured across seeds at one conditioning,
+gradient error spans 3.4e-06 to 7.7e-03. So measure it once on a
+representative state with `measure_gradient_error` before a long run; it costs
+a few CTM convergences.
+
+```python
+from tenax import measure_gradient_error
+from tenax.algorithms._ctm_root_implicit_asym import (
+    asym_root_implicit_energy_and_grad,
+)
+
+report = measure_gradient_error(
+    lambda t: asym_root_implicit_energy_and_grad(t, gate, chi=6)[:2], A_opt
+)
+print(report.summary())
+```
+
+`relative_error` is a measurement only when `is_resolved`. When it is not,
+check `fd_divergence`: only a SMALL value means the gradient is accurate to
+about `unresolved_bound` (the larger of the two thresholds it is tested
+against, so `is_resolved` is exactly `relative_error > unresolved_bound`) —
+the good case. A large one means the differences are still moving — the bound
+then carries that, so it is honest but wide. NaN means no two steps probed
+commensurable directions: the scan is indeterminate, and `unresolved_bound` is
+NaN too, because nothing established a floor to report.
 
 #### The rank clamp, and what the residual gate does and does not mean
 
@@ -470,6 +553,133 @@ path for speed.** Choose it when explicit back-propagation cannot produce a
 gradient at all — at `D=3, chi=4` it returns NaN for every entry while this
 path is finite and finite-difference-correct — or to avoid the block-sparse
 SVD/eigh VJP compile wall (#566, #687).
+
+## Configuration recipes
+
+The configurations below, one per path, in one script. Each runs on the
+square-lattice Heisenberg gate; `examples/heisenberg_ipeps_ad.py` compares
+random vs simple-update initialization, and
+`examples/heisenberg_ipeps_excitations.py` computes the full excitation
+spectrum along Gamma-X-M-Gamma. The root-implicit configuration is under
+{ref}`root-implicit-ad`.
+
+```python
+import jax.numpy as jnp
+from tenax import (
+    iPEPSConfig,
+    CTMConfig,
+    optimize_gs_ad,
+    optimize_gs_ad_chi_schedule,
+    ExcitationConfig,
+    compute_excitations,
+    make_momentum_path,
+)
+
+# Build a 2-site Heisenberg gate
+Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
+    jnp.einsum("ij,kl->ikjl", Sp, Sm) + jnp.einsum("ij,kl->ikjl", Sm, Sp)
+)
+
+# Explicit-AD configuration: L-BFGS + explicit AD + QR projectors.
+# forward_gauge defaults to "auto", which runs "phase" (variPEPS-style
+# Frobenius + phase fix) on explicit AD and "bond_phase" (#841) on
+# implicit AD. Reaches E=-0.6628
+# at D=2, chi=16 (literature: -0.6548 at D=2).
+config = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(
+        chi=16,
+        max_iter=80,
+        projector_method="qr",  # recommended projector for explicit AD
+        # Explicit AD has no fixed-point adjoint solve, so the 2x2 projector
+        # response can flow; do NOT use "flow" with gs_implicit_ad=True (#1028).
+        projector_backward="flow",
+    ),
+    gs_implicit_ad=False,  # opt into explicit AD (the default is implicit)
+    gs_projector_method="qr",
+    gs_optimizer="lbfgs",  # L-BFGS with Hager-Zhang line search
+    gs_line_search_method="hager_zhang",
+    gs_metric_precond=True,  # metric preconditioning (Rader et al.)
+    gs_c4v=True,  # C4v basis parameterization
+    su_init=True,
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
+print(f"Ground-state energy: {E_gs:.6f}")
+
+# Chi-ramping schedule: progressively increase chi for faster convergence.
+# Each entry is (chi, num_steps) — run `num_steps` AD steps at logical χ=chi.
+# Internally the schedule runs as a single `optimize_gs_ad` call with envs
+# padded to max(chi) from step 1, so the JIT-compiled CTM / energy / backward
+# kernels never see a shape change (issue #453).
+chi_schedule = [(4, 30), (8, 30), (16, 20)]
+A_opt, env, E_gs = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
+
+# 2-site shared-tensor C4v AD for antiferromagnets (Neel order)
+# A single C4v-parameterized tensor is optimized; B is derived from A via
+# sublattice rotation B = e^{i pi sigma^y/2} on the physical leg.  This
+# ties the two sublattices together and avoids the A/B drift that makes
+# the unconstrained 2-site AD path unstable.  Spin-1/2 (d=2) only.
+config_2site = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
+    gs_optimizer="lbfgs",
+    gs_explicit_ad_steps=10,
+    gs_explicit_ad_warmup=2,
+    gs_num_steps=50,
+    gs_line_search=True,
+    unit_cell="2site",
+    gs_c4v=True,
+    su_init=True,
+    num_imaginary_steps=100,
+    dt=0.05,
+)
+(A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(gate, None, config_2site)
+
+# SVD (Fishman) projectors — alternative to eigh and QR
+config_svd = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(chi=16, max_iter=50, projector_method="svd"),
+    gs_num_steps=200,
+    gs_optimizer="lbfgs",
+    gs_line_search_method="hager_zhang",
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_svd)
+
+# Opt-in reference-mode dense C4v mode (Francuz et al., App. C-F)
+config_reference = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(
+        chi=16,
+        max_iter=80,
+        projector_method="eigh",
+        ctm_ad_mode="c4v_reference",
+        adjoint_solver="bicgstab",
+        adjoint_maxiter=50,
+        adjoint_tol=1e-8,
+    ),
+    gs_implicit_ad=True,
+    gs_c4v=True,
+    unit_cell="1x1",
+    gs_num_steps=100,
+    gs_optimizer="adam",
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_reference)
+
+# Quasiparticle excitations (Ponsioen et al. 2022)
+momenta = make_momentum_path("brillouin", num_points=20)
+exc_config = ExcitationConfig(num_excitations=3)
+result = compute_excitations(A_opt, env, gate, E_gs, momenta, exc_config)
+print(result.energies.shape)  # (20, 3)
+```
+
+The explicit-AD configuration reaches E=-0.6628 at D=2, chi=16 (literature:
+-0.6548 at D=2). The chi-ramping schedule runs internally as a single
+`optimize_gs_ad` call with envs padded to `max(chi)` from step 1, so the
+JIT-compiled CTM / energy / backward kernels never see a shape change
+(issue #453). For excitations see {doc}`ad_excitations`.
 
 ## Forward Gauge Mode Matrix
 
@@ -627,9 +837,10 @@ optimization stability and speed.
    it reports says whether `y*` solves the characteristic equations, and
    that is measurably *not* the same as whether the gradient is accurate —
    it mispredicts in both directions (see Path 5). `usable_rank` does not
-   separate the cases either. Gradient accuracy on this path currently has
-   to be established by finite differences offline, not by anything the
-   library reports at run time. Tracked by issue #785.
+   separate the cases either. Gradient accuracy on this path has to be
+   established by finite differences — `measure_gradient_error` runs that
+   scan (see {ref}`measure-gradient-error`) — not by anything the engine
+   reports at run time. Tracked by issue #785.
 
 ## Stall recovery (`gs_stall_recovery`)
 

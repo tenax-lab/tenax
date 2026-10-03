@@ -23,7 +23,7 @@ research.
 - **Sector-based indices** -- `TensorIndex` keeps sorted charge sectors and
   multiplicities for O(n_sectors) lookups; `FuseInfo` records parent legs so
   `split_index` exactly reverses `fuse_indices`.
-- **Polymorphic arithmetic** -- `+`, `-`, `*`, transpose, `inner()`, `conj()`,
+- **Polymorphic arithmetic** -- `+`, `-`, `*`, `-T`, transpose, `inner()`, `conj()`,
   `dagger()`, `bar()`, and `max_abs()` behave identically on `DenseTensor` and
   `SymmetricTensor`, so algorithm code is agnostic to the storage backend.
 - **Label-based contraction** -- legs are identified by string/integer labels;
@@ -73,8 +73,8 @@ research.
     by spin-π rotation (stable across χ = 8-24 for spin-1/2 AFMs), plus an
     opt-in dense reference mode (`ctm_ad_mode="c4v_reference"`) with a Krylov
     implicit backward.
-  - **Root implicit AD** (`ctm_ad_mode="root_implicit"`, dense 1x1 only;
-    arXiv:2607.15030): differentiates a system of characteristic equations
+  - **Root implicit AD** (`ctm_ad_mode="root_implicit"`, dense 1x1 and 2-site
+    checkerboard cells -- `unit_cell="2site"`, #894; arXiv:2607.15030): differentiates a system of characteristic equations
     instead of back-propagating the CTM sweep, so **no SVD or eigh backward
     appears in the gradient path**. Choose it for accuracy/stability, never
     for speed -- it is ~63x slower than explicit AD at D=2, χ=6, matching the
@@ -83,14 +83,26 @@ research.
     finite-difference-correct. Note `chi` must not be over-provisioned here:
     raising it past the directions the environment supports fires the rank
     clamp and degrades the gradient (measured 27x on one state), which is the
-    opposite of the usual intuition. Multisite and `SymmetricTensor` inputs
-    are refused with their reasons. See `ipeps_ad_paths.md` Path 5.
+    opposite of the usual intuition. Its gradient accuracy is state-dependent
+    and no diagnostic predicts it (#785) -- measure it with
+    `measure_gradient_error`. The `SymmetricTensor` engine
+    (`"root_implicit_symmetric"`) is 1x1 only, and general lattices are refused
+    with their reasons. See {doc}`algorithms/ipeps_ad_paths` Path 5.
   - Stability knobs: sigma gauge fixing (`forward_gauge="sigma"`, on the
-    **explicit**-AD path only -- the implicit path accepts `"phase"` and
-    nothing else) and a chi-ramping schedule for progressive refinement.
+    **explicit**-AD path only -- the implicit path accepts `"phase"` or the
+    per-bond `"bond_phase"`, #841, which the `forward_gauge="auto"` default
+    selects there, and nothing else), the 2x2 projector
+    response in the gradient (`projector_backward="flow"`, explicit AD only),
+    and a chi-ramping schedule for progressive refinement.
 - **CTMRG projectors** -- SVD/Fishman (default), `eigh`, and a reduced-corner
-  **QR-CTMRG** projector (`projector_method="qr"`, arXiv:2505.00494), usable
-  both forward-only and under AD on the dense single-site path.
+  **QR-CTMRG** projector (`projector_method="qr"`, arXiv:2505.00494) on the
+  dense single-site path. `projector_method` is consulted only on the
+  deprecated `1x1` recipe (#911); `recipe="2x2"` hardcodes Fishman SVD, and
+  `ctm_tensor_c4v` runs all three methods at full rank on C4v-symmetric states.
+- **CTM convergence checks** -- `return_meta=True` reports whether a CTM met
+  `conv_tol` or ran out of `max_iter`, and the opt-in hold test
+  (`hold_sweeps`, `ctm_hold_test`) tells an attractor from a saddle. See
+  {doc}`algorithms/ctm`.
 - **In-CTM χ-bump** (variPEPS §2.8.2) -- reactive growth of the CTM bond
   dimension *inside* CTM convergence (`CTMConfig.ctmrg_heuristic_increase_chi`),
   so the environment is always reconverged at the new χ before the optimizer
@@ -100,12 +112,15 @@ research.
   The forward and energy entry points work on both `DenseTensor` and
   `SymmetricTensor`, for 2-site checkerboard and multisite (kagome PESS) cells.
   The split **AD ground-state** path is narrower: enable it with
-  `CTMConfig(fuse_virtual_legs=False)` **together with** the dense single-site
-  optimizer (`unit_cell="1x1"`), on either `gs_recipe` -- the default `"2x2"`
-  since #746, or `"1x1"`. `SymmetricTensor` / fermionic inputs raise
-  `NotImplementedError` (a later phase), and χ is fixed on this path. Its
-  implicit gradient matches the trusted explicit-AD gradient to ~1e-12; the
-  memory win over the fused double layer is a large-D effect (D ≳ 16).
+  `CTMConfig(fuse_virtual_legs=False)` on the single-site (`unit_cell="1x1"`)
+  or 2-site checkerboard (`unit_cell="2site"`) optimizer, on either
+  `gs_recipe` -- the default `"2x2"` since #746, or `"1x1"`. It is
+  dense-bosonic and experimental: bosonic `SymmetricTensor` runs on
+  single-site AD, a traced 2-site `SymmetricTensor` sweep is refused (#1048),
+  fermionic input is refused (#1035), and χ is fixed on this path. Its
+  implicit gradient matches the trusted explicit-AD gradient to ~1e-15 in the
+  non-degenerate regime; the memory win over the fused double layer is a
+  large-D effect (D ≳ 16). See {doc}`algorithms/ctm`.
 
   :::{warning}
   `gs_recipe="1x1"` is **deprecated** (#911) and emits a `DeprecationWarning`.
@@ -124,13 +139,17 @@ research.
   not help. Use `gs_recipe="2x2"`; if you need `projector_method` honoured at
   all, use `ctm_tensor_c4v`, since `2x2` hardcodes Fishman SVD.
   :::
+- **Belief-propagation gauge** (`bp_gauge_checkerboard`) -- re-derives
+  simple update's stored bond weights as BP messages, so they can be read as
+  Schmidt spectra. See {doc}`algorithms/ipeps`.
 - **Fermionic iPEPS (fPEPS)** -- graded tensors with Koszul signs,
   `FermionParity` / `FermionicU1`, and a `spinless_fermion_gate` (hopping +
-  interaction). See {doc}`algorithms/fpeps`.
+  interaction + chemical potential). See {doc}`algorithms/fpeps`.
 - **Native honeycomb CTM** -- a rank-4, 6-corner, 3-direction, 2-sublattice
   CTMRG (`honeycomb_ctm_energy_implicit`) with a JIT-fused GMRES backward,
   replacing the brick-wall workaround.
-- **PESS** -- kagome projected entangled simplex states.
+- **PESS** -- kagome projected entangled simplex states, with AD through the
+  exact single-supersite CTM. See {doc}`algorithms/honeycomb_kagome`.
 - **Quasiparticle excitations** -- iPEPS excitation spectra at arbitrary
   Brillouin-zone momenta (Ponsioen et al., 2022).
 - **Model gates** -- `heisenberg_gate`, `heisenberg_gate_u1sz` (U(1)-Sz
@@ -141,6 +160,10 @@ research.
 - **TRG** and **HOTRG** coarse-graining for 2D classical partition functions
   (free energy, critical temperature, critical exponents), plus the underlying
   coarse-graining utilities.
+- **Gilt-TNR** and **Gilt-HOTRG** -- TRG/HOTRG with graph-independent local
+  truncation (Hauru, Delcamp & Mizera, PRB 97, 045111). See {doc}`algorithms/trg`.
+- **q-state Potts** initial tensors (`compute_potts_tensor`,
+  `potts_critical_beta`) alongside Ising.
 
 ## Hardware acceleration
 
