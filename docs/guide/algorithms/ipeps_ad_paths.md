@@ -198,9 +198,10 @@ graph in memory).
 - `forward_gauge="auto"` — the `CTMConfig` default, which on this path
   (fused virtual legs, no `chi_ramp`, `ctm_ad_mode=None`) runs
   `"bond_phase"` (#841, below) in the loss and in every warm-start /
-  line-search / final-evaluation forward; with `chi_ramp`, split CTM
-  (`fuse_virtual_legs=False`) or a `ctm_ad_mode` engine it silently runs
-  `"phase"` instead.  Set `forward_gauge="phase"` explicitly to opt out of
+  line-search / final-evaluation forward; with `chi_ramp` it silently runs
+  `"phase"` instead, and with split CTM (`fuse_virtual_legs=False`) or a
+  `ctm_ad_mode` engine it resolves to `"phase"` (the split energies apply no
+  forward gauge, #1074).  Set `forward_gauge="phase"` explicitly to opt out of
   the bond gauge.  These two are the only concrete values this path
   accepts; `validate_ctm_for_implicit_ad` (`ipeps_ad_policy.py`) raises
   `ValueError` for anything else, `"sigma"` included; there is no `sigma`
@@ -708,12 +709,13 @@ the `sigma` row described a configuration that never ran (#808).
 **No silent gauge promotion**: only the ``"auto"`` default is resolved;
 ``optimize_gs_ad`` passes an explicit ``ctm.forward_gauge`` through
 unchanged.  An explicit user choice (``"qr"``, ``"sigma"``, ``"phase"``,
-``"bond_phase"``, or ``"none"``) is always respected, and an explicit
+``"bond_phase"``, or ``"none"``) is always passed through as-is (the
+explicit-AD and split energies then apply none of them, #1074), and an explicit
 ``"bond_phase"`` on a path that cannot honour it raises.  This was
 previously achieved through an auto-promotion of ``"qr"`` → ``"phase"``;
 the promotion was removed in PR #343 in favor of a static ``"phase"``
-default, which ``"auto"`` replaced once ``"bond_phase"`` (#841) made the
-implicit path's best gauge differ from the explicit path's.
+default, which ``"auto"`` replaced once ``"bond_phase"`` (#841) became the
+implicit path's best gauge while other paths cannot take it.
 
 The GMRES backward (``ad_backward_method="gmres"``) is tracked as an open
 gap — see issue #292 and the ``xfail``-marked regression test in

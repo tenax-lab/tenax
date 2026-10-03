@@ -266,11 +266,10 @@ prefer `ctmrg_heuristic_increase_chi`.
 
 ### Key AD tips
 
-- **Default `forward_gauge="auto"`** runs `"bond_phase"` on implicit AD
-  and `"phase"` (variPEPS-style Frobenius normalization + phase fix,
-  stable for 1-site and 2-site at chi up to 32+) on explicit AD.  Set
-  `forward_gauge="phase"` explicitly to opt the implicit path out of the
-  bond gauge.  No silent promotion: the user's explicit choice is
+- **Default `forward_gauge="auto"`** runs `"bond_phase"` on implicit AD.
+  On explicit AD it resolves to `"phase"`, which has no effect there (see
+  the explicit-AD tip below).  Set `forward_gauge="phase"` explicitly to opt
+  the implicit path out of the bond gauge.  No silent promotion: the user's explicit choice is
   preserved.
 - **Sigma gauge (`forward_gauge="sigma"`)** is required for strict
   element-wise convergence at large chi (1-site path).  Aligns CTM

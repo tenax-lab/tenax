@@ -83,7 +83,9 @@ path in fact *requires* one of those two and validates it
 (``projector_method`` in ``("svd", "qr")``, ``forward_gauge`` in
 ``("phase", "bond_phase")``, ``ctm_conv_method="elementwise"``). There is **no
 silent gauge promotion**: if you set ``forward_gauge="phase"``, ``"sigma"`` or
-``"none"`` explicitly, that choice is respected as-is.
+``"none"`` explicitly, that choice is passed through as-is (the implicit path
+then refuses ``"sigma"`` and ``"none"``; the explicit-AD energy applies none
+of them, #1074).
 
 See {doc}`ipeps_ad_paths` for the complete post-PR-#291 recommended
 configuration, benchmark results, and the split between the explicit-AD
