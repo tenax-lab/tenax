@@ -305,8 +305,11 @@ _register(
             "path without chi_ramp or ctm_ad_mode, 'phase' everywhere else. "
             "Set 'phase' explicitly to opt out of the bond gauge on the "
             "implicit path. Explicit values are never promoted; implicit AD "
-            "accepts only 'phase'/'bond_phase'; 'sigma' is an explicit-AD, "
-            "1-site option. 'none' is diagnostic only."
+            "accepts only 'phase'/'bond_phase'. Under optimize_gs_ad the "
+            "explicit-AD and split energies apply no forward gauge, so "
+            "'phase'/'sigma'/'qr'/'none' have no effect there (#1074); "
+            "'sigma' (1-site) is applied only by the legacy ad_utils paths. "
+            "'none' is diagnostic only."
         ),
         references=("arXiv:2311.11894",),  # Francuz et al.
     )

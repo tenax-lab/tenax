@@ -203,7 +203,7 @@ A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
 print(f"Ground-state energy: {E_gs:.6f}")
 ```
 
-### Explicit AD configuration (alternative, phase gauge)
+### Explicit AD configuration (alternative; no forward gauge is applied, #1074)
 
 Use this if implicit AD is too slow or you need unrolled backprop:
 

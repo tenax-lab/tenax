@@ -1,5 +1,9 @@
 # Gauge Selection and Normalization for Differentiable CTMRG
 
+> **Historical (2026-04-28).** Under the current routing, `optimize_gs_ad`'s
+> explicit-AD energy applies no forward gauge (#1074); the explicit-AD
+> cross-checks below predate that.
+>
 > Note assembled 2026-04-28 from a third-party design summary, cross-checked against
 > the current Tenax CTM AD code (`src/tenax/algorithms/_ctm_*.py`,
 > `ipeps_config.py`, `ipeps_ad_policy.py`, `ad_utils.py`) and the in-house

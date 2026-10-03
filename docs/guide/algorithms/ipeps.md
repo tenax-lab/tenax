@@ -492,7 +492,7 @@ workflow. If you use the implicit path, prefer ``ad_backward_method="vjp"``
 (the default) until the GMRES backward is stabilized.
 
 ```python
-# Explicit-AD configuration — explicit AD + QR projectors + phase gauge (default)
+# Explicit-AD configuration — explicit AD + QR projectors (forward gauge not applied, #1074)
 config = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(chi=16, max_iter=100, projector_method="qr"),

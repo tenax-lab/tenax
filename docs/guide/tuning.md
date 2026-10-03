@@ -90,9 +90,10 @@ Values: `"auto"` (default), `"phase"`, `"bond_phase"`, `"qr"`, `"sigma"`,
 - `"auto"`: resolves per path — `"bond_phase"` on the fused implicit-AD
   path (no `chi_ramp`, `ctm_ad_mode=None`), `"phase"` everywhere else.
 - `"phase"`: variPEPS-style Frobenius normalization + phase fix per
-  absorption.  Stable for both implicit and explicit AD (1-site and
-  2-site); set it explicitly to opt the implicit path out of the bond
-  gauge.
+  absorption, applied on the implicit-AD path (1-site and 2-site) and by
+  the legacy `ad_utils` paths; set it explicitly to opt the implicit path
+  out of the bond gauge.  Under `optimize_gs_ad` the explicit-AD and split
+  energies apply no forward gauge, so it has no effect there (#1074).
 - `"bond_phase"`: `"phase"` plus a per-chi-index sign/phase aligned to
   the previous environment (#841).  Implicit AD only.
 - `"qr"`: legacy QR gauge.  Forward-only CTM, notebooks, diagnostics.

@@ -73,8 +73,10 @@ scales well to chi=64 (2.5x slower than chi=8), and never NaNs.
 | Literature (chi=8) | -0.6625 | — | — |
 | Exact (QMC, chi→∞) | -0.6694 | — | — |
 
-Phase gauge is **6-9x faster** than sigma gauge for explicit AD with equal
-or better energy.
+Historical: phase gauge measured **6-9x faster** than sigma gauge for
+explicit AD with equal or better energy.  These measurements predate the
+current routing, under which `optimize_gs_ad`'s explicit-AD energy applies
+no forward gauge at all (#1074).
 
 The `eigh + sigma (GMRES implicit)` row is a historical measurement and its
 configuration **no longer runs**: `validate_ctm_for_implicit_ad` accepts
@@ -723,7 +725,7 @@ gap — see issue #292 and the ``xfail``-marked regression test in
 
 ## Critical Components
 
-### 1. Phase Gauge Fixing (default for explicit AD)
+### 1. Phase Gauge Fixing (implicit AD and the legacy ``ad_utils`` paths; not applied by ``optimize_gs_ad``'s explicit-AD energy, #1074)
 
 The phase gauge fix is two differentiable steps applied to every
 corner and edge after each CTM sweep:
@@ -736,10 +738,11 @@ corner and edge after each CTM sweep:
    real-positive (variPEPS ``_post_process_CTM_tensors`` convention).
 
 Together they remove the dominant gauge ambiguity at negligible cost —
-no power iteration, no eigensolve, fully differentiable — and are the
-reason the qr+phase path scales to chi=64 without NaNs.
+no power iteration, no eigensolve, fully differentiable.  (The historical
+note that they let the explicit qr+phase path scale to chi=64 without NaNs
+predates the routing in #1074, where that path applies no gauge.)
 
-### 2. Sigma Gauge Fixing (explicit-AD path only)
+### 2. Sigma Gauge Fixing (legacy ``ad_utils`` explicit-AD paths only; not applied by ``optimize_gs_ad``, #1074)
 
 Sigma gauge aligns each iteration's environment to the previous one using
 transfer matrix eigenvectors, making element-wise convergence monotonic.
