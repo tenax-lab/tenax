@@ -271,6 +271,9 @@ def ctm_converge_kwargs(
         "forward_gauge": "bond_phase"
         if ctm_cfg.effective_forward_gauge(implicit_ad=True) == "bond_phase"
         else None,
+        # #1060: the forwards share the loss's iteration, or a mixed loss
+        # forward converges where the warm start / probes keep cycling.
+        "mixing": ctm_cfg.ctm_mixing,
     }
 
 
@@ -595,6 +598,8 @@ def make_ctm_energy_fn(
             # Chunked edge absorption (#632 chunk×shard): lowers peak memory ÷K
             # (1×1 recipe, dense envs). None (default) → monolithic, unchanged.
             ctm_chunk_size=ctm_cfg.ctm_chunk_size,
+            # #1060: same iteration as the warm-start / probe forwards.
+            mixing=ctm_cfg.ctm_mixing,
         )
 
     return _ctm_energy_fn

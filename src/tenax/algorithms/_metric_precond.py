@@ -177,7 +177,14 @@ def _normalized_metric_matrix(A: Tensor, env: CTMTensorEnv) -> jnp.ndarray | Non
     floor = eps * jnp.linalg.norm(E_mat) * norm_A_sq
     if not bool(jnp.isfinite(psi_norm)) or not float(jnp.abs(psi_norm)) > float(floor):
         return None
-    return E_mat * (norm_A_sq / psi_norm)
+    N_hat = E_mat * (norm_A_sq / psi_norm)
+    if not jnp.iscomplexobj(A_dense):
+        # A real state has a real symmetric metric; a complex environment for
+        # it differs only by an overall phase, which the division just
+        # cancelled.  Drop the roundoff imaginary part so the GMRES matvec
+        # keeps the real RHS's dtype (Codex P2 on #1068).
+        N_hat = jnp.real(N_hat)
+    return N_hat
 
 
 def precondition_gradient(

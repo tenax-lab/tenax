@@ -285,24 +285,57 @@ def test_forward_stationary_does_not_warn():
     )
 
 
-@pytest.mark.slow
-def test_sv_convergence_does_not_certify_elementwise_premise():
-    """#841 signature: 'sv' reports converged while the premise fails.
+def test_guard_fires_even_when_the_loop_reports_converged(monkeypatch):
+    """#841 signature: the guard must not trust the loop's converged verdict.
 
-    On a D=3 SU-relaxed state at chi=9, conv_method='sv' crosses its
-    tolerance in ~11 sweeps (the corner spectra genuinely converge), but
-    the literal stationarity residual stays at O(0.5): the phase gauge
-    leaves Z2^chi bond signs and near-degenerate multiplet rotations
-    unpinned, so the environment never reaches an element-wise fixed
-    point.  This is exactly the configuration in which issue #841
-    measured slope_fd/|g| = 0.13: the forward reports success, the
-    backward premise is violated, and before the guard nothing warned.
+    'sv' certifies converged corner spectra, not an element-wise fixed point,
+    so a forward can report converged=True while one more gauged sweep still
+    moves the environment.  The guard must read the residual alone.
+
+    The residual is forced rather than found: #1055's tie-robust SVD signs
+    made the SU state this test used to run on genuinely stationary (0.377 ->
+    3.8e-6, see the next test), and a real state that fails the premise is a
+    fixture that a future CTM fix silently retires.  The loop itself is real
+    and must still report converged=True, so the configuration under test is
+    the one #841 measured (slope_fd/|g| = 0.13), not a non-converged exit,
+    which test_forward_nonstationary_warns_when_starved covers.
+    """
+    import tenax.algorithms._ctm_energy_ad as ead
+
+    monkeypatch.setattr(ead, "_max_env_leaf_diff", lambda a, b: 0.5)
+    with pytest.warns(RuntimeWarning, match="stationarity residual") as rec:
+        ctm_energy_implicit(
+            {(0, 0): _normed_random_d2_site()},
+            SINGLE_SITE_NEIGHBORS,
+            heisenberg_gate(),
+            chi=4,
+            max_iter=30,
+            conv_tol=1e-5,
+            conv_method="sv",
+        )
+
+    diag = ead.get_last_implicit_ad_diagnostics()
+    # Regime: without the mock this forward converges (residual 2.2e-5,
+    # measured) -- the point is a converged=True loop.
+    assert diag["forward_converged"] is True
+    assert diag["forward_stationarity_residual"] == 0.5
+    msg = next(str(w.message) for w in rec if "stationarity" in str(w.message))
+    assert "converged=True" in msg
+
+
+@pytest.mark.slow
+def test_sv_converged_su_state_is_stationary_after_1055():
+    """#1055 regression pin: the #841 SU state now reaches a fixed point.
+
+    On a D=3 SU-relaxed state at chi=9, conv_method='sv' converged while the
+    stationarity residual stayed at 0.377: the phase gauge left bond signs
+    unpinned whenever a 2x2-projector SVD had a ket<->bra tie.  #1055's
+    tie-robust sign convention pins them, and the residual is 3.8e-6
+    (measured at 6cc87ad vs 3971920).  The guard must stay quiet here.
     """
     import warnings as _warnings
 
     from tenax.algorithms._ctm_energy_ad import get_last_implicit_ad_diagnostics
-    from tenax.algorithms.ipeps import ipeps
-    from tenax.algorithms.ipeps_config import iPEPSConfig
 
     gate = heisenberg_gate()
     config = iPEPSConfig(max_bond_dim=3, num_imaginary_steps=30, dt=0.05)
@@ -313,7 +346,8 @@ def test_sv_convergence_does_not_certify_elementwise_premise():
     data = A_su.todense()
     site = _wrap_as_dense_tensor(data / jnp.linalg.norm(data))
 
-    with pytest.warns(RuntimeWarning, match="stationarity residual"):
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
         ctm_energy_implicit(
             {(0, 0): site},
             SINGLE_SITE_NEIGHBORS,
@@ -325,10 +359,9 @@ def test_sv_convergence_does_not_certify_elementwise_premise():
         )
 
     diag = get_last_implicit_ad_diagnostics()
-    # The loop itself must have reported success -- that is the point:
-    # 'sv' certifies converged spectra while the element-wise premise fails.
     assert diag["forward_converged"] is True
-    assert diag["forward_stationarity_residual"] > 0.1
+    assert diag["forward_stationarity_residual"] < 1e-3  # 100 * conv_tol
+    assert not [w for w in caught if "stationarity residual" in str(w.message)]
 
 
 # ---------------------------------------------------------------------------
