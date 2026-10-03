@@ -9,6 +9,7 @@ Reference: Rader et al., arXiv:2511.09546
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -75,6 +76,10 @@ def norm_environment_matvec(
 ) -> jnp.ndarray:
     """Apply the single-site norm environment metric to vector v.
 
+    This is the *raw* metric ``N``, carrying the CTM environment's arbitrary
+    overall scale; :func:`precondition_gradient` inverts the normalised
+    ``N ‖A‖² / ⟨A|N|A⟩`` instead.
+
     Computes ``(N·v)_{u',d',l',r',s} = E_{(u,u'),(d,d'),(l,l'),(r,r')} v_{u,d,l,r,s}``
     where E is the CTM environment contracted around the central site.
 
@@ -108,11 +113,7 @@ def norm_environment_matvec(
     # Reshape to (D,D, D,D, D,D, D,D), transpose bra indices out,
     # then flatten.  The 8-dim intermediate is fine as a reshape+transpose
     # (no einsum/fusion needed — XLA handles permutations natively).
-    E_mat = (
-        E.reshape(D, D, D, D, D, D, D, D)
-        .transpose(1, 3, 5, 7, 0, 2, 4, 6)
-        .reshape(D**4, D**4)
-    )
+    E_mat = _metric_matrix(E, D)
     v_mat = v_dense.reshape(D**4, d)
     Nv_mat = E_mat @ v_mat  # (D^4, d)
     return Nv_mat.reshape(D, D, D, D, d)
@@ -123,6 +124,69 @@ def norm_environment_matvec(
 # ---------------------------------------------------------------------------
 
 
+def _metric_matrix(E: jnp.ndarray, D: int) -> jnp.ndarray:
+    """Reshape the contracted environment into the ``(D^4, D^4)`` metric.
+
+    ``E_mat[bra, ket]`` with ``E_mat[A*D³+B*D²+C*D+D_, a*D³+b*D²+c*D+d_] =
+    E[a*D+A, b*D+B, c*D+C, d_*D+D_]`` (ket-slow fusing, see
+    :func:`norm_environment_matvec`).  Built by reshape + transpose rather
+    than an 8-dim einsum, which crashes XLA autotuning on GPU for small D.
+    """
+    return (
+        E.reshape(D, D, D, D, D, D, D, D)
+        .transpose(1, 3, 5, 7, 0, 2, 4, 6)
+        .reshape(D**4, D**4)
+    )
+
+
+def _normalized_metric_matrix(A: Tensor, env: CTMTensorEnv) -> jnp.ndarray | None:
+    """The local metric of the *normalised* state, ``N ‖A‖² / ⟨A|N|A⟩``.
+
+    ``N`` (the contracted single-site environment) carries the overall scale
+    of the CTM tensors, which is a normalisation *convention* (each CTM move
+    rescales C/T, and two exact gauges of one environment -- e.g.
+    ``forward_gauge="phase"`` vs ``"bond_phase"`` -- differ in it).  Dividing
+    by the Rayleigh quotient ``⟨A|N|A⟩ / ⟨A|A⟩`` removes it: the result is
+    invariant under ``env -> c·env`` (any nonzero ``c``, including a phase or
+    sign) and under ``A -> a·A``, and its expectation value along ``A`` is
+    exactly 1.  ``⟨A|N|A⟩`` is the single-site norm ``⟨ψ|ψ⟩`` per site, so
+    for the unit-norm site tensors the optimiser carries this is
+    ``N / ⟨ψ|ψ⟩``: the metric of the normalised state, consistent with the
+    ratio energy ``⟨ψ|H|ψ⟩/⟨ψ|ψ⟩`` whose gradient is already divided by
+    ``⟨ψ|ψ⟩`` (Rader et al. Eq. 9/11 write ``N`` for an unnormalised ``ψ``
+    and leave its scale implicit).
+
+    ``⟨A|N|A⟩`` is evaluated with the same operator that is inverted, so it
+    is the right normaliser for that operator whatever its sign/phase.
+
+    Returns:
+        The ``(D^4, D^4)`` normalised metric, or ``None`` if the norm is
+        degenerate: non-finite, or ``|⟨A|N|A⟩| <= eps·‖N‖_F·‖A‖²`` (``A`` is
+        numerically in the null space of ``N``; a relative floor, so the
+        test itself is invariant under both rescalings).
+    """
+    E = _contract_single_site_environment(env)
+    A_dense = A.todense()
+    D = A_dense.shape[0]
+    d = A_dense.shape[-1]
+    E_mat = _metric_matrix(E, D)
+    A_mat = A_dense.reshape(D**4, d)
+    norm_A_sq = jnp.real(jnp.vdot(A_mat, A_mat))
+    psi_norm = jnp.vdot(A_mat, E_mat @ A_mat)  # <psi|psi> per site
+    eps = jnp.finfo(jnp.result_type(E_mat.dtype, A_mat.dtype)).eps
+    floor = eps * jnp.linalg.norm(E_mat) * norm_A_sq
+    if not bool(jnp.isfinite(psi_norm)) or not float(jnp.abs(psi_norm)) > float(floor):
+        return None
+    N_hat = E_mat * (norm_A_sq / psi_norm)
+    if not jnp.iscomplexobj(A_dense):
+        # A real state has a real symmetric metric; a complex environment for
+        # it differs only by an overall phase, which the division just
+        # cancelled.  Drop the roundoff imaginary part so the GMRES matvec
+        # keeps the real RHS's dtype (Codex P2 on #1068).
+        N_hat = jnp.real(N_hat)
+    return N_hat
+
+
 def precondition_gradient(
     A: Tensor,
     env: CTMTensorEnv,
@@ -130,31 +194,49 @@ def precondition_gradient(
     delta: float,
     config: iPEPSConfig,
 ) -> jnp.ndarray:
-    """Solve ``(N + delta*I) g' = g`` via GMRES.
+    """Solve ``(N̂ + delta*I) g' = g`` via GMRES, ``N̂ = N ‖A‖² / ⟨A|N|A⟩``.
+
+    ``N`` is the local (single-site) norm metric of Rader et al.,
+    arXiv:2511.09546, Eq. 11.  It is normalised by its Rayleigh quotient at
+    ``A`` (see :func:`_normalized_metric_matrix`), so ``g'`` does not depend
+    on the arbitrary overall scale of the CTM environment, nor on the scale
+    of ``A``.  Consequently ``delta`` is measured relative to ``N̂``'s
+    expectation value along the current state, which is exactly 1: a
+    ``delta`` of 1 regularises the metric by its own scale along ``A``.
+    (Before this normalisation ``delta`` was relative to whatever scale the
+    CTM tensors happened to carry.)
+
+    Degenerate norm (``⟨A|N|A⟩`` zero or non-finite): the metric is
+    unusable, so a ``RuntimeWarning`` is emitted and ``grad`` is returned
+    unpreconditioned (the identity ``H_0`` of plain L-BFGS / CG), never a
+    NaN direction.
 
     Args:
-        A: Current iPEPS site tensor.
+        A: Current iPEPS site tensor (Dense or Symmetric; densified, as is
+            the gradient -- both are single-site sized).
         env: Converged CTM environment (from energy step).
         grad: Energy gradient w.r.t. A (same Tensor type).
-        delta: Regularization parameter (|dE| or ||g||^2).
+        delta: Regularization parameter (|dE| or ||g||^2), relative to the
+            normalised metric (see above).
         config: iPEPS config with GMRES settings.
 
     Returns:
         Preconditioned gradient as dense array, shape ``(D, D, D, D, d)``.
     """
-    E = _contract_single_site_environment(env)
     g_dense = grad.todense()
     D = g_dense.shape[0]
     d = g_dense.shape[-1]
     g_flat = g_dense.reshape(-1)
 
-    # Build (D^4, D^4) metric matrix, avoiding 8-dim einsum that crashes
-    # XLA autotuning on GPU.  Reshape+transpose is handled natively by XLA.
-    E_mat = (
-        E.reshape(D, D, D, D, D, D, D, D)
-        .transpose(1, 3, 5, 7, 0, 2, 4, 6)
-        .reshape(D**4, D**4)
-    )
+    E_mat = _normalized_metric_matrix(A, env)
+    if E_mat is None:
+        warnings.warn(
+            "metric preconditioner: degenerate state norm <A|N|A> (zero or "
+            "non-finite); returning the unpreconditioned gradient",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return g_dense
 
     def matvec(v_flat):
         v_mat = v_flat.reshape(D**4, d)
@@ -181,7 +263,9 @@ def precondition_gradient_multisite(
     """Apply metric preconditioning independently per site.
 
     The metric is block-diagonal in site index (local approximation),
-    so each site's gradient is preconditioned using its own environment.
+    so each site's gradient is preconditioned using its own environment,
+    normalised by that site's own ``⟨A|N|A⟩`` (each site's CTM environment
+    carries an independent scale; see :func:`precondition_gradient`).
 
     Args:
         site_tensors: ``{(r, c): Tensor}`` current site tensors.
