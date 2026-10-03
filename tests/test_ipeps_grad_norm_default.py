@@ -283,3 +283,96 @@ def test_su_init_guard_leaves_dE_alone(monkeypatch, unit_cell):
     hist, log = _run_captured(cfg)
     assert hist["converged"] is True
     assert hist["num_steps"] == 2, log
+
+
+@pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
+def test_su_guard_also_withholds_the_chi_stage_advance(monkeypatch, unit_cell):
+    """The skipped first evaluation must not reach ``_advance_chi_stage_if_due``
+    as a convergence signal either: with a chi schedule, the end-of-step
+    stage-advance call re-tests the same small |g| and would leave the first
+    stage after one step (Codex P2 on #1075)."""
+    from tenax import optimize_gs_ad_chi_schedule
+
+    _script_energy(monkeypatch, grad_scale=1e-9)
+    cfg = _su_cfg(unit_cell, ctm=CTMConfig(chi=4, chi_max=6, max_iter=4))
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf), warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        optimize_gs_ad_chi_schedule(
+            _heisenberg_gate(), None, cfg, chi_schedule=[(4, 3), (6, 3)]
+        )
+    log = buf.getvalue()
+    assert "[iPEPS-AD step 1] schedule advance" not in log, log
+
+
+# --- root-implicit engine: same guard, its own SU init ---------------------
+
+
+def _script_root_energy(monkeypatch, unit_cell: str, grad_scale: float):
+    if unit_cell == "1x1":
+        import tenax.algorithms._ctm_root_implicit_asym as _mod
+
+        def _fake(A_t, gate, **kw):
+            a = A_t.todense()
+            return jnp.asarray(_E_CONST), grad_scale * jnp.ones_like(a)
+
+        monkeypatch.setattr(_mod, "asym_root_implicit_energy_and_grad", _fake)
+    else:
+        import tenax.algorithms._ctm_root_implicit_multisite as _mod
+
+        def _fake(A_by_cell, **kw):
+            return jnp.asarray(_E_CONST), {
+                c: grad_scale * jnp.ones_like(t.todense()) for c, t in A_by_cell.items()
+            }
+
+        monkeypatch.setattr(_mod, "cell_root_implicit_energy_and_grad", _fake)
+
+
+def _root_cfg(unit_cell: str, **kw) -> iPEPSConfig:
+    base = dict(
+        max_bond_dim=2,
+        num_imaginary_steps=5,
+        unit_cell=unit_cell,
+        su_init=True,
+        gs_num_steps=4,
+        gs_metric_precond=False,
+        gs_line_search=False,
+        return_history=True,
+        ctm=CTMConfig(chi=4, max_iter=20, conv_tol=1e-10, ctm_ad_mode="root_implicit"),
+    )
+    base.update(kw)
+    return iPEPSConfig(**base)
+
+
+@pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
+def test_root_implicit_su_start_is_not_converged_at_step_zero(monkeypatch, unit_cell):
+    _script_root_energy(monkeypatch, unit_cell, 1e-9)
+    from tenax.algorithms.ipeps_optimize_root_implicit import (
+        optimize_gs_ad_root_implicit,
+    )
+
+    hist = optimize_gs_ad_root_implicit(_heisenberg_gate(), None, _root_cfg(unit_cell))[
+        -1
+    ]
+    assert hist["converged"] is True
+    assert hist["num_steps"] == 2
+
+
+@pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
+def test_root_implicit_user_A_init_converges_at_step_zero(monkeypatch, unit_cell):
+    _script_root_energy(monkeypatch, unit_cell, 1e-9)
+    from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
+    from tenax.algorithms.ipeps_optimize_root_implicit import (
+        optimize_gs_ad_root_implicit,
+    )
+
+    A = _wrap_as_dense_tensor(jax.random.normal(jax.random.PRNGKey(3), (2,) * 5))
+    A_init = A if unit_cell == "1x1" else (A, A)
+    hist = optimize_gs_ad_root_implicit(
+        _heisenberg_gate(), A_init, _root_cfg(unit_cell)
+    )[-1]
+    assert hist["converged"] is True
+    assert hist["num_steps"] == 1

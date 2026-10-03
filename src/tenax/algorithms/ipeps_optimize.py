@@ -2599,8 +2599,10 @@ def _optimize_gs_ad_tensor(
                     current_stage_idx=current_stage_idx,
                     steps_in_stage=steps_in_stage,
                     config=config,
-                    grad_norm=_gn_for_bump,
-                    delta_energy=delta_energy,
+                    # The SU-start guard withheld this step's convergence
+                    # test; it must not reach the stage advance either.
+                    grad_norm=math.inf if _skip_conv else _gn_for_bump,
+                    delta_energy=math.inf if _skip_conv else delta_energy,
                     stall_count=stall_count,
                     base_charges=_bump_base_charges,
                 )
@@ -4391,8 +4393,10 @@ def _optimize_gs_ad_tensor_2site(
                         current_stage_idx=current_stage_idx,
                         steps_in_stage=steps_in_stage,
                         config=config,
-                        grad_norm=_gn_for_bump,
-                        delta_energy=delta_energy,
+                        # The SU-start guard withheld this step's convergence
+                        # test; it must not reach the stage advance either.
+                        grad_norm=math.inf if _skip_conv else _gn_for_bump,
+                        delta_energy=math.inf if _skip_conv else delta_energy,
                         stall_count=stall_count,
                         base_charges=_bump_base_charges_2s,
                     )
