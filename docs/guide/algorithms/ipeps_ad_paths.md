@@ -113,11 +113,12 @@ gauge for equal or better energy.
 **Configuration**:
 - `gs_implicit_ad=False` — backprop through unrolled steps (explicit AD; opt-in, the default is `True` / implicit diff).
 - `gs_projector_method="qr"` — QR projectors (recommended for explicit AD).
-- `forward_gauge="auto"` (config default) runs `"phase"` on this path
-  (AD-correct).  Users can override with `forward_gauge="sigma"`
-  (historical path), `"qr"` (legacy), or `"none"` (diagnostic); see the
-  mode table below.  `"bond_phase"` is refused here.  No silent
-  promotion — explicit user choice is preserved.
+- `forward_gauge="auto"` (config default) resolves to `"phase"` on this
+  path, but under `optimize_gs_ad` the explicit energy
+  (`ctm_energy_explicit`, and its split variants) applies **no** forward
+  gauge, so `"phase"`, `"sigma"`, `"qr"` and `"none"` all run the same
+  ungauged sweep here.  Only the legacy `ad_utils` entry points apply the
+  setting.  `"bond_phase"` is refused here rather than silently ignored.
 - `projector_backward="auto"` (config default) — when `projector_method="eigh"`
   and `gs_implicit_ad=False`, `optimize_gs_ad` auto-promotes to `"lorentzian"`,
   routing the projector VJP through the Francuz–Schuch–Vanhecke
@@ -689,8 +690,8 @@ Their intended use is summarized below:
 
 | Mode | Explicit AD (Path 1) | Implicit AD (Path 2, VJP) | Notes |
 |------|----------------------|----------------------------|-------|
-| ``"auto"`` (default) | Runs ``"phase"`` | Runs ``"bond_phase"`` (``"phase"`` with ``chi_ramp``, split CTM, or ``ctm_ad_mode``) | Resolved silently at the path entry; never reaches a CTM. The legacy ``ad_utils`` paths run ``"phase"``. |
-| ``"phase"`` | **Recommended** (what ``"auto"`` runs) | Accepted (explicit opt-out of the bond gauge) | Cheapest gauge fix; Frobenius + differentiable phase fix. Works for 1-site and 2-site. |
+| ``"auto"`` (default) | Resolves to ``"phase"``; under ``optimize_gs_ad`` the explicit energy applies no forward gauge, so it has no effect there | Runs ``"bond_phase"`` (``"phase"`` with ``chi_ramp``, split CTM, or ``ctm_ad_mode``) | Resolved silently at the path entry; never reaches a CTM. The legacy ``ad_utils`` paths run ``"phase"``. |
+| ``"phase"`` | What ``"auto"`` resolves to; no effect under ``optimize_gs_ad`` (#1074) | Accepted (explicit opt-out of the bond gauge) | Cheapest gauge fix; Frobenius + differentiable phase fix. Works for 1-site and 2-site. |
 | ``"bond_phase"`` | Not supported | **Accepted (what ``"auto"`` runs)**, #841 | ``"phase"`` plus one sign/phase per chi index of every bond family, aligned to the previous env. Exact gauge transform. Removes the per-bond-index Z2 sign cycle that keeps ``"phase"`` from an element-wise fixed point (D=3 fermionic t-V, chi=12: stationarity residual 0.805 → ~5e-9). Not with ``chi_ramp``, split CTM, or ``ctm_ad_mode`` set (those engines own their CTM); explicit AD refuses it too. Charge sectors are grouped by block structure, not values: a bond whose stored blocks are numerically disconnected (exact zeros from rank deficiency) is only partly aligned, and the #841 stationarity guard then warns. |
 | ``"qr"`` | Legacy QR gauge | Refused (`ValueError`) | Forward-only CTM, notebooks, diagnostics. |
 | ``"sigma"`` | Historical — still correct but ~6–9× slower than phase | Refused (`ValueError`) | Power iteration (30 steps) per sweep. |

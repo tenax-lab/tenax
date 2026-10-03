@@ -412,11 +412,12 @@ manageable, and the backward pass avoids the implicit-diff linear solve
 entirely.
 
 ```{note}
-``forward_gauge`` defaults to ``"auto"``, which runs ``"phase"`` on this
-explicit path (no promotion needed). Phase gauge is 6–9× faster than sigma
-gauge with equal or better energy and is the post-PR-#291 recommended gauge
-for explicit AD. See
-{doc}`ipeps_ad_paths` for the full benchmark table.
+``forward_gauge`` defaults to ``"auto"``, which resolves to ``"phase"`` on
+this explicit path. Under ``optimize_gs_ad`` the explicit energy
+(``ctm_energy_explicit``) applies no forward gauge, so the setting has no
+effect here; only the legacy ``ad_utils`` entry points apply it. The
+phase-vs-sigma benchmark in {doc}`ipeps_ad_paths` predates this routing
+(#1074).
 ```
 
 #### CTM convergence tolerance schedule

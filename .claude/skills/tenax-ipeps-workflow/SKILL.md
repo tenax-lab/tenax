@@ -165,7 +165,11 @@ Tenax supports two AD paths:
    plus a per-chi-index bond gauge, #841; ``"phase"`` with ``chi_ramp``).
    Memory-efficient and variational.
 2. **Explicit AD**: backpropagates through unrolled CTM steps.  Uses QR
-   projectors; the ``"auto"`` default runs the ``"phase"`` gauge here.
+   projectors.  ``"auto"`` resolves to ``"phase"`` here, but the explicit
+   energy (``ctm_energy_explicit``) applies no forward gauge, so under
+   ``optimize_gs_ad`` the setting has no effect on this path (an explicit
+   ``"bond_phase"`` is refused); only the legacy ``ad_utils`` entry points
+   apply it.
    Faster per step but uses more memory.  Set `gs_implicit_ad=False` to
    enable.
 
