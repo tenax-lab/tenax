@@ -109,7 +109,7 @@ after each CTM sweep. Five modes are supported, plus the ``"auto"`` default:
 | Value | Description |
 |-------|-------------|
 | ``"auto"`` (default) | Resolved per path (``resolve_forward_gauge``): ``"bond_phase"`` on the fused implicit-AD path with no ``chi_ramp`` and ``ctm_ad_mode=None``; ``"phase"`` everywhere else (explicit AD, split CTM, ``chi_ramp``, ``ctm_ad_mode`` engines, legacy ``ad_utils`` paths). Never warns. |
-| ``"phase"`` | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. What ``"auto"`` runs off the implicit path; valid on both AD paths (1-site and 2-site). |
+| ``"phase"`` | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix. Applied by ``ctm_energy_implicit`` (accepted on the implicit path, 1-site and 2-site) and the legacy ``ad_utils`` paths. What ``"auto"`` resolves to off the implicit path, but ``optimize_gs_ad``'s explicit and split energies apply no forward gauge, so there it has no effect (#1074). |
 | ``"bond_phase"`` | Implicit-AD path only (``ctm_energy_implicit``): ``"phase"`` plus one sign/phase per chi index of every bond family, aligned to the previous environment (#841). An exact gauge transform that pins the per-bond-index signs the projector SVD re-draws each sweep. What ``"auto"`` runs on the implicit path; set explicitly elsewhere, it raises. |
 | ``"qr"`` | Legacy QR decomposition on corners with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
 | ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for element-wise CTM convergence at large chi (1-site path). |

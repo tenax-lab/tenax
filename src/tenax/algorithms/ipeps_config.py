@@ -245,8 +245,10 @@ class CTMConfig:
     # implicit-AD path with no ``chi_ramp`` and ``ctm_ad_mode=None``, and
     # into "phase" on every other path: explicit AD, split CTM, chi_ramp,
     # the reference / root-implicit engines, the legacy ad_utils paths).
-    # "phase" (Frobenius-norm phase fix per CTM absorption; works for both
-    # implicit and explicit AD, 1-site and 2-site).  "bond_phase" (implicit
+    # "phase" (Frobenius-norm phase fix per CTM absorption; applied by the
+    # implicit-AD forward and the legacy ad_utils paths, 1-site and 2-site --
+    # the explicit/split energies under optimize_gs_ad apply no forward
+    # gauge, #1074).  "bond_phase" (implicit
     # AD only: phase + per-chi-index bond signs/phases aligned to the
     # previous env, #841 -- removes the per-index Z2 sign 2-cycle the SVD
     # projectors re-draw each sweep).  "sigma" (transfer-matrix eigenvector
