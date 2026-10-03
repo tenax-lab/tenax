@@ -405,3 +405,35 @@ def test_legacy_paths_refuse_mixing_rather_than_drop_it():
     with pytest.raises(ValueError, match="ctm_mixing"):
         _legacy_forward_gauge(CTMConfig(ctm_mixing=0.3))
     assert _legacy_forward_gauge(CTMConfig()) == "phase"
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [{"chi_ramp": [(4, 2)]}, {"ctm_ad_mode": "root_implicit"}],
+    ids=["chi_ramp", "ctm_ad_mode"],
+)
+def test_mixing_with_auto_refused_at_construction_when_auto_cannot_be_bond_phase(kw):
+    """chi_ramp / ctm_ad_mode are known at construction and force auto -> phase
+    on every path, so ``CTMConfig`` itself must refuse mixing."""
+    with pytest.raises(ValueError, match="ctm_mixing > 0 requires"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            CTMConfig(ctm_mixing=0.3, **kw)
+
+
+def test_ctm_energy_implicit_refuses_mixing_under_a_phase_gauge():
+    """Direct callers (PESS losses) skip build_ad_ctm_config; the energy entry
+    point is the last place a phase-gauged mixed forward can be stopped."""
+    with pytest.raises(ValueError, match="mixing > 0 requires"):
+        ead.ctm_energy_implicit(
+            {(0, 0): None}, {}, None, forward_gauge="phase", mixing=0.3
+        )
+    with pytest.raises(ValueError, match="mixing > 0 requires"):
+        ead.ctm_energy_implicit(
+            {(0, 0): None},
+            {},
+            None,
+            forward_gauge="auto",
+            chi_ramp=[(4, 2)],
+            mixing=0.3,
+        )

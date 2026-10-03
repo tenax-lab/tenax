@@ -575,6 +575,15 @@ def ctm_energy_implicit(
     forward_gauge = resolve_forward_gauge(
         forward_gauge, implicit_ad=True, chi_ramp=chi_ramp
     )
+    if mixing > 0.0 and forward_gauge != "bond_phase":
+        # The phase gauge leaves the per-chi-index bond signs free, so mixing
+        # would average iterates in unrelated gauges.  Config-driven callers
+        # that skip ``build_ad_ctm_config`` (the PESS losses) reach here with
+        # a raw ``CTMConfig``; this is the last place to stop them.
+        raise ValueError(
+            "mixing > 0 requires forward_gauge='bond_phase' (resolved "
+            f"{forward_gauge!r}; 'auto' resolves to 'phase' with chi_ramp)"
+        )
 
     coords = sorted(site_tensors.keys())
     # Pass Tensor objects directly through custom_vjp boundary.

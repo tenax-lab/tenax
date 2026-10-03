@@ -483,8 +483,20 @@ class CTMConfig:
             )
         if not 0.0 <= self.ctm_mixing < 1.0:
             raise ValueError(f"ctm_mixing must be in [0, 1), got {self.ctm_mixing!r}")
+        # ``"auto"`` can only become bond_phase when nothing on the config
+        # already forces phase: fused legs, no chi_ramp, no ctm_ad_mode.  The
+        # remaining unknown (implicit vs explicit AD) is re-checked at the
+        # optimizer entry and in ``ctm_energy_implicit``.
+        _auto_may_be_bond = (
+            self.fuse_virtual_legs
+            and self.chi_ramp is None
+            and self.ctm_ad_mode is None
+        )
         if self.ctm_mixing > 0.0 and (
-            self.forward_gauge not in ("bond_phase", "auto")
+            not (
+                self.forward_gauge == "bond_phase"
+                or (self.forward_gauge == "auto" and _auto_may_be_bond)
+            )
             or self.ctm_conv_method != "elementwise"
         ):
             # Mixing is element-wise, so it needs gauge-aligned iterates, and
