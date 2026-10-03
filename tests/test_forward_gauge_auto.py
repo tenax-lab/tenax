@@ -362,3 +362,12 @@ def test_optimize_gs_ad_default_hands_the_resolved_gauge_everywhere(
     assert all(g == expected_loss for g in loss_calls), loss_calls
     assert fwd, "no forward-only CTM ran"
     assert all(g == expected_fwd for g in fwd), fwd
+
+
+def test_resolve_forward_gauge_is_public():
+    """The resolver is the documented meaning of ``"auto"``, so it is exported."""
+    import tenax
+
+    assert "resolve_forward_gauge" in tenax.__all__
+    assert tenax.resolve_forward_gauge("auto", implicit_ad=True) == "bond_phase"
+    assert tenax.resolve_forward_gauge("auto", implicit_ad=False) == "phase"
