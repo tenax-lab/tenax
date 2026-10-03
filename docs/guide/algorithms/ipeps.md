@@ -346,6 +346,25 @@ A_opt, env, E_gs = optimize_gs_ad(H_bond, A_init=None, config=config)
 
 When ``A_init`` is provided explicitly, ``su_init`` is ignored.
 
+#### Convergence criterion
+
+The outer loop stops when ``gs_conv_criterion`` is met, or after
+``gs_num_steps``:
+
+| Criterion | Stops when | Notes |
+|-----------|------------|-------|
+| ``"grad_norm"`` (default since v0.8.4) | ``‖∇E‖₂ < gs_grad_norm_tol`` (``1e-5``) | Stationarity test; variPEPS's outer criterion |
+| ``"dE"`` (default before v0.8.4, deprecated) | ``\|E_k − E_{k−1}\| < gs_conv_tol`` (``1e-8``) | Also fires when a line search barely moves or right after a stall rollback, with ``‖∇E‖`` still large |
+| ``"both"`` | both of the above | Most conservative |
+
+``‖∇E‖₂`` is the L2 norm of the raw (unpreconditioned) Euclidean gradient
+with respect to the optimizer's parameters — the C4v basis coefficients when
+``gs_c4v=True``, the site tensors otherwise. A run that exhausts
+``gs_num_steps`` returns its best state with ``converged=False`` in the
+history; a non-finite gradient never counts as convergence. To restore the
+pre-v0.8.4 behaviour, pass ``gs_conv_criterion="dE"`` (it emits a
+``DeprecationWarning``).
+
 #### Optimizer selection
 
 The AD optimizer is chosen via ``gs_optimizer`` in ``iPEPSConfig``:

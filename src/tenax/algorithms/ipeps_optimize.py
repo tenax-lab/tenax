@@ -365,8 +365,9 @@ def _normalize_stall_recovery(config, *, unit_cell: str):
     """Auto-default ``gs_stall_recovery`` based on unit cell when unset.
 
     The 1-site C4v production path requires the noise kick to break out
-    of the SU-init plateau (gradient norms ~1e-10 trip ``gs_conv_tol``
-    before the first real step), so the 1-site default is ``"noise"``.
+    of the SU-init plateau (gradient norms ~1e-10 trip the outer
+    convergence test before the first real step), so the 1-site default
+    is ``"noise"``.
 
     The 2-site default is ``"reset"`` because best-energy snapshot
     rollback dominates raw noise injection near convergence on this

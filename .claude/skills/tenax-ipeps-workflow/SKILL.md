@@ -278,6 +278,13 @@ prefer `ctmrg_heuristic_increase_chi`.
 - **Metric preconditioning (`gs_metric_precond=True`)** applies the
   natural gradient (Rader et al., arXiv:2511.09546), which dramatically
   improves convergence for L-BFGS and CG.
+- **Convergence is a gradient test** (`gs_conv_criterion="grad_norm"`,
+  default since v0.8.4): the loop stops at `‖∇E‖₂ < gs_grad_norm_tol`
+  (`1e-5`), otherwise at `gs_num_steps` with `converged=False` in the
+  history.  `gs_conv_tol` only matters for `"dE"`/`"both"`.  Do not switch
+  back to `"dE"` to make a run "converge" sooner — it stops on a tiny
+  `|ΔE|` that a barely-moving line search or a stall rollback produces with
+  `‖∇E‖` still at `1e-2`–`0.7`.  Quote `|g|` alongside the energy.
 - **Arnoldi precheck** (`adjoint_arnoldi_precheck=True`, default): for
   implicit AD, checks the spectral radius ρ(J^T) of the CTM Jacobian
   before the backward pass. If ρ ≥ `adjoint_arnoldi_threshold` (default 5.0),

@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Behavior Changes
+
+- **`iPEPSConfig.gs_conv_criterion` now defaults to `"grad_norm"`**
+  (was `"dE"`; #448).  The AD outer loop (`optimize_gs_ad` and every
+  dispatcher behind it -- 1-site, 2-site, multisite, C4v-reference,
+  root-implicit, and `optimize_fpeps_ad`) now stops when
+  `||grad E||_2 < gs_grad_norm_tol` (default `1e-5`, the variPEPS outer
+  criterion) instead of `|E_k - E_{k-1}| < gs_conv_tol`.  Why: in all four
+  square-Heisenberg validation runs (D=2/3, chi=16, implicit AD, L-BFGS)
+  the `dE` test declared convergence with `|g|` = 1.9e-2, 1.1e-2, 5.6e-2
+  and 0.69 -- a tiny `dE` happens whenever the line search barely moves or
+  right after a stall-recovery rollback or noise injection.
+  - **Expect more steps, and `converged=False` where `True` was reported
+    before**: a run that never reaches `|g| < 1e-5` now runs to
+    `gs_num_steps` and reports `converged=False` in its history.  Those
+    runs were never stationary; the old flag was the false signal.
+  - **To restore the old behaviour**, pass `gs_conv_criterion="dE"` (it
+    still works and emits a `DeprecationWarning`; the default no longer
+    warns).  `"both"` requires both tests.  `gs_conv_tol` is read only by
+    `"dE"` and `"both"`.
+  - The C4v-reference loop masked non-finite gradient entries to zero
+    before taking the norm, so an all-NaN gradient read as `|g| = 0` and
+    ended the run on step 0 under the new default (and one step later under
+    `"dE"`, via the no-op update).  It now skips the convergence test on such
+    a step, as the root-implicit loop already did (#812).
+
 ### Added
 
 - **CTM hold test: a saddle is not converged** (#1035): `ctm_tensor_2site`
