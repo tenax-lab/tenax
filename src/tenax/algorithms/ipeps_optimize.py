@@ -1734,6 +1734,8 @@ def _optimize_gs_ad_tensor(
         best_params = bundle["best_params"]
         best_energy = float(bundle["best_energy"])
         prev_energy = float(bundle["prev_energy"])
+        # Missing key (pre-#1073 checkpoint) -> False keeps old files loadable.
+        _rolled_back = bool(bundle.get("rolled_back", False))
         # Clear the env warm-start cache AND the implicit-AD lambda seed on
         # restore (issue #501), matching the 2-site resume path. The restored
         # env below is a fresh starting point; the prior Neumann seed is stale.
@@ -1814,6 +1816,7 @@ def _optimize_gs_ad_tensor(
             "best_params": best_params,
             "best_energy": float(best_energy),
             "prev_energy": float(prev_energy),
+            "rolled_back": bool(_rolled_back),
             "env_cache": dict(_env_cache),
             "best_env_cache": dict(best_env_cache),
             "opt_state": opt_state,
@@ -3422,6 +3425,8 @@ def _optimize_gs_ad_tensor_2site(
         best_params = bundle["best_params"]
         best_energy = float(bundle["best_energy"])
         prev_energy = float(bundle["prev_energy"])
+        # Missing key (pre-#1073 checkpoint) -> False keeps old files loadable.
+        _rolled_back = bool(bundle.get("rolled_back", False))
         _drop_env_cache_for_reset(_env_cache_2s)
         _env_cache_2s.update(bundle.get("env_cache", {}))
         best_env_cache_2s = dict(bundle.get("best_env_cache", {}))
@@ -3507,6 +3512,7 @@ def _optimize_gs_ad_tensor_2site(
             "best_params": best_params,
             "best_energy": float(best_energy),
             "prev_energy": float(prev_energy),
+            "rolled_back": bool(_rolled_back),
             "env_cache": dict(_env_cache_2s),
             "best_env_cache": dict(best_env_cache_2s),
             "opt_state": opt_state,

@@ -224,3 +224,29 @@ def test_grad_spike_rollback_does_not_converge_on_dE(monkeypatch, unit_cell):
     assert history["converged"] is False, (
         f"{unit_cell}: reported converged right after the |g|-spike rollback"
     )
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
+def test_rollback_flag_survives_checkpoint_resume(monkeypatch, tmp_path, unit_cell):
+    """A checkpoint written right after a rollback must carry the flag.
+
+    Phase A runs one step whose line search fails, so it ends on a stall
+    rollback (params == best_params) and checkpoints that state.  Phase B
+    resumes: its first step re-evaluates best_params, dE ~ 0 against the saved
+    prev_energy, and must not be read as convergence.  (Multisite has no
+    checkpointing: gs_checkpoint_path is rejected for Lattice unit cells.)
+    """
+    calls = {"n": 0}
+    monkeypatch.setattr(_ls_mod, "hager_zhang_line_search", _always_fail_factory(calls))
+    ckpt = str(tmp_path / f"ckpt_{unit_cell}")
+    common = dict(gs_checkpoint_path=ckpt, gs_checkpoint_every=1)
+
+    _run(_config(unit_cell, gs_num_steps=1, gs_resume=False, **common))
+    assert calls["n"] == 1, "phase A must end on exactly one stall rollback"
+
+    history = _run(_config(unit_cell, gs_num_steps=2, gs_resume=True, **common))
+    assert history["converged"] is False, (
+        f"{unit_cell}: resumed run converged on its first step -- the "
+        f"rollback flag was not checkpointed/restored"
+    )
