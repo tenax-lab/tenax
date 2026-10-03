@@ -27,6 +27,15 @@
     ended the run on step 0 under the new default (and one step later under
     `"dE"`, via the no-op update).  It now skips the convergence test on such
     a step, as the root-implicit loop already did (#812).
+  - A start produced by simple update (`su_init=True`, no `A_init`) is
+    never accepted on the first evaluation: `"dE"` could not converge there
+    (`dE = inf`), but `"grad_norm"` could, returning a stationary SU state
+    (a saddle) as converged before the line search failed and stall
+    recovery acted.  The first test is skipped and the optimizer step taken
+    (1-site, 2-site, C4v-reference); a still-stationary next step converges.
+    A user-supplied `A_init` that is already stationary still converges on
+    step 0.  Measured step-0 `|g|` from SU is 0.30-0.83 (D=2/3, chi=8/16),
+    so this costs nothing in the common case.
 
 ### Added
 

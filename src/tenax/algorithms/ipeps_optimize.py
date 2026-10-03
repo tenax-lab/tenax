@@ -364,10 +364,14 @@ def _resolve_projector_backward(config: iPEPSConfig) -> iPEPSConfig:
 def _normalize_stall_recovery(config, *, unit_cell: str):
     """Auto-default ``gs_stall_recovery`` based on unit cell when unset.
 
-    The 1-site C4v production path requires the noise kick to break out
-    of the SU-init plateau (gradient norms ~1e-10 trip the outer
-    convergence test before the first real step), so the 1-site default
-    is ``"noise"``.
+    The 1-site C4v production path was documented to need the noise kick
+    to break out of an SU-init plateau (gradient norms ~1e-10), so the
+    1-site default is ``"noise"``.  Not reproduced on the current stack
+    (2026-10-03, square Heisenberg, sublattice-rotated gate, su_init,
+    step-0 ``|g|``): 1-site C4v D=2 chi=8 and chi=16 -> 0.30 (E=-0.6408),
+    D=3 chi=16 -> 0.54 (E=-0.5829); 2-site D=2 chi=8 -> 0.83.  Should an
+    SU start be stationary anyway, ``_su_start_guard_armed`` keeps the
+    ``"grad_norm"`` test from accepting it before the first optimizer step.
 
     The 2-site default is ``"reset"`` because best-energy snapshot
     rollback dominates raw noise injection near convergence on this
@@ -922,6 +926,7 @@ def optimize_gs_ad(
     if A_init is not None and not isinstance(A_init, Tensor):
         A_init = _wrap_as_dense_tensor(A_init)
 
+    init_from_su = False
     if A_init is None:
         from tenax.algorithms.ipeps import ipeps
 
@@ -936,6 +941,7 @@ def optimize_gs_ad(
         if config.su_init:
             _, (A_su, _B_su), _ = ipeps(gate, None, config, compute_energy=False)
             A_init = A_su
+            init_from_su = True
         elif cg_with_map_fn and config.cg_gates.init_fn is not None:
             key = jax.random.PRNGKey(0)
             cg_raw_params = config.cg_gates.init_fn(D, key)
@@ -950,7 +956,11 @@ def optimize_gs_ad(
             A_init = _wrap_as_dense_tensor(A_data)
 
     return _optimize_gs_ad_tensor(
-        hamiltonian_gate, A_init, config, _cg_raw_params=cg_raw_params
+        hamiltonian_gate,
+        A_init,
+        config,
+        _cg_raw_params=cg_raw_params,
+        _init_from_su=init_from_su,
     )
 
 
@@ -1091,6 +1101,8 @@ def _optimize_gs_ad_tensor_reference_c4v(
         energy = compute_energy_ctm_tensor(A_tensor, env, gate, d_phys)
         return energy, (env, A_tensor)
 
+    # No stall recovery on this path: the guard is skip-and-continue.
+    _su_guard = _su_start_guard_armed(A_init is None and config.su_init, 0)
     for _step in range(config.gs_num_steps):
         try:
             (energy_val, _aux), grads = jax.value_and_grad(_loss_fn, has_aux=True)(
@@ -1146,9 +1158,10 @@ def _optimize_gs_ad_tensor_reference_c4v(
             if config.gs_conv_criterion in ("grad_norm", "both")
             else None
         )
+        _skip_conv, _su_guard = _su_guard, False
         if n_nonfinite:
             prev_energy = float("inf")
-        elif _converged_outer(config, delta_energy, grad_norm_val):
+        elif not _skip_conv and _converged_outer(config, delta_energy, grad_norm_val):
             if config.gs_verbose:
                 _log_ad_converged(
                     "c4v_reference",
@@ -1182,6 +1195,23 @@ def _optimize_gs_ad_tensor_reference_c4v(
     return final_A, final_env, float(final_energy)
 
 
+def _su_start_guard_armed(init_from_su: bool, start_step: int) -> bool:
+    """Whether to skip the convergence test on the first gradient evaluation.
+
+    Under ``"grad_norm"`` the very first evaluation can pass the test, which
+    ``"dE"`` never could (``prev_energy = inf``).  For a simple-update start
+    that is a stationary point (a saddle such as the product state, or the SU
+    plateau the 1-site ``"noise"`` default exists for) that would return the
+    SU state as converged before the line search could fail and trigger stall
+    recovery (Codex P1 on #1075).  So: skip the test once and take the
+    optimizer step, letting the configured recovery act; a still-stationary
+    next evaluation converges normally.  Only for an SU-derived start on a
+    fresh run -- a user-supplied ``A_init`` that is already stationary is a
+    warm start and converges at once, and so does a checkpoint resume.
+    """
+    return init_from_su and start_step == 0
+
+
 def _log_ad_compile_notice(config) -> None:
     """Emit a one-time, verbose-gated notice before the first gradient step.
 
@@ -1209,6 +1239,7 @@ def _optimize_gs_ad_tensor(
     config: iPEPSConfig,
     *,
     _cg_raw_params: tuple | None = None,
+    _init_from_su: bool = False,
 ):
     """AD-based ground state optimization for Tensor-protocol iPEPS (1-site).
 
@@ -1847,6 +1878,7 @@ def _optimize_gs_ad_tensor(
     # Sentinel for the post-loop checkpoint flush: stays None only if the
     # loop body never ran (nothing new to save).
     _chi_at_step_start = None
+    _su_guard = _su_start_guard_armed(_init_from_su, start_step)
     for step in range(start_step, config.gs_num_steps):
         # Snapshots for checkpoint "did chi change / new best" detection.
         # ``best_energy`` only decreases, so a strict < comparison after the
@@ -2053,7 +2085,8 @@ def _optimize_gs_ad_tensor(
             logged = True
 
         prev_energy = energy_float
-        if _converged_outer(config, delta_energy, grad_norm_val):
+        _skip_conv, _su_guard = _su_guard, False
+        if not _skip_conv and _converged_outer(config, delta_energy, grad_norm_val):
             # Convergence break short-circuits the end-of-iter bump. If
             # the energy stalled because χ is too small (high eps_T from
             # _update_env_cache above), the user-requested auto-bump
@@ -2722,6 +2755,7 @@ def _optimize_gs_ad_2site(
             for t in AB_init
         )
 
+    init_from_su = False
     if AB_init is None:
         gate = (
             hamiltonian_gate.todense()
@@ -2749,6 +2783,7 @@ def _optimize_gs_ad_2site(
             )
             _, (A_su, B_su), _ = ipeps(gate, None, su_config, compute_energy=False)
             AB_init = (A_su, B_su)
+            init_from_su = True
         else:
             # Random complex128 initialization for 2-site AD (matches variPEPS)
             key_A, key_B = jax.random.split(jax.random.PRNGKey(0))
@@ -2765,7 +2800,11 @@ def _optimize_gs_ad_2site(
             AB_init = (A, B)
 
     return _optimize_gs_ad_tensor_2site(
-        hamiltonian_gate, AB_init, config, envs_init=envs_init
+        hamiltonian_gate,
+        AB_init,
+        config,
+        envs_init=envs_init,
+        _init_from_su=init_from_su,
     )
 
 
@@ -2838,6 +2877,8 @@ def _optimize_gs_ad_tensor_2site(
     AB_init: tuple[Tensor, Tensor],
     config: iPEPSConfig,
     envs_init: dict[Coord, CTMTensorEnv] | None = None,
+    *,
+    _init_from_su: bool = False,
 ):
     """AD-based ground state optimization for 2-site Tensor-protocol iPEPS.
 
@@ -3546,6 +3587,7 @@ def _optimize_gs_ad_tensor_2site(
         _log_ad_compile_notice(config)
         # Sentinel for the post-loop checkpoint flush, as in the 1-site path.
         _chi_at_step_start = None
+        _su_guard = _su_start_guard_armed(_init_from_su, start_step)
         for step in range(start_step, config.gs_num_steps):
             # Snapshots for checkpoint "did chi change / new best" detection.
             # ``best_energy`` only decreases, so a strict < comparison after
@@ -3800,7 +3842,8 @@ def _optimize_gs_ad_tensor_2site(
                 logged = True
 
             prev_energy = energy_float
-            if _converged_outer(config, delta_energy, grad_norm_val):
+            _skip_conv, _su_guard = _su_guard, False
+            if not _skip_conv and _converged_outer(config, delta_energy, grad_norm_val):
                 # #455 PR2: at non-final χ stages, treat convergence as a
                 # signal to advance to the next stage rather than exit.
                 # Mirrors the 1-site convergence-block intercept, including

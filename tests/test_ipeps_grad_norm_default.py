@@ -204,3 +204,82 @@ def test_c4v_reference_nan_gradient_does_not_converge(monkeypatch):
     with redirect_stdout(buf):
         optimize_gs_ad(_heisenberg_gate(), A0, cfg)
     assert "converged at step" not in buf.getvalue(), buf.getvalue()
+
+
+# --- SU-init plateau: a stationary *simple-update* start is not converged ---
+#
+# Under "dE" step 0 can never converge (prev_energy = inf).  Under
+# "grad_norm" it can, and a simple-update start that lands on a stationary
+# point (a saddle such as the |up up> product state, or the documented SU
+# plateau) would be returned as converged before the line search could fail
+# and trigger stall recovery (Codex P1 on #1075).  The guard skips the test on
+# the first evaluation of an SU-derived start only; a user-supplied A_init
+# that is already stationary is a warm start and must converge at once.
+
+
+def _su_cfg(unit_cell: str, **overrides) -> iPEPSConfig:
+    base = iPEPSConfig(
+        max_bond_dim=2,
+        num_imaginary_steps=5,
+        ctm=CTMConfig(chi=4, max_iter=4),
+        unit_cell=unit_cell,
+        gs_num_steps=5,
+        gs_implicit_ad=False,
+        gs_explicit_ad_steps=2,
+        gs_explicit_ad_warmup=1,
+        su_init=True,
+        return_history=True,
+        gs_verbose=True,
+    )
+    return replace(base, **overrides)
+
+
+def _run_captured(cfg, A_init=None):
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        out = optimize_gs_ad(_heisenberg_gate(), A_init, cfg)
+    return out[-1], buf.getvalue()
+
+
+@pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
+def test_su_init_stationary_start_is_not_converged_at_step_zero(monkeypatch, unit_cell):
+    """(a) SU start with |g| << tol: step 0 must not converge; the optimizer
+    step runs (and, on 1-site's "noise" default, the stall recovery fires);
+    the next evaluation, still stationary, converges normally."""
+    _script_energy(monkeypatch, grad_scale=1e-9)
+    hist, log = _run_captured(_su_cfg(unit_cell))
+    assert hist["converged"] is True
+    assert hist["num_steps"] == 2, log
+    assert "converged at step 2" in log, log
+    if unit_cell == "1x1":
+        assert "adding noise" in log, log
+
+
+@pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
+def test_user_A_init_stationary_start_converges_at_step_zero(monkeypatch, unit_cell):
+    """(b) A user-supplied stationary start is a warm start: exit on step 0."""
+    _script_energy(monkeypatch, grad_scale=1e-9)
+    A = jax.random.normal(jax.random.PRNGKey(3), (2, 2, 2, 2, 2))
+    A_init = A if unit_cell == "1x1" else (A, A[::-1])
+    from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
+
+    if unit_cell == "2site":
+        A_init = tuple(_wrap_as_dense_tensor(a) for a in A_init)
+    hist, log = _run_captured(_su_cfg(unit_cell), A_init)
+    assert hist["converged"] is True
+    assert hist["num_steps"] == 1, log
+
+
+@pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
+def test_su_init_guard_leaves_dE_alone(monkeypatch, unit_cell):
+    """(c) Under "dE" step 0 never converges anyway (dE = inf); step 1 sees
+    dE == 0 and converges -- the guard must not add a step."""
+    _script_energy(monkeypatch, grad_scale=1e-9)
+    with pytest.warns(DeprecationWarning):
+        cfg = _su_cfg(unit_cell, gs_conv_criterion="dE")
+    hist, log = _run_captured(cfg)
+    assert hist["converged"] is True
+    assert hist["num_steps"] == 2, log
