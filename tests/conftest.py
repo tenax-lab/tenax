@@ -737,6 +737,9 @@ _FILE_MARKERS = {
     # required path, and the file is pure aggregation logic -- 3.96s CPU.
     "test_ctm_nonfinite_convergence_974.py": "core",
     "test_ctm_mixing_1060.py": "core",
+    # PESS losses hand ctm_mixing to ctm_energy_implicit (#1060, Codex on
+    # #1069).  Spy on the energy entry point; no CTM runs, ~3s for the file.
+    "test_pess_loss_threads_mixing.py": "core",
     # #899: the returned-energy-is-fresh guard.  ``core``: it is the
     # regression test for a wrong number coming out of ``optimize_gs_ad``,
     # which is exactly what should gate a merge, and it is cheap -- D=2
