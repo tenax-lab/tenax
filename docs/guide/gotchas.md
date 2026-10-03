@@ -60,3 +60,16 @@ Wrapping a square lattice with odd circumference creates odd-length cycles in
 the ring direction, breaking bipartiteness and frustrating antiferromagnetic
 (Neel) order. This leads to poor iDMRG convergence and physically different
 ground states.
+
+## Local test failures on macOS x86_64
+
+`uv run pytest` may fail on macOS x86_64 if jaxlib has no wheel for that
+platform. On macOS/headless runs, force the CPU backend with
+`JAX_PLATFORMS=cpu uv run pytest ...`.
+
+## Symmetric tensors
+
+Which legs may be contracted, the opt-in `TENAX_STRICT_CONTRACT=1` audit mode,
+and the charge-grouped `bond_order="sector"` mode of the block-sparse
+`svd`/`eigh` are covered in {doc}`symmetry`.
+

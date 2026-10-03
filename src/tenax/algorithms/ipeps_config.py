@@ -43,23 +43,33 @@ class CTMConfig:
                             tracked by issue #292.  Prefer
                             ``ad_backward_method="vjp"`` (the default)
                             until GMRES is stabilized.
-        chi_auto_bump:      Reactive auto-χ_E bump (variPEPS §2.8.2).  When
+        chi_ramp:           **Deprecated** (#512; emits ``DeprecationWarning``).
+                            Staged ``[(chi, num_sweeps), ...]`` CTM
+                            convergence.  It zero-pads the env between
+                            L-BFGS steps; use ``ctmrg_heuristic_increase_chi``
+                            instead (``chi_ramp=[(9, 20), (12, 20), (16, 20)]``
+                            becomes ``chi=9, chi_max=16,
+                            ctmrg_heuristic_increase_chi=True``).
+        projector_method:   ``"svd"`` (Fishman two-projector, default),
+                            ``"eigh"``, or ``"qr"`` (reduced-corner QR-CTMRG,
+                            arXiv:2505.00494, dense single-site).  Consulted
+                            only on the deprecated ``recipe="1x1"`` path
+                            (#911): ``recipe="2x2"`` hardcodes Fishman SVD
+                            and ignores it.  For ``qr``/``eigh`` on a
+                            C4v-symmetric state use ``ctm_tensor_c4v``.
+        chi_auto_bump:      **Deprecated** (#512; emits ``DeprecationWarning``).
+                            Reactive auto-χ_E bump (variPEPS §2.8.2).  When
                             ``True``, the optimizer raises ``chi`` by
                             ``chi_auto_bump_step`` between L-BFGS steps
                             whenever the CTM truncation error exceeds
                             ``chi_auto_bump_eps``.  Mutually exclusive with
-                            ``chi_ramp`` (a deterministic schedule).
-                            Off by default.
-
-                            For new code, prefer ``chi_schedule`` +
-                            ``optimize_gs_ad_chi_schedule`` with
-                            convergence-triggered ramping (#455);
-                            ``chi_auto_bump`` is retained as an
-                            orthogonal CTM-truncation sentinel for the
-                            case where the optimizer is making progress
-                            but ε_T indicates CTM under-resolution.
-                            These two mechanisms compose (reactive fires
-                            first, scheduled second).
+                            ``chi_ramp`` (a deterministic schedule) and with
+                            ``ctmrg_heuristic_increase_chi``.  Off by default.
+                            It hands a zero-padded env to the optimizer
+                            between steps; prefer
+                            ``ctmrg_heuristic_increase_chi=True`` with
+                            ``chi_max`` set, which grows chi inside CTM
+                            convergence.
         chi_auto_bump_eps:  Truncation-error threshold that triggers an
                             auto-χ bump.  Default ``1e-5`` follows
                             variPEPS §2.8.2.
@@ -79,7 +89,52 @@ class CTMConfig:
                             (jit/AD) 2-site sweep on ``SymmetricTensor`` site
                             tensors is refused rather than fixed (#1048) --
                             use ``fuse_virtual_legs=True`` for symmetric
-                            multisite AD.
+                            multisite AD.  Fermionic input is refused
+                            (#1035), and the χ-changing knobs are rejected.
+                            The memory win over the fused path is a large-D
+                            effect (D≳16, #825).
+        ctm_ad_mode:        ``None`` (default), ``"c4v_reference"`` (dense
+                            1-site C4v, Francuz et al. App. C-F, Krylov
+                            implicit backward), ``"root_implicit"`` (dense;
+                            ``unit_cell="1x1"`` or the ``"2site"``
+                            checkerboard, #894) or
+                            ``"root_implicit_symmetric"`` (``SymmetricTensor``,
+                            1x1 only).  The root-implicit modes drive the
+                            arXiv:2607.15030 characteristic equations, so no
+                            SVD/eigh backward appears in the gradient path;
+                            they are an accuracy/stability lever, not a speed
+                            one, and their gradient accuracy is measured with
+                            ``measure_gradient_error`` (#785).  Incompatible
+                            with ``forward_gauge="bond_phase"``.
+        projector_backward: Backward of the CTM projectors under AD.
+                            ``"auto"`` (default) promotes to ``"lorentzian"``
+                            when ``gs_implicit_ad=False`` and the effective
+                            projector is ``eigh``, else ``"standard"``.
+                            ``"flow"`` (2x2 recipe, #983) lets the plaquette
+                            projectors' ``dP/dA`` reach the gradient instead
+                            of freezing them: AD/FD on ``ctm_energy_explicit``
+                            goes from 0.229–0.928 to 0.944–0.994.  Explicit
+                            AD only — not safe under implicit AD (#1028).
+                            The eager forward is bit-identical either way.
+        ctmrg_heuristic_increase_chi: In-CTM χ-bump (variPEPS §2.8.2, #492).
+                            Grows ``chi`` by
+                            ``ctmrg_heuristic_increase_chi_step_size`` during
+                            CTM convergence whenever the smallest kept
+                            singular value relative to the largest exceeds
+                            ``ctmrg_heuristic_increase_chi_threshold``
+                            (default ``1e-6``), so every gradient is taken
+                            at a converged env.  Requires ``chi_max``;
+                            mutually exclusive with ``chi_ramp`` and
+                            ``chi_auto_bump``.  The recommended way to grow
+                            chi.  Off by default.
+        rel_floor:          Relative clamp on the retained CTM spectrum for
+                            ``ctm_ad_mode="root_implicit"`` (dense 1x1 only).
+                            ``None`` (default) uses ``eps**(1/3)``: the
+                            characteristic equations depend on ``S``
+                            cubically, so a direction below that cannot be
+                            resolved (#772/#778).  Two-sided — raising it past
+                            genuinely-weighted directions breaks the
+                            equations.
     """
 
     chi: int = 20
