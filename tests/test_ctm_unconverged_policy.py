@@ -219,16 +219,22 @@ def test_site1_history_sv_diff_is_the_loops(unit_cell, monkeypatch):
         return res
 
     monkeypatch.setattr(_cea, "_run_ctm_loop_with_bump", spy)
-    real_diag = _cea.get_last_implicit_ad_diagnostics
     residuals = []
+    real_s1 = _opt._site1_forward_info
 
-    def diag_spy():
-        d = real_diag()
+    # Spy on what the site-1 check itself sees (the module read, or the
+    # accepted probe's snapshot when the step reuses it, #1062).
+    def s1_spy(step_index, ctm_cfg, history, *, diagnostics=None):
+        d = (
+            diagnostics
+            if diagnostics is not None
+            else _cea.get_last_implicit_ad_diagnostics()
+        )
         if "forward_converged" in d:
             residuals.append(d["forward_stationarity_residual"])
-        return d
+        return real_s1(step_index, ctm_cfg, history, diagnostics=diagnostics)
 
-    monkeypatch.setattr(_cea, "get_last_implicit_ad_diagnostics", diag_spy)
+    monkeypatch.setattr(_opt, "_site1_forward_info", s1_spy)
     cfg = _cfg(unit_cell, "warn")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
@@ -261,16 +267,20 @@ def test_reset_forward_diagnostics_pops_keys():
 def test_unconverged_at_best_raises_immediately(monkeypatch, tmp_path):
     """Review Focus 3: failure at best_params must not burn the stall budget."""
     calls = {"n": 0}
-    real = _cea.get_last_implicit_ad_diagnostics
+    real_s1 = _opt._site1_forward_info
 
-    def fake():
-        d = real()
+    def fake(step_index, ctm_cfg, history, *, diagnostics=None):
+        d = dict(
+            diagnostics
+            if diagnostics is not None
+            else _cea.get_last_implicit_ad_diagnostics()
+        )
         if "forward_converged" in d:
             calls["n"] += 1
             d["forward_converged"] = False  # every gradient forward "fails"
-        return d
+        return real_s1(step_index, ctm_cfg, history, diagnostics=d)
 
-    monkeypatch.setattr(_cea, "get_last_implicit_ad_diagnostics", fake)
+    monkeypatch.setattr(_opt, "_site1_forward_info", fake)
     cfg = _cfg(
         "2site", "raise", max_iter=200, steps=10, retries=5, ckpt=str(tmp_path / "ck")
     )
@@ -314,17 +324,23 @@ def test_unconverged_after_best_resets_and_recovers(unit_cell, monkeypatch, capl
     import logging
 
     calls = {"n": 0}
-    real = _cea.get_last_implicit_ad_diagnostics
+    real_s1 = _opt._site1_forward_info
 
-    def fake():
-        d = real()
+    # Intercept at the site-1 check (not the module read, which the #1062
+    # probe snapshot also performs) so "call 2" is the step-2 gradient check.
+    def fake(step_index, ctm_cfg, history, *, diagnostics=None):
+        d = dict(
+            diagnostics
+            if diagnostics is not None
+            else _cea.get_last_implicit_ad_diagnostics()
+        )
         if "forward_converged" in d:
             calls["n"] += 1
             if calls["n"] == 2:  # only the step-2 gradient forward "fails"
                 d["forward_converged"] = False
-        return d
+        return real_s1(step_index, ctm_cfg, history, diagnostics=d)
 
-    monkeypatch.setattr(_cea, "get_last_implicit_ad_diagnostics", fake)
+    monkeypatch.setattr(_opt, "_site1_forward_info", fake)
     cfg = _cfg(unit_cell, "raise", max_iter=200, steps=3, retries=2)
     with warnings.catch_warnings(), caplog.at_level(logging.WARNING):
         warnings.simplefilter("ignore", UserWarning)
@@ -408,19 +424,24 @@ def test_1site_reset_reinits_optax_lbfgs_state(monkeypatch):
 
 def _fail_forwards(monkeypatch, failing):
     """Make the gradient forwards whose 1-based call index is in ``failing``
-    report forward_converged=False."""
+    report forward_converged=False.  Intercepts the site-1 check itself, not
+    the module read (the #1062 probe snapshot also reads it)."""
     calls = {"n": 0}
-    real = _cea.get_last_implicit_ad_diagnostics
+    real_s1 = _opt._site1_forward_info
 
-    def fake():
-        d = real()
+    def fake(step_index, ctm_cfg, history, *, diagnostics=None):
+        d = dict(
+            diagnostics
+            if diagnostics is not None
+            else _cea.get_last_implicit_ad_diagnostics()
+        )
         if "forward_converged" in d:
             calls["n"] += 1
             if calls["n"] in failing:
                 d["forward_converged"] = False
-        return d
+        return real_s1(step_index, ctm_cfg, history, diagnostics=d)
 
-    monkeypatch.setattr(_cea, "get_last_implicit_ad_diagnostics", fake)
+    monkeypatch.setattr(_opt, "_site1_forward_info", fake)
     return calls
 
 
@@ -904,3 +925,43 @@ def test_site5_ctm_tensor_2site_strict():
         ctm_tensor_2site(
             A, B, chi=4, max_iter=400, conv_tol=1e-6, strict=True
         )  # converges: no raise
+
+
+def test_reused_probe_carries_its_own_forward_diagnostics():
+    """#1062 reuse: a step that takes the accepted dφ probe's value_and_grad
+    must be site-1 checked against *that* probe's forward, not whatever forward
+    wrote the module diagnostics last (later φ probes, env refreshes)."""
+    ev = _opt._AcceptedProbeEval(enabled=True)
+    p0, d = jnp.ones(3), jnp.ones(3)
+    cfg = CTMConfig(chi=4)
+    trial = _opt._normalize_params(_opt._tree_add(p0, _opt._tree_scale(d, 0.5)))
+
+    def unconverged_loss(x):
+        _cea._F3_LAST_DIAGNOSTICS["forward_converged"] = False
+        _cea._F3_LAST_DIAGNOSTICS["forward_sv_diff"] = 0.25
+        return jnp.sum(x**2)
+
+    ev.start()
+    ev.probe(unconverged_loss, 0.5, trial, cfg)
+    # A later forward (another φ probe, the env refresh) overwrites the module.
+    _cea._F3_LAST_DIAGNOSTICS["forward_converged"] = True
+    new = ev.accept(0.5, p0, d)
+    assert ev.take(new, cfg) is not None
+    assert ev.reused_diagnostics["forward_converged"] is False
+    assert ev.reused_diagnostics["forward_sv_diff"] == 0.25
+    assert ev.take(new, cfg) is None and ev.reused_diagnostics is None
+    _cea.reset_forward_diagnostics()
+
+
+def test_site1_checks_supplied_diagnostics_over_module(monkeypatch):
+    """The reuse path hands the probe's snapshot to the site-1 check."""
+    monkeypatch.setattr(
+        _cea, "get_last_implicit_ad_diagnostics", lambda: {"forward_converged": True}
+    )
+    cfg = CTMConfig(chi=4, conv_tol=1e-10)
+    snap = {"forward_converged": False, "forward_iterations": 7, "forward_sv_diff": 0.5}
+    with pytest.raises(CTMNotConvergedError) as ei:
+        _opt._site1_forward_info(3, cfg, None, diagnostics=snap)
+    assert ei.value.site == "gradient" and ei.value.step == 3
+    # Without a snapshot the (converged) module diagnostics are read: no raise.
+    _opt._site1_forward_info(3, cfg, None)

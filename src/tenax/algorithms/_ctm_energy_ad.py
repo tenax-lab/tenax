@@ -397,6 +397,7 @@ def ctm_energy_implicit(
     recipe: str = "2x2",
     device_mesh=None,
     ctm_chunk_size: int | None = None,
+    mixing: float = 0.0,
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -509,6 +510,10 @@ def ctm_energy_implicit(
         chi_max:           Optional ceiling for in-CTM chi bumping.
                            Required when ``ctmrg_heuristic_increase_chi``
                            is True.
+        mixing:            Linear mixing of the forward CTM iterate (#1060),
+                           see ``python_loop_ctm_converge``.  The fixed point,
+                           and so the adjoint's linearization point, is the
+                           same as without mixing.
 
     Returns:
         Scalar energy per site.
@@ -593,6 +598,7 @@ def ctm_energy_implicit(
         recipe,
         device_mesh,
         ctm_chunk_size,
+        mixing,
     )
 
 
@@ -621,6 +627,7 @@ def _sigma_gauged_ctm_converge(
     device_mesh=None,
     ctm_chunk_size: int | None = None,
     return_info: bool = False,
+    mixing: float = 0.0,
 ):
     """CTM convergence with sigma gauge fixing for element-wise fixed point.
 
@@ -730,6 +737,7 @@ def _sigma_gauged_ctm_converge(
         conv_tol=conv_tol,
         conv_method=conv_method,
         plateau_patience=plateau_patience,
+        mixing=mixing,
     )
     # #841: return the loop's convergence verdict instead of discarding it.
     # Callers on the implicit-AD path linearize the gauged step around
@@ -750,6 +758,7 @@ def _sigma_gauged_ctm_converge(
                 max_smallest_S=result.max_smallest_S,
                 final_chi=result.final_chi,
                 best_iteration=warmup + result.best_iteration,
+                step_multiplier=result.step_multiplier,
             ),
         )
     return result.envs, result.final_chi, result.converged
@@ -878,6 +887,8 @@ def get_last_implicit_ad_diagnostics() -> dict:
       -- the same loop's sweep count, its own convergence metric (the number
       it compared with ``conv_tol``) and the sweep whose env it returned
       (trails ``forward_iterations`` on the ``plateau_patience`` bail).
+    * ``forward_step_multiplier`` -- the loop's signed step multiplier
+      (#1060; NaN when not measurable).
     * ``forward_stationarity_threshold`` -- the #841 threshold the residual
       above is compared with, ``max(100 * conv_tol, 1e-8)``.
 
@@ -895,6 +906,7 @@ _FORWARD_DIAGNOSTIC_KEYS = (
     "forward_iterations",
     "forward_sv_diff",
     "forward_best_iteration",
+    "forward_step_multiplier",
 )
 
 
@@ -937,6 +949,7 @@ def _ctm_energy_implicit_dispatch(
     recipe="2x2",
     device_mesh=None,
     ctm_chunk_size=None,
+    mixing=0.0,
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -975,6 +988,7 @@ def _ctm_energy_implicit_dispatch(
         recipe,  # distinct sweep recipe → distinct cached forward+backward
         device_mesh,  # sharded vs single → distinct cached forward+backward
         ctm_chunk_size,  # distinct chunk size → distinct forward lax.map shape
+        mixing,  # the forward closure reads it (#1060)
     )
 
     entry = _VJP_CACHE.get(cache_key)
@@ -1021,6 +1035,7 @@ def _ctm_energy_implicit_dispatch(
         recipe=recipe,
         device_mesh=device_mesh,
         ctm_chunk_size=ctm_chunk_size,
+        mixing=mixing,
     )
     _VJP_CACHE[cache_key] = (f, mutables)
     return f(params_data_tuple)
@@ -1053,6 +1068,7 @@ def _make_implicit_vjp_fn(
     recipe: str = "2x2",
     device_mesh=None,
     ctm_chunk_size: int | None = None,
+    mixing: float = 0.0,
 ):
     """Build a custom_vjp-decorated function closed over static config.
 
@@ -1152,6 +1168,7 @@ def _make_implicit_vjp_fn(
                 recipe=recipe,
                 device_mesh=device_mesh,
                 ctm_chunk_size=ctm_chunk_size,
+                mixing=mixing,
             )
             # chi_ramp doesn't trigger in-CTM bump (mutex enforced in dispatch);
             # chi_post is the final ramp stage's chi, which equals ``chi`` for
@@ -1181,6 +1198,7 @@ def _make_implicit_vjp_fn(
                 device_mesh=device_mesh,
                 ctm_chunk_size=ctm_chunk_size,
                 return_info=True,
+                mixing=mixing,
             )
         _check_forward_stationarity(site_tensors, envs, chi_post, _loop_info)
         return envs, chi_post
@@ -1250,6 +1268,9 @@ def _make_implicit_vjp_fn(
         _F3_LAST_DIAGNOSTICS["forward_iterations"] = int(loop_info.iterations)
         _F3_LAST_DIAGNOSTICS["forward_sv_diff"] = float(loop_info.sv_diff)
         _F3_LAST_DIAGNOSTICS["forward_best_iteration"] = int(loop_info.best_iteration)
+        _F3_LAST_DIAGNOSTICS["forward_step_multiplier"] = float(
+            getattr(loop_info, "step_multiplier", float("nan"))
+        )
         # Fails closed: a NaN residual is not <= threshold, so it warns.
         if not (residual <= threshold) and not _cached["stationarity_warned"]:
             _cached["stationarity_warned"] = True

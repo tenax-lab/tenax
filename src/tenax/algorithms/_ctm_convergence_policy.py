@@ -35,6 +35,10 @@ class CTMConvergeInfo(NamedTuple):
     # handed back and this trails ``iterations`` by ``plateau_patience``.
     # ``sv_diff`` is the metric of *this* sweep, not of ``iterations``.
     best_iteration: int = 0
+    # Signed multiplier of the gauged step on the last two sweeps (#1060):
+    # near -1 flags a two-state cycle (retry with ``mixing > 0``), 0 < rho < 1
+    # a slow contraction.  NaN when not measurable (``conv_method="sv"``).
+    step_multiplier: float = float("nan")
 
 
 class GradientForwardInfo(NamedTuple):
@@ -53,6 +57,8 @@ class GradientForwardInfo(NamedTuple):
     best_iteration: int = 0
     stationarity_residual: float | None = None
     stationarity_threshold: float | None = None
+    # Signed step multiplier of the forward loop (#1060); NaN when unknown.
+    step_multiplier: float = float("nan")
 
 
 def _plateau_bailed(info) -> bool:

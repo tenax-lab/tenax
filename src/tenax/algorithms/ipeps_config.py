@@ -320,6 +320,15 @@ class CTMConfig:
     # well-conditioned states.  Consulted by ``ctm_ad_mode="root_implicit"``
     # only.  Appended at the end to preserve positional CTMConfig ABI.
     rel_floor: float | None = None
+    # Linear mixing of the forward CTM iterate (#1060):
+    # e <- (1 - ctm_mixing) * gauge(step(e)) + ctm_mixing * e.  0.0 (default)
+    # is the plain iteration.  Same fixed points; a two-state cycle around an
+    # unstable fixed point (CTMConvergeInfo.step_multiplier near -1) contracts
+    # under mixing, measured on spinless t-V D=3 at chi=20: plain iteration
+    # cycles at residual 3.9e-2 forever, 0.3 converges to 6e-9.  Requires
+    # forward_gauge="bond_phase" and ctm_conv_method="elementwise".  Appended
+    # at the end to preserve positional CTMConfig ABI.
+    ctm_mixing: float = 0.0
     # What to do when a CTM forward feeding a gradient or a reported energy
     # returns converged=False (#1059/#1060): "raise" (default) fails loudly;
     # "warn" keeps the legacy control flow and emits CTMNotConvergedWarning.
@@ -353,6 +362,20 @@ class CTMConfig:
                 f"ctm_ad_mode={self.ctm_ad_mode!r}: that engine owns its CTM "
                 "and applies no forward gauge. Use ctm_ad_mode=None, or "
                 "forward_gauge='phase'."
+            )
+        if not 0.0 <= self.ctm_mixing < 1.0:
+            raise ValueError(f"ctm_mixing must be in [0, 1), got {self.ctm_mixing!r}")
+        if self.ctm_mixing > 0.0 and (
+            self.forward_gauge != "bond_phase" or self.ctm_conv_method != "elementwise"
+        ):
+            # Mixing is element-wise, so it needs gauge-aligned iterates, and
+            # every fused forward (warm start, probe, final evaluation) applies
+            # a pair gauge only under bond_phase -- under any other gauge those
+            # forwards would refuse at the first call instead of here.
+            raise ValueError(
+                "ctm_mixing > 0 requires forward_gauge='bond_phase' and "
+                f"ctm_conv_method='elementwise', got forward_gauge="
+                f"{self.forward_gauge!r}, ctm_conv_method={self.ctm_conv_method!r}"
             )
         valid_solvers = {"bicgstab", "gmres"}
         if self.adjoint_solver not in valid_solvers:

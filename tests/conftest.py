@@ -734,6 +734,7 @@ _FILE_MARKERS = {
     # env certifying as converged is a silently-wrong-answer bug in the
     # required path, and the file is pure aggregation logic -- 3.96s CPU.
     "test_ctm_nonfinite_convergence_974.py": "core",
+    "test_ctm_mixing_1060.py": "core",
     # #899: the returned-energy-is-fresh guard.  ``core``: it is the
     # regression test for a wrong number coming out of ``optimize_gs_ad``,
     # which is exactly what should gate a merge, and it is cheap -- D=2
@@ -761,6 +762,11 @@ _FILE_MARKERS = {
     # correct at all, so a regression here silently invalidates any periodic
     # oracle built on it.
     "test_twist_primitive.py": "core",
+    # The HZ dφ probe's value_and_grad at the accepted α is carried into the
+    # next step instead of recomputed.  ``core``: it changes what every
+    # L-BFGS + Hager-Zhang optimizer step evaluates.  Mechanism tests only
+    # (spied evaluation counts, a scripted line search) at D=2, chi<=6.
+    "test_ls_reuse_accepted_eval.py": "core",
 }
 
 

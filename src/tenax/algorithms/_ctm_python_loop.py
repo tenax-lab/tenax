@@ -163,6 +163,7 @@ def python_loop_ctm_converge(
     device_mesh=None,
     ctm_chunk_size: int | None = None,
     forward_gauge: str | None = None,
+    mixing: float = 0.0,
     _recipe_warning_emitted: bool = False,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM to convergence using a Python for-loop over JIT'd sweeps.
@@ -230,6 +231,17 @@ def python_loop_ctm_converge(
                            the same element-wise fixed point the loss
                            linearizes.  Exclusive with ``gauge_fix_fn`` and
                            with ``chi_ramp``.
+        mixing:            Linear mixing ``beta`` in ``[0, 1)`` (#1060).
+                           ``0`` (default) is the plain iteration.  ``beta >
+                           0`` iterates ``e <- (1-beta) gauge(step(e)) + beta
+                           e``: same fixed points, but a two-state cycle around
+                           an unstable fixed point can contract.  Convergence
+                           is still tested on the undamped residual.  Needs
+                           ``conv_method="elementwise"`` and a gauge
+                           (``forward_gauge="bond_phase"`` or
+                           ``gauge_fix_fn``).  See
+                           ``CTMConvergeInfo.step_multiplier`` for when to
+                           reach for it.
 
     Returns:
         ``(envs, CTMConvergeInfo)`` — converged environments and info.
@@ -298,6 +310,7 @@ def python_loop_ctm_converge(
             recipe=recipe,
             device_mesh=device_mesh,
             ctm_chunk_size=ctm_chunk_size,
+            mixing=mixing,
         )
 
     # Build the JIT'd step function (captures neighbors + device_mesh in closure)
@@ -397,6 +410,7 @@ def python_loop_ctm_converge(
         conv_tol=conv_tol,
         conv_method=conv_method,
         plateau_patience=plateau_patience,
+        mixing=mixing,
     )
 
     return result.envs, CTMConvergeInfo(
@@ -407,6 +421,7 @@ def python_loop_ctm_converge(
         max_smallest_S=result.max_smallest_S,
         final_chi=result.final_chi,
         best_iteration=warmup + result.best_iteration,
+        step_multiplier=result.step_multiplier,
     )
 
 
@@ -430,6 +445,7 @@ def _python_loop_chi_ramp(
     recipe: str = "2x2",
     device_mesh=None,
     ctm_chunk_size: int | None = None,
+    mixing: float = 0.0,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM with chi-ramp schedule."""
     envs = env_init
@@ -488,6 +504,7 @@ def _python_loop_chi_ramp(
             _recipe_warning_emitted=True,
             device_mesh=device_mesh,
             ctm_chunk_size=ctm_chunk_size,
+            mixing=mixing,
         )
         prev_chi = stage_chi
 
