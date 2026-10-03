@@ -484,12 +484,16 @@ class CTMConfig:
         if not 0.0 <= self.ctm_mixing < 1.0:
             raise ValueError(f"ctm_mixing must be in [0, 1), got {self.ctm_mixing!r}")
         if self.ctm_mixing > 0.0 and (
-            self.forward_gauge != "bond_phase" or self.ctm_conv_method != "elementwise"
+            self.forward_gauge not in ("bond_phase", "auto")
+            or self.ctm_conv_method != "elementwise"
         ):
             # Mixing is element-wise, so it needs gauge-aligned iterates, and
             # every fused forward (warm start, probe, final evaluation) applies
             # a pair gauge only under bond_phase -- under any other gauge those
             # forwards would refuse at the first call instead of here.
+            # ``"auto"`` passes here because the path is not known yet; the
+            # optimizer entry (``build_ad_ctm_config``) re-checks the
+            # resolved gauge, which is bond_phase exactly where mixing works.
             raise ValueError(
                 "ctm_mixing > 0 requires forward_gauge='bond_phase' and "
                 f"ctm_conv_method='elementwise', got forward_gauge="

@@ -371,3 +371,29 @@ def test_resolve_forward_gauge_is_public():
     assert "resolve_forward_gauge" in tenax.__all__
     assert tenax.resolve_forward_gauge("auto", implicit_ad=True) == "bond_phase"
     assert tenax.resolve_forward_gauge("auto", implicit_ad=False) == "phase"
+
+
+# --------------------------------------------------------------------------
+# ctm_mixing (#1060) with the "auto" default
+# --------------------------------------------------------------------------
+
+
+def test_mixing_accepts_the_auto_default():
+    """``"auto"`` is bond_phase where mixing is supported, so it must construct."""
+    cfg = CTMConfig(ctm_mixing=0.3)
+    resolved = build_ad_ctm_config(iPEPSConfig(ctm=cfg))
+    assert resolved.forward_gauge == "bond_phase"
+    assert resolved.ctm_mixing == 0.3
+
+
+def test_mixing_with_auto_still_refuses_where_auto_is_not_bond_phase():
+    """Off the fused implicit path ``"auto"`` resolves to phase: mixing must raise."""
+    cfg = CTMConfig(ctm_mixing=0.3)
+    with pytest.raises(ValueError, match="ctm_mixing > 0 requires"):
+        build_ad_ctm_config(iPEPSConfig(ctm=cfg, gs_implicit_ad=False))
+
+
+@pytest.mark.parametrize("gauge", ["phase", "qr", "sigma", "none"])
+def test_mixing_still_refuses_an_explicit_non_bond_gauge(gauge):
+    with pytest.raises(ValueError, match="ctm_mixing > 0 requires"):
+        CTMConfig(forward_gauge=gauge, ctm_mixing=0.3)

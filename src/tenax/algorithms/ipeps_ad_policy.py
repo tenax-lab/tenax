@@ -183,6 +183,17 @@ def build_ad_ctm_config(config: iPEPSConfig) -> CTMConfig:
     if config.gs_projector_method is not None:
         ctm_cfg = replace(ctm_cfg, projector_method=config.gs_projector_method)
     gauge = ctm_cfg.effective_forward_gauge(implicit_ad=config.gs_implicit_ad)
+    if ctm_cfg.ctm_mixing > 0.0 and gauge != "bond_phase":
+        # ``CTMConfig`` lets ``"auto"`` through with mixing because it cannot
+        # see the path; here it can.  Same message as the constructor check.
+        raise ValueError(
+            "ctm_mixing > 0 requires forward_gauge='bond_phase' and "
+            f"ctm_conv_method='elementwise', got forward_gauge="
+            f"{ctm_cfg.forward_gauge!r} (resolved to {gauge!r} on this path: "
+            "'auto' is 'bond_phase' only on the fused implicit-AD path with no "
+            "chi_ramp and no ctm_ad_mode), ctm_conv_method="
+            f"{ctm_cfg.ctm_conv_method!r}"
+        )
     if gauge != ctm_cfg.forward_gauge:
         # A shallow copy, not ``replace``: ``replace`` re-runs ``__post_init__``
         # and would re-emit the chi_ramp / chi_auto_bump deprecation warnings
