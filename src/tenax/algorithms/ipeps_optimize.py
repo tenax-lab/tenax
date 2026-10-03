@@ -1953,11 +1953,18 @@ def _optimize_gs_ad_tensor(
     _site1_check = config.gs_implicit_ad and not use_split
 
     def _restore_best_env():
-        """Reset for CTMNotConvergedError: restore the converged best env
-        when its chi matches; otherwise clear it (#518)."""
+        """Reset for CTMNotConvergedError: restore the best env when it is
+        certified converged at ``best_params`` and its chi matches; otherwise
+        clear it (#518).  A cold-start refresh caches an unconverged env, and
+        the best snapshot can copy it; restoring that would reinstate the
+        poisoned warm start site 2 refuses (Codex P1 on #1070)."""
         best = best_env_cache.get("envs") if best_env_cache else None
         _drop_env_cache_for_reset(_env_cache)
-        if _should_restore_best_env(best, ctm_cfg.chi, **_restore_chi_kwargs(ctm_cfg)):
+        if _cache_env_known_converged(
+            best_env_cache, best_params
+        ) and _should_restore_best_env(
+            best, ctm_cfg.chi, **_restore_chi_kwargs(ctm_cfg)
+        ):
             _env_cache.update(best_env_cache)
 
     # CTM conv_tol schedule: update ctm_cfg when tolerance changes
@@ -3707,10 +3714,13 @@ def _optimize_gs_ad_tensor_2site(
             _env_cache_2s.update(best_env_cache_2s or {"envs": envs_init})
 
     def _restore_best_env_2s():
-        """Reset for CTMNotConvergedError: restore the converged best env
-        when its chi matches; otherwise fall back to _reset_env_cache_2s."""
+        """Reset for CTMNotConvergedError: restore the best env when it is
+        certified converged at ``best_params`` and its chi matches; otherwise
+        fall back to _reset_env_cache_2s (see ``_restore_best_env``)."""
         best = best_env_cache_2s.get("envs") if best_env_cache_2s else None
-        if _should_restore_best_env(
+        if _cache_env_known_converged(
+            best_env_cache_2s, best_params
+        ) and _should_restore_best_env(
             best, ctm_cfg_2s.chi, **_restore_chi_kwargs(ctm_cfg_2s)
         ):
             _drop_env_cache_for_reset(_env_cache_2s)

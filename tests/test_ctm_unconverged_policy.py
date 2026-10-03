@@ -565,6 +565,49 @@ def test_2site_restore_closure_chi_mismatch_clears_env_cache(monkeypatch):
     assert cleared.count(True) > restored.count(True), (restored, cleared)
 
 
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_reset_does_not_restore_an_unconverged_best_env(monkeypatch, unit_cell):
+    """Codex P1 on #1070: the cold-start refresh caches an unconverged env
+    (readers need *an* env) and the best snapshot copies it.  A later
+    CTMNotConvergedError reset must not restore it as the warm start; it
+    clears the cache so the next forward cold-starts, as for a chi mismatch.
+    """
+    import tenax.algorithms.ipeps_ad_policy as _pol
+
+    def run(first_refresh_unconverged):
+        seen, refreshes = [], {"n": 0}
+        real_kwargs = _pol.ctm_converge_kwargs
+        real_refresh = _opt._refresh_env_cache
+
+        def spy(cfg, env_init=None, **kw):
+            seen.append(env_init is None)
+            return real_kwargs(cfg, env_init=env_init, **kw)
+
+        def refresh(cache, envs, info, ctm_cfg, params=None):
+            refreshes["n"] += 1
+            if first_refresh_unconverged and refreshes["n"] == 1:
+                assert "envs" not in cache  # the cold-start case
+                info = CTMConvergeInfo(
+                    converged=False, iterations=info.iterations, sv_diff=1.0
+                )
+            return real_refresh(cache, envs, info, ctm_cfg, params)
+
+        with monkeypatch.context() as m:
+            m.setattr(_pol, "ctm_converge_kwargs", spy)
+            m.setattr(_opt, "_refresh_env_cache", refresh)
+            _fail_forwards(m, {2})
+            cfg = _cfg(unit_cell, "raise", max_iter=200, steps=3, retries=2)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+        return seen
+
+    restored = run(first_refresh_unconverged=False)
+    cleared = run(first_refresh_unconverged=True)
+    assert len(restored) == len(cleared)
+    assert cleared.count(True) > restored.count(True), (restored, cleared)
+
+
 # ---------------------------------------------------------------------------
 # Task 3: site 2 -- the warm-start env cache never keeps an unconverged env.
 # ---------------------------------------------------------------------------
