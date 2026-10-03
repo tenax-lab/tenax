@@ -236,6 +236,43 @@ def _restore_chi_kwargs(ctm_cfg) -> dict:
     }
 
 
+def _gradient_forward_info(d: dict):
+    """``GradientForwardInfo`` from implicit-AD forward diagnostics ``d``.
+
+    None when ``d`` has no ``forward_converged`` key (no forward wrote one).
+    """
+    from tenax.algorithms._ctm_convergence_policy import GradientForwardInfo
+
+    if "forward_converged" not in d:
+        return None
+    nan = float("nan")
+    return GradientForwardInfo(
+        converged=bool(d["forward_converged"]),
+        iterations=int(d.get("forward_iterations", -1)),
+        sv_diff=float(d.get("forward_sv_diff", nan)),
+        best_iteration=int(d.get("forward_best_iteration", 0)),
+        stationarity_residual=float(d.get("forward_stationarity_residual", nan)),
+        stationarity_threshold=d.get("forward_stationarity_threshold"),
+        step_multiplier=float(d.get("forward_step_multiplier", nan)),
+    )
+
+
+def _policy_scope(enabled: bool):
+    """Scope a forward whose convergence verdict the caller acts on (#1059).
+
+    Inside it the implicit-AD forward defers its #841 stationarity warning
+    for an unconverged loop, so a caller promoting warnings to errors gets
+    the policy's ``CTMNotConvergedError`` rather than the legacy warning.
+    """
+    import contextlib
+
+    import tenax.algorithms._ctm_energy_ad as _cea
+
+    if not enabled:
+        return contextlib.nullcontext()
+    return _cea.policy_owns_unconverged_forward()
+
+
 def _site1_forward_info(
     step_index: int, ctm_cfg, history: tuple | None, *, diagnostics: dict | None = None
 ):
@@ -255,28 +292,16 @@ def _site1_forward_info(
     were snapshotted when the probe ran.
     """
     import tenax.algorithms._ctm_energy_ad as _cea
-    from tenax.algorithms._ctm_convergence_policy import (
-        GradientForwardInfo,
-        check_ctm_converged,
-    )
+    from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
 
     d = (
         diagnostics
         if diagnostics is not None
         else _cea.get_last_implicit_ad_diagnostics()
     )
-    if "forward_converged" not in d:
+    info = _gradient_forward_info(d)
+    if info is None:
         return
-    nan = float("nan")
-    info = GradientForwardInfo(
-        converged=bool(d["forward_converged"]),
-        iterations=int(d.get("forward_iterations", -1)),
-        sv_diff=float(d.get("forward_sv_diff", nan)),
-        best_iteration=int(d.get("forward_best_iteration", 0)),
-        stationarity_residual=float(d.get("forward_stationarity_residual", nan)),
-        stationarity_threshold=d.get("forward_stationarity_threshold"),
-        step_multiplier=float(d.get("forward_step_multiplier", nan)),
-    )
     ok = check_ctm_converged(
         info,
         site="gradient",
@@ -308,6 +333,32 @@ def _site3_reject(info, ctm_cfg) -> bool:
     if info.converged:
         return False
     if ctm_cfg.probe_max_iter is not None or ctm_cfg.probe_conv_tol is not None:
+        return False
+    if ctm_cfg.on_unconverged == "raise":
+        return True
+    check_ctm_converged(
+        info,
+        site="line_search",
+        policy="warn",
+        conv_tol=ctm_cfg.conv_tol,
+        chi=ctm_cfg.chi,
+    )
+    return False
+
+
+def _probe_forward_rejected(diag: dict, ctm_cfg) -> bool:
+    """#1059 for the HZ ``dφ`` probe: reject a gradient from an unconverged forward.
+
+    True (caller hands the line search a NaN slope, which never satisfies
+    Wolfe, and carries nothing to the next step) for an unconverged forward
+    under ``on_unconverged="raise"``.  Under ``"warn"`` the warning is
+    emitted and False is returned (legacy path).  No ``forward_converged``
+    key means no forward verdict was written: not rejected.
+    """
+    from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
+
+    info = _gradient_forward_info(diag)
+    if info is None or info.converged:
         return False
     if ctm_cfg.on_unconverged == "raise":
         return True
@@ -379,8 +430,11 @@ class _AcceptedProbeEval:
     parameters.
     """
 
-    def __init__(self, enabled: bool):
+    def __init__(self, enabled: bool, check_policy: bool = False):
         self._enabled = enabled
+        # Apply ``on_unconverged`` to the probe forward (#1059; the 1-site
+        # and 2-site optimizers).  The multisite optimizer is not wired yet.
+        self._check_policy = enabled and check_policy
         self._probe = None
         self._carry = None
         # Forward diagnostics of the probe whose result ``take`` last handed
@@ -392,23 +446,36 @@ class _AcceptedProbeEval:
         self._probe = None
 
     def probe(self, loss_fn, alpha, trial, cfg):
-        """``value_and_grad`` at the ``dφ`` trial point; returns the grads."""
+        """``value_and_grad`` at the ``dφ`` trial point.
+
+        Returns the grads, or (with ``check_policy``) None when the probe's
+        forward did not converge under ``on_unconverged="raise"`` (#1059,
+        Codex P1 on #1070): the
+        gradient of an unconverged forward must not steer the line search,
+        and a rejected probe is never carried to the next step.  Under
+        ``"warn"`` it warns and returns the grads (legacy).
+        """
         self._probe = None  # only the latest successful probe can match
         import tenax.algorithms._ctm_energy_ad as _cea
 
+        t0 = _time.perf_counter()
         if self._enabled:
             _cea.reset_forward_diagnostics()
-        t0 = _time.perf_counter()
-        energy, grads = jax.value_and_grad(loss_fn)(trial)
+        # The verdict is acted on just below, so the forward defers its #841
+        # stationarity warning for an unconverged loop to us.
+        with _policy_scope(self._check_policy):
+            energy, grads = jax.value_and_grad(loss_fn)(trial)
         grads = _euclidean_grads(grads)
         if self._enabled:
+            # Snapshot now: later φ probes and env refreshes overwrite the
+            # module diagnostics before the next step's site-1 check.
+            diag = _cea.get_last_implicit_ad_diagnostics()
+            if self._check_policy and _probe_forward_rejected(diag, cfg):
+                return None
             # Async backends (CUDA/TPU) return once the work is enqueued; sync
             # so ``dt`` is evaluation time, like the fresh path's step timer.
             jax.block_until_ready((energy, grads))
             dt = _time.perf_counter() - t0
-            # Snapshot now: later φ probes and env refreshes overwrite the
-            # module diagnostics before the next step's site-1 check.
-            diag = _cea.get_last_implicit_ad_diagnostics()
             self._probe = (alpha, trial, cfg, energy, grads, dt, diag)
         return grads
 
@@ -1863,7 +1930,7 @@ def _optimize_gs_ad_tensor(
 
     stall_count = 0  # noise recovery: consecutive line search failures
     # HZ dφ evaluation carried into the next step (see _AcceptedProbeEval).
-    _ls_eval = _AcceptedProbeEval(enabled=config.gs_implicit_ad)
+    _ls_eval = _AcceptedProbeEval(enabled=config.gs_implicit_ad, check_policy=True)
     current_stage_idx = 0
     stage_start_step = 0
 
@@ -2171,7 +2238,8 @@ def _optimize_gs_ad_tensor(
             else:
                 if _site1_check:
                     _cea.reset_forward_diagnostics()
-                energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                with _policy_scope(_site1_check):
+                    energy_val, grads = jax.value_and_grad(loss_fn)(params)
                 grads = _euclidean_grads(grads)
             if _site1_check:
                 _site1_forward_info(
@@ -2662,6 +2730,8 @@ def _optimize_gs_ad_tensor(
                     # Keeps the energy too: on acceptance at this α the next step
                     # reuses this evaluation instead of repeating it.
                     g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg)
+                    if g is None:  # unconverged forward rejected (#1059)
+                        return float("nan")
                     return _tree_dot(g, direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
@@ -3595,7 +3665,7 @@ def _optimize_gs_ad_tensor_2site(
     prev_grad_flat: jnp.ndarray | None = None
     stall_count = 0  # noise recovery: consecutive line search failures
     # HZ dφ evaluation carried into the next step (see _AcceptedProbeEval).
-    _ls_eval = _AcceptedProbeEval(enabled=config.gs_implicit_ad)
+    _ls_eval = _AcceptedProbeEval(enabled=config.gs_implicit_ad, check_policy=True)
     current_stage_idx = 0
     stage_start_step = 0
     # Rolling buffer of accepted ``||grad||_2`` for the gradient-spike
@@ -3996,7 +4066,8 @@ def _optimize_gs_ad_tensor_2site(
                 else:
                     if _site1_check_2s:
                         _cea.reset_forward_diagnostics()
-                    energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                    with _policy_scope(_site1_check_2s):
+                        energy_val, grads = jax.value_and_grad(loss_fn)(params)
                     grads = _euclidean_grads(grads)
                 if _site1_check_2s:
                     _site1_forward_info(
@@ -4570,6 +4641,8 @@ def _optimize_gs_ad_tensor_2site(
                         # Keeps the energy too: on acceptance at this α the next step
                         # reuses this evaluation instead of repeating it.
                         g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg_2s)
+                        if g is None:  # unconverged forward rejected (#1059)
+                            return float("nan")
                         return _tree_dot(g, direction)
 
                     dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
@@ -5661,6 +5734,8 @@ def _optimize_gs_ad_multisite(
                     # Keeps the energy too: on acceptance at this α the next step
                     # reuses this evaluation instead of repeating it.
                     g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg)
+                    if g is None:  # unconverged forward rejected (#1059)
+                        return float("nan")
                     return _tree_dot(g, direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))

@@ -5,6 +5,7 @@ Spec: docs/superpowers/specs/2026-10-01-ctm-unconverged-policy-design.md
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import re
 import warnings
@@ -153,12 +154,18 @@ def _rand(D, d, seed):
     return jnp.asarray(a / np.linalg.norm(a))
 
 
-def _cfg(unit_cell, policy, *, max_iter=3, steps=3, ckpt=None, retries=2):
+def _cfg(
+    unit_cell, policy, *, max_iter=3, steps=3, ckpt=None, retries=2, conv_tol=1e-14
+):
     return iPEPSConfig(
         unit_cell=unit_cell,
         max_bond_dim=2,
         ctm=CTMConfig(
-            chi=4, max_iter=max_iter, min_iter=1, conv_tol=1e-14, on_unconverged=policy
+            chi=4,
+            max_iter=max_iter,
+            min_iter=1,
+            conv_tol=conv_tol,
+            on_unconverged=policy,
         ),
         gs_num_steps=steps,
         gs_stall_recovery="reset",
@@ -249,7 +256,10 @@ def test_site1_history_sv_diff_is_the_loops(unit_cell, monkeypatch):
 def test_site1_missing_diagnostic_skips_check(monkeypatch):
     """Review Focus 2: no forward_converged key -> no check, no stale reuse."""
     monkeypatch.setattr(_cea, "get_last_implicit_ad_diagnostics", lambda: {})
-    cfg = _cfg("2site", "raise", max_iter=200, steps=2)
+    # conv_tol=1e-10, not the helper's 1e-14: this test is about site 1, and at
+    # 1e-14 the site-4 final-energy forward sat on the tolerance (sv_diff
+    # 1.27e-14 on macOS CI) and raised there instead.
+    cfg = _cfg("2site", "raise", max_iter=200, steps=2, conv_tol=1e-10)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         out = _opt.optimize_gs_ad(_heisenberg_gate(), _init("2site"), cfg)
@@ -997,6 +1007,108 @@ def test_reused_probe_carries_its_own_forward_diagnostics():
     assert ev.reused_diagnostics["forward_sv_diff"] == 0.25
     assert ev.take(new, cfg) is None and ev.reused_diagnostics is None
     _cea.reset_forward_diagnostics()
+
+
+def _probe_unconverged_loss(x):
+    _cea._F3_LAST_DIAGNOSTICS["forward_converged"] = False
+    _cea._F3_LAST_DIAGNOSTICS["forward_iterations"] = 9
+    _cea._F3_LAST_DIAGNOSTICS["forward_sv_diff"] = 0.25
+    return jnp.sum(x**2)
+
+
+def test_dphi_probe_rejects_unconverged_forward_under_raise():
+    """Codex P1 on #1070: an unconverged dφ forward must not steer HZ.
+
+    The probe's gradient is refused at once (None -> NaN slope, which never
+    satisfies Wolfe), and nothing is carried to the next step, so a rejected
+    probe cannot be reused either.
+    """
+    ev = _opt._AcceptedProbeEval(enabled=True, check_policy=True)
+    p0, d = jnp.ones(3), jnp.ones(3)
+    cfg = CTMConfig(chi=4, on_unconverged="raise")
+    trial = _opt._normalize_params(_opt._tree_add(p0, _opt._tree_scale(d, 0.5)))
+    ev.start()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # rejection is silent, not a warning
+        assert ev.probe(_probe_unconverged_loss, 0.5, trial, cfg) is None
+    new = ev.accept(0.5, p0, d)
+    assert new is not trial  # recomputed, not the rejected probe's trial
+    assert ev.take(new, cfg) is None
+    _cea.reset_forward_diagnostics()
+
+
+def test_dphi_probe_warns_and_keeps_gradient_under_warn():
+    ev = _opt._AcceptedProbeEval(enabled=True, check_policy=True)
+    cfg = CTMConfig(chi=4, on_unconverged="warn")
+    trial = jnp.ones(3)
+    ev.start()
+    with pytest.warns(CTMNotConvergedWarning, match="line_search"):
+        g = ev.probe(_probe_unconverged_loss, 0.5, trial, cfg)
+    np.testing.assert_allclose(np.asarray(g), 2 * np.ones(3))
+    _cea.reset_forward_diagnostics()
+
+
+def test_dphi_probe_without_policy_keeps_legacy_gradient():
+    """The multisite optimizer does not wire #1059 yet: no check there."""
+    ev = _opt._AcceptedProbeEval(enabled=True)
+    cfg = CTMConfig(chi=4, on_unconverged="raise")
+    ev.start()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert ev.probe(_probe_unconverged_loss, 0.5, jnp.ones(3), cfg) is not None
+    _cea.reset_forward_diagnostics()
+
+
+def test_hz_dphi_rejection_reaches_the_line_search(monkeypatch):
+    """End to end: under "raise" a dφ probe on an unconverged forward hands
+    HZ a NaN slope (counted in history), never a gradient."""
+    seen = []
+    real = _opt._probe_forward_rejected
+
+    def spy(diag, ctm_cfg):
+        d = dict(diag)
+        if "forward_converged" in d:
+            d["forward_converged"] = False  # every dφ forward "fails"
+        out = real(d, ctm_cfg)
+        seen.append(out)
+        return out
+
+    monkeypatch.setattr(_opt, "_probe_forward_rejected", spy)
+    cfg = dataclasses.replace(
+        _cfg("1x1", "raise", max_iter=200, steps=2, conv_tol=1e-10),
+        gs_line_search=True,
+        gs_line_search_method="hager_zhang",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        _opt.optimize_gs_ad(_heisenberg_gate(), _init("1x1"), cfg)
+    assert seen and all(seen), seen
+
+
+def test_policy_scope_defers_stationarity_warning_for_unconverged_forward():
+    """Codex P2 on #1070: inside the policy scope an unconverged forward does
+    not emit the #841 RuntimeWarning (the caller's typed policy reports it),
+    and the once-per-build latch stays unspent so the guard still fires for a
+    caller outside the scope."""
+    from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+    from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
+    from tenax.algorithms.ipeps import heisenberg_gate
+    from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
+
+    site = _rand(2, 2, 3)
+    data = site.todense() if hasattr(site, "todense") else site
+    site = _wrap_as_dense_tensor(data / jnp.linalg.norm(data))
+    kw = dict(chi=4, max_iter=5, min_iter=2, conv_tol=3e-9, conv_method="elementwise")
+    args = ({(0, 0): site}, SINGLE_SITE_NEIGHBORS, heisenberg_gate())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        with _cea.policy_owns_unconverged_forward():
+            ctm_energy_implicit(*args, **kw)
+    d = _cea.get_last_implicit_ad_diagnostics()
+    assert d["forward_converged"] is False
+    assert not d["forward_stationarity_residual"] <= d["forward_stationarity_threshold"]
+    with pytest.warns(RuntimeWarning, match="stationarity residual"):
+        ctm_energy_implicit(*args, **kw)
 
 
 def test_site1_checks_supplied_diagnostics_over_module(monkeypatch):

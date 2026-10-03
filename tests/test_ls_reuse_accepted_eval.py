@@ -78,10 +78,10 @@ def spy(monkeypatch):
     base = _opt._AcceptedProbeEval
 
     class _Spied(base):
-        def __init__(self, enabled):
+        def __init__(self, enabled, **kw):
             # reuse=False is the pristine pre-fix path: no probe recorded,
             # accept recomputes params, every top-of-step evaluates.
-            super().__init__(enabled and state["reuse"])
+            super().__init__(enabled and state["reuse"], **kw)
 
         def probe(self, *a, **kw):
             state["counts"].probes += 1

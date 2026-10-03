@@ -648,7 +648,10 @@ class TestOptimizeGsAd2Site:
             max_bond_dim=2,
             num_imaginary_steps=10,
             dt=0.3,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            # on_unconverged="warn" (#1059): max_iter=10 is a smoke-test budget
+            # that leaves the final-energy forward unconverged (sv_diff ~1e-7);
+            # this test checks the code path runs, not convergence.
+            ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
             gs_num_steps=3,
             gs_learning_rate=1e-3,
             unit_cell="2site",
@@ -723,7 +726,10 @@ class TestOptimizeGsAd2Site:
         """2-site AD with C4v parameterization should run and give finite energy."""
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            # on_unconverged="warn" (#1059): max_iter=10 is a smoke-test budget
+            # that leaves the final-energy forward unconverged (sv_diff ~1e-7);
+            # this test checks the code path runs, not convergence.
+            ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
             gs_num_steps=3,
             gs_learning_rate=1e-3,
             unit_cell="2site",
@@ -739,7 +745,10 @@ class TestOptimizeGsAd2Site:
         """With gs_c4v=True, B should be the sublattice rotation of A."""
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            # on_unconverged="warn" (#1059): max_iter=10 is a smoke-test budget
+            # that leaves the final-energy forward unconverged (sv_diff ~1e-7);
+            # this test checks the code path runs, not convergence.
+            ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
             gs_num_steps=3,
             gs_learning_rate=1e-3,
             unit_cell="2site",
@@ -1789,7 +1798,10 @@ def test_noise_floor_does_not_gate_healthy_optimization():
 
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=100),
+        # on_unconverged="warn" (#1059): the step-4 gradient forward of this
+        # su_init trajectory plateau-bails at 34 sweeps (CI, d5a6b326); the
+        # test checks the #510 noise floor, not CTM convergence.
+        ctm=CTMConfig(chi=4, max_iter=100, on_unconverged="warn"),
         gs_num_steps=5,
         gs_learning_rate=1e-2,
         unit_cell="1x1",

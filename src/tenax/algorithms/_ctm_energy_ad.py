@@ -9,6 +9,7 @@ __all__ = [
     "set_implicit_ad_norm_diagnostics",
 ]
 
+import contextlib
 import logging
 import math
 import warnings
@@ -898,6 +899,33 @@ def get_last_implicit_ad_diagnostics() -> dict:
     return dict(_F3_LAST_DIAGNOSTICS)
 
 
+# True while a caller that acts on the forward's convergence verdict (#1059
+# site 1 and the HZ dphi probe) is running it; see
+# ``policy_owns_unconverged_forward``.
+_F3_POLICY_OWNS_UNCONVERGED = False
+
+
+@contextlib.contextmanager
+def policy_owns_unconverged_forward():
+    """Defer the #841 stationarity warning for an unconverged forward.
+
+    A caller that applies ``CTMConfig.on_unconverged`` to the forward
+    verdict right after ``value_and_grad`` wraps the call in this, so an
+    unconverged loop is reported once, by the policy (``CTMNotConvergedError``
+    or ``CTMNotConvergedWarning``, both carrying the stationarity residual),
+    instead of first as a ``RuntimeWarning`` that a warnings-as-errors filter
+    would raise ahead of the typed exception (Codex P2 on #1070).  Converged
+    but non-stationary forwards still warn: the policy does not see those.
+    """
+    global _F3_POLICY_OWNS_UNCONVERGED
+    prev = _F3_POLICY_OWNS_UNCONVERGED
+    _F3_POLICY_OWNS_UNCONVERGED = True
+    try:
+        yield
+    finally:
+        _F3_POLICY_OWNS_UNCONVERGED = prev
+
+
 # Keys written per forward by ``_check_forward_stationarity``.
 _FORWARD_DIAGNOSTIC_KEYS = (
     "forward_converged",
@@ -1271,8 +1299,15 @@ def _make_implicit_vjp_fn(
         _F3_LAST_DIAGNOSTICS["forward_step_multiplier"] = float(
             getattr(loop_info, "step_multiplier", float("nan"))
         )
-        # Fails closed: a NaN residual is not <= threshold, so it warns.
-        if not (residual <= threshold) and not _cached["stationarity_warned"]:
+        # Fails closed: a NaN residual is not <= threshold, so it warns.  An
+        # unconverged loop is left to the caller's #1059 policy when one owns
+        # it (``policy_owns_unconverged_forward``); the latch stays unspent.
+        deferred = _F3_POLICY_OWNS_UNCONVERGED and not forward_converged
+        if (
+            not (residual <= threshold)
+            and not deferred
+            and not _cached["stationarity_warned"]
+        ):
             _cached["stationarity_warned"] = True
             warnings.warn(
                 f"Implicit-AD CTM: the forward environment is not an "
