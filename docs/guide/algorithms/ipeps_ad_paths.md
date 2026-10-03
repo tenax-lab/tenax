@@ -28,7 +28,8 @@ config = iPEPSConfig(
         conv_tol=1e-8,
         projector_method="qr",  # fastest, best energy, scales to chi=64+
         # forward_gauge defaults to "auto": "bond_phase" on implicit AD
-        # (#841), "phase" on explicit AD -- both AD-correct, 1-site and 2-site
+        # (#841); on explicit AD it resolves to "phase", which the explicit
+        # energy does not apply (#1074)
     ),
     # Path 2, implicit AD -- the default, so this line only makes it explicit.
     # Swap to False for Path 1 (explicit AD through the unrolled sweeps) and
@@ -585,10 +586,12 @@ gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
 )
 
 # Explicit-AD configuration: L-BFGS + explicit AD + QR projectors.
-# forward_gauge defaults to "auto", which runs "phase" (variPEPS-style
-# Frobenius + phase fix) on explicit AD and "bond_phase" (#841) on
-# implicit AD. Reaches E=-0.6628
-# at D=2, chi=16 (literature: -0.6548 at D=2).
+# forward_gauge defaults to "auto"; on this explicit route it resolves to
+# "phase" but has no effect -- ctm_energy_explicit applies no forward gauge,
+# so the sweeps are ungauged (#1074).  (On implicit AD "auto" runs
+# "bond_phase", #841.)  Reaches E=-0.6628 at D=2, chi=16; the converged
+# D=2, chi=16 optimum is -0.66251 (Tenax implicit AD and variPEPS agree to
+# 4e-7, 2026-10-03).
 config = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(
@@ -690,7 +693,7 @@ Their intended use is summarized below:
 
 | Mode | Explicit AD (Path 1) | Implicit AD (Path 2, VJP) | Notes |
 |------|----------------------|----------------------------|-------|
-| ``"auto"`` (default) | Resolves to ``"phase"``; under ``optimize_gs_ad`` the explicit energy applies no forward gauge, so it has no effect there | Runs ``"bond_phase"`` (``"phase"`` with ``chi_ramp``, split CTM, or ``ctm_ad_mode``) | Resolved silently at the path entry; never reaches a CTM. The legacy ``ad_utils`` paths run ``"phase"``. |
+| ``"auto"`` (default) | Resolves to ``"phase"``; under ``optimize_gs_ad`` the explicit energy applies no forward gauge, so it has no effect there | Runs ``"bond_phase"``; resolves to ``"phase"`` with ``chi_ramp``, split CTM, or ``ctm_ad_mode`` (the split energies apply no forward gauge, #1074) | Resolved silently at the path entry; never reaches a CTM. The legacy ``ad_utils`` paths run ``"phase"``. |
 | ``"phase"`` | What ``"auto"`` resolves to; no effect under ``optimize_gs_ad`` (#1074) | Accepted (explicit opt-out of the bond gauge) | Cheapest gauge fix; Frobenius + differentiable phase fix. Works for 1-site and 2-site. |
 | ``"bond_phase"`` | Not supported | **Accepted (what ``"auto"`` runs)**, #841 | ``"phase"`` plus one sign/phase per chi index of every bond family, aligned to the previous env. Exact gauge transform. Removes the per-bond-index Z2 sign cycle that keeps ``"phase"`` from an element-wise fixed point (D=3 fermionic t-V, chi=12: stationarity residual 0.805 → ~5e-9). Not with ``chi_ramp``, split CTM, or ``ctm_ad_mode`` set (those engines own their CTM); explicit AD refuses it too. Charge sectors are grouped by block structure, not values: a bond whose stored blocks are numerically disconnected (exact zeros from rank deficiency) is only partly aligned, and the #841 stationarity guard then warns. |
 | ``"qr"`` | Legacy QR gauge | Refused (`ValueError`) | Forward-only CTM, notebooks, diagnostics. |

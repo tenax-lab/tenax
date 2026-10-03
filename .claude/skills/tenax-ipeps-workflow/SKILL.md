@@ -187,8 +187,8 @@ config = iPEPSConfig(
     ctm=CTMConfig(
         chi=16,
         max_iter=60,
-        # forward_gauge="auto" is the default: "bond_phase" on implicit,
-        # "phase" on explicit AD, 1-site and 2-site.
+        # forward_gauge="auto" is the default: "bond_phase" on implicit AD;
+        # on explicit AD it resolves to "phase" but no gauge is applied (#1074).
     ),
     # gs_implicit_ad=True is the default (implicit diff + VJP backward)
     gs_optimizer="lbfgs",
@@ -275,7 +275,9 @@ prefer `ctmrg_heuristic_increase_chi`.
 - **Sigma gauge (`forward_gauge="sigma"`)** is required for strict
   element-wise convergence at large chi (1-site path).  Aligns CTM
   environments via power iteration of the transfer matrix.
-- **Explicit AD (`gs_implicit_ad=False`)** runs the `"phase"` gauge.
+- **Explicit AD (`gs_implicit_ad=False`)** applies no forward gauge under
+  `optimize_gs_ad`: `"auto"` resolves to `"phase"`, but `ctm_energy_explicit`
+  ignores it (#1074).
   Use `projector_method="qr"` for best performance with explicit AD.
 - **Start with SU init (`su_init=True`).** The simple update provides a good
   starting tensor that avoids bad local minima. Without it, random
