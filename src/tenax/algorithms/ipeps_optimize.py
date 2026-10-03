@@ -1109,6 +1109,12 @@ def _optimize_gs_ad_tensor_reference_c4v(
                     flush=True,
                 )
             continue
+        # Count before masking: the masked gradient is what keeps the run
+        # alive, and it is also a false stationarity signal -- an all-NaN
+        # gradient masks to norm exactly 0.0 (fires ``grad_norm`` on this
+        # step) and to a no-op update (fires ``dE`` on the next).  Same
+        # guard as ``ipeps_optimize_root_implicit`` (#812).
+        n_nonfinite = int(jnp.sum(~jnp.isfinite(grads)))
         grads = jnp.where(jnp.isfinite(grads), grads, 0.0)
         grads = _euclidean_grads(grads)
         E = float(energy_val)
@@ -1139,7 +1145,9 @@ def _optimize_gs_ad_tensor_reference_c4v(
             if config.gs_conv_criterion in ("grad_norm", "both")
             else None
         )
-        if _converged_outer(config, delta_energy, grad_norm_val):
+        if n_nonfinite:
+            prev_energy = float("inf")
+        elif _converged_outer(config, delta_energy, grad_norm_val):
             if config.gs_verbose:
                 _log_ad_converged(
                     "c4v_reference",

@@ -3,8 +3,10 @@
 ``iPEPSConfig.gs_conv_criterion`` selects which condition exits
 ``optimize_gs_ad``:
 
-* ``"dE"``       — legacy ``|E_step - E_step-1| < gs_conv_tol`` (default).
-* ``"grad_norm"`` — variPEPS-style ``||grad||_2 < gs_grad_norm_tol``.
+* ``"dE"``       — legacy ``|E_step - E_step-1| < gs_conv_tol`` (the
+  default before v0.8.4, deprecated).
+* ``"grad_norm"`` — variPEPS-style ``||grad||_2 < gs_grad_norm_tol``
+  (default since v0.8.4).
 * ``"both"``      — require both to hold simultaneously.
 
 These tests cover the helper, config validation, and end-to-end exit
@@ -20,18 +22,17 @@ import pytest
 from tenax import CTMConfig, iPEPSConfig, optimize_gs_ad
 from tenax.algorithms.ipeps_optimize import _converged_outer, _grad_l2_norm
 
-# --- unit: deprecation warning for legacy default --------------------------
+# --- unit: deprecation warning for the legacy criterion -------------------
 
 
 def test_iPEPSConfig_dE_emits_deprecation_warning():
-    """``gs_conv_criterion='dE'`` (current default) emits a DeprecationWarning.
+    """An explicit ``gs_conv_criterion='dE'`` emits a DeprecationWarning.
 
-    The warning is suppressed project-wide in ``pyproject.toml`` so the
-    rest of the test suite stays quiet during the transition; this test
-    un-suppresses it via ``pytest.warns`` to confirm it still fires.
+    Since v0.8.4 the default is ``'grad_norm'`` and does not warn (pinned
+    in ``tests/test_ipeps_grad_norm_default.py``).  The warning is
+    suppressed project-wide in ``pyproject.toml``; this test un-suppresses
+    it via ``pytest.warns`` to confirm it still fires.
     """
-    with pytest.warns(DeprecationWarning, match="gs_conv_criterion='dE'"):
-        iPEPSConfig()  # default
     with pytest.warns(DeprecationWarning, match="gs_conv_criterion='dE'"):
         iPEPSConfig(gs_conv_criterion="dE")  # explicit
 
@@ -57,7 +58,7 @@ def _cfg(criterion: str, *, dE_tol: float = 1e-8, gn_tol: float = 1e-5) -> iPEPS
     )
 
 
-def test_converged_outer_dE_default_ignores_grad_norm():
+def test_converged_outer_dE_ignores_grad_norm():
     cfg = _cfg("dE", dE_tol=1e-5)
     # Small dE: converged regardless of (huge) grad norm.
     assert _converged_outer(cfg, delta_energy=1e-7, grad_norm=1e3) is True
@@ -163,8 +164,8 @@ def test_grad_norm_criterion_exits_when_grad_is_tiny():
 
 
 @pytest.mark.algorithm
-def test_dE_default_unchanged_when_dE_tol_loose():
-    """``"dE"`` (legacy default) still exits via the dE branch."""
+def test_dE_unchanged_when_dE_tol_loose():
+    """An explicit ``"dE"`` (the pre-v0.8.4 default) still exits via the dE branch."""
     cfg = replace(
         _fast_base_cfg(),
         gs_conv_criterion="dE",

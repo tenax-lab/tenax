@@ -559,6 +559,23 @@ class iPEPSConfig:
                                tensor via simple update (``ipeps()``) instead of
                                random initialization.  Ignored when ``A_init``
                                is provided explicitly.
+        gs_conv_criterion:     Outer-loop exit test for ``optimize_gs_ad``.
+                               ``"grad_norm"`` (default since v0.8.4) exits
+                               when ``||grad E||_2 < gs_grad_norm_tol`` -- a
+                               stationarity test, as in variPEPS.  ``"dE"``
+                               (the default before v0.8.4, deprecated) exits
+                               when ``|E_k - E_{k-1}| < gs_conv_tol``, which
+                               also fires when a line search barely moves or
+                               right after a rollback / noise injection, with
+                               the gradient still large.  ``"both"`` requires
+                               both.  A run that exhausts ``gs_num_steps``
+                               without meeting the criterion returns the best
+                               state with ``converged=False`` in its history.
+        gs_conv_tol:           ``|dE|`` tolerance; used only by the ``"dE"``
+                               and ``"both"`` criteria.
+        gs_grad_norm_tol:      ``||grad E||_2`` tolerance (default ``1e-5``,
+                               variPEPS ``optimizer_convergence_eps``); used
+                               by ``"grad_norm"`` and ``"both"``.
         gs_verbose:            If True, print AD optimization progress.
         gs_log_interval:       Print every N AD steps when ``gs_verbose`` is
                                enabled. The first and final steps are always
@@ -646,16 +663,17 @@ class iPEPSConfig:
     gs_learning_rate: float = 1e-3
     gs_num_steps: int = 200
     gs_conv_tol: float = 1e-8
-    # Outer convergence criterion for ``optimize_gs_ad``. ``"dE"`` (current
-    # legacy default, **deprecated** — see ``__post_init__``) exits when
-    # ``|E_step - E_step-1| < gs_conv_tol`` — this is variationally fragile
-    # near flat minima or right after a stall recovery, where ``|dE|`` can
-    # underflow ``gs_conv_tol`` while the gradient is still large.
-    # ``"grad_norm"`` matches variPEPS by exiting when
-    # ``||grad E||_2 < gs_grad_norm_tol`` (a true stationarity test); it
-    # will become the default in a future release. ``"both"`` requires both
-    # to hold simultaneously (most conservative). See issue #448.
-    gs_conv_criterion: Literal["dE", "grad_norm", "both"] = "dE"
+    # Outer convergence criterion for ``optimize_gs_ad``. ``"grad_norm"``
+    # (the default since v0.8.4) matches variPEPS by exiting when
+    # ``||grad E||_2 < gs_grad_norm_tol`` (a true stationarity test).
+    # ``"dE"`` (the default before v0.8.4, **deprecated** — see
+    # ``__post_init__``) exits when ``|E_step - E_step-1| < gs_conv_tol`` —
+    # variationally fragile near flat minima, after a barely-moving line
+    # search, or right after a stall recovery, where ``|dE|`` underflows
+    # ``gs_conv_tol`` while the gradient is still large (|g| = 1e-2 .. 0.69
+    # at "convergence" in the v0.8.4 validation runs).  ``"both"`` requires
+    # both to hold simultaneously (most conservative). See issue #448.
+    gs_conv_criterion: Literal["dE", "grad_norm", "both"] = "grad_norm"
     # Gradient-norm tolerance used by the ``"grad_norm"`` and ``"both"``
     # criteria. The default ``1e-5`` matches variPEPS
     # ``optimizer_convergence_eps``.
@@ -1000,12 +1018,13 @@ class iPEPSConfig:
             raise ValueError("gs_resume=True requires gs_checkpoint_path to be set")
         if self.gs_conv_criterion == "dE":
             warnings.warn(
-                "gs_conv_criterion='dE' is deprecated and will be replaced by "
-                "'grad_norm' as the default in a future release (issue #448). "
-                "The dE criterion underflows near flat minima and after stall "
-                "recoveries, causing premature exit. "
-                "Set gs_conv_criterion='grad_norm' to opt in now, or 'both' "
-                "for the most conservative criterion.",
+                "gs_conv_criterion='dE' is deprecated; it was the default "
+                "before v0.8.4, and the default is now 'grad_norm' (issue "
+                "#448). The dE criterion underflows near flat minima, after "
+                "a barely-moving line search and after stall recoveries, "
+                "declaring convergence while ||grad E|| is still large. "
+                "Drop the argument to use 'grad_norm', or pass 'both' for "
+                "the most conservative criterion.",
                 DeprecationWarning,
                 stacklevel=2,
             )

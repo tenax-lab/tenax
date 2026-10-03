@@ -221,13 +221,16 @@ def _converged_outer(
 
     Honors ``config.gs_conv_criterion``:
 
-    - ``"dE"`` (default): legacy behaviour — exit on
+    - ``"grad_norm"`` (default since v0.8.4): exit on
+      ``||grad||_2 < gs_grad_norm_tol`` (variPEPS
+      ``optimizer_convergence_eps`` analog, issue #448).
+    - ``"dE"`` (default before v0.8.4, deprecated): exit on
       ``|dE| < gs_conv_tol``.
-    - ``"grad_norm"``: exit on ``||grad||_2 < gs_grad_norm_tol``
-      (variPEPS ``optimizer_convergence_eps`` analog, issue #448).
     - ``"both"``: require both to hold simultaneously.
 
-    A ``None`` ``grad_norm`` defeats any criterion that needs it.
+    A ``None`` ``grad_norm`` defeats any criterion that needs it, and so
+    does a NaN one (``nan < tol`` is False) -- keep the comparisons in the
+    ``x < tol`` form; ``not (x >= tol)`` would let NaN through.
     """
     criterion = config.gs_conv_criterion
     de_ok = delta_energy < config.gs_conv_tol

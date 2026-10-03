@@ -1,0 +1,206 @@
+"""``gs_conv_criterion`` defaults to ``"grad_norm"`` (v0.8.4, issue #448).
+
+The legacy ``"dE"`` default, ``|E_k - E_{k-1}| < gs_conv_tol``, declared
+convergence with ``||grad E||`` between 1e-2 and 0.69 in all four D=2/3
+square-Heisenberg validation runs: a tiny ``dE`` happens whenever the line
+search barely moves, or right after a rollback / noise injection.
+
+These tests pin the *mechanism*, not a physical convergence: the CTM energy
+function is replaced by a scripted one whose value and gradient are set
+independently, so "energy repeats while the gradient stays large" is exact
+rather than hoped for.
+"""
+
+from __future__ import annotations
+
+import warnings
+from dataclasses import replace
+
+import jax
+import jax.numpy as jnp
+import pytest
+
+from tenax import CTMConfig, iPEPSConfig, optimize_gs_ad
+from tenax.algorithms import ipeps_ad_policy
+
+_E_CONST = -0.5
+
+
+def _heisenberg_gate():
+    Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+    H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
+    return H.reshape(2, 2, 2, 2)
+
+
+def _script_energy(monkeypatch, grad_scale: float):
+    """Replace the CTM energy with ``E == _E_CONST`` and ``|grad| ~ grad_scale``.
+
+    ``s - stop_gradient(s)`` is identically zero in value but carries the
+    gradient of ``s``, so the energy repeats *exactly* on every step (dE == 0
+    from step 1 on) while the gradient norm is whatever ``grad_scale`` makes
+    it.  ``W`` is a fixed random tensor so the gradient is not parallel to the
+    (normalised) parameters and survives the projection onto the sphere.
+    """
+    calls = {"n": 0}
+
+    def _factory(**_kw):
+        def _energy(site_tensors):
+            calls["n"] += 1
+            s = 0.0
+            for i, key in enumerate(sorted(site_tensors)):
+                a = site_tensors[key].todense()
+                w = jax.random.normal(jax.random.PRNGKey(11 + i), a.shape)
+                s = s + jnp.real(jnp.sum(a * w))
+            s = grad_scale * s
+            return _E_CONST + (s - jax.lax.stop_gradient(s))
+
+        return _energy
+
+    monkeypatch.setattr(ipeps_ad_policy, "make_ctm_energy_fn", _factory)
+    return calls
+
+
+def _cfg(unit_cell: str, **overrides) -> iPEPSConfig:
+    base = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4, max_iter=4),
+        unit_cell=unit_cell,
+        gs_num_steps=5,
+        gs_learning_rate=1e-3,
+        gs_optimizer="adam",
+        gs_line_search=False,
+        gs_implicit_ad=False,
+        gs_explicit_ad_steps=2,
+        gs_explicit_ad_warmup=1,
+        su_init=False,
+        return_history=True,
+    )
+    return replace(base, **overrides)
+
+
+def _run(unit_cell: str, cfg: iPEPSConfig) -> dict:
+    out = optimize_gs_ad(_heisenberg_gate(), None, cfg)
+    return out[-1]
+
+
+# --- (a) the default -------------------------------------------------------
+
+
+def test_default_criterion_is_grad_norm():
+    assert iPEPSConfig().gs_conv_criterion == "grad_norm"
+    assert iPEPSConfig().gs_grad_norm_tol == 1e-5
+
+
+# --- (d) warnings ----------------------------------------------------------
+
+
+def test_default_does_not_warn():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        iPEPSConfig()
+        iPEPSConfig(max_bond_dim=3, gs_num_steps=10)
+
+
+def test_explicit_dE_still_selectable_and_warns():
+    with pytest.warns(DeprecationWarning, match="gs_conv_criterion='dE'") as rec:
+        cfg = iPEPSConfig(gs_conv_criterion="dE")
+    assert cfg.gs_conv_criterion == "dE"
+    assert "before v0.8.4" in str(rec[0].message)
+
+
+# --- (b) dE == 0 with a large gradient does not converge -------------------
+
+
+@pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
+def test_default_ignores_zero_dE_when_gradient_is_large(monkeypatch, unit_cell):
+    """dE == 0 exactly from step 1, |g| ~ O(1): the default must keep going."""
+    _script_energy(monkeypatch, grad_scale=1.0)
+    cfg = _cfg(unit_cell)
+    assert cfg.gs_conv_criterion == "grad_norm"  # the default under test
+    hist = _run(unit_cell, cfg)
+    assert hist["converged"] is False
+    assert hist["num_steps"] == cfg.gs_num_steps
+    # Regime guard: the scripted energy really did repeat, so the legacy
+    # criterion *would* have fired (see the dE control below).
+    energies = [e for e in hist["energies"] if e is not None]
+    assert len(energies) >= 2 and max(energies) - min(energies) < 1e-12
+
+
+@pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
+def test_explicit_dE_converges_on_the_same_signal(monkeypatch, unit_cell):
+    """Control: the same scripted run under ``"dE"`` stops at step 2 —
+    the false convergence the default switch removes."""
+    _script_energy(monkeypatch, grad_scale=1.0)
+    with pytest.warns(DeprecationWarning):
+        cfg = _cfg(unit_cell, gs_conv_criterion="dE")
+    hist = _run(unit_cell, cfg)
+    assert hist["converged"] is True
+    assert hist["num_steps"] == 2
+
+
+# --- (c) a small gradient converges under the default ----------------------
+
+
+@pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
+def test_default_converges_when_gradient_is_below_tol(monkeypatch, unit_cell):
+    """|g| ~ 1e-9 << gs_grad_norm_tol: exit on step 0, before any dE exists."""
+    _script_energy(monkeypatch, grad_scale=1e-9)
+    hist = _run(unit_cell, _cfg(unit_cell))
+    assert hist["converged"] is True
+    assert hist["num_steps"] == 1
+
+
+# --- finite safety: a masked NaN gradient is not stationarity ---------------
+
+
+def test_c4v_reference_nan_gradient_does_not_converge(monkeypatch):
+    """The C4v-reference loop masks non-finite gradient entries to 0 before
+    taking the norm.  An all-NaN gradient then has ``||g|| == 0.0`` -- below
+    any tolerance -- so, under the ``grad_norm`` default, the run would stop
+    on step 0 and report the untouched initial state as converged.
+
+    The energy is scripted (value ``_E_CONST``, gradient NaN everywhere) so
+    the signal is exact; the real CTM still runs, only its energy is replaced.
+    """
+    import tenax.algorithms._ctm_tensor as _ctm_tensor
+
+    @jax.custom_vjp
+    def _nan_grad(x):
+        return jnp.zeros((), x.dtype)
+
+    def _fwd(x):
+        return _nan_grad(x), x
+
+    def _bwd(x, g):
+        return (jnp.full_like(x, jnp.nan),)
+
+    _nan_grad.defvjp(_fwd, _bwd)
+
+    def _fake_energy(A_tensor, env, gate, d_phys):
+        return _E_CONST + _nan_grad(A_tensor.todense())
+
+    monkeypatch.setattr(_ctm_tensor, "compute_energy_ctm_tensor", _fake_energy)
+
+    cfg = iPEPSConfig(
+        max_bond_dim=2,
+        ctm=CTMConfig(chi=4, max_iter=8, min_iter=2, ctm_ad_mode="c4v_reference"),
+        gs_num_steps=3,
+        gs_learning_rate=1e-2,
+        gs_implicit_ad=True,
+        gs_c4v=True,
+        unit_cell="1x1",
+        su_init=False,
+        gs_optimizer="adam",
+        gs_verbose=True,
+    )
+    assert cfg.gs_conv_criterion == "grad_norm"
+    A0 = jax.random.normal(jax.random.PRNGKey(7), (2, 2, 2, 2, 2))
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        optimize_gs_ad(_heisenberg_gate(), A0, cfg)
+    assert "converged at step" not in buf.getvalue(), buf.getvalue()
