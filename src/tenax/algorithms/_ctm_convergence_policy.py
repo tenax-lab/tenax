@@ -144,11 +144,16 @@ class CTMNotConvergedError(RuntimeError):
         *,
         conv_tol: float | None = None,
         chi: int | None = None,
+        detail: str | None = None,
     ):
         self.info = info
         self.site = site
         self.step = step
-        super().__init__(_describe(info, site, step, conv_tol, chi))
+        msg = _describe(info, site, step, conv_tol, chi)
+        # ``detail``: the diagnostic a strict caller would otherwise have been
+        # warned with (blind corners, hold-test verdicts), so raising loses
+        # none of it.
+        super().__init__(f"{msg}\n{detail}" if detail else msg)
 
 
 class CTMNotConvergedWarning(UserWarning):

@@ -927,6 +927,52 @@ def test_site5_ctm_tensor_2site_strict():
         )  # converges: no raise
 
 
+def test_site5_strict_raises_under_warnings_as_errors():
+    """Codex P2 on #1070: strict=True must raise CTMNotConvergedError *instead
+    of* warning -- under ``-W error`` a legacy warning emitted first would abort
+    the call as a UserWarning and the typed exception would never surface.  The
+    suppressed diagnostic is carried in the exception's message instead."""
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+    from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
+
+    A = _wrap_as_dense_tensor(_rand(2, 2, 0))
+    B = _wrap_as_dense_tensor(_rand(2, 2, 1))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(CTMNotConvergedError) as ei:
+            ctm_tensor_2site(A, B, chi=4, max_iter=2, conv_tol=1e-14, strict=True)
+    assert "ctm_tensor_multisite()" in str(ei.value)
+    assert ei.value.info.iterations == 2
+
+
+def test_site5_iterations_count_sweeps_run_on_early_hold_exit():
+    """Codex P2 on #1070: the hold's budget exit stops before max_iter, so the
+    reported iteration count must be the sweeps that ran, not the budget."""
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+    from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
+
+    A = _wrap_as_dense_tensor(_rand(2, 2, 0))
+    B = _wrap_as_dense_tensor(_rand(2, 2, 1))
+    max_iter = 150
+    with pytest.raises(CTMNotConvergedError) as ei:
+        # The criterion is met well inside max_iter, but a 100-sweep hold needs
+        # more CTM steps than remain, so the loop stops early, unverified.
+        ctm_tensor_2site(
+            A,
+            B,
+            chi=4,
+            max_iter=max_iter,
+            conv_tol=1e-6,
+            hold_sweeps=100,
+            strict=True,
+        )
+    msg = str(ei.value)
+    assert "hold test" in msg and "did not run" in msg, msg
+    n = ei.value.info.iterations
+    assert 0 < n < max_iter
+    assert f"stopped after {n} of max_iter={max_iter}" in msg
+
+
 def test_reused_probe_carries_its_own_forward_diagnostics():
     """#1062 reuse: a step that takes the accepted dφ probe's value_and_grad
     must be site-1 checked against *that* probe's forward, not whatever forward
