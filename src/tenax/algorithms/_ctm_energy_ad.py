@@ -397,6 +397,7 @@ def ctm_energy_implicit(
     recipe: str = "2x2",
     device_mesh=None,
     ctm_chunk_size: int | None = None,
+    mixing: float = 0.0,
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -509,6 +510,10 @@ def ctm_energy_implicit(
         chi_max:           Optional ceiling for in-CTM chi bumping.
                            Required when ``ctmrg_heuristic_increase_chi``
                            is True.
+        mixing:            Linear mixing of the forward CTM iterate (#1060),
+                           see ``python_loop_ctm_converge``.  The fixed point,
+                           and so the adjoint's linearization point, is the
+                           same as without mixing.
 
     Returns:
         Scalar energy per site.
@@ -593,6 +598,7 @@ def ctm_energy_implicit(
         recipe,
         device_mesh,
         ctm_chunk_size,
+        mixing,
     )
 
 
@@ -620,6 +626,7 @@ def _sigma_gauged_ctm_converge(
     recipe: str = "2x2",
     device_mesh=None,
     ctm_chunk_size: int | None = None,
+    mixing: float = 0.0,
 ):
     """CTM convergence with sigma gauge fixing for element-wise fixed point.
 
@@ -726,6 +733,7 @@ def _sigma_gauged_ctm_converge(
         conv_tol=conv_tol,
         conv_method=conv_method,
         plateau_patience=plateau_patience,
+        mixing=mixing,
     )
     # #841: return the loop's convergence verdict instead of discarding it.
     # Callers on the implicit-AD path linearize the gauged step around
@@ -892,6 +900,7 @@ def _ctm_energy_implicit_dispatch(
     recipe="2x2",
     device_mesh=None,
     ctm_chunk_size=None,
+    mixing=0.0,
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -930,6 +939,7 @@ def _ctm_energy_implicit_dispatch(
         recipe,  # distinct sweep recipe → distinct cached forward+backward
         device_mesh,  # sharded vs single → distinct cached forward+backward
         ctm_chunk_size,  # distinct chunk size → distinct forward lax.map shape
+        mixing,  # the forward closure reads it (#1060)
     )
 
     entry = _VJP_CACHE.get(cache_key)
@@ -976,6 +986,7 @@ def _ctm_energy_implicit_dispatch(
         recipe=recipe,
         device_mesh=device_mesh,
         ctm_chunk_size=ctm_chunk_size,
+        mixing=mixing,
     )
     _VJP_CACHE[cache_key] = (f, mutables)
     return f(params_data_tuple)
@@ -1008,6 +1019,7 @@ def _make_implicit_vjp_fn(
     recipe: str = "2x2",
     device_mesh=None,
     ctm_chunk_size: int | None = None,
+    mixing: float = 0.0,
 ):
     """Build a custom_vjp-decorated function closed over static config.
 
@@ -1107,6 +1119,7 @@ def _make_implicit_vjp_fn(
                 recipe=recipe,
                 device_mesh=device_mesh,
                 ctm_chunk_size=ctm_chunk_size,
+                mixing=mixing,
             )
             # chi_ramp doesn't trigger in-CTM bump (mutex enforced in dispatch);
             # chi_post is the final ramp stage's chi, which equals ``chi`` for
@@ -1136,6 +1149,7 @@ def _make_implicit_vjp_fn(
                 recipe=recipe,
                 device_mesh=device_mesh,
                 ctm_chunk_size=ctm_chunk_size,
+                mixing=mixing,
             )
         _check_forward_stationarity(site_tensors, envs, chi_post, forward_converged)
         return envs, chi_post
