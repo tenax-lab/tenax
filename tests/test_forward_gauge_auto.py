@@ -397,3 +397,11 @@ def test_mixing_with_auto_still_refuses_where_auto_is_not_bond_phase():
 def test_mixing_still_refuses_an_explicit_non_bond_gauge(gauge):
     with pytest.raises(ValueError, match="ctm_mixing > 0 requires"):
         CTMConfig(forward_gauge=gauge, ctm_mixing=0.3)
+
+
+def test_legacy_paths_refuse_mixing_rather_than_drop_it():
+    """``"auto"`` + mixing now constructs; the legacy paths resolve it to phase
+    and have no mixing, so they must refuse, not silently run unmixed."""
+    with pytest.raises(ValueError, match="ctm_mixing"):
+        _legacy_forward_gauge(CTMConfig(ctm_mixing=0.3))
+    assert _legacy_forward_gauge(CTMConfig()) == "phase"

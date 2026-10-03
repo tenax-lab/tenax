@@ -114,6 +114,15 @@ def _legacy_forward_gauge(config) -> str:
     values pass through.  Duck-typed configs without the attribute keep the
     historical ``"qr"``.
     """
+    if getattr(config, "ctm_mixing", 0.0) > 0.0:
+        # CTMConfig admits ``"auto"`` with mixing (it is bond_phase on the
+        # fused implicit path); these paths resolve it to phase and implement
+        # no mixing, so refuse rather than silently run unmixed (#1060).
+        raise ValueError(
+            f"ctm_mixing={config.ctm_mixing!r} is not implemented on the legacy "
+            "ad_utils CTM paths; use optimize_gs_ad's implicit-AD path with "
+            "forward_gauge='bond_phase' (or the 'auto' default)."
+        )
     return resolve_forward_gauge(
         getattr(config, "forward_gauge", "qr"), implicit_ad=False
     )
