@@ -4,6 +4,24 @@
 
 ### Behavior Changes
 
+- **Implicit-AD gradients now include the 2x2 projector response**
+  (#1028).  `CTMConfig.projector_backward="auto"` resolves to `"flow"`
+  wherever `forward_gauge` resolves to `"bond_phase"` on the implicit path
+  -- i.e. the default fused implicit-AD path -- instead of freezing the
+  plaquette projectors with `stop_gradient`.  Why: the frozen gradient is
+  not the gradient of the energy.  Relative AD-vs-FD error on the 1x1
+  Heisenberg implicit energy, frozen vs flowing: D=2 chi=8 0.37-0.66% vs
+  1e-6; D=3 chi=16 6.8%/74% vs 1.2e-6/4.7e-6; D=3 chi=32 9.8%/7.5% vs
+  2.5e-6/4.2e-6 (adjoint residual ~3e-11).  At D=3 chi=16 (1x1, 74 L-BFGS
+  steps) the frozen run ended at E=-0.66750, the flowing one at -0.66819
+  (variPEPS: -0.66823).
+  - **Cost**: a flowing backward is more expensive; that D=3 run took 1.8x
+    the wall-clock of the frozen one.
+  - **To restore the old behaviour**, pass
+    `CTMConfig(projector_backward="standard")`.  Explicit AD, split CTM,
+    an explicit `forward_gauge="phase"` and the `ctm_ad_mode` engines are
+    unchanged (`"auto"` still freezes there).
+
 - **`iPEPSConfig.gs_conv_criterion` now defaults to `"grad_norm"`**
   (was `"dE"`; #448).  The AD outer loop (`optimize_gs_ad` and every
   dispatcher behind it -- 1-site, 2-site, multisite, C4v-reference,
