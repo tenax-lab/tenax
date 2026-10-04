@@ -221,13 +221,16 @@ def _converged_outer(
 
     Honors ``config.gs_conv_criterion``:
 
-    - ``"dE"`` (default): legacy behaviour — exit on
+    - ``"grad_norm"`` (default since v0.8.4): exit on
+      ``||grad||_2 < gs_grad_norm_tol`` (variPEPS
+      ``optimizer_convergence_eps`` analog, issue #448).
+    - ``"dE"`` (default before v0.8.4, deprecated): exit on
       ``|dE| < gs_conv_tol``.
-    - ``"grad_norm"``: exit on ``||grad||_2 < gs_grad_norm_tol``
-      (variPEPS ``optimizer_convergence_eps`` analog, issue #448).
     - ``"both"``: require both to hold simultaneously.
 
-    A ``None`` ``grad_norm`` defeats any criterion that needs it.
+    A ``None`` ``grad_norm`` defeats any criterion that needs it, and so
+    does a NaN one (``nan < tol`` is False) -- keep the comparisons in the
+    ``x < tol`` form; ``not (x >= tol)`` would let NaN through.
     """
     criterion = config.gs_conv_criterion
     de_ok = delta_energy < config.gs_conv_tol
@@ -272,3 +275,20 @@ def _grad_l2_norm(grads) -> float:
         return 0.0
     sq = sum(jnp.vdot(jnp.ravel(g), jnp.ravel(g)).real for g in leaves)
     return float(jnp.sqrt(sq))
+
+
+def _su_start_guard_armed(init_from_su: bool, start_step: int) -> bool:
+    """Whether to skip the convergence test on the first gradient evaluation.
+
+    Under ``"grad_norm"`` the very first evaluation can pass the test, which
+    ``"dE"`` never could (``prev_energy = inf``).  For a simple-update start
+    that is a stationary point (a saddle such as the product state, or the SU
+    plateau the 1-site ``"noise"`` default exists for) that would return the
+    SU state as converged before the line search could fail and trigger stall
+    recovery (Codex P1 on #1075).  So: skip the test once and take the
+    optimizer step, letting the configured recovery act; a still-stationary
+    next evaluation converges normally.  Only for an SU-derived start on a
+    fresh run -- a user-supplied ``A_init`` that is already stationary is a
+    warm start and converges at once, and so does a checkpoint resume.
+    """
+    return init_from_su and start_step == 0

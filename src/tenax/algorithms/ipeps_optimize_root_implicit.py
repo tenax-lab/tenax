@@ -647,6 +647,12 @@ def optimize_gs_ad_root_implicit(
     steps_run = 0
 
     converged_flag = False
+    # A simple-update start is never accepted on its first evaluation (#1075);
+    # this engine builds its own SU state, so the provenance is decided here.
+    # No stall recovery on this path: skip-and-continue.
+    from tenax.algorithms._ipeps_optimize_shared import _su_start_guard_armed
+
+    _su_guard = _su_start_guard_armed(A_init is None and config.su_init, 0)
     for step in range(config.gs_num_steps):
         steps_run = step + 1
         _step_t0 = _time.perf_counter()
@@ -735,6 +741,7 @@ def optimize_gs_ad_root_implicit(
             if config.gs_conv_criterion in ("grad_norm", "both")
             else None
         )
+        _skip_conv, _su_guard = _su_guard, False
         if n_nonfinite:
             # #812.  Masking a non-finite gradient to zero is what keeps the
             # run alive, and it is also what makes the run look converged --
@@ -754,7 +761,7 @@ def optimize_gs_ad_root_implicit(
             # grad-spike rollback, for the same "re-evaluates the same state
             # and sees dE == 0" reason.
             prev_energy = float("inf")
-        elif _converged_outer(config, delta_energy, grad_norm_val):
+        elif not _skip_conv and _converged_outer(config, delta_energy, grad_norm_val):
             if config.gs_verbose:
                 _log_ad_converged(
                     "root_implicit",
