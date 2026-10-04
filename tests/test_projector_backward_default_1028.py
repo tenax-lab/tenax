@@ -142,9 +142,13 @@ def test_default_implicit_gradient_matches_finite_differences():
         )
         return abs(ad - fd) / abs(fd)
 
+    from tenax.algorithms._ctm_energy_ad import get_last_implicit_ad_diagnostics
+
     cfg, energy = closure("auto")
     assert cfg.projector_backward == "flow"
     err_default = rel_error(energy)
+    # A converged forward must keep the flowing backward, not fall back.
+    assert get_last_implicit_ad_diagnostics()["projector_backward_used"] == "flow"
 
     _, energy_frozen = closure("standard")
     err_frozen = rel_error(energy_frozen)
@@ -155,3 +159,55 @@ def test_default_implicit_gradient_matches_finite_differences():
         f"(frozen control {err_frozen:.2e})"
     )
     assert np.isfinite(err_default)
+
+
+def test_unsolvable_flowing_adjoint_falls_back_to_frozen():
+    """A flowing backward whose adjoint is not solved is redone frozen.
+
+    The 2-site U(1)-Sz start's CTM is not a fixed point at max_iter=20
+    (stationarity residual 0.25), and there the flowing gradient was 121x off
+    finite differences (|g| = 82 against 1.5 frozen).  The backward must
+    detect the unsolved adjoint and return exactly the frozen gradient,
+    saying so in the diagnostics.
+    """
+    import warnings
+
+    from tenax.algorithms._ctm_energy_ad import (
+        ctm_energy_implicit,
+        get_last_implicit_ad_diagnostics,
+    )
+    from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
+    from tenax.algorithms.ipeps import heisenberg_gate, heisenberg_u1sz_init_pair
+    from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
+
+    A_sym, B_sym = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+    A0, B0 = jnp.asarray(A_sym.todense()), jnp.asarray(B_sym.todense())
+    gate = heisenberg_gate().todense()
+
+    def grad_with(projector_backward):
+        def energy(A, B):
+            return ctm_energy_implicit(
+                {(0, 0): _wrap_as_dense_tensor(A), (1, 0): _wrap_as_dense_tensor(B)},
+                CHECKERBOARD_NEIGHBORS,
+                gate,
+                chi=8,
+                max_iter=20,
+                projector_method="svd",
+                forward_gauge="bond_phase",
+                conv_method="elementwise",
+                projector_backward=projector_backward,
+            )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            g = jax.grad(energy, argnums=(0, 1))(A0, B0)
+        return g, dict(get_last_implicit_ad_diagnostics()), caught
+
+    g_flow, diag_flow, caught = grad_with("flow")
+    g_frozen, diag_frozen, _ = grad_with("auto")
+
+    assert diag_flow["projector_backward_used"] == "frozen_fallback", diag_flow
+    assert diag_frozen["projector_backward_used"] == "auto"
+    assert any("flowing-projector adjoint" in str(w.message) for w in caught)
+    for a, b in zip(g_flow, g_frozen):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-12)
