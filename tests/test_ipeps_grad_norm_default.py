@@ -247,15 +247,15 @@ def _run_captured(cfg, A_init=None):
 @pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
 def test_su_init_stationary_start_is_not_converged_at_step_zero(monkeypatch, unit_cell):
     """(a) SU start with |g| << tol: step 0 must not converge; the optimizer
-    step runs (and, on 1-site's "noise" default, the stall recovery fires);
-    the next evaluation, still stationary, converges normally."""
+    step runs (its line search fails, so the default "reset" stall recovery
+    fires and rolls back to the same state); the next evaluation, still
+    stationary, converges normally."""
     _script_energy(monkeypatch, grad_scale=1e-9)
     hist, log = _run_captured(_su_cfg(unit_cell))
     assert hist["converged"] is True
     assert hist["num_steps"] == 2, log
     assert "converged at step 2" in log, log
-    if unit_cell == "1x1":
-        assert "adding noise" in log, log
+    assert "stall #1, reset L-BFGS history" in log, log
 
 
 @pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
