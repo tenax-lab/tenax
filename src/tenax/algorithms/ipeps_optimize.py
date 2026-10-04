@@ -4446,6 +4446,9 @@ def _optimize_gs_ad_tensor_2site(
                                 flush=True,
                             )
                         params = best_params
+                        # Saved below: a resume re-evaluates best_params and
+                        # must not read the dE ~ 0 as convergence.
+                        _rolled_back = True
                         _maybe_save_2s_checkpoint(
                             step, chi_before, _best_energy_at_step_start
                         )

@@ -250,3 +250,30 @@ def test_rollback_flag_survives_checkpoint_resume(monkeypatch, tmp_path, unit_ce
         f"{unit_cell}: resumed run converged on its first step -- the "
         f"rollback flag was not checkpointed/restored"
     )
+
+
+@pytest.mark.core
+def test_chi_ceiling_bailout_flag_survives_checkpoint_resume(tmp_path):
+    """The 2-site chi-ceiling bail-out rolls back and checkpoints -- flag it.
+
+    Phase A pins chi at chi_max with an auto-bump threshold every step
+    exceeds, so step 1 bails out to best_params and saves.  Phase B resumes
+    with the bail-out off: its first step re-evaluates the saved best state,
+    and dE ~ 0 must not be read as convergence.
+    """
+    ckpt = str(tmp_path / "ckpt_bailout")
+    ctm = CTMConfig(chi=4, chi_max=4, chi_auto_bump_eps=1e-300)
+    common = dict(ctm=ctm, gs_checkpoint_path=ckpt, gs_checkpoint_every=1)
+
+    phase_a = _run(_config("2site", gs_num_steps=5, gs_chi_ceiling_bailout=1, **common))
+    assert len(phase_a["energies"]) < 5, "phase A must end on the bail-out"
+
+    history = _run(
+        _config(
+            "2site", gs_num_steps=6, gs_chi_ceiling_bailout=0, gs_resume=True, **common
+        )
+    )
+    assert history["converged"] is False, (
+        "resumed run converged on its first step -- the chi-ceiling bail-out "
+        "did not flag its rollback in the checkpoint"
+    )
