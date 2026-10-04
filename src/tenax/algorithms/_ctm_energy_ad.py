@@ -48,6 +48,7 @@ from tenax.algorithms.ad_utils import (
     _phase_fix_ctm_tensor,
     _sigma_gauge_fix_env,
 )
+from tenax.algorithms.ipeps_config import resolve_forward_gauge
 
 # Every ``forward_gauge`` value the implicit-AD path accepts.
 _IMPLICIT_FORWARD_GAUGES = ("phase", "bond_phase", "sigma", "none")
@@ -380,7 +381,7 @@ def ctm_energy_implicit(
     qr_warmup_steps: int = 3,
     chi_ramp=None,
     env_init=None,
-    forward_gauge: str = "phase",
+    forward_gauge: str = "auto",
     conv_method: str = "sv",
     min_iter: int = 4,
     gmres_tol: float = 1e-6,
@@ -439,9 +440,13 @@ def ctm_energy_implicit(
         gmres_tol:         GMRES relative tolerance.
         gmres_maxiter:     GMRES maximum iterations.
         gmres_restart:     GMRES restart parameter.
-        forward_gauge:     Gauge fixing in forward/backward: ``"phase"`` (default),
-                           ``"sigma"`` (transfer-matrix eigenvector alignment), or
-                           ``"none"`` (no gauge fixing).
+        forward_gauge:     Gauge fixing in forward/backward: ``"auto"``
+                           (default, as in ``CTMConfig``) -- resolved here to
+                           ``"bond_phase"`` (``"phase"`` when ``chi_ramp`` is
+                           set) by ``ipeps_config.resolve_forward_gauge`` --
+                           or explicitly ``"phase"``, ``"bond_phase"`` (see
+                           below), ``"sigma"`` (transfer-matrix eigenvector
+                           alignment) or ``"none"`` (no gauge fixing).
 
                            Measured on the 2x2 recipe (#841/#798, near-optimal
                            D=3 state, chi=27): all three converge to the same
@@ -459,7 +464,8 @@ def ctm_energy_implicit(
                            NOT a repair for #841; prefer the default
                            ``"phase"`` and heed the stationarity warning.
 
-                           ``"bond_phase"`` (opt-in, #841): ``"phase"`` plus
+                           ``"bond_phase"`` (#841; what the ``CTMConfig``
+                           default ``"auto"`` selects on this path): ``"phase"`` plus
                            one unit-modulus factor per chi index of every
                            bond family, aligned to the previous environment
                            (``ad_utils._bond_phase_fix_envs``).  An exact
@@ -560,6 +566,24 @@ def ctm_energy_implicit(
         bump_enabled=ctmrg_heuristic_increase_chi,
         bump_step_size=ctmrg_heuristic_increase_chi_step_size,
     )
+
+    # ``"auto"`` is this function's default and ``CTMConfig.forward_gauge``'s,
+    # which config-driven callers (e.g. ``pess_optimize``) hand straight through.
+    # Resolve it here, before ``forward_gauge`` enters the VJP cache key:
+    # ``chi_ramp`` is a per-call mutable, not part of that key, so the
+    # resolution must see it now.  An explicit value is returned unchanged.
+    forward_gauge = resolve_forward_gauge(
+        forward_gauge, implicit_ad=True, chi_ramp=chi_ramp
+    )
+    if mixing > 0.0 and forward_gauge != "bond_phase":
+        # The phase gauge leaves the per-chi-index bond signs free, so mixing
+        # would average iterates in unrelated gauges.  Config-driven callers
+        # that skip ``build_ad_ctm_config`` (the PESS losses) reach here with
+        # a raw ``CTMConfig``; this is the last place to stop them.
+        raise ValueError(
+            "mixing > 0 requires forward_gauge='bond_phase' (resolved "
+            f"{forward_gauge!r}; 'auto' resolves to 'phase' with chi_ramp)"
+        )
 
     coords = sorted(site_tensors.keys())
     # Pass Tensor objects directly through custom_vjp boundary.

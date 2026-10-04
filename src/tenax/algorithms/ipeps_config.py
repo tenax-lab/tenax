@@ -9,6 +9,42 @@ import jax
 
 from tenax.core.lattice import Lattice
 
+# Every ``CTMConfig.forward_gauge`` spelling.  ``"auto"`` is a sentinel that
+# :func:`resolve_forward_gauge` replaces before any CTM consumer sees it.
+FORWARD_GAUGES = ("auto", "phase", "bond_phase", "qr", "sigma", "none")
+
+
+def resolve_forward_gauge(
+    forward_gauge: str,
+    *,
+    implicit_ad: bool,
+    fuse_virtual_legs: bool = True,
+    chi_ramp=None,
+    ctm_ad_mode: str | None = None,
+) -> str:
+    """Resolve the ``forward_gauge="auto"`` sentinel for one CTM path.
+
+    The single source of truth for what ``"auto"`` means.  It becomes
+    ``"bond_phase"`` (#841) exactly where that gauge is implemented: the
+    implicit-AD fixed point (``implicit_ad=True``) on the fused double layer
+    (``fuse_virtual_legs=True``), with no ``chi_ramp`` and no reference /
+    root-implicit engine (``ctm_ad_mode is None``).  Everywhere else --
+    explicit AD, split CTM, ``chi_ramp``, ``ctm_ad_mode``, the legacy
+    ``ad_utils`` paths -- it becomes ``"phase"``, the historical default, and
+    it does so silently: the default must not warn.
+
+    Every explicit value is returned unchanged ("no silent promotion"), so an
+    explicit ``"bond_phase"`` still reaches -- and is refused by -- a path
+    that cannot honour it, and an explicit ``"phase"`` stays ``"phase"`` on
+    the implicit path.
+    """
+    if forward_gauge != "auto":
+        return forward_gauge
+    bond_phase_ok = (
+        implicit_ad and fuse_virtual_legs and chi_ramp is None and ctm_ad_mode is None
+    )
+    return "bond_phase" if bond_phase_ok else "phase"
+
 
 @dataclass
 class CTMConfig:
@@ -26,12 +62,19 @@ class CTMConfig:
                             broadening to prevent NaN from degenerate singular
                             values (Francuz et al., PRR 7, 013237).
         forward_gauge:      Gauge fix applied after each CTM sweep.  One of
-                            ``"phase"`` (default), ``"bond_phase"``
-                            (implicit-AD path only: ``"phase"`` plus a
-                            per-chi-index bond gauge aligned to the previous
-                            env, #841), ``"qr"``, ``"sigma"``, or
-                            ``"none"``.  Explicit user choice is preserved —
-                            no silent promotion in AD paths.  See
+                            ``"auto"`` (default), ``"phase"``,
+                            ``"bond_phase"`` (implicit-AD path only:
+                            ``"phase"`` plus a per-chi-index bond gauge
+                            aligned to the previous env, #841), ``"qr"``,
+                            ``"sigma"``, or ``"none"``.  ``"auto"`` resolves
+                            per path (:func:`resolve_forward_gauge`) to
+                            ``"bond_phase"`` on the fused implicit-AD path
+                            (no ``chi_ramp``, ``ctm_ad_mode=None``) and to
+                            ``"phase"`` everywhere else, silently.  An
+                            explicit value is preserved exactly — no silent
+                            promotion in AD paths, and an explicit
+                            ``"bond_phase"`` on a path that cannot honour it
+                            still raises.  See
                             ``docs/guide/algorithms/ipeps_ad_paths.md`` for
                             the full mode matrix and benchmarks.
         ad_backward_method: Backward method for the implicit-diff path.
@@ -197,14 +240,25 @@ class CTMConfig:
     # should remain the AD default is open: the AD path has not been measured
     # under "sv".
     ctm_conv_method: str = "elementwise"
-    # forward_gauge: "phase" (default — Frobenius-norm phase fix per CTM
-    # absorption; works for both implicit and explicit AD, 1-site and
-    # 2-site).  "bond_phase" (opt-in, implicit AD only: phase + per-chi-
-    # index bond signs/phases aligned to the previous env, #841).  "sigma"
-    # (transfer-matrix eigenvector alignment, 1-site
-    # only), "qr" (legacy), or "none" (diagnostic).  No silent promotion
-    # — explicit user choice is preserved.  See ipeps_ad_paths.md.
-    forward_gauge: str = "phase"
+    # forward_gauge: "auto" (default -- a sentinel, never handed to a CTM;
+    # ``resolve_forward_gauge`` turns it into "bond_phase" on the fused
+    # implicit-AD path with no ``chi_ramp`` and ``ctm_ad_mode=None``, and
+    # into "phase" on every other path: explicit AD, split CTM, chi_ramp,
+    # the reference / root-implicit engines, the legacy ad_utils paths).
+    # "phase" (Frobenius-norm phase fix per CTM absorption; applied by the
+    # implicit-AD forward and the legacy ad_utils paths, 1-site and 2-site --
+    # the explicit/split energies under optimize_gs_ad apply no forward
+    # gauge, #1074).  "bond_phase" (implicit
+    # AD only: phase + per-chi-index bond signs/phases aligned to the
+    # previous env, #841 -- removes the per-index Z2 sign 2-cycle the SVD
+    # projectors re-draw each sweep).  "sigma" (transfer-matrix eigenvector
+    # alignment, 1-site only), "qr" (legacy), or "none" (diagnostic).  No
+    # silent promotion -- an explicit user choice is preserved exactly, and
+    # an explicit "bond_phase" on a path that cannot honour it raises.  The
+    # "auto" fallback to "phase" is silent on purpose: the default must not
+    # warn.  Mirrors the ``projector_backward="auto"`` pattern below.  See
+    # ipeps_ad_paths.md.
+    forward_gauge: str = "auto"
     # Optional reference-mode implicit AD mode (App. C-F) for dense 1-site C4v.
     # None | "c4v_reference" | "root_implicit" | "root_implicit_symmetric".
     # The root-implicit modes (#715) drive arXiv:2607.15030 characteristic
@@ -385,6 +439,21 @@ class CTMConfig:
     # at the end to preserve positional CTMConfig ABI.
     ctm_mixing: float = 0.0
 
+    def effective_forward_gauge(self, *, implicit_ad: bool) -> str:
+        """This config's concrete gauge on an (implicit / other) AD path.
+
+        Thin wrapper over :func:`resolve_forward_gauge` reading this config's
+        ``fuse_virtual_legs``, ``chi_ramp`` and ``ctm_ad_mode``; never returns
+        ``"auto"``.
+        """
+        return resolve_forward_gauge(
+            self.forward_gauge,
+            implicit_ad=implicit_ad,
+            fuse_virtual_legs=self.fuse_virtual_legs,
+            chi_ramp=self.chi_ramp,
+            ctm_ad_mode=self.ctm_ad_mode,
+        )
+
     def __post_init__(self):
         valid_modes = {
             None,
@@ -395,6 +464,11 @@ class CTMConfig:
         if self.ctm_ad_mode not in valid_modes:
             raise ValueError(
                 f"ctm_ad_mode must be one of {valid_modes}, got {self.ctm_ad_mode!r}"
+            )
+        if self.forward_gauge not in FORWARD_GAUGES:
+            raise ValueError(
+                f"forward_gauge must be one of {FORWARD_GAUGES}, "
+                f"got {self.forward_gauge!r}"
             )
         if self.ctm_ad_mode is not None and self.forward_gauge == "bond_phase":
             # The c4v-reference and root-implicit engines own their CTM and
@@ -409,13 +483,29 @@ class CTMConfig:
             )
         if not 0.0 <= self.ctm_mixing < 1.0:
             raise ValueError(f"ctm_mixing must be in [0, 1), got {self.ctm_mixing!r}")
+        # ``"auto"`` can only become bond_phase when nothing on the config
+        # already forces phase: fused legs, no chi_ramp, no ctm_ad_mode.  The
+        # remaining unknown (implicit vs explicit AD) is re-checked at the
+        # optimizer entry and in ``ctm_energy_implicit``.
+        _auto_may_be_bond = (
+            self.fuse_virtual_legs
+            and self.chi_ramp is None
+            and self.ctm_ad_mode is None
+        )
         if self.ctm_mixing > 0.0 and (
-            self.forward_gauge != "bond_phase" or self.ctm_conv_method != "elementwise"
+            not (
+                self.forward_gauge == "bond_phase"
+                or (self.forward_gauge == "auto" and _auto_may_be_bond)
+            )
+            or self.ctm_conv_method != "elementwise"
         ):
             # Mixing is element-wise, so it needs gauge-aligned iterates, and
             # every fused forward (warm start, probe, final evaluation) applies
             # a pair gauge only under bond_phase -- under any other gauge those
             # forwards would refuse at the first call instead of here.
+            # ``"auto"`` passes here because the path is not known yet; the
+            # optimizer entry (``build_ad_ctm_config``) re-checks the
+            # resolved gauge, which is bond_phase exactly where mixing works.
             raise ValueError(
                 "ctm_mixing > 0 requires forward_gauge='bond_phase' and "
                 f"ctm_conv_method='elementwise', got forward_gauge="
@@ -570,10 +660,14 @@ class iPEPSConfig:
                                (iterative VJP backward) is the recommended
                                AD path.  ``False`` opts into explicit AD
                                (backprop through unrolled CTM sweeps).
-                               ``ctm.forward_gauge`` defaults to ``"phase"``
-                               for both paths — there is no silent gauge
-                               promotion, and the implicit path validates
-                               ``forward_gauge="phase"``.  See
+                               ``ctm.forward_gauge`` defaults to ``"auto"``,
+                               which resolves to ``"bond_phase"`` on the
+                               fused implicit path and to ``"phase"`` on the
+                               explicit path (and on split CTM, ``chi_ramp``
+                               and ``ctm_ad_mode`` runs).  An explicit value
+                               is never promoted, and the implicit path
+                               validates ``forward_gauge`` in
+                               ``("phase", "bond_phase")``.  See
                                ``docs/guide/algorithms/ipeps_ad_paths.md``.
         gs_ctm_conv_tol_schedule:
                                Optional ramp for the CTM convergence
@@ -741,10 +835,12 @@ class iPEPSConfig:
     # variational CTM artifact (see issue #298).  None disables the check.
     gs_energy_floor: float | None = None
     # Implicit differentiation through the CTM fixed point (iterative VJP
-    # backward).  The gauge is ``ctm.forward_gauge``, which defaults to
-    # ``"phase"`` -- and for this path "defaults to" understates it:
-    # ``validate_ctm_for_implicit_ad`` accepts no other value.  This comment
-    # said "sigma gauge" until #808; sigma is an *explicit*-AD option.
+    # backward).  The gauge is ``ctm.forward_gauge``, whose default
+    # ``"auto"`` resolves to ``"bond_phase"`` on this path (fused, no
+    # ``chi_ramp``, ``ctm_ad_mode=None``; ``"phase"`` otherwise) -- and
+    # ``validate_ctm_for_implicit_ad`` accepts only "phase" / "bond_phase".
+    # This comment said "sigma gauge" until #808; sigma is an
+    # *explicit*-AD option.
     gs_implicit_ad: bool = True
     # When True, optimize_gs_ad appends a trajectory dict
     # ``{energies, step_times, jit_compile_time, num_steps, converged}``

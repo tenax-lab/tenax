@@ -93,6 +93,9 @@ iPEPS
    :members:
    :no-index:
 
+.. autofunction:: tenax.algorithms.ipeps_config.resolve_forward_gauge
+   :no-index:
+
 .. autoclass:: tenax.algorithms.ipeps_config.CTMEnvironment
    :members:
    :no-index:
