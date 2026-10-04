@@ -5,9 +5,11 @@
 ### Behavior Changes
 
 - **Implicit-AD gradients now include the 2x2 projector response**
-  (#1028).  `CTMConfig.projector_backward="auto"` resolves to `"flow"`
-  wherever `forward_gauge` resolves to `"bond_phase"` on the implicit path
-  -- i.e. the default fused implicit-AD path -- instead of freezing the
+  (#1028).  In the iPEPS optimizer (`optimize_gs_ad`'s 1-site, 2-site and
+  multisite dispatchers), `CTMConfig.projector_backward="auto"` resolves to
+  `"flow"` wherever `forward_gauge` resolves to `"bond_phase"` on the
+  implicit path -- i.e. the default fused implicit-AD path -- instead of
+  freezing the
   plaquette projectors with `stop_gradient`.  Why: the frozen gradient is
   not the gradient of the energy.  Relative AD-vs-FD error on the 1x1
   Heisenberg implicit energy, frozen vs flowing: D=2 chi=8 0.37-0.66% vs
@@ -21,6 +23,11 @@
     `CTMConfig(projector_backward="standard")`.  Explicit AD, split CTM,
     an explicit `forward_gauge="phase"` and the `ctm_ad_mode` engines are
     unchanged (`"auto"` still freezes there).
+  - **Not yet on the PESS (kagome) implicit losses** (`build_pess_loss`,
+    `build_pess_loss_exact`, `build_pess_loss_3site_multisite`): they call
+    `ctm_energy_implicit` directly and still freeze the projectors, whatever
+    `projector_backward` says; direct calls to `ctm_energy_implicit` keep its
+    frozen `"lorentzian"` default too.
 
 - **`gs_stall_recovery` now defaults to `"reset"` on 1-site cells too**
   (item 5 of #298): an unset value resolved to `"noise"` for `unit_cell="1x1"`
