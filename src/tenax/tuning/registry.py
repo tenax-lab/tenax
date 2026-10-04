@@ -835,9 +835,8 @@ _register(
             "legacy regularized_eigh backward; 'lorentzian' forces the "
             "Francuz-Schmoll truncated-eigh Lorentzian backward. 'flow' "
             "(2x2 recipe, #983) additionally lets the plaquette projectors' "
-            "dP/dA reach the gradient; use it only on paths with no "
-            "fixed-point adjoint solve -- it is unsafe under implicit AD "
-            "(#1028)."
+            "dP/dA reach the gradient; 'auto' resolves to it on implicit AD "
+            "with the bond_phase gauge (#1028) and freezes elsewhere."
         ),
         hint=TuningHint(
             scale=Scale.CATEGORICAL,

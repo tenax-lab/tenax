@@ -27,11 +27,11 @@ __all__ = ["_build_enlarged_corner", "_compute_2x2_projector"]
 
 
 # The single ``projector_backward`` value that lets ``dP/dA`` reach the
-# gradient on the 2x2 recipe.  Every other value -- including the "auto"
-# default, and the "none" spelling #983 proposed for the explicit freeze --
+# gradient on the 2x2 recipe.  Every other value -- including an unresolved
+# "auto", and the "none" spelling #983 proposed for the explicit freeze --
 # keeps the projectors as ``stop_gradient`` constants.
 #
-# Opt-in rather than default.  The original reason, measured before #841 was
+# It was opt-in until #1028.  The original reason, measured before #841 was
 # fixed: the implicit-AD backward solves ``(I - J^T) λ = dE/denv``, and
 # restoring ``dP/denv`` puts the CTM gauge mode back into ``J``.  On the D=2
 # chi=4 fixture of ``tests/test_adjoint_convergence_gate.py``, with
@@ -57,8 +57,10 @@ __all__ = ["_build_enlarged_corner", "_compute_2x2_projector"]
 # converge; stationarity 0.02-0.16), so its adjoint -- now 2e-15..5e-13 --
 # linearizes around a point that is not a fixed point and certifies nothing.
 #
-# So "flow" is now solvable where the forward converges; whether it becomes
-# the implicit-path default is a separate decision.  Paths with no adjoint
+# So "flow" is now solvable where the forward converges, and #1028 made it the
+# implicit-path default under the "bond_phase" gauge
+# (``CTMConfig.effective_projector_backward``): at D=3 chi=16/32 the frozen
+# gradient was 6.8-74% off FD, the flowing one 1-5e-6.  Paths with no adjoint
 # solve (explicit AD, a bare sweep) had no such obstruction and should pass
 # "flow" regardless -- measured AD/FD on ctm_energy_explicit at the chi=4
 # fixture before #841: 0.229..0.928 frozen against 0.944..0.994 flowing.

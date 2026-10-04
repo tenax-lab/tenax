@@ -133,9 +133,9 @@ and was 6–9× faster than sigma gauge.
   tracked in issue #299 (E_best improves from ≈ −0.558 to ≈ −0.6602 at
   D=2, χ=8). On the 2x2 recipe there is also `"flow"`, which additionally
   lets the plaquette projectors' `dP/dA` reach the gradient instead of
-  returning them as `stop_gradient` constants (#983) — use it on explicit
-  AD, which has no fixed-point adjoint solve; it is **not** safe under
-  implicit AD (#1028). Set to `"standard"` to force the legacy backward, or
+  returning them as `stop_gradient` constants (#983). On implicit AD with
+  the `"bond_phase"` gauge, `"auto"` already resolves to `"flow"` (#1028).
+  Set to `"standard"` to force the legacy backward, or
   `"lorentzian"` to opt in even when using `projector_method="qr"/"svd"`
   (the flag is a no-op on non-eigh projectors). Currently dense-only;
   U(1) `SymmetricTensor` support is deferred to Approach B of the plan.
@@ -146,18 +146,25 @@ and was 6–9× faster than sigma gauge.
 
 `CTMConfig(projector_backward="flow")` lets the 2x2 plaquette projectors'
 `dP/dA` reach the gradient instead of returning them as `stop_gradient`
-constants (#983). Every other value (`"auto"` default, `"standard"`,
-`"lorentzian"`) freezes them, which is the historical behaviour and stays the
-default.
+constants (#983). `"standard"` and `"lorentzian"` freeze them. `"auto"`
+(the default) resolves per path:
 
-- **Explicit AD only** (`gs_implicit_ad=False`), on both the fused and split
-  paths. Measured AD-vs-finite-difference on `ctm_energy_explicit` goes from
+- **Implicit AD with the `"bond_phase"` gauge** (the default fused implicit
+  path): `"auto"` is `"flow"` (#1028). Freezing the projectors there biased
+  the gradient — relative AD-vs-FD error at D=3, χ=16/32 was 6.8–74% frozen
+  against 1–5e-6 flowing, with the adjoint residual at ~3e-11. The adjoint is
+  solvable because `"bond_phase"` gives the forward an element-wise fixed
+  point (#841).
+- **Every other path** (explicit AD, split CTM, `"phase"` gauge,
+  `ctm_ad_mode` engines): `"auto"` stays frozen. Pass `"flow"` explicitly on
+  explicit AD (`gs_implicit_ad=False`, fused or split). Measured AD-vs-finite-difference on `ctm_energy_explicit` goes from
   0.229–0.928 frozen to 0.944–0.994 flowing, and on a single CTM sweep from
   ratios spanning −7.98…+14.95 (wrong by up to 15×, sometimes wrong in sign)
   to 1.000000.
-- It is **not** safe under implicit AD: restoring `dP/denv` puts the CTM gauge
-  mode back into `J`, and the fixed-point adjoint `(I − Jᵀ)λ = dE/denv` stops
-  being reliably solvable (issue #1028, blocked on #841).
+- Implicit AD needs a forward that actually converges element-wise: the
+  adjoint `(I − Jᵀ)λ = dE/denv` linearizes around the fixed point, so an
+  unconverged forward (too small `max_iter`) leaves the gradient unreliable
+  whether the projectors flow or not.
 - The eager CTM forward is bit-identical either way — only the VJP changes.
 
 **Why phase gauge works in backprop**: Each phase-gauge step is a
@@ -607,8 +614,8 @@ config = iPEPSConfig(
         chi=16,
         max_iter=80,
         projector_method="qr",  # recommended projector for explicit AD
-        # Explicit AD has no fixed-point adjoint solve, so the 2x2 projector
-        # response can flow; do NOT use "flow" with gs_implicit_ad=True (#1028).
+        # Explicit AD's "auto" freezes the 2x2 projectors; let them flow.
+        # (On implicit AD "auto" already resolves to "flow", #1028.)
         projector_backward="flow",
     ),
     gs_implicit_ad=False,  # opt into explicit AD (the default is implicit)
