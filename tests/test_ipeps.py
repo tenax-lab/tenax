@@ -1690,7 +1690,11 @@ class TestPostPR291ADBaseline:
             # before the optimizer declares convergence.
             gs_ctm_conv_tol_schedule=[(0.0, 1e-3), (0.1, 1e-6)],
             # Disable outer-loop convergence so the schedule has room to
-            # advance even when the surrogate energy is flat.
+            # advance even when the surrogate energy is flat.  The surrogate
+            # is |A_norm|^2 == 1, so its gradient is ~0 and the default
+            # "grad_norm" criterion would stop on step 0; "both" with a
+            # negative dE tolerance can never be met.
+            gs_conv_criterion="both",
             gs_conv_tol=-1.0,
             unit_cell="1x1",
             su_init=False,

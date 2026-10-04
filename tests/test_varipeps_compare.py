@@ -107,3 +107,14 @@ _HAVE_VARIPEPS = importlib.util.find_spec("varipeps") is not None
 @pytest.mark.skipif(not _HAVE_VARIPEPS, reason="varipeps not installed")
 def test_smoke_run_varipeps_single_site_d2_chi4(tmp_path):
     """Placeholder for variPEPS-side smoke; see decorator reason."""
+
+
+def test_tenax_runner_pins_the_grad_norm_stop():
+    """Both runners stop on ||grad E||_2 < --tol; the Tenax side must not follow
+    the library default criterion (#1075)."""
+    from benchmarks.varipeps_compare.run_tenax import _build_config
+
+    for path in ("single_site", "bipartite_2site"):
+        cfg = _build_config(path=path, D=2, chi=4, tol=3e-5, max_steps=5)
+        assert cfg.gs_conv_criterion == "grad_norm"
+        assert cfg.gs_grad_norm_tol == 3e-5

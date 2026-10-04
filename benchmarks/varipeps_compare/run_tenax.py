@@ -3,7 +3,7 @@
 Usage:
     python -m benchmarks.varipeps_compare.run_tenax \\
         --payload payload.npz --path single_site --D 2 --chi 16 \\
-        --tol 1e-6 --max-steps 100 --out tenax_<key>.json
+        --tol 1e-5 --max-steps 100 --out tenax_<key>.json
 """
 
 from __future__ import annotations
@@ -70,7 +70,10 @@ def _build_config(
         max_bond_dim=D,
         ctm=ctm,
         gs_num_steps=max_steps,
-        gs_conv_tol=tol,
+        # Stop on ||grad E||_2 < tol, the variPEPS criterion, pinned
+        # explicitly so the benchmark does not follow the library default.
+        gs_conv_criterion="grad_norm",
+        gs_grad_norm_tol=tol,
         su_init=False,
         return_history=True,
     )

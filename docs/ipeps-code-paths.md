@@ -404,7 +404,8 @@ dispatch time:
   ``gs_noise_amplitude`` Frobenius perturbation and reset the L-BFGS
   history. Required for the C4v production path to break out of the
   SU-init plateau, where gradient norms ≈ ``1e-10`` would otherwise
-  trip ``gs_conv_tol``.
+  trip the outer convergence test (``gs_grad_norm_tol`` under the
+  default ``gs_conv_criterion="grad_norm"``).
 - **2-site** (``_optimize_gs_ad_tensor_2site``) → ``"reset"``: clear
   the L-BFGS ``(s, y)`` history and CG beta state so the next step is
   a plain (preconditioned) steepest descent step from the current

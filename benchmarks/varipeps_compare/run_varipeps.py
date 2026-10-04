@@ -3,7 +3,7 @@
 Usage:
     python -m benchmarks.varipeps_compare.run_varipeps \\
         --payload payload.npz --path single_site --D 2 --chi 16 \\
-        --tol 1e-6 --max-steps 100 --out varipeps_<key>.json
+        --tol 1e-5 --max-steps 100 --out varipeps_<key>.json
 """
 
 from __future__ import annotations
@@ -95,6 +95,8 @@ def main():
         varipeps.config.Projector_Method.FISHMAN
     )
     varipeps.config.optimizer_max_steps = args.max_steps
+    # Same outer stop as the Tenax runner: ||grad E||_2 < tol.
+    varipeps.config.optimizer_convergence_eps = args.tol
     varipeps.config.ctmrg_max_steps = CTM_MAX_ITER
     varipeps.config.ctmrg_convergence_eps = CTM_TOL
     varipeps.config.ctmrg_print_steps = False

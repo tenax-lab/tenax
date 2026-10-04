@@ -897,7 +897,8 @@ runs a stall-recovery routine. Two modes are supported:
   perturbation on the current params and reset the L-BFGS history.
   **Required for the 1-site C4v production path**, which sits on an
   SU-init plateau with gradient norms around ``1e-10`` that would
-  otherwise trip ``gs_conv_tol`` before the first real step.
+  otherwise trip the outer convergence test (``gs_grad_norm_tol`` under
+  the default ``gs_conv_criterion="grad_norm"``) before the first real step.
 - ``"reset"`` — clear the L-BFGS ``(s, y)`` history and the CG beta
   state so the next iteration is a plain (preconditioned) steepest
   descent step from the current iterate. No rollback, no randomness.
