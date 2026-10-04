@@ -586,10 +586,11 @@ _register(
         type_str="str | None",
         category=TuningCategory.OPTIMIZER,
         description=(
-            "Strategy when the line search stalls: 'noise' injects a "
-            "Frobenius perturbation (legacy 1-site C4v); 'reset' clears "
-            "L-BFGS (s,y) history and rolls back to best_params "
-            "(variPEPS). None = auto-per-dispatcher."
+            "Strategy when the line search stalls: 'reset' clears L-BFGS "
+            "(s,y) history and rolls back to best_params (variPEPS); "
+            "'noise' (legacy) kicks the current params by a Frobenius "
+            "perturbation with no rollback. None = 'reset'. Ignored by the "
+            "ctm_ad_mode engines, which have no stall recovery."
         ),
         hint=TuningHint(
             scale=Scale.CATEGORICAL,
@@ -597,8 +598,8 @@ _register(
             values=(None, "noise", "reset"),
         ),
         when_to_tune=(
-            "Set to 'reset' for 2-site runs that get stuck; 'noise' is "
-            "required for 1-site C4v to break out of SU-init plateaus."
+            "Leave at the default; 'noise' only to escape a genuinely "
+            "stationary start, since a kick near convergence is not undone."
         ),
     )
 )

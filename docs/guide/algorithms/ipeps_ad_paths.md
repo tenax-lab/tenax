@@ -867,25 +867,31 @@ optimization stability and speed.
 ## Stall recovery (`gs_stall_recovery`)
 
 When the L-BFGS / CG line search fails to make progress, the optimizer
-runs a stall-recovery routine. Two modes are supported:
+runs a stall-recovery routine. Two modes are supported on the standard
+1-site, 2-site and multisite dispatchers. The ``ctm_ad_mode`` engines
+(``"c4v_reference"``, ``"root_implicit"``, ``"root_implicit_symmetric"``)
+have no stall recovery: they skip a failed step and continue, and ignore
+``gs_stall_recovery`` whether it is set or not.
 
-- ``"noise"`` — inject a ``gs_noise_amplitude`` (default 10 %) Frobenius
-  perturbation on the current params and reset the L-BFGS history.
-  **Required for the 1-site C4v production path**, which sits on an
-  SU-init plateau with gradient norms around ``1e-10`` that would
-  otherwise trip the outer convergence test (``gs_grad_norm_tol`` under
-  the default ``gs_conv_criterion="grad_norm"``) before the first real step.
-- ``"reset"`` — clear the L-BFGS ``(s, y)`` history and the CG beta
-  state so the next iteration is a plain (preconditioned) steepest
-  descent step from the current iterate. No rollback, no randomness.
-  **Default for the 2-site path** because the 10 % noise kick in the
-  ~32-dimensional D=2 parameter space lands in non-variational CTM
-  regions and drives the optimizer into unphysical "best" energies
-  (see issue #298).
+- ``"reset"`` (default on every unit cell) — roll back to
+  ``best_params``, clear the L-BFGS ``(s, y)`` history and the CG beta
+  state, so the next iteration is a plain (preconditioned) steepest
+  descent step from the best iterate; after ``gs_stall_recovery_retries``
+  consecutive resets the optimizer returns the best state. This is what
+  variPEPS does.
+- ``"noise"`` (legacy) — inject a ``gs_noise_amplitude`` (default 10 %)
+  Frobenius perturbation on the *current* params and reset the L-BFGS
+  history, with no rollback. It was the 1-site default until v0.8.4, to
+  break the C4v run off an SU-init plateau with gradient norms ~1e-10;
+  that plateau no longer reproduces (the SU start has |g| = 0.30 at D=2
+  and 0.54 at D=3). Near a settled energy the kick is destructive: on
+  D=3 χ=16 Heisenberg it took a 1x1 run from E=-0.66819 to -0.033, after
+  which the CTM adjoint diverged, and a 1x1 C4v run from -0.6668 to
+  -0.50. On 2-site it was retired earlier for the same reason (#298,
+  #520).
 
-Leaving ``gs_stall_recovery=None`` (the default) auto-selects the
-right mode for the unit cell at dispatch time. An explicit user
-setting is never overridden.
+Leaving ``gs_stall_recovery=None`` (the default) selects ``"reset"``. An
+explicit user setting is never overridden.
 
 For extra safety on 2-site runs, set ``gs_energy_floor`` to a value a
 bit below the expected variational minimum (e.g. ``2 * E_literature``).

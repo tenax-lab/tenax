@@ -741,13 +741,16 @@ class iPEPSConfig:
                                ``optimize_gs_ad_chi_schedule`` internally;
                                users should not set it directly.
         gs_stall_recovery:     Stall-recovery mode for line-search failures
-                               (issue #298).  ``"noise"`` injects a Frobenius
-                               perturbation (legacy 1-site C4v path);
-                               ``"reset"`` clears L-BFGS ``(s, y)`` history
-                               and rolls back to ``best_params`` (variPEPS
-                               style).  ``None`` (default) lets
-                               ``optimize_gs_ad`` pick per dispatcher:
-                               ``"noise"`` for 1-site, ``"reset"`` for 2-site.
+                               (issue #298).  ``"reset"`` clears L-BFGS
+                               ``(s, y)`` history and rolls back to
+                               ``best_params`` (variPEPS style);
+                               ``"noise"`` (legacy) kicks the current params
+                               by a ``gs_noise_amplitude`` Frobenius
+                               perturbation with no rollback.  ``None``
+                               (default) resolves to ``"reset"`` on every
+                               unit cell (1-site was ``"noise"`` before
+                               v0.8.4).  The ``ctm_ad_mode`` engines have no
+                               stall recovery and ignore this field.
         gs_stall_recovery_retries:
                                Maximum consecutive resets allowed on the
                                ``"reset"`` recovery path before the
@@ -861,13 +864,15 @@ class iPEPSConfig:
     gs_stall_recovery_retries: int = 5  # max consecutive resets before giving up (#454)
     gs_noise_amplitude: float = 0.1  # relative noise amplitude for recovery
     # Stall recovery mode for L-BFGS / CG line search failures.
-    #   "noise"  -> inject gs_noise_amplitude Frobenius perturbation (legacy,
-    #               required for 1-site C4v production path to break out of the
-    #               SU-init plateau at step 0).
+    #   "noise"  -> inject gs_noise_amplitude Frobenius perturbation, no
+    #               rollback (legacy; a kick near a settled energy can land
+    #               where the CTM adjoint diverges).
     #   "reset"  -> clear L-BFGS (s, y) history, roll back params to best_params,
     #               force steepest descent on next step.  Matches variPEPS.
-    #   None     -> auto-default per dispatcher: "noise" for 1-site, "reset" for
-    #               2-site.  Set by optimize_gs_ad at entry.
+    #   None     -> "reset" on every unit cell (1-site was "noise" before
+    #               v0.8.4).  Set by optimize_gs_ad at entry.  The
+    #               ctm_ad_mode engines (c4v_reference, root_implicit*) have
+    #               no stall recovery and ignore it.
     gs_stall_recovery: Literal["noise", "reset"] | None = None
     # Optional variational sanity floor on in-loop best-state tracking.  Any
     # candidate energy strictly below this value is rejected as a non-

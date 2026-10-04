@@ -22,6 +22,24 @@
     an explicit `forward_gauge="phase"` and the `ctm_ad_mode` engines are
     unchanged (`"auto"` still freezes there).
 
+- **`gs_stall_recovery` now defaults to `"reset"` on 1-site cells too**
+  (item 5 of #298): an unset value resolved to `"noise"` for `unit_cell="1x1"`
+  and `"reset"` elsewhere; it is now `"reset"` everywhere, which rolls back to
+  the best state and clears the L-BFGS history instead of kicking the current
+  state by 10 % with no rollback.  The kick was there to escape an SU-init
+  plateau (|g| ~ 1e-10) that no longer reproduces -- Heisenberg 1x1 from the
+  default SU start has |g| = 0.30 at D=2 chi=8 and 0.54 at D=3 chi=9, with and
+  without `gs_c4v`, and at D=2 both modes reach the same energy to 1e-10.  Near
+  convergence it was destructive: on D=3 chi=16 Heisenberg a stall at
+  E=-0.66819 (a Hager-Zhang approximate-Wolfe step that does not lower E)
+  kicked a 1x1 run to E=-0.033, after which the CTM adjoint diverged and the
+  run never recovered; it also took a 1x1 C4v D=3 run from -0.6668 to -0.50.
+  Pass `gs_stall_recovery="noise"` for the old behaviour.  This covers the
+  standard 1-site, 2-site and multisite dispatchers; the `ctm_ad_mode`
+  engines (`"c4v_reference"`, `"root_implicit"`,
+  `"root_implicit_symmetric"`) have no stall recovery and ignore the setting,
+  as before.
+
 - **`iPEPSConfig.gs_conv_criterion` now defaults to `"grad_norm"`**
   (was `"dE"`; #448).  The AD outer loop (`optimize_gs_ad` and every
   dispatcher behind it -- 1-site, 2-site, multisite, C4v-reference,
