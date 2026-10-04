@@ -277,3 +277,34 @@ def test_chi_ceiling_bailout_flag_survives_checkpoint_resume(tmp_path):
         "resumed run converged on its first step -- the chi-ceiling bail-out "
         "did not flag its rollback in the checkpoint"
     )
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
+def test_legacy_checkpoint_without_flag_does_not_converge_on_resume(
+    monkeypatch, tmp_path, unit_cell
+):
+    """A pre-#1073 checkpoint has no ``rolled_back`` key -- assume it rolled back.
+
+    Phase A ends on a stall rollback and checkpoints it; the key is then
+    stripped to mimic an old file.  Whether that old run had just rolled back
+    is unknowable, so the resume must invalidate its first dE test rather
+    than converge on dE ~ 0.
+    """
+    from tenax.algorithms._checkpoint import load_checkpoint, save_checkpoint
+
+    calls = {"n": 0}
+    monkeypatch.setattr(_ls_mod, "hager_zhang_line_search", _always_fail_factory(calls))
+    ckpt = str(tmp_path / f"ckpt_legacy_{unit_cell}")
+    common = dict(gs_checkpoint_path=ckpt, gs_checkpoint_every=1)
+
+    _run(_config(unit_cell, gs_num_steps=1, gs_resume=False, **common))
+    bundle = load_checkpoint(ckpt)
+    assert bundle.pop("rolled_back") is True
+    save_checkpoint(bundle, ckpt)
+
+    history = _run(_config(unit_cell, gs_num_steps=2, gs_resume=True, **common))
+    assert history["converged"] is False, (
+        f"{unit_cell}: a resume from a checkpoint with no rolled_back key "
+        f"converged on its first dE"
+    )
