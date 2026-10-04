@@ -276,10 +276,15 @@ def test_user_A_init_stationary_start_converges_at_step_zero(monkeypatch, unit_c
 @pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
 def test_su_init_guard_leaves_dE_alone(monkeypatch, unit_cell):
     """(c) Under "dE" step 0 never converges anyway (dE = inf); step 1 sees
-    dE == 0 and converges -- the guard must not add a step."""
+    dE == 0 and converges -- the guard must not add a step.
+
+    Pinned to the "noise" stall recovery: the scripted line search fails, and
+    a "reset" rollback would (correctly, #1073) refuse the rollback's dE == 0
+    as convergence, which is a different mechanism from the one tested here.
+    """
     _script_energy(monkeypatch, grad_scale=1e-9)
     with pytest.warns(DeprecationWarning):
-        cfg = _su_cfg(unit_cell, gs_conv_criterion="dE")
+        cfg = _su_cfg(unit_cell, gs_conv_criterion="dE", gs_stall_recovery="noise")
     hist, log = _run_captured(cfg)
     assert hist["converged"] is True
     assert hist["num_steps"] == 2, log
