@@ -6,6 +6,7 @@ This module centralizes lightweight decision logic used by
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import Callable
 from dataclasses import replace
@@ -18,6 +19,10 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
     implicit-AD CTM combination: SVD projectors, phase forward-gauge,
     element-wise convergence check.
 
+    The gauge checked is the one the implicit path would run, so the
+    ``forward_gauge="auto"`` default (resolving to ``"bond_phase"`` or
+    ``"phase"``) is accepted.
+
     Centralizing this check lets the iPEPS dispatchers (operating on
     :class:`iPEPSConfig`) and the PESS multisite path (operating on a raw
     :class:`CTMConfig`) share a single source of truth for the invariant.
@@ -27,7 +32,7 @@ def validate_ctm_for_implicit_ad(ctm_cfg: CTMConfig) -> None:
         errors.append(
             f"projector_method={ctm_cfg.projector_method!r} (expected 'svd' or 'qr')"
         )
-    if ctm_cfg.forward_gauge not in ("phase", "bond_phase"):
+    if ctm_cfg.effective_forward_gauge(implicit_ad=True) not in ("phase", "bond_phase"):
         errors.append(
             f"forward_gauge={ctm_cfg.forward_gauge!r} "
             "(expected 'phase' or 'bond_phase')"
@@ -74,6 +79,9 @@ def validate_split_ctm_config(
     # is kept in the signature because callers pass it and it documents which
     # branch is being validated; both branches now accept both recipes.
     del single_site
+    # Only an EXPLICIT ``"bond_phase"`` is refused: the ``"auto"`` default
+    # resolves to ``"phase"`` here (``resolve_forward_gauge``), which is what
+    # the split forwards effectively run anyway.
     if ctm_cfg.forward_gauge == "bond_phase":
         # The split forwards never read ``forward_gauge``, so accepting it
         # would silently run a different gauge than the one requested (Codex
@@ -114,7 +122,8 @@ def resolve_projector_backward(
     empirically stable CTM combination:
     - ``projector_method == "svd"``
     - ``forward_gauge in ("phase", "bond_phase")`` (Frobenius + phase fixing
-      path, optionally with the per-bond gauge of #841)
+      path, optionally with the per-bond gauge of #841); the ``"auto"``
+      default resolves to one of the two
     - ``ctm_conv_method == "elementwise"``
 
     Explicit-AD keeps user choices unchanged.
@@ -159,13 +168,38 @@ def build_ad_ctm_config(config: iPEPSConfig) -> CTMConfig:
     """Return the effective CTMConfig used by iPEPS AD optimizers.
 
     Applies AD-only policy overrides while leaving ``config.ctm`` unchanged.
-    No silent gauge promotion: explicit user choices are preserved.  The
-    defaults (``projector_method="svd"``, ``forward_gauge="phase"``) are
-    already correct for AD paths.
+    No silent gauge promotion: explicit user choices are preserved.
+
+    This is the path entry point that resolves the ``forward_gauge="auto"``
+    default (:func:`~tenax.algorithms.ipeps_config.resolve_forward_gauge`),
+    so every consumer downstream -- the energy closure, the warm-start /
+    probe / final-evaluation forwards -- sees one concrete gauge:
+    ``"bond_phase"`` on the fused implicit path (no ``chi_ramp``,
+    ``ctm_ad_mode=None``), ``"phase"`` on explicit AD, split CTM,
+    ``chi_ramp`` and the ``ctm_ad_mode`` engines.  An explicit value is
+    returned unchanged.
     """
     ctm_cfg = config.ctm
     if config.gs_projector_method is not None:
         ctm_cfg = replace(ctm_cfg, projector_method=config.gs_projector_method)
+    gauge = ctm_cfg.effective_forward_gauge(implicit_ad=config.gs_implicit_ad)
+    if ctm_cfg.ctm_mixing > 0.0 and gauge != "bond_phase":
+        # ``CTMConfig`` lets ``"auto"`` through with mixing because it cannot
+        # see the path; here it can.  Same message as the constructor check.
+        raise ValueError(
+            "ctm_mixing > 0 requires forward_gauge='bond_phase' and "
+            f"ctm_conv_method='elementwise', got forward_gauge="
+            f"{ctm_cfg.forward_gauge!r} (resolved to {gauge!r} on this path: "
+            "'auto' is 'bond_phase' only on the fused implicit-AD path with no "
+            "chi_ramp and no ctm_ad_mode), ctm_conv_method="
+            f"{ctm_cfg.ctm_conv_method!r}"
+        )
+    if gauge != ctm_cfg.forward_gauge:
+        # A shallow copy, not ``replace``: ``replace`` re-runs ``__post_init__``
+        # and would re-emit the chi_ramp / chi_auto_bump deprecation warnings
+        # the user already got when constructing ``config.ctm``.
+        ctm_cfg = copy.copy(ctm_cfg)
+        ctm_cfg.forward_gauge = gauge
     return ctm_cfg
 
 
@@ -241,8 +275,12 @@ def ctm_converge_kwargs(
         # must converge under the same gauge, or they keep the period-2 sign
         # cycle and hand the loss an env that is not bond-gauged.  Other
         # gauges keep the historical behaviour (these forwards apply none).
+        # An unresolved ``"auto"`` is read as the implicit path, matching the
+        # loss ``make_ctm_energy_fn`` builds from the same config; the
+        # optimize dispatchers resolve it first (``build_ad_ctm_config``), so
+        # an explicit-AD run arrives here already as ``"phase"``.
         "forward_gauge": "bond_phase"
-        if ctm_cfg.forward_gauge == "bond_phase"
+        if ctm_cfg.effective_forward_gauge(implicit_ad=True) == "bond_phase"
         else None,
         # #1060: the forwards share the loss's iteration, or a mixed loss
         # forward converges where the warm start / probes keep cycling.
@@ -462,7 +500,9 @@ def make_ctm_energy_fn(
             # ``ctm_energy_explicit`` takes no ``forward_gauge`` and applies no
             # gauge fix, so ``bond_phase`` (a reference-aligned gauge for the
             # implicit fixed point, #841) would be silently ignored here
-            # (Codex P2 on #1057).  Refuse, as on the split path.
+            # (Codex P2 on #1057).  Refuse, as on the split path.  Only an
+            # EXPLICIT ``"bond_phase"`` is refused; the ``"auto"`` default
+            # resolves to ``"phase"`` off the implicit path.
             if ctm_cfg.forward_gauge == "bond_phase":
                 raise NotImplementedError(
                     "forward_gauge='bond_phase' is only implemented on the "
@@ -535,7 +575,9 @@ def make_ctm_energy_fn(
             qr_warmup_steps=ctm_cfg.qr_warmup_steps,
             chi_ramp=ctm_cfg.chi_ramp,
             env_init=env_init,
-            forward_gauge=ctm_cfg.forward_gauge,
+            # Resolve the ``"auto"`` default for the implicit path (a no-op on
+            # a config ``build_ad_ctm_config`` already resolved).
+            forward_gauge=ctm_cfg.effective_forward_gauge(implicit_ad=True),
             conv_method=ctm_cfg.ctm_conv_method,
             min_iter=ctm_cfg.min_iter,
             gmres_tol=ctm_cfg.gmres_tol,

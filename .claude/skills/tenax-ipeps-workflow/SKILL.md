@@ -160,16 +160,22 @@ differentiation (AD) to variationally optimize the iPEPS tensors directly.
 Tenax supports two AD paths:
 
 1. **Implicit AD** (default, recommended): differentiates through the CTM
-   fixed point via VJP iteration (Francuz et al., PRR 7, 013237).  Uses
-   the AD-correct ``forward_gauge="phase"`` default.  Memory-efficient
-   and variational.
+   fixed point via VJP iteration (Francuz et al., PRR 7, 013237).  The
+   ``forward_gauge="auto"`` default runs ``"bond_phase"`` here (phase fix
+   plus a per-chi-index bond gauge, #841; ``"phase"`` with ``chi_ramp``).
+   Memory-efficient and variational.
 2. **Explicit AD**: backpropagates through unrolled CTM steps.  Uses QR
-   projectors with the same ``"phase"`` gauge.  Faster per step but
-   uses more memory.  Set `gs_implicit_ad=False` to enable.
+   projectors.  ``"auto"`` resolves to ``"phase"`` here, but the explicit
+   energy (``ctm_energy_explicit``) applies no forward gauge, so under
+   ``optimize_gs_ad`` the setting has no effect on this path (an explicit
+   ``"bond_phase"`` is refused); only the legacy ``ad_utils`` entry points
+   apply it.
+   Faster per step but uses more memory.  Set `gs_implicit_ad=False` to
+   enable.
 
-No silent gauge promotion in either path — the user's
-``ctm.forward_gauge`` choice (``"phase"``, ``"qr"``, ``"sigma"``,
-``"none"``) is preserved as-is.
+No silent gauge promotion in either path — only the ``"auto"`` default
+is resolved; an explicit ``ctm.forward_gauge`` (``"phase"``,
+``"bond_phase"``, ``"qr"``, ``"sigma"``, ``"none"``) is preserved as-is.
 
 ### Recommended AD configuration
 
@@ -181,8 +187,8 @@ config = iPEPSConfig(
     ctm=CTMConfig(
         chi=16,
         max_iter=60,
-        # forward_gauge="phase" is the default — AD-correct for both
-        # implicit and explicit, 1-site and 2-site.
+        # forward_gauge="auto" is the default: "bond_phase" on implicit AD;
+        # on explicit AD it resolves to "phase" but no gauge is applied (#1074).
     ),
     # gs_implicit_ad=True is the default (implicit diff + VJP backward)
     gs_optimizer="lbfgs",
@@ -197,7 +203,7 @@ A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
 print(f"Ground-state energy: {E_gs:.6f}")
 ```
 
-### Explicit AD configuration (alternative, phase gauge)
+### Explicit AD configuration (alternative; no forward gauge is applied, #1074)
 
 Use this if implicit AD is too slow or you need unrolled backprop:
 
@@ -260,14 +266,19 @@ prefer `ctmrg_heuristic_increase_chi`.
 
 ### Key AD tips
 
-- **Default `forward_gauge="phase"` works for both implicit and explicit
-  AD.** variPEPS-style Frobenius normalization + phase fix.  Stable
-  for 1-site and 2-site at chi up to 32+.  No silent promotion: the
-  user's explicit choice is preserved.
-- **Sigma gauge (`forward_gauge="sigma"`)** is required for strict
-  element-wise convergence at large chi (1-site path).  Aligns CTM
-  environments via power iteration of the transfer matrix.
-- **Explicit AD (`gs_implicit_ad=False`)** uses the same `"phase"` gauge.
+- **Default `forward_gauge="auto"`** runs `"bond_phase"` on implicit AD.
+  On explicit AD it resolves to `"phase"`, which has no effect there (see
+  the explicit-AD tip below).  Set `forward_gauge="phase"` explicitly to opt
+  the implicit path out of the bond gauge.  No silent promotion: the user's explicit choice is
+  preserved.
+- **Sigma gauge (`forward_gauge="sigma"`)** aligns CTM environments via
+  power iteration of the transfer matrix (1-site).  Under `optimize_gs_ad`
+  it is refused on implicit AD and ignored by the explicit-AD energy
+  (#1074); only the legacy `ad_utils` paths and direct `ctm_energy_implicit`
+  calls apply it.
+- **Explicit AD (`gs_implicit_ad=False`)** applies no forward gauge under
+  `optimize_gs_ad`: `"auto"` resolves to `"phase"`, but `ctm_energy_explicit`
+  ignores it (#1074).
   Use `projector_method="qr"` for best performance with explicit AD.
 - **Start with SU init (`su_init=True`).** The simple update provides a good
   starting tensor that avoids bad local minima. Without it, random

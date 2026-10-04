@@ -79,14 +79,18 @@ $d = 2^{L_y}$).
 ```python
 from tenax import iDMRGConfig, idmrg, build_bulk_mpo_heisenberg_cylinder
 
+# Ly=4 cylinder: each super-site is a ring of 4 spins (d=16, D_w=14)
 Ly = 4
 bulk_mpo = build_bulk_mpo_heisenberg_cylinder(Ly=Ly, J=1.0)
 
 config = iDMRGConfig(max_bond_dim=200, max_iterations=300)
-result = idmrg(bulk_mpo, config)
+result = idmrg(bulk_mpo, config, d=2**Ly)  # pass the super-site dimension
 
 print(f"E/site (Ly={Ly}): {result.energy_per_site / Ly:.8f}")
 ```
+
+See `examples/heisenberg_infinite_cylinder.py` for Ly=2 and Ly=4 cylinders
+with ED cross-checks.
 
 ```{note}
 `build_bulk_mpo_heisenberg_cylinder` only accepts **even** $L_y$.

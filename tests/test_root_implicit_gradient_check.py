@@ -1472,7 +1472,7 @@ def test_an_indeterminate_scan_says_so_rather_than_quoting_a_floor():
 
 
 def test_is_resolved_is_exactly_the_advertised_comparison():
-    """The invariant the docstring and README promise, with no exception.
+    """The invariant the docstring and the AD-paths guide promise, with no exception.
 
     Every regime -- measured, unresolved against a floor, unconverged, and
     indeterminate -- must satisfy ``is_resolved == (relative_error >

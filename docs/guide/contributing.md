@@ -93,10 +93,16 @@ up-to-date with `main`.
 When you add a new public class, function, or algorithm:
 
 1. Add the symbol to `src/tenax/__init__.py` (`__all__` and imports).
-2. Add API docs in the appropriate `docs/api/*.rst` file using `autofunction`
+2. Document it in its docstring — every option, default, caveat and refusal —
+   and render it in the appropriate `docs/api/*.rst` file using `autofunction`
    or `autoclass` directives.
-3. Update `README.md` — add to the features list and/or add an example section.
-4. If it's a new algorithm, add a tutorial in `docs/guide/algorithms/`.
+3. Document it in the matching `docs/guide/` page (a new tutorial in
+   `docs/guide/algorithms/` for a new algorithm). Usage notes, measured numbers
+   and issue references belong here, not in the README.
+4. Only if it adds a new user-visible capability, add **one line** to the
+   README's Features list linking to that guide page. Never put option-level
+   detail in `README.md`.
+5. Keep README and guide examples consistent with the actual signatures.
 
 ## Code style
 

@@ -233,7 +233,8 @@ def test_every_cell_of_a_multisite_env_shares_one_chi_seed():
 # the lattice could actually produce.                                    #
 # --------------------------------------------------------------------- #
 
-#: Checkerboard pairing is ``A.d<->B.u`` and ``B.d<->A.u`` (README:363), so a
+#: Checkerboard pairing is ``A.d<->B.u`` and ``B.d<->A.u``
+#: (docs/guide/algorithms/ipeps.md, "Simple update on the checkerboard"), so a
 #: LEGAL state can give the two sublattices different ``u`` layouts: B's ``u``
 #: is the partner of A's ``d``, not of A's ``u``.
 _SUB_X = np.array([0, 1, 0], dtype=np.int32)
