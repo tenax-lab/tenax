@@ -134,7 +134,28 @@ def _describe(info, site, step, conv_tol, chi) -> str:
 
 
 class CTMNotConvergedError(RuntimeError):
-    """A CTM forward feeding a gradient or a reported energy did not converge."""
+    """A CTM forward feeding a gradient or a reported energy did not converge.
+
+    Raised under ``CTMConfig(on_unconverged="raise")`` (the default) by
+    ``optimize_gs_ad`` on the fused-CTM implicit-AD 1x1 and 2-site paths, and
+    by ``ctm_tensor_2site(..., strict=True)`` (#1059).  The optimizer first
+    tries to recover by resetting to the best params; it re-raises (after
+    writing ``ckpt.last.pkl`` when ``gs_checkpoint_path`` is set) when it
+    cannot.
+
+    Attributes:
+        info: The forward's convergence info (``converged``, ``iterations``,
+            ``sv_diff`` and, when measured, ``step_multiplier`` and the #841
+            stationarity residual).
+        site: Where the forward was used: ``"gradient"``, ``"final_energy"``
+            or ``"ctm_tensor_2site"``.
+        step: The optimizer step, or None outside the optimizer loop.
+
+    The message gives the sweep count, ``sv_diff`` against ``conv_tol``, the
+    step multiplier (near -1: a two-state cycle that ``ctm_mixing`` cures;
+    near +1: slow convergence) and, after a plateau bail, that raising
+    ``max_iter`` alone will not help.
+    """
 
     def __init__(
         self,
@@ -157,7 +178,11 @@ class CTMNotConvergedError(RuntimeError):
 
 
 class CTMNotConvergedWarning(UserWarning):
-    """Emitted instead of CTMNotConvergedError under on_unconverged='warn'."""
+    """Emitted instead of ``CTMNotConvergedError`` under
+    ``CTMConfig(on_unconverged="warn")``, which keeps the pre-#1059 control
+    flow: the unconverged forward is used anyway, except that a warm-start
+    env refresh that did not converge still never replaces a cached env.
+    """
 
 
 def check_ctm_converged(

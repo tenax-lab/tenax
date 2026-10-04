@@ -30,7 +30,7 @@ Each entry links to its guide page; the full documentation is at [tenax.readthed
 **2D quantum algorithms**
 
 - **iPEPS simple update** — 1-site and 2-site unit cells, with a belief-propagation gauge for the bond weights ([iPEPS](docs/guide/algorithms/ipeps.md))
-- **AD ground-state optimization** — implicit, explicit, C4v and root-implicit AD through CTM; an unconverged CTM forward raises `CTMNotConvergedError` (or warns with `CTMNotConvergedWarning`) on the fused 1x1 and 2-site paths ([AD paths](docs/guide/algorithms/ipeps_ad_paths.md))
+- **AD ground-state optimization** — implicit, explicit, C4v and root-implicit AD through CTM; on the fused-CTM implicit-AD 1x1 and 2-site paths an unconverged CTM forward raises `CTMNotConvergedError` (or warns with `CTMNotConvergedWarning`) ([AD paths](docs/guide/algorithms/ipeps_ad_paths.md))
 - **CTM environments** — SVD/eigh/QR projectors, in-CTM χ growth, convergence and saddle checks, optional mixing for two-state cycles, split-CTMRG ([CTM](docs/guide/algorithms/ctm.md))
 - **Fermionic iPEPS (fPEPS)** — graded tensors for spinless fermions / the t-V model ([fPEPS](docs/guide/algorithms/fpeps.md))
 - **Honeycomb and kagome** — native honeycomb CTM and kagome iPESS with AD ([guide](docs/guide/algorithms/honeycomb_kagome.md))
