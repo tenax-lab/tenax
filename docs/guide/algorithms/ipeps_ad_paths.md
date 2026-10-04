@@ -167,7 +167,13 @@ constants (#983). `"standard"` and `"lorentzian"` freeze them. `"auto"`
 - Implicit AD needs a forward that actually converges element-wise: the
   adjoint `(I − Jᵀ)λ = dE/denv` linearizes around the fixed point, so an
   unconverged forward (too small `max_iter`) leaves the gradient unreliable
-  whether the projectors flow or not.
+  whether the projectors flow or not. Flowing is the more fragile of the two
+  there — on a 2-site U(1) start whose CTM never converges it was 121× off
+  finite differences, then NaN, where frozen was 3–34% off — so when the
+  flowing adjoint is not solved to `gmres_tol` (or the gradient is
+  non-finite) the backward is redone with frozen projectors.
+  `get_last_implicit_ad_diagnostics()["projector_backward_used"]` reports
+  `"flow"` or `"frozen_fallback"`.
 - The eager CTM forward is bit-identical either way — only the VJP changes.
 
 **Why phase gauge works in backprop**: Each phase-gauge step is a

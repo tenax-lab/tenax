@@ -19,6 +19,15 @@
   (variPEPS: -0.66823).
   - **Cost**: a flowing backward is more expensive; that D=3 run took 1.8x
     the wall-clock of the frozen one.
+  - **Frozen fallback**: flowing is exact only where the forward CTM is a
+    fixed point.  Where it is not, the flowing adjoint can be unsolvable
+    (measured on a 2-site U(1)-Sz start whose CTM never converges: 121x off
+    finite differences at `max_iter=20`, NaN at 300, against 3% / 34% frozen).
+    A flowing backward whose adjoint is not solved to `gmres_tol`, or whose
+    gradient is non-finite, is therefore redone with frozen projectors; a
+    `RuntimeWarning` fires once per cached energy function, and
+    `get_last_implicit_ad_diagnostics()["projector_backward_used"]` reports
+    `"flow"` or `"frozen_fallback"` on every call.
   - **To restore the old behaviour**, pass
     `CTMConfig(projector_backward="standard")`.  Explicit AD, split CTM,
     an explicit `forward_gauge="phase"` and the `ctm_ad_mode` engines are
