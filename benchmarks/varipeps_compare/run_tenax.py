@@ -59,7 +59,10 @@ def _build_config(
 
     ctm = CTMConfig(
         chi=chi,
-        max_iter=5 if test_fast else CTM_MAX_ITER,
+        # test_fast: 30, not 5 -- 5 sweeps never reach min_iter=10, so the
+        # final CTM was never measured and on_unconverged="raise" (#1059)
+        # refuses it.
+        max_iter=30 if test_fast else CTM_MAX_ITER,
         conv_tol=CTM_TOL,
         projector_method="svd",  # Fishman, matches variPEPS default
     )

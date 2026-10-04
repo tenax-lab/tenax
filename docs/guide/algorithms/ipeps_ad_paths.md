@@ -857,6 +857,37 @@ optimization stability and speed.
    scan (see {ref}`measure-gradient-error`) — not by anything the engine
    reports at run time. Tracked by issue #785.
 
+## Unconverged CTM forwards (`on_unconverged`)
+
+The implicit gradient is only valid at a CTM fixed point, and an energy from
+an unconverged environment can even fall below the variational bound (#1059,
+#1060). So by default (`CTMConfig(on_unconverged="raise")`) `optimize_gs_ad`
+acts on every forward's `converged` flag:
+
+- **Gradient forward:** raises `CTMNotConvergedError`. The optimizer resets to
+  the best params and restores the best environment if it is certified
+  converged there, or writes `ckpt.last.pkl` and re-raises when it cannot
+  recover.
+- **Warm-start cache:** an unconverged environment is never cached, except on
+  a cold start when nothing is cached yet.
+- **Line search:** an unconverged φ trial returns `+inf` and is rejected; an
+  unconverged dφ (Hager–Zhang) trial ends that line search, keeping the best
+  converged φ point found so far.
+- **Final energy:** a fresh evaluation first; if it does not converge, the
+  energy comes from a warm environment certified converged at exactly those
+  params, and `history["final_env_source"]` records which.
+
+`CTMConfig(on_unconverged="warn")` keeps the old control flow and emits
+`CTMNotConvergedWarning` instead.
+
+**Coverage.** All of this applies to the fused-CTM implicit-AD optimizers for
+`unit_cell="1x1"` and `"2site"`. With explicit AD (`gs_implicit_ad=False`)
+the gradient forward is not checked, though the line search and the final
+energy still are. Split CTM (`fuse_virtual_legs=False`),
+`ctm_ad_mode="root_implicit"` and multisite unit cells do not check
+convergence yet, and continue on an unconverged forward without raising or
+warning.
+
 ## Stall recovery (`gs_stall_recovery`)
 
 When the L-BFGS / CG line search fails to make progress, the optimizer

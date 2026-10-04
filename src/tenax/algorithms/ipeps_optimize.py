@@ -66,6 +66,131 @@ def _restore_env_cache_after_line_search(env_cache: dict, snapshot: tuple) -> No
         env_cache.pop("envs", None)
 
 
+_VERDICT_KEY = "refresh_verdict"
+
+
+def _cached_env_state(cache: dict) -> str:
+    """Convergence of the env currently in ``cache``: none/converged/unconverged/unknown.
+
+    Only :func:`_refresh_env_cache` records a verdict, as
+    ``(env, converged, params)`` (``params``: what the env was converged FOR).
+    Other writers (line-search probes, checkpoint restore, resets) replace
+    ``cache["envs"]`` without touching it, so the verdict only counts while it
+    is about the very env object still cached -- it cannot go stale.
+    """
+    envs = cache.get("envs")
+    if envs is None:
+        return "none"
+    verdict = cache.get(_VERDICT_KEY)
+    if verdict is None or verdict[0] is not envs:
+        return "unknown"
+    return "converged" if verdict[1] else "unconverged"
+
+
+def _refresh_env_cache(cache: dict, envs, info, ctm_cfg, params=None) -> None:
+    """Store a warm-start refresh result in ``cache`` unless it is unconverged.
+
+    An unconverged refresh never replaces an existing env (#1059 site 2); it
+    is cached only on a cold start, where readers need *an* env.  Never
+    raises: site 1 (the gradient forward) is authoritative.  Under
+    ``on_unconverged="warn"`` it also emits :class:`CTMNotConvergedWarning`.
+    """
+    prev = _cached_env_state(cache)
+    if info.converged or prev == "none":
+        cache["envs"] = envs
+        cache[_VERDICT_KEY] = (envs, bool(info.converged), params)
+    if info.converged:
+        return
+    if prev == "none":
+        outcome = "no previous env, so caching it anyway"
+    elif prev == "converged":
+        outcome = "keeping the previous (converged) env"
+    elif prev == "unconverged":
+        outcome = "keeping the previous env, which was also unconverged"
+    else:
+        outcome = "keeping the previous env (its convergence is unknown)"
+    _logger.warning(
+        "[iPEPS-AD] warm-start CTM refresh did not converge "
+        "(sweeps %d, sv_diff %.3g); %s",
+        info.iterations,
+        info.sv_diff,
+        outcome,
+    )
+    if ctm_cfg.on_unconverged == "warn":
+        from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
+
+        check_ctm_converged(
+            info,
+            site="env_cache",
+            policy="warn",
+            conv_tol=ctm_cfg.conv_tol,
+            chi=ctm_cfg.chi,
+        )
+
+
+def _cache_env_known_converged(cache: dict | None, params=None) -> bool:
+    """True only if ``cache`` holds an env certified converged FOR ``params``.
+
+    The verdict must be identity-matched to ``cache["envs"]``, say converged,
+    and carry ``params`` (identity).  A missing, stale, unconverged, legacy
+    2-tuple (e.g. from a checkpoint), or other-params verdict disqualifies it:
+    the final evaluation must not report an env that was not positively
+    certified at exactly these params (#1059 site 4, R9/R11).
+    """
+    if not cache or _cached_env_state(cache) != "converged":
+        return False
+    verdict = cache[_VERDICT_KEY]
+    return len(verdict) == 3 and verdict[2] is params
+
+
+def _final_eval_use_warm(
+    info, warm_cache: dict | None, ctm_cfg, *, params=None, skippable: bool = False
+) -> str:
+    """Site 4 of #1059: decide how to handle an unconverged final evaluation.
+
+    Returns ``"fresh"`` when the fresh forward converged, or when it did not
+    but ``on_unconverged="warn"`` (the warning is emitted; legacy result).
+    Returns ``"warm"`` (``"raise"`` policy only; under ``"warn"`` the spec
+    wants the legacy cold result plus a warning, R12) when the caller should
+    recompute the energy from the warm env in ``warm_cache``, certified
+    converged at exactly ``params``.  Returns ``"skip"`` when
+    unconverged under ``"raise"`` with no warm env but ``skippable`` (the
+    caller has another certified candidate and drops this one).  Otherwise
+    raises ``CTMNotConvergedError`` under ``"raise"``.
+    """
+    if info.converged:
+        return "fresh"
+    if (
+        ctm_cfg.on_unconverged == "raise"
+        and warm_cache is not None
+        and _cache_env_known_converged(warm_cache, params)
+        and _should_restore_best_env(
+            warm_cache["envs"], ctm_cfg.chi, **_restore_chi_kwargs(ctm_cfg)
+        )
+    ):
+        _logger.warning(
+            "[iPEPS-AD] fresh final CTM did not converge; "
+            "reporting the converged warm env's energy"
+        )
+        return "warm"
+    if skippable and ctm_cfg.on_unconverged == "raise":
+        _logger.warning(
+            "[iPEPS-AD] fresh final CTM at the last iterate did not converge "
+            "and has no converged warm env; reporting the best params instead"
+        )
+        return "skip"
+    from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
+
+    check_ctm_converged(
+        info,
+        site="final_energy",
+        policy=ctm_cfg.on_unconverged,
+        conv_tol=ctm_cfg.conv_tol,
+        chi=ctm_cfg.chi,
+    )
+    return "fresh"
+
+
 def _drop_env_cache_for_reset(env_cache: dict) -> None:
     """Clear the env warm-start cache AND the implicit-AD λ warm-start seed.
 
@@ -78,6 +203,196 @@ def _drop_env_cache_for_reset(env_cache: dict) -> None:
     """
     env_cache.clear()
     invalidate_implicit_ad_warm_start()
+
+
+def _should_restore_best_env(
+    best_envs, chi, *, chi_max: int | None = None, in_ctm_growth: bool = False
+) -> bool:
+    """CTMNotConvergedError reset (and the site-4 warm check): is the converged
+    best env usable at the current chi?  Else the #518 clear path.
+
+    Without in-CTM growth the env must sit at exactly ``chi``.  With
+    ``ctmrg_heuristic_increase_chi`` the forward grows the env inside the
+    loop but ``ctm_cfg.chi`` is never synced, so the env legitimately
+    carries any chi the forward itself accepts as a seed
+    (``_validate_chi_bump_args``): ``chi <= chi(env) <= chi_max``.  An env
+    below ``chi`` is still stale -- an outer bump moved past it (#518).
+    """
+    if not best_envs:
+        return False
+    from tenax.algorithms.ad_utils import _env_chi
+
+    env_chi = _env_chi(best_envs)
+    if env_chi == chi:
+        return True
+    return in_ctm_growth and chi_max is not None and chi < env_chi <= chi_max
+
+
+def _restore_chi_kwargs(ctm_cfg) -> dict:
+    """The in-CTM growth window of ``ctm_cfg`` for ``_should_restore_best_env``."""
+    return {
+        "chi_max": ctm_cfg.chi_max,
+        "in_ctm_growth": bool(ctm_cfg.ctmrg_heuristic_increase_chi),
+    }
+
+
+def _gradient_forward_info(d: dict):
+    """``GradientForwardInfo`` from implicit-AD forward diagnostics ``d``.
+
+    None when ``d`` has no ``forward_converged`` key (no forward wrote one).
+    """
+    from tenax.algorithms._ctm_convergence_policy import GradientForwardInfo
+
+    if "forward_converged" not in d:
+        return None
+    nan = float("nan")
+    return GradientForwardInfo(
+        converged=bool(d["forward_converged"]),
+        iterations=int(d.get("forward_iterations", -1)),
+        sv_diff=float(d.get("forward_sv_diff", nan)),
+        best_iteration=int(d.get("forward_best_iteration", 0)),
+        stationarity_residual=float(d.get("forward_stationarity_residual", nan)),
+        stationarity_threshold=d.get("forward_stationarity_threshold"),
+        step_multiplier=float(d.get("forward_step_multiplier", nan)),
+    )
+
+
+def _policy_scope(enabled: bool):
+    """Scope a forward whose convergence verdict the caller acts on (#1059).
+
+    Inside it the implicit-AD forward defers its #841 stationarity warning
+    for an unconverged loop, so a caller promoting warnings to errors gets
+    the policy's ``CTMNotConvergedError`` rather than the legacy warning.
+    """
+    import contextlib
+
+    import tenax.algorithms._ctm_energy_ad as _cea
+
+    if not enabled:
+        return contextlib.nullcontext()
+    return _cea.policy_owns_unconverged_forward()
+
+
+def _site1_forward_info(
+    step_index: int, ctm_cfg, history: tuple | None, *, diagnostics: dict | None = None
+):
+    """Site 1 of #1059: check the gradient forward's convergence verdict.
+
+    Reads the implicit-AD forward diagnostics through the module attribute at
+    call time (so tests can monkeypatch it).  A missing ``forward_converged``
+    key means no forward wrote one this call (the caller popped it before
+    ``value_and_grad``): skip the check rather than reuse a stale value.
+    Raises ``CTMNotConvergedError`` under ``on_unconverged="raise"``; warns
+    under ``"warn"``.  When ``history`` is given (``(converged, sv_diff,
+    multiplier, stationarity)`` lists), appends one entry per checked step:
+    ``sv_diff`` is the CTM loop's own metric, ``stationarity`` the #841
+    one-sweep residual (a different quantity with its own threshold).
+    ``diagnostics`` overrides the module read: the step reused the accepted
+    line-search probe's ``value_and_grad`` (#1062), whose forward diagnostics
+    were snapshotted when the probe ran.
+    """
+    import tenax.algorithms._ctm_energy_ad as _cea
+    from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
+
+    d = (
+        diagnostics
+        if diagnostics is not None
+        else _cea.get_last_implicit_ad_diagnostics()
+    )
+    info = _gradient_forward_info(d)
+    if info is None:
+        return
+    ok = check_ctm_converged(
+        info,
+        site="gradient",
+        policy=ctm_cfg.on_unconverged,
+        step=step_index,
+        conv_tol=ctm_cfg.conv_tol,
+        chi=ctm_cfg.chi,
+    )
+    if history is not None:
+        conv_list, sv_list, mult_list, stat_list = history
+        conv_list.append(bool(ok))
+        sv_list.append(float(info.sv_diff))
+        m = float(info.step_multiplier)
+        mult_list.append(None if m != m else m)  # NaN -> None (spec section 3)
+        stat_list.append(float(info.stationarity_residual))
+
+
+def _site3_reject(info, ctm_cfg) -> bool:
+    """Site 3 of #1059: should a line-search probe forward be rejected?
+
+    Returns True (caller returns ``+inf`` without caching the env) for an
+    unconverged probe under ``on_unconverged="raise"``.  Under ``"warn"`` the
+    warning is emitted and False is returned (legacy path).  Probes with
+    ``probe_max_iter`` / ``probe_conv_tol`` set are designed to stop early
+    (#503): legacy path, no warning.
+    """
+    from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
+
+    if info.converged:
+        return False
+    if ctm_cfg.probe_max_iter is not None or ctm_cfg.probe_conv_tol is not None:
+        return False
+    if ctm_cfg.on_unconverged == "raise":
+        return True
+    check_ctm_converged(
+        info,
+        site="line_search",
+        policy="warn",
+        conv_tol=ctm_cfg.conv_tol,
+        chi=ctm_cfg.chi,
+    )
+    return False
+
+
+def _probe_forward_rejected(diag: dict, ctm_cfg) -> bool:
+    """#1059 for the HZ ``dφ`` probe: reject a gradient from an unconverged forward.
+
+    True (the caller aborts the line search with ``LineSearchAborted``, which
+    keeps the best converged φ point found so far, and carries nothing to
+    the next step) for an unconverged forward
+    under ``on_unconverged="raise"``.  Under ``"warn"`` the warning is
+    emitted and False is returned (legacy path).  No ``forward_converged``
+    key means no forward verdict was written: not rejected.
+    """
+    from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
+
+    info = _gradient_forward_info(diag)
+    if info is None or info.converged:
+        return False
+    if ctm_cfg.on_unconverged == "raise":
+        return True
+    check_ctm_converged(
+        info,
+        site="line_search",
+        policy="warn",
+        conv_tol=ctm_cfg.conv_tol,
+        chi=ctm_cfg.chi,
+    )
+    return False
+
+
+def _log_ctm_not_converged_reset(
+    exc, *, conv_tol, n_reset: int, retries: int, verbose: bool
+) -> None:
+    """Spec section 3 reset log line (logger always; stdout when verbose)."""
+    from tenax.algorithms._ctm_convergence_policy import (
+        _fmt,
+        format_step_multiplier,
+    )
+
+    info = exc.info
+    msg = (
+        f"[iPEPS-AD] CTM forward not converged at step {exc.step} "
+        f"(sweeps {_fmt(getattr(info, 'iterations', None), 'd')}, sv_diff "
+        f"{_fmt(getattr(info, 'sv_diff', None), '.3g')} vs tol "
+        f"{_fmt(conv_tol, 'g')}, step multiplier {format_step_multiplier(info)}) "
+        f"— reset to best (#{n_reset}/{retries})"
+    )
+    _logger.warning(msg)
+    if verbose:
+        print(msg, flush=True)
 
 
 class _AcceptedProbeEval:
@@ -116,27 +431,53 @@ class _AcceptedProbeEval:
     parameters.
     """
 
-    def __init__(self, enabled: bool):
+    def __init__(self, enabled: bool, check_policy: bool = False):
         self._enabled = enabled
+        # Apply ``on_unconverged`` to the probe forward (#1059; the 1-site
+        # and 2-site optimizers).  The multisite optimizer is not wired yet.
+        self._check_policy = enabled and check_policy
         self._probe = None
         self._carry = None
+        # Forward diagnostics of the probe whose result ``take`` last handed
+        # back (#1059 site 1 checks that forward); None when nothing reused.
+        self.reused_diagnostics = None
 
     def start(self) -> None:
         """Drop any probe left by an earlier line search."""
         self._probe = None
 
     def probe(self, loss_fn, alpha, trial, cfg):
-        """``value_and_grad`` at the ``dφ`` trial point; returns the grads."""
+        """``value_and_grad`` at the ``dφ`` trial point.
+
+        Returns the grads, or (with ``check_policy``) None when the probe's
+        forward did not converge under ``on_unconverged="raise"`` (#1059,
+        Codex P1 on #1070): the
+        gradient of an unconverged forward must not steer the line search,
+        and a rejected probe is never carried to the next step.  Under
+        ``"warn"`` it warns and returns the grads (legacy).
+        """
         self._probe = None  # only the latest successful probe can match
+        import tenax.algorithms._ctm_energy_ad as _cea
+
         t0 = _time.perf_counter()
-        energy, grads = jax.value_and_grad(loss_fn)(trial)
+        if self._enabled:
+            _cea.reset_forward_diagnostics()
+        # The verdict is acted on just below, so the forward defers its #841
+        # stationarity warning for an unconverged loop to us.
+        with _policy_scope(self._check_policy):
+            energy, grads = jax.value_and_grad(loss_fn)(trial)
         grads = _euclidean_grads(grads)
         if self._enabled:
+            # Snapshot now: later φ probes and env refreshes overwrite the
+            # module diagnostics before the next step's site-1 check.
+            diag = _cea.get_last_implicit_ad_diagnostics()
+            if self._check_policy and _probe_forward_rejected(diag, cfg):
+                return None
             # Async backends (CUDA/TPU) return once the work is enqueued; sync
             # so ``dt`` is evaluation time, like the fresh path's step timer.
             jax.block_until_ready((energy, grads))
             dt = _time.perf_counter() - t0
-            self._probe = (alpha, trial, cfg, energy, grads, dt)
+            self._probe = (alpha, trial, cfg, energy, grads, dt, diag)
         return grads
 
     def accept(self, alpha, params, direction):
@@ -150,8 +491,10 @@ class _AcceptedProbeEval:
     def take(self, params, cfg):
         """``(energy, grads, probe_seconds)`` if the carry matches, else None."""
         carry, self._carry = self._carry, None
+        self.reused_diagnostics = None
         if carry is None or carry[1] is not params or carry[2] is not cfg:
             return None
+        self.reused_diagnostics = carry[6]
         return carry[3], carry[4], carry[5]
 
 
@@ -1219,6 +1562,7 @@ def _optimize_gs_ad_tensor(
     _warn_implicit_ad_variational_caveat(config, path="1-site Tensor-protocol")
     import optax
 
+    import tenax.algorithms._ctm_energy_ad as _cea
     from tenax.algorithms._checkpoint import (
         _config_to_dict,
         cg_gates_fingerprint,
@@ -1228,6 +1572,7 @@ def _optimize_gs_ad_tensor(
         save_checkpoint,
         validate_config,
     )
+    from tenax.algorithms._ctm_convergence_policy import CTMNotConvergedError
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor
     from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
@@ -1422,7 +1767,7 @@ def _optimize_gs_ad_tensor(
             SINGLE_SITE_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
-        _env_cache["envs"] = envs
+        _refresh_env_cache(_env_cache, envs, info, ctm_cfg, params)
         # ``info.max_truncation_error`` comes from the JIT-compiled CTM step,
         # which sets eps_T = 0.0 for any input that is a JAX tracer during
         # JIT compilation.  For the auto-bump path we need a real eps_T from
@@ -1562,7 +1907,7 @@ def _optimize_gs_ad_tensor(
             _env_cache["envs"] = {(0, 0): env}
             return float(compute_energy_split_ctm_tensor(A_norm, env, gate))
         site_tensors = {(0, 0): A_norm}
-        envs, _ = python_loop_ctm_converge(
+        envs, info = python_loop_ctm_converge(
             site_tensors,
             SINGLE_SITE_NEIGHBORS,
             **ctm_converge_kwargs(
@@ -1571,6 +1916,8 @@ def _optimize_gs_ad_tensor(
                 for_probe=True,
             ),
         )
+        if _site3_reject(info, ctm_cfg):
+            return float("inf")
         # Issue #502: share the just-converged env with the subsequent
         # ``_dphi(α)`` call (and any nearby ``_phi(α')`` probe).  The
         # implicit-AD ``loss_fn`` warm-starts from the same ``_env_cache``
@@ -1586,7 +1933,7 @@ def _optimize_gs_ad_tensor(
 
     stall_count = 0  # noise recovery: consecutive line search failures
     # HZ dφ evaluation carried into the next step (see _AcceptedProbeEval).
-    _ls_eval = _AcceptedProbeEval(enabled=config.gs_implicit_ad)
+    _ls_eval = _AcceptedProbeEval(enabled=config.gs_implicit_ad, check_policy=True)
     current_stage_idx = 0
     stage_start_step = 0
 
@@ -1599,6 +1946,29 @@ def _optimize_gs_ad_tensor(
     _jit_compile_time: float = 0.0
     _first_step = True
     _converged = False
+    # Site 1 of #1059: per-step gradient-forward convergence verdicts.
+    _hist_ctm_converged: list[bool] = []
+    _hist_ctm_sv_diff: list[float] = []
+    _hist_ctm_mult: list = []
+    _hist_ctm_stationarity: list[float] = []
+    # The implicit-AD fused forward writes ``forward_converged``; the split
+    # and explicit-AD paths do not, so skip the check (and the pop) there.
+    _site1_check = config.gs_implicit_ad and not use_split
+
+    def _restore_best_env():
+        """Reset for CTMNotConvergedError: restore the best env when it is
+        certified converged at ``best_params`` and its chi matches; otherwise
+        clear it (#518).  A cold-start refresh caches an unconverged env, and
+        the best snapshot can copy it; restoring that would reinstate the
+        poisoned warm start site 2 refuses (Codex P1 on #1070)."""
+        best = best_env_cache.get("envs") if best_env_cache else None
+        _drop_env_cache_for_reset(_env_cache)
+        if _cache_env_known_converged(
+            best_env_cache, best_params
+        ) and _should_restore_best_env(
+            best, ctm_cfg.chi, **_restore_chi_kwargs(ctm_cfg)
+        ):
+            _env_cache.update(best_env_cache)
 
     # CTM conv_tol schedule: update ctm_cfg when tolerance changes
     _conv_tol_schedule = config.gs_ctm_conv_tol_schedule
@@ -1868,14 +2238,76 @@ def _optimize_gs_ad_tensor(
             _step_t0 = _time.perf_counter()
         try:
             _reused = _ls_eval.take(params, ctm_cfg)
+            _reused_diag = None
             if _reused is not None:
                 energy_val, grads, _probe_dt = _reused
+                # #1059 site 1 checks the probe's own forward (#1062 reuse).
+                _reused_diag = _ls_eval.reused_diagnostics
                 if config.return_history:
                     _step_t0 -= _probe_dt  # step_times = this point's grad eval
             else:
-                energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                if _site1_check:
+                    _cea.reset_forward_diagnostics()
+                with _policy_scope(_site1_check):
+                    energy_val, grads = jax.value_and_grad(loss_fn)(params)
                 grads = _euclidean_grads(grads)
-        except CTMRGGradientError as exc:
+            if _site1_check:
+                _site1_forward_info(
+                    step + 1,
+                    ctm_cfg,
+                    (
+                        _hist_ctm_converged,
+                        _hist_ctm_sv_diff,
+                        _hist_ctm_mult,
+                        _hist_ctm_stationarity,
+                    ),
+                    diagnostics=_reused_diag,
+                )
+        except (CTMRGGradientError, CTMNotConvergedError) as exc:
+            if isinstance(exc, CTMNotConvergedError):
+                # #1059 section 3: restore the converged best env rather than
+                # cold-start; checkpoint and re-raise when recovery is
+                # impossible (the reset target is the failing point, no best
+                # accepted yet, budget spent, or not "reset").
+                if (
+                    params is best_params
+                    or best_energy == float("inf")
+                    or config.gs_stall_recovery != "reset"
+                    or stall_count + 1 > config.gs_stall_recovery_retries
+                ):
+                    _maybe_save_1s_checkpoint(
+                        step, ctm_cfg.chi, best_energy, force_last=True
+                    )
+                    raise
+                _log_ctm_not_converged_reset(
+                    exc,
+                    conv_tol=ctm_cfg.conv_tol,
+                    n_reset=stall_count + 1,
+                    retries=config.gs_stall_recovery_retries,
+                    verbose=config.gs_verbose,
+                )
+                stall_count += 1
+                params = best_params
+                _restore_best_env()
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_A_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                # Same as the 2-site reset and the 1-site spike/stall resets
+                # (#1059 final review I2): drop the abandoned trajectory's
+                # optax L-BFGS curvature pairs.
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
+                # The reset puts params back on best_params, which the step
+                # before evaluated from a converged env: the next step reproduces
+                # prev_energy and the "dE" criterion would read the re-evaluation
+                # as convergence.  Forget it (#1059 final review I1).
+                prev_energy = float("inf")
+                continue
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
                 "skipping, triggering stall recovery",
@@ -1945,6 +2377,11 @@ def _optimize_gs_ad_tensor(
                     cg_direction = None
                     prev_grad = None
                     prev_precond_grad = None
+            # A reset (or noise) leaves params at/near best_params, which the
+            # step before evaluated from a converged env, so the next step
+            # reproduces prev_energy and the "dE" criterion would read the
+            # re-evaluation as convergence.  Forget it (#1059 final review I1).
+            prev_energy = float("inf")
             continue
         energy_float = float(energy_val)
         grad_norm_val = _grad_l2_norm(grads)
@@ -2276,7 +2713,10 @@ def _optimize_gs_ad_tensor(
             # ``_restore_env_cache_after_line_search`` (#502 Codex P1).
             _ls_env_snap = ("envs" in _env_cache, _env_cache.get("envs"))
             if line_search_method == "hager_zhang":
-                from tenax.algorithms._line_search import hager_zhang_line_search
+                from tenax.algorithms._line_search import (
+                    LineSearchAborted,
+                    hager_zhang_line_search,
+                )
 
                 slope = _tree_dot(grads, direction)
                 if slope >= 0:
@@ -2303,6 +2743,8 @@ def _optimize_gs_ad_tensor(
                     # Keeps the energy too: on acceptance at this α the next step
                     # reuses this evaluation instead of repeating it.
                     g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg)
+                    if g is None:  # unconverged forward rejected (#1059)
+                        raise LineSearchAborted
                     return _tree_dot(g, direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
@@ -2614,8 +3056,13 @@ def _optimize_gs_ad_tensor(
     # (non-variational at finite chi), so we compare fresh evaluations only.
     # Match in-loop CTM tolerances (#317) by reusing ctm_cfg directly.
 
-    def _eval_fresh(p, env_init=None):
-        """Evaluate energy with fully converged fresh CTM."""
+    def _eval_fresh(p, env_init=None, warm_cache=None, skippable=False):
+        """Evaluate energy with fully converged fresh CTM.
+
+        Returns ``(A, env, E, source)``; ``source`` is ``"warm_fallback"`` when
+        the fresh forward did not converge and ``warm_cache`` (the cache dict
+        holding the env converged at exactly ``p``) supplied the energy.
+        """
         A_t = _params_to_A_norm(p)
         if use_split:
             # Final env is the split fixed point used by the gradient; return
@@ -2623,18 +3070,27 @@ def _optimize_gs_ad_tensor(
             # from the passed env_init dict when available.
             env_ = _split_forward(A_t, env_init=_split_env_seed(env_init))
             E_ = float(compute_energy_split_ctm_tensor(A_t, env_, gate))
-            return A_t, env_, E_
-        envs, _ = python_loop_ctm_converge(
+            return A_t, env_, E_, "fresh"
+        envs, info = python_loop_ctm_converge(
             {(0, 0): A_t},
             SINGLE_SITE_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg, env_init=env_init),
         )
+        verdict = _final_eval_use_warm(
+            info, warm_cache, ctm_cfg, params=p, skippable=skippable
+        )
+        source = "fresh"
+        if verdict == "warm":
+            envs = warm_cache["envs"]
+            source = "warm_fallback"
         env_ = envs[(0, 0)]
-        if _use_cg:
+        if verdict == "skip":
+            E_ = float("inf")
+        elif _use_cg:
             E_ = float(compute_energy_cg(A_t, env_, cg_gates, _cg_d_eff))
         else:
             E_ = float(compute_energy_ctm_tensor(A_t, env_, gate, d_phys))
-        return A_t, env_, E_
+        return A_t, env_, E_, source
 
     # #899: NO env_init.  The block comment above says these evaluations are
     # fresh, and the code then seeded them from ``_env_cache["envs"]`` -- which
@@ -2650,18 +3106,32 @@ def _optimize_gs_ad_tensor(
     # This also retires the #469 chi-padding of the best-env snapshot: it
     # existed solely to make that snapshot shape-compatible as a SEED, and
     # nothing is seeded now.
-    A_final, env_final, E_final = _eval_fresh(params)
-
+    #
+    # #1059 site 4: an unconverged cold evaluation falls back to the warm env
+    # converged at exactly these params.  After the line search ``_env_cache``
+    # was restored to the previous params' env, so it is params' env only when
+    # ``params is best_params``; ``best_env_cache`` is always best_params' env.
+    #
+    # The best point is evaluated first: when the last iterate is unconverged
+    # with no converged warm env of its own, it is dropped (E = +inf) in favour
+    # of the certified best point rather than failing the whole run.
     if best_params is not params:
-        _, env_best, E_best_fresh = _eval_fresh(best_params)
-    else:
+        A_best, env_best, E_best_fresh, src_best = _eval_fresh(
+            best_params, warm_cache=best_env_cache
+        )
+    A_final, env_final, E_final, src_final = _eval_fresh(
+        params,
+        warm_cache=_env_cache if params is best_params else None,
+        skippable=params is not best_params,
+    )
+    if best_params is params:
         E_best_fresh = E_final
 
     if E_final <= E_best_fresh:
-        env, E_gs = env_final, E_final
+        env, E_gs, _final_env_source = env_final, E_final, src_final
     else:
-        A_final, _, _ = _eval_fresh(best_params)
-        env, E_gs = env_best, E_best_fresh
+        A_final = A_best
+        env, E_gs, _final_env_source = env_best, E_best_fresh, src_best
     if config.gs_verbose:
         print(f"[iPEPS-AD:1site-tensor] final E={E_gs:.10f}", flush=True)
 
@@ -2672,6 +3142,11 @@ def _optimize_gs_ad_tensor(
             "jit_compile_time": _jit_compile_time,
             "num_steps": len(_history_energies),
             "converged": _converged,
+            "ctm_converged": _hist_ctm_converged,
+            "ctm_sv_diff": _hist_ctm_sv_diff,
+            "ctm_step_multiplier": _hist_ctm_mult,
+            "ctm_stationarity": _hist_ctm_stationarity,
+            "final_env_source": _final_env_source,
         }
         return A_final, env, E_gs, history
     return A_final, env, E_gs
@@ -2901,6 +3376,7 @@ def _optimize_gs_ad_tensor_2site(
             )
     import optax
 
+    import tenax.algorithms._ctm_energy_ad as _cea
     from tenax.algorithms._checkpoint import (
         _config_to_dict,
         checkpoint_exists,
@@ -2909,6 +3385,7 @@ def _optimize_gs_ad_tensor_2site(
         save_checkpoint,
         validate_config,
     )
+    from tenax.algorithms._ctm_convergence_policy import CTMNotConvergedError
     from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
     from tenax.algorithms._ctm_tensor import (
         compute_energy_ctm_tensor_2site,
@@ -3145,7 +3622,7 @@ def _optimize_gs_ad_tensor_2site(
             CHECKERBOARD_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg_2s, env_init=_env_cache_2s.get("envs", None)),
         )
-        _env_cache_2s["envs"] = envs
+        _refresh_env_cache(_env_cache_2s, envs, info, ctm_cfg_2s, params)
         # Capture ``info.max_truncation_error`` so the end-of-step
         # ``_maybe_bump_chi`` reactive trigger (#472) has an ε_T to
         # compare against.  As of #474 the 2x2 plaquette projector
@@ -3201,7 +3678,7 @@ def _optimize_gs_ad_tensor_2site(
     prev_grad_flat: jnp.ndarray | None = None
     stall_count = 0  # noise recovery: consecutive line search failures
     # HZ dφ evaluation carried into the next step (see _AcceptedProbeEval).
-    _ls_eval = _AcceptedProbeEval(enabled=config.gs_implicit_ad)
+    _ls_eval = _AcceptedProbeEval(enabled=config.gs_implicit_ad, check_policy=True)
     current_stage_idx = 0
     stage_start_step = 0
     # Rolling buffer of accepted ``||grad||_2`` for the gradient-spike
@@ -3242,6 +3719,21 @@ def _optimize_gs_ad_tensor_2site(
         if envs_init is not None:
             _env_cache_2s.update(best_env_cache_2s or {"envs": envs_init})
 
+    def _restore_best_env_2s():
+        """Reset for CTMNotConvergedError: restore the best env when it is
+        certified converged at ``best_params`` and its chi matches; otherwise
+        fall back to _reset_env_cache_2s (see ``_restore_best_env``)."""
+        best = best_env_cache_2s.get("envs") if best_env_cache_2s else None
+        if _cache_env_known_converged(
+            best_env_cache_2s, best_params
+        ) and _should_restore_best_env(
+            best, ctm_cfg_2s.chi, **_restore_chi_kwargs(ctm_cfg_2s)
+        ):
+            _drop_env_cache_for_reset(_env_cache_2s)
+            _env_cache_2s.update(best_env_cache_2s)
+        else:
+            _reset_env_cache_2s()
+
     # Optional trajectory capture (config.return_history).  Always allocated
     # but only populated/returned when the flag is set.
     _history_energies: list[float] = []
@@ -3249,6 +3741,14 @@ def _optimize_gs_ad_tensor_2site(
     _jit_compile_time: float = 0.0
     _first_step = True
     _converged = False
+    # Site 1 of #1059: per-step gradient-forward convergence verdicts.
+    _hist_ctm_converged: list[bool] = []
+    _hist_ctm_sv_diff: list[float] = []
+    _hist_ctm_mult: list = []
+    _hist_ctm_stationarity: list[float] = []
+    # The implicit-AD fused forward writes ``forward_converged``; the split
+    # and explicit-AD paths do not, so skip the check (and the pop) there.
+    _site1_check_2s = config.gs_implicit_ad and not use_split_2s
 
     # CTM conv_tol schedule (shared helper with 1-site optimizer)
     _conv_tol_schedule_2s = config.gs_ctm_conv_tol_schedule
@@ -3309,7 +3809,7 @@ def _optimize_gs_ad_tensor_2site(
             envs = _split_forward_2s(site_tensors, _env_cache_2s.get("envs", None))
             _env_cache_2s["envs"] = envs
             return float(_forward_energy_2s(A_norm, B_norm, envs))
-        envs, _ = python_loop_ctm_converge(
+        envs, info = python_loop_ctm_converge(
             site_tensors,
             CHECKERBOARD_NEIGHBORS,
             **ctm_converge_kwargs(
@@ -3318,6 +3818,8 @@ def _optimize_gs_ad_tensor_2site(
                 for_probe=True,
             ),
         )
+        if _site3_reject(info, ctm_cfg_2s):
+            return float("inf")
         # Issue #502: see 1-site loss_fn_fwd above for rationale.
         _env_cache_2s["envs"] = envs
         return float(
@@ -3570,14 +4072,75 @@ def _optimize_gs_ad_tensor_2site(
                 _step_t0 = _time.perf_counter()
             try:
                 _reused = _ls_eval.take(params, ctm_cfg_2s)
+                _reused_diag = None
                 if _reused is not None:
                     energy_val, grads, _probe_dt = _reused
+                    # #1059 site 1 checks the probe's own forward (#1062 reuse).
+                    _reused_diag = _ls_eval.reused_diagnostics
                     if config.return_history:
                         _step_t0 -= _probe_dt  # step_times = this point's grad eval
                 else:
-                    energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                    if _site1_check_2s:
+                        _cea.reset_forward_diagnostics()
+                    with _policy_scope(_site1_check_2s):
+                        energy_val, grads = jax.value_and_grad(loss_fn)(params)
                     grads = _euclidean_grads(grads)
-            except CTMRGGradientError as exc:
+                if _site1_check_2s:
+                    _site1_forward_info(
+                        step + 1,
+                        ctm_cfg_2s,
+                        (
+                            _hist_ctm_converged,
+                            _hist_ctm_sv_diff,
+                            _hist_ctm_mult,
+                            _hist_ctm_stationarity,
+                        ),
+                        diagnostics=_reused_diag,
+                    )
+            except (CTMRGGradientError, CTMNotConvergedError) as exc:
+                if isinstance(exc, CTMNotConvergedError):
+                    # #1059 section 3: restore the converged best env rather
+                    # than cold-start; checkpoint and re-raise when recovery
+                    # is impossible (the reset target is the failing point,
+                    # no best accepted yet, budget spent, or not "reset").
+                    if (
+                        params is best_params
+                        or best_energy == float("inf")
+                        or config.gs_stall_recovery != "reset"
+                        or stall_count + 1 > config.gs_stall_recovery_retries
+                    ):
+                        _maybe_save_2s_checkpoint(
+                            step, ctm_cfg_2s.chi, best_energy, force_last=True
+                        )
+                        raise
+                    _log_ctm_not_converged_reset(
+                        exc,
+                        conv_tol=ctm_cfg_2s.conv_tol,
+                        n_reset=stall_count + 1,
+                        retries=config.gs_stall_recovery_retries,
+                        verbose=config.gs_verbose,
+                    )
+                    stall_count += 1
+                    params = best_params
+                    _restore_best_env_2s()
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                        prev_params_flat = None
+                        prev_grad_flat = None
+                    if is_cg:
+                        cg_direction = None
+                        prev_grad = None
+                        prev_precond_grad = None
+                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                        opt_state = optimizer.init(params)
+                    # Same streak contract as the CTMRGGradientError branch.
+                    chi_ceiling_consecutive_2s = 0
+                    # The reset puts params back on best_params, which the step
+                    # before evaluated from a converged env: the next step reproduces
+                    # prev_energy and the "dE" criterion would read the re-evaluation
+                    # as convergence.  Forget it (#1059 final review I1).
+                    prev_energy = float("inf")
+                    continue
                 _logger.warning(
                     "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
                     "skipping, triggering stall recovery",
@@ -3658,6 +4221,11 @@ def _optimize_gs_ad_tensor_2site(
                 # recovered CTM-error step would still count toward the
                 # K-consecutive bail-out trigger.
                 chi_ceiling_consecutive_2s = 0
+                # A reset (or noise) leaves params at/near best_params, which the
+                # step before evaluated from a converged env, so the next step
+                # reproduces prev_energy and the "dE" criterion would read the
+                # re-evaluation as convergence.  Forget it (#1059 final review I1).
+                prev_energy = float("inf")
                 continue
             energy_float = float(energy_val)
 
@@ -4060,7 +4628,10 @@ def _optimize_gs_ad_tensor_2site(
                     _env_cache_2s.get("envs"),
                 )
                 if line_search_method == "hager_zhang":
-                    from tenax.algorithms._line_search import hager_zhang_line_search
+                    from tenax.algorithms._line_search import (
+                        LineSearchAborted,
+                        hager_zhang_line_search,
+                    )
 
                     slope = _tree_dot(grads, direction)
                     if slope >= 0:
@@ -4089,6 +4660,8 @@ def _optimize_gs_ad_tensor_2site(
                         # Keeps the energy too: on acceptance at this α the next step
                         # reuses this evaluation instead of repeating it.
                         g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg_2s)
+                        if g is None:  # unconverged forward rejected (#1059)
+                            raise LineSearchAborted
                         return _tree_dot(g, direction)
 
                     dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
@@ -4445,8 +5018,11 @@ def _optimize_gs_ad_tensor_2site(
         # unphysical values, so we compare fresh evaluations only.
         # Match in-loop CTM tolerances (#317) by reusing ctm_cfg_2s directly.
 
-        def _eval_fresh_2site(p, env_init=None):
-            """Evaluate energy with fully converged fresh CTM."""
+        def _eval_fresh_2site(p, env_init=None, warm_cache=None, skippable=False):
+            """Evaluate energy with fully converged fresh CTM.
+
+            Returns ``(A, B, envs, E, source)``; see the 1-site ``_eval_fresh``.
+            """
             if use_c4v:
                 A_t, B_t = _c4v_AB(p)
             else:
@@ -4457,40 +5033,61 @@ def _optimize_gs_ad_tensor_2site(
                 # return the SplitCTMTensorEnv dict (not the fused envs).
                 envs = _split_forward_2s(st, env_init)
                 E_ = float(_forward_energy_2s(A_t, B_t, envs))
-                return A_t, B_t, envs, E_
-            envs, _ = python_loop_ctm_converge(
+                return A_t, B_t, envs, E_, "fresh"
+            envs, info = python_loop_ctm_converge(
                 st,
                 CHECKERBOARD_NEIGHBORS,
                 **ctm_converge_kwargs(ctm_cfg_2s, env_init=env_init),
             )
-            E_ = float(
-                compute_energy_ctm_tensor_2site(
-                    A_t, B_t, envs[(0, 0)], envs[(1, 0)], gate, d_phys
-                )
+            verdict = _final_eval_use_warm(
+                info, warm_cache, ctm_cfg_2s, params=p, skippable=skippable
             )
-            return A_t, B_t, envs, E_
+            source = "fresh"
+            if verdict == "warm":
+                envs = warm_cache["envs"]
+                source = "warm_fallback"
+            if verdict == "skip":
+                E_ = float("inf")
+            else:
+                E_ = float(
+                    compute_energy_ctm_tensor_2site(
+                        A_t, B_t, envs[(0, 0)], envs[(1, 0)], gate, d_phys
+                    )
+                )
+            return A_t, B_t, envs, E_, source
 
         # #899: NO env_init -- see the 1-site path for the full reasoning.
         # The seed was the line-search-reverted cache, i.e. a different
         # state's environment, and ``best_params`` is evaluated cold for the
         # same reason so the comparison below compares like with like.
-        A_last, B_last, envs_last, E_last = _eval_fresh_2site(params)
-        env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
-
+        # #1059 site 4: warm fallback only from a cache certified converged at
+        # exactly these params (see the 1-site path).
+        # The best point goes first: an unconverged last iterate with no
+        # converged warm env of its own is dropped (E = +inf) in favour of it.
         if best_params is not params:
-            A_best, B_best, envs_best, E_best_fresh = _eval_fresh_2site(best_params)
+            A_best, B_best, envs_best, E_best_fresh, src_best = _eval_fresh_2site(
+                best_params, warm_cache=best_env_cache_2s
+            )
             env_A_best = envs_best[(0, 0)]
             env_B_best = envs_best[(1, 0)]
-        else:
+        A_last, B_last, envs_last, E_last, src_last = _eval_fresh_2site(
+            params,
+            warm_cache=_env_cache_2s if params is best_params else None,
+            skippable=params is not best_params,
+        )
+        env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
+        if best_params is params:
             E_best_fresh = E_last
 
         # Pick whichever fresh evaluation is lower
         if E_last <= E_best_fresh:
             A_final, B_final = A_last, B_last
             env_A, env_B, E_gs = env_A_last, env_B_last, E_last
+            _final_env_source = src_last
         else:
             A_final, B_final = A_best, B_best
             env_A, env_B, E_gs = env_A_best, env_B_best, E_best_fresh
+            _final_env_source = src_best
         if config.gs_verbose:
             print(f"[iPEPS-AD:2site-tensor] final E={E_gs:.10f}", flush=True)
 
@@ -4501,6 +5098,11 @@ def _optimize_gs_ad_tensor_2site(
                 "jit_compile_time": _jit_compile_time,
                 "num_steps": len(_history_energies),
                 "converged": _converged,
+                "ctm_converged": _hist_ctm_converged,
+                "ctm_sv_diff": _hist_ctm_sv_diff,
+                "ctm_step_multiplier": _hist_ctm_mult,
+                "ctm_stationarity": _hist_ctm_stationarity,
+                "final_env_source": _final_env_source,
             }
             return (A_final, B_final), (env_A, env_B), E_gs, history
         return (A_final, B_final), (env_A, env_B), E_gs
@@ -5123,7 +5725,10 @@ def _optimize_gs_ad_multisite(
             # ``_restore_env_cache_after_line_search`` (#502 Codex P1).
             _ls_env_snap = ("envs" in _env_cache, _env_cache.get("envs"))
             if line_search_method == "hager_zhang":
-                from tenax.algorithms._line_search import hager_zhang_line_search
+                from tenax.algorithms._line_search import (
+                    LineSearchAborted,
+                    hager_zhang_line_search,
+                )
 
                 slope = _tree_dot(grads, direction)
                 if slope >= 0:
@@ -5151,6 +5756,8 @@ def _optimize_gs_ad_multisite(
                     # Keeps the energy too: on acceptance at this α the next step
                     # reuses this evaluation instead of repeating it.
                     g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg)
+                    if g is None:  # unconverged forward rejected (#1059)
+                        raise LineSearchAborted
                     return _tree_dot(g, direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
