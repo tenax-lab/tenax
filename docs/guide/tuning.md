@@ -212,14 +212,15 @@ Reference: Hager & Zhang, SIAM J. Optim. 16(1):170–192 (2005).
 
 Values: `None` (auto), `"noise"`, `"reset"`
 
-- **`"noise"`** — inject a `gs_noise_amplitude` Frobenius perturbation
-  when the line search stalls. Required for 1-site C4v to break out of
-  SU-init plateaus.
 - **`"reset"`** — clear L-BFGS `(s, y)` history, roll back to
   `best_params`, force steepest descent on the next step. This is what
-  variPEPS does; best for 2-site runs.
-- **`None`** (default) — auto-select: `"noise"` for 1-site, `"reset"`
-  for 2-site.
+  variPEPS does.
+- **`"noise"`** (legacy) — inject a `gs_noise_amplitude` Frobenius
+  perturbation when the line search stalls, with no rollback. A kick
+  near a settled energy is not undone: on D=3 Heisenberg it took a 1x1
+  run from E=-0.66819 to -0.033.
+- **`None`** (default) — `"reset"` on every unit cell (1-site was
+  `"noise"` before v0.8.4).
 
 ---
 
