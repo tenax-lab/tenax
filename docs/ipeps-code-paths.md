@@ -443,8 +443,8 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | ``forward_gauge="none"`` on JIT   | **EXPERIMENTAL** | JIT ``while_loop`` kernel falls back to ``"qr"``; known limitation.|
 | ``gs_ctm_conv_tol_schedule``      | **Working**      | Loose-to-tight CTM tolerance ramp; optional tuning knob.           |
 | Metric preconditioning            | **Working**      | Natural-gradient preconditioner for CG / L-BFGS.                   |
-| Stall recovery (1-site)           | **Working**      | ``gs_stall_recovery="noise"`` auto-default; required by C4v path.  |
-| Stall recovery (2-site)           | **Working**      | ``gs_stall_recovery="reset"`` auto-default since #298.             |
+| Stall recovery (1-site)           | **Working**      | ``gs_stall_recovery="reset"`` auto-default since v0.8.4 (was ``"noise"``; the SU-init plateau it targeted no longer reproduces). |
+| Stall recovery (2-site)           | **Working**      | ``gs_stall_recovery="reset"`` auto-default since #298/#520.        |
 | 2-site L-BFGS at χ=8              | **Working**      | ``E_best ≈ -0.6602`` at D=2 with Lorentzian projector backward (issue #299 closed; post-convergence re-eval tracked separately by #317). |
 | Lorentzian projector backward     | **Aspirational** | ``CTMConfig`` documents auto-promotion of ``"auto"`` to ``"lorentzian"`` when ``gs_implicit_ad=False`` + ``projector_method="eigh"``, but the ``"auto"`` resolver is **not yet implemented** (see ``_ctm_projector.py`` "Task 8 will resolve 'auto'"); ``"auto"`` currently behaves as ``"standard"``. Setting ``projector_backward="lorentzian"`` explicitly works. |
 | 2x2 projector response (``"flow"``) | **Working (explicit AD only)** | ``projector_backward="flow"`` lets the 2x2 plaquette projectors' ``dP/dA`` reach the gradient (#983); every other value freezes them, which was the only behaviour before. Measured on ``ctm_energy_explicit``: AD/FD 0.229..0.928 frozen against 0.944..0.994 flowing. **Not safe under implicit AD** — restoring ``dP/denv`` puts the CTM gauge mode back into ``J`` and ``(I − J^T)λ = dE/denv`` stops being reliably solvable (#1028, blocked on #841). |

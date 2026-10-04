@@ -6,7 +6,7 @@ zero so the best-so-far state survives.  That rescue is also what makes the run
 
 * ``gs_conv_criterion='grad_norm'`` -- a fully masked gradient has L2 norm
   *exactly* ``0.0``, below any tolerance.  Fires on the masked step itself.
-* ``gs_conv_criterion='dE'`` (the current default) -- a fully masked step is a
+* ``gs_conv_criterion='dE'`` (the default before v0.8.4) -- a fully masked step is a
   no-op, so the *next* step re-evaluates identical params and sees
   ``delta_energy == 0.0``.  Fires one step later.
 
@@ -108,7 +108,7 @@ def test_a_masked_gradient_does_not_end_the_optimization(monkeypatch):
 
 
 def test_a_masked_step_does_not_false_converge_one_step_later(monkeypatch):
-    """dE criterion -- the default, and the variant a per-step guard misses.
+    """dE criterion -- the variant a per-step guard misses.
 
     Step 0 is fully masked, so it is a no-op and step 1 re-evaluates *identical*
     params.  ``delta_energy`` is then exactly 0.0 through no merit of the
