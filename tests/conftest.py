@@ -660,6 +660,9 @@ _FILE_MARKERS = {
     # now closed and the file passes.
     "test_architecture_imports.py": "core",
     "test_ipeps_ad_policy.py": "core",
+    # #841 follow-up: forward_gauge="auto" resolution -- spies on the
+    # hand-off to the CTM, plus one tiny optimize_gs_ad run per AD path.
+    "test_forward_gauge_auto.py": "core",
     "test_ipeps_checkpoint.py": "core",
     "test_ipeps_config_chi_ceiling_bailout.py": "core",
     "test_ipeps_config_grad_spike.py": "core",
@@ -735,6 +738,9 @@ _FILE_MARKERS = {
     # required path, and the file is pure aggregation logic -- 3.96s CPU.
     "test_ctm_nonfinite_convergence_974.py": "core",
     "test_ctm_mixing_1060.py": "core",
+    # PESS losses hand ctm_mixing to ctm_energy_implicit (#1060, Codex on
+    # #1069).  Spy on the energy entry point; no CTM runs, ~3s for the file.
+    "test_pess_loss_threads_mixing.py": "core",
     # #899: the returned-energy-is-fresh guard.  ``core``: it is the
     # regression test for a wrong number coming out of ``optimize_gs_ad``,
     # which is exactly what should gate a merge, and it is cheap -- D=2
@@ -767,6 +773,11 @@ _FILE_MARKERS = {
     # L-BFGS + Hager-Zhang optimizer step evaluates.  Mechanism tests only
     # (spied evaluation counts, a scripted line search) at D=2, chi<=6.
     "test_ls_reuse_accepted_eval.py": "core",
+    # The metric preconditioner normalises N by <A|N|A> so g' is invariant to
+    # the CTM environment's arbitrary overall scale (phase vs bond_phase
+    # differed by ~40%).  ``core``: it shapes every default (gs_metric_precond
+    # =True) L-BFGS/CG direction.  D=2 chi=8 SU fixture, no AD.
+    "test_metric_precond_env_norm.py": "core",
 }
 
 

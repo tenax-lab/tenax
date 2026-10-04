@@ -48,6 +48,10 @@ TRG
 
 .. autofunction:: tenax.algorithms.trg.ising_free_energy_exact
 
+.. autofunction:: tenax.algorithms.trg.compute_potts_tensor
+
+.. autofunction:: tenax.algorithms.trg.potts_critical_beta
+
 HOTRG
 -----
 
@@ -56,6 +60,27 @@ HOTRG
    :no-index:
 
 .. autofunction:: tenax.algorithms.hotrg.hotrg
+
+Gilt-TNR and Gilt-HOTRG
+-----------------------
+
+.. autoclass:: tenax.algorithms.gilt.GiltConfig
+   :members:
+   :no-index:
+
+.. autoclass:: tenax.algorithms.gilt.GiltTNRConfig
+   :members:
+   :no-index:
+
+.. autofunction:: tenax.algorithms.gilt.gilt_tnr
+
+.. autofunction:: tenax.algorithms.gilt.gilt_plaquette
+
+.. autoclass:: tenax.algorithms.gilt_hotrg.GiltHOTRGConfig
+   :members:
+   :no-index:
+
+.. autofunction:: tenax.algorithms.gilt_hotrg.gilt_hotrg
 
 iPEPS
 -----
@@ -66,6 +91,9 @@ iPEPS
 
 .. autoclass:: tenax.algorithms.ipeps_config.CTMConfig
    :members:
+   :no-index:
+
+.. autofunction:: tenax.algorithms.ipeps_config.resolve_forward_gauge
    :no-index:
 
 .. autoclass:: tenax.algorithms.ipeps_config.CTMEnvironment
@@ -84,7 +112,49 @@ iPEPS
 
 .. autofunction:: tenax.algorithms.ipeps_optimize.optimize_gs_ad
 
+.. autofunction:: tenax.algorithms.ipeps_optimize.optimize_gs_ad_chi_schedule
+
+.. autofunction:: tenax.algorithms.ipeps.heisenberg_gate
+
+.. autofunction:: tenax.algorithms.ipeps.heisenberg_gate_u1sz
+
+.. autoclass:: tenax.algorithms.ipeps_simple_update.BondWeights
+   :members:
+   :no-index:
+
+.. autofunction:: tenax.algorithms.ipeps_bp_gauge.bp_gauge_checkerboard
+
 .. autofunction:: tenax.algorithms._ctm_tensor_convergence.ctm_multisite
+
+CTM (Tensor protocol)
+---------------------
+
+.. autofunction:: tenax.algorithms._ctm_tensor_convergence.ctm_tensor
+
+.. autofunction:: tenax.algorithms._ctm_tensor_convergence.ctm_tensor_2site
+
+.. autofunction:: tenax.algorithms._ctm_tensor_c4v.ctm_tensor_c4v
+
+.. autofunction:: tenax.algorithms._ctm_tensor_convergence.ctm_hold_test
+
+.. autoclass:: tenax.algorithms._ctm_tensor_convergence.CTMConvergenceInfo
+   :members:
+   :no-index:
+
+.. autofunction:: tenax.algorithms._ctm_tensor_energy.compute_energy_ctm_tensor_2site
+
+Split-CTMRG
+-----------
+
+.. autofunction:: tenax.algorithms.ipeps_ctm_convergence.ctm_split
+
+.. autofunction:: tenax.algorithms.ipeps_rdm.compute_energy_split_ctm
+
+.. autofunction:: tenax.algorithms._split_ctm_tensor_convergence.ctm_split_tensor
+
+.. autofunction:: tenax.algorithms._split_ctm_tensor_energy.compute_energy_split_ctm_tensor_2site
+
+.. autofunction:: tenax.algorithms._split_ctm_tensor_energy.compute_energy_split_ctm_tensor_multisite
 
 Honeycomb iPEPS CTM
 -------------------
@@ -129,8 +199,11 @@ Kagome iPESS
 Differentiable iPESS for the kagome lattice (spin-½ and spin-1 XXZ).
 The state is parameterized by two simplex tensors ``T_u``, ``T_d`` and
 three site tensors ``R_a``, ``R_b``, ``R_c``; triangle simple update
-provides a warm start and L-BFGS through the square coarse-grained
-CTM (Convention C, Liao 2019) refines the iPESS primitives.
+provides a warm start and L-BFGS through the exact single-supersite CTM
+(``loss_builder="exact"``, #991) refines all five primitives. The legacy
+Convention-C loss (``kagome_xxz_pess_cg_gates`` / ``build_pess_loss``, Liao
+2019) is kept only for backward compatibility and must not be used for physics
+results (#1002). See :doc:`/guide/algorithms/honeycomb_kagome`.
 
 .. autoclass:: tenax.algorithms.pess.IPESSState
    :members:
@@ -147,6 +220,12 @@ CTM (Convention C, Liao 2019) refines the iPESS primitives.
 .. autofunction:: tenax.algorithms.pess_optimize.build_pess_loss
 
 .. autofunction:: tenax.algorithms.pess_optimize.optimize_pess_ad
+
+.. autofunction:: tenax.algorithms.pess.pess_to_kagome_supersite_exact
+
+.. autofunction:: tenax.algorithms.pess.kagome_xxz_pess_cg_gates_exact
+
+.. autofunction:: tenax.algorithms.pess_optimize.build_pess_loss_exact
 
 Lattice
 -------
@@ -176,6 +255,8 @@ AD Utilities
 
 .. autofunction:: tenax.algorithms.ad_utils.ctm_tensor_converge
 
+.. autofunction:: tenax.algorithms._root_implicit_gradient_check.measure_gradient_error
+
 iPEPS Excitations
 -----------------
 
@@ -203,6 +284,10 @@ Fermionic iPEPS (fPEPS)
 .. autofunction:: tenax.algorithms.fermionic_ipeps.fpeps
 
 .. autofunction:: tenax.algorithms.fermionic_ipeps.sublattice_gap
+
+.. autofunction:: tenax.algorithms.fermionic_ipeps.su_grow_layout
+
+.. autofunction:: tenax.algorithms.fermionic_ipeps.bond_layout
 
 AutoMPO
 -------

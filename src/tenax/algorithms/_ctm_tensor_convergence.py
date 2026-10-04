@@ -36,6 +36,7 @@ import numpy as np
 from tenax.algorithms._ctm_hold import (
     DEFAULT_HOLD_DIRECTIONS,
     DEFAULT_HOLD_EXTENSION,
+    DEFAULT_HOLD_NOISE_FLOOR,
     DEFAULT_HOLD_PERTURBATION,
     DEFAULT_HOLD_SWEEPS,
     HoldResult,
@@ -1149,14 +1150,14 @@ def ctm_tensor(
         reading this to decide whether to grow ``chi`` -- the variPEPS
         §2.8.2 auto-bump -- is dead on the blind rows:
 
-        =============  ==================  ==========================
+        =============  ====================  ==========================
         ``recipe``     ``projector_method``  ε_T
-        =============  ==================  ==========================
-        ``"2x2"``      *(ignored)*         genuine
-        ``"1x1"``      ``"svd"``           **structurally 0**
-        ``"1x1"``      ``"eigh"``          genuine
-        ``"1x1"``      ``"qr"``            **0, never computed**
-        =============  ==================  ==========================
+        =============  ====================  ==========================
+        ``"2x2"``      *(ignored)*           genuine
+        ``"1x1"``      ``"svd"``             **structurally 0**
+        ``"1x1"``      ``"eigh"``            genuine
+        ``"1x1"``      ``"qr"``              **0, never computed**
+        =============  ====================  ==========================
 
         The ``"1x1"``/``"svd"`` zero is a *shape* artifact, not a
         measurement: ``_ctm_projector.py`` forms ``M = C1g^H C4g``, which is
@@ -1632,7 +1633,7 @@ def _ctm_tensor_multisite(
                 status, stat = "nonfinite", held.rate
             else:
                 status, stat = "fail", held.rate
-            hold_log.append((status, used, stat, capped))
+            hold_log.append((status, used, stat, capped, held.floor))
             if status == "nonfinite":
                 # Codex P2 on #1058: the perturbed copy blew up; resuming from
                 # it would feed NaN/inf into the next projector SVD.  Keep the
@@ -1767,12 +1768,22 @@ def _hold_failure_note(hold_log: list) -> str:
     if fails:
         rates = ", ".join(f"{h[2]:.4f}" for h in fails[-3:])
         cut = " (the last hold was cut short by max_iter)" if fails[-1][3] else ""
+        # #1063: a displacement that sinks into the reference's own jitter
+        # counts as contracted, so a rejection was fitted above that floor.
+        floors = [h[4] for h in fails[-3:] if len(h) > 4 and math.isfinite(h[4])]
+        floor = (
+            f", fitted above the reference's own noise floor "
+            f"{', '.join(f'{f:.2g}' for f in floors)} (a displacement that sinks "
+            f"to {DEFAULT_HOLD_NOISE_FLOOR:g}x that floor counts as contracted)"
+            if floors
+            else ""
+        )
         parts.append(
             f"; the successive-sweep criterion passed {len(fails)} time(s) at a "
             f"point the hold test rejected as a saddle, not an attractor -- a "
             f"perturbation did not contract (fitted growth rate/sweep {rates} "
-            f">= 1){cut}; the loop walked on from the perturbed point, and the "
-            f"budget ran out before it reached an attractor"
+            f">= 1{floor}){cut}; the loop walked on from the perturbed point, "
+            f"and the budget ran out before it reached an attractor"
         )
     drifts = [h for h in hold_log if h[0] == "drift"]
     if drifts:

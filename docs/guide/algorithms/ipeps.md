@@ -48,7 +48,7 @@ ctm_config = CTMConfig(
     max_iter=100,        # maximum CTM iterations
     conv_tol=1e-8,       # convergence tolerance on corner singular values
     renormalize=True,
-    forward_gauge="phase",  # "phase" (default), "qr", "sigma", or "none"
+    forward_gauge="auto",   # "auto" (default), "phase", "bond_phase", "qr", "sigma", or "none"
 )
 
 config = iPEPSConfig(
@@ -63,22 +63,29 @@ config = iPEPSConfig(
 ### Forward gauge
 
 The ``forward_gauge`` option in ``CTMConfig`` controls how gauge ambiguity is
-fixed after each CTM sweep during the forward pass. Four modes are supported:
+fixed after each CTM sweep during the forward pass. Five modes are supported,
+plus the ``"auto"`` default that picks one per path:
 
 | Value | Description |
 |-------|-------------|
-| ``"phase"`` (default) | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix that still stabilizes unrolled AD. **Recommended for both implicit and explicit AD** (1-site and 2-site). |
+| ``"auto"`` (default) | Resolved per path: ``"bond_phase"`` on the fused implicit-AD path (no ``chi_ramp``, ``ctm_ad_mode=None``), ``"phase"`` everywhere else. |
+| ``"phase"`` | variPEPS-style Frobenius normalization + phase fixing. Cheapest gauge fix. What ``"auto"`` resolves to on explicit AD, where ``optimize_gs_ad``'s explicit energy applies no forward gauge, so it has no effect (#1074). |
+| ``"bond_phase"`` | ``"phase"`` plus a per-chi-index sign/phase aligned to the previous environment (#841); removes the per-index Z2 sign 2-cycle the SVD projectors re-draw each sweep. Implicit AD only; what ``"auto"`` runs there. |
 | ``"qr"`` | Legacy QR decomposition on each corner with sign-fixed diagonal. Fast and stable for simple update and forward-only CTM. |
-| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for element-wise convergence at large chi (1-site path). |
+| ``"sigma"`` | Transfer-matrix eigenvector alignment via power iteration. Required for element-wise convergence at large chi (1-site path). Under ``optimize_gs_ad`` it is refused on implicit AD and has no effect on explicit AD (#1074). |
 | ``"none"`` | No gauge fix. Diagnostic / benchmark mode only. |
 
-**Forward gauge default**: ``forward_gauge`` defaults to ``"phase"`` (the
-variPEPS-style Frobenius + phase fix), which is AD-correct for both the
-implicit and explicit paths — the implicit-AD path in fact *requires*
-``"phase"`` and validates it (``projector_method`` in ``("svd", "qr")``,
-``forward_gauge="phase"``, ``ctm_conv_method="elementwise"``). There is **no
-silent gauge promotion**: if you set ``forward_gauge="sigma"`` or ``"none"``
-explicitly, that choice is respected as-is.
+**Forward gauge default**: ``forward_gauge`` defaults to ``"auto"``, which
+runs ``"bond_phase"`` on the implicit-AD path and resolves to ``"phase"`` on
+the explicit path, where ``optimize_gs_ad``'s explicit energy applies no
+forward gauge (#1074) — the implicit-AD
+path in fact *requires* one of those two and validates it
+(``projector_method`` in ``("svd", "qr")``, ``forward_gauge`` in
+``("phase", "bond_phase")``, ``ctm_conv_method="elementwise"``). There is **no
+silent gauge promotion**: if you set ``forward_gauge="phase"``, ``"sigma"`` or
+``"none"`` explicitly, that choice is passed through as-is (the implicit path
+then refuses ``"sigma"`` and ``"none"``; the explicit-AD energy applies none
+of them, #1074).
 
 See {doc}`ipeps_ad_paths` for the complete post-PR-#291 recommended
 configuration, benchmark results, and the split between the explicit-AD
@@ -158,6 +165,110 @@ with independent tensors $A$ (sublattice 0) and $B$ (sublattice 1).
 
 On the checkerboard every neighbour of $A$ is $B$ and vice versa, which
 is the minimal unit cell for Néel-ordered states.
+
+### Simple update on the checkerboard
+
+```python
+import jax.numpy as jnp
+from tenax import iPEPSConfig, CTMConfig, ipeps
+
+# Build a 2-site Heisenberg gate
+Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
+    jnp.einsum("ij,kl->ikjl", Sp, Sm) + jnp.einsum("ij,kl->ikjl", Sm, Sp)
+)
+
+# 2-site checkerboard iPEPS — captures Neel order
+config = iPEPSConfig(
+    max_bond_dim=2,
+    num_imaginary_steps=200,
+    dt=0.05,
+    ctm=CTMConfig(chi=10, max_iter=40),
+    unit_cell="2site",
+)
+energy, peps, (env_A, env_B) = ipeps(gate, None, config)
+print(f"Energy per site: {energy:.6f}")  # ~ -0.63
+```
+
+The checkerboard has **four** inequivalent bonds — `A.r<->B.l`, `B.r<->A.l`,
+`A.d<->B.u`, `B.d<->A.u` — and by default each pair shares one Schmidt
+spectrum. On a translation-invariant Hamiltonian that is exact at the fixed
+point (the paired bonds agree to ~1e-6), and it is the more robust choice: it
+constrains the two horizontal bonds to be equal, which projects out a
+dimerising direction that four free bonds can follow. Measured at D=3 from a
+random start, four free bonds converged to a dimerised state on 3 of 8 seeds
+against 1 of 8 when shared.
+
+Give each bond its own spectrum when the *state* may genuinely break the
+AB↔BA symmetry — a spontaneously dimerised or valence-bond phase, where two
+spectra cannot represent the answer — and prefer a physical initial state with
+it:
+
+```python
+config = iPEPSConfig(..., su_independent_bond_lambdas=True)
+```
+
+This does **not** make the bonds inequivalent in the *Hamiltonian*: `ipeps()`
+takes a single `hamiltonian_gate` and applies it to all four bonds, so an
+anisotropic model (`Jx != Jy`) cannot be expressed today regardless of this
+flag — setting it would silently evolve the uniform model. Per-bond
+gates are #883.
+
+The energy `ipeps()` reports comes from the legacy 2-site CTM, which does not
+converge on a genuinely entangled state — it sits ~0.02 above the truth. For an
+accurate number, measure the returned state with `ctm_tensor(recipe="2x2")`
+(D=2 gives −0.65933, χ-converged).
+
+When you want only the simple-update state — as a warm start or fixture — skip
+that measurement entirely:
+
+```python
+_, (A, B), _ = ipeps(gate, None, config, compute_energy=False)
+# returns (None, (A, B), None): no CTM is run, no energy is computed
+```
+
+Simple update itself was fixed in #667; if
+you have results from before that, note it converged to the product state and
+that *smaller* `dt` made it worse — see the changelog.
+
+See `examples/heisenberg_ipeps_su.py` for 1-site and 2-site unit cell examples.
+
+(bp-gauge)=
+### Belief-propagation gauge (correct bond weights)
+
+Simple update stores each bond's Schmidt spectrum straight from the SVD that
+produced it. A *non-unitary* gate on a neighbouring bond changes this bond's
+Schmidt values, and they are never recomputed, so the stored weights drift away
+from the spectra they are taken to be. `bp_gauge_checkerboard` re-derives all
+four of them by solving the belief-propagation fixed point (bond weights on a
+PEPS *are* BP messages) and re-gauges the tensors to match:
+
+```python
+from tenax import BondWeights, bp_gauge_checkerboard
+
+# A, B are bare Vidal Gamma tensors; lam_h, lam_v are the weights they carry.
+stored = BondWeights(h_AB=lam_h, h_BA=lam_h, v_AB=lam_v, v_BA=lam_v)
+A, B, weights, info = bp_gauge_checkerboard(A, B, stored)
+print(info.converged, info.iterations)
+print(weights.h_AB, weights.h_BA)   # the two horizontal bonds, resolved separately
+```
+
+The weights are required, and are not an initial guess: in Vidal form the state
+is `... Γ_A λ Γ_B ...`, so `λ` is half of what you are handing over. A fresh
+random pair whose bonds really are unweighted passes `BondWeights.ones(D, D)`.
+
+Every step is a gauge transformation, so the physical state is unchanged to
+machine precision — only the weights move. Measured on simple update's own
+converged D=3 output, the stored spectrum is `[1, 0.16586, 0.01564]` where the
+BP-consistent one is `[1, 0.14243, 0.01130]`: 15% off on the second Schmidt
+value and ~35% on the tail. Use this before reading `lambda` as a Schmidt
+spectrum — entanglement entropy, truncation-error estimates, or the symmetric
+gauge handed to a CTM.
+
+This corrects the *weights*, not simple update's dynamics; it does not change
+the state `ipeps()` converges to.
 
 ### `ctm_2site()` -- standalone 2-site CTM
 
@@ -248,13 +359,17 @@ The AD optimizer is chosen via ``gs_optimizer`` in ``iPEPSConfig``:
 
 | Optimizer | Setting | Best for |
 |-----------|---------|----------|
-| Adam | ``gs_optimizer="adam"`` (default) | Stable convergence, noisy gradients |
-| L-BFGS | ``gs_optimizer="lbfgs"`` | Fast convergence near minimum |
+| L-BFGS | ``gs_optimizer="lbfgs"`` (default) | Fast convergence near minimum |
+| Adam | ``gs_optimizer="adam"`` | Stable convergence, noisy gradients |
 | Conjugate gradient | ``gs_optimizer="cg"`` | Memory-efficient alternative to L-BFGS |
 
-L-BFGS and CG use **Armijo backtracking line search** by default
-(``gs_line_search=True``). Each trial step runs a fresh CTM convergence
-to evaluate the energy, avoiding stale-environment artifacts.
+L-BFGS and CG run a line search by default (``gs_line_search=None`` resolves
+to ``True`` for them): **Hager-Zhang** (``gs_line_search_method="hager_zhang"``,
+the default) or Armijo backtracking (``"armijo"``). Each trial step runs a
+fresh CTM convergence to evaluate the energy, avoiding stale-environment
+artifacts. Metric preconditioning (``gs_metric_precond``, Rader et al.,
+arXiv:2511.09546) uses the environment metric as a natural-gradient
+preconditioner.
 
 ```python
 config = iPEPSConfig(
@@ -300,10 +415,12 @@ manageable, and the backward pass avoids the implicit-diff linear solve
 entirely.
 
 ```{note}
-``forward_gauge`` defaults to ``"phase"`` (no promotion needed). Phase gauge
-is 6–9× faster than sigma gauge with equal or better energy and is the
-post-PR-#291 recommended gauge for both explicit and implicit AD. See
-{doc}`ipeps_ad_paths` for the full benchmark table.
+``forward_gauge`` defaults to ``"auto"``, which resolves to ``"phase"`` on
+this explicit path. Under ``optimize_gs_ad`` the explicit energy
+(``ctm_energy_explicit``) applies no forward gauge, so the setting has no
+effect here; only the legacy ``ad_utils`` entry points apply it. The
+phase-vs-sigma benchmark in {doc}`ipeps_ad_paths` predates this routing
+(#1074).
 ```
 
 #### CTM convergence tolerance schedule
@@ -375,7 +492,7 @@ workflow. If you use the implicit path, prefer ``ad_backward_method="vjp"``
 (the default) until the GMRES backward is stabilized.
 
 ```python
-# Explicit-AD configuration — explicit AD + QR projectors + phase gauge (default)
+# Explicit-AD configuration — explicit AD + QR projectors (forward gauge not applied, #1074)
 config = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(chi=16, max_iter=100, projector_method="qr"),
@@ -395,6 +512,19 @@ For AD-based excitation spectra on top of an optimised iPEPS, see
 when to reach for ``forward_gauge="sigma"``, ``forward_gauge="none"``, or
 the ``gs_ctm_conv_tol_schedule`` knob) see {doc}`ipeps_ad_paths`.
 
+## Model gates
+
+Pre-built 2-site Hamiltonian tensors:
+
+- `heisenberg_gate` — dense `DenseTensor` with trivial charges.
+- `heisenberg_gate_u1sz` — U(1)-Sz block-sparse `SymmetricTensor` with charges
+  `[+1, −1]` for spin-↑/↓.
+- `xxz_gate` — XXZ anisotropy.
+- `spinless_fermion_gate` — fPEPS hopping + interaction + chemical potential
+  (`FPEPSConfig.mu`), with `FermionParity` symmetry; see {doc}`fpeps`.
+
+For honeycomb and kagome lattices see {doc}`honeycomb_kagome`.
+
 ## Split-CTMRG with Tensor protocol
 
 The `ctm_split_tensor()` function provides a polymorphic split-CTMRG that
@@ -411,7 +541,8 @@ E = compute_energy_split_ctm_tensor(A, env, H_bond, d=2)
 ```
 
 `A` can be either a `DenseTensor` or `SymmetricTensor` with 5 legs
-`(u, d, l, r, phys)`.
+`(u, d, l, r, phys)`. For the 2-site/multisite entry points, the
+projector-cost vs memory trade-off and split-CTM AD, see {ref}`split-ctmrg`.
 
 ## Fermionic iPEPS (fPEPS)
 
@@ -434,8 +565,8 @@ print(f"CDW gap: {sublattice_gap(A, B, env_A, env_B):.4f}")
 
 The `spinless_fermion_gate()` builds $H = -t \sum (c^\dagger_i c_j + \text{h.c.}) + V \sum n_i n_j$
 as a `SymmetricTensor` with `FermionParity` charges. The simple update uses
-`contract()` and `svd()` which automatically compute Koszul
-signs at every leg crossing.
+`contract()` (sign-free) and `svd()`, whose matricization carries the
+Koszul signs; see {ref}`fermionic-sign-convention`.
 
 The state and environment are **pairs** (#878): the t-V ground state at finite
 `V` is a checkerboard charge-density wave, which is inherently two-site.

@@ -1012,12 +1012,14 @@ def optimize_gs_ad_chi_schedule(
 
                           Three signals advance a stage at non-final
                           stages (#455):
-                              - the per-stage ``max_steps`` budget is
-                                exhausted;
-                              - the user's ``gs_conv_criterion`` (dE,
-                                grad_norm, or both) is met;
-                              - the L-BFGS reset-recovery stall cap
-                                ``gs_stall_recovery_retries`` is hit.
+
+                          - the per-stage ``max_steps`` budget is
+                            exhausted;
+                          - the user's ``gs_conv_criterion`` (dE,
+                            grad_norm, or both) is met;
+                          - the L-BFGS reset-recovery stall cap
+                            ``gs_stall_recovery_retries`` is hit.
+
                           Unused steps from an early-exiting stage are
                           discarded (each stage's max_steps is an
                           upper bound, not a fixed quota).

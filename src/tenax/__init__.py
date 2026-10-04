@@ -298,6 +298,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "CTMEnvironment": ("tenax.algorithms.ipeps_config", "CTMEnvironment"),
     "SplitCTMEnvironment": ("tenax.algorithms.ipeps_config", "SplitCTMEnvironment"),
     "iPEPSConfig": ("tenax.algorithms.ipeps_config", "iPEPSConfig"),
+    "resolve_forward_gauge": (
+        "tenax.algorithms.ipeps_config",
+        "resolve_forward_gauge",
+    ),
     "aligned_ctm_schedules": (
         "tenax.algorithms.ipeps_config",
         "aligned_ctm_schedules",
@@ -518,6 +522,7 @@ __all__ = [
     "CTMNotConvergedWarning",
     "CTMEnvironment",
     "SplitCTMEnvironment",
+    "resolve_forward_gauge",
     "aligned_ctm_schedules",
     "heisenberg_gate",
     "heisenberg_gate_u1sz",
