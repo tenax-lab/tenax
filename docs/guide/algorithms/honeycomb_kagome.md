@@ -190,5 +190,6 @@ state, e_per_site = optimize_pess_3site_multisite_ad(
 The optimizer warm-starts CTM envs across L-BFGS steps via an internal
 `env_cache`, returns the best-seen energy across the trajectory, and
 gates `CTMConfig` at entry on the implicit-AD invariants
-(`projector_method='svd'`, `forward_gauge` in `('phase', 'bond_phase')`,
+(`projector_method='svd'`, `forward_gauge` in `('phase', 'bond_phase')` —
+the `'auto'` default resolves to `'bond_phase'` —
 `ctm_conv_method='elementwise'`).

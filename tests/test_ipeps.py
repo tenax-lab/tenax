@@ -1532,9 +1532,10 @@ class TestPostPR291ADBaseline:
     """Regression tests locking down the post-PR-#341 iPEPS AD baseline.
 
     ``CTMConfig.forward_gauge`` accepts four modes (``qr``, ``sigma``,
-    ``phase``, ``none``) and defaults to ``"phase"`` — the value that is
-    correct for both implicit and explicit AD (1-site and 2-site).  No
-    silent promotion: explicit user choice is preserved by the AD config
+    ``phase``, ``none``) plus ``bond_phase`` (#841), and defaults to the
+    ``"auto"`` sentinel: ``"bond_phase"`` on the fused implicit-AD path,
+    ``"phase"`` everywhere else (see ``tests/test_forward_gauge_auto.py``).
+    No silent promotion: explicit user choice is preserved by the AD config
     builder (see ``tests/test_ipeps_ad_policy.py``).  ``iPEPSConfig``
     exposes a ``gs_ctm_conv_tol_schedule`` knob.  These tests pin that
     behavior so future refactors cannot silently drift off the documented
@@ -1556,14 +1557,16 @@ class TestPostPR291ADBaseline:
             cfg = CTMConfig(forward_gauge=mode)
             assert cfg.forward_gauge == mode
 
-    def test_forward_gauge_default_is_phase(self):
-        """Config default is ``phase`` — the AD-correct choice.
+    def test_forward_gauge_default_is_auto(self):
+        """Config default is the ``"auto"`` sentinel.
 
-        ``"phase"`` is the correct default for both implicit and explicit
-        AD (1-site and 2-site).  No silent promotion: direct ``CTMConfig()``
-        users get the same behavior the AD optimizer uses.
+        It resolves to ``"bond_phase"`` (#841) on the implicit-AD path and
+        to ``"phase"`` -- the historical default -- on explicit AD.
         """
-        assert CTMConfig().forward_gauge == "phase"
+        cfg = CTMConfig()
+        assert cfg.forward_gauge == "auto"
+        assert cfg.effective_forward_gauge(implicit_ad=True) == "bond_phase"
+        assert cfg.effective_forward_gauge(implicit_ad=False) == "phase"
 
     def test_gs_ctm_conv_tol_schedule_is_configurable(self):
         """New iPEPSConfig knob from PR #291 is exposed and round-trips."""

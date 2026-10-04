@@ -167,7 +167,7 @@ is unaffected: it runs the fused backward and keeps all three rules.
 
 The defaults already match the recommended combination:
 ``gs_implicit_ad=True``, ``ctm.projector_method="svd"``,
-``ctm.forward_gauge="phase"``, ``ctm.ctm_conv_method="elementwise"``,
+``ctm.forward_gauge="auto"`` (→ ``"bond_phase"`` here), ``ctm.ctm_conv_method="elementwise"``,
 ``gs_optimizer="lbfgs"``, ``gs_metric_precond=True``.  No silent gauge
 or projector promotion is applied.
 
@@ -190,7 +190,7 @@ config = iPEPSConfig(
         max_iter=80,
         # All three are defaults — shown here for visibility:
         projector_method="svd",          # Fishman two-projector
-        forward_gauge="phase",           # Frobenius + first-above-threshold phase fix
+        forward_gauge="auto",            # → "bond_phase" here: phase fix + per-chi-index bond gauge (#841)
         ctm_conv_method="elementwise",
     ),
     su_init=True,
@@ -428,8 +428,8 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | Path                              | Status           | Notes                                                              |
 |-----------------------------------|------------------|--------------------------------------------------------------------|
 | Implicit AD (svd + phase + elementwise) | **Working** | **Default and recommended.** Enforced by ``resolve_projector_backward`` (PR #341). |
-| Explicit AD (standard CTM)        | **Working**      | ``gs_implicit_ad=False``. Warmup + checkpoint, ``forward_gauge`` honored as set. |
-| Implicit diff + VJP backward      | **Working**      | Regression-covered. Default ``ad_backward_method``; uses ``forward_gauge="phase"`` (the only value the implicit path accepts). |
+| Explicit AD (standard CTM)        | **Working**      | ``gs_implicit_ad=False``. Warmup + checkpoint. ``forward_gauge`` is accepted but **not applied** (``ctm_energy_explicit`` takes no gauge; explicit ``"bond_phase"`` is refused), #1074. |
+| Implicit diff + VJP backward      | **Working**      | Regression-covered. Default ``ad_backward_method``; the ``forward_gauge="auto"`` default runs ``"bond_phase"`` (``"phase"`` with ``chi_ramp``); those two are the only values the implicit path accepts. |
 | Implicit diff + GMRES backward    | **BROKEN**       | ``ad_backward_method="gmres"`` user knob still flagged unstable (spectral radius > 1); ``xfail`` regression, issue #292. The internal Python-loop CTM AD calls JAX's ``gmres_pytree_jax`` directly and is *not* gated by this knob. |
 | C4v + sublattice rotation         | **Working**      | Recommended Zhang/Corboz-style path.                               |
 | 2-site shared-tensor C4v          | **Working**      | ``unit_cell="2site"`` + ``gs_c4v=True``; spin-1/2 only (PR #304).  |
@@ -437,9 +437,10 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | Reference-mode C4v AD             | **Working**      | ``ctm_ad_mode="c4v_reference"``; dense 1-site C4v only (PR #304).  |
 | Root-implicit AD                  | **Working**      | ``ctm_ad_mode="root_implicit"`` (arXiv:2607.15030); dense 1x1 asymmetric engine only (PR #773) -- ``unit_cell`` other than ``"1x1"`` raises ``NotImplementedError`` (the multisite engine is built and tested but not yet wired, see ``ipeps_optimize_root_implicit.py:197``). |
 | QR-CTMRG (C4v)                    | **Working**      | Best-scaling projector at D=2 for explicit AD; recommended for ``chi ≥ 16`` on the explicit path. Implicit AD requires ``"svd"``. |
-| Phase gauge (``forward_gauge``)   | **Working**      | variPEPS-style Frobenius + first-above-threshold phase fix per absorption. Default for both implicit and explicit AD. |
-| Sigma gauge (``forward_gauge``)   | **Working**      | Transfer-matrix eigenvector alignment, **1-site only**. Breaks 2-site (inconsistent A/B alignment causes gradient explosion). Not auto-promoted; opt-in for 1-site users mirroring YASTN. |
-| ``forward_gauge="none"``          | **Working**      | Diagnostic / benchmark mode; honored on the explicit-AD path.     |
+| Phase gauge (``forward_gauge``)   | **Working**      | variPEPS-style Frobenius + first-above-threshold phase fix per absorption. What the ``"auto"`` default runs with ``chi_ramp``; what it resolves to on explicit AD, split CTM and ``ctm_ad_mode``, though the explicit and split energies apply no forward gauge (#1074); explicit opt-out on implicit AD. |
+| Bond-phase gauge (``forward_gauge``) | **Working**   | Phase fix + per-chi-index sign/phase aligned to the previous env (#841). What the ``"auto"`` default runs on the fused implicit-AD path; refused (when set explicitly) elsewhere. |
+| Sigma gauge (``forward_gauge``)   | **Working**      | Transfer-matrix eigenvector alignment, **1-site only**. Breaks 2-site (inconsistent A/B alignment causes gradient explosion). Not auto-promoted; opt-in for 1-site users mirroring YASTN. Applied only by the legacy ``ad_utils`` paths: refused on implicit AD, ignored by ``optimize_gs_ad``'s explicit energy (#1074). |
+| ``forward_gauge="none"``          | **Working**      | Diagnostic / benchmark mode; accepted on the explicit-AD path, which applies no gauge under ``optimize_gs_ad`` anyway (#1074). |
 | ``forward_gauge="none"`` on JIT   | **EXPERIMENTAL** | JIT ``while_loop`` kernel falls back to ``"qr"``; known limitation.|
 | ``gs_ctm_conv_tol_schedule``      | **Working**      | Loose-to-tight CTM tolerance ramp; optional tuning knob.           |
 | Metric preconditioning            | **Working**      | Natural-gradient preconditioner for CG / L-BFGS.                   |
@@ -464,10 +465,16 @@ The 2-site L-BFGS path still has a separate convergence gap at
 
 | D | chi | Path                                        | E (best)   | Literature / exact |
 |---|-----|---------------------------------------------|------------|--------------------|
-| 2 | 16  | qr + phase + explicit AD (1-site C4v)       | -0.6628    | -0.6548 (Corboz D=2) |
+| 2 | 16  | qr + phase + explicit AD (1-site C4v)       | -0.6628    | -0.66251 (converged D=2 χ=16, 2026-10-03) |
 | 2 | 8   | qr + phase + explicit AD (1-site C4v)       | -0.6610    | —                  |
-| 2 | 8   | svd + phase + implicit AD (2-site C4v)      | -0.6602    | -0.6548 (Corboz D=2 χ=16) |
+| 2 | 8   | svd + phase + implicit AD (2-site C4v)      | -0.6602    | —                  |
 | 3 | 16  | svd + phase + implicit AD (2-site C4v)      | -0.6521    | (50 steps, monotonic, 7.9 s/step) |
+
+Historical numbers.  The converged D=2, χ=16 optimum is −0.66251 (Tenax
+implicit AD and variPEPS agree to 4e-7, 2026-10-03), not the "−0.6548"
+formerly quoted.  The explicit-AD rows predate #1074 (the explicit energy
+now applies no forward gauge), and −0.6628 lies *below* that optimum, so it
+is not a converged variational energy.
 | 2 | 16  | svd + phase + implicit AD (2-site, complex128, non-C4v) | -0.6406 | variational; ≈1 min/step on GPU |
 | — | —   | QMC exact                                   | -0.66944   | Sandvik, PRB 56, 11678 (1997) |
 
@@ -501,7 +508,7 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | Backward              | ``ad_backward_method``      | ``"vjp"``        | ``"gmres"`` (BROKEN — issue #292)    |
 | Projector             | ``projector_method``        | ``"svd"``        | ``"eigh"`` / ``"qr"`` (recommended for explicit AD only)  |
 | Projector backward    | ``projector_backward``      | ``"auto"``       | ``"standard"`` / ``"lorentzian"`` (``"auto"`` resolver not yet implemented; behaves as ``"standard"``) / ``"flow"`` (2x2 recipe: unfreeze ``dP/dA`` — explicit AD only, see #983/#1028) |
-| Forward gauge         | ``forward_gauge``           | ``"phase"``      | ``"qr"`` / ``"sigma"`` / ``"none"`` (no silent promotion; implicit AD requires ``"phase"``) |
+| Forward gauge         | ``forward_gauge``           | ``"auto"``       | ``"phase"`` / ``"bond_phase"`` / ``"qr"`` / ``"sigma"`` / ``"none"`` (``"auto"`` → ``"bond_phase"`` on fused implicit AD, else ``"phase"``; explicit values never promoted; implicit AD requires ``"phase"``/``"bond_phase"``) |
 | CTM conv method       | ``ctm_conv_method``         | ``"elementwise"``| ``"sv"`` (singular-value); implicit AD requires ``"elementwise"`` |
 | Conv tol schedule     | ``gs_ctm_conv_tol_schedule``| ``None``         | ``[(frac, tol), ...]``               |
 | Metric precond        | ``gs_metric_precond``       | ``True``         | ``False`` = standard grad            |
@@ -515,16 +522,17 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | CTM variant           | (function choice)           | standard         | split, C4v                          |
 
 The static defaults
-(``projector_method="svd"``, ``forward_gauge="phase"``, ``ctm_conv_method="elementwise"``)
+(``projector_method="svd"``, ``forward_gauge="auto"``, ``ctm_conv_method="elementwise"``)
 are the AD-correct choices for both implicit and explicit AD.  For
 the implicit-AD path these three values are *enforced* by
 ``resolve_projector_backward`` — any other combination raises
 ``ValueError`` at dispatch.  For the explicit-AD path
 ``optimize_gs_ad`` passes the user's configured gauge and projector
 through unchanged.  ``build_ad_ctm_config`` performs **no silent
-promotion** of any value: only ``gs_projector_method`` (when set)
-overrides ``ctm.projector_method``.  Direct ``CTMConfig()`` users get
-the same behavior the optimizer uses.
+promotion** of any explicit value: only ``gs_projector_method`` (when
+set) overrides ``ctm.projector_method``, and the ``forward_gauge="auto"``
+default is resolved per path (``"bond_phase"`` on fused implicit AD with
+no ``chi_ramp`` / ``ctm_ad_mode``, ``"phase"`` otherwise).
 
 The root-implicit path additionally reads ``CTMConfig.rel_floor``, the
 relative clamp on the retained CTM spectrum (``None`` uses the derived
