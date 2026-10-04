@@ -740,6 +740,7 @@ _FILE_MARKERS = {
     # PESS losses hand ctm_mixing to ctm_energy_implicit (#1060, Codex on
     # #1069).  Spy on the energy entry point; no CTM runs, ~3s for the file.
     "test_pess_loss_threads_mixing.py": "core",
+    "test_ad_no_converge_after_rollback.py": "core",
     # #899: the returned-energy-is-fresh guard.  ``core``: it is the
     # regression test for a wrong number coming out of ``optimize_gs_ad``,
     # which is exactly what should gate a merge, and it is cheap -- D=2
