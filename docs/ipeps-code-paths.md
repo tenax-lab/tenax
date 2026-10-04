@@ -397,20 +397,20 @@ Reference: Naumann, Weerda, Rizzi, Eisert, Schmoll, *SciPost Phys. Lect. Notes* 
 ## Stall Recovery (issue #298)
 
 When the L-BFGS / CG line search cannot make progress the optimizer runs
-``gs_stall_recovery``. The knob is auto-defaulted per unit cell at
-dispatch time:
+``gs_stall_recovery``. The unset default resolves to ``"reset"`` on every
+unit cell at dispatch time (``_normalize_stall_recovery``): roll back to
+``best_params`` and clear the L-BFGS ``(s, y)`` history and CG beta state,
+so the next step is a plain (preconditioned) steepest descent step from
+the best iterate; after ``gs_stall_recovery_retries`` consecutive resets
+the optimizer returns the best state.
 
-- **1-site** (``_optimize_gs_ad_tensor``) → ``"noise"``: inject a
-  ``gs_noise_amplitude`` Frobenius perturbation and reset the L-BFGS
-  history. Required for the C4v production path to break out of the
-  SU-init plateau, where gradient norms ≈ ``1e-10`` would otherwise
-  trip ``gs_conv_tol``.
-- **2-site** (``_optimize_gs_ad_tensor_2site``) → ``"reset"``: clear
-  the L-BFGS ``(s, y)`` history and CG beta state so the next step is
-  a plain (preconditioned) steepest descent step from the current
-  iterate. No randomness, no rollback. Needed because the 10 % noise
-  kick in the 32-dim D=2 space teleports the state into non-variational
-  CTM regions and produces unphysical "best" energies.
+``"noise"`` (legacy) injects a ``gs_noise_amplitude`` Frobenius
+perturbation on the current params with no rollback. It was the 1-site
+default until v0.8.4, for an SU-init plateau (gradient norms ≈ ``1e-10``)
+that no longer reproduces -- the SU start has |g| = 0.30 at D=2 and 0.54
+at D=3. A kick near a settled energy is destructive: it took a D=3 1x1
+run from E=-0.66819 to -0.033 (the CTM adjoint then diverged), and the
+2-site default was moved off it earlier for the same reason (#298, #520).
 
 An explicit ``gs_stall_recovery`` setting is never overridden by the
 dispatcher. For extra safety on 2-site runs, set ``gs_energy_floor`` to

@@ -362,45 +362,32 @@ def _resolve_projector_backward(config: iPEPSConfig) -> iPEPSConfig:
 
 
 def _normalize_stall_recovery(config, *, unit_cell: str):
-    """Auto-default ``gs_stall_recovery`` based on unit cell when unset.
+    """Resolve an unset ``gs_stall_recovery`` to ``"reset"`` on every unit cell.
 
-    The 1-site C4v production path requires the noise kick to break out
-    of the SU-init plateau (gradient norms ~1e-10 trip ``gs_conv_tol``
-    before the first real step), so the 1-site default is ``"noise"``.
-
-    The 2-site default is ``"reset"`` because best-energy snapshot
-    rollback dominates raw noise injection near convergence on this
-    path.  Empirically verified in #520 (PR #551) on the post-#494
-    corrected energy: under both modes the trajectory stayed above the
-    QMC reference (so the original "non-variational drift" pathology
-    from #298 did **not** reproduce), but a 10%-Frobenius noise kick
-    fired close to a settled energy can perturb the L-BFGS state by
-    enough that re-descent does not recover before ``gs_num_steps``
-    runs out.  Reset's best-snapshot fallback dodges this failure mode
-    by construction, so it wins on this path by ~2.6e-2 in the
-    canonical D=2 χ=8 probe.
-
-    Note: the older justification — "noise interacts pathologically
-    with non-variational CTM regions on 2-site (see #298)" — was made
-    on the pre-#494 broken 2-site bipartite energy and does not hold
-    on the corrected loss landscape.  The default itself is unchanged.
+    ``"reset"`` rolls back to ``best_params`` and clears the L-BFGS / CG
+    state; ``"noise"`` kicks the *current* params by ``gs_noise_amplitude``
+    (10 % Frobenius) with no rollback.  The 1-site default used to be
+    ``"noise"``, to break the 1-site C4v run off an SU-init plateau with
+    gradient norms ~1e-10.  That plateau no longer reproduces: Heisenberg
+    1x1 from the default SU start has |g| = 0.30 at D=2 chi=8 and 0.54 at
+    D=3 chi=9, with and without ``gs_c4v``, and at D=2 ``"noise"`` and
+    ``"reset"`` reach the same energy to 1e-10.  The kick is destructive near
+    a settled energy instead: on D=3 chi=16
+    Heisenberg (``forward_gauge="bond_phase"``, ``projector_backward="flow"``)
+    a stall at E=-0.66819 -- fired by a Hager-Zhang approximate-Wolfe step
+    that does not lower E by more than ``_STALL_NOISE_FLOOR`` -- kicked the
+    state to E=-0.033, after which the CTM adjoint diverged (residual up to
+    1e46) and the run never returned to its best energy; the same kick took
+    the 1-site C4v D=3 run from -0.6668 to -0.50.  The 2-site default has
+    been ``"reset"`` since #520 for the same reason.  ``unit_cell`` is kept
+    for the call sites; an explicit user setting is never overridden.
     """
     from dataclasses import replace
 
     if config.gs_stall_recovery is not None:
         return config
-    # CG with map_fn optimizes a tuple of raw site tensors; the noise
-    # injection path assumes a single tensor (calls .todense()/jnp.linalg.norm
-    # on params), so default to "reset" for that case.
-    cg_with_map_fn = (
-        config.cg_gates is not None
-        and getattr(config.cg_gates, "map_fn", None) is not None
-    )
-    if cg_with_map_fn:
-        default = "reset"
-    else:
-        default = "noise" if unit_cell == "1x1" else "reset"
-    return replace(config, gs_stall_recovery=default)
+    del unit_cell
+    return replace(config, gs_stall_recovery="reset")
 
 
 _STALL_NOISE_FLOOR: float = 1e-12

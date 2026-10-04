@@ -1698,15 +1698,32 @@ class TestPostPR291ADBaseline:
 
 
 def test_stall_recovery_auto_defaults():
-    """1-site -> 'noise', 2-site -> 'reset' when user leaves gs_stall_recovery=None.
+    """Every unit cell -> 'reset' when user leaves gs_stall_recovery=None.
 
-    See issue #298.
+    1-site was 'noise' before v0.8.4; a noise kick near a settled energy is
+    not rolled back (issue #298, and the D=3 1x1 collapse in the v0.8.4
+    validation).
     """
     from tenax.algorithms.ipeps_config import iPEPSConfig
     from tenax.algorithms.ipeps_optimize import _normalize_stall_recovery
 
     cfg_1s = _normalize_stall_recovery(iPEPSConfig(unit_cell="1x1"), unit_cell="1x1")
-    assert cfg_1s.gs_stall_recovery == "noise"
+    assert cfg_1s.gs_stall_recovery == "reset"
+
+    cfg_1s_c4v = _normalize_stall_recovery(
+        iPEPSConfig(unit_cell="1x1", gs_c4v=True), unit_cell="1x1"
+    )
+    assert cfg_1s_c4v.gs_stall_recovery == "reset"
+
+    cfg_ms = _normalize_stall_recovery(
+        iPEPSConfig(unit_cell="1x1"), unit_cell="multisite"
+    )
+    assert cfg_ms.gs_stall_recovery == "reset"
+
+    cfg_user_1s = _normalize_stall_recovery(
+        iPEPSConfig(unit_cell="1x1", gs_stall_recovery="noise"), unit_cell="1x1"
+    )
+    assert cfg_user_1s.gs_stall_recovery == "noise", "explicit 1-site setting wins"
 
     cfg_2s = _normalize_stall_recovery(
         iPEPSConfig(unit_cell="2site"), unit_cell="2site"
