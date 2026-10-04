@@ -870,8 +870,9 @@ acts on every forward's `converged` flag:
   recover.
 - **Warm-start cache:** an unconverged environment is never cached, except on
   a cold start when nothing is cached yet.
-- **Line search:** an unconverged φ trial returns `+inf`, and an unconverged
-  dφ (Hager–Zhang) trial gives a NaN slope, so neither is accepted.
+- **Line search:** an unconverged φ trial returns `+inf` and is rejected; an
+  unconverged dφ (Hager–Zhang) trial ends that line search, keeping the best
+  converged φ point found so far.
 - **Final energy:** a fresh evaluation first; if it does not converge, the
   energy comes from a warm environment certified converged at exactly those
   params, and `history["final_env_source"]` records which.

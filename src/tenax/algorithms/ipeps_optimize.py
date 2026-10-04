@@ -349,8 +349,9 @@ def _site3_reject(info, ctm_cfg) -> bool:
 def _probe_forward_rejected(diag: dict, ctm_cfg) -> bool:
     """#1059 for the HZ ``dφ`` probe: reject a gradient from an unconverged forward.
 
-    True (caller hands the line search a NaN slope, which never satisfies
-    Wolfe, and carries nothing to the next step) for an unconverged forward
+    True (the caller aborts the line search with ``LineSearchAborted``, which
+    keeps the best converged φ point found so far, and carries nothing to
+    the next step) for an unconverged forward
     under ``on_unconverged="raise"``.  Under ``"warn"`` the warning is
     emitted and False is returned (legacy path).  No ``forward_converged``
     key means no forward verdict was written: not rejected.
@@ -2712,7 +2713,10 @@ def _optimize_gs_ad_tensor(
             # ``_restore_env_cache_after_line_search`` (#502 Codex P1).
             _ls_env_snap = ("envs" in _env_cache, _env_cache.get("envs"))
             if line_search_method == "hager_zhang":
-                from tenax.algorithms._line_search import hager_zhang_line_search
+                from tenax.algorithms._line_search import (
+                    LineSearchAborted,
+                    hager_zhang_line_search,
+                )
 
                 slope = _tree_dot(grads, direction)
                 if slope >= 0:
@@ -2740,7 +2744,7 @@ def _optimize_gs_ad_tensor(
                     # reuses this evaluation instead of repeating it.
                     g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg)
                     if g is None:  # unconverged forward rejected (#1059)
-                        return float("nan")
+                        raise LineSearchAborted
                     return _tree_dot(g, direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
@@ -4624,7 +4628,10 @@ def _optimize_gs_ad_tensor_2site(
                     _env_cache_2s.get("envs"),
                 )
                 if line_search_method == "hager_zhang":
-                    from tenax.algorithms._line_search import hager_zhang_line_search
+                    from tenax.algorithms._line_search import (
+                        LineSearchAborted,
+                        hager_zhang_line_search,
+                    )
 
                     slope = _tree_dot(grads, direction)
                     if slope >= 0:
@@ -4654,7 +4661,7 @@ def _optimize_gs_ad_tensor_2site(
                         # reuses this evaluation instead of repeating it.
                         g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg_2s)
                         if g is None:  # unconverged forward rejected (#1059)
-                            return float("nan")
+                            raise LineSearchAborted
                         return _tree_dot(g, direction)
 
                     dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
@@ -5718,7 +5725,10 @@ def _optimize_gs_ad_multisite(
             # ``_restore_env_cache_after_line_search`` (#502 Codex P1).
             _ls_env_snap = ("envs" in _env_cache, _env_cache.get("envs"))
             if line_search_method == "hager_zhang":
-                from tenax.algorithms._line_search import hager_zhang_line_search
+                from tenax.algorithms._line_search import (
+                    LineSearchAborted,
+                    hager_zhang_line_search,
+                )
 
                 slope = _tree_dot(grads, direction)
                 if slope >= 0:
@@ -5747,7 +5757,7 @@ def _optimize_gs_ad_multisite(
                     # reuses this evaluation instead of repeating it.
                     g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg)
                     if g is None:  # unconverged forward rejected (#1059)
-                        return float("nan")
+                        raise LineSearchAborted
                     return _tree_dot(g, direction)
 
                 dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))

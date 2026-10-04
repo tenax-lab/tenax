@@ -50,6 +50,12 @@ def _cfg(mesh, chi):
             max_iter=500,
             conv_tol=1e-10,
             plateau_patience=None,
+            # on_unconverged="warn" (#1059): 500 sweeps reach conv_tol on Linux
+            # CPU, but on macOS CI the final-energy forward stalls at sv_diff
+            # 1.5e-7 (step multiplier ~0, a noise-floor wander, not a budget
+            # shortfall).  This test checks sharded-vs-single parity of the
+            # same trajectory, not convergence, so it must not abort there.
+            on_unconverged="warn",
             device_mesh=mesh,
         ),
         gs_num_steps=4,

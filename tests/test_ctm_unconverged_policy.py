@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 import tenax.algorithms._ctm_energy_ad as _cea
+import tenax.algorithms._line_search as _ls
 import tenax.algorithms.ipeps_optimize as _opt
 from tenax.algorithms._ctm_convergence_policy import (
     CTMNotConvergedError,
@@ -641,7 +642,16 @@ def test_site2_refuses_to_cache_unconverged(monkeypatch, policy, unit_cell):
     cfg = _cfg(unit_cell, policy, max_iter=300, steps=3)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+        try:
+            _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+        except CTMNotConvergedError as exc:
+            # With the bond_phase default (#1069) this 1x1 init's later
+            # forwards do not converge at any tolerance tried (300 sweeps:
+            # sv_diff 1.3e-12 / 5e-9 / 2.3e-8 at conv_tol 1e-14 / 1e-10 /
+            # 1e-8, step multiplier ~0.95), so under "raise" site 1 or 4 may
+            # end the run.  Site 2 is what is checked, through the spy.
+            assert policy == "raise", exc
+            assert exc.site in ("gradient", "final_energy"), exc
     assert poisoned["env"] is not None, "spy never saw a warm refresh"
     assert all(e is not poisoned["env"] for e in seen), (
         "unconverged env was used as a seed"
@@ -1062,8 +1072,8 @@ def _probe_unconverged_loss(x):
 def test_dphi_probe_rejects_unconverged_forward_under_raise():
     """Codex P1 on #1070: an unconverged dφ forward must not steer HZ.
 
-    The probe's gradient is refused at once (None -> NaN slope, which never
-    satisfies Wolfe), and nothing is carried to the next step, so a rejected
+    The probe's gradient is refused at once (None; the HZ closure then aborts
+    the search), and nothing is carried to the next step, so a rejected
     probe cannot be reused either.
     """
     ev = _opt._AcceptedProbeEval(enabled=True, check_policy=True)
@@ -1103,8 +1113,10 @@ def test_dphi_probe_without_policy_keeps_legacy_gradient():
 
 
 def test_hz_dphi_rejection_reaches_the_line_search(monkeypatch):
-    """End to end: under "raise" a dφ probe on an unconverged forward hands
-    HZ a NaN slope (counted in history), never a gradient."""
+    """End to end: under "raise" a dφ probe on an unconverged forward never
+    hands HZ a gradient, and it ends that line search at once: one rejected
+    probe per line search, not a bisection to max_iter (which cost a
+    fermionic CI test 600 s+)."""
     seen = []
     real = _opt._probe_forward_rejected
 
@@ -1122,10 +1134,19 @@ def test_hz_dphi_rejection_reaches_the_line_search(monkeypatch):
         gs_line_search=True,
         gs_line_search_method="hager_zhang",
     )
+    searches = {"n": 0}
+    real_hz = _ls.hager_zhang_line_search
+
+    def counting_hz(*a, **k):
+        searches["n"] += 1
+        return real_hz(*a, **k)
+
+    monkeypatch.setattr(_ls, "hager_zhang_line_search", counting_hz)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         _opt.optimize_gs_ad(_heisenberg_gate(), _init("1x1"), cfg)
     assert seen and all(seen), seen
+    assert len(seen) <= searches["n"], (len(seen), searches["n"])
 
 
 def test_policy_scope_defers_stationarity_warning_for_unconverged_forward():
