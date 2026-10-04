@@ -402,7 +402,11 @@ unit cell at dispatch time (``_normalize_stall_recovery``): roll back to
 ``best_params`` and clear the L-BFGS ``(s, y)`` history and CG beta state,
 so the next step is a plain (preconditioned) steepest descent step from
 the best iterate; after ``gs_stall_recovery_retries`` consecutive resets
-the optimizer returns the best state.
+the optimizer returns the best state. This covers the standard 1-site,
+2-site and multisite dispatchers only: the ``ctm_ad_mode`` engines
+(``"c4v_reference"``, ``"root_implicit"``, ``"root_implicit_symmetric"``)
+dispatch before ``_normalize_stall_recovery`` and have no stall recovery,
+so they ignore the setting.
 
 ``"noise"`` (legacy) injects a ``gs_noise_amplitude`` Frobenius
 perturbation on the current params with no rollback. It was the 1-site

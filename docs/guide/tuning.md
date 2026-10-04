@@ -220,7 +220,9 @@ Values: `None` (auto), `"noise"`, `"reset"`
   near a settled energy is not undone: on D=3 Heisenberg it took a 1x1
   run from E=-0.66819 to -0.033.
 - **`None`** (default) — `"reset"` on every unit cell (1-site was
-  `"noise"` before v0.8.4).
+  `"noise"` before v0.8.4). The `ctm_ad_mode` engines (`"c4v_reference"`, `"root_implicit"`,
+  `"root_implicit_symmetric"`) have no stall recovery and ignore this
+  setting.
 
 ---
 

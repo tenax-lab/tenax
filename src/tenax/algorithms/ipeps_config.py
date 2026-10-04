@@ -728,7 +728,8 @@ class iPEPSConfig:
                                perturbation with no rollback.  ``None``
                                (default) resolves to ``"reset"`` on every
                                unit cell (1-site was ``"noise"`` before
-                               v0.8.4).
+                               v0.8.4).  The ``ctm_ad_mode`` engines have no
+                               stall recovery and ignore this field.
         gs_stall_recovery_retries:
                                Maximum consecutive resets allowed on the
                                ``"reset"`` recovery path before the
@@ -848,7 +849,9 @@ class iPEPSConfig:
     #   "reset"  -> clear L-BFGS (s, y) history, roll back params to best_params,
     #               force steepest descent on next step.  Matches variPEPS.
     #   None     -> "reset" on every unit cell (1-site was "noise" before
-    #               v0.8.4).  Set by optimize_gs_ad at entry.
+    #               v0.8.4).  Set by optimize_gs_ad at entry.  The
+    #               ctm_ad_mode engines (c4v_reference, root_implicit*) have
+    #               no stall recovery and ignore it.
     gs_stall_recovery: Literal["noise", "reset"] | None = None
     # Optional variational sanity floor on in-loop best-state tracking.  Any
     # candidate energy strictly below this value is rejected as a non-

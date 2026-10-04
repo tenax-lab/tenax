@@ -860,7 +860,11 @@ optimization stability and speed.
 ## Stall recovery (`gs_stall_recovery`)
 
 When the L-BFGS / CG line search fails to make progress, the optimizer
-runs a stall-recovery routine. Two modes are supported:
+runs a stall-recovery routine. Two modes are supported on the standard
+1-site, 2-site and multisite dispatchers. The ``ctm_ad_mode`` engines
+(``"c4v_reference"``, ``"root_implicit"``, ``"root_implicit_symmetric"``)
+have no stall recovery: they skip a failed step and continue, and ignore
+``gs_stall_recovery`` whether it is set or not.
 
 - ``"reset"`` (default on every unit cell) — roll back to
   ``best_params``, clear the L-BFGS ``(s, y)`` history and the CG beta

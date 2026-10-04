@@ -16,7 +16,11 @@
   E=-0.66819 (a Hager-Zhang approximate-Wolfe step that does not lower E)
   kicked a 1x1 run to E=-0.033, after which the CTM adjoint diverged and the
   run never recovered; it also took a 1x1 C4v D=3 run from -0.6668 to -0.50.
-  Pass `gs_stall_recovery="noise"` for the old behaviour.
+  Pass `gs_stall_recovery="noise"` for the old behaviour.  This covers the
+  standard 1-site, 2-site and multisite dispatchers; the `ctm_ad_mode`
+  engines (`"c4v_reference"`, `"root_implicit"`,
+  `"root_implicit_symmetric"`) have no stall recovery and ignore the setting,
+  as before.
 
 - **`iPEPSConfig.gs_conv_criterion` now defaults to `"grad_norm"`**
   (was `"dE"`; #448).  The AD outer loop (`optimize_gs_ad` and every

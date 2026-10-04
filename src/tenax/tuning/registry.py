@@ -589,7 +589,8 @@ _register(
             "Strategy when the line search stalls: 'reset' clears L-BFGS "
             "(s,y) history and rolls back to best_params (variPEPS); "
             "'noise' (legacy) kicks the current params by a Frobenius "
-            "perturbation with no rollback. None = 'reset'."
+            "perturbation with no rollback. None = 'reset'. Ignored by the "
+            "ctm_ad_mode engines, which have no stall recovery."
         ),
         hint=TuningHint(
             scale=Scale.CATEGORICAL,
