@@ -650,7 +650,7 @@ def optimize_gs_ad_root_implicit(
     # A simple-update start is never accepted on its first evaluation (#1075);
     # this engine builds its own SU state, so the provenance is decided here.
     # No stall recovery on this path: skip-and-continue.
-    from tenax.algorithms.ipeps_optimize import _su_start_guard_armed
+    from tenax.algorithms._ipeps_optimize_shared import _su_start_guard_armed
 
     _su_guard = _su_start_guard_armed(A_init is None and config.su_init, 0)
     for step in range(config.gs_num_steps):
