@@ -23,11 +23,13 @@
     `CTMConfig(projector_backward="standard")`.  Explicit AD, split CTM,
     an explicit `forward_gauge="phase"` and the `ctm_ad_mode` engines are
     unchanged (`"auto"` still freezes there).
-  - **Not yet on the PESS (kagome) implicit losses** (`build_pess_loss`,
-    `build_pess_loss_exact`, `build_pess_loss_3site_multisite`): they call
-    `ctm_energy_implicit` directly and still freeze the projectors, whatever
-    `projector_backward` says; direct calls to `ctm_energy_implicit` keep its
-    frozen `"lorentzian"` default too.
+  - **Not yet on the PESS (kagome) implicit losses**, which call
+    `ctm_energy_implicit` directly.  `build_pess_loss_3site_multisite`
+    forwards `projector_backward` unresolved, so its `"auto"` default still
+    freezes but an explicit `CTMConfig(projector_backward="flow")` does
+    unfreeze it; `build_pess_loss` and `build_pess_loss_exact` do not pass
+    the field at all and freeze regardless.  Direct calls to
+    `ctm_energy_implicit` keep its frozen `"lorentzian"` default.
 
 - **`gs_stall_recovery` now defaults to `"reset"` on 1-site cells too**
   (item 5 of #298): an unset value resolved to `"noise"` for `unit_cell="1x1"`

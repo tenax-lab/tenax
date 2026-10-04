@@ -150,8 +150,10 @@ constants (#983). `"standard"` and `"lorentzian"` freeze them. `"auto"`
 (the default) resolves per path:
 
 - **Implicit AD with the `"bond_phase"` gauge** (the default fused implicit
-  path of `optimize_gs_ad`): `"auto"` is `"flow"` (#1028). The PESS implicit
-  losses and direct `ctm_energy_implicit` calls still freeze. Freezing the projectors there biased
+  path of `optimize_gs_ad`): `"auto"` is `"flow"` (#1028). By default the PESS
+  implicit losses and direct `ctm_energy_implicit` calls still freeze (of
+  the PESS builders only `build_pess_loss_3site_multisite` honours an
+  explicit `"flow"`). Freezing the projectors there biased
   the gradient — relative AD-vs-FD error at D=3, χ=16/32 was 6.8–74% frozen
   against 1–5e-6 flowing, with the adjoint residual at ~3e-11. The adjoint is
   solvable because `"bond_phase"` gives the forward an element-wise fixed
