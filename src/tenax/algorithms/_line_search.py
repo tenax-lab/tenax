@@ -100,8 +100,16 @@ def hager_zhang_line_search(
         return f <= phi0 + delta * alpha * dphi0 and df >= sigma * dphi0
 
     def _approx_wolfe(alpha: float, f: float, df: float) -> bool:
-        """Check approximate Wolfe conditions (relaxed decrease)."""
-        return f <= phi0 + eps and sigma * dphi0 <= df <= (2 * delta - 1) * dphi0
+        """Check approximate Wolfe conditions (relaxed decrease).
+
+        Hager-Zhang allow ``f <= phi0 + eps`` here, i.e. a rise of up to
+        ``eps``.  Every caller (iPEPS, PESS) rejects a step that does not
+        lower the energy, so an accepted rise is a stall: the iPEPS
+        optimizer rolls back, retries the identical search, and stops on
+        its stall budget (1x1 D=3 Heisenberg stopped at |grad| = 6e-3 on a
+        +3.2e-7 rise).  Keep the relaxed curvature test, require a decrease.
+        """
+        return f < phi0 and sigma * dphi0 <= df <= (2 * delta - 1) * dphi0
 
     def _wolfe_ok(alpha: float, f: float, df: float) -> bool:
         return _standard_wolfe(alpha, f, df) or _approx_wolfe(alpha, f, df)

@@ -402,3 +402,71 @@ class TestBisectAcceptsWolfe:
         assert phi(1.0) > phi(0.0)  # the regime: alpha=1 is past the wall
         assert converged
         assert n["dphi"] == 1
+
+
+class TestApproxWolfeRequiresDecrease:
+    """An approximate-Wolfe point must lower phi.
+
+    The probes are the ones traced at the first stall of the 1x1 D=3
+    Heisenberg run (chi=16, main c4bc0f8): alpha_init=0.1908 rises 7.3e-6
+    (above eps), the bisection midpoint 0.0954 rises 3.2e-7 (below eps)
+    with slope +3.9e-5.  That midpoint met the relaxed Wolfe test, so the
+    search returned a rise; the optimizer, which needs a decrease, counted
+    a stall and repeated the identical search until its budget ran out.
+    phi is the cubic Hermite through those values on [0, h] (it dips
+    below phi0 inside) and a quadratic through the alpha_init probe past h.
+    """
+
+    PHI0 = -0.668165747702
+    S = -1.787e-4  # dphi0
+    H, FH, GH = 0.09541529, 3.194e-7, 3.910e-5  # traced midpoint
+    A0, FA0 = 0.19083058, 7.287e-6  # traced alpha_init probe
+
+    def _phi_dphi(self):
+        h, s, F, G = self.H, self.S, self.FH, self.GH
+        K = (self.FA0 - F - G * (self.A0 - h)) / (self.A0 - h) ** 2
+
+        def phi(a):
+            if a <= h:
+                t = a / h
+                h10 = t**3 - 2 * t**2 + t
+                h01, h11 = -2 * t**3 + 3 * t**2, t**3 - t**2
+                return self.PHI0 + h10 * h * s + h01 * F + h11 * h * G
+            x = a - h
+            return self.PHI0 + F + G * x + K * x * x
+
+        def dphi(a):
+            if a <= h:
+                t = a / h
+                d10, d01, d11 = (
+                    3 * t**2 - 4 * t + 1,
+                    (-6 * t**2 + 6 * t) / h,
+                    3 * t**2 - 2 * t,
+                )
+                return d10 * s + d01 * F + d11 * G
+            return G + 2 * K * (a - h)
+
+        return phi, dphi
+
+    def test_a_sub_eps_rise_is_not_accepted(self):
+        from tenax.algorithms._line_search import hager_zhang_line_search
+
+        phi, dphi = self._phi_dphi()
+        eps = 1e-6 * abs(self.PHI0)
+        # The regime: the midpoint rises by less than eps, and its slope is
+        # inside the relaxed curvature band -- the old test accepted it.
+        assert 0.0 < phi(self.H) - self.PHI0 < eps
+        assert phi(self.A0) - self.PHI0 > eps
+        assert 0.9 * self.S <= dphi(self.H) <= -0.8 * self.S
+        alpha, f_alpha, converged = hager_zhang_line_search(
+            phi,
+            dphi,
+            self.PHI0,
+            self.S,
+            alpha_init=self.A0,
+            rho=1.5,
+            max_step=2 * self.A0,
+            bracket_only_phi=True,
+        )
+        assert f_alpha < self.PHI0
+        assert 0.0 < alpha < self.H

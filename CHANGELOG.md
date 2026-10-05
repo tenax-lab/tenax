@@ -432,6 +432,21 @@
 
 ### Fixed
 
+- **The Hager-Zhang line search no longer accepts an energy rise**
+  (`_line_search.py`).  Its approximate-Wolfe test allowed `f <= phi0 + eps`,
+  a rise of up to `eps = 1e-6*|E|` (~6.7e-7 at E=-0.67), but every caller
+  (iPEPS, PESS) rejects a step that does not lower the energy.  An accepted
+  rise was therefore a stall: the iPEPS optimizer rolled back, repeated the
+  identical search, and stopped on its stall budget.  Traced on 1x1 D=3
+  Heisenberg (chi=16, main c4bc0f8): the bisection midpoint rose by 3.2e-7
+  with slope +3.9e-5, met the relaxed test, and the run stopped at
+  |grad| = 6.1e-3.  The relaxed test now requires `f < phi0` and keeps its
+  curvature band.  D=3 chi=16, before -> after: 1x1 E=-0.66816575 ->
+  -0.66818298, 2-site -0.66816092 -> -0.66816418, C4v -0.66761094 ->
+  -0.66764494; D=2 unchanged (all three converge to `grad_norm < 1e-5`).
+  The D=3 runs still stop short (at |grad| ~ 1e-3 / 5e-4 with `alpha=0`);
+  that limit is open.
+
 - **The Hager-Zhang line search no longer stalls near convergence**
   (`_line_search.py`).  Every iPEPS call site runs it with
   `bracket_only_phi=True` (#504), whose bracket phase saw an overshoot only
