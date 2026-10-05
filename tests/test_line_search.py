@@ -470,3 +470,93 @@ class TestApproxWolfeRequiresDecrease:
         )
         assert f_alpha < self.PHI0
         assert 0.0 < alpha < self.H
+
+
+class TestBracketEndsNeedADecrease:
+    """A point that does not lower phi must not become the left bracket end.
+
+    The probes are the ones traced at the stall state of the 1x1 D=3
+    Heisenberg run (chi=16, branch 1af82da, |grad| = 1.0e-3).  phi dips by
+    8.8e-8 near alpha = 0.025, rises over a hump, and has a second local
+    minimum at alpha = 0.261 that sits 1.8e-7 *above* phi0 -- below
+    eps = 6.7e-7.  The bisection made alpha = 0.2276 (rise 1.85e-7, slope
+    -2.1e-7) the left end because its rise was inside the eps band; the zoom
+    then converged on the high minimum, where no Wolfe test that requires a
+    decrease can pass, and returned alpha = 0 after 40 iterations.  phi is
+    the piecewise cubic Hermite through the traced values and slopes (the
+    two extrema between the probes are estimated from the scan).
+    """
+
+    PHI0 = -0.668182976262
+    S = -7.1505e-6  # dphi0
+    A0 = 0.9103308  # traced alpha_init
+    # (alpha, phi - phi0, dphi): low minimum, hump, high minimum, probes.
+    KNOTS = (
+        (0.0, 0.0, S),
+        (0.0247, -8.8e-8, 0.0),
+        (0.15, 2.0e-7, 0.0),
+        (0.2611, 1.813e-7, 0.0),
+        (0.4552, 3.607e-7, 1.9924e-6),
+        (0.9103, 2.580e-6, 8.0e-6),
+    )
+
+    def _phi_dphi(self):
+        knots = self.KNOTS
+        a_end, f_end, g_end = knots[-1]
+
+        def _seg(a):
+            for (x0, f0, g0), (x1, f1, g1) in zip(knots, knots[1:]):
+                if a <= x1:
+                    return x0, f0, g0, x1, f1, g1
+            return None
+
+        def phi(a):
+            seg = _seg(a)
+            if seg is None:  # quadratic continuation past the last probe
+                x = a - a_end
+                return self.PHI0 + f_end + g_end * x + 1e-5 * x * x
+            x0, f0, g0, x1, f1, g1 = seg
+            h = x1 - x0
+            t = (a - x0) / h
+            h00, h10 = 2 * t**3 - 3 * t**2 + 1, t**3 - 2 * t**2 + t
+            h01, h11 = -2 * t**3 + 3 * t**2, t**3 - t**2
+            return self.PHI0 + h00 * f0 + h10 * h * g0 + h01 * f1 + h11 * h * g1
+
+        def dphi(a):
+            seg = _seg(a)
+            if seg is None:
+                return g_end + 2e-5 * (a - a_end)
+            x0, f0, g0, x1, f1, g1 = seg
+            h = x1 - x0
+            t = (a - x0) / h
+            d00, d10 = (6 * t**2 - 6 * t) / h, 3 * t**2 - 4 * t + 1
+            d01, d11 = (-6 * t**2 + 6 * t) / h, 3 * t**2 - 2 * t
+            return d00 * f0 + d10 * g0 + d01 * f1 + d11 * g1
+
+        return phi, dphi
+
+    def test_the_search_finds_the_low_minimum(self):
+        from tenax.algorithms._line_search import hager_zhang_line_search
+
+        phi, dphi = self._phi_dphi()
+        eps = 1e-6 * abs(self.PHI0)
+        # The regime: a decrease exists near 0; the traced left end and the
+        # high minimum rise by less than eps; alpha_init rises by more.
+        assert phi(0.0247) < self.PHI0
+        assert 0.0 < phi(0.2276) - self.PHI0 < eps and dphi(0.2276) < 0.0
+        assert 0.0 < phi(0.2611) - self.PHI0 < eps
+        assert phi(self.A0) - self.PHI0 > eps
+        alpha, f_alpha, converged = hager_zhang_line_search(
+            phi,
+            dphi,
+            self.PHI0,
+            self.S,
+            alpha_init=self.A0,
+            rho=1.5,
+            max_step=2 * self.A0,
+            max_iter=40,
+            bracket_only_phi=True,
+        )
+        assert converged
+        assert f_alpha < self.PHI0
+        assert 0.0 < alpha < 0.15
