@@ -338,3 +338,67 @@ class TestPhiOnlyBracketSeesSubEpsOvershoot:
         assert alpha > 0.0
         assert f_alpha < self.PHI0 - 1e-12  # a real decrease, as the stall test asks
         assert converged
+
+
+class TestBisectAcceptsWolfe:
+    """Codex P1 on #1078: an accepted point must end the search.
+
+    ``phi(a) = -0.66 - 0.1*(1 - exp(-10a))`` flattens monotonically.  At
+    alpha=1 it fails sufficient decrease yet satisfies approximate Wolfe;
+    bisection that stops only on ``dphi >= 0`` never stops on it and pays
+    one ``dphi`` -- an implicit-AD backward on iPEPS -- per pass, up to 50.
+    """
+
+    @staticmethod
+    def _run(phi_fn, dphi_fn):
+        from tenax.algorithms._line_search import hager_zhang_line_search
+
+        n = {"phi": 0, "dphi": 0}
+
+        def phi(a):
+            n["phi"] += 1
+            return phi_fn(a)
+
+        def dphi(a):
+            n["dphi"] += 1
+            return dphi_fn(a)
+
+        out = hager_zhang_line_search(
+            phi,
+            dphi,
+            phi_fn(0.0),
+            dphi_fn(0.0),
+            alpha_init=1.0,
+            rho=1.5,
+            max_step=2.0,
+            bracket_only_phi=True,
+        )
+        return out, n
+
+    def test_sufficient_decrease_failure_accepts_a_wolfe_probe(self):
+        import math
+
+        (alpha, _, converged), n = self._run(
+            lambda a: -0.66 - 0.1 * (1 - math.exp(-10 * a)),
+            lambda a: -math.exp(-10 * a),
+        )
+        assert converged and alpha == 1.0
+        assert n["dphi"] == 1
+
+    def test_bisection_accepts_a_wolfe_midpoint(self):
+        """Same flattening phi with a steep wall past alpha=0.9: the probe
+        at alpha=1 rises far above eps, so the search bisects [0, 1].  The
+        slope stays negative up to the wall, so without a Wolfe check the
+        bisection walks to the wall (7 dphi here, against 1)."""
+        import math
+
+        def phi(a):
+            return -0.66 - 0.1 * (1 - math.exp(-10 * a)) + 1e4 * max(0.0, a - 0.9) ** 2
+
+        def dphi(a):
+            return -math.exp(-10 * a) + 2e4 * max(0.0, a - 0.9)
+
+        (_, _, converged), n = self._run(phi, dphi)
+        assert phi(1.0) > phi(0.0)  # the regime: alpha=1 is past the wall
+        assert converged
+        assert n["dphi"] == 1

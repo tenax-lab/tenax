@@ -442,9 +442,14 @@
   The optimizer then spent its stall budget on identical retries and stopped
   at |grad| ~ 3e-4 with `converged=False` -- it could not meet the default
   `grad_norm < 1e-5` test.  Before #1073 the dE=0 of the post-rollback
-  re-evaluation reported this as converged.  A phi-only bracket now also
-  stops on a failed sufficient-decrease test, `phi > phi0 + delta*alpha*dphi0`,
-  which scales with the slope.  Heisenberg D=2 chi=16, `grad_norm < 1e-5`:
+  re-evaluation reported this as converged.  A phi-only probe that fails
+  the sufficient-decrease test `phi > phi0 + delta*alpha*dphi0` (which scales
+  with the slope) now pays one `dphi` and is judged as a derivative bracket
+  would judge it: accepted if it meets the Wolfe conditions, a bracket end if
+  its slope is non-negative, else bisected.  Bisection also accepts a Wolfe
+  point now, rather than stopping only on a slope sign change -- before, a
+  monotone, flattening `phi` could bisect up to 50 times, one `dphi` (an
+  implicit-AD backward on iPEPS) per pass.  Heisenberg D=2 chi=16, `grad_norm < 1e-5`:
   1x1 stalled at |grad|=3.4e-4 (E=-0.66251424) -> converged at step 49,
   |grad|=8.0e-6 (E=-0.66251430); C4v stalled at 2.1e-4 -> converged at
   step 53, |grad|=4.3e-6.

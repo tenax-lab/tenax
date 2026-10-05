@@ -145,6 +145,8 @@ def hager_zhang_line_search(
     # ------------------------------------------------------------------
     # Bisection on the bracket to guarantee sufficient shrinkage.
     # ------------------------------------------------------------------
+    wolfe_hit: list[tuple[float, float]] = []
+
     def _bisect(
         a: float,
         fa: float,
@@ -164,6 +166,12 @@ def hager_zhang_line_search(
                 b, fb, db = mid, fm, 0.0
             else:
                 dm = _safe_dphi(mid)
+                if _wolfe_ok(mid, fm, dm):
+                    # Accept, as the zoom does; without this a monotone,
+                    # flattening phi bisects max_bisect times, one dphi
+                    # (an implicit-AD backward on iPEPS) per pass.
+                    wolfe_hit.append((mid, fm))
+                    return a, fa, da, mid, fm, dm
                 if dm >= 0:
                     return a, fa, da, mid, fm, dm
                 a, fa, da = mid, fm, dm
@@ -211,16 +219,27 @@ def hager_zhang_line_search(
                 b, fb, db = c, fc, dc
                 break
 
+        if fc > phi0 + eps:
+            # phi too high — bracket using bisection from [0, c]
+            a, fa, da = 0.0, phi0, dphi0
+            b, fb, db = c, fc, 0.0
+            a, fa, da, b, fb, db = _bisect(a, fa, da, b, fb, db)
+            break
+
         # Without dphi, the eps band alone cannot see an overshoot whose
         # rise is below eps = eps_factor*|phi0| -- near convergence every
         # probe passes, the bracket grows to max_step and collapses, and
-        # the search returns alpha=0.  So a phi-only bracket also stops on
-        # a failed sufficient-decrease test, which scales with the slope.
-        too_high = fc > phi0 + eps or (
-            bracket_only_phi and fc > phi0 + delta * c * dphi0
-        )
-        if too_high:
-            # phi too high — bracket using bisection from [0, c]
+        # the search returns alpha=0.  So a phi-only probe that fails
+        # sufficient decrease (which scales with the slope) pays for one
+        # dphi and is judged as the derivative bracket would judge it.
+        if bracket_only_phi and fc > phi0 + delta * c * dphi0:
+            dc = _safe_dphi(c)
+            if _wolfe_ok(c, fc, dc):
+                return c, fc, True
+            if dc >= 0:
+                a, fa, da = c_prev, f_prev, d_prev
+                b, fb, db = c, fc, dc
+                break
             a, fa, da = 0.0, phi0, dphi0
             b, fb, db = c, fc, 0.0
             a, fa, da, b, fb, db = _bisect(a, fa, da, b, fb, db)
@@ -240,6 +259,9 @@ def hager_zhang_line_search(
     else:
         # Exhausted iterations in bracket phase
         return best_alpha, best_phi, False
+
+    if wolfe_hit:
+        return wolfe_hit[0][0], wolfe_hit[0][1], True
 
     # ==================================================================
     # Phase 2: Zoom — secant-based bisection within the bracket
@@ -280,6 +302,8 @@ def hager_zhang_line_search(
         new_width = abs(b - a)
         if new_width > gamma * old_width:
             a, fa, da, b, fb, db = _bisect(a, fa, da, b, fb, db)
+            if wolfe_hit:
+                return wolfe_hit[0][0], wolfe_hit[0][1], True
 
     # Return best point found even if Wolfe not satisfied
     return best_alpha, best_phi, False
