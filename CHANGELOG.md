@@ -432,6 +432,28 @@
 
 ### Fixed
 
+- **The Hager-Zhang line search no longer stalls near convergence**
+  (`_line_search.py`).  Every iPEPS call site runs it with
+  `bracket_only_phi=True` (#504), whose bracket phase saw an overshoot only
+  as `phi > phi0 + eps` with `eps = 1e-6*|E|` (~6.6e-7 at E=-0.66).  Near a
+  minimum the rise at an overshooting probe is ~|grad|^2, below `eps`, so
+  every probe passed, the bracket grew to `max_step` and collapsed, and the
+  search returned `alpha=0` (logged as `HZ probes phi=4 dphi=0 alpha=0`).
+  The optimizer then spent its stall budget on identical retries and stopped
+  at |grad| ~ 3e-4 with `converged=False` -- it could not meet the default
+  `grad_norm < 1e-5` test.  Before #1073 the dE=0 of the post-rollback
+  re-evaluation reported this as converged.  A phi-only probe that fails
+  the sufficient-decrease test `phi > phi0 + delta*alpha*dphi0` (which scales
+  with the slope) now pays one `dphi` and is judged as a derivative bracket
+  would judge it: accepted if it meets the Wolfe conditions, a bracket end if
+  its slope is non-negative, else bisected.  Bisection also accepts a Wolfe
+  point now, rather than stopping only on a slope sign change -- before, a
+  monotone, flattening `phi` could bisect up to 50 times, one `dphi` (an
+  implicit-AD backward on iPEPS) per pass.  Heisenberg D=2 chi=16, `grad_norm < 1e-5`:
+  1x1 stalled at |grad|=3.4e-4 (E=-0.66251424) -> converged at step 49,
+  |grad|=8.0e-6 (E=-0.66251430); C4v stalled at 2.1e-4 -> converged at
+  step 53, |grad|=4.3e-6.
+
 - **The split-CTM chi seed is one array for the whole environment** (#1024):
   every chi bond of a split env has two ends, both seeded by tiling one of
   `A`'s virtual legs, and seeding them from *different* legs left the seam
