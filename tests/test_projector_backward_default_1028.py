@@ -220,6 +220,7 @@ def test_unsolvable_flowing_adjoint_falls_back_to_frozen():
 
     assert diag_flow["projector_backward_used"] == "frozen_fallback", diag_flow
     assert diag_frozen["projector_backward_used"] == "auto"
-    assert any("flowing-projector adjoint" in str(w.message) for w in caught)
+    assert "did not reach gmres_tol" in diag_flow["flow_fallback_reason"]
+    assert any("flowing-projector backward" in str(w.message) for w in caught)
     for a, b in zip(g_flow, g_frozen):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-12)

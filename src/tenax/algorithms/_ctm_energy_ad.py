@@ -913,7 +913,9 @@ def get_last_implicit_ad_diagnostics() -> dict:
       this gradient: the configured value, or ``"frozen_fallback"`` when a
       ``"flow"`` backward's adjoint was not solvable and the step was redone
       with frozen projectors (#1028).  ``flow_adjoint_residual`` then holds
-      the discarded flowing solve's relative residual.
+      the discarded flowing solve's relative residual and
+      ``flow_fallback_reason`` says which safeguard fired (unsolved adjoint,
+      spectral precheck, or non-finite gradient).
 
     Returns a shallow copy so the caller cannot mutate internal state.
     Empty dict if no backward has run yet.
@@ -2009,38 +2011,48 @@ def _make_implicit_vjp_fn(
         specific to flowing: an adjoint that cannot be solved at all.
         """
         _F3_LAST_DIAGNOSTICS.pop("flow_adjoint_residual", None)
+        _F3_LAST_DIAGNOSTICS.pop("flow_fallback_reason", None)
         if projector_backward != _PROJECTOR_BACKWARD_FLOW:
             grads, _ = _bwd_core(residuals, g, projector_backward, warn=True)
             _F3_LAST_DIAGNOSTICS["projector_backward_used"] = projector_backward
             return grads
+        reason = None
         try:
             grads, solved = _bwd_core(
                 residuals, g, _PROJECTOR_BACKWARD_FLOW, warn=False
             )
-        except CTMRGGradientError:
+        except CTMRGGradientError as exc:
             grads, solved = None, False
-        if solved and all(
+            reason = f"the adjoint spectral precheck rejected it ({exc})"
+        flow_residual = _F3_LAST_DIAGNOSTICS.get("adjoint_residual")
+        if reason is None and not solved:
+            reason = (
+                f"its adjoint solve did not reach gmres_tol={gmres_tol:.1e} "
+                f"(relative residual {flow_residual}) -- either the Krylov "
+                "budget (gmres_maxiter / gmres_restart) is too small, or the "
+                "forward CTM is not a fixed point (see "
+                "'forward_stationarity_residual' in the diagnostics)"
+            )
+        if reason is None and not all(
             bool(jax.device_get(jnp.all(jnp.isfinite(leaf))))
             for leaf in jax.tree.leaves(grads)
         ):
+            reason = "its gradient was non-finite"
+        if reason is None:
             _F3_LAST_DIAGNOSTICS["projector_backward_used"] = _PROJECTOR_BACKWARD_FLOW
             return grads
-        flow_residual = _F3_LAST_DIAGNOSTICS.get("adjoint_residual")
         # The cached lambda solves the flowing system (or is garbage); the
         # frozen solve must not be seeded from it.
         _cached["prev_lam_leaves"] = None
         if not _cached["flow_fallback_warned"]:
             _cached["flow_fallback_warned"] = True
             warnings.warn(
-                "Implicit-AD CTM: the flowing-projector adjoint "
+                "Implicit-AD CTM: the flowing-projector backward "
                 '(projector_backward="flow", the default under '
-                'forward_gauge="bond_phase") was not solvable here '
-                f"(relative residual {flow_residual}); this gradient uses "
-                "frozen projectors instead, which are biased (#1028) but "
-                "bounded.  This happens when the forward CTM is not a fixed "
-                "point -- see the stationarity residual in "
-                "get_last_implicit_ad_diagnostics().  Warned once per cached "
-                "energy function; the diagnostics report "
+                'forward_gauge="bond_phase") was discarded because '
+                f"{reason}; this gradient uses frozen projectors instead, "
+                "which are biased (#1028) but bounded.  Warned once per "
+                "cached energy function; the diagnostics report "
                 "'projector_backward_used' on every call.",
                 RuntimeWarning,
                 stacklevel=3,
@@ -2051,6 +2063,7 @@ def _make_implicit_vjp_fn(
         _cached["prev_lam_leaves"] = None
         _F3_LAST_DIAGNOSTICS["projector_backward_used"] = "frozen_fallback"
         _F3_LAST_DIAGNOSTICS["flow_adjoint_residual"] = flow_residual
+        _F3_LAST_DIAGNOSTICS["flow_fallback_reason"] = reason
         return grads
 
     f.defvjp(f_fwd, f_bwd)
