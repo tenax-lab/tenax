@@ -203,7 +203,19 @@ def test_unsolvable_flowing_adjoint_falls_back_to_frozen():
             g = jax.grad(energy, argnums=(0, 1))(A0, B0)
         return g, dict(get_last_implicit_ad_diagnostics()), caught
 
+    from tenax.algorithms._ctm_energy_ad import _VJP_CACHE
+
+    _VJP_CACHE.clear()
     g_flow, diag_flow, caught = grad_with("flow")
+    # The fallback's frozen solve must not leave its lambda as the warm start
+    # of the next (flowing, different) adjoint system.
+    (f_flow, _mutables) = next(iter(_VJP_CACHE.values()))
+    cached = next(
+        c.cell_contents
+        for c in f_flow.bwd.__closure__
+        if isinstance(c.cell_contents, dict) and "prev_lam_leaves" in c.cell_contents
+    )
+    assert cached["prev_lam_leaves"] is None
     g_frozen, diag_frozen, _ = grad_with("auto")
 
     assert diag_flow["projector_backward_used"] == "frozen_fallback", diag_flow

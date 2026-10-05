@@ -2046,6 +2046,9 @@ def _make_implicit_vjp_fn(
                 stacklevel=3,
             )
         grads, _ = _bwd_core(residuals, g, _PROJECTOR_BACKWARD_FROZEN, warn=True)
+        # That solve cached the FROZEN system's lambda; the next call tries
+        # flowing again, a different linear system, so it must start cold.
+        _cached["prev_lam_leaves"] = None
         _F3_LAST_DIAGNOSTICS["projector_backward_used"] = "frozen_fallback"
         _F3_LAST_DIAGNOSTICS["flow_adjoint_residual"] = flow_residual
         return grads
