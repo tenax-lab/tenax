@@ -535,28 +535,52 @@ class TestBracketEndsNeedADecrease:
 
         return phi, dphi
 
-    def test_the_search_finds_the_low_minimum(self):
+    def _search(self, alpha_init, eps_factor=1e-6, bracket_only_phi=True):
         from tenax.algorithms._line_search import hager_zhang_line_search
 
         phi, dphi = self._phi_dphi()
-        eps = 1e-6 * abs(self.PHI0)
+        eps = eps_factor * abs(self.PHI0)
         # The regime: a decrease exists near 0; the traced left end and the
-        # high minimum rise by less than eps; alpha_init rises by more.
+        # high minimum rise by less than eps; alpha_init rises by more than
+        # phi0 and fails sufficient decrease.
         assert phi(0.0247) < self.PHI0
         assert 0.0 < phi(0.2276) - self.PHI0 < eps and dphi(0.2276) < 0.0
         assert 0.0 < phi(0.2611) - self.PHI0 < eps
-        assert phi(self.A0) - self.PHI0 > eps
+        assert phi(alpha_init) > self.PHI0
         alpha, f_alpha, converged = hager_zhang_line_search(
             phi,
             dphi,
             self.PHI0,
             self.S,
-            alpha_init=self.A0,
+            alpha_init=alpha_init,
+            eps_factor=eps_factor,
             rho=1.5,
-            max_step=2 * self.A0,
+            max_step=2 * alpha_init,
             max_iter=40,
-            bracket_only_phi=True,
+            bracket_only_phi=bracket_only_phi,
         )
         assert converged
         assert f_alpha < self.PHI0
         assert 0.0 < alpha < 0.15
+
+    def test_the_traced_search_finds_the_low_minimum(self):
+        # alpha_init rises above eps; either bracket-end test below
+        # catches 0.2276, so this pins the pair, not each one.
+        self._search(self.A0)
+
+    def test_zoom_update_rejects_a_sub_eps_rise(self):
+        # The derivative bracket: phi'(0.4552) > 0 brackets [0, 0.4552]
+        # without a bisection, the zoom's first point is the midpoint
+        # 0.2276, and only _update decides which end it becomes.
+        phi, dphi = self._phi_dphi()
+        assert dphi(0.4552) > 0.0
+        self._search(0.4552, bracket_only_phi=False)
+
+    def test_bisection_rejects_a_sub_eps_rise(self):
+        # eps = 2.7e-7 puts phi(0.4552) = 3.6e-7 above the band, so the
+        # phi-only bracket bisects [0, 0.4552]; its first midpoint 0.2276
+        # (rise 1.85e-7, slope < 0) is judged inside _bisect.
+        phi, _ = self._phi_dphi()
+        eps = 4e-7 * abs(self.PHI0)
+        assert phi(0.4552) - self.PHI0 > eps
+        self._search(0.4552, eps_factor=4e-7)
