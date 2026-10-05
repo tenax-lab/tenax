@@ -706,50 +706,35 @@ def _resolve_projector_backward(config: iPEPSConfig) -> iPEPSConfig:
 
 
 def _normalize_stall_recovery(config, *, unit_cell: str):
-    """Auto-default ``gs_stall_recovery`` based on unit cell when unset.
+    """Resolve an unset ``gs_stall_recovery`` to ``"reset"`` on every unit cell.
 
-    The 1-site C4v production path was documented to need the noise kick
-    to break out of an SU-init plateau (gradient norms ~1e-10), so the
-    1-site default is ``"noise"``.  Not reproduced on the current stack
-    (2026-10-03, square Heisenberg, sublattice-rotated gate, su_init,
-    step-0 ``|g|``): 1-site C4v D=2 chi=8 and chi=16 -> 0.30 (E=-0.6408),
-    D=3 chi=16 -> 0.54 (E=-0.5829); 2-site D=2 chi=8 -> 0.83.  Should an
-    SU start be stationary anyway, ``_su_start_guard_armed`` keeps the
-    ``"grad_norm"`` test from accepting it before the first optimizer step.
-
-    The 2-site default is ``"reset"`` because best-energy snapshot
-    rollback dominates raw noise injection near convergence on this
-    path.  Empirically verified in #520 (PR #551) on the post-#494
-    corrected energy: under both modes the trajectory stayed above the
-    QMC reference (so the original "non-variational drift" pathology
-    from #298 did **not** reproduce), but a 10%-Frobenius noise kick
-    fired close to a settled energy can perturb the L-BFGS state by
-    enough that re-descent does not recover before ``gs_num_steps``
-    runs out.  Reset's best-snapshot fallback dodges this failure mode
-    by construction, so it wins on this path by ~2.6e-2 in the
-    canonical D=2 χ=8 probe.
-
-    Note: the older justification — "noise interacts pathologically
-    with non-variational CTM regions on 2-site (see #298)" — was made
-    on the pre-#494 broken 2-site bipartite energy and does not hold
-    on the corrected loss landscape.  The default itself is unchanged.
+    ``"reset"`` rolls back to ``best_params`` and clears the L-BFGS / CG
+    state; ``"noise"`` kicks the *current* params by ``gs_noise_amplitude``
+    (10 % Frobenius) with no rollback.  The 1-site default used to be
+    ``"noise"``, to break the 1-site C4v run off an SU-init plateau with
+    gradient norms ~1e-10.  That plateau no longer reproduces: Heisenberg
+    1x1 from the default SU start has |g| = 0.30 at D=2 chi=8 and 0.54 at
+    D=3 chi=9, with and without ``gs_c4v``, and at D=2 ``"noise"`` and
+    ``"reset"`` reach the same energy to 1e-10.  The kick is destructive near
+    a settled energy instead: on D=3 chi=16
+    Heisenberg (``forward_gauge="bond_phase"``, ``projector_backward="flow"``)
+    a stall at E=-0.66819 -- fired by a Hager-Zhang approximate-Wolfe step
+    that does not lower E by more than ``_STALL_NOISE_FLOOR`` -- kicked the
+    state to E=-0.033, after which the CTM adjoint diverged (residual up to
+    1e46) and the run never returned to its best energy; the same kick took
+    the 1-site C4v D=3 run from -0.6668 to -0.50.  The 2-site default has
+    been ``"reset"`` since #520 for the same reason.  ``unit_cell`` is kept
+    for the call sites; an explicit user setting is never overridden.
+    Should an SU start be stationary anyway, ``_su_start_guard_armed``
+    keeps the ``"grad_norm"`` test from accepting it before the first
+    optimizer step.
     """
     from dataclasses import replace
 
     if config.gs_stall_recovery is not None:
         return config
-    # CG with map_fn optimizes a tuple of raw site tensors; the noise
-    # injection path assumes a single tensor (calls .todense()/jnp.linalg.norm
-    # on params), so default to "reset" for that case.
-    cg_with_map_fn = (
-        config.cg_gates is not None
-        and getattr(config.cg_gates, "map_fn", None) is not None
-    )
-    if cg_with_map_fn:
-        default = "reset"
-    else:
-        default = "noise" if unit_cell == "1x1" else "reset"
-    return replace(config, gs_stall_recovery=default)
+    del unit_cell
+    return replace(config, gs_stall_recovery="reset")
 
 
 _STALL_NOISE_FLOOR: float = 1e-12
@@ -1901,6 +1886,11 @@ def _optimize_gs_ad_tensor(
     best_params = params
     best_env_cache: dict[str, dict] = {}  # tracked for fresh-CTM warm-start (#317)
     prev_energy = float("inf")
+    # Set by every rollback to best_params: the next step re-evaluates an
+    # already-evaluated state, so its dE is ~0 by construction and must not
+    # count toward convergence.  Only the convergence decisions consume it;
+    # delta_energy itself (log, metric preconditioner) stays as measured.
+    _rolled_back = False
     prev_grad = None
     cg_direction = None
     prev_precond_grad = None  # for preconditioned CG beta
@@ -2125,6 +2115,10 @@ def _optimize_gs_ad_tensor(
         best_params = bundle["best_params"]
         best_energy = float(bundle["best_energy"])
         prev_energy = float(bundle["prev_energy"])
+        # Missing key (pre-#1073 checkpoint): whether that run had just rolled
+        # back is unknowable, so assume it did -- invalidating one dE test
+        # costs a step, a false convergence costs the run.
+        _rolled_back = bool(bundle.get("rolled_back", True))
         # Clear the env warm-start cache AND the implicit-AD lambda seed on
         # restore (issue #501), matching the 2-site resume path. The restored
         # env below is a fresh starting point; the prior Neumann seed is stale.
@@ -2205,6 +2199,7 @@ def _optimize_gs_ad_tensor(
             "best_params": best_params,
             "best_energy": float(best_energy),
             "prev_energy": float(prev_energy),
+            "rolled_back": bool(_rolled_back),
             "env_cache": dict(_env_cache),
             "best_env_cache": dict(best_env_cache),
             "opt_state": opt_state,
@@ -2389,6 +2384,7 @@ def _optimize_gs_ad_tensor(
                         )
                     break
                 params = best_params
+                _rolled_back = True  # next step's dE cannot converge
                 # #518: ``best_env_cache`` may be at a stale χ if a
                 # reactive/scheduled bump fired after it was last
                 # snapshotted.  Clear instead of restoring; the next
@@ -2458,9 +2454,9 @@ def _optimize_gs_ad_tensor(
                 # A rollback leaves params == best_params, so the NEXT step
                 # re-evaluates the same state and sees dE == 0 — which the "dE"
                 # convergence criterion would misread as convergence (the
-                # gradient is still large).  Reset prev_energy so the
-                # post-rollback step cannot false-converge.
-                prev_energy = float("inf")
+                # gradient is still large).  Flag it so the post-rollback step
+                # cannot false-converge.
+                _rolled_back = True
                 continue
         recent_gnorms.append(grad_norm_val)
         if len(recent_gnorms) > config.gs_grad_spike_window:
@@ -2506,8 +2502,10 @@ def _optimize_gs_ad_tensor(
             logged = True
 
         prev_energy = energy_float
+        _conv_dE = float("inf") if _rolled_back else delta_energy
+        _rolled_back = False
         _skip_conv, _su_guard = _su_guard, False
-        if not _skip_conv and _converged_outer(config, delta_energy, grad_norm_val):
+        if not _skip_conv and _converged_outer(config, _conv_dE, grad_norm_val):
             # Convergence break short-circuits the end-of-iter bump. If
             # the energy stalled because χ is too small (high eps_T from
             # _update_env_cache above), the user-requested auto-bump
@@ -2551,7 +2549,7 @@ def _optimize_gs_ad_tensor(
                         steps_in_stage=steps_in_stage,
                         config=config,
                         grad_norm=_gn_for_bump,
-                        delta_energy=delta_energy,
+                        delta_energy=_conv_dE,
                         stall_count=stall_count,
                         base_charges=_bump_base_charges,
                     )
@@ -2893,7 +2891,7 @@ def _optimize_gs_ad_tensor(
                             steps_in_stage=steps_in_stage,
                             config=config,
                             grad_norm=_gn_for_bump,
-                            delta_energy=delta_energy,
+                            delta_energy=_conv_dE,
                             stall_count=stall_count,
                             base_charges=_bump_base_charges,
                         )
@@ -2916,6 +2914,7 @@ def _optimize_gs_ad_tensor(
                             # padded post-bump state (the budget-path
                             # invariant — see _apply_chi_bump).
                             params = best_params
+                            _rolled_back = True  # next step's dE cannot converge
                             stall_count = 0
                             if is_metric_lbfgs:
                                 lbfgs_history.clear()
@@ -2957,6 +2956,7 @@ def _optimize_gs_ad_tensor(
                         )
                     break
                 params = best_params
+                _rolled_back = True  # next step's dE cannot converge
                 # #518: ``best_env_cache`` may be at a stale χ if a
                 # reactive/scheduled bump fired after it was last
                 # snapshotted.  Clear instead of restoring; the next
@@ -3028,7 +3028,7 @@ def _optimize_gs_ad_tensor(
                     # The SU-start guard withheld this step's convergence
                     # test; it must not reach the stage advance either.
                     grad_norm=math.inf if _skip_conv else _gn_for_bump,
-                    delta_energy=math.inf if _skip_conv else delta_energy,
+                    delta_energy=math.inf if _skip_conv else _conv_dE,
                     stall_count=stall_count,
                     base_charges=_bump_base_charges,
                 )
@@ -3705,6 +3705,11 @@ def _optimize_gs_ad_tensor_2site(
     best_params = params
     best_env_cache_2s: dict[str, dict] = {}  # tracked for fresh-CTM warm-start (#317)
     prev_energy = float("inf")
+    # Set by every rollback to best_params: the next step re-evaluates an
+    # already-evaluated state, so its dE is ~0 by construction and must not
+    # count toward convergence.  Only the convergence decisions consume it;
+    # delta_energy itself (log, metric preconditioner) stays as measured.
+    _rolled_back = False
     prev_grad = None
     cg_direction = None
     prev_precond_grad = None
@@ -3947,6 +3952,10 @@ def _optimize_gs_ad_tensor_2site(
         best_params = bundle["best_params"]
         best_energy = float(bundle["best_energy"])
         prev_energy = float(bundle["prev_energy"])
+        # Missing key (pre-#1073 checkpoint): whether that run had just rolled
+        # back is unknowable, so assume it did -- invalidating one dE test
+        # costs a step, a false convergence costs the run.
+        _rolled_back = bool(bundle.get("rolled_back", True))
         _drop_env_cache_for_reset(_env_cache_2s)
         _env_cache_2s.update(bundle.get("env_cache", {}))
         best_env_cache_2s = dict(bundle.get("best_env_cache", {}))
@@ -4032,6 +4041,7 @@ def _optimize_gs_ad_tensor_2site(
             "best_params": best_params,
             "best_energy": float(best_energy),
             "prev_energy": float(prev_energy),
+            "rolled_back": bool(_rolled_back),
             "env_cache": dict(_env_cache_2s),
             "best_env_cache": dict(best_env_cache_2s),
             "opt_state": opt_state,
@@ -4236,6 +4246,7 @@ def _optimize_gs_ad_tensor_2site(
                             )
                         break
                     params = best_params
+                    _rolled_back = True  # next step's dE cannot converge
                     # #518 / R17: see _reset_env_cache_2s's docstring -- with
                     # envs_init set, restore the seed's env instead of a bare
                     # clear, since envs_init already pins χ.
@@ -4300,6 +4311,7 @@ def _optimize_gs_ad_tensor_2site(
                 spike_floor = max(float(np.median(recent_gnorms_2s)), 1.0)
                 if grad_norm_val > config.gs_grad_spike_ratio * spike_floor:
                     params = best_params
+                    _rolled_back = True  # next step's dE cannot converge
                     # #518 / R17: see _reset_env_cache_2s's docstring.
                     _reset_env_cache_2s()
                     # Clear the rolling buffer too (codex PR #524 P1): if a chi
@@ -4396,8 +4408,10 @@ def _optimize_gs_ad_tensor_2site(
                 logged = True
 
             prev_energy = energy_float
+            _conv_dE = float("inf") if _rolled_back else delta_energy
+            _rolled_back = False
             _skip_conv, _su_guard = _su_guard, False
-            if not _skip_conv and _converged_outer(config, delta_energy, grad_norm_val):
+            if not _skip_conv and _converged_outer(config, _conv_dE, grad_norm_val):
                 # #455 PR2: at non-final χ stages, treat convergence as a
                 # signal to advance to the next stage rather than exit.
                 # Mirrors the 1-site convergence-block intercept, including
@@ -4439,7 +4453,7 @@ def _optimize_gs_ad_tensor_2site(
                         steps_in_stage=steps_in_stage,
                         config=config,
                         grad_norm=_gn_for_bump,
-                        delta_energy=delta_energy,
+                        delta_energy=_conv_dE,
                         stall_count=stall_count,
                         base_charges=_bump_base_charges_2s,
                     )
@@ -4823,7 +4837,7 @@ def _optimize_gs_ad_tensor_2site(
                                 steps_in_stage=steps_in_stage,
                                 config=config,
                                 grad_norm=_gn_for_bump,
-                                delta_energy=delta_energy,
+                                delta_energy=_conv_dE,
                                 stall_count=stall_count,
                                 base_charges=_bump_base_charges_2s,
                             )
@@ -4841,6 +4855,7 @@ def _optimize_gs_ad_tensor_2site(
                                 # padded post-bump state (the budget-path
                                 # invariant — see _apply_chi_bump).
                                 params = best_params
+                                _rolled_back = True  # next step's dE cannot converge
                                 stall_count = 0
                                 if is_metric_lbfgs:
                                     lbfgs_history.clear()
@@ -4882,6 +4897,7 @@ def _optimize_gs_ad_tensor_2site(
                             )
                         break
                     params = best_params
+                    _rolled_back = True  # next step's dE cannot converge
                     # #518 / R17: see _reset_env_cache_2s's docstring.
                     _reset_env_cache_2s()
                     if is_cg:
@@ -4953,7 +4969,7 @@ def _optimize_gs_ad_tensor_2site(
                         # The SU-start guard withheld this step's convergence
                         # test; it must not reach the stage advance either.
                         grad_norm=math.inf if _skip_conv else _gn_for_bump,
-                        delta_energy=math.inf if _skip_conv else delta_energy,
+                        delta_energy=math.inf if _skip_conv else _conv_dE,
                         stall_count=stall_count,
                         base_charges=_bump_base_charges_2s,
                     )
@@ -5032,6 +5048,9 @@ def _optimize_gs_ad_tensor_2site(
                                 flush=True,
                             )
                         params = best_params
+                        # Saved below: a resume re-evaluates best_params and
+                        # must not read the dE ~ 0 as convergence.
+                        _rolled_back = True
                         _maybe_save_2s_checkpoint(
                             step, chi_before, _best_energy_at_step_start
                         )
@@ -5316,6 +5335,11 @@ def _optimize_gs_ad_multisite(
     best_energy = float("inf")
     best_params = params
     prev_energy = float("inf")
+    # Set by every rollback to best_params: the next step re-evaluates an
+    # already-evaluated state, so its dE is ~0 by construction and must not
+    # count toward convergence.  Only the convergence decisions consume it;
+    # delta_energy itself (log, metric preconditioner) stays as measured.
+    _rolled_back = False
     prev_grad = None
     cg_direction = None
     prev_precond_grad = None
@@ -5456,6 +5480,7 @@ def _optimize_gs_ad_multisite(
                         )
                     break
                 params = best_params
+                _rolled_back = True  # next step's dE cannot converge
                 # #518: ``best_env_cache`` may be at a stale χ if a
                 # reactive/scheduled bump fired after it was last
                 # snapshotted.  Clear instead of restoring; the next
@@ -5551,7 +5576,9 @@ def _optimize_gs_ad_multisite(
         # follow-up).
         needs_warmup = config.gs_conv_criterion in ("dE", "both")
         warmup_ok = (not needs_warmup) or (step > 5 and stall_count == 0)
-        if _converged_outer(config, delta_energy, grad_norm_val) and warmup_ok:
+        _conv_dE = float("inf") if _rolled_back else delta_energy
+        _rolled_back = False
+        if _converged_outer(config, _conv_dE, grad_norm_val) and warmup_ok:
             # #455 PR2: at non-final χ stages, treat convergence as a
             # signal to advance to the next stage rather than exit.
             # Mirrors the 1-site / 2-site convergence-block intercepts,
@@ -5592,7 +5619,7 @@ def _optimize_gs_ad_multisite(
                     steps_in_stage=steps_in_stage,
                     config=config,
                     grad_norm=_gn_for_bump,
-                    delta_energy=delta_energy,
+                    delta_energy=_conv_dE,
                     stall_count=stall_count,
                     base_charges=_bump_base_charges_multi,
                 )
@@ -5889,7 +5916,7 @@ def _optimize_gs_ad_multisite(
                             steps_in_stage=steps_in_stage,
                             config=config,
                             grad_norm=_gn_for_bump,
-                            delta_energy=delta_energy,
+                            delta_energy=_conv_dE,
                             stall_count=stall_count,
                             base_charges=_bump_base_charges_multi,
                         )
@@ -5907,6 +5934,7 @@ def _optimize_gs_ad_multisite(
                             # padded post-bump state (the budget-path
                             # invariant — see _apply_chi_bump).
                             params = best_params
+                            _rolled_back = True  # next step's dE cannot converge
                             stall_count = 0
                             if is_metric_lbfgs:
                                 lbfgs_history.clear()
@@ -5940,6 +5968,7 @@ def _optimize_gs_ad_multisite(
                         )
                     break
                 params = best_params
+                _rolled_back = True  # next step's dE cannot converge
                 # #518: ``best_env_cache`` may be at a stale χ if a
                 # reactive/scheduled bump fired after it was last
                 # snapshotted.  Clear instead of restoring; the next
@@ -6038,7 +6067,7 @@ def _optimize_gs_ad_multisite(
             # ``not warmup_ok`` to keep the dE trigger inside
             # ``_advance_chi_stage_if_due`` from firing prematurely.
             # Grad-norm and stall-cap signals are unaffected.
-            _dE_for_bump = delta_energy if warmup_ok else float("inf")
+            _dE_for_bump = _conv_dE if warmup_ok else float("inf")
             ctm_cfg, _env_cache, new_stage_idx, bump_fired, _should_break = (
                 _advance_chi_stage_if_due(
                     ctm_cfg,

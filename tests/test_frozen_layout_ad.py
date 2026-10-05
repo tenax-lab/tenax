@@ -908,7 +908,7 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
     and clearing the seed anyway was pure loss of the feature's whole
     point. Correction to that first version's claim: the stall-reset branch
     IS gated by ``gs_stall_recovery`` -- ``_normalize_stall_recovery``
-    resolves the unset default to ``"reset"`` for any non-1x1 unit cell
+    resolves the unset default to ``"reset"`` (then for any non-1x1 unit cell; now for every one)
     (``ipeps_optimize.py`` ``_normalize_stall_recovery``, called with
     ``unit_cell="2site"``), so it is *on by default* for every 2-site
     ``envs_init`` caller, not an edge case.
