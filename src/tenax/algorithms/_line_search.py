@@ -126,8 +126,14 @@ def hager_zhang_line_search(
     # ------------------------------------------------------------------
     # "update" procedure: given bracket [a, b] and a trial point c,
     # return a tighter bracket.
-    # Precondition: dphi(a) < 0, phi(a) <= phi0 + eps,
-    #               dphi(b) >= 0 or phi(b) > phi0 + eps.
+    # Precondition: dphi(a) < 0, phi(a) < phi0 (or a = 0),
+    #               dphi(b) >= 0 or phi(b) >= phi0.
+    # Hager-Zhang put both tests at phi0 + eps.  Acceptance requires a
+    # decrease (_approx_wolfe), so a left end inside the band but above
+    # phi0 can steer the zoom onto a local minimum that sits above phi0,
+    # where nothing is acceptable: the 1x1 D=3 Heisenberg run converged
+    # on one 1.8e-7 above phi0 and returned alpha = 0.  With these ends
+    # the interior minimum lies below phi0 and passes approximate Wolfe.
     # ------------------------------------------------------------------
     def _update(
         a: float, fa: float, da: float, b: float, fb: float, db: float, c: float
@@ -138,8 +144,8 @@ def hager_zhang_line_search(
             # Treat as too high — shrink right endpoint
             return a, fa, da, c, fc, 0.0
 
-        if fc > phi0 + eps:
-            # c is too high — it becomes the new right endpoint
+        if fc >= phi0:
+            # c does not decrease phi — it becomes the new right endpoint
             return a, fa, da, c, fc, 0.0
 
         dc = _safe_dphi(c)
@@ -170,7 +176,7 @@ def hager_zhang_line_search(
             mid = (1 - theta) * a + theta * b
             fm = _safe_phi(mid)
             _update_best(mid, fm)
-            if fm > phi0 + eps:
+            if fm >= phi0:  # no decrease: right end (see _update)
                 b, fb, db = mid, fm, 0.0
             else:
                 dm = _safe_dphi(mid)
