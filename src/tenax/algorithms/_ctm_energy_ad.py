@@ -963,9 +963,10 @@ _F3_POLICY_OWNS_UNCONVERGED = False
 def policy_owns_unconverged_forward():
     """Defer the forward-caused warnings for an unconverged forward.
 
-    These are the #841 stationarity warning and the #1028 flowing-projector
-    fallback warning.  Both stay latched as unspent, so a caller outside the
-    scope still gets them.
+    These are the #841 stationarity warning, and in the backward the #1028
+    flowing-projector fallback warning and the unsolved-adjoint warning (see
+    ``_policy_defers_backward_warnings``).  The once-only latches stay
+    unspent, so a caller outside the scope still gets them.
 
     A caller that applies ``CTMConfig.on_unconverged`` to the forward
     verdict right after ``value_and_grad`` wraps the call in this, so an
@@ -982,6 +983,21 @@ def policy_owns_unconverged_forward():
         yield
     finally:
         _F3_POLICY_OWNS_UNCONVERGED = prev
+
+
+def _policy_defers_backward_warnings() -> bool:
+    """True when a caller's #1059 policy owns this call's unconverged forward.
+
+    The backward then keeps its forward-caused warnings (the #1028 flow
+    fallback and an unsolved adjoint) quiet: the policy reports the
+    unconverged forward once, as a typed error or warning, and a
+    warnings-as-errors filter must not raise a ``RuntimeWarning`` ahead of it
+    (Codex P2s on #1070).  The diagnostics still record both.  A missing
+    forward verdict fails closed: warn.
+    """
+    return _F3_POLICY_OWNS_UNCONVERGED and not _F3_LAST_DIAGNOSTICS.get(
+        "forward_converged", True
+    )
 
 
 # Keys written per forward by ``_check_forward_stationarity``.
@@ -2108,8 +2124,9 @@ def _make_implicit_vjp_fn(
         """
         _F3_LAST_DIAGNOSTICS.pop("flow_adjoint_residual", None)
         _F3_LAST_DIAGNOSTICS.pop("flow_fallback_reason", None)
+        deferred = _policy_defers_backward_warnings()
         if projector_backward != _PROJECTOR_BACKWARD_FLOW:
-            grads, _ = _bwd_core(residuals, g, projector_backward, warn=True)
+            grads, _ = _bwd_core(residuals, g, projector_backward, warn=not deferred)
             _F3_LAST_DIAGNOSTICS["projector_backward_used"] = projector_backward
             return grads
         reason = None
@@ -2140,13 +2157,7 @@ def _make_implicit_vjp_fn(
         # The cached lambda solves the flowing system (or is garbage); the
         # frozen solve must not be seeded from it.
         _cached["prev_lam_leaves"] = None
-        # As for the stationarity warning: an unconverged forward under a
-        # caller's #1059 policy is reported once, by the policy, so the latch
-        # stays unspent (Codex P2 on #1070).  The diagnostics still record
-        # the fallback.  A missing verdict fails closed: warn.
-        deferred = _F3_POLICY_OWNS_UNCONVERGED and not _F3_LAST_DIAGNOSTICS.get(
-            "forward_converged", True
-        )
+        # Deferred to the caller's policy, the latch stays unspent.
         if not deferred and not _cached["flow_fallback_warned"]:
             _cached["flow_fallback_warned"] = True
             warnings.warn(
@@ -2160,7 +2171,9 @@ def _make_implicit_vjp_fn(
                 RuntimeWarning,
                 stacklevel=3,
             )
-        grads, _ = _bwd_core(residuals, g, _PROJECTOR_BACKWARD_FROZEN, warn=True)
+        grads, _ = _bwd_core(
+            residuals, g, _PROJECTOR_BACKWARD_FROZEN, warn=not deferred
+        )
         # That solve cached the FROZEN system's lambda; the next call tries
         # flowing again, a different linear system, so it must start cold.
         _cached["prev_lam_leaves"] = None
