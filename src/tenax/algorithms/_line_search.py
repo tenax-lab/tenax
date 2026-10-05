@@ -211,7 +211,15 @@ def hager_zhang_line_search(
                 b, fb, db = c, fc, dc
                 break
 
-        if fc > phi0 + eps:
+        # Without dphi, the eps band alone cannot see an overshoot whose
+        # rise is below eps = eps_factor*|phi0| -- near convergence every
+        # probe passes, the bracket grows to max_step and collapses, and
+        # the search returns alpha=0.  So a phi-only bracket also stops on
+        # a failed sufficient-decrease test, which scales with the slope.
+        too_high = fc > phi0 + eps or (
+            bracket_only_phi and fc > phi0 + delta * c * dphi0
+        )
+        if too_high:
             # phi too high — bracket using bisection from [0, c]
             a, fa, da = 0.0, phi0, dphi0
             b, fb, db = c, fc, 0.0

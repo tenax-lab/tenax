@@ -287,3 +287,54 @@ class TestHagerZhangBracketSkipDphi:
             f"phi; got alpha={alpha} f_alpha={f_alpha}"
         )
         assert f_alpha < 0.0
+
+
+class TestPhiOnlyBracketSeesSubEpsOvershoot:
+    """The phi-only bracket must see an overshoot smaller than eps.
+
+    Near convergence the energy rise at an overshooting probe is
+    ~|g|^2, far below ``eps = eps_factor*|phi0|`` (6.6e-7 at E=-0.66).
+    Judged by ``phi > phi0 + eps`` alone, every probe passed, the bracket
+    grew to ``max_step`` and collapsed, and the search returned alpha=0
+    (the log signature ``HZ probes phi=4 dphi=0 alpha=0``).  The iPEPS
+    optimizer then stalled at |grad| ~ 3e-4 and could never meet the
+    default grad_norm < 1e-5 test.  Numbers below are the iPEPS call
+    site's: alpha_init=1, rho=1.5, max_step=2, |g| from the stalled
+    D=2 chi=16 Heisenberg run.
+    """
+
+    PHI0 = -0.6625142352
+    G2 = 3.372e-4**2  # steepest descent: dphi0 = -|g|^2
+
+    def _search(self, argmin):
+        from tenax.algorithms._line_search import hager_zhang_line_search
+
+        k = self.G2 / argmin  # quadratic with its minimum at alpha=argmin
+
+        def phi(a):
+            return self.PHI0 - self.G2 * a + 0.5 * k * a * a
+
+        def dphi(a):
+            return -self.G2 + k * a
+
+        # The regime this test exists for: the whole rise over the probed
+        # range is below eps, so the eps band alone cannot see it.
+        eps = 1e-6 * abs(self.PHI0)
+        assert phi(2.0) - self.PHI0 < eps
+        return hager_zhang_line_search(
+            phi,
+            dphi,
+            self.PHI0,
+            -self.G2,
+            alpha_init=1.0,
+            rho=1.5,
+            max_step=2.0,
+            bracket_only_phi=True,
+        )
+
+    @pytest.mark.parametrize("argmin", [0.3, 0.6])
+    def test_overshoot_below_eps_still_decreases(self, argmin):
+        alpha, f_alpha, converged = self._search(argmin)
+        assert alpha > 0.0
+        assert f_alpha < self.PHI0 - 1e-12  # a real decrease, as the stall test asks
+        assert converged
