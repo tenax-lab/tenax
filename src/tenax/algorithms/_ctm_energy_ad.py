@@ -1993,6 +1993,20 @@ def _make_implicit_vjp_fn(
         redone with frozen projectors.  ``get_last_implicit_ad_diagnostics()``
         reports which one produced the gradient under
         ``"projector_backward_used"``.
+
+        Deliberately NOT gated on the forward stationarity residual.  A
+        non-stationary forward whose flowing adjoint IS solvable gives an
+        unreliable gradient either way, and measured there flow is the less
+        wrong one: on the D=2 chi=4 limit-cycle fixture of
+        ``test_adjoint_convergence_gate.py`` (stationarity 0.15-0.16 at
+        max_iter 20/80/300, both adjoints solved to ~1e-11) AD/FD relative
+        error was 0.38 / 0.38 / 0.66 flowing against 2.7 / 2.7 / 4.1 frozen
+        (wrong sign) on one direction and 1.3% / 1.3% / 0.4% against 5.1% /
+        5.1% / 2.7% on another; on a chi=8 forward starved at max_iter=5
+        (stationarity 7.4e-4) flow was 3.5e-5 / 1.2e-3 and frozen 2.6e-4 /
+        1.6e-4.  A stationarity gate would trade flow for frozen exactly
+        where frozen is no better.  The fallback targets the failure that is
+        specific to flowing: an adjoint that cannot be solved at all.
         """
         _F3_LAST_DIAGNOSTICS.pop("flow_adjoint_residual", None)
         if projector_backward != _PROJECTOR_BACKWARD_FLOW:
