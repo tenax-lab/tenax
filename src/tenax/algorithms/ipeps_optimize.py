@@ -320,6 +320,28 @@ def _site1_forward_info(
         stat_list.append(float(info.stationarity_residual))
 
 
+def _site1_value_and_grad(loss_fn, params, *, enabled: bool, step_index: int, ctm_cfg):
+    """``value_and_grad`` for the site-1 step gradient, policy first.
+
+    The backward can raise ``CTMRGGradientError`` (the Arnoldi spectral
+    precheck) before the caller's site-1 check sees the forward verdict.
+    For an unconverged forward the policy owns the outcome (Codex P2 on
+    #1070): ``"raise"`` turns it into ``CTMNotConvergedError``, which goes to
+    the policy's reset path; ``"warn"`` warns and re-raises the gradient
+    error to the legacy recovery.  No history entry: the step is not
+    recorded either way.
+    """
+    from tenax.algorithms.ad_utils import CTMRGGradientError
+
+    with _policy_scope(enabled):
+        try:
+            return jax.value_and_grad(loss_fn)(params)
+        except CTMRGGradientError:
+            if enabled:
+                _site1_forward_info(step_index, ctm_cfg, None)
+            raise
+
+
 def _site3_reject(info, ctm_cfg) -> bool:
     """Site 3 of #1059: should a line-search probe forward be rejected?
 
@@ -465,8 +487,20 @@ class _AcceptedProbeEval:
             _cea.reset_forward_diagnostics()
         # The verdict is acted on just below, so the forward defers its #841
         # stationarity warning for an unconverged loop to us.
+        from tenax.algorithms.ad_utils import CTMRGGradientError
+
         with _policy_scope(self._check_policy):
-            energy, grads = jax.value_and_grad(loss_fn)(trial)
+            try:
+                energy, grads = jax.value_and_grad(loss_fn)(trial)
+            except CTMRGGradientError:
+                # The backward's spectral precheck fired ahead of the verdict
+                # below; an unconverged forward is still a rejection, not a
+                # gradient error (Codex P2 on #1070).
+                if self._check_policy and _probe_forward_rejected(
+                    _cea.get_last_implicit_ad_diagnostics(), cfg
+                ):
+                    return None
+                raise
         grads = _euclidean_grads(grads)
         if self._enabled:
             # Snapshot now: later φ probes and env refreshes overwrite the
@@ -2268,8 +2302,13 @@ def _optimize_gs_ad_tensor(
             else:
                 if _site1_check:
                     _cea.reset_forward_diagnostics()
-                with _policy_scope(_site1_check):
-                    energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                energy_val, grads = _site1_value_and_grad(
+                    loss_fn,
+                    params,
+                    enabled=_site1_check,
+                    step_index=step + 1,
+                    ctm_cfg=ctm_cfg,
+                )
                 grads = _euclidean_grads(grads)
             if _site1_check:
                 _site1_forward_info(
@@ -4120,8 +4159,13 @@ def _optimize_gs_ad_tensor_2site(
                 else:
                     if _site1_check_2s:
                         _cea.reset_forward_diagnostics()
-                    with _policy_scope(_site1_check_2s):
-                        energy_val, grads = jax.value_and_grad(loss_fn)(params)
+                    energy_val, grads = _site1_value_and_grad(
+                        loss_fn,
+                        params,
+                        enabled=_site1_check_2s,
+                        step_index=step + 1,
+                        ctm_cfg=ctm_cfg_2s,
+                    )
                     grads = _euclidean_grads(grads)
                 if _site1_check_2s:
                     _site1_forward_info(

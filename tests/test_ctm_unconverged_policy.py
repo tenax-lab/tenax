@@ -1312,6 +1312,98 @@ def test_policy_scope_defers_unsolved_adjoint_warning(projector_backward):
     assert any("adjoint solve did not converge" in str(w.message) for w in caught)
 
 
+def _gradient_error_after_unconverged_forward(monkeypatch, fail_call):
+    """Make the ``fail_call``-th ``value_and_grad`` look like Codex's case on
+    #1070: the forward ran but did not converge, and the backward's Arnoldi
+    precheck then raised ``CTMRGGradientError`` inside ``value_and_grad``."""
+    import jax
+
+    from tenax.algorithms._ad_primitives import CTMRGGradientError
+
+    real_vg = jax.value_and_grad
+    calls = {"n": 0}
+
+    def vg(fun, *a, **kw):
+        inner = real_vg(fun, *a, **kw)
+
+        def run(*args, **kwargs):
+            calls["n"] += 1
+            out = inner(*args, **kwargs)
+            if calls["n"] == fail_call:
+                _cea._F3_LAST_DIAGNOSTICS["forward_converged"] = False
+                raise CTMRGGradientError(spectral_radius=1.5)
+            return out
+
+        return run
+
+    monkeypatch.setattr(jax, "value_and_grad", vg)
+    return calls
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_gradient_error_on_unconverged_forward_goes_to_policy(monkeypatch, unit_cell):
+    """Codex P2 on #1070: under "raise", a CTMRGGradientError from the
+    backward of an unconverged forward is the policy's CTMNotConvergedError,
+    not the legacy gradient-error recovery.  "noise" recovery would carry on
+    past it; the policy's re-raise rule (not "reset") must stop the run."""
+    calls = _gradient_error_after_unconverged_forward(monkeypatch, 2)
+    cfg = dataclasses.replace(
+        _cfg(unit_cell, "raise", max_iter=200, steps=3),
+        gs_optimizer="adam",
+        gs_learning_rate=1e-2,
+        gs_stall_recovery="noise",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with pytest.raises(CTMNotConvergedError) as ei:
+            _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+    assert calls["n"] == 2
+    assert ei.value.site == "gradient" and ei.value.step == 2
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_gradient_error_on_unconverged_forward_warns_under_warn(monkeypatch, unit_cell):
+    """Under "warn" the policy warns, and the gradient error then takes its
+    legacy recovery: the run continues."""
+    _gradient_error_after_unconverged_forward(monkeypatch, 2)
+    cfg = dataclasses.replace(
+        _cfg(unit_cell, "warn", max_iter=200, steps=3),
+        gs_optimizer="adam",
+        gs_learning_rate=1e-2,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with pytest.warns(CTMNotConvergedWarning, match="gradient"):
+            _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+
+
+@pytest.mark.parametrize("converged", [False, True])
+def test_probe_gradient_error_on_unconverged_forward_is_a_rejection(
+    monkeypatch, converged
+):
+    """Codex P2 on #1070: a dφ probe whose backward raises CTMRGGradientError
+    after an unconverged forward is rejected (None -> LineSearchAborted)
+    under "raise"; after a converged forward the error propagates as before."""
+    from tenax.algorithms._ad_primitives import CTMRGGradientError
+
+    monkeypatch.setattr(
+        _cea,
+        "get_last_implicit_ad_diagnostics",
+        lambda: {"forward_converged": converged, "forward_iterations": 7},
+    )
+
+    def loss(x):
+        raise CTMRGGradientError(spectral_radius=1.5)
+
+    ev = _opt._AcceptedProbeEval(True, check_policy=True)
+    cfg = CTMConfig(chi=4, conv_tol=1e-10, on_unconverged="raise")
+    if converged:
+        with pytest.raises(CTMRGGradientError):
+            ev.probe(loss, 0.1, jnp.ones(3), cfg)
+    else:
+        assert ev.probe(loss, 0.1, jnp.ones(3), cfg) is None
+
+
 def test_site1_checks_supplied_diagnostics_over_module(monkeypatch):
     """The reuse path hands the probe's snapshot to the site-1 check."""
     monkeypatch.setattr(
