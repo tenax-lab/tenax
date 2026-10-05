@@ -178,6 +178,11 @@ def build_ad_ctm_config(config: iPEPSConfig) -> CTMConfig:
     ``ctm_ad_mode=None``), ``"phase"`` on explicit AD, split CTM,
     ``chi_ramp`` and the ``ctm_ad_mode`` engines.  An explicit value is
     returned unchanged.
+
+    It resolves ``projector_backward="auto"`` the same way
+    (:meth:`~tenax.algorithms.ipeps_config.CTMConfig.effective_projector_backward`):
+    ``"flow"`` wherever the gauge above came out ``"bond_phase"`` on the
+    implicit path (#1028), ``"auto"`` (frozen projectors) everywhere else.
     """
     ctm_cfg = config.ctm
     if config.gs_projector_method is not None:
@@ -194,12 +199,14 @@ def build_ad_ctm_config(config: iPEPSConfig) -> CTMConfig:
             "chi_ramp and no ctm_ad_mode), ctm_conv_method="
             f"{ctm_cfg.ctm_conv_method!r}"
         )
-    if gauge != ctm_cfg.forward_gauge:
+    backward = ctm_cfg.effective_projector_backward(implicit_ad=config.gs_implicit_ad)
+    if gauge != ctm_cfg.forward_gauge or backward != ctm_cfg.projector_backward:
         # A shallow copy, not ``replace``: ``replace`` re-runs ``__post_init__``
         # and would re-emit the chi_ramp / chi_auto_bump deprecation warnings
         # the user already got when constructing ``config.ctm``.
         ctm_cfg = copy.copy(ctm_cfg)
         ctm_cfg.forward_gauge = gauge
+        ctm_cfg.projector_backward = backward
     return ctm_cfg
 
 
@@ -571,7 +578,9 @@ def make_ctm_energy_fn(
             conv_tol=ctm_cfg.conv_tol,
             projector_method=ctm_cfg.projector_method,
             renormalize=ctm_cfg.renormalize,
-            projector_backward=ctm_cfg.projector_backward,
+            # Resolve "auto" like forward_gauge below (#1028); a no-op on a
+            # config ``build_ad_ctm_config`` already resolved.
+            projector_backward=ctm_cfg.effective_projector_backward(implicit_ad=True),
             qr_warmup_steps=ctm_cfg.qr_warmup_steps,
             chi_ramp=ctm_cfg.chi_ramp,
             env_init=env_init,

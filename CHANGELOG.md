@@ -4,6 +4,42 @@
 
 ### Behavior Changes
 
+- **Implicit-AD gradients now include the 2x2 projector response**
+  (#1028).  In the iPEPS optimizer (`optimize_gs_ad`'s 1-site, 2-site and
+  multisite dispatchers), `CTMConfig.projector_backward="auto"` resolves to
+  `"flow"` wherever `forward_gauge` resolves to `"bond_phase"` on the
+  implicit path -- i.e. the default fused implicit-AD path -- instead of
+  freezing the
+  plaquette projectors with `stop_gradient`.  Why: the frozen gradient is
+  not the gradient of the energy.  Relative AD-vs-FD error on the 1x1
+  Heisenberg implicit energy, frozen vs flowing: D=2 chi=8 0.37-0.66% vs
+  1e-6; D=3 chi=16 6.8%/74% vs 1.2e-6/4.7e-6; D=3 chi=32 9.8%/7.5% vs
+  2.5e-6/4.2e-6 (adjoint residual ~3e-11).  At D=3 chi=16 (1x1, 74 L-BFGS
+  steps) the frozen run ended at E=-0.66750, the flowing one at -0.66819
+  (variPEPS: -0.66823).
+  - **Cost**: a flowing backward is more expensive; that D=3 run took 1.8x
+    the wall-clock of the frozen one.
+  - **Frozen fallback**: flowing is exact only where the forward CTM is a
+    fixed point.  Where it is not, the flowing adjoint can be unsolvable
+    (measured on a 2-site U(1)-Sz start whose CTM never converges: 121x off
+    finite differences at `max_iter=20`, NaN at 300, against 3% / 34% frozen).
+    A flowing backward whose adjoint is not solved to `gmres_tol`, or whose
+    gradient is non-finite, is therefore redone with frozen projectors; a
+    `RuntimeWarning` fires once per cached energy function, and
+    `get_last_implicit_ad_diagnostics()["projector_backward_used"]` reports
+    `"flow"` or `"frozen_fallback"` on every call.
+  - **To restore the old behaviour**, pass
+    `CTMConfig(projector_backward="standard")`.  Explicit AD, split CTM,
+    an explicit `forward_gauge="phase"` and the `ctm_ad_mode` engines are
+    unchanged (`"auto"` still freezes there).
+  - **Not yet on the PESS (kagome) implicit losses**, which call
+    `ctm_energy_implicit` directly.  `build_pess_loss_3site_multisite`
+    forwards `projector_backward` unresolved, so its `"auto"` default still
+    freezes but an explicit `CTMConfig(projector_backward="flow")` does
+    unfreeze it; `build_pess_loss` and `build_pess_loss_exact` do not pass
+    the field at all and freeze regardless.  Direct calls to
+    `ctm_energy_implicit` keep its frozen `"lorentzian"` default.
+
 - **`gs_stall_recovery` now defaults to `"reset"` on 1-site cells too**
   (item 5 of #298): an unset value resolved to `"noise"` for `unit_cell="1x1"`
   and `"reset"` elsewhere; it is now `"reset"` everywhere, which rolls back to
