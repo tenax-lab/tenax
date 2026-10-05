@@ -607,13 +607,24 @@ def test_reset_does_not_restore_an_unconverged_best_env(monkeypatch, unit_cell):
     import tenax.algorithms.ipeps_ad_policy as _pol
 
     def run(first_refresh_unconverged):
-        seen, refreshes = [], {"n": 0}
+        # env_init of the first CTM forward after each reset: None = cold.
+        # (Comparing whole-run call lists is fragile: from the reset on, the
+        # two runs warm-start from different envs, so the line search may
+        # spend a different number of probes.)
+        after_reset, pending, refreshes = [], {"on": False}, {"n": 0}
         real_kwargs = _pol.ctm_converge_kwargs
         real_refresh = _opt._refresh_env_cache
+        real_log = _opt._log_ctm_not_converged_reset
 
         def spy(cfg, env_init=None, **kw):
-            seen.append(env_init is None)
+            if pending["on"]:
+                after_reset.append(env_init is None)
+                pending["on"] = False
             return real_kwargs(cfg, env_init=env_init, **kw)
+
+        def log(*a, **kw):
+            pending["on"] = True
+            return real_log(*a, **kw)
 
         def refresh(cache, envs, info, ctm_cfg, params=None):
             refreshes["n"] += 1
@@ -627,17 +638,18 @@ def test_reset_does_not_restore_an_unconverged_best_env(monkeypatch, unit_cell):
         with monkeypatch.context() as m:
             m.setattr(_pol, "ctm_converge_kwargs", spy)
             m.setattr(_opt, "_refresh_env_cache", refresh)
+            m.setattr(_opt, "_log_ctm_not_converged_reset", log)
             _fail_forwards(m, {2})
             cfg = _cfg(unit_cell, "raise", max_iter=200, steps=3, retries=2)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
                 _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
-        return seen
+        return after_reset
 
-    restored = run(first_refresh_unconverged=False)
-    cleared = run(first_refresh_unconverged=True)
-    assert len(restored) == len(cleared)
-    assert cleared.count(True) > restored.count(True), (restored, cleared)
+    # Converged best env: the reset restores it, so the next forward is warm.
+    assert run(first_refresh_unconverged=False) == [False]
+    # Unconverged best env: the reset clears the cache instead -> cold start.
+    assert run(first_refresh_unconverged=True) == [True]
 
 
 # ---------------------------------------------------------------------------
