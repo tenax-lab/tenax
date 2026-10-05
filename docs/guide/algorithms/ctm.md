@@ -219,6 +219,11 @@ if not info.converged:
     print(f"not a fixed point ({reason}): {info.n_iter} sweeps, diff {info.diff:.2e}")
 ```
 
+`ctm_tensor_2site` warns instead when the environment is not converged (or
+the hold test left it unverified). Pass `strict=True` to raise
+`CTMNotConvergedError` in its place (#1059); the default `strict=False` warns
+and returns the environment.
+
 (ctm-hold-test)=
 ## Mixing for two-state cycles
 

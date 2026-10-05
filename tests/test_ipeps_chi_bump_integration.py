@@ -45,7 +45,7 @@ def test_optimize_gs_ad_auto_bump_raises_chi_under_pressure():
             chi_auto_bump_eps=1e-5,
             chi_auto_bump_step=2,
             chi_max=8,
-            max_iter=10,
+            max_iter=60,  # 10 left the forwards unconverged (#1059)
             min_iter=2,
             conv_tol=1e-3,
         ),
@@ -116,7 +116,7 @@ def test_optimize_gs_ad_auto_bump_fires_after_line_search():
                 chi_auto_bump_eps=1e-5,
                 chi_auto_bump_step=2,
                 chi_max=8,
-                max_iter=10,
+                max_iter=60,  # 10 left the forwards unconverged (#1059)
                 min_iter=2,
                 conv_tol=1e-3,
             ),
@@ -175,7 +175,7 @@ def test_optimize_gs_ad_auto_bump_fires_on_convergence_break():
             chi_auto_bump_eps=1e-5,
             chi_auto_bump_step=2,
             chi_max=8,
-            max_iter=10,
+            max_iter=60,  # 10 left the forwards unconverged (#1059)
             min_iter=2,
             conv_tol=1e-3,
         ),
@@ -253,7 +253,7 @@ def test_optimize_gs_ad_auto_bump_runs_on_2site(monkeypatch):
             chi_auto_bump_eps=1e-5,
             chi_auto_bump_step=2,
             chi_max=8,
-            max_iter=10,
+            max_iter=60,  # 10 left the forwards unconverged (#1059)
             min_iter=2,
             conv_tol=1e-3,
         ),
