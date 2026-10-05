@@ -2322,11 +2322,7 @@ def _optimize_gs_ad_tensor(
                 # optax L-BFGS curvature pairs.
                 if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
                     opt_state = optimizer.init(params)
-                # The reset puts params back on best_params, which the step
-                # before evaluated from a converged env: the next step reproduces
-                # prev_energy and the "dE" criterion would read the re-evaluation
-                # as convergence.  Forget it (#1059 final review I1).
-                prev_energy = float("inf")
+                _rolled_back = True  # next step's dE cannot converge
                 continue
             _logger.warning(
                 "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -2398,11 +2394,6 @@ def _optimize_gs_ad_tensor(
                     cg_direction = None
                     prev_grad = None
                     prev_precond_grad = None
-            # A reset (or noise) leaves params at/near best_params, which the
-            # step before evaluated from a converged env, so the next step
-            # reproduces prev_energy and the "dE" criterion would read the
-            # re-evaluation as convergence.  Forget it (#1059 final review I1).
-            prev_energy = float("inf")
             continue
         energy_float = float(energy_val)
         grad_norm_val = _grad_l2_norm(grads)
@@ -4182,11 +4173,7 @@ def _optimize_gs_ad_tensor_2site(
                         opt_state = optimizer.init(params)
                     # Same streak contract as the CTMRGGradientError branch.
                     chi_ceiling_consecutive_2s = 0
-                    # The reset puts params back on best_params, which the step
-                    # before evaluated from a converged env: the next step reproduces
-                    # prev_energy and the "dE" criterion would read the re-evaluation
-                    # as convergence.  Forget it (#1059 final review I1).
-                    prev_energy = float("inf")
+                    _rolled_back = True  # next step's dE cannot converge
                     continue
                 _logger.warning(
                     "[iPEPS-AD] Arnoldi precheck: rho(J^T) = %.4f >= 1 at step %d — "
@@ -4269,11 +4256,6 @@ def _optimize_gs_ad_tensor_2site(
                 # recovered CTM-error step would still count toward the
                 # K-consecutive bail-out trigger.
                 chi_ceiling_consecutive_2s = 0
-                # A reset (or noise) leaves params at/near best_params, which the
-                # step before evaluated from a converged env, so the next step
-                # reproduces prev_energy and the "dE" criterion would read the
-                # re-evaluation as convergence.  Forget it (#1059 final review I1).
-                prev_energy = float("inf")
                 continue
             energy_float = float(energy_val)
 

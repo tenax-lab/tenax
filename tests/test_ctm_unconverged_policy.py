@@ -372,22 +372,53 @@ def test_reset_does_not_false_converge_under_de(unit_cell, monkeypatch):
     step before evaluated from a converged env.  The re-evaluation therefore
     reproduces the previous energy to ~1e-16, and with the default "dE"
     criterion the run used to stop right there reporting converged=True.
-    The reset must forget prev_energy so the run carries on."""
+    The reset must flag the rollback (#1073) so the run carries on."""
     import dataclasses
 
     calls = _fail_forwards(monkeypatch, {2})
+    # Three steps: forward 1 = step 1, forward 2 = the failing step, forward 3
+    # = the re-evaluation of best_params straight after the reset, which is
+    # where the false convergence used to stop the run.  No longer: past step
+    # 3 the 1x1 run now descends (#1073 keeps dE finite for the metric
+    # preconditioner) into params whose CTM forward oscillates, and raises.
     cfg = dataclasses.replace(
-        _cfg(unit_cell, "raise", max_iter=200, steps=6, retries=2),
+        _cfg(unit_cell, "raise", max_iter=200, steps=3, retries=2),
         gs_conv_criterion="dE",
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         out = _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
     history = out[-1]
-    # forward 1 = step 1, forward 2 = the failing step, forward 3 = the
-    # re-evaluation of best_params straight after the reset.  Stopping there
-    # is the false convergence.
-    assert calls["n"] > 3, (calls["n"], history["converged"], history["energies"])
+    assert calls["n"] == 3, calls["n"]
+    assert history["converged"] is False, history["energies"]
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_reset_keeps_metric_delta_finite(unit_cell, monkeypatch):
+    """The I1 fix used to set prev_energy = inf at the reset, so the next
+    step's dE -- the metric preconditioner's delta -- was inf.  Solving
+    (N + inf*I) g' = g returns g' = 0, the line search failed at alpha = 0,
+    and the reset cost a second stall retry.  The #1073 flag keeps dE as
+    measured, so every delta the preconditioner sees is finite."""
+    import tenax.algorithms._metric_precond as _mp
+
+    deltas = []
+    for name in ("precondition_gradient", "precondition_gradient_multisite"):
+        real = getattr(_mp, name)
+
+        def spy(*a, _real=real, **kw):
+            deltas.append(float(a[3]))
+            return _real(*a, **kw)
+
+        monkeypatch.setattr(_mp, name, spy)
+    calls = _fail_forwards(monkeypatch, {2})
+    cfg = _cfg(unit_cell, "raise", max_iter=200, steps=3, retries=2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+    assert calls["n"] == 3, calls["n"]
+    assert deltas, f"{unit_cell}: metric preconditioner never ran"
+    assert all(math.isfinite(d) for d in deltas), deltas
 
 
 def test_1site_reset_reinits_optax_lbfgs_state(monkeypatch):
