@@ -313,3 +313,118 @@ def test_aborted_probe_returns_best_phi_point_immediately():
     assert calls["dphi"] == 1
     assert not converged
     assert alpha > 0 and f < 0.0  # the best phi point, not alpha=0
+
+
+class TestPhiOnlyBracketSeesSubEpsOvershoot:
+    """The phi-only bracket must see an overshoot smaller than eps.
+
+    Near convergence the energy rise at an overshooting probe is
+    ~|g|^2, far below ``eps = eps_factor*|phi0|`` (6.6e-7 at E=-0.66).
+    Judged by ``phi > phi0 + eps`` alone, every probe passed, the bracket
+    grew to ``max_step`` and collapsed, and the search returned alpha=0
+    (the log signature ``HZ probes phi=4 dphi=0 alpha=0``).  The iPEPS
+    optimizer then stalled at |grad| ~ 3e-4 and could never meet the
+    default grad_norm < 1e-5 test.  Numbers below are the iPEPS call
+    site's: alpha_init=1, rho=1.5, max_step=2, |g| from the stalled
+    D=2 chi=16 Heisenberg run.
+    """
+
+    PHI0 = -0.6625142352
+    G2 = 3.372e-4**2  # steepest descent: dphi0 = -|g|^2
+
+    def _search(self, argmin):
+        from tenax.algorithms._line_search import hager_zhang_line_search
+
+        k = self.G2 / argmin  # quadratic with its minimum at alpha=argmin
+
+        def phi(a):
+            return self.PHI0 - self.G2 * a + 0.5 * k * a * a
+
+        def dphi(a):
+            return -self.G2 + k * a
+
+        # The regime this test exists for: the whole rise over the probed
+        # range is below eps, so the eps band alone cannot see it.
+        eps = 1e-6 * abs(self.PHI0)
+        assert phi(2.0) - self.PHI0 < eps
+        return hager_zhang_line_search(
+            phi,
+            dphi,
+            self.PHI0,
+            -self.G2,
+            alpha_init=1.0,
+            rho=1.5,
+            max_step=2.0,
+            bracket_only_phi=True,
+        )
+
+    @pytest.mark.parametrize("argmin", [0.3, 0.6])
+    def test_overshoot_below_eps_still_decreases(self, argmin):
+        alpha, f_alpha, converged = self._search(argmin)
+        assert alpha > 0.0
+        assert f_alpha < self.PHI0 - 1e-12  # a real decrease, as the stall test asks
+        assert converged
+
+
+class TestBisectAcceptsWolfe:
+    """Codex P1 on #1078: an accepted point must end the search.
+
+    ``phi(a) = -0.66 - 0.1*(1 - exp(-10a))`` flattens monotonically.  At
+    alpha=1 it fails sufficient decrease yet satisfies approximate Wolfe;
+    bisection that stops only on ``dphi >= 0`` never stops on it and pays
+    one ``dphi`` -- an implicit-AD backward on iPEPS -- per pass, up to 50.
+    """
+
+    @staticmethod
+    def _run(phi_fn, dphi_fn):
+        from tenax.algorithms._line_search import hager_zhang_line_search
+
+        n = {"phi": 0, "dphi": 0}
+
+        def phi(a):
+            n["phi"] += 1
+            return phi_fn(a)
+
+        def dphi(a):
+            n["dphi"] += 1
+            return dphi_fn(a)
+
+        out = hager_zhang_line_search(
+            phi,
+            dphi,
+            phi_fn(0.0),
+            dphi_fn(0.0),
+            alpha_init=1.0,
+            rho=1.5,
+            max_step=2.0,
+            bracket_only_phi=True,
+        )
+        return out, n
+
+    def test_sufficient_decrease_failure_accepts_a_wolfe_probe(self):
+        import math
+
+        (alpha, _, converged), n = self._run(
+            lambda a: -0.66 - 0.1 * (1 - math.exp(-10 * a)),
+            lambda a: -math.exp(-10 * a),
+        )
+        assert converged and alpha == 1.0
+        assert n["dphi"] == 1
+
+    def test_bisection_accepts_a_wolfe_midpoint(self):
+        """Same flattening phi with a steep wall past alpha=0.9: the probe
+        at alpha=1 rises far above eps, so the search bisects [0, 1].  The
+        slope stays negative up to the wall, so without a Wolfe check the
+        bisection walks to the wall (7 dphi here, against 1)."""
+        import math
+
+        def phi(a):
+            return -0.66 - 0.1 * (1 - math.exp(-10 * a)) + 1e4 * max(0.0, a - 0.9) ** 2
+
+        def dphi(a):
+            return -math.exp(-10 * a) + 2e4 * max(0.0, a - 0.9)
+
+        (_, _, converged), n = self._run(phi, dphi)
+        assert phi(1.0) > phi(0.0)  # the regime: alpha=1 is past the wall
+        assert converged
+        assert n["dphi"] == 1
