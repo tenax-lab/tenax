@@ -1218,6 +1218,51 @@ def test_policy_scope_defers_stationarity_warning_for_unconverged_forward():
         ctm_energy_implicit(*args, **kw)
 
 
+def test_policy_scope_defers_flow_fallback_warning_for_unconverged_forward():
+    """Codex P2 on #1070 (after #1077): an unconverged forward whose flowing
+    adjoint falls back to frozen projectors must not emit the fallback
+    RuntimeWarning inside the policy scope, so warnings-as-errors still sees
+    the typed policy outcome.  The latch stays unspent: outside the scope
+    the same call still warns.  Fixture of #1077's fallback test: the 2-site
+    U(1)-Sz start at max_iter=20 (stationarity residual 0.25)."""
+    import jax
+
+    from tenax.algorithms._ctm_energy_ad import _VJP_CACHE, ctm_energy_implicit
+    from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
+    from tenax.algorithms.ipeps import heisenberg_gate, heisenberg_u1sz_init_pair
+    from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
+
+    A_sym, B_sym = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+    A0, B0 = jnp.asarray(A_sym.todense()), jnp.asarray(B_sym.todense())
+    gate = heisenberg_gate().todense()
+
+    def energy(A, B):
+        return ctm_energy_implicit(
+            {(0, 0): _wrap_as_dense_tensor(A), (1, 0): _wrap_as_dense_tensor(B)},
+            CHECKERBOARD_NEIGHBORS,
+            gate,
+            chi=8,
+            max_iter=20,
+            projector_method="svd",
+            forward_gauge="bond_phase",
+            conv_method="elementwise",
+            projector_backward="flow",
+        )
+
+    _VJP_CACHE.clear()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        with _cea.policy_owns_unconverged_forward():
+            jax.grad(energy, argnums=(0, 1))(A0, B0)
+    d = _cea.get_last_implicit_ad_diagnostics()
+    assert d["forward_converged"] is False
+    assert d["projector_backward_used"] == "frozen_fallback", d
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        jax.grad(energy, argnums=(0, 1))(A0, B0)
+    assert any("flowing-projector backward" in str(w.message) for w in caught)
+
+
 def test_site1_checks_supplied_diagnostics_over_module(monkeypatch):
     """The reuse path hands the probe's snapshot to the site-1 check."""
     monkeypatch.setattr(

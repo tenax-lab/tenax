@@ -961,7 +961,11 @@ _F3_POLICY_OWNS_UNCONVERGED = False
 
 @contextlib.contextmanager
 def policy_owns_unconverged_forward():
-    """Defer the #841 stationarity warning for an unconverged forward.
+    """Defer the forward-caused warnings for an unconverged forward.
+
+    These are the #841 stationarity warning and the #1028 flowing-projector
+    fallback warning.  Both stay latched as unspent, so a caller outside the
+    scope still gets them.
 
     A caller that applies ``CTMConfig.on_unconverged`` to the forward
     verdict right after ``value_and_grad`` wraps the call in this, so an
@@ -2136,7 +2140,14 @@ def _make_implicit_vjp_fn(
         # The cached lambda solves the flowing system (or is garbage); the
         # frozen solve must not be seeded from it.
         _cached["prev_lam_leaves"] = None
-        if not _cached["flow_fallback_warned"]:
+        # As for the stationarity warning: an unconverged forward under a
+        # caller's #1059 policy is reported once, by the policy, so the latch
+        # stays unspent (Codex P2 on #1070).  The diagnostics still record
+        # the fallback.  A missing verdict fails closed: warn.
+        deferred = _F3_POLICY_OWNS_UNCONVERGED and not _F3_LAST_DIAGNOSTICS.get(
+            "forward_converged", True
+        )
+        if not deferred and not _cached["flow_fallback_warned"]:
             _cached["flow_fallback_warned"] = True
             warnings.warn(
                 "Implicit-AD CTM: the flowing-projector backward "
