@@ -756,6 +756,7 @@ _FILE_MARKERS = {
     # the required AD path, and the file is cheap -- single CTM sweeps at
     # D=2 chi=4, 31.5s CPU for all eight tests (fused and split).
     "test_ctm_2x2_projector_backward_983.py": "core",
+    "test_projector_backward_default_1028.py": "core",
     # #1024: the split-CTM chi-seam layout invariant.  ``core``: a charge
     # layout that disagrees across a chi bond kills the 2x2 projector with a
     # shape error on any state whose horizontal and vertical bonds differ --

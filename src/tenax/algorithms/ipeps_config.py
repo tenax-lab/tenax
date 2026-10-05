@@ -156,8 +156,10 @@ class CTMConfig:
                             ``"flow"`` (2x2 recipe, #983) lets the plaquette
                             projectors' ``dP/dA`` reach the gradient instead
                             of freezing them: AD/FD on ``ctm_energy_explicit``
-                            goes from 0.229–0.928 to 0.944–0.994.  Explicit
-                            AD only — not safe under implicit AD (#1028).
+                            goes from 0.229–0.928 to 0.944–0.994.  On
+                            implicit AD with the ``"bond_phase"`` gauge,
+                            ``"auto"`` resolves to ``"flow"`` (#1028;
+                            :meth:`effective_projector_backward`).
                             The eager forward is bit-identical either way.
         ctmrg_heuristic_increase_chi: In-CTM χ-bump (variPEPS §2.8.2, #492).
                             Grows ``chi`` by
@@ -300,7 +302,9 @@ class CTMConfig:
     #     two spatial dimensions", SciPost Phys. Codebases (arXiv:2308.12358).
     adjoint_tikhonov: float = 1e-6
     # Backward pass used for the eigh projector inside AD.
-    #   "auto"       -> default; ``optimize_gs_ad`` promotes to "lorentzian"
+    #   "auto"       -> default; "flow" on implicit AD with the "bond_phase"
+    #                   gauge (#1028, ``effective_projector_backward``).
+    #                   Elsewhere ``optimize_gs_ad`` promotes to "lorentzian"
     #                   when ``gs_implicit_ad=False`` and the effective
     #                   projector is "eigh"; otherwise the effective value is
     #                   "standard".  Mirrors the ``forward_gauge`` pattern.
@@ -318,11 +322,10 @@ class CTMConfig:
     #                   Use this on paths with NO fixed-point adjoint solve --
     #                   explicit AD, or a bare sweep -- where it is measurably
     #                   more correct (AD/FD 0.229..0.928 frozen against
-    #                   0.944..0.994 flowing on ``ctm_energy_explicit``).  It
-    #                   is NOT safe under implicit AD: restoring ``dP/denv``
-    #                   puts the CTM gauge mode back into ``J`` and
-    #                   ``(I - J^T)λ = dE/denv`` stops being solvable (#1028,
-    #                   blocked on #841).
+    #                   0.944..0.994 flowing on ``ctm_energy_explicit``).
+    #                   Under implicit AD it needs an element-wise fixed point
+    #                   (#841, fixed), so "auto" picks it only with the
+    #                   "bond_phase" gauge (#1028).
     # Kept at the end of the dataclass to preserve positional-argument
     # compatibility for callers that construct CTMConfig positionally.
     projector_backward: Literal["auto", "standard", "lorentzian", "flow"] = "auto"
@@ -459,6 +462,24 @@ class CTMConfig:
             chi_ramp=self.chi_ramp,
             ctm_ad_mode=self.ctm_ad_mode,
         )
+
+    def effective_projector_backward(self, *, implicit_ad: bool) -> str:
+        """This config's projector backward on an (implicit / other) AD path.
+
+        ``"auto"`` becomes ``"flow"`` where the forward gauge resolves to
+        ``"bond_phase"`` on the implicit path (#1028): there the adjoint is
+        solvable with ``dP/dA`` flowing, and freezing the projectors biases
+        the gradient (D=3 chi=16/32: 6.8-74% relative error frozen, 1e-6
+        flowing).  Every other path, and every explicit value, is returned
+        unchanged.
+        """
+        if (
+            self.projector_backward == "auto"
+            and implicit_ad
+            and self.effective_forward_gauge(implicit_ad=True) == "bond_phase"
+        ):
+            return "flow"
+        return self.projector_backward
 
     def __post_init__(self):
         if self.on_unconverged not in ("raise", "warn"):

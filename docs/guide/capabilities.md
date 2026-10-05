@@ -94,7 +94,9 @@ research.
     path accepts `"phase"` or the
     per-bond `"bond_phase"`, #841, which the `forward_gauge="auto"` default
     selects there, and nothing else), the 2x2 projector
-    response in the gradient (`projector_backward="flow"`, explicit AD only),
+    response in the gradient (`projector_backward="flow"`, #983; the
+    default on the `"bond_phase"` implicit path, #1028, which falls back to
+    frozen projectors for a step whose flowing adjoint cannot be solved),
     and a chi-ramping schedule for progressive refinement.
 - **CTMRG projectors** -- SVD/Fishman (default), `eigh`, and a reduced-corner
   **QR-CTMRG** projector (`projector_method="qr"`, arXiv:2505.00494) on the

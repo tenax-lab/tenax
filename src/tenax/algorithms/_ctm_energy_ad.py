@@ -185,6 +185,13 @@ def _best_adjoint_seed(matvec, rhs, candidates):
     return best
 
 
+# #1028: the flowing projector backward, and the frozen value its backward
+# falls back to when the flowing adjoint is not solvable (see ``f_bwd``).
+# "auto" is the frozen default every non-flow caller already runs.
+_PROJECTOR_BACKWARD_FLOW = "flow"
+_PROJECTOR_BACKWARD_FROZEN = "auto"
+
+
 def _warn_if_adjoint_unconverged(
     matvec, lam, rhs, *, tol: float, maxiter: int, restart: int
 ) -> float:
@@ -209,9 +216,25 @@ def _warn_if_adjoint_unconverged(
     warning — see ``_jit_fused_fixed_point_bwd``, where reaching the caller at
     all implies the residual already cleared ``tol``.
     """
+    return _measure_adjoint(
+        matvec, lam, rhs, tol=tol, maxiter=maxiter, restart=restart, warn=True
+    )[0]
+
+
+def _measure_adjoint(
+    matvec, lam, rhs, *, tol: float, maxiter: int, restart: int, warn: bool
+) -> tuple[float, bool]:
+    """``(relative residual, converged)`` of an adjoint solve; warn if asked.
+
+    The body of :func:`_warn_if_adjoint_unconverged`, with the warning made
+    optional: the flowing-projector attempt (#1028) measures silently, because
+    a failed solve there is retried with frozen projectors rather than
+    consumed.
+    """
     abs_resid, b_norm = _adjoint_residual_and_rhs_norm(matvec, lam, rhs)
     rel = abs_resid / b_norm if b_norm > 0 else abs_resid
-    if not _adjoint_converged(abs_resid, b_norm, tol):
+    converged = _adjoint_converged(abs_resid, b_norm, tol)
+    if warn and not converged:
         warnings.warn(
             f"Implicit-AD CTM: adjoint solve did not converge (relative "
             f"residual {rel:.3e} > gmres_tol {tol:.1e} after gmres_maxiter="
@@ -222,9 +245,9 @@ def _warn_if_adjoint_unconverged(
             "gmres_restart, or loosen gmres_tol if this residual is "
             "acceptable for your use.",
             RuntimeWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
-    return rel
+    return rel, converged
 
 
 def _default_energy(site_tensors, envs, gate, coords, neighbors):
@@ -916,6 +939,13 @@ def get_last_implicit_ad_diagnostics() -> dict:
       (#1060; NaN when not measurable).
     * ``forward_stationarity_threshold`` -- the #841 threshold the residual
       above is compared with, ``max(100 * conv_tol, 1e-8)``.
+    * ``projector_backward_used`` -- the projector backward that produced
+      this gradient: the configured value, or ``"frozen_fallback"`` when a
+      ``"flow"`` backward's adjoint was not solvable and the step was redone
+      with frozen projectors (#1028).  ``flow_adjoint_residual`` then holds
+      the discarded flowing solve's relative residual and
+      ``flow_fallback_reason`` says which safeguard fired (unsolved adjoint,
+      spectral precheck, or non-finite gradient).
 
     Returns a shallow copy so the caller cannot mutate internal state.
     Empty dict if no backward has run yet.
@@ -1155,7 +1185,11 @@ def _make_implicit_vjp_fn(
     # to the previous one — using the previous ``λ`` as a warm seed for the
     # Neumann iteration converges in fewer iterations (#501).  Cleared on
     # divergence/non-convergence so the next call gets a fresh start.
-    _cached = {"prev_lam_leaves": None, "stationarity_warned": False}
+    _cached = {
+        "prev_lam_leaves": None,
+        "stationarity_warned": False,
+        "flow_fallback_warned": False,
+    }
 
     def _invalidate_warm_start() -> None:
         """Drop the cached ``prev_lam_leaves`` warm-start seed.
@@ -1428,8 +1462,8 @@ def _make_implicit_vjp_fn(
         _, vjp_fn = jax.vjp(energy_from_env, env_leaves)
         return vjp_fn(jnp.ones(()))[0]
 
-    @partial(jax.jit, static_argnames=("chi",))
-    def _jit_apply_Jt(params_data_tuple, env_leaves, v, *, chi):
+    @partial(jax.jit, static_argnames=("chi", "pb"))
+    def _jit_apply_Jt(params_data_tuple, env_leaves, v, *, chi, pb):
         """Apply the GMRES matvec ``(I - J^T) v`` (NOT just ``J^T v``).
 
         The wrapping makes this the matvec for the linear system
@@ -1455,7 +1489,7 @@ def _make_implicit_vjp_fn(
                 chi=chi,
                 projector_method=projector_method,
                 renormalize=renormalize,
-                projector_backward=projector_backward,
+                projector_backward=pb,
             )
             e_fixed = _apply_gauge_fix(e_out, e_ref)
             return tuple(jax.tree.leaves(e_fixed))
@@ -1464,8 +1498,8 @@ def _make_implicit_vjp_fn(
         jt_v = vjp_fn(v)[0]
         return tuple(vi - ji for vi, ji in zip(v, jt_v))
 
-    @partial(jax.jit, static_argnames=("chi",))
-    def _jit_chain_rule(params_data_tuple, env_leaves, lam, g_scalar, *, chi):
+    @partial(jax.jit, static_argnames=("chi", "pb"))
+    def _jit_chain_rule(params_data_tuple, env_leaves, lam, g_scalar, *, chi, pb):
         """Steps 3-4: direct gradient + indirect (J_params^T @ lam)."""
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
@@ -1491,7 +1525,7 @@ def _make_implicit_vjp_fn(
                 chi=chi,
                 projector_method=projector_method,
                 renormalize=renormalize,
-                projector_backward=projector_backward,
+                projector_backward=pb,
             )
             e_fixed = _apply_gauge_fix(e_out, envs)
             return tuple(jax.tree.leaves(e_fixed))
@@ -1502,7 +1536,7 @@ def _make_implicit_vjp_fn(
         total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
         return (total,)
 
-    @partial(jax.jit, static_argnames=("chi",))
+    @partial(jax.jit, static_argnames=("chi", "pb"))
     def _jit_fused_fixed_point_bwd(
         params_data_tuple,
         env_leaves,
@@ -1510,6 +1544,7 @@ def _make_implicit_vjp_fn(
         init_lam,
         *,
         chi,
+        pb,
     ):
         """F3: fused dE/denv + adjoint fixed-point + chain rule.
 
@@ -1592,7 +1627,7 @@ def _make_implicit_vjp_fn(
                 chi=chi,
                 projector_method=projector_method,
                 renormalize=renormalize,
-                projector_backward=projector_backward,
+                projector_backward=pb,
             )
             e_fixed = _apply_gauge_fix(e_out, e_ref)
             return tuple(jax.tree.leaves(e_fixed))
@@ -1676,7 +1711,7 @@ def _make_implicit_vjp_fn(
                 chi=chi,
                 projector_method=projector_method,
                 renormalize=renormalize,
-                projector_backward=projector_backward,
+                projector_backward=pb,
             )
             e_fixed = _apply_gauge_fix(e_out, envs)
             return tuple(jax.tree.leaves(e_fixed))
@@ -1728,8 +1763,13 @@ def _make_implicit_vjp_fn(
         )
         return tuple(jax.tree.leaves(lam)), info
 
-    def f_bwd(residuals, g):
+    def _bwd_core(residuals, g, pb, warn):
         """Backward: adjoint solve (fixed-point or GMRES) + JIT'd chain rule.
+
+        Runs with projector backward ``pb`` and returns ``(grads, solved)``,
+        ``solved`` meaning the adjoint system was solved to ``gmres_tol``.
+        ``warn=False`` keeps an unsolved eager solve quiet (the #1028
+        flowing attempt, which :func:`f_bwd` retries frozen instead).
 
         ``chi_post`` (from residuals) is the post-bump chi reported by the
         forward CTM.  It is passed to the four JIT'd backward helpers as a
@@ -1793,7 +1833,7 @@ def _make_implicit_vjp_fn(
             def apply_Jt_only(v):
                 """Apply J^T (not I - J^T)."""
                 i_minus_jt_v = _jit_apply_Jt(
-                    params_data_tuple, env_leaves, v, chi=chi_post
+                    params_data_tuple, env_leaves, v, chi=chi_post, pb=pb
                 )
                 return tuple(vi - ri for vi, ri in zip(v, i_minus_jt_v))
 
@@ -1806,7 +1846,7 @@ def _make_implicit_vjp_fn(
         # Both eager-GMRES paths (fixed_point divergence fallback + the
         # "gmres" branch) share the same cached _jit_apply_Jt matvec.
         def _eager_apply_I_minus_Jt(v):
-            return _jit_apply_Jt(params_data_tuple, env_leaves, v, chi=chi_post)
+            return _jit_apply_Jt(params_data_tuple, env_leaves, v, chi=chi_post, pb=pb)
 
         if adjoint_method == "fixed_point":
             # F3 fused JIT: dE/denv + adjoint fixed-point + chain rule
@@ -1848,7 +1888,7 @@ def _make_implicit_vjp_fn(
                 _abs_resid,
                 _b_norm,
             ) = _jit_fused_fixed_point_bwd(
-                params_data_tuple, env_leaves, g, init_lam, chi=chi_post
+                params_data_tuple, env_leaves, g, init_lam, chi=chi_post, pb=pb
             )
             _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
@@ -1938,18 +1978,28 @@ def _make_implicit_vjp_fn(
                 )
                 # ``_info`` is not a convergence flag on this solver -- see
                 # _warn_if_adjoint_unconverged.  Measure the residual instead.
-                _F3_LAST_DIAGNOSTICS["adjoint_residual"] = _warn_if_adjoint_unconverged(
+                _rel, _solved = _measure_adjoint(
                     _eager_apply_I_minus_Jt,
                     lam,
                     rhs,
                     tol=gmres_tol,
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
+                    warn=warn,
                 )
+                _F3_LAST_DIAGNOSTICS["adjoint_residual"] = _rel
                 lam_leaves = tuple(jax.tree.leaves(lam))
                 _cached["prev_lam_leaves"] = lam_leaves
-                return _jit_chain_rule(
-                    params_data_tuple, env_leaves, lam_leaves, g, chi=chi_post
+                return (
+                    _jit_chain_rule(
+                        params_data_tuple,
+                        env_leaves,
+                        lam_leaves,
+                        g,
+                        chi=chi_post,
+                        pb=pb,
+                    ),
+                    _solved,
                 )
             # No convergence warning here, and it would be dead code if there
             # were one.  Reaching this line means the loop set ``converged``,
@@ -1962,7 +2012,7 @@ def _make_implicit_vjp_fn(
             # guard.  Pinned by
             # test_the_fused_happy_path_is_residual_gated_by_construction.
             _cached["prev_lam_leaves"] = tuple(jax.tree.leaves(lam_final))
-            return grads_tuple
+            return grads_tuple, True
         else:
             # adjoint_method == "gmres": eager Krylov via JAX's built-in
             # solver.  Retained as an opt-out for divergent edge cases.
@@ -2004,19 +2054,109 @@ def _make_implicit_vjp_fn(
             )
             # ``_info`` is not a convergence flag on this solver -- see
             # _warn_if_adjoint_unconverged.  Measure the residual instead.
-            _F3_LAST_DIAGNOSTICS["adjoint_residual"] = _warn_if_adjoint_unconverged(
+            _rel, _solved = _measure_adjoint(
                 _eager_apply_I_minus_Jt,
                 lam,
                 rhs,
                 tol=gmres_tol,
                 maxiter=gmres_maxiter,
                 restart=gmres_restart,
+                warn=warn,
             )
+            _F3_LAST_DIAGNOSTICS["adjoint_residual"] = _rel
             lam_leaves = tuple(jax.tree.leaves(lam))
             _cached["prev_lam_leaves"] = lam_leaves
-            return _jit_chain_rule(
-                params_data_tuple, env_leaves, lam_leaves, g, chi=chi_post
+            return (
+                _jit_chain_rule(
+                    params_data_tuple, env_leaves, lam_leaves, g, chi=chi_post, pb=pb
+                ),
+                _solved,
             )
+
+    def f_bwd(residuals, g):
+        """Backward with the #1028 frozen-projector fallback.
+
+        ``"flow"`` differentiates the projectors, which is exact where the
+        forward is a fixed point and the adjoint is solvable -- and garbage
+        where it is not: on a 2-site U(1) start whose CTM never converges
+        (stationarity residual 0.25 at max_iter=20, 0.6 at 300), the flowing
+        gradient was 121x off finite differences at max_iter=20 and NaN at
+        300, while the frozen one was 3% / 34% off.  So a flowing backward
+        whose adjoint is not solved to ``gmres_tol``, whose spectral precheck
+        fails, or whose gradient is non-finite is discarded and the step is
+        redone with frozen projectors.  ``get_last_implicit_ad_diagnostics()``
+        reports which one produced the gradient under
+        ``"projector_backward_used"``.
+
+        Deliberately NOT gated on the forward stationarity residual.  A
+        non-stationary forward whose flowing adjoint IS solvable gives an
+        unreliable gradient either way, and measured there flow is the less
+        wrong one: on the D=2 chi=4 limit-cycle fixture of
+        ``test_adjoint_convergence_gate.py`` (stationarity 0.15-0.16 at
+        max_iter 20/80/300, both adjoints solved to ~1e-11) AD/FD relative
+        error was 0.38 / 0.38 / 0.66 flowing against 2.7 / 2.7 / 4.1 frozen
+        (wrong sign) on one direction and 1.3% / 1.3% / 0.4% against 5.1% /
+        5.1% / 2.7% on another; on a chi=8 forward starved at max_iter=5
+        (stationarity 7.4e-4) flow was 3.5e-5 / 1.2e-3 and frozen 2.6e-4 /
+        1.6e-4.  A stationarity gate would trade flow for frozen exactly
+        where frozen is no better.  The fallback targets the failure that is
+        specific to flowing: an adjoint that cannot be solved at all.
+        """
+        _F3_LAST_DIAGNOSTICS.pop("flow_adjoint_residual", None)
+        _F3_LAST_DIAGNOSTICS.pop("flow_fallback_reason", None)
+        if projector_backward != _PROJECTOR_BACKWARD_FLOW:
+            grads, _ = _bwd_core(residuals, g, projector_backward, warn=True)
+            _F3_LAST_DIAGNOSTICS["projector_backward_used"] = projector_backward
+            return grads
+        reason = None
+        try:
+            grads, solved = _bwd_core(
+                residuals, g, _PROJECTOR_BACKWARD_FLOW, warn=False
+            )
+        except CTMRGGradientError as exc:
+            grads, solved = None, False
+            reason = f"the adjoint spectral precheck rejected it ({exc})"
+        flow_residual = _F3_LAST_DIAGNOSTICS.get("adjoint_residual")
+        if reason is None and not solved:
+            reason = (
+                f"its adjoint solve did not reach gmres_tol={gmres_tol:.1e} "
+                f"(relative residual {flow_residual}) -- either the Krylov "
+                "budget (gmres_maxiter / gmres_restart) is too small, or the "
+                "forward CTM is not a fixed point (see "
+                "'forward_stationarity_residual' in the diagnostics)"
+            )
+        if reason is None and not all(
+            bool(jax.device_get(jnp.all(jnp.isfinite(leaf))))
+            for leaf in jax.tree.leaves(grads)
+        ):
+            reason = "its gradient was non-finite"
+        if reason is None:
+            _F3_LAST_DIAGNOSTICS["projector_backward_used"] = _PROJECTOR_BACKWARD_FLOW
+            return grads
+        # The cached lambda solves the flowing system (or is garbage); the
+        # frozen solve must not be seeded from it.
+        _cached["prev_lam_leaves"] = None
+        if not _cached["flow_fallback_warned"]:
+            _cached["flow_fallback_warned"] = True
+            warnings.warn(
+                "Implicit-AD CTM: the flowing-projector backward "
+                '(projector_backward="flow", the default under '
+                'forward_gauge="bond_phase") was discarded because '
+                f"{reason}; this gradient uses frozen projectors instead, "
+                "which are biased (#1028) but bounded.  Warned once per "
+                "cached energy function; the diagnostics report "
+                "'projector_backward_used' on every call.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        grads, _ = _bwd_core(residuals, g, _PROJECTOR_BACKWARD_FROZEN, warn=True)
+        # That solve cached the FROZEN system's lambda; the next call tries
+        # flowing again, a different linear system, so it must start cold.
+        _cached["prev_lam_leaves"] = None
+        _F3_LAST_DIAGNOSTICS["projector_backward_used"] = "frozen_fallback"
+        _F3_LAST_DIAGNOSTICS["flow_adjoint_residual"] = flow_residual
+        _F3_LAST_DIAGNOSTICS["flow_fallback_reason"] = reason
+        return grads
 
     f.defvjp(f_fwd, f_bwd)
     return f
