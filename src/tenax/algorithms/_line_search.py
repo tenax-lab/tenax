@@ -9,6 +9,16 @@ import math
 from collections.abc import Callable
 
 
+class LineSearchAborted(Exception):
+    """Raised by ``phi`` or ``dphi`` to stop the search at once.
+
+    ``hager_zhang_line_search`` then returns the best ``phi`` point seen so
+    far with ``converged=False``, exactly as when ``max_iter`` runs out.  Any
+    other exception from a probe is treated as a bad point (``phi`` -> inf,
+    ``dphi`` -> NaN) and the search continues.
+    """
+
+
 def hager_zhang_line_search(
     phi: Callable[[float], float],
     dphi: Callable[[float], float],
@@ -57,6 +67,9 @@ def hager_zhang_line_search(
             extra zoom-phase iterations.  iPEPS HZ call sites pass
             ``True`` explicitly to capture the implicit-AD backward
             savings (issue #504).
+
+    ``phi`` or ``dphi`` may raise :class:`LineSearchAborted` to end the
+    search early; the best ``phi`` point seen so far is returned.
     """
     # Not a descent direction
     if dphi0 >= 0:
@@ -74,6 +87,8 @@ def hager_zhang_line_search(
     def _safe_phi(alpha: float) -> float:
         try:
             val = float(phi(alpha))
+        except LineSearchAborted:
+            raise
         except Exception:
             return float("inf")
         if not _is_finite(val):
@@ -85,6 +100,8 @@ def hager_zhang_line_search(
     def _safe_dphi(alpha: float) -> float:
         try:
             val = float(dphi(alpha))
+        except LineSearchAborted:
+            raise
         except Exception:
             return float("nan")
         return val
@@ -191,142 +208,150 @@ def hager_zhang_line_search(
                 a, fa, da = mid, fm, dm
         return a, fa, da, b, fb, db
 
-    # ==================================================================
-    # Phase 1: Bracket — expand from alpha_init
-    # ==================================================================
-    c_prev = 0.0
-    f_prev = phi0
-    d_prev = dphi0
-    c = alpha_init
-    if max_step is not None:
-        c = min(c, max_step)
+    def _search() -> tuple[float, float, bool]:
+        # ==================================================================
+        # Phase 1: Bracket — expand from alpha_init
+        # ==================================================================
+        c_prev = 0.0
+        f_prev = phi0
+        d_prev = dphi0
+        c = alpha_init
+        if max_step is not None:
+            c = min(c, max_step)
 
-    for it in range(max_iter):
-        fc = _safe_phi(c)
-        _update_best(c, fc)
+        for it in range(max_iter):
+            fc = _safe_phi(c)
+            _update_best(c, fc)
 
-        if not _is_finite(fc):
-            # NaN/inf — treat as too high, bracket is [c_prev, c]
-            a, fa, da = c_prev, f_prev, d_prev
-            b, fb, db = c, fc, 0.0
-            break
-
-        # Issue #504: phi-only bracket skips the per-probe dphi call.
-        # Bracket detection then relies solely on the energy-excess
-        # branch (``fc > phi0 + eps``) below; the slope-sign-change
-        # shortcut and the Wolfe-OK early exit are unavailable until
-        # the zoom phase.  ``d_prev`` is propagated as NaN so the zoom
-        # secant degrades gracefully (``da if finite else 0.0``).
-        if bracket_only_phi:
-            dc = float("nan")
-        else:
-            dc = _safe_dphi(c)
-
-            # Check Wolfe at this point
-            if _wolfe_ok(c, fc, dc):
-                return c, fc, True
-
-            if dc >= 0:
-                # Found bracket: slope changed sign
-                # The bracket is [c_prev, c] but we need dphi(a) < 0
+            if not _is_finite(fc):
+                # NaN/inf — treat as too high, bracket is [c_prev, c]
                 a, fa, da = c_prev, f_prev, d_prev
-                b, fb, db = c, fc, dc
+                b, fb, db = c, fc, 0.0
                 break
 
-            if fc >= phi0:
-                # No decrease: a right end, as in _update.  Expanding past
-                # it makes it c_prev, and a later sign change brackets
-                # [c_prev, c] to the right of every decrease.
+            # Issue #504: phi-only bracket skips the per-probe dphi call.
+            # Bracket detection then relies solely on the energy-excess
+            # branch (``fc > phi0 + eps``) below; the slope-sign-change
+            # shortcut and the Wolfe-OK early exit are unavailable until
+            # the zoom phase.  ``d_prev`` is propagated as NaN so the zoom
+            # secant degrades gracefully (``da if finite else 0.0``).
+            if bracket_only_phi:
+                dc = float("nan")
+            else:
+                dc = _safe_dphi(c)
+
+                # Check Wolfe at this point
+                if _wolfe_ok(c, fc, dc):
+                    return c, fc, True
+
+                if dc >= 0:
+                    # Found bracket: slope changed sign
+                    # The bracket is [c_prev, c] but we need dphi(a) < 0
+                    a, fa, da = c_prev, f_prev, d_prev
+                    b, fb, db = c, fc, dc
+                    break
+
+                if fc >= phi0:
+                    # No decrease: a right end, as in _update.  Expanding
+                    # past it makes it c_prev, and a later sign change
+                    # brackets [c_prev, c] to the right of every decrease.
+                    a, fa, da = 0.0, phi0, dphi0
+                    b, fb, db = c, fc, 0.0
+                    a, fa, da, b, fb, db = _bisect(a, fa, da, b, fb, db)
+                    break
+
+            if fc > phi0 + eps:
+                # phi too high — bracket using bisection from [0, c]
                 a, fa, da = 0.0, phi0, dphi0
                 b, fb, db = c, fc, 0.0
                 a, fa, da, b, fb, db = _bisect(a, fa, da, b, fb, db)
                 break
 
-        if fc > phi0 + eps:
-            # phi too high — bracket using bisection from [0, c]
-            a, fa, da = 0.0, phi0, dphi0
-            b, fb, db = c, fc, 0.0
-            a, fa, da, b, fb, db = _bisect(a, fa, da, b, fb, db)
-            break
+            # Without dphi, the eps band alone cannot see an overshoot whose
+            # rise is below eps = eps_factor*|phi0| -- near convergence every
+            # probe passes, the bracket grows to max_step and collapses, and
+            # the search returns alpha=0.  So a phi-only probe that fails
+            # sufficient decrease (which scales with the slope) pays for one
+            # dphi and is judged as the derivative bracket would judge it.
+            if bracket_only_phi and fc > phi0 + delta * c * dphi0:
+                dc = _safe_dphi(c)
+                if _wolfe_ok(c, fc, dc):
+                    return c, fc, True
+                if dc >= 0:
+                    a, fa, da = c_prev, f_prev, d_prev
+                    b, fb, db = c, fc, dc
+                    break
+                a, fa, da = 0.0, phi0, dphi0
+                b, fb, db = c, fc, 0.0
+                a, fa, da, b, fb, db = _bisect(a, fa, da, b, fb, db)
+                break
 
-        # Without dphi, the eps band alone cannot see an overshoot whose
-        # rise is below eps = eps_factor*|phi0| -- near convergence every
-        # probe passes, the bracket grows to max_step and collapses, and
-        # the search returns alpha=0.  So a phi-only probe that fails
-        # sufficient decrease (which scales with the slope) pays for one
-        # dphi and is judged as the derivative bracket would judge it.
-        if bracket_only_phi and fc > phi0 + delta * c * dphi0:
+            # Expand
+            c_prev, f_prev, d_prev = c, fc, dc
+            c = rho * c
+            if max_step is not None:
+                c = min(c, max_step)
+                if c <= c_prev:
+                    # Hit max_step — bracket with what we have
+                    a, fa, da = c_prev, f_prev, d_prev
+                    b, fb, db = c, _safe_phi(c), 0.0
+                    _update_best(c, fb)
+                    break
+        else:
+            # Exhausted iterations in bracket phase
+            return best_alpha, best_phi, False
+
+        if wolfe_hit:
+            return wolfe_hit[0][0], wolfe_hit[0][1], True
+
+        # ==================================================================
+        # Phase 2: Zoom — secant-based bisection within the bracket
+        # ==================================================================
+        for it in range(max_iter):
+            if abs(b - a) < 1e-15:
+                break
+
+            # Secant step using derivatives at bracket endpoints
+            da_val = da if _is_finite(da) else 0.0
+            db_val = db if _is_finite(db) else 0.0
+            c = _secant_step(a, da_val, b, db_val)
+
+            # Safeguard: ensure c is inside (a, b)
+            lo, hi = min(a, b), max(a, b)
+            margin = 0.01 * (hi - lo)
+            if not (lo + margin < c < hi - margin):
+                c = (a + b) / 2.0
+
+            fc = _safe_phi(c)
+            _update_best(c, fc)
+
+            if not _is_finite(fc):
+                b, fb, db = c, fc, 0.0
+                continue
+
             dc = _safe_dphi(c)
+
+            # Check Wolfe
             if _wolfe_ok(c, fc, dc):
                 return c, fc, True
-            if dc >= 0:
-                a, fa, da = c_prev, f_prev, d_prev
-                b, fb, db = c, fc, dc
-                break
-            a, fa, da = 0.0, phi0, dphi0
-            b, fb, db = c, fc, 0.0
-            a, fa, da, b, fb, db = _bisect(a, fa, da, b, fb, db)
-            break
 
-        # Expand
-        c_prev, f_prev, d_prev = c, fc, dc
-        c = rho * c
-        if max_step is not None:
-            c = min(c, max_step)
-            if c <= c_prev:
-                # Hit max_step — bracket with what we have
-                a, fa, da = c_prev, f_prev, d_prev
-                b, fb, db = c, _safe_phi(c), 0.0
-                _update_best(c, fb)
-                break
-    else:
-        # Exhausted iterations in bracket phase
+            # Update bracket
+            a, fa, da, b, fb, db = _update(a, fa, da, b, fb, db, c)
+
+            # Check if bracket is shrinking enough; if not, bisect
+            old_width = hi - lo
+            new_width = abs(b - a)
+            if new_width > gamma * old_width:
+                a, fa, da, b, fb, db = _bisect(a, fa, da, b, fb, db)
+                if wolfe_hit:
+                    return wolfe_hit[0][0], wolfe_hit[0][1], True
+
+        # Return best point found even if Wolfe not satisfied
         return best_alpha, best_phi, False
 
-    if wolfe_hit:
-        return wolfe_hit[0][0], wolfe_hit[0][1], True
-
-    # ==================================================================
-    # Phase 2: Zoom — secant-based bisection within the bracket
-    # ==================================================================
-    for it in range(max_iter):
-        if abs(b - a) < 1e-15:
-            break
-
-        # Secant step using derivatives at bracket endpoints
-        da_val = da if _is_finite(da) else 0.0
-        db_val = db if _is_finite(db) else 0.0
-        c = _secant_step(a, da_val, b, db_val)
-
-        # Safeguard: ensure c is inside (a, b)
-        lo, hi = min(a, b), max(a, b)
-        margin = 0.01 * (hi - lo)
-        if not (lo + margin < c < hi - margin):
-            c = (a + b) / 2.0
-
-        fc = _safe_phi(c)
-        _update_best(c, fc)
-
-        if not _is_finite(fc):
-            b, fb, db = c, fc, 0.0
-            continue
-
-        dc = _safe_dphi(c)
-
-        # Check Wolfe
-        if _wolfe_ok(c, fc, dc):
-            return c, fc, True
-
-        # Update bracket
-        a, fa, da, b, fb, db = _update(a, fa, da, b, fb, db, c)
-
-        # Check if bracket is shrinking enough; if not, bisect
-        old_width = hi - lo
-        new_width = abs(b - a)
-        if new_width > gamma * old_width:
-            a, fa, da, b, fb, db = _bisect(a, fa, da, b, fb, db)
-            if wolfe_hit:
-                return wolfe_hit[0][0], wolfe_hit[0][1], True
-
-    # Return best point found even if Wolfe not satisfied
-    return best_alpha, best_phi, False
+    try:
+        return _search()
+    except LineSearchAborted:
+        # A probe refused to give a trustworthy value: stop here and return
+        # the best phi point seen, as when the iterations run out.
+        return best_alpha, best_phi, False

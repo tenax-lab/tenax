@@ -65,7 +65,11 @@ def _script_energy(monkeypatch, grad_scale: float):
 def _cfg(unit_cell: str, **overrides) -> iPEPSConfig:
     base = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=4),
+        # needs an unconverged forward: the energy is scripted and max_iter=4
+        # keeps the real CTM cheap, so the final-energy forward stops far from
+        # conv_tol; these tests pin the stopping rule, not CTM convergence;
+        # see #1059.
+        ctm=CTMConfig(chi=4, max_iter=4, on_unconverged="warn"),
         unit_cell=unit_cell,
         gs_num_steps=5,
         gs_learning_rate=1e-3,
@@ -221,7 +225,11 @@ def _su_cfg(unit_cell: str, **overrides) -> iPEPSConfig:
     base = iPEPSConfig(
         max_bond_dim=2,
         num_imaginary_steps=5,
-        ctm=CTMConfig(chi=4, max_iter=4),
+        # needs an unconverged forward: the energy is scripted and max_iter=4
+        # keeps the real CTM cheap, so the final-energy forward stops far from
+        # conv_tol; these tests pin the stopping rule, not CTM convergence;
+        # see #1059.
+        ctm=CTMConfig(chi=4, max_iter=4, on_unconverged="warn"),
         unit_cell=unit_cell,
         gs_num_steps=5,
         gs_implicit_ad=False,
@@ -299,7 +307,10 @@ def test_su_guard_also_withholds_the_chi_stage_advance(monkeypatch, unit_cell):
     from tenax import optimize_gs_ad_chi_schedule
 
     _script_energy(monkeypatch, grad_scale=1e-9)
-    cfg = _su_cfg(unit_cell, ctm=CTMConfig(chi=4, chi_max=6, max_iter=4))
+    cfg = _su_cfg(
+        unit_cell,
+        ctm=CTMConfig(chi=4, chi_max=6, max_iter=4, on_unconverged="warn"),
+    )
     import io
     from contextlib import redirect_stdout
 

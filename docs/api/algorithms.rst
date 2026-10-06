@@ -96,6 +96,12 @@ iPEPS
 .. autofunction:: tenax.algorithms.ipeps_config.resolve_forward_gauge
    :no-index:
 
+.. autoexception:: tenax.algorithms._ctm_convergence_policy.CTMNotConvergedError
+   :no-index:
+
+.. autoexception:: tenax.algorithms._ctm_convergence_policy.CTMNotConvergedWarning
+   :no-index:
+
 .. autoclass:: tenax.algorithms.ipeps_config.CTMEnvironment
    :members:
    :no-index:

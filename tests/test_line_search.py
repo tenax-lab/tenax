@@ -289,6 +289,32 @@ class TestHagerZhangBracketSkipDphi:
         assert f_alpha < 0.0
 
 
+def test_aborted_probe_returns_best_phi_point_immediately():
+    """A probe raising LineSearchAborted ends the search at once (#1059: an
+    unconverged dphi forward), returning the best phi point seen so far."""
+    from tenax.algorithms._line_search import (
+        LineSearchAborted,
+        hager_zhang_line_search,
+    )
+
+    calls = {"phi": 0, "dphi": 0}
+
+    def phi(a):
+        calls["phi"] += 1
+        return (a - 1.0) ** 2 - 1.0
+
+    def dphi(a):
+        calls["dphi"] += 1
+        raise LineSearchAborted
+
+    alpha, f, converged = hager_zhang_line_search(
+        phi, dphi, phi(0.0), -2.0, alpha_init=0.5, bracket_only_phi=True
+    )
+    assert calls["dphi"] == 1
+    assert not converged
+    assert alpha > 0 and f < 0.0  # the best phi point, not alpha=0
+
+
 class TestPhiOnlyBracketSeesSubEpsOvershoot:
     """The phi-only bracket must see an overshoot smaller than eps.
 

@@ -77,9 +77,15 @@ class TestOptimizeFpepsAd:
         H = spinless_fermion_gate(fpeps_config)
         A_init = _build_initial_fpeps_tensor(fpeps_config, jax.random.PRNGKey(7))
         assert isinstance(A_init, SymmetricTensor)
-        A_opt, env, E_gs = optimize_fpeps_ad(
-            H, A_init=A_init, config=ipeps_config_short
+        # The fixture's 10 sweeps leave this init's gradient forward
+        # unconverged, which the default on_unconverged="raise" refuses; 100
+        # converge (#1059).
+        from dataclasses import replace
+
+        config = replace(
+            ipeps_config_short, ctm=replace(ipeps_config_short.ctm, max_iter=100)
         )
+        A_opt, env, E_gs = optimize_fpeps_ad(H, A_init=A_init, config=config)
         # optimize_fpeps_ad is polymorphic over the Tensor protocol (#297) —
         # returns a tensor of the same type as the input.
         assert isinstance(A_opt, type(A_init))

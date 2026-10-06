@@ -568,7 +568,10 @@ def test_optimize_gs_ad_fused_still_returns_fused_env():
     from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 
     A, gate = _split_opt_inputs()
-    _, env, E = optimize_gs_ad(gate, A, _split_opt_config(fuse=True, gs_recipe="2x2"))
+    # max_iter 40 left the fused 2x2 gradient forward unconverged at
+    # conv_tol=1e-10 (residual 1.4e-6); 200 converge (#1059).
+    cfg = _split_opt_config(fuse=True, gs_recipe="2x2", ctm={"max_iter": 200})
+    _, env, E = optimize_gs_ad(gate, A, cfg)
     assert isinstance(env, CTMTensorEnv)
     assert jnp.isfinite(E)
 

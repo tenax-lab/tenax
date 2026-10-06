@@ -134,7 +134,10 @@ def _fast_base_cfg() -> iPEPSConfig:
     """
     return iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=5),
+        # max_iter=5 never reached min_iter=10, so the CTM was never measured;
+        # the default on_unconverged="raise" refuses that forward.  30 sweeps
+        # converge here (#1059).
+        ctm=CTMConfig(chi=4, max_iter=30),
         gs_num_steps=6,
         gs_learning_rate=1e-2,
         gs_implicit_ad=False,

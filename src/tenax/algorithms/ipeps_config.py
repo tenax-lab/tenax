@@ -441,6 +441,12 @@ class CTMConfig:
     # forward_gauge="bond_phase" and ctm_conv_method="elementwise".  Appended
     # at the end to preserve positional CTMConfig ABI.
     ctm_mixing: float = 0.0
+    # What to do when a CTM forward feeding a gradient or a reported energy
+    # returns converged=False (#1059/#1060): "raise" (default) fails loudly;
+    # "warn" keeps the legacy control flow and emits CTMNotConvergedWarning.
+    # See tenax.algorithms._ctm_convergence_policy.  Appended at the end to
+    # preserve positional CTMConfig ABI.
+    on_unconverged: Literal["raise", "warn"] = "raise"
 
     def effective_forward_gauge(self, *, implicit_ad: bool) -> str:
         """This config's concrete gauge on an (implicit / other) AD path.
@@ -476,6 +482,11 @@ class CTMConfig:
         return self.projector_backward
 
     def __post_init__(self):
+        if self.on_unconverged not in ("raise", "warn"):
+            raise ValueError(
+                f"CTMConfig.on_unconverged must be 'raise' or 'warn', "
+                f"got {self.on_unconverged!r}"
+            )
         valid_modes = {
             None,
             "c4v_reference",

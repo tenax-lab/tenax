@@ -352,7 +352,13 @@ def test_optimize_gs_ad_default_hands_the_resolved_gauge_everywhere(
         gs_implicit_ad=implicit,
         gs_num_steps=1,
         gs_verbose=False,
-        ctm=CTMConfig(chi=4, max_iter=4, min_iter=1, conv_tol=1e-8),
+        # needs an unconverged forward: max_iter=4 keeps this wiring test
+        # cheap, and at 4 sweeps the final-energy forward is far from
+        # conv_tol (sv_diff 0.06-1.9); the test checks which gauge reaches
+        # each call, not convergence; see #1059.
+        ctm=CTMConfig(
+            chi=4, max_iter=4, min_iter=1, conv_tol=1e-8, on_unconverged="warn"
+        ),
     )
     assert cfg.ctm.forward_gauge == "auto"  # regime: the default, unset
     with warnings.catch_warnings():

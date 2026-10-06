@@ -16,13 +16,16 @@ __all__ = [
 
 from collections.abc import Callable
 from functools import partial
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import jax
 
 if TYPE_CHECKING:
     from jax.sharding import Mesh
 
+# Defined in the leaf policy module so ``_ctm_tensor_convergence`` can build
+# one without importing this module (which imports it: an import cycle).
+from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
     _validate_chi_bump_args,
@@ -38,27 +41,6 @@ from tenax.algorithms._ctm_tensor_init import (
     initialize_ctm_tensor_env,
 )
 from tenax.core.tensor import Tensor
-
-
-class CTMConvergeInfo(NamedTuple):
-    """Convergence information from python_loop_ctm_converge."""
-
-    converged: bool
-    iterations: int  # CTM sweeps actually performed (#781)
-    sv_diff: float
-    max_truncation_error: float = 0.0  # variPEPS §2.8.2 indicator (last sweep)
-    max_smallest_S: float = 0.0  # variPEPS norm_smallest_S indicator (#492)
-    final_chi: int = 0  # final chi after any in-CTM bumps (#492); 0 ⇒ unchanged
-    # Sweep index whose environment is returned.  Equals ``iterations``
-    # except on the ``plateau_patience`` bail, where the best-metric env is
-    # handed back and this trails ``iterations`` by ``plateau_patience``.
-    # ``sv_diff`` is the metric of *this* sweep, not of ``iterations``.
-    best_iteration: int = 0
-    # Signed multiplier of the gauged step on the last two sweeps (#1060):
-    # near -1 flags a two-state cycle (retry with ``mixing > 0``), 0 < rho < 1
-    # a slow contraction.  NaN when not measurable (``conv_method="sv"``).
-    step_multiplier: float = float("nan")
-
 
 # Process-lifetime cache so repeat calls with the same neighbors dict reuse
 # the same compiled @jit'd ``_step`` function.  Without this, every callsite

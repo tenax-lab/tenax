@@ -96,7 +96,7 @@ class TestHeisenbergU1SzInit:
 
 class TestU1SzSymmetricMatchesDense:
     def test_one_step_symmetric_charged_ctm_no_collapse(self):
-        """U(1)-Sz charged CTM does not collapse and agrees with dense (#602).
+        """U(1)-Sz charged CTM does not collapse (#602).
 
         Regression guard for #602: before the fix the charged CTM environment
         sectors collapsed to zero after the first sweep, so ``E_sym == 0``.
@@ -110,8 +110,9 @@ class TestU1SzSymmetricMatchesDense:
         path truncates globally without charge structure, and the CTM is not
         fully converged for this variationally-restricted D=2 / chi=8 init.
         The guard is that the charged sectors survive (``E_sym`` finite and
-        clearly negative, not 0) and the symmetric energy agrees with dense to
-        a physical tolerance.  (The symmetric contraction was separately
+        clearly negative, not 0).  A dense-parity check (``atol=2e-2``) was
+        dropped in #1059: both forwards are unconverged from this init, so it
+        compared two unconverged energies.  (The symmetric contraction was separately
         confirmed order-invariant to ~1e-13 under a faithful virtual-bond
         permutation during the #602 fix.)
         """
@@ -122,27 +123,27 @@ class TestU1SzSymmetricMatchesDense:
         )
 
         A_sym, B_sym = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
-        A_dense = A_sym.todense()
-        B_dense = B_sym.todense()
-        gate = heisenberg_gate().todense()  # dense gate, identical numerics
+        gate = heisenberg_gate().todense()
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=8, max_iter=20),
+            # needs an unconverged forward: from this init the symmetric
+            # gradient forward is still unconverged at max_iter=1000 with
+            # plateau_patience=None (residual 1.7e-5; dense 0.85), and the test
+            # pins only the #602 no-collapse guard; see #1059.  The former
+            # E_sym ~ E_dense parity check compared two unconverged energies
+            # and was dropped; restoring it needs a converging init.
+            ctm=CTMConfig(chi=8, max_iter=20, on_unconverged="warn"),
             gs_num_steps=1,
             unit_cell="2site",
         )
 
         # Symmetric run — this exercises the non-trivial-charge absorb step.
         (_, _), _, E_sym = optimize_gs_ad(gate, (A_sym, B_sym), config)
-        # Dense run from the densified same init.
-        (_, _), _, E_dense = optimize_gs_ad(gate, (A_dense, B_dense), config)
 
         assert np.isfinite(E_sym)
         # #602 guard: charged sectors did NOT collapse (was exactly 0.0).
         assert float(E_sym) < -0.05, f"charged CTM sectors collapsed: E_sym={E_sym}"
-        # Physical agreement with dense (not exact — see docstring).
-        np.testing.assert_allclose(float(E_sym), float(E_dense), atol=2e-2)
 
 
 class TestU1SzSymmetricCTMD3:

@@ -1384,6 +1384,9 @@ def _ctm_tensor_multisite(
     _deprecation_stacklevel: int = 3,
     hold_sweeps: int = 0,
     hold_perturbation: float = DEFAULT_HOLD_PERTURBATION,
+    *,
+    _return_status: bool = False,
+    _warn_unconverged: bool = True,
 ) -> dict[Coord, CTMTensorEnv]:
     """Run multisite CTM to convergence using the Tensor protocol.
 
@@ -1405,6 +1408,14 @@ def _ctm_tensor_multisite(
                       both and there is no fixed point to converge to.
         hold_sweeps:  See :func:`ctm_tensor_2site`.  Default ``0`` (off).
         hold_perturbation: See :func:`ctm_tensor_2site`.
+        _return_status: Private.  When true, return ``(envs, info, detail)``
+                      with ``info`` a :class:`CTMConvergeInfo` (``iterations``
+                      is the sweeps actually run when not converged, ``-1``
+                      otherwise) and ``detail`` the not-converged diagnostic
+                      text (``None`` when converged), so a wrapper can act on
+                      the verdict (#1059 site 5).
+        _warn_unconverged: Private.  ``False`` suppresses the not-converged
+                      warning, for a wrapper that raises instead (#1059).
 
     Returns:
         Dict mapping coordinates to converged CTMTensorEnv.
@@ -1641,17 +1652,21 @@ def _ctm_tensor_multisite(
         if converged:
             break
 
+    # #1059 (Codex P2 on #1070): the verdict is built first and emitted at
+    # the end, so ``ctm_tensor_2site(strict=True)`` can raise its typed
+    # error *instead of* warning -- under ``-W error`` the warning would
+    # otherwise abort the call before the documented exception.
+    unconv = None
     if blind_coords:
         # Not silent, and not fatal.  The sweeps still ran, so the environment
         # returned here is the best this budget reached.  What the caller must
         # not do is read it as converged.
-        warnings.warn(
+        unconv = (
             _blind_corner_message(blind_coords, collapsed_coords),
             RuntimeWarning,
-            stacklevel=2,
         )
     elif hold_log and hold_log[-1][0] == "nonfinite":
-        warnings.warn(
+        unconv = (
             f"CTM not verified in ctm_tensor_multisite(): the successive-sweep "
             f"criterion reached conv_tol={conv_tol:g} at chi={chi}, but a "
             f"hold-test perturbation diverged to non-finite values, so the "
@@ -1659,14 +1674,13 @@ def _ctm_tensor_multisite(
             f"environment is the finite claimed point, UNVERIFIED (#1035).  "
             f"Try a smaller hold_perturbation, or hold_sweeps=0.",
             UserWarning,
-            stacklevel=2,
         )
     elif hold_log and hold_log[-1][0] == "budget":
         # Codex P2 on #1058: this exit is early, so "ran the full max_iter"
         # would be false.  Report the sweeps that ran, and why they stopped.
         _, at, left, need = hold_log[-1]
         swept = budget - max_iter + at  # + any QR warm-up
-        warnings.warn(
+        unconv = (
             f"CTM not verified in ctm_tensor_multisite(): stopped after "
             f"{swept} of max_iter={budget} sweeps at chi={chi}.  The "
             f"successive-sweep criterion reached conv_tol={conv_tol:g} at "
@@ -1680,7 +1694,6 @@ def _ctm_tensor_multisite(
             f"least {need - left}, or pass hold_sweeps=0 to accept "
             f"successive-sweep agreement alone.",
             UserWarning,
-            stacklevel=2,
         )
     elif not converged:
         # #901.  The blind branch above covers a criterion that could not
@@ -1717,7 +1730,7 @@ def _ctm_tensor_multisite(
             )
         else:
             outcome = f"without reaching conv_tol={conv_tol:g} ({criterion})"
-        warnings.warn(
+        unconv = (
             f"CTM did not converge in ctm_tensor_multisite(): ran the full "
             f"max_iter={budget} sweeps at chi={chi} {outcome}{hold_note}. The "
             f"returned environment is not a fixed point and any observable "
@@ -1726,9 +1739,23 @@ def _ctm_tensor_multisite(
             f"fix. Raise max_iter, or switch recipe: the 1x1 recipe does not "
             f"converge on a non-C4v multisite cell (#425/#426/#901).",
             UserWarning,
-            stacklevel=2,
         )
 
+    if unconv is not None and (_warn_unconverged or converged):
+        warnings.warn(unconv[0], unconv[1], stacklevel=2)
+
+    if _return_status:
+        from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
+
+        # Codex P2 on #1070: count the sweeps that ran, not the budget -- the
+        # hold's budget and non-finite exits stop early.  ``budget - max_iter``
+        # is the QR warm-up.
+        info = CTMConvergeInfo(
+            converged=bool(converged),
+            iterations=(budget - max_iter + used) if not converged else -1,
+            sv_diff=float(final_diff),
+        )
+        return envs, info, (unconv[0] if unconv is not None else None)
     return envs
 
 
@@ -1784,6 +1811,7 @@ def ctm_tensor_2site(
     recipe: str = "2x2",
     hold_sweeps: int = 0,
     hold_perturbation: float = DEFAULT_HOLD_PERTURBATION,
+    strict: bool = False,
 ) -> tuple[CTMTensorEnv, CTMTensorEnv]:
     """Run 2-site checkerboard CTM to convergence using the Tensor protocol.
 
@@ -1832,11 +1860,22 @@ def ctm_tensor_2site(
                       1e-6).  Keep it well above the point's residual
                       (``~conv_tol``) or the displacement sits on the
                       residual floor.
+        strict:       If true, raise
+                      :class:`~tenax.CTMNotConvergedError` (``site=
+                      "ctm_tensor_2site"``) when the CTM does not converge
+                      within ``max_iter`` -- including a criterion that was
+                      blind, or a point the hold test could not verify --
+                      instead of warning and returning the unconverged
+                      environment.  Default ``False`` keeps the legacy
+                      warn-and-return behaviour (#1059).
 
     Returns:
         ``(env_A, env_B)`` — converged CTMTensorEnv for each sublattice.
+
+    Raises:
+        CTMNotConvergedError: if ``strict`` and the CTM did not converge.
     """
-    envs = _ctm_tensor_multisite(
+    envs, info, detail = _ctm_tensor_multisite(
         {(0, 0): A, (1, 0): B},
         CHECKERBOARD_NEIGHBORS,
         chi,
@@ -1852,7 +1891,15 @@ def ctm_tensor_2site(
         _deprecation_stacklevel=4,
         hold_sweeps=hold_sweeps,
         hold_perturbation=hold_perturbation,
+        _return_status=True,
+        _warn_unconverged=not strict,
     )
+    if strict and not info.converged:
+        from tenax.algorithms._ctm_convergence_policy import CTMNotConvergedError
+
+        raise CTMNotConvergedError(
+            info, "ctm_tensor_2site", conv_tol=conv_tol, chi=chi, detail=detail
+        )
     return envs[(0, 0)], envs[(1, 0)]
 
 
