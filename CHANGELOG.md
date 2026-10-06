@@ -432,6 +432,30 @@
 
 ### Fixed
 
+- **The Hager-Zhang line search no longer accepts an energy rise**
+  (`_line_search.py`).  Its approximate-Wolfe test allowed `f <= phi0 + eps`,
+  a rise of up to `eps = 1e-6*|E|` (~6.7e-7 at E=-0.67), but every caller
+  (iPEPS, PESS) rejects a step that does not lower the energy.  An accepted
+  rise was therefore a stall: the iPEPS optimizer rolled back, repeated the
+  identical search, and stopped on its stall budget.  Traced on 1x1 D=3
+  Heisenberg (chi=16, main c4bc0f8): the bisection midpoint rose by 3.2e-7
+  with slope +3.9e-5, met the relaxed test, and the run stopped at
+  |grad| = 6.1e-3.  The relaxed test now requires `f < phi0` and keeps its
+  curvature band.  D=3 chi=16, before -> after: 1x1 E=-0.66816575 ->
+  -0.66818298, 2-site -0.66816092 -> -0.66816418, C4v -0.66761094 ->
+  -0.66764494; D=2 unchanged (all three converge to `grad_norm < 1e-5`).
+  Those D=3 runs still stopped short (at |grad| ~ 1e-3 / 5e-4 with
+  `alpha=0`) on a second form of the same mismatch: the bracket ends were
+  still chosen with the eps band, so a point that rose by less than `eps`
+  could become the left end.  Traced at the 1x1 D=3 stall state (|grad| =
+  1.0e-3; the CTM energy agrees to 1.4e-12 between 1e-8 and 1e-12 tolerances,
+  and the AD slope matches a central difference to 0.9999): alpha=0.2276
+  rose 1.85e-7 with a negative slope and became the left end, the zoom
+  converged on a local minimum 1.8e-7 *above* phi0, and the search returned
+  `alpha=0` after 40 iterations, although phi falls 5.1e-8 at alpha=0.0091.
+  A probe that does not lower phi is now a right end in the zoom
+  (`_update`), the bisection, and the derivative bracket.
+
 - **The Hager-Zhang line search no longer stalls near convergence**
   (`_line_search.py`).  Every iPEPS call site runs it with
   `bracket_only_phi=True` (#504), whose bracket phase saw an overshoot only
