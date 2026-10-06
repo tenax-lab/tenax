@@ -584,3 +584,12 @@ class TestBracketEndsNeedADecrease:
         eps = 4e-7 * abs(self.PHI0)
         assert phi(0.4552) - self.PHI0 > eps
         self._search(0.4552, eps_factor=4e-7)
+
+    def test_derivative_bracket_rejects_a_sub_eps_rise(self):
+        # Codex P2 on #1079: with dphi at every bracket probe, 0.2276
+        # (rise 1.85e-7, slope < 0) fails Wolfe but was kept as c_prev; the
+        # next probe's slope is >= 0, so the bracket [0.2276, 0.3414] lay
+        # to the right of every decrease.
+        _, dphi = self._phi_dphi()
+        assert dphi(0.2276 * 1.5) >= 0.0
+        self._search(0.2276, bracket_only_phi=False)
