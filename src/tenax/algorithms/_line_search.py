@@ -233,6 +233,15 @@ def hager_zhang_line_search(
                 b, fb, db = c, fc, dc
                 break
 
+            if fc >= phi0:
+                # No decrease: a right end, as in _update.  Expanding past
+                # it makes it c_prev, and a later sign change brackets
+                # [c_prev, c] to the right of every decrease.
+                a, fa, da = 0.0, phi0, dphi0
+                b, fb, db = c, fc, 0.0
+                a, fa, da, b, fb, db = _bisect(a, fa, da, b, fb, db)
+                break
+
         if fc > phi0 + eps:
             # phi too high — bracket using bisection from [0, c]
             a, fa, da = 0.0, phi0, dphi0
