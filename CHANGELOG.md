@@ -444,8 +444,17 @@
   curvature band.  D=3 chi=16, before -> after: 1x1 E=-0.66816575 ->
   -0.66818298, 2-site -0.66816092 -> -0.66816418, C4v -0.66761094 ->
   -0.66764494; D=2 unchanged (all three converge to `grad_norm < 1e-5`).
-  The D=3 runs still stop short (at |grad| ~ 1e-3 / 5e-4 with `alpha=0`);
-  that limit is open.
+  Those D=3 runs still stopped short (at |grad| ~ 1e-3 / 5e-4 with
+  `alpha=0`) on a second form of the same mismatch: the bracket ends were
+  still chosen with the eps band, so a point that rose by less than `eps`
+  could become the left end.  Traced at the 1x1 D=3 stall state (|grad| =
+  1.0e-3; the CTM energy agrees to 1.4e-12 between 1e-8 and 1e-12 tolerances,
+  and the AD slope matches a central difference to 0.9999): alpha=0.2276
+  rose 1.85e-7 with a negative slope and became the left end, the zoom
+  converged on a local minimum 1.8e-7 *above* phi0, and the search returned
+  `alpha=0` after 40 iterations, although phi falls 5.1e-8 at alpha=0.0091.
+  A probe that does not lower phi is now a right end in the zoom
+  (`_update`), the bisection, and the derivative bracket.
 
 - **The Hager-Zhang line search no longer stalls near convergence**
   (`_line_search.py`).  Every iPEPS call site runs it with
