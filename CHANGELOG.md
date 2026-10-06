@@ -432,6 +432,24 @@
 
 ### Fixed
 
+- **Hager-Zhang `phi` probes warm-start CTM from the step's env**
+  (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
+  start from the previous probe's env (the #502 write-back), so the warm
+  start followed HZ's probe sequence instead of the line through alpha = 0.
+  At a 2-site D=3 Heisenberg stall (chi=16, E=-0.6681622484, |grad|=4.4e-4),
+  HZ bisected down from alpha = 1 and every probe at alpha <= 2.4e-4 started
+  from an env on another CTM fixed point: it did not converge in 100 sweeps
+  and was rejected as +inf (#1059), so the search returned alpha = 0 five
+  times and the run stopped.  From the alpha = 0 env the same probes converge
+  in 10 sweeps to the decrease dphi0 predicts.  Now every `phi` probe starts
+  from the step's env; the `dphi` probe at the same alpha still reuses that
+  probe's env.  At the stall state HZ returns alpha = 1.95e-3 with a decrease
+  of 5.7e-9 in 11 probes (was alpha = 0 in 52).  D=2 chi=16 is unchanged in
+  energy (2-site -0.66251430 in 77 steps, was 154; 1x1 and C4v identical).
+  2-site D=3 now passes the old stall (best E=-0.6681656890), then cycles: the
+  state restored by a stall rollback re-evaluates on a different CTM fixed
+  point (E 3.7e-7 higher, |grad| 3.5e-2), which is open.
+
 - **The Hager-Zhang line search no longer accepts an energy rise**
   (`_line_search.py`).  Its approximate-Wolfe test allowed `f <= phi0 + eps`,
   a rise of up to `eps = 1e-6*|E|` (~6.7e-7 at E=-0.67), but every caller
