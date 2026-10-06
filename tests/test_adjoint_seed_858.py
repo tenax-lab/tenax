@@ -276,13 +276,21 @@ def test_the_real_adjoint_seeds_the_solver_no_worse_than_zero(monkeypatch):
     import tenax.algorithms._ctm_energy_ad as ad
 
     seen = []
-    real = ad.gmres_pytree_jax
+    # The solve is compiled (#1087), so ``gmres_pytree_jax`` only ever sees
+    # tracers.  Spy one level up, on the call the backward makes with concrete
+    # values, and rebuild the same ``(I - J^T)`` matvec the solve uses.
+    real = ad._jit_eager_gmres_solve
 
-    def spy(matvec, b_tree, x0_tree=None, **kw):
+    def spy(params, env, b_tree, x0_tree, *, apply_Jt, chi, pb, **kw):
+        def matvec(v):
+            return apply_Jt(params, env, v, chi=chi, pb=pb)
+
         seen.append((matvec, b_tree, x0_tree))
-        return real(matvec, b_tree, x0_tree, **kw)
+        return real(
+            params, env, b_tree, x0_tree, apply_Jt=apply_Jt, chi=chi, pb=pb, **kw
+        )
 
-    monkeypatch.setattr(ad, "gmres_pytree_jax", spy)
+    monkeypatch.setattr(ad, "_jit_eager_gmres_solve", spy)
 
     A0 = _random_D2_site()
     jax.grad(lambda a: _implicit_energy(a, chi=_HARMFUL_SEED_CHI, max_iter=80))(A0)
@@ -290,7 +298,7 @@ def test_the_real_adjoint_seeds_the_solver_no_worse_than_zero(monkeypatch):
     assert seen, (
         "no eager GMRES solve ran, so this test observed nothing. The "
         "backward took the fused fixed-point branch instead; re-point the "
-        "fixture at the branch that calls gmres_pytree_jax."
+        "fixture at the branch that calls _jit_eager_gmres_solve."
     )
     for i, (matvec, b_tree, x0_tree) in enumerate(seen):
         b_norm = _l2(b_tree)

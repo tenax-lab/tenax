@@ -185,6 +185,38 @@ def _best_adjoint_seed(matvec, rhs, candidates):
     return best
 
 
+@partial(
+    jax.jit, static_argnames=("apply_Jt", "chi", "pb", "tol", "maxiter", "restart")
+)
+def _jit_eager_gmres_solve(
+    params_data_tuple, env_leaves, rhs, x0, *, apply_Jt, chi, pb, tol, maxiter, restart
+):
+    """The eager-GMRES adjoint solve, compiled once per static configuration.
+
+    ``gmres_pytree_jax`` runs JAX's GMRES, a ``lax.while_loop``.  Called
+    outside a jit, that loop is traced and compiled on the spot, and its
+    matvec used to be a closure built fresh on every backward over that
+    call's ``params_data_tuple`` and ``env_leaves`` -- so JAX saw a new
+    function each time and re-compiled the whole Krylov loop on every
+    gradient: ~170 s per call against a 0.6 s solve at D=2 chi=8 on CPU,
+    3-5 min per call at D=3 (#1087).  This hit ``adjoint_method="gmres"``
+    on every call, and the fused fixed-point branch whenever it fell back.
+
+    Here the matvec is built inside the trace from ``apply_Jt`` (the
+    dispatch entry's cached ``_jit_apply_Jt``, static -- its identity is
+    stable for the life of the cache entry) and the per-call data arrive as
+    traced arguments, so a later backward with new parameter values reuses
+    the compiled loop.  The seed ``x0`` is still chosen outside, by
+    :func:`_best_adjoint_seed`, and the residual is still measured outside:
+    neither changes.  Returns ``gmres_pytree_jax``'s ``(lam, info)``.
+    """
+
+    def matvec(v):
+        return apply_Jt(params_data_tuple, env_leaves, v, chi=chi, pb=pb)
+
+    return gmres_pytree_jax(matvec, rhs, x0, tol=tol, maxiter=maxiter, restart=restart)
+
+
 # #1028: the flowing projector backward, and the frozen value its backward
 # falls back to when the flowing adjoint is not solvable (see ``f_bwd``).
 # "auto" is the frozen default every non-flow caller already runs.
@@ -1864,7 +1896,9 @@ def _make_implicit_vjp_fn(
                 raise CTMRGGradientError(rho)
 
         # Both eager-GMRES paths (fixed_point divergence fallback + the
-        # "gmres" branch) share the same cached _jit_apply_Jt matvec.
+        # "gmres" branch) share the same cached _jit_apply_Jt matvec.  This
+        # closure is for the eager seed choice and residual measurement only;
+        # the solve itself goes through _jit_eager_gmres_solve (#1087).
         def _eager_apply_I_minus_Jt(v):
             return _jit_apply_Jt(params_data_tuple, env_leaves, v, chi=chi_post, pb=pb)
 
@@ -1988,10 +2022,14 @@ def _make_implicit_vjp_fn(
                     gmres_tol,
                     gmres_restart,
                 )
-                lam, _info = gmres_pytree_jax(
-                    _eager_apply_I_minus_Jt,
+                lam, _info = _jit_eager_gmres_solve(
+                    params_data_tuple,
+                    env_leaves,
                     rhs,
                     _best_adjoint_seed(_eager_apply_I_minus_Jt, rhs, [rhs]),
+                    apply_Jt=_jit_apply_Jt,
+                    chi=chi_post,
+                    pb=pb,
                     tol=gmres_tol,
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
@@ -2064,10 +2102,14 @@ def _make_implicit_vjp_fn(
                 gmres_restart,
                 prev_lam is not None,
             )
-            lam, _info = gmres_pytree_jax(
-                _eager_apply_I_minus_Jt,
+            lam, _info = _jit_eager_gmres_solve(
+                params_data_tuple,
+                env_leaves,
                 rhs,
                 x0,
+                apply_Jt=_jit_apply_Jt,
+                chi=chi_post,
+                pb=pb,
                 tol=gmres_tol,
                 maxiter=gmres_maxiter,
                 restart=gmres_restart,
