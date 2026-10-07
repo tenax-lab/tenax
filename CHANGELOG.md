@@ -434,21 +434,38 @@
 
 - **Hager-Zhang `phi` probes warm-start CTM from the step's env**
   (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
-  start from the previous probe's env (the #502 write-back), so the warm
-  start followed HZ's probe sequence instead of the line through alpha = 0.
-  At a 2-site D=3 Heisenberg stall (chi=16, E=-0.6681622484, |grad|=4.4e-4),
-  HZ bisected down from alpha = 1 and every probe at alpha <= 2.4e-4 started
-  from an env on another CTM fixed point: it did not converge in 100 sweeps
-  and was rejected as +inf (#1059), so the search returned alpha = 0 five
-  times and the run stopped.  From the alpha = 0 env the same probes converge
-  in 10 sweeps to the decrease dphi0 predicts.  Now every `phi` probe starts
-  from the step's env; the `dphi` probe at the same alpha still reuses that
-  probe's env.  At the stall state HZ returns alpha = 1.95e-3 with a decrease
-  of 5.7e-9 in 11 probes (was alpha = 0 in 52).  D=2 chi=16 is unchanged in
-  energy (2-site -0.66251430 in 77 steps, was 154; 1x1 and C4v identical).
-  2-site D=3 now passes the old stall (best E=-0.6681656890), then cycles: the
-  state restored by a stall rollback re-evaluates on a different CTM fixed
-  point (E 3.7e-7 higher, |grad| 3.5e-2), which is open.
+  start from the previous probe's env (the #502 write-back), so the env a
+  probe at alpha started from depended on the order HZ probed in, and
+  `phi(alpha)` was not a function of alpha alone.  Now every `phi` probe
+  starts from the step's env; the `dphi` probe at the same alpha still
+  reuses that probe's env.  Seen at a 2-site D=3 Heisenberg stall (chi=16,
+  E=-0.6681622484, |grad|=4.4e-4): HZ bisected down from alpha = 1, every
+  probe at alpha <= 2.4e-4 failed to converge in 100 sweeps from the last
+  probe's env and was rejected as +inf (#1059), and the search returned
+  alpha = 0 five times; from the alpha = 0 env the same probes converge in
+  10 sweeps.  D=2 chi=16: 2-site reaches the same energy (-0.66251430) in
+  77 steps, was 154 (one start); 1x1 and C4v are identical.
+  - **Not shown at D=3.**  With the default CTM (`conv_tol` 1e-8,
+    `plateau_patience` 20) the CTM stops early at 2-site D=3 chi=16 with an
+    energy bias of about 1e-7 that depends on the start env -- larger than
+    the decreases HZ resolves near the minimum there.  Whether this change
+    lowers the D=3 energy is open.
+
+- **The eager-GMRES adjoint compiles once per configuration, not on every
+  gradient** (#1087, `_ctm_energy_ad.py`).  `adjoint_method="gmres"` -- and
+  the default fused `"fixed_point"` backward whenever it falls back to
+  GMRES -- handed `gmres_pytree_jax` a matvec closure built fresh on every
+  backward over that call's params and environment, so JAX re-traced and
+  re-compiled the Krylov `lax.while_loop` each time.  Measured on the
+  spinless-fermion 2-site D=2 chi=8 benchmark (CPU, 4 optimizer steps):
+  ~170 s of recompile per gradient against a 0.6 s solve, 1608 s for the
+  optimize stage; at D=3 chi=12, 173-296 s per gradient.  The solve now goes
+  through one `jax.jit`-compiled helper with the per-call data as arguments:
+  later gradients take 7.8 s with no compile (optimize stage 871 s), and the
+  gradient is unchanged (relative difference 4.9e-7 against the fused path).
+  The seed choice (#858) and the measured residual (#801) are unchanged.
+  The honeycomb backward (`_ctm_honeycomb_ad.py`) has the same pattern and
+  is not changed here.
 
 - **The Hager-Zhang line search no longer accepts an energy rise**
   (`_line_search.py`).  Its approximate-Wolfe test allowed `f <= phi0 + eps`,
