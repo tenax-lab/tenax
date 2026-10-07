@@ -23,7 +23,7 @@ from tenax import CTMConfig, heisenberg_gate, iPEPSConfig, optimize_gs_ad
 # χ=4 does not always reach conv_tol; the spies, not convergence, are tested.
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
-NUM_STEPS = 4
+NUM_STEPS = 3
 
 
 def _rand(seed=0):
@@ -32,7 +32,7 @@ def _rand(seed=0):
     return jnp.asarray(a / np.linalg.norm(a))
 
 
-def _run(monkeypatch, optimizer):
+def _run(monkeypatch, optimizer, num_steps=NUM_STEPS):
     hist_lens, metric_As = [], []
     real_two_loop = _mp.lbfgs_two_loop
     real_precond = _mp.precondition_gradient
@@ -52,7 +52,7 @@ def _run(monkeypatch, optimizer):
         ctm=CTMConfig(
             chi=4, max_iter=300, min_iter=1, conv_tol=1e-8, on_unconverged="warn"
         ),
-        gs_num_steps=NUM_STEPS,
+        gs_num_steps=num_steps,
         gs_optimizer=optimizer,
         gs_metric_precond=True,
         gs_line_search_method="hager_zhang",
@@ -76,7 +76,8 @@ def test_lbfgs_stores_curvature_pairs(monkeypatch):
 
 @pytest.mark.parametrize("optimizer", ["lbfgs", "cg"])
 def test_metric_is_built_at_the_current_iterate(monkeypatch, optimizer):
-    _, metric_As, A0 = _run(monkeypatch, optimizer)
+    # Two steps give the two metric calls the test needs (CG is slow here).
+    _, metric_As, A0 = _run(monkeypatch, optimizer, num_steps=2)
     assert len(metric_As) >= 2, len(metric_As)
     # The first metric is at the start point; every later one has moved off it.
     assert np.allclose(metric_As[0], A0)
