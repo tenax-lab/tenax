@@ -1600,7 +1600,7 @@ def _optimize_gs_ad_tensor(
     """
     # #973: drop any previous run's adjoint seed before this run's first
     # gradient -- see invalidate_implicit_ad_warm_start's docstring.
-    invalidate_implicit_ad_warm_start()
+    invalidate_implicit_ad_warm_start(run_start=True)
     config = _normalize_stall_recovery(config, unit_cell="1x1")
     _warn_implicit_ad_variational_caveat(config, path="1-site Tensor-protocol")
     import optax
@@ -3390,7 +3390,7 @@ def _optimize_gs_ad_tensor_2site(
     """
     # #973: drop any previous run's adjoint seed before this run's first
     # gradient -- see invalidate_implicit_ad_warm_start's docstring.
-    invalidate_implicit_ad_warm_start()
+    invalidate_implicit_ad_warm_start(run_start=True)
     config = _normalize_stall_recovery(config, unit_cell="2site")
     use_c4v = config.gs_c4v
     if not use_c4v:
@@ -5212,7 +5212,7 @@ def _optimize_gs_ad_multisite(
     """
     # #973: drop any previous run's adjoint seed before this run's first
     # gradient -- see invalidate_implicit_ad_warm_start's docstring.
-    invalidate_implicit_ad_warm_start()
+    invalidate_implicit_ad_warm_start(run_start=True)
     config = _normalize_stall_recovery(config, unit_cell="multisite")
     _warn_implicit_ad_variational_caveat(config, path="Multisite Lattice")
 

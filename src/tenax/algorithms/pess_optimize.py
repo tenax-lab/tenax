@@ -520,7 +520,7 @@ def optimize_pess_ad(
     """
     # #973: drop any previous run's adjoint seed before this run's first
     # gradient -- see invalidate_implicit_ad_warm_start's docstring.
-    invalidate_implicit_ad_warm_start()
+    invalidate_implicit_ad_warm_start(run_start=True)
     import optax
 
     if loss_builder == "convc":
@@ -802,7 +802,7 @@ def optimize_pess_3site_multisite_ad(
     """
     # #973: drop any previous run's adjoint seed before this run's first
     # gradient -- see invalidate_implicit_ad_warm_start's docstring.
-    invalidate_implicit_ad_warm_start()
+    invalidate_implicit_ad_warm_start(run_start=True)
     import optax
 
     # Promote Tensor-valued gates to ndarray once at the optimizer entry

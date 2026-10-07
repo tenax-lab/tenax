@@ -28,7 +28,12 @@ import numpy as np
 import pytest
 
 from tenax.algorithms import _ctm_energy_ad as cea
-from tenax.algorithms._cache_fingerprint import fingerprint, lru_get, lru_put
+from tenax.algorithms._cache_fingerprint import (
+    _MAX_HASHED_ELEMENTS,
+    cache_key_part,
+    lru_get,
+    lru_put,
+)
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
 from tenax.algorithms.ipeps import _wrap_as_dense_tensor, heisenberg_gate
 
@@ -38,7 +43,11 @@ from tenax.algorithms.ipeps import _wrap_as_dense_tensor, heisenberg_gate
 
 
 def _key(obj):
-    return fingerprint(obj)[0]
+    return cache_key_part(obj)[0]
+
+
+def _exact(obj):
+    return _key(obj)[0] == "fp"
 
 
 def test_equal_arrays_on_distinct_objects_share_a_key():
@@ -95,16 +104,71 @@ def test_partials_compare_by_function_and_arguments():
     assert _key(functools.partial(f, 1)) != _key(functools.partial(f, 2))
 
 
-def test_opaque_objects_are_keyed_by_id_and_kept_alive():
-    class Opaque:
-        pass
+def test_opaque_objects_fall_back_to_the_whole_components_id():
+    """Anything not exactly fingerprintable keys the WHOLE component by id --
+    the pre-#1049 key -- and keeps it alive, so it can only miss."""
+    o = object()  # no __dict__, no __slots__: nothing to read
+    holder = {"x": o}
+    key, keep = cache_key_part(holder)
+    assert key == ("id", id(holder))
+    assert any(k is holder for k in keep)
+    assert key != _key({"x": object()})
 
-    o = Opaque()
-    key, keep = fingerprint({"x": o})
-    assert any(k is o for k in keep), (
-        "an id-keyed object must be returned to keep alive"
-    )
-    assert key != _key({"x": Opaque()})
+
+def test_dict_insertion_order_is_part_of_the_key():
+    """Codex review of #1090: ``.items()`` order is observable in a trace."""
+    assert _key({"a": 1, "b": 2}) != _key({"b": 2, "a": 1})
+    assert _key({"a": 1, "b": 2}) == _key({"a": 1, "b": 2})
+
+
+class _Model:
+    def __init__(self, coupling):
+        self.coupling = coupling
+
+    def energy(self, site_tensors, envs, gate_):
+        return self.coupling
+
+
+def test_a_mutated_receiver_changes_the_key():
+    """Codex review of #1090: a bound method's receiver state is part of the
+    program it traces, so changing it must miss -- never reuse a backward that
+    baked in the old value."""
+    m = _Model(1.0)
+    before = _key(m.energy)
+    assert _exact(m.energy)
+    m.coupling = 2.0
+    assert _key(m.energy) != before
+    assert _key(_Model(1.0).energy) == before
+
+
+def test_large_captured_arrays_fall_back_to_identity():
+    """Codex review of #1090: a big array is not hashed per call, and an id
+    would not see an in-place mutation -- so the closure holding it is keyed
+    by its own identity and a fresh closure misses."""
+    big = np.zeros(_MAX_HASHED_ELEMENTS + 1)
+    f1, f2 = _make_closure(big), _make_closure(big)
+    assert not _exact(f1)
+    assert _key(f1) != _key(f2)
+
+
+def test_weak_type_is_part_of_the_array_key():
+    """Codex review of #1090: weak and strong scalars promote differently."""
+    assert _key(jnp.array(1.0)) != _key(jnp.array(1.0, dtype=jnp.float64))
+
+
+def test_fuse_info_distinguishes_tensor_indices():
+    """Codex review of #1090: ``TensorIndex.__eq__`` ignores ``fuse_info``,
+    which ``split_index`` branches on; the fingerprint must not."""
+    import dataclasses
+
+    from tenax.core.index import FuseInfo, TensorIndex
+
+    g = heisenberg_gate()
+    idx = g.indices[0]
+    assert isinstance(idx, TensorIndex)
+    fused = dataclasses.replace(idx, fuse_info=FuseInfo(parent_indices=(idx, idx)))
+    assert fused == idx, "premise: __eq__ ignores fuse_info"
+    assert _key(fused) != _key(idx)
 
 
 def test_a_self_referencing_closure_terminates():
@@ -114,8 +178,7 @@ def test_a_self_referencing_closure_terminates():
 
         return rec
 
-    f = outer()
-    key, _ = fingerprint(f)
+    key, _ = cache_key_part(outer())
     hash(key)
 
 
@@ -234,3 +297,28 @@ def test_a_different_gate_does_not_reuse_the_old_backward(_fresh_cache):
     np.testing.assert_allclose(
         np.asarray(d2), 2.0 * np.asarray(d1), rtol=1e-4, atol=1e-10
     )
+
+
+def test_run_start_rearms_warning_latches_and_mid_run_does_not():
+    """Codex review of #1090: a shared entry's once-per-run warning latches
+    are re-armed when a run starts, not on a mid-run reset."""
+    calls = {"seed": 0, "latch": 0}
+    key = "_test_1049_latch_sentinel"
+
+    def _seed():
+        calls["seed"] += 1
+
+    def _latch():
+        calls["latch"] += 1
+
+    cea._VJP_CACHE[key] = (
+        None,
+        {"_invalidate_warm_start": _seed, "_reset_run_latches": _latch},
+    )
+    try:
+        cea.invalidate_implicit_ad_warm_start()
+        assert calls == {"seed": 1, "latch": 0}
+        cea.invalidate_implicit_ad_warm_start(run_start=True)
+        assert calls == {"seed": 2, "latch": 1}
+    finally:
+        cea._VJP_CACHE.pop(key, None)

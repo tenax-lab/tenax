@@ -38,7 +38,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
-from tenax.algorithms._cache_fingerprint import fingerprint, lru_get, lru_put
+from tenax.algorithms._cache_fingerprint import cache_key_part, lru_get, lru_put
 from tenax.algorithms._ctm_honeycomb_energy import compute_honeycomb_energy
 from tenax.algorithms._ctm_honeycomb_env import HoneycombCTMEnv
 from tenax.algorithms._ctm_honeycomb_forward import (
@@ -213,8 +213,8 @@ def _honeycomb_ctm_energy_implicit_dispatch(
     # Value fingerprints, not ids (#1049): the backward bakes the Hamiltonian
     # and energy callback in at trace time, so equal fingerprints trace the
     # same program, while a fresh-but-equal object no longer misses.
-    hamiltonian_fp, keep_h = fingerprint(hamiltonian)
-    energy_fn_fp, keep_e = fingerprint(energy_fn)
+    hamiltonian_fp, keep_h = cache_key_part(hamiltonian)
+    energy_fn_fp, keep_e = cache_key_part(energy_fn)
     cache_key = (
         tuple(coords),
         chi,

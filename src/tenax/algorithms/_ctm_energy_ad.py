@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
-from tenax.algorithms._cache_fingerprint import fingerprint, lru_get, lru_put
+from tenax.algorithms._cache_fingerprint import cache_key_part, lru_get, lru_put
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
     _validate_chi_bump_args,
@@ -851,7 +851,7 @@ def _sigma_gauged_ctm_converge(
 _VJP_CACHE: collections.OrderedDict = collections.OrderedDict()
 
 
-def invalidate_implicit_ad_warm_start() -> int:
+def invalidate_implicit_ad_warm_start(*, run_start: bool = False) -> int:
     """Clear cached Neumann warm-start seeds across the implicit-AD VJP cache.
 
     The implicit-AD backward (``adjoint_method="fixed_point"`` and the
@@ -881,6 +881,13 @@ def invalidate_implicit_ad_warm_start() -> int:
     compiled VJP functions stay cached, so the cost is one cold adjoint
     solve per run, not a recompile.
 
+    ``run_start=True`` (the run-entry calls only) also re-arms the entry's
+    once-per-run warning latches (the #841 stationarity warning and the #1028
+    flow-fallback warning).  Since #1049 an entry is shared by every run with
+    an equal configuration, so without this a warning emitted by one run
+    would stay silent in every later one.  The mid-run calls (stall reset,
+    chi change) leave the latches alone, so a run still warns once.
+
     Returns
     -------
     int
@@ -893,6 +900,12 @@ def invalidate_implicit_ad_warm_start() -> int:
         if cb is not None:
             cb()
             n += 1
+        # #1049: an entry is now shared by every run with an equal
+        # configuration, so its once-per-run warning latches must be re-armed
+        # when a run starts -- not on a mid-run reset, which would re-warn.
+        reset = mutables.get("_reset_run_latches") if run_start else None
+        if reset is not None:
+            reset()
     return n
 
 
@@ -1098,9 +1111,9 @@ def _ctm_energy_implicit_dispatch(
     # Build a hashable key from the static configuration.
     # Gate and energy_fn must be in the key because the JIT backward
     # captures them at trace time as compile-time constants.
-    neighbors_fp, keep_n = fingerprint(neighbors)
-    gate_fp, keep_g = fingerprint(gate)
-    energy_fn_fp, keep_e = fingerprint(energy_fn)
+    neighbors_fp, keep_n = cache_key_part(neighbors)
+    gate_fp, keep_g = cache_key_part(gate)
+    energy_fn_fp, keep_e = cache_key_part(energy_fn)
     cache_key = (
         tuple(coords),
         chi,
@@ -1271,6 +1284,13 @@ def _make_implicit_vjp_fn(
         _cached["prev_lam_leaves"] = None
 
     mutables["_invalidate_warm_start"] = _invalidate_warm_start
+
+    def _reset_run_latches() -> None:
+        """Re-arm the once-per-run warnings (#1049): called at run start only."""
+        _cached["stationarity_warned"] = False
+        _cached["flow_fallback_warned"] = False
+
+    mutables["_reset_run_latches"] = _reset_run_latches
 
     # Step function for the #841 stationarity check below: the exact step the
     # forward loop runs (same recipe, mesh, and chunking — memoised, so this
