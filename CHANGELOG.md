@@ -432,6 +432,16 @@
 
 ### Fixed
 
+- **The metric preconditioner's GMRES solve compiles once per
+  configuration** (`_metric_precond.py`).  `precondition_gradient` handed
+  JAX's GMRES a `matvec` closure built fresh on every call, so the Krylov
+  `lax.while_loop` was re-traced and re-compiled twice per optimizer step:
+  1.38 s per step on GPU (about 6% of a 2-site D=3 chi=16 step) and 0.23 s
+  on CPU, with a warm persistent cache.  The solve now goes through one
+  `jax.jit`-compiled helper with the metric, `delta` and the gradient as
+  arguments, as in #1087.  Measured on CPU over 7 steps after the first:
+  `while` compile events 48 -> 0, total backend compile 2.46 s -> 0.49 s.
+
 - **The eager-GMRES adjoint compiles once per configuration, not on every
   gradient** (#1087, `_ctm_energy_ad.py`).  `adjoint_method="gmres"` -- and
   the default fused `"fixed_point"` backward whenever it falls back to
