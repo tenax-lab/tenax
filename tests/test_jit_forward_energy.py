@@ -122,3 +122,73 @@ def test_warnings_as_errors_get_the_warning_not_an_xla_error():
         warnings.simplefilter("error", RuntimeWarning)
         with pytest.raises(RuntimeWarning, match="not positive semi-definite"):
             _energy(_site(), **_NON_PSD)
+
+
+# --------------------------------------------------------------------------
+# The replay queue (Codex review of #1092): per call, ordered, thread-local.
+# --------------------------------------------------------------------------
+
+
+def _spy_checks(monkeypatch):
+    from tenax.algorithms import _ctm_diagnostics
+
+    seen = []
+    monkeypatch.setattr(
+        _ctm_diagnostics,
+        "check_rdm",
+        lambda rdm, *, context="", **kw: seen.append((context, float(rdm[0, 0]))),
+    )
+    return seen
+
+
+def test_replay_follows_trace_order_not_callback_order(monkeypatch):
+    from tenax.algorithms import _ctm_tensor_energy as te
+
+    seen = _spy_checks(monkeypatch)
+    for pos in (2, 0, 1):  # callbacks may arrive in any order
+        te._queue_traced_rdm(np.full((2, 2), pos), 7, position=pos, context=f"b{pos}")
+    te.replay_traced_rdm_checks(7)
+    assert [c for c, _ in seen] == ["b0", "b1", "b2"]
+
+
+def test_a_call_replays_only_its_own_rdms(monkeypatch):
+    from tenax.algorithms import _ctm_tensor_energy as te
+
+    seen = _spy_checks(monkeypatch)
+    te._queue_traced_rdm(np.ones((2, 2)), 11, position=0, context="call11")
+    te._queue_traced_rdm(np.ones((2, 2)), 12, position=0, context="call12")
+    te.replay_traced_rdm_checks(11)
+    assert [c for c, _ in seen] == ["call11"]
+    assert 12 in te._TRACED_RDMS and 11 not in te._TRACED_RDMS
+    te.discard_traced_rdm_checks(12)
+    assert 12 not in te._TRACED_RDMS
+
+
+def test_recording_is_invisible_to_other_threads():
+    import threading
+
+    from tenax.algorithms import _ctm_tensor_energy as te
+
+    seen_elsewhere = []
+    with te.recording_traced_rdms(5):
+        assert te._RDM_RECORDING.get() is not None
+        t = threading.Thread(
+            target=lambda: seen_elsewhere.append(te._RDM_RECORDING.get())
+        )
+        t.start()
+        t.join()
+    assert seen_elsewhere == [None]
+    assert te._RDM_RECORDING.get() is None
+
+
+def test_a_raising_check_leaves_nothing_queued():
+    from tenax.algorithms import _ctm_tensor_energy as te
+
+    bad = np.array([[1.0, 0.0], [0.0, -5.0]])  # not positive semi-definite
+    te._queue_traced_rdm(bad, 21, position=0, context="bad")
+    te._queue_traced_rdm(bad, 21, position=1, context="bad2")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        with pytest.raises(RuntimeWarning):
+            te.replay_traced_rdm_checks(21)
+    assert 21 not in te._TRACED_RDMS

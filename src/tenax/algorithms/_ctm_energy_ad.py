@@ -10,6 +10,7 @@ __all__ = [
 ]
 
 import contextlib
+import itertools
 import logging
 import math
 import warnings
@@ -35,6 +36,7 @@ from tenax.algorithms._ctm_tensor_convergence import (
 from tenax.algorithms._ctm_tensor_energy import (
     compute_energy_ctm_tensor,
     compute_energy_ctm_tensor_multisite,
+    discard_traced_rdm_checks,
     recording_traced_rdms,
     replay_traced_rdm_checks,
 )
@@ -848,6 +850,11 @@ def _sigma_gauged_ctm_converge(
 
 _VJP_CACHE: dict = {}
 
+# Per-call ids for the forward energy's RDM-check replay (see
+# ``_ctm_tensor_energy.recording_traced_rdms``).  ``next`` on a count is
+# atomic under the GIL, so concurrent calls never share an id.
+_RDM_CALL_TOKENS = itertools.count(1)
+
 
 def invalidate_implicit_ad_warm_start() -> int:
     """Clear cached Neumann warm-start seeds across the implicit-AD VJP cache.
@@ -1455,7 +1462,7 @@ def _make_implicit_vjp_fn(
         return _default_energy(site_tensors, envs, gate, coords, neighbors)
 
     @jax.jit
-    def _jit_forward_energy(params_data_tuple, envs):
+    def _jit_forward_energy(params_data_tuple, envs, rdm_token):
         """The forward's energy, compiled.
 
         Eager, this contraction ran op by op and was most of a warm gradient:
@@ -1464,8 +1471,10 @@ def _make_implicit_vjp_fn(
         evaluates the same ``energy_fn`` under ``jax.jit`` (``_jit_dE_denv``),
         so any callback that works there traces here.  The gate and callback
         are read from ``mutables`` at trace time, like the backward's helpers.
+        ``rdm_token`` is a per-call id for the RDM-check replay.
         """
-        return _energy_value(dict(zip(coords, params_data_tuple)), envs)
+        with recording_traced_rdms(rdm_token):
+            return _energy_value(dict(zip(coords, params_data_tuple)), envs)
 
     def _compute_energy(site_tensors, envs):
         """Compute energy using energy_fn or default (jitted, checks replayed)."""
@@ -1477,13 +1486,20 @@ def _make_implicit_vjp_fn(
             # or wait for, so keep the plain call.
             return _energy_value(site_tensors, envs)
         params = tuple(site_tensors[c] for c in coords)
-        with recording_traced_rdms():  # read only while the jit traces
-            energy = _jit_forward_energy(params, envs)
-        jax.block_until_ready(energy)
-        jax.effects_barrier()
+        token = next(_RDM_CALL_TOKENS) % (2**31 - 1)
+        try:
+            energy = _jit_forward_energy(
+                params, envs, jnp.asarray(token, dtype=jnp.int32)
+            )
+            jax.block_until_ready(energy)
+            jax.effects_barrier()
+        except BaseException:
+            discard_traced_rdm_checks(token)
+            raise
         # The eager path ran check_rdm on each bond's RDM (#845/#854); the
-        # jitted one queued their values, so run the same checks here.
-        replay_traced_rdm_checks()
+        # jitted one sent this call's RDMs to the host, so run the same checks
+        # here, in the same order.
+        replay_traced_rdm_checks(token)
         return energy
 
     @jax.custom_vjp
