@@ -432,6 +432,22 @@
 
 ### Fixed
 
+- **A second `optimize_gs_ad` call no longer recompiles the implicit-AD
+  backward** (#1049, `_ctm_energy_ad.py`, `_ctm_honeycomb_ad.py`).  The
+  compile cache keyed the backward on `id(gate)`, `id(energy_fn)` and
+  `id(neighbors)`, and the optimizer builds its energy callback as a fresh
+  closure per call, so every call missed, re-traced and re-compiled the
+  backward (measured ~82-92 s per extra call at D=2 chi=8; a D=3 backward
+  compile takes hours on CPU) and left the old entry behind for good.  The
+  key now uses value fingerprints (`_cache_fingerprint.py`): a function's
+  code and what it closes over, an array's shape, dtype and contents, a
+  pytree's structure and leaves; anything else is keyed by identity and kept
+  alive, which can only miss, never hit wrongly.  A gate with different
+  values still gets its own compiled backward.  The cache is now an LRU of
+  at most 8 entries.  On the 2-site D=2 chi=4 repro, the second call drops
+  from 7.7 s (backward re-traced, a second cache entry) to 1.3 s (no
+  backward trace, one entry).
+
 - **The eager-GMRES adjoint compiles once per configuration, not on every
   gradient** (#1087, `_ctm_energy_ad.py`).  `adjoint_method="gmres"` -- and
   the default fused `"fixed_point"` backward whenever it falls back to

@@ -9,6 +9,7 @@ __all__ = [
     "set_implicit_ad_norm_diagnostics",
 ]
 
+import collections
 import contextlib
 import logging
 import math
@@ -19,6 +20,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
+from tenax.algorithms._cache_fingerprint import fingerprint, lru_get, lru_put
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
     _validate_chi_bump_args,
@@ -844,7 +846,9 @@ def _sigma_gauged_ctm_converge(
     return result.envs, result.final_chi, result.converged
 
 
-_VJP_CACHE: dict = {}
+# LRU-bounded (``VJP_CACHE_MAXSIZE``) and keyed by value, not object identity
+# (#1049): see ``_cache_fingerprint``.
+_VJP_CACHE: collections.OrderedDict = collections.OrderedDict()
 
 
 def invalidate_implicit_ad_warm_start() -> int:
@@ -1094,6 +1098,9 @@ def _ctm_energy_implicit_dispatch(
     # Build a hashable key from the static configuration.
     # Gate and energy_fn must be in the key because the JIT backward
     # captures them at trace time as compile-time constants.
+    neighbors_fp, keep_n = fingerprint(neighbors)
+    gate_fp, keep_g = fingerprint(gate)
+    energy_fn_fp, keep_e = fingerprint(energy_fn)
     cache_key = (
         tuple(coords),
         chi,
@@ -1109,9 +1116,13 @@ def _ctm_energy_implicit_dispatch(
         gmres_tol,
         gmres_maxiter,
         gmres_restart,
-        id(neighbors),  # same dict object across optimizer steps
-        id(gate),  # different Hamiltonian → different backward
-        id(energy_fn),  # different energy callback → different backward
+        # Value fingerprints, not ids (#1049): the backward bakes the gate
+        # and energy callback in at trace time, so equal fingerprints trace
+        # the same program.  ``optimize_gs_ad`` builds its energy callback as
+        # a fresh closure per call, so an ``id`` key recompiled every call.
+        neighbors_fp,
+        gate_fp,
+        energy_fn_fp,
         arnoldi_precheck,
         adjoint_method,
         plateau_patience,
@@ -1125,7 +1136,7 @@ def _ctm_energy_implicit_dispatch(
         mixing,  # the forward closure reads it (#1060)
     )
 
-    entry = _VJP_CACHE.get(cache_key)
+    entry = lru_get(_VJP_CACHE, cache_key)
     if entry is not None:
         f, mutables = entry
         # Update per-call mutable state
@@ -1171,7 +1182,10 @@ def _ctm_energy_implicit_dispatch(
         ctm_chunk_size=ctm_chunk_size,
         mixing=mixing,
     )
-    _VJP_CACHE[cache_key] = (f, mutables)
+    # Objects the key holds only by id must outlive the entry, or a recycled
+    # id could match it (see ``fingerprint``).
+    mutables["_cache_keepalive"] = keep_n + keep_g + keep_e
+    lru_put(_VJP_CACHE, cache_key, (f, mutables))
     return f(params_data_tuple)
 
 
