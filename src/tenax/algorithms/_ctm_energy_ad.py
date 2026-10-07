@@ -1586,7 +1586,12 @@ def _make_implicit_vjp_fn(
 
     @partial(jax.jit, static_argnames=("chi", "pb"))
     def _jit_chain_rule(params_data_tuple, env_leaves, lam, g_scalar, *, chi, pb):
-        """Steps 3-4: direct gradient + indirect (J_params^T @ lam)."""
+        """Steps 3-4: direct gradient + indirect (J_params^T @ lam).
+
+        Shared by the fused fixed-point path and the eager-GMRES fallback,
+        so it compiles once per ``(chi, pb)`` whichever solver produced
+        ``lam`` -- see ``_jit_fused_fixed_point_bwd``.
+        """
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
         env_treedef = _cached["env_treedef"]
@@ -1626,18 +1631,28 @@ def _make_implicit_vjp_fn(
     def _jit_fused_fixed_point_bwd(
         params_data_tuple,
         env_leaves,
-        g_scalar,
         init_lam,
         *,
         chi,
         pb,
     ):
-        """F3: fused dE/denv + adjoint fixed-point + chain rule.
+        """F3: fused dE/denv + adjoint fixed-point.  The chain rule is separate.
 
-        One @jax.jit boundary in place of the F2 trio
-        (_jit_dE_denv, _jit_apply_Jt, _jit_chain_rule) + Python adjoint
-        loop. The adjoint runs as lax.while_loop so the loop body and
-        the J^T VJP closure trace once and reuse on every iter.
+        One @jax.jit boundary in place of the F2 pair (_jit_dE_denv,
+        _jit_apply_Jt) + Python adjoint loop.  The adjoint runs as
+        lax.while_loop so the loop body and the J^T VJP closure trace once
+        and reuse on every iter.
+
+        The chain rule is deliberately NOT in this program.  The caller
+        applies ``_jit_chain_rule`` to the returned ``lam_final`` after the
+        convergence check -- the same compiled function the eager-GMRES
+        fallback uses.  It is the params-VJP of the CTM sweep and most of the
+        backward's compile: at D=3 chi=12 on CPU the standalone chain rule
+        compiled for 2 h 56 min (a 111 MB artifact, against 120 MB for the
+        whole fused program that used to contain it).  When it lived in here,
+        the first fallback compiled a second copy, so a run paid the D=3
+        backward compile twice; and a fused attempt that then fell back had
+        evaluated a chain rule it threw away.
 
         ``init_lam`` is the warm-start seed for the Neumann iteration
         (shape-matched to ``dE_denv``).  Cold start passes ``dE_denv``
@@ -1646,8 +1661,6 @@ def _make_implicit_vjp_fn(
 
         Returns
         -------
-        grads : tuple of pytrees
-            Same shape as ``params_data_tuple``.
         diverged : bool scalar
             Set when the in-loop check (diff > prev_diff after step 5)
             fires. Caller falls back to eager GMRES when True.
@@ -1691,7 +1704,6 @@ def _make_implicit_vjp_fn(
         energy_fn_ = mutables["energy_fn"]
         site_tensors = dict(zip(coords, params_data_tuple))
         env_treedef = _cached["env_treedef"]
-        envs = jax.tree.unflatten(env_treedef, env_leaves)
 
         # --- 1. dE/denv via VJP through the energy function ---
         def energy_from_env(env_leaves_flat):
@@ -1779,34 +1791,7 @@ def _make_implicit_vjp_fn(
             real_dtype
         )
 
-        # --- 4. Chain rule: direct dE/dparams + indirect J_p^T @ lam ---
-        def energy_from_params(p_tuple):
-            st = dict(zip(coords, p_tuple))
-            if energy_fn_ is not None:
-                return energy_fn_(st, envs, gate_)
-            return _default_energy(st, envs, gate_, coords, neighbors)
-
-        _, vjp_energy_params = jax.vjp(energy_from_params, params_data_tuple)
-        direct = vjp_energy_params(jnp.ones(()))[0]
-
-        def gauge_fixed_sweep_from_params(p_tuple):
-            st = dict(zip(coords, p_tuple))
-            e_out, _eps, _smin = jit_step_bwd(
-                st,
-                envs,
-                chi=chi,
-                projector_method=projector_method,
-                renormalize=renormalize,
-                projector_backward=pb,
-            )
-            e_fixed = _apply_gauge_fix(e_out, envs)
-            return tuple(jax.tree.leaves(e_fixed))
-
-        _, vjp_sweep_params = jax.vjp(gauge_fixed_sweep_from_params, params_data_tuple)
-        indirect = vjp_sweep_params(lam_final)[0]
-
-        total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
-        return (total,), diverged, converged, n_iter, lam_final, abs_resid, b_norm
+        return diverged, converged, n_iter, lam_final, abs_resid, b_norm
 
     @partial(jax.jit, static_argnames=("chi",))
     def _jit_gmres_solve(params_data_tuple, env_leaves, rhs, *, chi):
@@ -1968,7 +1953,6 @@ def _make_implicit_vjp_fn(
                 init_lam = prev_lam
 
             (
-                grads_tuple,
                 diverged,
                 _converged,
                 _n_iter,
@@ -1976,7 +1960,7 @@ def _make_implicit_vjp_fn(
                 _abs_resid,
                 _b_norm,
             ) = _jit_fused_fixed_point_bwd(
-                params_data_tuple, env_leaves, g, init_lam, chi=chi_post, pb=pb
+                params_data_tuple, env_leaves, init_lam, chi=chi_post, pb=pb
             )
             _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
@@ -2104,6 +2088,12 @@ def _make_implicit_vjp_fn(
             # guard.  Pinned by
             # test_the_fused_happy_path_is_residual_gated_by_construction.
             _cached["prev_lam_leaves"] = tuple(jax.tree.leaves(lam_final))
+            # The same compiled chain rule as the fallback above: the fused
+            # program returns lam only, so the D=3-sized params-VJP compiles
+            # once per (chi, pb) whichever solver produced lam.
+            grads_tuple = _jit_chain_rule(
+                params_data_tuple, env_leaves, lam_final, g, chi=chi_post, pb=pb
+            )
             return grads_tuple, True
         else:
             # adjoint_method == "gmres": eager Krylov via JAX's built-in

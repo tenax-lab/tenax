@@ -263,6 +263,9 @@ _FILE_MARKERS = {
     "test_gmres_adjoint_no_recompile_1087.py": "core",
     # #1049: the implicit-AD compile cache is keyed by value and bounded (~45s).
     "test_vjp_cache_key_1049.py": "algorithm",
+    # The fused backward and its GMRES fallback share one compiled chain rule
+    # (~75s: a fused and a gmres backward at D=2 chi=4).
+    "test_shared_chain_rule_bwd.py": "algorithm",
     # MPS/MPO physical-basis agreement (#816).  A mismatched charge ORDER
     # still converges and reports the correct energy while returning a
     # permuted state, so the energy check that normally catches everything
