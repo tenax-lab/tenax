@@ -4,6 +4,18 @@
 
 ### Behavior Changes
 
+- **The 1-site metric L-BFGS now has a memory.**  On the 1-site
+  `optimize_gs_ad` path the metric L-BFGS built its curvature pair from
+  the initial tensor, not the current iterate, so `s = 0` at every step and
+  no pair was stored: the default 1x1 optimizer (`gs_optimizer="lbfgs"`,
+  `gs_metric_precond=True`) ran as metric-preconditioned steepest descent.
+  The metric itself (L-BFGS `H0` and metric CG) was also built at the
+  initial tensor.  Both now use the current iterate, as the 2-site and
+  multisite paths already did.  1x1 trajectories change.  Measured on the
+  Heisenberg model, D=2 chi=16, three starts: steps to converge
+  (`grad_norm` 1e-5) 56-57 -> 42-51, steps to within 1e-6 of the minimum
+  32-44 -> 25-29, same final energy (-0.6625143001).
+
 - **Implicit-AD gradients now include the 2x2 projector response**
   (#1028).  In the iPEPS optimizer (`optimize_gs_ad`'s 1-site, 2-site and
   multisite dispatchers), `CTMConfig.projector_backward="auto"` resolves to
