@@ -432,6 +432,22 @@
 
 ### Fixed
 
+- **The eager-GMRES adjoint compiles once per configuration, not on every
+  gradient** (#1087, `_ctm_energy_ad.py`).  `adjoint_method="gmres"` -- and
+  the default fused `"fixed_point"` backward whenever it falls back to
+  GMRES -- handed `gmres_pytree_jax` a matvec closure built fresh on every
+  backward over that call's params and environment, so JAX re-traced and
+  re-compiled the Krylov `lax.while_loop` each time.  Measured on the
+  spinless-fermion 2-site D=2 chi=8 benchmark (CPU, 4 optimizer steps):
+  ~170 s of recompile per gradient against a 0.6 s solve, 1608 s for the
+  optimize stage; at D=3 chi=12, 173-296 s per gradient.  The solve now goes
+  through one `jax.jit`-compiled helper with the per-call data as arguments:
+  later gradients take 7.8 s with no compile (optimize stage 871 s), and the
+  gradient is unchanged (relative difference 4.9e-7 against the fused path).
+  The seed choice (#858) and the measured residual (#801) are unchanged.
+  The honeycomb backward (`_ctm_honeycomb_ad.py`) has the same pattern and
+  is not changed here.
+
 - **The Hager-Zhang line search no longer accepts an energy rise**
   (`_line_search.py`).  Its approximate-Wolfe test allowed `f <= phi0 + eps`,
   a rise of up to `eps = 1e-6*|E|` (~6.7e-7 at E=-0.67), but every caller

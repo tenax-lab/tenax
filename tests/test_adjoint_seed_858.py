@@ -276,13 +276,21 @@ def test_the_real_adjoint_seeds_the_solver_no_worse_than_zero(monkeypatch):
     import tenax.algorithms._ctm_energy_ad as ad
 
     seen = []
-    real = ad.gmres_pytree_jax
+    # The solve is compiled (#1087), so ``gmres_pytree_jax`` only ever sees
+    # tracers.  Spy one level up, on the call the backward makes with concrete
+    # values, and rebuild the same ``(I - J^T)`` matvec the solve uses.
+    real = ad._jit_eager_gmres_solve
 
-    def spy(matvec, b_tree, x0_tree=None, **kw):
+    def spy(params, env, b_tree, x0_tree, *, apply_Jt, chi, pb, **kw):
+        def matvec(v):
+            return apply_Jt(params, env, v, chi=chi, pb=pb)
+
         seen.append((matvec, b_tree, x0_tree))
-        return real(matvec, b_tree, x0_tree, **kw)
+        return real(
+            params, env, b_tree, x0_tree, apply_Jt=apply_Jt, chi=chi, pb=pb, **kw
+        )
 
-    monkeypatch.setattr(ad, "gmres_pytree_jax", spy)
+    monkeypatch.setattr(ad, "_jit_eager_gmres_solve", spy)
 
     A0 = _random_D2_site()
     jax.grad(lambda a: _implicit_energy(a, chi=_HARMFUL_SEED_CHI, max_iter=80))(A0)
@@ -290,7 +298,7 @@ def test_the_real_adjoint_seeds_the_solver_no_worse_than_zero(monkeypatch):
     assert seen, (
         "no eager GMRES solve ran, so this test observed nothing. The "
         "backward took the fused fixed-point branch instead; re-point the "
-        "fixture at the branch that calls gmres_pytree_jax."
+        "fixture at the branch that calls _jit_eager_gmres_solve."
     )
     for i, (matvec, b_tree, x0_tree) in enumerate(seen):
         b_norm = _l2(b_tree)
@@ -311,6 +319,63 @@ def test_the_real_adjoint_seeds_the_solver_no_worse_than_zero(monkeypatch):
             f"lambda worse than lambda = 0 -- and it cannot recover if it "
             f"stagnates. See #858."
         )
+
+
+# A module-level operator for the wrapper test below: ``_jit_eager_gmres_solve``
+# takes ``apply_Jt`` as a static (hashed) argument, so it must be a stable
+# function with the library's ``(params, env, v, *, chi, pb)`` signature.
+_WRAP_N = 24
+_WRAP_J = jnp.asarray(
+    3.0
+    * np.random.default_rng(1).standard_normal((_WRAP_N, _WRAP_N))
+    / np.sqrt(_WRAP_N)
+)
+
+
+def _wrap_apply_I_minus_Jt(params, env, v, *, chi, pb):
+    del params, env, chi, pb
+    return (v[0] - _WRAP_J.T @ v[0],)
+
+
+def test_the_compiled_solve_hands_its_seed_to_gmres():
+    """``_jit_eager_gmres_solve`` must pass the caller's ``x0`` to GMRES.
+
+    The wiring test above spies on the wrapper's *arguments*, so it proves the
+    backward chose a safe seed -- not that the compiled wrapper uses it.  A
+    wrapper that substituted ``rhs`` for ``x0`` would bring #858 back with
+    that test still green (Codex review of #1088).  So run the wrapper with a
+    budget too small to converge, where the answer depends on the start:
+    it must equal ``gmres_pytree_jax`` from the same ``x0`` and differ from
+    the answer started at ``rhs``.
+    """
+    import tenax.algorithms._ctm_energy_ad as ad
+
+    rng = np.random.default_rng(2)
+    b = (jnp.asarray(rng.standard_normal(_WRAP_N)),)
+    x0 = (jnp.asarray(rng.standard_normal(_WRAP_N)),)
+    kw = {"tol": 1e-14, "maxiter": 1, "restart": 2}
+
+    def matvec(v):
+        return _wrap_apply_I_minus_Jt(None, None, v, chi=0, pb="auto")
+
+    got, _ = ad._jit_eager_gmres_solve(
+        (), (), b, x0, apply_Jt=_wrap_apply_I_minus_Jt, chi=0, pb="auto", **kw
+    )
+    want, _ = gmres_pytree_jax(matvec, b, x0, **kw)
+    from_rhs, _ = gmres_pytree_jax(matvec, b, b, **kw)
+
+    gap = float(np.linalg.norm(np.asarray(want[0]) - np.asarray(from_rhs[0])))
+    assert gap > 1e-6, (
+        f"premise: with this budget the start x0 vs rhs changes the answer by "
+        f"only {gap:.2e}, so this test could not tell them apart"
+    )
+    np.testing.assert_allclose(
+        np.asarray(got[0]),
+        np.asarray(want[0]),
+        rtol=1e-10,
+        atol=1e-12,
+        err_msg="the compiled solve did not start GMRES from the x0 it was given",
+    )
 
 
 def test_the_real_adjoint_never_reports_a_relative_residual_above_one():
