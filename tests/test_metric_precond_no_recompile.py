@@ -85,3 +85,16 @@ def test_second_preconditioner_call_compiles_nothing():
     )
     assert np.all(np.isfinite(np.asarray(g1))) and np.all(np.isfinite(np.asarray(g2)))
     assert not np.allclose(np.asarray(g1), np.asarray(g2))  # it did new work
+
+
+def test_delta_as_a_jax_scalar_compiles_nothing_new():
+    # The optimizer passes delta as a Python float on later steps and as a
+    # JAX scalar on step 0; both must hit one compiled solve.
+    A = _site(0)
+    env = _env(A)
+    mp.precondition_gradient(A, env, _site(2), 0.3, CFG)
+    delta = jnp.asarray(0.05)
+    mark = len(_EVENTS)
+    mp.precondition_gradient(A, env, _site(2), delta, CFG)
+    new = _EVENTS[mark:]
+    assert not new, sorted({fn for _, fn in new})
