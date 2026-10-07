@@ -71,18 +71,24 @@ def declare_cache_key(fn, *data):
     else raises ``ValueError`` -- a capture left out of the key would let a
     later call reuse a backward traced against a different value.
     """
+    functions = []
     for name, cell in zip(fn.__code__.co_freevars, fn.__closure__ or ()):
         try:
             value = cell.cell_contents
         except ValueError:
             continue  # an empty cell carries no value
-        if any(value is x for x in data) or _is_tenax_module_function(value):
+        if any(value is x for x in data):
+            continue
+        if _is_tenax_module_function(value):
+            # Keyed by identity: a factory that binds a different function
+            # here, or a monkeypatched/reloaded one, gets a different key.
+            functions.append(value)
             continue
         raise ValueError(
             f"declare_cache_key({fn.__qualname__}): the closure captures "
             f"{name!r}, which is not among the declared values"
         )
-    setattr(fn, _ATTR, data)
+    setattr(fn, _ATTR, (data, tuple(functions)))
     return fn
 
 
@@ -132,7 +138,14 @@ def _key(obj, depth):
     if isinstance(obj, (np.generic, np.ndarray, jax.Array)):
         return _key_array(obj)
     if callable(obj) and hasattr(obj, _ATTR) and hasattr(obj, "__code__"):
-        return ("declared", obj.__code__, _key(getattr(obj, _ATTR), d))
+        data, functions = getattr(obj, _ATTR)
+        return (
+            "declared",
+            obj.__code__,
+            _key(data, d),
+            # Module-level tenax functions: immortal, so an id is stable.
+            tuple((f.__module__, f.__qualname__, id(f)) for f in functions),
+        )
     if type(obj) in (tuple, list):
         return (type(obj).__name__, tuple(_key(x, d) for x in obj))
     if type(obj) is dict:
@@ -148,8 +161,12 @@ def _key(obj, depth):
         return (
             "dc",
             type(obj),
+            # A field marked ``metadata={"cache_key": False}`` is declared by
+            # its class not to affect what is traced (e.g. ``CGGates.map_fn``).
             tuple(
-                (f.name, _key(getattr(obj, f.name), d)) for f in dataclasses.fields(obj)
+                (f.name, _key(getattr(obj, f.name), d))
+                for f in dataclasses.fields(obj)
+                if f.metadata.get("cache_key", True)
             ),
         )
     state = _object_state(obj)
@@ -196,9 +213,19 @@ def _object_state(obj):
 def _key_array(x):
     if isinstance(x, jax.core.Tracer) or getattr(x, "size", 0) > _MAX_HASHED_ELEMENTS:
         raise _Inexact
+    # The array type is part of the key: a callback may branch on
+    # ``isinstance(gate, np.ndarray)``.
+    kind = "jax" if isinstance(x, jax.Array) else type(x).__name__
     weak = bool(getattr(x, "weak_type", False))
     a = np.ascontiguousarray(np.asarray(x))
-    return ("arr", a.shape, a.dtype.str, weak, hashlib.sha1(a.tobytes()).hexdigest())
+    return (
+        "arr",
+        kind,
+        a.shape,
+        a.dtype.str,
+        weak,
+        hashlib.sha1(a.tobytes()).hexdigest(),
+    )
 
 
 #: Bound on each implicit-AD ``_VJP_CACHE``.  An entry pins compiled

@@ -15,6 +15,7 @@ one -- a wrong hit would return a gradient for the wrong Hamiltonian.
 from __future__ import annotations
 
 import collections
+import dataclasses
 import functools
 import warnings
 
@@ -56,7 +57,6 @@ def test_equal_arrays_on_distinct_objects_share_a_key():
     b = jnp.arange(6.0).reshape(2, 3)
     assert a is not b
     assert _key(a) == _key(b)
-    assert _key(np.asarray(a)) == _key(a)
 
 
 def test_different_values_shapes_or_dtypes_get_different_keys():
@@ -343,3 +343,59 @@ def test_a_declaration_must_list_every_captured_value():
         return compute_energy_ctm_tensor(x, x, x)
 
     declare_cache_key(g)
+
+
+# --------------------------------------------------------------------------
+# Codex re-review of #1090 (73770f76)
+# --------------------------------------------------------------------------
+
+
+def test_cg_gates_with_functions_are_keyed_by_their_gate_data():
+    """PESS captures ``cg_gates``, whose ``map_fn``/``init_fn`` are functions
+    the energy never reads; they are excluded from the key so a fresh PESS
+    callback still hits."""
+    from tenax.algorithms.coarse_grain import CGGates
+
+    def mk(map_fn):
+        return CGGates(
+            h_intra=jnp.eye(4),
+            h_inter={"h": jnp.ones((16, 16))},
+            n_sites=2,
+            map_fn=map_fn,
+            init_fn=lambda: None,
+        )
+
+    g1, g2 = mk(lambda x: x), mk(lambda x: 2 * x)
+    assert _exact(g1)
+    assert _key(g1) == _key(g2)
+    assert _key(g1) != _key(dataclasses.replace(g1, n_sites=3))
+
+    def factory(cg, d):
+        def energy(site_tensors, envs, _gate):
+            return cg, d
+
+        return declare_cache_key(energy, cg, d)
+
+    assert _exact(factory(g1, 4))
+    assert _key(factory(g1, 4)) == _key(factory(g2, 4))
+
+
+def test_numpy_and_jax_arrays_get_different_keys():
+    """A callback may branch on ``isinstance(gate, np.ndarray)``."""
+    a = np.arange(4.0)
+    assert _key(a) != _key(jnp.asarray(a))
+
+
+def test_a_different_captured_tenax_function_changes_the_key():
+    """Captured module-level tenax functions are part of the declared key."""
+    from tenax.algorithms import _ctm_tensor_energy as te
+
+    def factory(fn):
+        def energy(site_tensors, envs, gate):
+            return fn(site_tensors, envs, gate)
+
+        return declare_cache_key(energy)
+
+    k_a = _key(factory(te.compute_energy_ctm_tensor))
+    assert k_a == _key(factory(te.compute_energy_ctm_tensor))
+    assert k_a != _key(factory(te.compute_energy_ctm_tensor_2site))

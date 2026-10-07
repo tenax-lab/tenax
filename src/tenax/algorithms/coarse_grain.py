@@ -16,7 +16,7 @@ __all__ = [
 ]
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import jax
 import jax.numpy as jnp
@@ -53,8 +53,12 @@ class CGGates:
     h_intra: jnp.ndarray
     h_inter: dict[str, jnp.ndarray]
     n_sites: int
-    map_fn: Callable | None = None
-    init_fn: Callable | None = None
+    # Not read by the energy (``compute_energy_cg`` uses ``h_intra``,
+    # ``h_inter`` and ``n_sites``), so they are left out of the implicit-AD
+    # compile-cache key (#1049) -- functions cannot be keyed by value, and
+    # including them would make every PESS run recompile its backward.
+    map_fn: Callable | None = field(default=None, metadata={"cache_key": False})
+    init_fn: Callable | None = field(default=None, metadata={"cache_key": False})
 
 
 def _ss_2site(dtype=jnp.float64) -> jnp.ndarray:
