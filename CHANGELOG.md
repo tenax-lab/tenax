@@ -446,6 +446,21 @@
   call, so the same warnings -- or, under warnings-as-errors, the same
   `RuntimeWarning` -- reach the caller.  The line search's and final
   evaluation's own energy calls outside the dispatch are unchanged.
+- **The implicit-AD backward compiles its chain rule once, not once per
+  solver** (`_ctm_energy_ad.py`).  The chain rule -- the params-VJP of the
+  CTM sweep, most of the backward's compile -- lived inside the fused
+  fixed-point program, and the eager-GMRES fallback compiled a second copy
+  as `_jit_chain_rule`.  So the first time the fused Neumann loop gave up
+  (its `gmres_maxiter` cap, or the divergence guard on an unconverged
+  forward), a run paid the backward compile again: 2 h 56 min at D=3 chi=12
+  on CPU.  The fused program now returns `lam` only, and both paths apply the
+  one `_jit_chain_rule` after the convergence check.  Measured on the
+  spinless-fermion 2-site benchmark (CPU, 4 optimizer steps, with #1087's
+  fix): at D=3 the first fallback took 466 s instead of 10,720 s and the
+  first gradient 9,600 s instead of 10,760 s, with the same gradient norms;
+  at D=2 the first gradient took 461 s instead of 526 s, and the gradient is
+  bit-identical.  A fused attempt that falls back also no longer evaluates a
+  chain rule it then discards.
 
 - **The eager-GMRES adjoint compiles once per configuration, not on every
   gradient** (#1087, `_ctm_energy_ad.py`).  `adjoint_method="gmres"` -- and
