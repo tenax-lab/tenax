@@ -6,9 +6,9 @@ and again as ``_jit_chain_rule`` for the eager-GMRES fallback, so the first
 fallback paid the compile a second time: 2 h 56 min at D=3 chi=12 on CPU.  Now
 the fused program returns ``lam`` only and both paths call ``_jit_chain_rule``.
 
-Pinned here by JAX's own compile events: a backward that the fused loop solves
-must compile ``_jit_chain_rule`` (when the chain rule lived inside the fused
-program it never did), and the gradient must match the eager-GMRES path's.
+Pinned here by JAX's own compile events, on one cache entry driven down both
+paths: the fused path must compile ``_jit_chain_rule``, and a later fallback
+must not compile another.
 """
 
 from __future__ import annotations
@@ -57,31 +57,60 @@ def _energy(A_arr, adjoint_method):
     )
 
 
-def _site():
-    rng = np.random.default_rng(0)
+def _site(seed=0):
+    rng = np.random.default_rng(seed)
     A0 = jnp.asarray(rng.standard_normal((2, 2, 2, 2, 2)))
     return A0 / jnp.linalg.norm(A0)
 
 
-def test_fused_backward_uses_the_shared_chain_rule():
-    A0 = _site()
+#: On this configuration the fused Neumann loop solves seed 0 (19 iterations)
+#: and its divergence guard fires on seed 2 (7 iterations), so the two seeds
+#: drive the two paths of ONE ``_VJP_CACHE`` entry.  Measured, not assumed:
+#: both premises are asserted per call.
+_FUSED_SEED, _FALLBACK_SEED = 0, 2
+
+
+def test_fallback_in_the_same_entry_reuses_the_chain_rule():
+    """The fused path compiles ``_jit_chain_rule``; a later fallback in the
+    same cache entry must not compile another (Codex review of #1089).  When
+    the chain rule lived inside the fused program, this fallback traced
+    ``_jit_chain_rule`` for the first time -- the D=3 multi-hour compile."""
+    grad = jax.grad(lambda a: _energy(a, "fixed_point"))
+
     mark = len(_TRACED)
-    g_fused = jax.grad(lambda a: _energy(a, "fixed_point"))(A0)
+    grad(_site(_FUSED_SEED))
     diag = get_last_implicit_ad_diagnostics()
     assert diag.get("converged") and not diag.get("diverged"), (
-        f"premise: the fused loop must solve this backward itself (no "
-        f"fallback), else this test observes the fallback, not the fused "
-        f"path; got converged={diag.get('converged')} "
-        f"diverged={diag.get('diverged')} n_iter={diag.get('n_iter')}"
+        f"premise: seed {_FUSED_SEED} must be solved by the fused loop; got "
+        f"converged={diag.get('converged')} diverged={diag.get('diverged')}"
     )
-    traced = _TRACED[mark:]
-    assert "_jit_chain_rule" in traced, (
+    first = _TRACED[mark:]
+    assert "_jit_chain_rule" in first, (
         "a backward solved by the fused loop did not trace _jit_chain_rule, "
-        "so the chain rule is still inside _jit_fused_fixed_point_bwd and "
-        "the GMRES fallback would compile a second copy. Traced: "
-        f"{sorted(set(traced))}"
+        "so the chain rule is still inside _jit_fused_fixed_point_bwd. "
+        f"Traced: {sorted(set(first))}"
     )
 
+    mark = len(_TRACED)
+    g = grad(_site(_FALLBACK_SEED))
+    diag = get_last_implicit_ad_diagnostics()
+    assert diag.get("diverged") or not diag.get("converged"), (
+        f"premise: seed {_FALLBACK_SEED} must make the fused loop give up "
+        f"(n_iter={diag.get('n_iter')}), else no fallback ran"
+    )
+    second = _TRACED[mark:]
+    assert "_jit_chain_rule" not in second, (
+        "the GMRES fallback traced its own _jit_chain_rule instead of reusing "
+        f"the fused path's. Traced: {sorted(set(second))}"
+    )
+    assert np.all(np.isfinite(np.asarray(g)))
+
+
+def test_fused_and_gmres_adjoints_give_the_same_gradient():
+    """Numerical check only: ``adjoint_method`` is part of the cache key, so
+    this compares two separate entries and says nothing about sharing."""
+    A0 = _site(_FUSED_SEED)
+    g_fused = jax.grad(lambda a: _energy(a, "fixed_point"))(A0)
     g_gmres = jax.grad(lambda a: _energy(a, "gmres"))(A0)
     np.testing.assert_allclose(
         np.asarray(g_fused),
