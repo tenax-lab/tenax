@@ -20,6 +20,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.monitoring as jm
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from tenax.algorithms._ctm_energy_ad import (
     ctm_energy_implicit,
@@ -70,6 +71,27 @@ def _site(seed=0):
 _FUSED_SEED, _FALLBACK_SEED = 0, 2
 
 
+@pytest.fixture
+def _fresh_vjp_cache():
+    """An empty ``_VJP_CACHE`` for this test, restored afterwards.
+
+    The compile-event assertions need this test's own cache entry: run after
+    a sibling that built the same configuration, nothing would be traced and
+    the first assertion would fail on a correct implementation (Codex review
+    of #1089).
+    """
+    import collections
+
+    from tenax.algorithms import _ctm_energy_ad as cea
+
+    saved = collections.OrderedDict(cea._VJP_CACHE)
+    cea._VJP_CACHE.clear()
+    yield
+    cea._VJP_CACHE.clear()
+    cea._VJP_CACHE.update(saved)
+
+
+@pytest.mark.usefixtures("_fresh_vjp_cache")
 def test_fallback_in_the_same_entry_reuses_the_chain_rule():
     """The fused path compiles ``_jit_chain_rule``; a later fallback in the
     same cache entry must not compile another (Codex review of #1089).  When
