@@ -785,6 +785,7 @@ _FILE_MARKERS = {
     # differed by ~40%).  ``core``: it shapes every default (gs_metric_precond
     # =True) L-BFGS/CG direction.  D=2 chi=8 SU fixture, no AD.
     "test_metric_precond_env_norm.py": "core",
+    "test_metric_precond_1site_current_params.py": "core",
 }
 
 
