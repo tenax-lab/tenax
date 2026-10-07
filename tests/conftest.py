@@ -261,6 +261,7 @@ _FILE_MARKERS = {
     "test_adjoint_seed_858.py": "core",
     # #1087: a second eager-GMRES backward must compile nothing (~14s).
     "test_gmres_adjoint_no_recompile_1087.py": "core",
+    "test_metric_precond_no_recompile.py": "core",
     # MPS/MPO physical-basis agreement (#816).  A mismatched charge ORDER
     # still converges and reports the correct energy while returning a
     # permuted state, so the energy check that normally catches everything
