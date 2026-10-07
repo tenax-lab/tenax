@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._cache_fingerprint import declare_cache_key
 from tenax.algorithms._ctm_energy_ad import (
     ctm_energy_implicit,
     invalidate_implicit_ad_warm_start,
@@ -102,6 +103,9 @@ def build_pess_loss(
         # plus 3 inter (h/v/diag 2-site RDM × h_inter) terms.
         A_norm = site_tensors[(0, 0)]
         return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, d_eff)
+
+    # #1049: keyed by value; lists exactly what the closure captures.
+    declare_cache_key(_energy_fn, cg_gates, d_eff)
 
     def loss_fn(state: IPESSState) -> jnp.ndarray:
         A_super = pess_to_kagome_supersite(
@@ -190,6 +194,9 @@ def build_pess_loss_exact(
     def _energy_fn(site_tensors, envs, _gate):
         A_norm = site_tensors[(0, 0)]
         return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, d_eff)
+
+    # #1049: keyed by value; lists exactly what the closure captures.
+    declare_cache_key(_energy_fn, cg_gates, d_eff)
 
     def loss_fn(state: IPESSState) -> jnp.ndarray:
         A_super = pess_to_kagome_supersite_exact(
@@ -709,6 +716,9 @@ def build_pess_loss_3site_multisite(
             bond_gates_arr,
             d=d,
         )
+
+    # #1049: keyed by value; lists exactly what the closure captures.
+    declare_cache_key(_energy_fn, bond_gates_arr, d)
 
     def loss_fn(state: IPESSState) -> jnp.ndarray:
         sites = pess_to_kagome_3site_multisite(

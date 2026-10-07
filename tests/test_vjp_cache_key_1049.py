@@ -31,6 +31,7 @@ from tenax.algorithms import _ctm_energy_ad as cea
 from tenax.algorithms._cache_fingerprint import (
     _MAX_HASHED_ELEMENTS,
     cache_key_part,
+    declare_cache_key,
     lru_get,
     lru_put,
 )
@@ -47,7 +48,7 @@ def _key(obj):
 
 
 def _exact(obj):
-    return _key(obj)[0] == "fp"
+    return _key(obj)[0] == "val"
 
 
 def test_equal_arrays_on_distinct_objects_share_a_key():
@@ -79,35 +80,40 @@ def _make_closure(d):
     return energy
 
 
-def test_closures_from_one_def_compare_by_what_they_capture():
-    f1, f2, f3 = _make_closure(2), _make_closure(2), _make_closure(3)
+def _make_declared(d):
+    return declare_cache_key(_make_closure(d), d)
+
+
+def test_declared_closures_compare_by_their_declared_data():
+    f1, f2, f3 = _make_declared(2), _make_declared(2), _make_declared(3)
     assert f1 is not f2
-    assert _key(f1) == _key(f2), "a per-call closure must not miss the cache"
-    assert _key(f1) != _key(f3), "a different captured value is a different program"
+    assert _key(f1) == _key(f2), "a per-call tenax closure must not miss the cache"
+    assert _key(f1) != _key(f3), "different declared data is a different program"
 
 
-def test_distinct_defs_with_the_same_body_get_different_keys():
+def test_undeclared_callbacks_keep_the_identity_key():
+    """A user callback can read state no fingerprint sees (module globals,
+    class attributes, registries -- Codex review of #1090), so it keeps the
+    pre-#1049 identity key: two equal-looking closures still miss."""
+    f1, f2 = _make_closure(2), _make_closure(2)
+    assert not _exact(f1)
+    assert _key(f1) != _key(f2)
+
+
+def test_declared_closures_with_different_code_differ():
     def a(x):
         return x
 
     def b(x):
         return x
 
-    assert _key(a) != _key(b)
-
-
-def test_partials_compare_by_function_and_arguments():
-    def f(x, y):
-        return x + y
-
-    assert _key(functools.partial(f, 1)) == _key(functools.partial(f, 1))
-    assert _key(functools.partial(f, 1)) != _key(functools.partial(f, 2))
+    assert _key(declare_cache_key(a)) != _key(declare_cache_key(b))
 
 
 def test_opaque_objects_fall_back_to_the_whole_components_id():
-    """Anything not exactly fingerprintable keys the WHOLE component by id --
-    the pre-#1049 key -- and keeps it alive, so it can only miss."""
-    o = object()  # no __dict__, no __slots__: nothing to read
+    """Anything not keyable by value keys the WHOLE component by id -- the
+    pre-#1049 key -- and keeps it alive, so it can only miss."""
+    o = object()
     holder = {"x": o}
     key, keep = cache_key_part(holder)
     assert key == ("id", id(holder))
@@ -122,33 +128,27 @@ def test_dict_insertion_order_is_part_of_the_key():
 
 
 class _Model:
-    def __init__(self, coupling):
-        self.coupling = coupling
+    coupling = 1.0
 
     def energy(self, site_tensors, envs, gate_):
-        return self.coupling
+        return type(self).coupling
 
 
-def test_a_mutated_receiver_changes_the_key():
-    """Codex review of #1090: a bound method's receiver state is part of the
-    program it traces, so changing it must miss -- never reuse a backward that
-    baked in the old value."""
-    m = _Model(1.0)
-    before = _key(m.energy)
-    assert _exact(m.energy)
-    m.coupling = 2.0
-    assert _key(m.energy) != before
-    assert _key(_Model(1.0).energy) == before
+def test_user_objects_and_bound_methods_keep_the_identity_key():
+    """Codex review of #1090: a method can read class-level state that two
+    receivers with equal ``__dict__`` share, so a user object or its bound
+    method is never keyed by value -- a fresh one misses."""
+    m = _Model()
+    assert not _exact(m)
+    assert not _exact(m.energy)
+    assert _key(m.energy) != _key(_Model().energy)
 
 
-def test_large_captured_arrays_fall_back_to_identity():
-    """Codex review of #1090: a big array is not hashed per call, and an id
-    would not see an in-place mutation -- so the closure holding it is keyed
-    by its own identity and a fresh closure misses."""
+def test_large_arrays_keep_the_identity_key():
+    """A big array is not hashed per call, so its component keeps its id."""
     big = np.zeros(_MAX_HASHED_ELEMENTS + 1)
-    f1, f2 = _make_closure(big), _make_closure(big)
-    assert not _exact(f1)
-    assert _key(f1) != _key(f2)
+    assert not _exact(big)
+    assert not _exact(_make_declared(big))
 
 
 def test_weak_type_is_part_of_the_array_key():
@@ -322,3 +322,24 @@ def test_run_start_rearms_warning_latches_and_mid_run_does_not():
         assert calls == {"seed": 2, "latch": 1}
     finally:
         cea._VJP_CACHE.pop(key, None)
+
+
+def test_a_declaration_must_list_every_captured_value():
+    """The declaration is a contract; ``declare_cache_key`` enforces it."""
+    a, b = 1, 2
+
+    def f(x):
+        return x + a + b
+
+    with pytest.raises(ValueError, match="not among the declared values"):
+        declare_cache_key(f, a)
+    declare_cache_key(f, a, b)  # complete: accepted
+
+    # A tenax module-level function imported locally, as the optimizers do,
+    # is a captured cell too; it is fixed code, so it needs no declaration.
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
+
+    def g(x):
+        return compute_energy_ctm_tensor(x, x, x)
+
+    declare_cache_key(g)

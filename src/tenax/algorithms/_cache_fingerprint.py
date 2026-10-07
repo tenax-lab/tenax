@@ -1,168 +1,182 @@
-"""Value fingerprints for the implicit-AD compile caches (#1049).
+"""Value keys for the implicit-AD compile caches (#1049).
 
 ``_VJP_CACHE`` (``_ctm_energy_ad``, ``_ctm_honeycomb_ad``) maps a static
-configuration to a compiled ``custom_vjp``.  The gate and the energy callback
-are part of that configuration -- the JIT'd backward reads them at trace time
-and bakes them in as compile-time constants -- and they used to enter the key
-as ``id(gate)`` / ``id(energy_fn)``.  ``optimize_gs_ad`` builds its energy
-callback as a closure inside the optimizer, so every call had a fresh id,
-missed the cache, re-traced and re-compiled the whole backward, and left the
-old entry behind.
+configuration to a compiled ``custom_vjp``.  The gate, the lattice
+``neighbors`` and the energy callback are part of that configuration -- the
+JIT'd backward reads them at trace time and bakes them in -- and they used to
+enter the key as ``id(...)``.  ``optimize_gs_ad`` builds its energy callback as
+a closure inside the optimizer, so every call had a fresh id, missed the
+cache, re-traced and re-compiled the whole backward, and left the old entry
+behind.
 
-:func:`cache_key_part` replaces those ids with a fingerprint of what decides
-the traced program, when one can be taken **exactly**: a function's code
-object, defaults and the fingerprints of what it closes over; an array's
-shape, dtype, weak-type bit and contents; a pytree's node types, static
-(auxiliary) data and leaves; a plain object's type and attribute state.  Two
-objects with equal exact fingerprints trace to the same program, so reusing the
-compiled backward is exact, not approximate.
+:func:`cache_key_part` keys a component by **value only where the value is
+the whole story**:
 
-If any part cannot be fingerprinted exactly -- an object with no inspectable
-state, an array too large to hash per call, a recursion past the depth bound --
-the whole component falls back to ``id(obj)``, exactly the old key.  That can
-only cause a cache *miss*, never a wrong hit, as long as the object stays alive
-while a key holds its id; the returned ``keepalive`` list is for that.
+* **Data** -- scalars (floats and complexes by bit pattern, so ``-0.0`` is not
+  ``0.0``), strings, ``None``, tuples, lists, dicts (in insertion order, which
+  a trace can observe), arrays (shape, dtype, JAX weak-type bit, contents),
+  and objects whose class is defined in ``tenax`` (tensors, ``TensorIndex``,
+  ``FuseInfo``, symmetries, ``CGGates``, ...), walked field by field.  A tenax
+  pytree node is walked node by node; static data is never compared with
+  ``__eq__`` (``TensorIndex.__eq__`` ignores ``fuse_info``, which
+  ``split_index`` branches on).
+* **Declared callbacks** -- a function tenax builds and marks with
+  :func:`declare_cache_key` is keyed by its code object plus the data it
+  declares.  That declaration is a contract: the callback's trace depends on
+  nothing else (tenax module-level functions and constants it calls are taken
+  as fixed).
 
-Equality of static data is decided here, field by field, and never delegated
-to ``__eq__``: ``TensorIndex.__eq__`` ignores ``fuse_info``, which
-``split_index`` branches on, so two gates it calls equal can trace differently.
+Everything else -- user callbacks, bound methods, sets, objects from other
+packages, arrays too large to hash per call -- keeps the **old identity key**
+for that whole component.  Behaviour can depend on state no fingerprint can
+see (module globals, class attributes, external registries), so for those a
+value key could hit a backward traced against stale state, while an identity
+key can only miss.  The returned ``keepalive`` list keeps every object an
+identity key names alive, so a recycled ``id`` cannot match.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import enum
-import functools
 import hashlib
-import types
+import struct
 
 import jax
 import numpy as np
 
 #: Arrays larger than this are not content-hashed: a per-call device-to-host
-#: copy of a big captured constant would cost more than it saves, and an
-#: identity key would not see an in-place mutation.  Such a component falls
-#: back to the identity of the object that holds it.
+#: copy would cost more than it saves.  Their component keeps its identity key.
 _MAX_HASHED_ELEMENTS = 1 << 20
 
-#: Recursion bound for closures that reach themselves or deep object graphs.
-_MAX_DEPTH = 12
+#: Recursion bound for deep object graphs.
+_MAX_DEPTH = 16
 
-_SCALARS = (type(None), bool, int, float, complex, str, bytes)
+_ATTR = "_tenax_cache_key"
 
 
 class _Inexact(Exception):
-    """Raised inside the walk when a component cannot be fingerprinted exactly."""
+    """Raised inside the walk when a component cannot be keyed by value."""
+
+
+def declare_cache_key(fn, *data):
+    """Mark a tenax-built callback as keyed by its code object plus ``data``.
+
+    Use only where ``fn``'s trace is determined by its code and ``data`` --
+    the values its closure captures, e.g. ``d_phys``.  Returns ``fn``.
+
+    The contract is checked here, on every declaration: each captured cell
+    must be one of ``data`` (by identity) or a module-level tenax function
+    (e.g. an energy routine imported locally by the optimizer).  Anything
+    else raises ``ValueError`` -- a capture left out of the key would let a
+    later call reuse a backward traced against a different value.
+    """
+    for name, cell in zip(fn.__code__.co_freevars, fn.__closure__ or ()):
+        try:
+            value = cell.cell_contents
+        except ValueError:
+            continue  # an empty cell carries no value
+        if any(value is x for x in data) or _is_tenax_module_function(value):
+            continue
+        raise ValueError(
+            f"declare_cache_key({fn.__qualname__}): the closure captures "
+            f"{name!r}, which is not among the declared values"
+        )
+    setattr(fn, _ATTR, data)
+    return fn
+
+
+def _is_tenax_module_function(obj) -> bool:
+    import sys
+
+    mod = sys.modules.get(getattr(obj, "__module__", None) or "")
+    return (
+        callable(obj)
+        and mod is not None
+        and mod.__name__.split(".")[0] == "tenax"
+        and getattr(mod, getattr(obj, "__name__", ""), None) is obj
+    )
 
 
 def cache_key_part(obj) -> tuple[tuple, list]:
     """``(key, keepalive)`` for one component of a compile-cache key.
 
-    ``key`` is a value fingerprint when ``obj`` can be fingerprinted exactly,
-    else ``("id", id(obj))``.  ``keepalive`` holds every object the key refers
-    to by identity; the cache entry must keep them alive for as long as the
-    key is cached.
+    ``key`` is ``("val", ...)`` when ``obj`` is data or a declared callback, else
+    ``("id", id(obj))``.  The cache entry must keep ``keepalive`` alive for as
+    long as ``key`` is cached.
     """
-    keep: list = []
     try:
-        return ("fp", _fp(obj, keep, 0)), keep
+        return ("val", _key(obj, 0)), []
     except _Inexact:
         return ("id", id(obj)), [obj]
 
 
-def _fp(obj, keep, depth):
+def _tenax_owned(t: type) -> bool:
+    return (getattr(t, "__module__", "") or "").split(".")[0] == "tenax"
+
+
+def _key(obj, depth):
     if depth > _MAX_DEPTH:
         raise _Inexact
     d = depth + 1
-    if isinstance(obj, _SCALARS):
-        return ("v", type(obj).__name__, obj)
+    if obj is None or isinstance(obj, (bool, int, str, bytes)):
+        return (type(obj).__name__, obj)
+    if isinstance(obj, float):
+        return ("float", struct.pack("<d", obj))
+    if isinstance(obj, complex):
+        return ("complex", struct.pack("<dd", obj.real, obj.imag))
     if isinstance(obj, enum.Enum):
         return ("enum", type(obj), obj.value)
-    if isinstance(obj, type):
-        return ("type", obj)
     if isinstance(obj, np.dtype):
         return ("dtype", obj.str)
     if isinstance(obj, (np.generic, np.ndarray, jax.Array)):
-        return _fp_array(obj)
-    if isinstance(obj, (tuple, list)):
-        return (type(obj), tuple(_fp(x, keep, d) for x in obj))
-    if isinstance(obj, dict):
-        # Insertion order is observable (``.items()``/``.values()``), so it is
-        # part of the key.
-        return (
-            type(obj),
-            tuple((_fp(k, keep, d), _fp(v, keep, d)) for k, v in obj.items()),
-        )
-    if isinstance(obj, (set, frozenset)):
-        return (type(obj), tuple(sorted((_fp(x, keep, d) for x in obj), key=repr)))
-    if isinstance(obj, functools.partial):
-        return (
-            "partial",
-            _fp(obj.func, keep, d),
-            _fp(obj.args, keep, d),
-            _fp(obj.keywords, keep, d),
-        )
-    if isinstance(obj, types.MethodType):
-        return ("method", _fp(obj.__func__, keep, d), _fp(obj.__self__, keep, d))
-    if isinstance(obj, types.FunctionType):
-        cells = []
-        for cell in obj.__closure__ or ():
-            try:
-                contents = cell.cell_contents
-            except ValueError:  # an empty cell (referenced before assignment)
-                cells.append(("empty-cell",))
-                continue
-            cells.append(_fp(contents, keep, d))
-        keep.append(obj.__globals__)
-        return (
-            "fn",
-            obj.__code__,  # equal code objects compare by content
-            ("globals", id(obj.__globals__)),  # the namespace names resolve in
-            _fp(obj.__defaults__, keep, d),
-            _fp(obj.__kwdefaults__, keep, d),
-            tuple(cells),
-        )
-    if isinstance(obj, (types.BuiltinFunctionType, types.ModuleType)):
-        keep.append(obj)
-        return ("id-stable", type(obj).__name__, id(obj))
-    # A registered pytree node (DenseTensor, SymmetricTensor, CTMTensorEnv,
-    # ...): node types, static data and leaves, walked here rather than
-    # compared with ``PyTreeDef.__eq__`` (see the module docstring).
+        return _key_array(obj)
+    if callable(obj) and hasattr(obj, _ATTR) and hasattr(obj, "__code__"):
+        return ("declared", obj.__code__, _key(getattr(obj, _ATTR), d))
+    if type(obj) in (tuple, list):
+        return (type(obj).__name__, tuple(_key(x, d) for x in obj))
+    if type(obj) is dict:
+        return ("dict", tuple((_key(k, d), _key(v, d)) for k, v in obj.items()))
+    if not _tenax_owned(type(obj)):
+        raise _Inexact
+    # A tenax pytree node (DenseTensor, SymmetricTensor, CTMTensorEnv, ...):
+    # node types, static data and leaves.
     leaves, treedef = jax.tree_util.tree_flatten(obj)
     if not (len(leaves) == 1 and leaves[0] is obj):
-        return _fp_tree(treedef, iter(leaves), keep, d)
+        return _key_tree(treedef, iter(leaves), d)
     if dataclasses.is_dataclass(obj):
         return (
             "dc",
             type(obj),
             tuple(
-                (f.name, _fp(getattr(obj, f.name), keep, d))
-                for f in dataclasses.fields(obj)
+                (f.name, _key(getattr(obj, f.name), d)) for f in dataclasses.fields(obj)
             ),
         )
     state = _object_state(obj)
-    if state is not None:
-        return ("obj", type(obj), _fp(state, keep, d))
-    raise _Inexact
+    if state is None:
+        raise _Inexact
+    return ("obj", type(obj), _key(state, d))
 
 
-def _fp_tree(treedef, leaves, keep, depth):
+def _key_tree(treedef, leaves, depth):
     if depth > _MAX_DEPTH:
         raise _Inexact
     node = treedef.node_data()
     if node is None:  # a leaf
-        return _fp(next(leaves), keep, depth + 1)
+        return _key(next(leaves), depth + 1)
     node_type, aux = node
+    if not (_tenax_owned(node_type) or node_type in (tuple, list, dict, type(None))):
+        raise _Inexact
     return (
         "node",
         node_type,
-        _fp(aux, keep, depth + 1),
-        tuple(_fp_tree(c, leaves, keep, depth + 1) for c in treedef.children()),
+        _key(aux, depth + 1),
+        tuple(_key_tree(c, leaves, depth + 1) for c in treedef.children()),
     )
 
 
 def _object_state(obj):
-    """Attribute state of a plain object, or ``None`` if it has none to read."""
+    """Instance state of a tenax object, or ``None`` if it has none to read."""
     d = getattr(obj, "__dict__", None)
     has_dict = isinstance(d, dict)
     state = dict(d) if has_dict else {}
@@ -179,7 +193,7 @@ def _object_state(obj):
     return state
 
 
-def _fp_array(x):
+def _key_array(x):
     if isinstance(x, jax.core.Tracer) or getattr(x, "size", 0) > _MAX_HASHED_ELEMENTS:
         raise _Inexact
     weak = bool(getattr(x, "weak_type", False))

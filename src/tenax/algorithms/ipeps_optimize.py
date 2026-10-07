@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._cache_fingerprint import declare_cache_key
 from tenax.algorithms._ctm_energy_ad import invalidate_implicit_ad_warm_start
 from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
@@ -1744,6 +1745,9 @@ def _optimize_gs_ad_tensor(
             A_norm = site_tensors[(0, 0)]
             return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, _cg_d_eff)
 
+        # #1049: keyed by value, so a new optimize_gs_ad call reuses the compiled
+        # backward.  Lists exactly what the closure captures.
+        declare_cache_key(_cg_energy_callable, cg_gates, _cg_d_eff)
         _energy_fn_kw = _cg_energy_callable
     else:
         _energy_fn_kw = None
@@ -3640,6 +3644,10 @@ def _optimize_gs_ad_tensor_2site(
             d_phys,
         )
 
+    # #1049: keyed by value, so a new optimize_gs_ad call reuses the compiled
+    # backward.  Lists exactly what the closure captures.
+    declare_cache_key(_energy_fn_2site, d_phys)
+
     _ctm_energy_fn_2s = make_ctm_energy_fn(
         neighbors=CHECKERBOARD_NEIGHBORS,
         gate=gate,
@@ -5283,6 +5291,10 @@ def _optimize_gs_ad_multisite(
             neighbors,
             gate_,
         )
+
+    # #1049: keyed by value, so a new optimize_gs_ad call reuses the compiled
+    # backward.  Lists exactly what the closure captures.
+    declare_cache_key(_energy_fn, neighbors)
 
     _ctm_energy_fn = make_ctm_energy_fn(
         neighbors=neighbors,
