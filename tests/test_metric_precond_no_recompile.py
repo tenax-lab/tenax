@@ -93,7 +93,10 @@ def test_delta_as_a_jax_scalar_compiles_nothing_new():
     A = _site(0)
     env = _env(A)
     mp.precondition_gradient(A, env, _site(2), 0.3, CFG)
-    delta = jnp.asarray(0.05)
+    # Strongly typed, as _tree_dot returns it (jnp.asarray(0.05) would be weak,
+    # like a Python float, and test nothing).
+    delta = jnp.asarray(0.05, dtype=jnp.float64)
+    assert not delta.weak_type
     mark = len(_EVENTS)
     mp.precondition_gradient(A, env, _site(2), delta, CFG)
     new = _EVENTS[mark:]
