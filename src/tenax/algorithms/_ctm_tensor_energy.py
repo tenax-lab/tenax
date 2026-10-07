@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import functools
+
 __all__ = [
     "_rdm1x2_tensor",
     "_rdm1x2_tensor_2site",
@@ -101,6 +104,50 @@ def _normalise_rdm(mat: jax.Array) -> jax.Array:
     return 0.5 * (mat + mat.conj().T)
 
 
+# The implicit-AD forward jits its energy (``_ctm_energy_ad``), and a traced
+# RDM has no value for ``check_rdm`` to inspect.  While this flag is set *at
+# trace time*, :func:`_normalise_rdm_for_energy` adds a host callback that
+# queues each RDM's concrete value; the caller drains the queue with
+# :func:`replay_traced_rdm_checks` after the jitted call returns, so the
+# checks run -- and warn, or raise under warnings-as-errors -- in the same
+# Python call as the eager evaluation they replace.  Off by default, so every
+# other trace (the backward's jitted helpers, user jits) is unchanged.
+_RECORD_TRACED_RDMS = False
+_TRACED_RDM_QUEUE: list = []
+
+
+@contextlib.contextmanager
+def recording_traced_rdms():
+    """Queue traced energy RDMs for :func:`replay_traced_rdm_checks`."""
+    global _RECORD_TRACED_RDMS
+    prev = _RECORD_TRACED_RDMS
+    _RECORD_TRACED_RDMS = True
+    try:
+        yield
+    finally:
+        _RECORD_TRACED_RDMS = prev
+
+
+def _queue_traced_rdm(rdm, *, context: str) -> None:
+    import numpy as np
+
+    _TRACED_RDM_QUEUE.append((np.asarray(rdm), context))
+
+
+def replay_traced_rdm_checks() -> None:
+    """Run ``check_rdm`` on every queued RDM, in order, then clear the queue.
+
+    Call after the jitted energy's result is ready and ``jax.effects_barrier()``
+    has flushed its callbacks.
+    """
+    from tenax.algorithms._ctm_diagnostics import check_rdm
+
+    items = list(_TRACED_RDM_QUEUE)
+    _TRACED_RDM_QUEUE.clear()
+    for rdm, context in items:
+        check_rdm(rdm, context=context)
+
+
 def _normalise_rdm_for_energy(mat: jax.Array, context: str = "") -> jax.Array:
     """:func:`_normalise_rdm` for an RDM that is about to be contracted with H.
 
@@ -121,7 +168,9 @@ def _normalise_rdm_for_energy(mat: jax.Array, context: str = "") -> jax.Array:
     The check runs only on concrete arrays.  Under ``jit``/``grad`` the value
     is a tracer with no runtime value to inspect, and the AD path is hot
     enough that a ``debug.callback`` on every bond of every sweep is not worth
-    its cost.  Drivers that want the guarantee under tracing should call
+    its cost.  The one exception is the implicit-AD forward energy, which is
+    jitted but evaluated once per gradient: it records its RDMs and replays
+    this check after the call (``recording_traced_rdms``).  Drivers that want the guarantee under tracing should call
     :func:`~tenax.algorithms._ctm_diagnostics.check_rdm` on the concrete
     result, or :func:`~tenax.algorithms._ctm_diagnostics.check_ctm_env` on the
     environment beforehand.
@@ -131,6 +180,10 @@ def _normalise_rdm_for_energy(mat: jax.Array, context: str = "") -> jax.Array:
         from tenax.algorithms._ctm_diagnostics import check_rdm
 
         check_rdm(out, context=context)
+    elif _RECORD_TRACED_RDMS:
+        # The jitted implicit-AD forward energy: queue the value for a replay
+        # of the same check once the call returns (see the flag above).
+        jax.debug.callback(functools.partial(_queue_traced_rdm, context=context), out)
     return out
 
 
