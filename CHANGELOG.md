@@ -4,6 +4,18 @@
 
 ### Behavior Changes
 
+- **The 1-site metric L-BFGS now has a memory.**  On the 1-site
+  `optimize_gs_ad` path the metric L-BFGS built its curvature pair from
+  the initial tensor, not the current iterate, so `s = 0` at every step and
+  no pair was stored: the default 1x1 optimizer (`gs_optimizer="lbfgs"`,
+  `gs_metric_precond=True`) ran as metric-preconditioned steepest descent.
+  The metric itself (L-BFGS `H0` and metric CG) was also built at the
+  initial tensor.  Both now use the current iterate, as the 2-site and
+  multisite paths already did.  1x1 trajectories change.  Measured on the
+  Heisenberg model, D=2 chi=16, three starts: steps to converge
+  (`grad_norm` 1e-5) 56-57 -> 42-51, steps to within 1e-6 of the minimum
+  32-44 -> 25-29, same final energy (-0.6625143001).
+
 - **Implicit-AD gradients now include the 2x2 projector response**
   (#1028).  In the iPEPS optimizer (`optimize_gs_ad`'s 1-site, 2-site and
   multisite dispatchers), `CTMConfig.projector_backward="auto"` resolves to
@@ -441,6 +453,22 @@
   `jax.jit`-compiled helper with the metric, `delta` and the gradient as
   arguments, as in #1087.  Measured on CPU over 7 steps after the first:
   `while` compile events 48 -> 0, total backend compile 2.46 s -> 0.49 s.
+
+- **The implicit-AD backward compiles its chain rule once, not once per
+  solver** (`_ctm_energy_ad.py`).  The chain rule -- the params-VJP of the
+  CTM sweep, most of the backward's compile -- lived inside the fused
+  fixed-point program, and the eager-GMRES fallback compiled a second copy
+  as `_jit_chain_rule`.  So the first time the fused Neumann loop gave up
+  (its `gmres_maxiter` cap, or the divergence guard on an unconverged
+  forward), a run paid the backward compile again: 2 h 56 min at D=3 chi=12
+  on CPU.  The fused program now returns `lam` only, and both paths apply the
+  one `_jit_chain_rule` after the convergence check.  Measured on the
+  spinless-fermion 2-site benchmark (CPU, 4 optimizer steps, with #1087's
+  fix): at D=3 the first fallback took 466 s instead of 10,720 s and the
+  first gradient 9,600 s instead of 10,760 s, with the same gradient norms;
+  at D=2 the first gradient took 461 s instead of 526 s, and the gradient is
+  bit-identical.  A fused attempt that falls back also no longer evaluates a
+  chain rule it then discards.
 
 - **The eager-GMRES adjoint compiles once per configuration, not on every
   gradient** (#1087, `_ctm_energy_ad.py`).  `adjoint_method="gmres"` -- and
