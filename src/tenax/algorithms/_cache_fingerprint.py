@@ -121,22 +121,34 @@ def _tenax_owned(t: type) -> bool:
     return (getattr(t, "__module__", "") or "").split(".")[0] == "tenax"
 
 
-def _key(obj, depth):
+def _key(obj, depth, inner=False):
     if depth > _MAX_DEPTH:
         raise _Inexact
     d = depth + 1
-    if obj is None or isinstance(obj, (bool, int, str, bytes)):
+    # Scalars by exact type: ``np.float64`` subclasses ``float`` but is
+    # strongly typed under JAX, where a Python float is weakly typed.
+    if obj is None or type(obj) in (bool, int, str, bytes):
         return (type(obj).__name__, obj)
-    if isinstance(obj, float):
+    if type(obj) is float:
         return ("float", struct.pack("<d", obj))
-    if isinstance(obj, complex):
+    if type(obj) is complex:
         return ("complex", struct.pack("<dd", obj.real, obj.imag))
     if isinstance(obj, enum.Enum):
         return ("enum", type(obj), obj.value)
     if isinstance(obj, np.dtype):
         return ("dtype", obj.str)
-    if isinstance(obj, (np.generic, np.ndarray, jax.Array)):
+    if isinstance(obj, jax.Array):
         return _key_array(obj)
+    if isinstance(obj, (np.generic, np.ndarray)):
+        # A user's NumPy value keeps the identity key: its observable state
+        # goes beyond the values (flags, strides, ownership, writeability),
+        # and no gate tenax builds is a NumPy array, so a miss costs nothing.
+        # NumPy held inside a tenax object (``inner``, e.g. a TensorIndex's
+        # charges) is keyed by value: tenax code reads it for its values
+        # only, and every tenax gate carries such metadata.
+        if not inner:
+            raise _Inexact
+        return _key_numpy(obj)
     if callable(obj) and hasattr(obj, _ATTR) and hasattr(obj, "__code__"):
         data, functions = getattr(obj, _ATTR)
         return (
@@ -147,9 +159,12 @@ def _key(obj, depth):
             tuple((f.__module__, f.__qualname__, id(f)) for f in functions),
         )
     if type(obj) in (tuple, list):
-        return (type(obj).__name__, tuple(_key(x, d) for x in obj))
+        return (type(obj).__name__, tuple(_key(x, d, inner) for x in obj))
     if type(obj) is dict:
-        return ("dict", tuple((_key(k, d), _key(v, d)) for k, v in obj.items()))
+        return (
+            "dict",
+            tuple((_key(k, d, inner), _key(v, d, inner)) for k, v in obj.items()),
+        )
     if not _tenax_owned(type(obj)):
         raise _Inexact
     # A tenax pytree node (DenseTensor, SymmetricTensor, CTMTensorEnv, ...):
@@ -162,13 +177,14 @@ def _key(obj, depth):
             "dc",
             type(obj),
             tuple(
-                (f.name, _key(getattr(obj, f.name), d)) for f in dataclasses.fields(obj)
+                (f.name, _key(getattr(obj, f.name), d, True))
+                for f in dataclasses.fields(obj)
             ),
         )
     state = _object_state(obj)
     if state is None:
         raise _Inexact
-    return ("obj", type(obj), _key(state, d))
+    return ("obj", type(obj), _key(state, d, True))
 
 
 def _key_tree(treedef, leaves, depth):
@@ -183,7 +199,7 @@ def _key_tree(treedef, leaves, depth):
     return (
         "node",
         node_type,
-        _key(aux, depth + 1),
+        _key(aux, depth + 1, True),
         tuple(_key_tree(c, leaves, depth + 1) for c in treedef.children()),
     )
 
@@ -206,29 +222,33 @@ def _object_state(obj):
     return state
 
 
-def _key_array(x):
-    if isinstance(x, jax.core.Tracer) or getattr(x, "size", 0) > _MAX_HASHED_ELEMENTS:
+def _key_numpy(x):
+    """Value key for NumPy metadata held inside a tenax object."""
+    if getattr(x, "size", 0) > _MAX_HASHED_ELEMENTS:
         raise _Inexact
-    # The array type is part of the key: a callback may branch on
-    # ``isinstance(gate, np.ndarray)``.
-    kind = "jax" if isinstance(x, jax.Array) else type(x).__name__
-    weak = bool(getattr(x, "weak_type", False))
-    # A NumPy array's layout is observable too (``x.flags``, ``x.strides``);
-    # a jax.Array exposes none, so its key carries no layout.
-    layout = None
-    if isinstance(x, np.ndarray):
-        layout = (x.flags.c_contiguous, x.flags.f_contiguous, x.strides)
-    # The shape is read before the conversion: ``np.ascontiguousarray``
-    # promotes a 0-d array to shape ``(1,)``.
     shape = tuple(np.shape(x))
     a = np.ascontiguousarray(np.asarray(x))
     return (
-        "arr",
-        kind,
+        "np",
+        type(x).__name__,
         shape,
         a.dtype.str,
-        weak,
-        layout,
+        hashlib.sha1(a.tobytes()).hexdigest(),
+    )
+
+
+def _key_array(x):
+    if isinstance(x, jax.core.Tracer) or getattr(x, "size", 0) > _MAX_HASHED_ELEMENTS:
+        raise _Inexact
+    # The shape is read before the conversion: ``np.ascontiguousarray``
+    # promotes a 0-d array to shape ``(1,)``.
+    shape = tuple(x.shape)
+    a = np.ascontiguousarray(np.asarray(x))
+    return (
+        "arr",
+        shape,
+        a.dtype.str,
+        bool(x.weak_type),
         hashlib.sha1(a.tobytes()).hexdigest(),
     )
 

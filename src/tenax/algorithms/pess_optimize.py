@@ -96,7 +96,7 @@ def build_pess_loss(
     """
     d_eff = int(cg_gates.h_intra.shape[0])
     # Without map_fn/init_fn, so the callback is keyed by value (#1049).
-    energy_gates = cg_gates.energy_gates()
+    energy_gates = cg_gates._energy_gates()
 
     def _energy_fn(site_tensors, envs, _gate):
         # Custom energy function for ctm_energy_implicit's energy_fn hook.
@@ -193,7 +193,7 @@ def build_pess_loss_exact(
 
     d_eff = int(cg_gates.h_intra.shape[0])
     # Without map_fn/init_fn, so the callback is keyed by value (#1049).
-    energy_gates = cg_gates.energy_gates()
+    energy_gates = cg_gates._energy_gates()
 
     def _energy_fn(site_tensors, envs, _gate):
         A_norm = site_tensors[(0, 0)]

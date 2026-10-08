@@ -56,7 +56,7 @@ class CGGates:
     map_fn: Callable | None = None
     init_fn: Callable | None = None
 
-    def energy_gates(self) -> CGGates:
+    def _energy_gates(self) -> CGGates:
         """A copy without ``map_fn``/``init_fn``, for an energy callback.
 
         :func:`compute_energy_cg` reads only ``h_intra``, ``h_inter`` and

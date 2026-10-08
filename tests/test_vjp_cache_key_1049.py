@@ -146,7 +146,7 @@ def test_user_objects_and_bound_methods_keep_the_identity_key():
 
 def test_large_arrays_keep_the_identity_key():
     """A big array is not hashed per call, so its component keeps its id."""
-    big = np.zeros(_MAX_HASHED_ELEMENTS + 1)
+    big = jnp.zeros(_MAX_HASHED_ELEMENTS + 1)
     assert not _exact(big)
     assert not _exact(_make_declared(big))
 
@@ -351,7 +351,7 @@ def test_a_declaration_must_list_every_captured_value():
 
 
 def test_cg_energy_gates_are_keyed_by_their_gate_data():
-    """The CG energy callbacks capture ``cg_gates.energy_gates()``, a copy
+    """The CG energy callbacks capture ``cg_gates._energy_gates()``, a copy
     without ``map_fn``/``init_fn``, so a fresh callback still hits.  The full
     gates keep the identity key: a user callback may call ``gate.map_fn``
     (Codex review of #1090), so its functions are not dropped globally."""
@@ -369,7 +369,7 @@ def test_cg_energy_gates_are_keyed_by_their_gate_data():
     g1, g2 = mk(lambda x: x), mk(lambda x: 2 * x)
     assert not _exact(g1)
     assert _key(g1) != _key(g2)
-    e1, e2 = g1.energy_gates(), g2.energy_gates()
+    e1, e2 = g1._energy_gates(), g2._energy_gates()
     assert e1.map_fn is None and e1.init_fn is None
     assert _exact(e1)
     assert _key(e1) == _key(e2)
@@ -385,28 +385,48 @@ def test_cg_energy_gates_are_keyed_by_their_gate_data():
     assert _key(factory(e1, 4)) == _key(factory(e2, 4))
 
 
-def test_numpy_and_jax_arrays_get_different_keys():
-    """A callback may branch on ``isinstance(gate, np.ndarray)``."""
-    a = np.arange(4.0)
-    assert _key(a) != _key(jnp.asarray(a))
+def test_numpy_values_keep_the_identity_key():
+    """NumPy state goes beyond the values (flags, strides, ownership,
+    writeability), so NumPy arrays and scalars are never keyed by value
+    (Codex review of #1090).  Equal NumPy objects therefore miss."""
+    c = np.arange(6.0).reshape(2, 3)
+    for x in (
+        c,
+        np.asfortranarray(c),
+        c.view(),
+        np.float64(1.0),
+        np.int64(1),
+        np.asarray(2.0),
+    ):
+        assert not _exact(x)
+        assert not _exact(_make_declared(x))
+    assert _key(c) != _key(c.copy())
+    assert _key(c) != _key(jnp.asarray(c))
+
+
+def test_numpy_inside_tenax_objects_is_keyed_by_value():
+    """A tensor's ``TensorIndex`` charges are NumPy arrays; they are tenax's
+    own metadata, so a tenax gate is still keyed by value."""
+    g = heisenberg_gate()
+    assert any(isinstance(ix.charges, np.ndarray) for ix in g.indices)
+    assert _exact(g)
+
+
+def test_python_scalars_are_keyed_by_exact_type():
+    """``np.float64`` subclasses ``float`` but is strongly typed under JAX."""
+    assert _exact(1.0) and _exact(1) and _exact(True) and _exact(1j)
+    assert _key(1.0) == _key(1.0)
+    assert _key(1.0) != _key(np.float64(1.0))
+    assert _key(1j) != _key(np.complex128(1j))
+    assert _key(1) != _key(True)
 
 
 def test_zero_dimensional_shape_is_part_of_the_array_key():
     """``np.ascontiguousarray`` promotes shape ``()`` to ``(1,)``; a callback
     may branch on ``gate.ndim``."""
-    for x in (jnp.asarray(2.0), np.asarray(2.0)):
-        v = x.reshape(1)
-        assert _key(x) != _key(v)
-
-
-def test_numpy_layout_is_part_of_the_array_key():
-    """A callback may branch on ``gate.flags`` or ``gate.strides``."""
-    c = np.arange(6.0).reshape(2, 3)
-    f = np.asfortranarray(c)
-    assert np.array_equal(c, f)
-    assert _key(c) != _key(f)
-    assert _key(c) == _key(c.copy())
-    assert _key(f) == _key(np.asfortranarray(c.copy()))
+    x = jnp.asarray(2.0, dtype=jnp.float64)
+    assert _key(x) != _key(x.reshape(1))
+    assert _key(x) == _key(jnp.asarray(2.0, dtype=jnp.float64))
 
 
 def test_a_different_captured_tenax_function_changes_the_key():

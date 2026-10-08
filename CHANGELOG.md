@@ -462,13 +462,15 @@
   backward (measured ~82-92 s per extra call at D=2 chi=8; a D=3 backward
   compile takes hours on CPU) and left the old entry behind for good.  The
   key now uses values where the value is the whole story
-  (`_cache_fingerprint.py`): data -- scalars (floats by bit pattern),
-  strings, tuples, lists, dicts in order, arrays (type, shape, dtype,
-  weak-type bit, NumPy layout, contents), and tenax-owned types walked
-  field by field (`TensorIndex.__eq__` ignores `fuse_info`, so equality is never trusted)
+  (`_cache_fingerprint.py`): data -- Python scalars by exact type (floats
+  by bit pattern), strings, tuples, lists, dicts in order, `jax.Array`s
+  (shape, dtype, weak-type bit, contents), and tenax-owned types walked
+  field by field, NumPy metadata inside them included (`TensorIndex.__eq__`
+  ignores `fuse_info`, so equality is never trusted)
   -- and the optimizers' own energy callbacks, which declare exactly what
   they capture with `declare_cache_key` (checked at declaration).  User
-  callbacks, bound methods, sets and foreign objects keep the old identity
+  callbacks, bound methods, sets, a user's NumPy arrays and scalars (whose
+  flags and strides are observable too) and foreign objects keep the old identity
   key, since their behaviour can depend on state no fingerprint sees; that
   can only miss.  A gate with different values still gets its own compiled
   backward.  Entries are shared by runs with equal configurations, so each

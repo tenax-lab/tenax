@@ -1741,7 +1741,7 @@ def _optimize_gs_ad_tensor(
     if _use_cg:
         # Without map_fn/init_fn, which the energy never reads, so the
         # callback below is keyed by value (#1049).
-        _cg_energy_gates = cg_gates.energy_gates()
+        _cg_energy_gates = cg_gates._energy_gates()
 
         def _cg_energy_callable(site_tensors, envs, _gate):
             """energy_fn closure for ctm_energy_explicit/implicit (CG path)."""
