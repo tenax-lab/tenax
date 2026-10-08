@@ -454,6 +454,21 @@
   arguments, as in #1087.  Measured on CPU over 7 steps after the first:
   `while` compile events 48 -> 0, total backend compile 2.46 s -> 0.49 s.
 
+- **The implicit-AD forward evaluates its energy under jit** (`_ctm_energy_ad.py`).
+  Every gradient's forward ran the energy contraction op by op, and that was
+  most of a warm gradient: 7.1 s of 8.3 s at D=2 chi=8 on the fermionic 2-site
+  benchmark, against 0.13 s for the 20 CTM sweeps before it.  It is now one
+  compiled program per `_VJP_CACHE` entry (the backward already evaluated the
+  same callback under jit, so any callback that worked still traces).  Warm
+  gradients there go from 8.3 s to 1.1 s, with a bit-identical gradient; the
+  energy's compile adds ~40 s to the first gradient, so the gain is per step
+  (~7 s at D=2) and a 4-step run breaks even.  The #845/#854 RDM checks, which
+  run only on concrete values, are kept: while the energy traces, each RDM is
+  queued through a host callback and `check_rdm` is replayed on it after the
+  call, so the same warnings -- or, under warnings-as-errors, the same
+  `RuntimeWarning` -- reach the caller.  The line search's and final
+  evaluation's own energy calls outside the dispatch are unchanged.
+
 - **A second `optimize_gs_ad` call no longer recompiles the implicit-AD
   backward** (#1049, `_ctm_energy_ad.py`, `_ctm_honeycomb_ad.py`).  The
   compile cache keyed the backward on `id(gate)`, `id(energy_fn)` and

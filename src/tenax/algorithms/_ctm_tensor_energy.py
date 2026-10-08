@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import functools
+import threading
+
 __all__ = [
     "_rdm1x2_tensor",
     "_rdm1x2_tensor_2site",
@@ -101,6 +106,67 @@ def _normalise_rdm(mat: jax.Array) -> jax.Array:
     return 0.5 * (mat + mat.conj().T)
 
 
+# The implicit-AD forward jits its energy (``_ctm_energy_ad``), and a traced
+# RDM has no value for ``check_rdm`` to inspect.  So that one trace records:
+# inside ``recording_traced_rdms(token)`` -- entered *within* the jitted
+# function, with ``token`` a traced per-call id -- each RDM is sent to the host
+# by ``jax.debug.callback`` with its call token and its position in the trace,
+# and the caller replays ``check_rdm`` on its own call's RDMs, in trace order,
+# after the call returns (:func:`replay_traced_rdm_checks`).  The recording
+# state is a context variable, so a trace on another thread never sees it;
+# the queue is keyed by token, so concurrent calls never share entries.
+_RDM_RECORDING: contextvars.ContextVar = contextvars.ContextVar(
+    "tenax_rdm_recording", default=None
+)
+_TRACED_RDMS: dict = {}  # token -> list of (trace position, rdm, context)
+_TRACED_RDMS_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def recording_traced_rdms(token):
+    """Record the energy RDMs traced inside this block under ``token``.
+
+    Enter it inside the function being jitted, with ``token`` one of its
+    (traced) arguments, so every call can pass its own id.
+    """
+    state = {"token": token, "next": 0}
+    reset = _RDM_RECORDING.set(state)
+    try:
+        yield
+    finally:
+        _RDM_RECORDING.reset(reset)
+
+
+def _queue_traced_rdm(rdm, token, *, position: int, context: str) -> None:
+    import numpy as np
+
+    with _TRACED_RDMS_LOCK:
+        _TRACED_RDMS.setdefault(int(token), []).append(
+            (position, np.asarray(rdm), context)
+        )
+
+
+def replay_traced_rdm_checks(token: int) -> None:
+    """Run ``check_rdm`` on call ``token``'s RDMs in trace order; drop them.
+
+    Call after the jitted energy's result is ready and ``jax.effects_barrier()``
+    has flushed its callbacks.  The entries are removed before any check runs,
+    so a check that raises cannot leave them behind.
+    """
+    from tenax.algorithms._ctm_diagnostics import check_rdm
+
+    with _TRACED_RDMS_LOCK:
+        items = _TRACED_RDMS.pop(int(token), [])
+    for _position, rdm, context in sorted(items, key=lambda t: t[0]):
+        check_rdm(rdm, context=context)
+
+
+def discard_traced_rdm_checks(token: int) -> None:
+    """Drop call ``token``'s queued RDMs without checking them."""
+    with _TRACED_RDMS_LOCK:
+        _TRACED_RDMS.pop(int(token), None)
+
+
 def _normalise_rdm_for_energy(mat: jax.Array, context: str = "") -> jax.Array:
     """:func:`_normalise_rdm` for an RDM that is about to be contracted with H.
 
@@ -121,7 +187,9 @@ def _normalise_rdm_for_energy(mat: jax.Array, context: str = "") -> jax.Array:
     The check runs only on concrete arrays.  Under ``jit``/``grad`` the value
     is a tracer with no runtime value to inspect, and the AD path is hot
     enough that a ``debug.callback`` on every bond of every sweep is not worth
-    its cost.  Drivers that want the guarantee under tracing should call
+    its cost.  The one exception is the implicit-AD forward energy, which is
+    jitted but evaluated once per gradient: it records its RDMs and replays
+    this check after the call (``recording_traced_rdms``).  Drivers that want the guarantee under tracing should call
     :func:`~tenax.algorithms._ctm_diagnostics.check_rdm` on the concrete
     result, or :func:`~tenax.algorithms._ctm_diagnostics.check_ctm_env` on the
     environment beforehand.
@@ -131,6 +199,20 @@ def _normalise_rdm_for_energy(mat: jax.Array, context: str = "") -> jax.Array:
         from tenax.algorithms._ctm_diagnostics import check_rdm
 
         check_rdm(out, context=context)
+    else:
+        state = _RDM_RECORDING.get()
+        if state is not None:
+            # The jitted implicit-AD forward energy: send the value to the
+            # host for a replay of the same check once the call returns.
+            position = state["next"]
+            state["next"] += 1
+            jax.debug.callback(
+                functools.partial(
+                    _queue_traced_rdm, position=position, context=context
+                ),
+                out,
+                state["token"],
+            )
     return out
 
 
