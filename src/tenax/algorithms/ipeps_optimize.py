@@ -2684,8 +2684,10 @@ def _optimize_gs_ad_tensor(
 
                 env_for_metric = _env_cache["envs"][(0, 0)]
                 delta_metric = delta_energy if step > 0 else _tree_dot(grads, grads)
+                # The metric at the current iterate: ``A`` is the initial
+                # tensor and never moves; ``params`` does.
                 z_dense = precondition_gradient(
-                    A, env_for_metric, grads, delta_metric, config
+                    params, env_for_metric, grads, delta_metric, config
                 )
                 z = _wrap_tensor(z_dense, grads)
                 neg_z = jax.tree.map(lambda g: -g, z)
@@ -2715,8 +2717,12 @@ def _optimize_gs_ad_tensor(
                 g_flat = grads
                 p_flat = params
             else:
+                # The current iterate, not ``A`` (the initial tensor, which
+                # never moves): with ``A``, s = 0 at every step and no
+                # curvature pair was ever stored.
+                A_cur = params
                 g_flat = grads.todense().reshape(-1)
-                p_flat = A.todense().reshape(-1)
+                p_flat = A_cur.todense().reshape(-1)
 
             # Update L-BFGS history
             if prev_A_flat is not None:
@@ -2743,15 +2749,15 @@ def _optimize_gs_ad_tensor(
                     if step > 0
                     else float(jnp.real(jnp.vdot(g_flat, g_flat)))
                 )
-                D_bond = A.todense().shape[0]
-                d_loc = A.todense().shape[-1]
+                D_bond = A_cur.todense().shape[0]
+                d_loc = A_cur.todense().shape[-1]
 
                 def h0_matvec(v):
                     v_tensor = _wrap_tensor(
-                        v.reshape(D_bond, D_bond, D_bond, D_bond, d_loc), A
+                        v.reshape(D_bond, D_bond, D_bond, D_bond, d_loc), A_cur
                     )
                     result = precondition_gradient(
-                        A, env_for_metric, v_tensor, delta_metric, config
+                        A_cur, env_for_metric, v_tensor, delta_metric, config
                     )
                     return result.reshape(-1)
 
@@ -2759,7 +2765,7 @@ def _optimize_gs_ad_tensor(
                 direction_dense = -direction_flat.reshape(
                     D_bond, D_bond, D_bond, D_bond, d_loc
                 )
-                direction = _wrap_tensor(direction_dense, A)
+                direction = _wrap_tensor(direction_dense, A_cur)
         elif optimizer is not None:
             updates, opt_state = optimizer.update(grads, opt_state, params)
             direction = updates

@@ -4,6 +4,18 @@
 
 ### Behavior Changes
 
+- **The 1-site metric L-BFGS now has a memory.**  On the 1-site
+  `optimize_gs_ad` path the metric L-BFGS built its curvature pair from
+  the initial tensor, not the current iterate, so `s = 0` at every step and
+  no pair was stored: the default 1x1 optimizer (`gs_optimizer="lbfgs"`,
+  `gs_metric_precond=True`) ran as metric-preconditioned steepest descent.
+  The metric itself (L-BFGS `H0` and metric CG) was also built at the
+  initial tensor.  Both now use the current iterate, as the 2-site and
+  multisite paths already did.  1x1 trajectories change.  Measured on the
+  Heisenberg model, D=2 chi=16, three starts: steps to converge
+  (`grad_norm` 1e-5) 56-57 -> 42-51, steps to within 1e-6 of the minimum
+  32-44 -> 25-29, same final energy (-0.6625143001).
+
 - **Implicit-AD gradients now include the 2x2 projector response**
   (#1028).  In the iPEPS optimizer (`optimize_gs_ad`'s 1-site, 2-site and
   multisite dispatchers), `CTMConfig.projector_backward="auto"` resolves to
@@ -432,6 +444,16 @@
 
 ### Fixed
 
+- **The metric preconditioner's GMRES solve compiles once per
+  configuration** (`_metric_precond.py`).  `precondition_gradient` handed
+  JAX's GMRES a `matvec` closure built fresh on every call, so the Krylov
+  `lax.while_loop` was re-traced and re-compiled twice per optimizer step:
+  1.38 s per step on GPU (about 6% of a 2-site D=3 chi=16 step) and 0.23 s
+  on CPU, with a warm persistent cache.  The solve now goes through one
+  `jax.jit`-compiled helper with the metric, `delta` and the gradient as
+  arguments, as in #1087.  Measured on CPU over 7 steps after the first:
+  `while` compile events 48 -> 0, total backend compile 2.46 s -> 0.49 s.
+
 - **A second `optimize_gs_ad` call no longer recompiles the implicit-AD
   backward** (#1049, `_ctm_energy_ad.py`, `_ctm_honeycomb_ad.py`).  The
   compile cache keyed the backward on `id(gate)`, `id(energy_fn)` and
@@ -441,9 +463,9 @@
   compile takes hours on CPU) and left the old entry behind for good.  The
   key now uses values where the value is the whole story
   (`_cache_fingerprint.py`): data -- scalars (floats by bit pattern),
-  strings, tuples, lists, dicts in order, arrays (shape, dtype, weak-type
-  bit, contents), and tenax-owned types walked field by field
-  (`TensorIndex.__eq__` ignores `fuse_info`, so equality is never trusted)
+  strings, tuples, lists, dicts in order, arrays (type, shape, dtype,
+  weak-type bit, NumPy layout, contents), and tenax-owned types walked
+  field by field (`TensorIndex.__eq__` ignores `fuse_info`, so equality is never trusted)
   -- and the optimizers' own energy callbacks, which declare exactly what
   they capture with `declare_cache_key` (checked at declaration).  User
   callbacks, bound methods, sets and foreign objects keep the old identity

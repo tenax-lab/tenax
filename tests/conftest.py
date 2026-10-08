@@ -263,6 +263,7 @@ _FILE_MARKERS = {
     "test_gmres_adjoint_no_recompile_1087.py": "core",
     # #1049: the implicit-AD compile cache is keyed by value and bounded (~45s).
     "test_vjp_cache_key_1049.py": "algorithm",
+    "test_metric_precond_no_recompile.py": "core",
     # The fused backward and its GMRES fallback share one compiled chain rule
     # (~75s: a fused and a gmres backward at D=2 chi=4).
     "test_shared_chain_rule_bwd.py": "algorithm",
@@ -790,6 +791,7 @@ _FILE_MARKERS = {
     # differed by ~40%).  ``core``: it shapes every default (gs_metric_precond
     # =True) L-BFGS/CG direction.  D=2 chi=8 SU fixture, no AD.
     "test_metric_precond_env_norm.py": "core",
+    "test_metric_precond_1site_current_params.py": "core",
 }
 
 
