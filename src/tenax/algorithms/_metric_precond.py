@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
+from functools import partial
 from typing import TYPE_CHECKING
 
+import jax
 import jax.numpy as jnp
 from jax.scipy.sparse.linalg import gmres as jax_gmres
 
@@ -187,6 +189,29 @@ def _normalized_metric_matrix(A: Tensor, env: CTMTensorEnv) -> jnp.ndarray | Non
     return N_hat
 
 
+@partial(jax.jit, static_argnames=("tol", "maxiter"))
+def _jit_metric_gmres_solve(E_mat, delta, g_flat, *, tol, maxiter):
+    """Solve ``(N̂ + delta*I) x = g`` by GMRES, compiled once per configuration.
+
+    JAX's GMRES is a ``lax.while_loop``.  Called outside a jit with a
+    ``matvec`` closure built fresh on every call, the loop was traced and
+    compiled on every call -- twice per optimizer step (1.38 s per step on
+    GPU at 2-site D=3 chi=16).  Here the matvec is built inside the trace and
+    ``E_mat``, ``delta`` and ``g_flat`` are traced arguments, so a later call
+    with new values and the same shapes reuses the compiled loop (cf. #1087).
+    ``x0 = g_flat`` as before.
+    """
+    n_virt = E_mat.shape[0]
+    d = g_flat.shape[0] // n_virt
+
+    def matvec(v_flat):
+        Nv_mat = E_mat @ v_flat.reshape(n_virt, d)
+        return Nv_mat.reshape(-1) + delta * v_flat
+
+    x, _ = jax_gmres(matvec, g_flat, x0=g_flat, tol=tol, maxiter=maxiter)
+    return x
+
+
 def precondition_gradient(
     A: Tensor,
     env: CTMTensorEnv,
@@ -238,15 +263,12 @@ def precondition_gradient(
         )
         return g_dense
 
-    def matvec(v_flat):
-        v_mat = v_flat.reshape(D**4, d)
-        Nv_mat = E_mat @ v_mat
-        return Nv_mat.reshape(-1) + delta * v_flat
-
-    g_precond, _ = jax_gmres(
-        matvec,
+    g_precond = _jit_metric_gmres_solve(
+        E_mat,
+        # One dtype for every caller (a Python float on some steps, a JAX
+        # scalar on others), so the compiled solve is not keyed on it.
+        jnp.asarray(delta, dtype=jnp.real(g_flat).dtype),
         g_flat,
-        x0=g_flat,
         tol=config.metric_gmres_tol,
         maxiter=config.metric_gmres_maxiter,
     )
