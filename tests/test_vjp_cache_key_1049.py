@@ -386,6 +386,16 @@ def test_numpy_and_jax_arrays_get_different_keys():
     assert _key(a) != _key(jnp.asarray(a))
 
 
+def test_numpy_layout_is_part_of_the_array_key():
+    """A callback may branch on ``gate.flags`` or ``gate.strides``."""
+    c = np.arange(6.0).reshape(2, 3)
+    f = np.asfortranarray(c)
+    assert np.array_equal(c, f)
+    assert _key(c) != _key(f)
+    assert _key(c) == _key(c.copy())
+    assert _key(f) == _key(np.asfortranarray(c.copy()))
+
+
 def test_a_different_captured_tenax_function_changes_the_key():
     """Captured module-level tenax functions are part of the declared key."""
     from tenax.algorithms import _ctm_tensor_energy as te

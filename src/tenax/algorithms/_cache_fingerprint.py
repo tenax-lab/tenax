@@ -217,6 +217,11 @@ def _key_array(x):
     # ``isinstance(gate, np.ndarray)``.
     kind = "jax" if isinstance(x, jax.Array) else type(x).__name__
     weak = bool(getattr(x, "weak_type", False))
+    # A NumPy array's layout is observable too (``x.flags``, ``x.strides``);
+    # a jax.Array exposes none, so its key carries no layout.
+    layout = None
+    if isinstance(x, np.ndarray):
+        layout = (x.flags.c_contiguous, x.flags.f_contiguous, x.strides)
     a = np.ascontiguousarray(np.asarray(x))
     return (
         "arr",
@@ -224,6 +229,7 @@ def _key_array(x):
         a.shape,
         a.dtype.str,
         weak,
+        layout,
         hashlib.sha1(a.tobytes()).hexdigest(),
     )
 
