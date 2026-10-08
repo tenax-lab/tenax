@@ -261,6 +261,10 @@ _FILE_MARKERS = {
     "test_adjoint_seed_858.py": "core",
     # #1087: a second eager-GMRES backward must compile nothing (~14s).
     "test_gmres_adjoint_no_recompile_1087.py": "core",
+    "test_metric_precond_no_recompile.py": "core",
+    # The fused backward and its GMRES fallback share one compiled chain rule
+    # (~75s: a fused and a gmres backward at D=2 chi=4).
+    "test_shared_chain_rule_bwd.py": "algorithm",
     # MPS/MPO physical-basis agreement (#816).  A mismatched charge ORDER
     # still converges and reports the correct energy while returning a
     # permuted state, so the energy check that normally catches everything
@@ -789,6 +793,7 @@ _FILE_MARKERS = {
     # probe's.  ``core``: it sets the env every L-BFGS + HZ probe starts from.
     # Mechanism tests only (spied env_init, a scripted line search), D=2 chi=4.
     "test_hz_probe_warm_start.py": "core",
+    "test_metric_precond_1site_current_params.py": "core",
 }
 
 
