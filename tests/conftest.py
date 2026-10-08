@@ -261,6 +261,8 @@ _FILE_MARKERS = {
     "test_adjoint_seed_858.py": "core",
     # #1087: a second eager-GMRES backward must compile nothing (~14s).
     "test_gmres_adjoint_no_recompile_1087.py": "core",
+    # The implicit-AD forward jits its energy and replays the RDM checks (~60s).
+    "test_jit_forward_energy.py": "algorithm",
     "test_metric_precond_no_recompile.py": "core",
     # The fused backward and its GMRES fallback share one compiled chain rule
     # (~75s: a fused and a gmres backward at D=2 chi=4).
