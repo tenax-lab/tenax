@@ -16,6 +16,9 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor
 _FILE_MARKERS = {
     "test_eps_t_blindness_727.py": "core",
     "test_gs_recipe_explicit_rejection_755.py": "core",
+    # #1059 finding 1: optimize_fpeps_ad dispatch; spies on the branch
+    # targets, so no tensor work (the one end-to-end test is marked slow).
+    "test_fpeps_ad_dispatch_1059.py": "core",
     "test_tensor.py": "core",
     # PR #986 Phase 1: the swap-gate primitive.  Pure block-metadata sign
     # tests, no CTM, ~1s; the graded-transpose cross-check is the mutation

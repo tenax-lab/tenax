@@ -1335,11 +1335,11 @@ def _use_reference_c4v_path(config: iPEPSConfig) -> bool:
 def _reject_mislabelled_1x1(config: iPEPSConfig) -> None:
     """Refuse gs_recipe='1x1' everywhere it is not threaded end to end (#938).
 
-    Shared by every public optimizer entry point -- ``optimize_gs_ad`` and
-    ``optimize_fpeps_ad`` (which dispatches straight to
-    ``_optimize_gs_ad_tensor`` and would otherwise bypass the check, Codex
-    round 5 on #972). See the call site in ``optimize_gs_ad`` for the
-    per-path inventory of where the recipe gets dropped."""
+    Called by ``optimize_gs_ad``, which ``optimize_fpeps_ad`` also goes
+    through (#1059; before that it called ``_optimize_gs_ad_tensor`` directly
+    and ran this check itself, Codex round 5 on #972). See the call site in
+    ``optimize_gs_ad`` for the per-path inventory of where the recipe gets
+    dropped."""
     if config.gs_recipe == "1x1" and (
         config.ctm.fuse_virtual_legs
         or config.unit_cell != "1x1"
@@ -6202,39 +6202,51 @@ def _optimize_gs_ad_multisite(
 
 def optimize_fpeps_ad(
     hamiltonian_gate: Tensor,
-    A_init: Tensor | None,
+    A_init: Tensor | tuple | dict | None,
     config: iPEPSConfig,
     fpeps_config=None,
+    *,
+    envs_init: dict[Coord, CTMTensorEnv] | None = None,
 ) -> tuple:
     """AD-based ground state optimization of fermionic iPEPS.
 
     Uses automatic differentiation through the CTM fixed-point equation
     to compute exact gradients of the energy with respect to the
-    fermionic site tensor, then optimizes with optax.
+    fermionic site tensor(s), then optimizes with optax.
 
-    Accepts either ``DenseTensor`` or ``SymmetricTensor`` (e.g.
-    ``FermionParity`` symmetry) inputs — the optimizer shell is
-    polymorphic over the Tensor protocol (#297) and returns a tensor
-    of the same type as the input, preserving charges and flows.
+    This is :func:`optimize_gs_ad` with a fermionic initial state: it builds
+    ``A_init`` from *fpeps_config* when it is ``None``, then hands off to
+    :func:`optimize_gs_ad`, so every unit cell, AD engine and config check
+    that function has applies here too (#1059).
+
+    Accepts ``DenseTensor`` or ``SymmetricTensor`` (e.g.
+    ``FermionParity`` symmetry) inputs, and returns tensors of the same
+    type, preserving charges and flows (#297).
 
     Args:
         hamiltonian_gate: 2-site Hamiltonian as a ``Tensor`` (typically
             a ``SymmetricTensor`` with ``FermionParity`` symmetry),
             shape ``(d, d, d, d)``.
-        A_init:           Initial fPEPS site tensor ``(D, D, D, D, d)``
-            with labels ``(u, d, l, r, phys)``.  If ``None``, a random
-            tensor with ``FermionParity`` is created using
-            *fpeps_config*.
+        A_init:           Initial fPEPS site tensor(s), labels
+            ``(u, d, l, r, phys)``: one tensor for ``unit_cell="1x1"``, an
+            ``(A, B)`` tuple for ``"2site"``, a ``dict[str, Tensor]`` for a
+            ``Lattice``.  If ``None``, random ``FermionParity`` tensors are
+            built from *fpeps_config* (``"1x1"`` and ``"2site"`` only).
         config:           ``iPEPSConfig`` with AD optimization settings
-            (learning rate, number of steps, CTM config, etc.).
+            (unit cell, learning rate, number of steps, CTM config, etc.).
         fpeps_config:     ``FPEPSConfig`` used only when ``A_init`` is
-            ``None`` to build the initial tensor (bond dimension D,
+            ``None`` to build the initial tensor(s) (bond dimension D,
             physical dimension d=2, FermionParity charges).
+        envs_init:        Passed to :func:`optimize_gs_ad`: a converged
+            2-site environment that seeds the first forward CTM and fixes
+            its sector layout (see ``su_grow_layout``).
 
     Returns:
-        ``(A_opt, env, E_gs)`` where ``A_opt`` is the optimized site
-        tensor (same type as ``A_init``), ``env`` is a ``CTMTensorEnv``,
-        and ``E_gs`` is the ground-state energy per site.
+        As :func:`optimize_gs_ad`:
+
+        - ``"1x1"``:    ``(A_opt, env, E_gs)``
+        - ``"2site"``:  ``((A_opt, B_opt), (env_A, env_B), E_gs)``
+        - ``Lattice``:  ``(dict[str, Tensor], dict[str, CTMTensorEnv], E_gs)``
     """
     if A_init is None:
         if fpeps_config is None:
@@ -6244,10 +6256,18 @@ def optimize_fpeps_ad(
             )
         from tenax.algorithms.fermionic_ipeps import _build_initial_fpeps_tensor
 
-        A_init = _build_initial_fpeps_tensor(fpeps_config)
+        if isinstance(config.unit_cell, Lattice):
+            raise ValueError(
+                "optimize_fpeps_ad cannot build the initial tensors of a "
+                "Lattice unit cell; pass A_init as a dict[str, Tensor]."
+            )
+        if config.unit_cell == "2site":
+            k_a, k_b = jax.random.split(jax.random.PRNGKey(0))
+            A_init = (
+                _build_initial_fpeps_tensor(fpeps_config, k_a),
+                _build_initial_fpeps_tensor(fpeps_config, k_b),
+            )
+        else:
+            A_init = _build_initial_fpeps_tensor(fpeps_config)
 
-    # Dispatches straight to the private optimizer, so it must run the #938
-    # recipe guard itself -- _optimize_gs_ad_tensor threads gs_recipe into
-    # the implicit loss while its warm-start and final evaluations drop it.
-    _reject_mislabelled_1x1(config)
-    return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
+    return optimize_gs_ad(hamiltonian_gate, A_init, config, envs_init=envs_init)
