@@ -161,12 +161,8 @@ def _key(obj, depth):
         return (
             "dc",
             type(obj),
-            # A field marked ``metadata={"cache_key": False}`` is declared by
-            # its class not to affect what is traced (e.g. ``CGGates.map_fn``).
             tuple(
-                (f.name, _key(getattr(obj, f.name), d))
-                for f in dataclasses.fields(obj)
-                if f.metadata.get("cache_key", True)
+                (f.name, _key(getattr(obj, f.name), d)) for f in dataclasses.fields(obj)
             ),
         )
     state = _object_state(obj)
@@ -222,11 +218,14 @@ def _key_array(x):
     layout = None
     if isinstance(x, np.ndarray):
         layout = (x.flags.c_contiguous, x.flags.f_contiguous, x.strides)
+    # The shape is read before the conversion: ``np.ascontiguousarray``
+    # promotes a 0-d array to shape ``(1,)``.
+    shape = tuple(np.shape(x))
     a = np.ascontiguousarray(np.asarray(x))
     return (
         "arr",
         kind,
-        a.shape,
+        shape,
         a.dtype.str,
         weak,
         layout,

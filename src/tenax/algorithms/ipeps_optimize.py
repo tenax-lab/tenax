@@ -1739,15 +1739,18 @@ def _optimize_gs_ad_tensor(
         return params * (1.0 / (params.norm() + 1e-10))
 
     if _use_cg:
+        # Without map_fn/init_fn, which the energy never reads, so the
+        # callback below is keyed by value (#1049).
+        _cg_energy_gates = cg_gates.energy_gates()
 
         def _cg_energy_callable(site_tensors, envs, _gate):
             """energy_fn closure for ctm_energy_explicit/implicit (CG path)."""
             A_norm = site_tensors[(0, 0)]
-            return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, _cg_d_eff)
+            return compute_energy_cg(A_norm, envs[(0, 0)], _cg_energy_gates, _cg_d_eff)
 
         # #1049: keyed by value, so a new optimize_gs_ad call reuses the compiled
         # backward.  Lists exactly what the closure captures.
-        declare_cache_key(_cg_energy_callable, cg_gates, _cg_d_eff)
+        declare_cache_key(_cg_energy_callable, _cg_energy_gates, _cg_d_eff)
         _energy_fn_kw = _cg_energy_callable
     else:
         _energy_fn_kw = None

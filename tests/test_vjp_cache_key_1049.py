@@ -350,10 +350,11 @@ def test_a_declaration_must_list_every_captured_value():
 # --------------------------------------------------------------------------
 
 
-def test_cg_gates_with_functions_are_keyed_by_their_gate_data():
-    """PESS captures ``cg_gates``, whose ``map_fn``/``init_fn`` are functions
-    the energy never reads; they are excluded from the key so a fresh PESS
-    callback still hits."""
+def test_cg_energy_gates_are_keyed_by_their_gate_data():
+    """The CG energy callbacks capture ``cg_gates.energy_gates()``, a copy
+    without ``map_fn``/``init_fn``, so a fresh callback still hits.  The full
+    gates keep the identity key: a user callback may call ``gate.map_fn``
+    (Codex review of #1090), so its functions are not dropped globally."""
     from tenax.algorithms.coarse_grain import CGGates
 
     def mk(map_fn):
@@ -366,9 +367,13 @@ def test_cg_gates_with_functions_are_keyed_by_their_gate_data():
         )
 
     g1, g2 = mk(lambda x: x), mk(lambda x: 2 * x)
-    assert _exact(g1)
-    assert _key(g1) == _key(g2)
-    assert _key(g1) != _key(dataclasses.replace(g1, n_sites=3))
+    assert not _exact(g1)
+    assert _key(g1) != _key(g2)
+    e1, e2 = g1.energy_gates(), g2.energy_gates()
+    assert e1.map_fn is None and e1.init_fn is None
+    assert _exact(e1)
+    assert _key(e1) == _key(e2)
+    assert _key(e1) != _key(dataclasses.replace(e1, n_sites=3))
 
     def factory(cg, d):
         def energy(site_tensors, envs, _gate):
@@ -376,14 +381,22 @@ def test_cg_gates_with_functions_are_keyed_by_their_gate_data():
 
         return declare_cache_key(energy, cg, d)
 
-    assert _exact(factory(g1, 4))
-    assert _key(factory(g1, 4)) == _key(factory(g2, 4))
+    assert _exact(factory(e1, 4))
+    assert _key(factory(e1, 4)) == _key(factory(e2, 4))
 
 
 def test_numpy_and_jax_arrays_get_different_keys():
     """A callback may branch on ``isinstance(gate, np.ndarray)``."""
     a = np.arange(4.0)
     assert _key(a) != _key(jnp.asarray(a))
+
+
+def test_zero_dimensional_shape_is_part_of_the_array_key():
+    """``np.ascontiguousarray`` promotes shape ``()`` to ``(1,)``; a callback
+    may branch on ``gate.ndim``."""
+    for x in (jnp.asarray(2.0), np.asarray(2.0)):
+        v = x.reshape(1)
+        assert _key(x) != _key(v)
 
 
 def test_numpy_layout_is_part_of_the_array_key():

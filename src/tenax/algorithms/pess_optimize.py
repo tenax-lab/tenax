@@ -95,6 +95,8 @@ def build_pess_loss(
         through the implicit-AD square CTM.
     """
     d_eff = int(cg_gates.h_intra.shape[0])
+    # Without map_fn/init_fn, so the callback is keyed by value (#1049).
+    energy_gates = cg_gates.energy_gates()
 
     def _energy_fn(site_tensors, envs, _gate):
         # Custom energy function for ctm_energy_implicit's energy_fn hook.
@@ -102,10 +104,10 @@ def build_pess_loss(
         # compute_energy_cg, which handles intra (1-site RDM × h_intra)
         # plus 3 inter (h/v/diag 2-site RDM × h_inter) terms.
         A_norm = site_tensors[(0, 0)]
-        return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, d_eff)
+        return compute_energy_cg(A_norm, envs[(0, 0)], energy_gates, d_eff)
 
     # #1049: keyed by value; lists exactly what the closure captures.
-    declare_cache_key(_energy_fn, cg_gates, d_eff)
+    declare_cache_key(_energy_fn, energy_gates, d_eff)
 
     def loss_fn(state: IPESSState) -> jnp.ndarray:
         A_super = pess_to_kagome_supersite(
@@ -190,13 +192,15 @@ def build_pess_loss_exact(
     from tenax.algorithms.pess import pess_to_kagome_supersite_exact
 
     d_eff = int(cg_gates.h_intra.shape[0])
+    # Without map_fn/init_fn, so the callback is keyed by value (#1049).
+    energy_gates = cg_gates.energy_gates()
 
     def _energy_fn(site_tensors, envs, _gate):
         A_norm = site_tensors[(0, 0)]
-        return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, d_eff)
+        return compute_energy_cg(A_norm, envs[(0, 0)], energy_gates, d_eff)
 
     # #1049: keyed by value; lists exactly what the closure captures.
-    declare_cache_key(_energy_fn, cg_gates, d_eff)
+    declare_cache_key(_energy_fn, energy_gates, d_eff)
 
     def loss_fn(state: IPESSState) -> jnp.ndarray:
         A_super = pess_to_kagome_supersite_exact(
