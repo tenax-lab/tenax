@@ -53,17 +53,40 @@ def _energy(A_arr, **kw):
 
 #: Converges cleanly; the energy is a plain number to compare.
 _CLEAN = dict(recipe="2x2", chi=4, max_iter=60, min_iter=8, conv_tol=1e-10)
-#: Its RDMs are not positive semi-definite (smallest eigenvalue ~ -2.7, see
-#: #854), so the forward's energy check must warn.
-_NON_PSD = dict(
-    recipe="1x1",
-    projector_method="eigh",
-    chi=4,
-    max_iter=30,
-    min_iter=8,
-    conv_tol=1e-12,
-    adjoint_method="gmres",
-)
+
+
+@pytest.fixture
+def _non_psd_rdms(monkeypatch):
+    """Every energy RDM gets a negative eigenvalue, by construction.
+
+    A CTM fixture whose RDMs happen to come out non-PSD depends on numerics
+    that move with the JAX version and BLAS (Codex review of #1092), so the
+    defect is injected instead: ``_normalise_rdm`` returns ``rho + P`` with
+    ``P = diag(2, -2, 0, ...)``.  ``P`` is traceless and Hermitian, so the
+    trace and Hermiticity checks still pass, and the smallest eigenvalue is
+    at most ``rho_11 - 2 <= -1``.  The implicit-AD entries are cleared on
+    both sides, so the patch is traced in and does not leak out.
+    """
+    import collections
+
+    from tenax.algorithms import _ctm_energy_ad as cea
+    from tenax.algorithms import _ctm_tensor_energy as te
+
+    orig = te._normalise_rdm
+
+    def poisoned(mat):
+        out = orig(mat)
+        if out.ndim != 2 or out.shape[0] < 2:
+            return out
+        p = jnp.zeros(out.shape[0], dtype=out.dtype).at[0].set(2.0).at[1].set(-2.0)
+        return out + jnp.diag(p)
+
+    saved = collections.OrderedDict(cea._VJP_CACHE)
+    cea._VJP_CACHE.clear()
+    monkeypatch.setattr(te, "_normalise_rdm", poisoned)
+    yield
+    cea._VJP_CACHE.clear()
+    cea._VJP_CACHE.update(saved)
 
 
 def test_forward_energy_is_jitted_and_matches_eager():
@@ -104,11 +127,13 @@ def test_forward_energy_is_jitted_and_matches_eager():
     np.testing.assert_allclose(e, e_eager, rtol=1e-10, atol=1e-12)
 
 
+@pytest.mark.usefixtures("_non_psd_rdms")
 def test_rdm_check_still_warns_from_the_jitted_forward():
     with pytest.warns(RuntimeWarning, match="not positive semi-definite"):
-        jax.grad(lambda a: _energy(a, **_NON_PSD))(_site())
+        jax.grad(lambda a: _energy(a, **_CLEAN))(_site())
 
 
+@pytest.mark.usefixtures("_non_psd_rdms")
 def test_warnings_as_errors_get_the_warning_not_an_xla_error():
     """The check is replayed in Python after the call, so under
     warnings-as-errors the caller sees the RuntimeWarning itself -- not a
@@ -117,11 +142,11 @@ def test_warnings_as_errors_get_the_warning_not_an_xla_error():
     # replay on a cached program, the steady state of an optimizer loop.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        _energy(_site(), **_NON_PSD)
+        _energy(_site(), **_CLEAN)
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
         with pytest.raises(RuntimeWarning, match="not positive semi-definite"):
-            _energy(_site(), **_NON_PSD)
+            _energy(_site(), **_CLEAN)
 
 
 # --------------------------------------------------------------------------
