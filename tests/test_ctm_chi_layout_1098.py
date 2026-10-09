@@ -104,3 +104,35 @@ def test_charge_sorting_a_chi_leg_is_a_faithful_basis_permutation():
     )
     assert np.array_equal(np.asarray(s.indices[1].charges), D2[::-1])
     assert s._data is t._data
+
+
+def _rec(alloc, spectra, floor=None):
+    return {
+        "q": np.arange(len(alloc), dtype=np.int32),
+        "alloc": np.asarray(alloc, dtype=np.int32),
+        "floor": np.asarray(floor or [0] * len(alloc), dtype=np.int32),
+        "s": tuple(np.asarray(s, dtype=float) for s in spectra),
+    }
+
+
+def test_the_probe_accepts_a_top_chi_cut_and_rejects_a_frozen_one():
+    """The host side of the #1098 probe: a traced allocation is accepted iff
+    it is a global top-chi cut, up to ties within 1e-10 * s_max."""
+    from tenax.algorithms._ctm_python_loop import _probe_says_layout_is_eager as ok
+
+    spectra = ([1.0, 0.5, 0.01], [0.3, 0.2])  # top-3 = 1.0, 0.5, 0.3
+    assert ok([_rec([2, 1], spectra)])
+    assert not ok([_rec([3, 0], spectra)])  # keeps 0.01, drops 0.3
+    assert not ok([_rec([1, 2], spectra)])  # keeps 0.2, drops 0.5
+    # A tie at the cut: either side may be kept, within the tolerance only.
+    tied = ([1.0, 0.25], [0.25 * (1 + 1e-12), 0.1])
+    assert ok([_rec([2, 0], tied)]) and ok([_rec([1, 1], tied)])
+    split = ([1.0, 0.25], [0.25 * (1 + 1e-6), 0.1])
+    assert not ok([_rec([2, 0], split)]) and ok([_rec([1, 1], split)])
+    # The eager floor: a base charge with a vector must keep one slot.
+    assert not ok([_rec([3, 0], ([1.0, 0.9, 0.8], [0.01]), floor=[1, 1])])
+    assert ok([_rec([2, 1], ([1.0, 0.9, 0.8], [0.01]), floor=[1, 1])])
+    # Every record must pass, and no record is no certificate.
+    assert not ok([_rec([2, 1], spectra), _rec([3, 0], spectra)])
+    assert not ok([])
+    assert not ok([_rec([1, 1], ([0.0, 0.0], [0.0]))])  # blind: all zero

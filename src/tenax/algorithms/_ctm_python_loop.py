@@ -109,6 +109,7 @@ def _make_jit_ctm_step(
             "renormalize",
             "projector_backward",
             "chunk_size",
+            "probe",
         ),
     )
     def _step(
@@ -120,8 +121,10 @@ def _make_jit_ctm_step(
         renormalize: bool = False,
         projector_backward: str = "auto",
         chunk_size: int | None = None,
-    ) -> tuple[dict[Coord, CTMTensorEnv], jax.Array, jax.Array]:
-        return _ctm_sweep(
+        probe: bool = False,
+    ):
+        sweep = partial(
+            _ctm_sweep,
             site_tensors,
             envs,
             neighbors=neighbors,
@@ -133,6 +136,22 @@ def _make_jit_ctm_step(
             projector_backward=projector_backward,
             chunk_size=chunk_size,
         )
+        if not probe:
+            return sweep()
+        # #1098 layout probe: also return, per traced symmetric chi cut, the
+        # per-sector spectra and allocation (see ``_layout_probe_record``).
+        # A separate trace (``probe`` is static), so ``probe=False`` -- every
+        # existing caller -- compiles exactly what it did before.
+        from tenax.algorithms import _ctm_tensor_projector_2x2 as _p2x2
+
+        outer = _p2x2._LAYOUT_PROBE
+        _p2x2._LAYOUT_PROBE = []
+        try:
+            envs_new, max_eps, max_s = sweep()
+            records = tuple(_p2x2._LAYOUT_PROBE)
+        finally:
+            _p2x2._LAYOUT_PROBE = outer
+        return envs_new, max_eps, max_s, records
 
     _JIT_STEP_CACHE[cache_key] = _step
     return _step
@@ -301,6 +320,51 @@ def _eager_ctm_sweep(site_tensors, envs, **kwargs):
     return _ctm_sweep(site_tensors, envs, **kwargs)
 
 
+# Relative tolerance of the probe's tie test (#1098): a traced cut whose
+# smallest freely kept value and largest dropped value differ by less than
+# this times the cut's largest value counts as the eager cut.
+_PROBE_TIE_RTOL = 1e-10
+
+
+def _probe_says_layout_is_eager(records, rtol: float = _PROBE_TIE_RTOL) -> bool:
+    """True when every traced cut kept a global top-``chi`` (#1098).
+
+    For each record of the jitted probe step: the traced allocation ``alloc``
+    is accepted when it honours the eager floor (one slot per charge in the
+    projector's ``base_charges``, where the sector has one) and no dropped
+    value exceeds a freely kept one by more than ``rtol * s_max``.  That is
+    the eager rule (:func:`_ctm_utils._select_chi_slots`) up to ties: at an
+    exactly or nearly degenerate cut the eager rule's choice depends on
+    tie-breaking, and any choice among tied values is accepted, so noise at
+    the cut does not send every call down the eager path.
+
+    No records (no traced symmetric cut was seen) is not a certificate.
+    """
+    if not records:
+        return False
+    for rec in records:
+        alloc = np.asarray(rec["alloc"])
+        floor = np.asarray(rec["floor"])
+        spectra = [np.asarray(s) for s in rec["s"]]
+        s_max = max((float(sp[0]) for sp in spectra if sp.size), default=0.0)
+        if not np.isfinite(s_max) or s_max <= 0.0:
+            return False
+        kept_min = np.inf
+        dropped_max = -np.inf
+        for k, f, sp in zip(alloc, floor, spectra):
+            n = sp.size
+            f_eff = min(int(f), n)
+            if k > n or k < f_eff:
+                return False
+            if k > f_eff:
+                kept_min = min(kept_min, float(sp[k - 1]))
+            if k < n:
+                dropped_max = max(dropped_max, float(sp[k]))
+        if dropped_max > kept_min + rtol * s_max:
+            return False
+    return True
+
+
 def _adapt_symmetric_layout(
     site_tensors,
     envs,
@@ -386,11 +450,12 @@ def python_loop_ctm_converge(
     checking happens in Python so no recompilation is needed when
     tolerances change.
 
-    With ``SymmetricTensor`` input the first sweeps run eagerly (see
-    ``eager_layout_sweeps``): a jitted sweep cannot change the charge-sector
-    layout of the chi legs (#929), so a cold start would otherwise keep the
-    initial tiling and converge to the energy of that restricted layout
-    (#1098).
+    With ``SymmetricTensor`` input the chi layout is chosen before the jitted
+    sweeps (see ``eager_layout_sweeps``): a jitted sweep cannot change the
+    charge-sector layout of the chi legs (#929), so a cold start would
+    otherwise keep the initial tiling and converge to the energy of that
+    restricted layout (#1098).  A warm start is checked by a jitted probe
+    sweep and runs eager sweeps only when the probe finds a non-top-chi cut.
 
     Args:
         site_tensors:      Map from coordinate to iPEPS site tensor.
@@ -468,22 +533,28 @@ def python_loop_ctm_converge(
                            projector keeps the global top-``chi`` singular
                            values and so can move chi slots between charge
                            sectors; the jitted projector keeps each sector's
-                           size (#929).  Stop rule: a warm start whose
-                           layout is off the cold-init tiling stops after
-                           the first eager sweep that returns its layout
-                           (one sweep once settled); a cold start, or an env
-                           with the cold-init layout, stops when two
-                           consecutive eager sweeps agree (so a value of 1
-                           cannot certify it, and warns).  If the layout is
-                           still changing when this cap or ``max_iter`` ends
-                           the phase, a warning is issued and any jitted
-                           sweeps continue from there.  Eager outputs are put
-                           in ascending-charge order along each chi leg, so
-                           the jitted step does not recompile per call.
-                           Eager sweeps count toward ``max_iter``,
+                           size (#929).  A warm start off the cold-init
+                           tiling first runs one jitted *probe* sweep that
+                           also returns every traced cut's per-sector
+                           spectrum; if each cut kept a global top-``chi``
+                           (ties within ``1e-10 * s_max`` accepted) the
+                           probe sweep is kept and no eager sweep runs.
+                           Otherwise -- and always for a cold start or an env
+                           with the cold-init layout -- eager sweeps run: a
+                           warm start stops at the first one that returns its
+                           layout, a cold(-shaped) one when two consecutive
+                           eager sweeps agree (so a value of 1 cannot certify
+                           it, and warns).  If the layout is still changing
+                           when this cap or ``max_iter`` ends the phase, a
+                           warning is issued and any jitted sweeps continue
+                           from there.  Eager outputs are put in
+                           ascending-charge order along each chi leg, so the
+                           jitted step does not recompile per call.  The probe
+                           compiles once per layout.
+                           Probe and eager sweeps count toward ``max_iter``,
                            ``min_iter`` and the returned iteration counts.
-                           The gauge is applied on the final (stable) eager
-                           sweep only, and ``mixing`` only to jitted sweeps.
+                           The gauge is applied on the probe sweep and the
+                           final (stable) eager sweep only, and ``mixing`` only to jitted sweeps.
                            Dense input never enters this phase.  ``0``
                            disables it (the pre-#1098 behaviour).  Applied
                            per stage under ``chi_ramp``.  Not covered: chi
@@ -645,46 +716,62 @@ def python_loop_ctm_converge(
                 projector_backward=projector_backward,
             )
 
-    # #1098: let eager sweeps choose the symmetric chi layout; the jitted
-    # sweeps below keep the layout they are handed (#929).
+    # #1098: the jitted sweeps keep the chi layout they are handed (#929), so
+    # choose it first.  A warm start already off the cold-init tiling is
+    # checked by one jitted probe sweep; only if the probe finds a traced cut
+    # that is not the eager top-chi cut (or for a cold or cold-shaped env)
+    # do eager sweeps run.
     eager = 0
     eager_budget = min(eager_layout_sweeps, max_iter - warmup)
     if eager_budget > 0 and _needs_eager_layout_phase(site_tensors, envs):
-        # A warm start whose layout is already off the cold-init tiling needs
-        # one eager sweep to confirm it; a cold(-shaped) env needs two.
         compare_input = env_init is not None and _chi_layout(envs) != _cold_init_layout(
             site_tensors, chi_current
         )
-        envs, eager, stable = _adapt_symmetric_layout(
-            site_tensors,
-            envs,
-            max_sweeps=eager_budget,
-            gauge_pair=_gauge_pair,
-            compare_input=compare_input,
-            neighbors=neighbors,
-            recipe=recipe,
-            device_mesh=device_mesh,
-            chi=chi_current,
-            projector_method=projector_method,
-            renormalize=renormalize,
-            projector_backward=projector_backward,
-            chunk_size=ctm_chunk_size,
-        )
-        if not stable:
-            cause = (
-                f"eager_layout_sweeps={eager_layout_sweeps}"
-                if eager == eager_layout_sweeps
-                else f"the iteration budget (max_iter={max_iter})"
+        probed = False
+        if compare_input:
+            envs_p, _, _, records = jit_step(
+                site_tensors,
+                envs,
+                chi=chi_current,
+                projector_method=projector_method,
+                renormalize=renormalize,
+                projector_backward=projector_backward,
+                probe=True,
             )
-            warnings.warn(
-                "python_loop_ctm_converge: the symmetric chi-leg layout was "
-                f"still changing when {cause} ended the eager phase after "
-                f"{eager} sweeps (#1098).  Any jitted sweeps continue from the "
-                "last eager environment and keep its layout, so the result "
-                "may be the energy of a restricted layout; raise "
-                "eager_layout_sweeps or max_iter.",
-                stacklevel=2,
+            if _probe_says_layout_is_eager(records):
+                envs = envs_p if _gauge_pair is None else _gauge_pair(envs_p, envs)
+                eager, probed = 1, True
+        if not probed:
+            envs, eager, stable = _adapt_symmetric_layout(
+                site_tensors,
+                envs,
+                max_sweeps=eager_budget,
+                gauge_pair=_gauge_pair,
+                compare_input=compare_input,
+                neighbors=neighbors,
+                recipe=recipe,
+                device_mesh=device_mesh,
+                chi=chi_current,
+                projector_method=projector_method,
+                renormalize=renormalize,
+                projector_backward=projector_backward,
+                chunk_size=ctm_chunk_size,
             )
+            if not stable:
+                cause = (
+                    f"eager_layout_sweeps={eager_layout_sweeps}"
+                    if eager == eager_layout_sweeps
+                    else f"the iteration budget (max_iter={max_iter})"
+                )
+                warnings.warn(
+                    "python_loop_ctm_converge: the symmetric chi-leg layout was "
+                    f"still changing when {cause} ended the eager phase after "
+                    f"{eager} sweeps (#1098).  Any jitted sweeps continue from "
+                    "the last eager environment and keep its layout, so the "
+                    "result may be the energy of a restricted layout; raise "
+                    "eager_layout_sweeps or max_iter.",
+                    stacklevel=2,
+                )
     pre = warmup + eager
 
     # Run the bump-aware loop via shared helper.

@@ -217,16 +217,15 @@ def _count_eager(monkeypatch):
     return calls
 
 
-def test_a_settled_warm_start_costs_one_eager_sweep_and_no_recompile(case, monkeypatch):
-    """Requirement 4, and the cost measured in a 2-site optimize_gs_ad: a warm
-    start whose layout has settled confirms it with one eager sweep, and a
-    second warm start at perturbed tensors (a line-search probe) compiles
-    nothing new -- the eager output's chi legs come back in the charge order
-    the jitted step was compiled for."""
+def test_a_settled_warm_start_runs_no_eager_sweep_and_no_recompile(case, monkeypatch):
+    """A warm start whose layout is already the eager top-chi layout is
+    certified by one jitted probe sweep: no eager sweep.  A second warm start
+    at perturbed tensors (a line-search probe) adds no ``jit(_step)`` cache
+    entry -- the probe has static shapes and compiles once per layout."""
     name, A, B, envs = case.name, case.A, case.B, case.envs
     calls = _count_eager(monkeypatch)
     envs2, _ = _run(A, B, case.chi, env_init=envs, max_iter=20)
-    assert len(calls) == 1, (name, len(calls))
+    assert len(calls) == 0, (name, len(calls))
     assert abs(_energy(A, B, envs2) - _energy(A, B, envs)) < 1e-10
 
     step = cpl._make_jit_ctm_step(CHECKERBOARD_NEIGHBORS)
@@ -235,8 +234,44 @@ def test_a_settled_warm_start_costs_one_eager_sweep_and_no_recompile(case, monke
     Ap = A + SymmetricTensor.random_normal(A.indices, kA) * 1e-3
     Bp = B + SymmetricTensor.random_normal(B.indices, kB) * 1e-3
     _run(Ap, Bp, case.chi, env_init=envs2, max_iter=20)
-    assert len(calls) == 2, (name, len(calls))
+    assert len(calls) == 0, (name, len(calls))
     assert step._cache_size() == n_compiled, (name, n_compiled, step._cache_size())
+
+
+def test_a_warm_start_on_a_suboptimal_layout_is_caught_by_the_probe(case, monkeypatch):
+    """The probe must say "different" when the handed-in layout is neither
+    the cold tiling nor the eager top-chi one.  Built by freezing (traced-only
+    CTM) the layout of one eager sweep from the cold init.  U(1) only: for
+    Z2 that first sweep returns the cold tiling itself, which skips the probe
+    (see the cold-init test below)."""
+    name, A, B, E_dense = case.name, case.A, case.B, case.E_dense
+    if name != "u1":
+        pytest.skip("Z2's first eager sweep returns the cold tiling")
+    st = {(0, 0): A, (1, 0): B}
+    cold = {c: initialize_ctm_tensor_env(t, case.chi) for c, t in st.items()}
+    mid, _, _ = cpl._eager_ctm_sweep(
+        st,
+        cold,
+        neighbors=CHECKERBOARD_NEIGHBORS,
+        recipe="2x2",
+        device_mesh=None,
+        chi=case.chi,
+        projector_method="svd",
+        renormalize=False,
+        projector_backward="auto",
+        chunk_size=None,
+    )
+    mid = cpl._charge_sorted_envs(mid)
+    stuck, _ = _run(A, B, case.chi, env_init=mid, eager_layout_sweeps=0)
+    # Regime: off the cold tiling, and a real energy gap.
+    assert _layout(stuck[(0, 0)].C1) != _layout(cold[(0, 0)].C1), name
+    assert abs(_energy(A, B, stuck) - E_dense) > 1e-7, name
+
+    calls = _count_eager(monkeypatch)
+    envs, info = _run(A, B, case.chi, env_init=stuck)
+    assert len(calls) >= 1, (name, len(calls))
+    assert info.converged, (name, info)
+    assert abs(_energy(A, B, envs) - E_dense) < 1e-10, name
 
 
 def test_a_warm_start_from_the_frozen_layout_still_adapts(case, monkeypatch):
