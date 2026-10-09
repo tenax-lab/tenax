@@ -662,6 +662,7 @@ _FILE_MARKERS = {
     "test_projector_backward_dispatch.py": "core",
     "test_svd_adjoint_fd_750.py": "core",
     "test_symmetric_custom_vjp.py": "core",
+    "test_symmetric_spin_models.py": "core",  # 7 tests ~6.15s
     "test_truncated_lowrank_svd.py": "core",
     #
     # Tier B, part 2 -- CTM structural invariants (7 files, +47 gate tests,
