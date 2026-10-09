@@ -146,6 +146,16 @@ def test_optimize_gs_ad_checks_now_apply(spy):
     assert spy == []
 
 
+def test_implicit_ad_config_checks_now_apply(spy):
+    """Implicit AD with an eigh projector is refused by optimize_gs_ad; the
+    old direct call ran it unchecked (Codex review of #1094)."""
+    cfg = _cfg(gs_implicit_ad=True)
+    cfg = replace(cfg, ctm=replace(cfg.ctm, projector_method="eigh"))
+    with pytest.raises(ValueError, match="projector_method"):
+        iom.optimize_fpeps_ad(spinless_fermion_gate(_FCFG), _A(), cfg)
+    assert spy == []
+
+
 @pytest.mark.slow
 def test_2site_end_to_end_returns_the_pair():
     """One real 2-site step: the result is the pair, not one uniform tensor."""
