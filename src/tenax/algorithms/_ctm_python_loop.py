@@ -14,11 +14,13 @@ __all__ = [
     "python_loop_ctm_converge",
 ]
 
+import warnings
 from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING
 
 import jax
+import numpy as np
 
 if TYPE_CHECKING:
     from jax.sharding import Mesh
@@ -40,7 +42,7 @@ from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
-from tenax.core.tensor import Tensor
+from tenax.core.tensor import SymmetricTensor, Tensor
 
 # Process-lifetime cache so repeat calls with the same neighbors dict reuse
 # the same compiled @jit'd ``_step`` function.  Without this, every callsite
@@ -118,24 +120,143 @@ def _make_jit_ctm_step(
         projector_backward: str = "auto",
         chunk_size: int | None = None,
     ) -> tuple[dict[Coord, CTMTensorEnv], jax.Array, jax.Array]:
-        double_layers = {
-            c: _build_double_layer_tensor(A) for c, A in site_tensors.items()
-        }
-        return _ctm_tensor_sweep_multisite(
+        return _ctm_sweep(
+            site_tensors,
             envs,
-            double_layers,
-            neighbors,
-            chi,
-            renormalize,
-            projector_method,
-            projector_backward=projector_backward,
+            neighbors=neighbors,
             recipe=recipe,
             device_mesh=device_mesh,
+            chi=chi,
+            projector_method=projector_method,
+            renormalize=renormalize,
+            projector_backward=projector_backward,
             chunk_size=chunk_size,
         )
 
     _JIT_STEP_CACHE[cache_key] = _step
     return _step
+
+
+def _ctm_sweep(
+    site_tensors: dict[Coord, Tensor],
+    envs: dict[Coord, CTMTensorEnv],
+    *,
+    neighbors: dict[Coord, dict[str, Coord]],
+    recipe: str,
+    device_mesh,
+    chi: int,
+    projector_method: str,
+    renormalize: bool,
+    projector_backward: str,
+    chunk_size: int | None,
+) -> tuple[dict[Coord, CTMTensorEnv], jax.Array, jax.Array]:
+    """One CTM sweep: the body that ``_make_jit_ctm_step`` jits.
+
+    Called directly (not jitted) by the #1098 eager layout phase.
+    """
+    double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
+    return _ctm_tensor_sweep_multisite(
+        envs,
+        double_layers,
+        neighbors,
+        chi,
+        renormalize,
+        projector_method,
+        projector_backward=projector_backward,
+        recipe=recipe,
+        device_mesh=device_mesh,
+        chunk_size=chunk_size,
+    )
+
+
+# Labels of the D² legs of the edge tensors (``CTMTensorEnv``).  Every other
+# env leg is a chi leg.
+_D2_LEG_LABELS = frozenset({"u2", "r2", "d2", "l2"})
+
+
+def _chi_layout(envs: dict[Coord, CTMTensorEnv]) -> tuple:
+    """Per-sector ``(charge, size)`` of every chi leg of every env tensor (#1098).
+
+    The layout of a ``SymmetricTensor`` chi leg is what the traced projector
+    can never change (it reuses the leg's sector sizes, #929).  Dense tensors
+    have no layout and contribute nothing.
+    """
+    out = []
+    for c in sorted(envs):
+        for field, t in zip(envs[c]._fields, envs[c]):
+            if not isinstance(t, SymmetricTensor):
+                continue
+            for ix in t.indices:
+                if ix.label in _D2_LEG_LABELS:
+                    continue
+                pairs = zip(
+                    np.asarray(ix.sectors).tolist(),
+                    np.asarray(ix.multiplicities).tolist(),
+                )
+                out.append((c, field, ix.label, tuple(sorted(pairs))))
+    return tuple(out)
+
+
+def _needs_eager_layout_phase(site_tensors, env_init) -> bool:
+    """True for concrete symmetric input: the only case the traced cut freezes.
+
+    Dense input has no chi-leg layout, so it never enters the eager phase and
+    runs the same compiled step as before (#1098).  Under an enclosing trace
+    the sweep cannot run eagerly, so the phase is skipped there too.
+    """
+    leaves = jax.tree.leaves(
+        (site_tensors, env_init),
+        is_leaf=lambda x: isinstance(x, Tensor),
+    )
+    if not any(isinstance(x, SymmetricTensor) for x in leaves):
+        return False
+    arrays = jax.tree.leaves((site_tensors, env_init))
+    return not any(isinstance(a, jax.core.Tracer) for a in arrays)
+
+
+def _eager_ctm_sweep(site_tensors, envs, **kwargs):
+    """One un-jitted CTM sweep (#1098).
+
+    Outside ``jax.jit`` the projector sees concrete blocks and takes its eager
+    branch (global top-chi, may add or drop charge sectors).  Module-level so
+    tests can count eager sweeps.
+    """
+    return _ctm_sweep(site_tensors, envs, **kwargs)
+
+
+def _adapt_symmetric_layout(
+    site_tensors,
+    envs,
+    *,
+    max_sweeps: int,
+    gauge_pair,
+    **sweep_kwargs,
+):
+    """Eager sweeps until the chi-leg layout stops changing (#1098).
+
+    Every sweep of the jitted ``step`` sizes each sector from the leg it
+    overwrites (``_seam_chi_charges``, #929), so a jitted symmetric CTM keeps
+    whatever layout it starts with -- for a cold start, the tiling of
+    ``_tile_fused_to_chi``.  This phase lets the eager projector choose the
+    layout; the jitted sweeps that follow inherit it.
+
+    A sweep counts as stable when its output layout equals its input layout.
+    The gauge is applied only on a stable sweep (it pairs legs index by index,
+    which needs one layout); mixing is not applied here.
+
+    Returns ``(envs, n_sweeps, stable)``.
+    """
+    prev = _chi_layout(envs)
+    for n in range(1, max_sweeps + 1):
+        start = envs
+        envs, _, _ = _eager_ctm_sweep(site_tensors, start, **sweep_kwargs)
+        layout = _chi_layout(envs)
+        if layout == prev:
+            if gauge_pair is not None:
+                envs = gauge_pair(envs, start)
+            return envs, n, True
+        prev = layout
+    return envs, max_sweeps, False
 
 
 def python_loop_ctm_converge(
@@ -164,6 +285,7 @@ def python_loop_ctm_converge(
     ctm_chunk_size: int | None = None,
     forward_gauge: str | None = None,
     mixing: float = 0.0,
+    eager_layout_sweeps: int = 20,
     _recipe_warning_emitted: bool = False,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM to convergence using a Python for-loop over JIT'd sweeps.
@@ -171,6 +293,12 @@ def python_loop_ctm_converge(
     Each sweep is JIT-compiled via ``_make_jit_ctm_step``; convergence
     checking happens in Python so no recompilation is needed when
     tolerances change.
+
+    With ``SymmetricTensor`` input the first sweeps run eagerly (see
+    ``eager_layout_sweeps``): a jitted sweep cannot change the charge-sector
+    layout of the chi legs (#929), so a cold start would otherwise keep the
+    initial tiling and converge to the energy of that restricted layout
+    (#1098).
 
     Args:
         site_tensors:      Map from coordinate to iPEPS site tensor.
@@ -242,6 +370,25 @@ def python_loop_ctm_converge(
                            ``gauge_fix_fn``).  See
                            ``CTMConvergeInfo.step_multiplier`` for when to
                            reach for it.
+        eager_layout_sweeps: Maximum number of eager (un-jitted) sweeps run
+                           before the jitted ones when any site or env tensor
+                           is a ``SymmetricTensor`` (#1098).  The eager
+                           projector keeps the global top-``chi`` singular
+                           values and so can move chi slots between charge
+                           sectors; the jitted projector keeps each sector's
+                           size (#929).  The eager phase ends at the first
+                           sweep that leaves the per-sector sizes of every
+                           chi leg unchanged -- after one sweep for a warm
+                           start whose layout has settled.  If the layout is
+                           still changing after this many sweeps, a warning
+                           is issued and the jitted sweeps continue from
+                           there.  Eager sweeps count toward ``max_iter``,
+                           ``min_iter`` and the returned iteration counts.
+                           The gauge is applied on the final (stable) eager
+                           sweep only, and ``mixing`` only to jitted sweeps.
+                           Dense input never enters this phase.  ``0``
+                           disables it (the pre-#1098 behaviour).  Applied
+                           per stage under ``chi_ramp``.
 
     Returns:
         ``(envs, CTMConvergeInfo)`` — converged environments and info.
@@ -277,6 +424,10 @@ def python_loop_ctm_converge(
     # reopening the first.  (#921 review r4.)
     if recipe == "1x1" and not _recipe_warning_emitted:
         _warn_recipe_1x1_deprecated("python_loop_ctm_converge")
+    if eager_layout_sweeps < 0:
+        raise ValueError(
+            f"eager_layout_sweeps must be >= 0, got {eager_layout_sweeps!r}"
+        )
 
     # Reject ``ctmrg_heuristic_increase_chi`` + ``chi_ramp`` BEFORE the
     # chi_ramp early-return, otherwise the bump flag is silently ignored
@@ -311,6 +462,7 @@ def python_loop_ctm_converge(
             device_mesh=device_mesh,
             ctm_chunk_size=ctm_chunk_size,
             mixing=mixing,
+            eager_layout_sweeps=eager_layout_sweeps,
         )
 
     # Build the JIT'd step function (captures neighbors + device_mesh in closure)
@@ -391,6 +543,37 @@ def python_loop_ctm_converge(
                 projector_backward=projector_backward,
             )
 
+    # #1098: let eager sweeps choose the symmetric chi layout; the jitted
+    # sweeps below keep the layout they are handed (#929).
+    eager = 0
+    eager_budget = min(eager_layout_sweeps, max_iter - warmup)
+    if eager_budget > 0 and _needs_eager_layout_phase(site_tensors, envs):
+        envs, eager, stable = _adapt_symmetric_layout(
+            site_tensors,
+            envs,
+            max_sweeps=eager_budget,
+            gauge_pair=_gauge_pair,
+            neighbors=neighbors,
+            recipe=recipe,
+            device_mesh=device_mesh,
+            chi=chi_current,
+            projector_method=projector_method,
+            renormalize=renormalize,
+            projector_backward=projector_backward,
+            chunk_size=ctm_chunk_size,
+        )
+        if not stable and eager == eager_layout_sweeps:
+            warnings.warn(
+                "python_loop_ctm_converge: the symmetric chi-leg layout was "
+                f"still changing after eager_layout_sweeps={eager_layout_sweeps} "
+                "eager sweeps (#1098).  The jitted sweeps continue from the "
+                "last eager environment and keep its layout, so the result "
+                "may be the energy of a restricted layout; raise "
+                "eager_layout_sweeps.",
+                stacklevel=2,
+            )
+    pre = warmup + eager
+
     # Run the bump-aware loop via shared helper.
     result = _run_ctm_loop_with_bump(
         jit_step,
@@ -405,8 +588,8 @@ def python_loop_ctm_converge(
         renormalize=renormalize,
         projector_backward=projector_backward,
         gauge_fix_fn=_gauge_pair,
-        max_iter=max_iter - warmup,
-        min_iter=max(0, min_iter - warmup),
+        max_iter=max_iter - pre,
+        min_iter=max(0, min_iter - pre),
         conv_tol=conv_tol,
         conv_method=conv_method,
         plateau_patience=plateau_patience,
@@ -415,12 +598,12 @@ def python_loop_ctm_converge(
 
     return result.envs, CTMConvergeInfo(
         converged=result.converged,
-        iterations=warmup + result.iterations,
+        iterations=pre + result.iterations,
         sv_diff=result.sv_diff,
         max_truncation_error=result.max_truncation_error,
         max_smallest_S=result.max_smallest_S,
         final_chi=result.final_chi,
-        best_iteration=warmup + result.best_iteration,
+        best_iteration=pre + result.best_iteration,
         step_multiplier=result.step_multiplier,
     )
 
@@ -446,6 +629,7 @@ def _python_loop_chi_ramp(
     device_mesh=None,
     ctm_chunk_size: int | None = None,
     mixing: float = 0.0,
+    eager_layout_sweeps: int = 20,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM with chi-ramp schedule."""
     envs = env_init
@@ -505,6 +689,7 @@ def _python_loop_chi_ramp(
             device_mesh=device_mesh,
             ctm_chunk_size=ctm_chunk_size,
             mixing=mixing,
+            eager_layout_sweeps=eager_layout_sweeps,
         )
         prev_chi = stage_chi
 

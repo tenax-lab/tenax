@@ -444,7 +444,30 @@
 
 ### Fixed
 
-- **Hager-Zhang `phi` probes warm-start CTM from the step's env**
+- **A symmetric `python_loop_ctm_converge` now chooses its chi-leg charge
+  layout** (#1098, `_ctm_python_loop.py`).  Every sweep ran under
+  `jax.jit`, and for `SymmetricTensor` input the jitted 2x2 projector keeps
+  each charge sector's size from the leg it overwrites (#929).  So a cold
+  start never left the initial tiling (the D² fused charges padded with
+  q=0), and the converged energy was the energy of that restricted layout.
+  Now, for symmetric input, eager (un-jitted) sweeps run first, until a
+  sweep leaves the per-sector sizes of every chi leg unchanged; the jitted
+  sweeps then keep that layout.  New keyword `eager_layout_sweeps` (default
+  20, `0` = old behaviour) caps the eager phase and warns if the layout is
+  still changing at the cap.  Eager sweeps count toward `max_iter` and the
+  returned iteration counts.  Dense input is unchanged.  This reaches the
+  optimizer's symmetric warm starts, line-search probes and final
+  evaluations, which all call this function.  Measured (D=2 XXZ Delta=0.3,
+  2-site SU, chi=8, cold start), symmetric minus dense energy: U(1)-Sz
+  6.9e-6 -> 5.8e-11, Z2 8.3e-5 -> 0.0.  (The U(1) cut is a three-fold
+  degenerate set; the 5.8e-11 is which two of the three are kept.)
+  - **Cost.**  An eager sweep compiles each primitive per new block shape.
+    In a fresh process the U(1) cold start above took 105 s (was 9.6 s with
+    the jitted sweeps only), most of it first-use compiles paid once per
+    process; repeated in the same process, it took 4.5 s.  A warm start whose
+    layout has settled runs one eager sweep (about 1.4 s here) before the
+    jitted ones.
+
   (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
   start from the previous probe's env (the #502 write-back), so the env a
   probe at alpha started from depended on the order HZ probed in, and

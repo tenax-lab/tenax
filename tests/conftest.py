@@ -486,6 +486,9 @@ _FILE_MARKERS = {
     "test_ctm_truncation_error.py": "core",
     "test_ctm_paired.py": "algorithm",
     "test_ctm_python_loop.py": "algorithm",
+    # #1098: symmetric python_loop_ctm_converge adapts the chi layout.  Two
+    # 200-step SU fixtures plus eager + jitted CTM runs: well over 20 s on CPU.
+    "test_ctm_symmetric_layout_adapts_1098.py": "algorithm",
     "test_rsvd.py": "core",
     "test_cbe.py": "algorithm",
     "test_lattice.py": "algorithm",

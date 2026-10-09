@@ -416,7 +416,11 @@ def test_the_cold_traced_ctm_is_why_the_seed_exists(frozen_state, eager_envs):
     environment the traced CTM lands on a different sector layout (sizes, not
     basis order -- see ``_layout``).  If this ever fails, the seed is a no-op
     for this fixture and Task 3's first test certifies nothing -- pick a
-    fixture where it matters."""
+    fixture where it matters.
+
+    ``eager_layout_sweeps=0`` (#1098): ``python_loop_ctm_converge`` now runs
+    eager sweeps first and so adapts the layout itself; the traced-only CTM
+    this guard measures is its opt-out."""
     A, B, _, _ = frozen_state
     envs, _ = python_loop_ctm_converge(
         {(0, 0): A, (1, 0): B},
@@ -424,6 +428,7 @@ def test_the_cold_traced_ctm_is_why_the_seed_exists(frozen_state, eager_envs):
         chi=CHI,
         max_iter=50,
         conv_tol=1e-10,
+        eager_layout_sweeps=0,
     )
     assert _layout(envs) != _layout(eager_envs)
 
