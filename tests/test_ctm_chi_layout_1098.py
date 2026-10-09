@@ -1,0 +1,82 @@
+"""#1098: unit tests for ``_chi_layout``, the eager phase's stop criterion.
+
+The layout the jitted projector freezes (#929) is the per-sector
+``(charge, size)`` split of each chi leg -- not its total size, and not the
+order of a tensor's legs.  Hand-built environments, no CTM: core.
+"""
+
+from __future__ import annotations
+
+import jax
+import numpy as np
+
+from tenax.algorithms._ctm_python_loop import _chi_layout
+from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import SymmetricTensor
+
+IN, OUT = FlowDirection.IN, FlowDirection.OUT
+SYM = U1Symmetry()
+D2 = np.array([0, 1, -1, 0], dtype=np.int32)
+
+# (field, (label, flow) per leg); chi legs are every leg but u2/r2/d2/l2.
+_SPECS = {
+    "C1": (("c1_d", IN), ("c1_r", OUT)),
+    "C2": (("c2_l", IN), ("c2_d", OUT)),
+    "C3": (("c3_u", IN), ("c3_l", OUT)),
+    "C4": (("c4_r", OUT), ("c4_u", IN)),
+    "T1": (("t1_l", IN), ("u2", OUT), ("t1_r", OUT)),
+    "T2": (("t2_u", IN), ("r2", IN), ("t2_d", OUT)),
+    "T3": (("t3_r", OUT), ("d2", IN), ("t3_l", IN)),
+    "T4": (("t4_d", OUT), ("l2", OUT), ("t4_u", IN)),
+}
+
+
+def _env(chi_charges, c1_charges=None):
+    """An env whose every chi leg carries ``chi_charges`` (C1: ``c1_charges``)."""
+    key = jax.random.PRNGKey(0)
+    fields = []
+    for field, legs in _SPECS.items():
+        idx = []
+        for label, flow in legs:
+            if label.endswith("2"):
+                q = D2
+            elif field == "C1" and c1_charges is not None:
+                q = c1_charges
+            else:
+                q = chi_charges
+            idx.append(TensorIndex.from_charges(SYM, q.copy(), flow, label=label))
+        key, sub = jax.random.split(key)
+        fields.append(SymmetricTensor.random_normal(tuple(idx), sub))
+    return CTMTensorEnv(*fields)
+
+
+BASE = np.array([-2, 0, 0, 0, 0, 0, 0, 2], dtype=np.int32)  # (-2:1, 0:6, 2:1)
+MOVED = np.array([-4, -2, -2, 0, 0, 0, 2, 2], dtype=np.int32)  # same chi = 8
+
+
+def test_an_equal_total_chi_with_a_different_sector_split_is_a_change():
+    """Kills "compare by total chi": both legs are 8 wide."""
+    a = {(0, 0): _env(BASE)}
+    b = {(0, 0): _env(BASE, c1_charges=MOVED)}
+    assert a[(0, 0)].C1.indices[0].dim == b[(0, 0)].C1.indices[0].dim == 8
+    assert _chi_layout(a) != _chi_layout(b)
+
+
+def test_swapping_a_corners_legs_is_not_a_change():
+    """The cold-init corners come back from a sweep with their two legs in
+    the other order; that alone must not count as a layout change."""
+    env = _env(BASE, c1_charges=MOVED)
+    swapped = env._replace(C1=env.C1.transpose((1, 0)))
+    assert swapped.C1.labels() == ("c1_r", "c1_d")
+    assert _chi_layout({(0, 0): env}) == _chi_layout({(0, 0): swapped})
+
+
+def test_the_layout_ignores_the_d2_legs_and_dense_tensors():
+    env = _env(BASE)
+    layout = _chi_layout({(0, 0): env})
+    labels = {entry[2] for entry in layout}
+    assert labels.isdisjoint({"u2", "r2", "d2", "l2"})
+    assert len(layout) == 4 * 2 + 4 * 2  # two chi legs per corner and edge
+    assert _chi_layout({(0, 0): CTMTensorEnv(*[None] * 8)}) == ()

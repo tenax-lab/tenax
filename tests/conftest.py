@@ -489,6 +489,8 @@ _FILE_MARKERS = {
     # #1098: symmetric python_loop_ctm_converge adapts the chi layout.  Two
     # 200-step SU fixtures plus eager + jitted CTM runs: well over 20 s on CPU.
     "test_ctm_symmetric_layout_adapts_1098.py": "algorithm",
+    # #1098: hand-built envs for the eager phase's _chi_layout criterion, ~1 s.
+    "test_ctm_chi_layout_1098.py": "core",
     "test_rsvd.py": "core",
     "test_cbe.py": "algorithm",
     "test_lattice.py": "algorithm",
