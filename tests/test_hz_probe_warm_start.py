@@ -4,10 +4,10 @@
 ``dphi`` probe at the same alpha starts from it (#502).  The next ``phi`` probe
 read that cache too, so the warm start followed HZ's probe sequence, not the
 line through alpha = 0.  On 2-site D=3 Heisenberg (chi=16) at a stall state,
-HZ bisected down from alpha = 1 and every probe at alpha <= 2.4e-4 started
-from an env on another CTM fixed point: it did not converge in 100 sweeps and
-was rejected as +inf (#1059), while a warm start from the alpha = 0 env
-converged in 10 sweeps to the decrease that dphi0 predicts.
+HZ bisected down from alpha = 1 and every probe at alpha <= 2.4e-4, warm-started
+from the previous probe's env, did not converge in 100 sweeps and was rejected
+as +inf (#1059), while a warm start from the alpha = 0 env converged in 10
+sweeps to the decrease that dphi0 predicts.
 
 Mechanism tests: a scripted line search calls phi at several alphas and the
 spied CTM records the ``env_init`` each forward receives.

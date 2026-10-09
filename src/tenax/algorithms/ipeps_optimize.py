@@ -2796,8 +2796,8 @@ def _optimize_gs_ad_tensor(
                     # Warm-start from the step's env, not the last probe's (which the
                     # #502 write-back left in the cache): dphi0 is the slope of the
                     # branch through alpha = 0, and an env carried down from a larger
-                    # alpha can sit on another CTM fixed point, fail to converge, and
-                    # be rejected as +inf (#1059) right where the decrease is.  dphi
+                    # alpha can fail to converge in the sweep budget and be rejected
+                    # as +inf (#1059) right where the decrease is.  dphi
                     # at this alpha still reuses this probe's env.
                     _restore_env_cache_after_line_search(_env_cache, _ls_env_snap)
                     return loss_fn_fwd(trial)
@@ -4744,8 +4744,8 @@ def _optimize_gs_ad_tensor_2site(
                         # Warm-start from the step's env, not the last probe's (which the
                         # #502 write-back left in the cache): dphi0 is the slope of the
                         # branch through alpha = 0, and an env carried down from a larger
-                        # alpha can sit on another CTM fixed point, fail to converge, and
-                        # be rejected as +inf (#1059) right where the decrease is.  dphi
+                        # alpha can fail to converge in the sweep budget and be rejected
+                        # as +inf (#1059) right where the decrease is.  dphi
                         # at this alpha still reuses this probe's env.
                         _restore_env_cache_after_line_search(
                             _env_cache_2s, _ls_env_snap
@@ -5864,8 +5864,8 @@ def _optimize_gs_ad_multisite(
                     # Warm-start from the step's env, not the last probe's (which the
                     # #502 write-back left in the cache): dphi0 is the slope of the
                     # branch through alpha = 0, and an env carried down from a larger
-                    # alpha can sit on another CTM fixed point, fail to converge, and
-                    # be rejected as +inf (#1059) right where the decrease is.  dphi
+                    # alpha can fail to converge in the sweep budget and be rejected
+                    # as +inf (#1059) right where the decrease is.  dphi
                     # at this alpha still reuses this probe's env.
                     _restore_env_cache_after_line_search(_env_cache, _ls_env_snap)
                     return loss_fn_fwd(trial)
