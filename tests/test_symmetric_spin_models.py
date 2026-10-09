@@ -33,6 +33,11 @@ def test_gate_equals_the_dense_xxz_gate(build, delta):
     )
     _conserves(g)
     assert len(g.blocks) > 1
+    # Check physical charges
+    if build is xxz_gate_u1sz:
+        assert set(np.asarray(g.indices[0].charges).tolist()) == {1, -1}
+    else:  # xxz_gate_z2
+        assert np.asarray(g.indices[0].charges).tolist() == [0, 1]
 
 
 def test_z2_physical_charges_are_down_spin_parity():
@@ -45,6 +50,16 @@ def test_z2_pair_is_symmetric_and_blocked():
     for t in (A, B):
         assert isinstance(t, SymmetricTensor)
         assert [ix.label for ix in t.indices] == ["u", "d", "l", "r", "phys"]
+        # Check flows: (u=OUT(-1), d=IN(1), l=OUT(-1), r=IN(1), phys=IN(1))
+        flows = [int(ix.flow.value) for ix in t.indices]
+        assert flows == [-1, 1, -1, 1, 1]
+        # Check virtual charges [0, 1] (D=2)
+        for label in ["u", "d", "l", "r"]:
+            idx = next(i for i, ix in enumerate(t.indices) if ix.label == label)
+            assert np.asarray(t.indices[idx].charges).tolist() == [0, 1]
+        # Check physical charges [0, 1]
+        phys_idx = 4
+        assert np.asarray(t.indices[phys_idx].charges).tolist() == [0, 1]
         assert len(t.blocks) > 1
         _conserves(t)
 
