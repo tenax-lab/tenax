@@ -31,6 +31,18 @@ def is_fermionic(t) -> bool:
     return isinstance(t, SymmetricTensor) and _is_graded(t)
 
 
+def site_tensors_of(A_init) -> list:
+    """The site tensors in an optimizer ``A_init``: one tensor, a tuple of
+    them, or a ``dict`` of them.  ``None`` gives ``[]``."""
+    if A_init is None:
+        return []
+    if isinstance(A_init, dict):
+        return list(A_init.values())
+    if isinstance(A_init, (tuple, list)):
+        return list(A_init)
+    return [A_init]
+
+
 def contract(a, b, *, output_labels=None):
     """Pairwise contraction on shared labels: graded when either operand is
     fermionic, production's ``contract`` otherwise.

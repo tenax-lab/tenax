@@ -4,6 +4,24 @@
 
 ### Behavior Changes
 
+- **Fermionic input is refused where its signs would be dropped**
+  (#1059 findings 2 and 3).  Grading lives in the tensor type, so a
+  fermionic tensor made dense, or contracted without signs, silently
+  becomes a hard-core boson: the run optimised the boson model and
+  reported its energy as the fermionic one.  `NotImplementedError` now
+  fires, before any tensor work, for:
+  - `gs_c4v=True` with a fermionic gate or site (1-site and 2-site): the
+    C4v branches rebuild the site from a dense C4v basis;
+  - any root-implicit `ctm_ad_mode` with a fermionic gate or site:
+    `"root_implicit_symmetric"` contracts its graded double layer without
+    signs, and the dense engines make the gate dense.  The check sits in
+    `optimize_gs_ad_root_implicit`, so direct callers get it too;
+  - a fermionic gate with sites that are not all fermionic, including
+    `A_init=None`, which built a random dense site.  Pass `FermionParity`
+    `SymmetricTensor`s, or use `optimize_fpeps_ad` with an `FPEPSConfig`.
+
+  `optimize_fpeps_ad` runs the same checks.
+
 - **The 1-site metric L-BFGS now has a memory.**  On the 1-site
   `optimize_gs_ad` path the metric L-BFGS built its curvature pair from
   the initial tensor, not the current iterate, so `s = 0` at every step and
