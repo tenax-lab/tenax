@@ -281,7 +281,7 @@ def test_the_cap_warns_and_the_eager_sweeps_count_toward_max_iter(case, monkeypa
     monkeypatch.setattr(cpl, "_run_ctm_loop_with_bump", _loop_spy)
     with pytest.warns(UserWarning, match=r"eager_layout_sweeps=1 .*#1098"):
         _, info = _run(
-            A, B, max_iter=4, min_iter=0, conv_tol=0.0, eager_layout_sweeps=1
+            A, B, case.chi, max_iter=4, min_iter=0, conv_tol=0.0, eager_layout_sweeps=1
         )
     # 1 eager sweep + 3 jitted sweeps: the eager one is inside the budget and
     # inside the reported counts.

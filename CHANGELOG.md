@@ -450,23 +450,32 @@
   each charge sector's size from the leg it overwrites (#929).  So a cold
   start never left the initial tiling (the D² fused charges padded with
   q=0), and the converged energy was the energy of that restricted layout.
-  Now, for symmetric input, eager (un-jitted) sweeps run first, until two
-  consecutive sweeps give every chi leg the same per-sector sizes; the
-  jitted sweeps then keep that layout.  New keyword `eager_layout_sweeps` (default
-  20, `0` = old behaviour) caps the eager phase and warns if the layout is
-  still changing at the cap.  Eager sweeps count toward `max_iter` and the
+  Now, for symmetric input, eager (un-jitted) sweeps run first and choose
+  the layout; the jitted sweeps then keep it.  A cold start (or an env with
+  the cold-init layout) stops when two consecutive eager sweeps agree; a
+  warm start already off the init tiling stops after one sweep that returns
+  its layout.  Eager outputs are put in ascending-charge order along each
+  chi leg, so the jitted step does not recompile per call.  New keyword
+  `eager_layout_sweeps` (default 20, `0` = old behaviour) caps the eager
+  phase; it warns if the layout is still changing when the cap or
+  `max_iter` ends the phase.  Eager sweeps count toward `max_iter` and the
   returned iteration counts.  Dense input is unchanged.  This reaches the
   optimizer's symmetric warm starts, line-search probes and final
   evaluations, which all call this function.  Measured (D=2 XXZ Delta=0.3,
-  2-site SU, chi=8, cold start), symmetric minus dense energy: U(1)-Sz
-  6.9e-6 -> 5.8e-11, Z2 8.3e-5 -> 0.0.  (The U(1) cut is a three-fold
-  degenerate set; the 5.8e-11 is which two of the three are kept.)
-  - **Cost.**  An eager sweep compiles each primitive per new block shape.
-    In a fresh process the U(1) cold start above took 105 s (was 9.6 s with
-    the jitted sweeps only), most of it first-use compiles paid once per
-    process; repeated in the same process, it took 4.5 s.  A warm start whose
-    layout has settled runs two eager sweeps (about 1.4 s each here) before
-    the jitted ones.
+  2-site SU, cold start), symmetric minus dense energy: U(1)-Sz chi=6
+  6.6e-6 -> 1e-16, chi=8 6.9e-6 -> 5.8e-11 (a three-fold degenerate cut:
+  the residual is which two of the three are kept); Z2 chi=8 8.3e-5 -> 0.0.
+  - **Cost.**  An eager sweep runs op by op (about 1.8 s per warm call at
+    D=2 chi=8 on CPU, against ~0.05 s jitted) and compiles each primitive
+    per new block shape on first use.  In a 10-step symmetric 2-site
+    `optimize_gs_ad` (U(1), D=2, chi=8, CPU) the steady-state step took
+    7-15 s against 1.3-4.7 s before, with no per-step recompile of the
+    CTM step.  Step 2 took 379 s against 15 s: the first AD step still ran
+    on the cold, frozen layout (the implicit-AD forward is not seeded from
+    this function), and step 2 is the first on the adapted layout.  Total
+    804 s against 230 s.  Final energy -0.5024173361 against -0.5023729185.
+  - **Not covered:** chi slots added by the in-loop chi bump
+    (`ctmrg_heuristic_increase_chi`) keep a frozen layout.
 
 - **Hager-Zhang `phi` probes warm-start CTM from the step's env**
   (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
