@@ -80,11 +80,17 @@ def _corner_values(t: Tensor) -> np.ndarray:
 
 
 def _cut_gap(envs: dict, chi: int) -> float:
+    """Smallest relative gap ``(s[chi-1] - s[chi]) / s[chi-1]`` over all corners.
+
+    A corner whose ``s[chi-1] <= 1e-12 * s[0]`` has no weight at the cut (its
+    spectrum is rank-deficient, and values that small are roundoff), so it is
+    skipped.  If every corner is skipped, the result is ``inf``.
+    """
     gaps = []
     for env in envs.values():
         for field in ("C1", "C2", "C3", "C4"):
             s = _corner_values(getattr(env, field))
-            if len(s) > chi and s[chi - 1] > 0:
+            if len(s) > chi and s[chi - 1] > 1e-12 * s[0]:
                 gaps.append((s[chi - 1] - s[chi]) / s[chi - 1])
     return float(min(gaps)) if gaps else float("inf")
 
