@@ -31,6 +31,7 @@ import pytest
 from tenax.algorithms import _ctm_energy_ad as cea
 from tenax.algorithms._cache_fingerprint import (
     _MAX_HASHED_ELEMENTS,
+    _key_numpy,
     cache_key_part,
     declare_cache_key,
     lru_get,
@@ -427,6 +428,19 @@ def test_zero_dimensional_shape_is_part_of_the_array_key():
     x = jnp.asarray(2.0, dtype=jnp.float64)
     assert _key(x) != _key(x.reshape(1))
     assert _key(x) == _key(jnp.asarray(2.0, dtype=jnp.float64))
+
+
+def test_float8_dtypes_get_different_keys():
+    """``dtype.str`` is ``"<V1"`` for every float8 variant (Codex review of
+    #1090); equal bytes in different float8 types must not share a key."""
+    a = jnp.array([0, 1], dtype=jnp.float8_e4m3fnuz)
+    b = jax.lax.bitcast_convert_type(a, jnp.float8_e5m2fnuz)
+    assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+    assert np.asarray(a).dtype.str == np.asarray(b).dtype.str
+    assert _key(a) != _key(b)
+    assert _key(a) == _key(jnp.array([0, 1], dtype=jnp.float8_e4m3fnuz))
+    # The same on the NumPy-inside-a-tenax-object path.
+    assert _key_numpy(np.asarray(a)) != _key_numpy(np.asarray(b))
 
 
 def test_placement_is_part_of_the_array_key():

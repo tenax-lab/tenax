@@ -479,7 +479,7 @@
   key now uses values where the value is the whole story
   (`_cache_fingerprint.py`): data -- Python scalars by exact type (floats
   by bit pattern), strings, tuples, lists, dicts in order, `jax.Array`s
-  (shape, dtype, weak-type bit, placement -- `committed` and `sharding` --,
+  (shape, exact dtype, weak-type bit, placement -- `committed` and `sharding` --,
   contents), and tenax-owned types walked
   field by field, NumPy metadata inside them included (`TensorIndex.__eq__`
   ignores `fuse_info`, so equality is never trusted)

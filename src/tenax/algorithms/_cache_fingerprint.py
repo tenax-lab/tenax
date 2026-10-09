@@ -232,7 +232,10 @@ def _key_numpy(x):
         "np",
         type(x).__name__,
         shape,
-        a.dtype.str,
+        # The dtype itself, not ``dtype.str``: the string is not unique for
+        # ml_dtypes types (every float8 variant is ``"<V1"``).  A dtype hashes
+        # and compares exactly, byte order and fields included.
+        a.dtype,
         hashlib.sha1(a.tobytes()).hexdigest(),
     )
 
@@ -256,7 +259,7 @@ def _key_array(x):
     return (
         "arr",
         shape,
-        a.dtype.str,
+        a.dtype,  # not ``dtype.str``; see ``_key_numpy``
         bool(x.weak_type),
         getattr(x, "committed", None),
         sharding,
