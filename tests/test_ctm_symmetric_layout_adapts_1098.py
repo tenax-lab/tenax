@@ -252,6 +252,19 @@ def test_a_warm_start_from_the_frozen_layout_still_adapts(case, monkeypatch):
     assert abs(_energy(A, B, envs) - E_dense) < 1e-10, name
 
 
+def test_a_warm_start_from_the_cold_init_env_still_adapts(case):
+    """Requirement 4, the rank-1 case: a caller that passes the cold init
+    itself as ``env_init`` (as the envs_init seeding tests do).  From it the
+    first Z2 eager sweep returns the initial tiling unchanged, so a one-sweep
+    "output equals input" rule would stop on the frozen layout."""
+    name, A, B, E_dense = case.name, case.A, case.B, case.E_dense
+    cold = {(0, 0): initialize_ctm_tensor_env(A, case.chi)}
+    cold[(1, 0)] = initialize_ctm_tensor_env(B, case.chi)
+    envs, info = _run(A, B, case.chi, env_init=cold)
+    assert info.converged, (name, info)
+    assert abs(_energy(A, B, envs) - E_dense) < 1e-10, name
+
+
 def test_the_dense_path_never_enters_the_eager_phase(case, monkeypatch):
     """Requirement: dense input keeps its behaviour and its compiled code."""
     Ad, Bd, E_dense = case.Ad, case.Bd, case.E_dense
