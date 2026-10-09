@@ -42,6 +42,7 @@ from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
+from tenax.core.index import TensorIndex
 from tenax.core.tensor import SymmetricTensor, Tensor
 
 # Process-lifetime cache so repeat calls with the same neighbors dict reuse
@@ -199,6 +200,80 @@ def _chi_layout(envs: dict[Coord, CTMTensorEnv]) -> tuple:
     return tuple(sorted(out))
 
 
+def _charge_sorted_chi_legs(t: SymmetricTensor) -> SymmetricTensor:
+    """``t`` with every chi leg's basis in ascending-charge order (#1098).
+
+    The eager projector orders a new chi bond by singular value, so the charge
+    *sequence* along the leg depends on the values: two eager runs with the
+    same layout give different ``TensorIndex`` aux data, and every jitted
+    consumer (``_step``, the bond-phase gauge) recompiles.  The jitted
+    projector and the cold init emit the bond in ascending-charge order.
+
+    A stable sort by charge keeps the order inside each sector, and blocks
+    are stored per sector, so only the index metadata changes: this is a
+    faithful relabelling of the dense basis (the same one on both ends of a
+    bond, which carry the same charge list, #905), and the block data is
+    reused as is.
+    """
+    new_indices = []
+    changed = False
+    for ix in t.indices:
+        if ix.label in _D2_LEG_LABELS or getattr(ix, "fuse_info", None) is not None:
+            new_indices.append(ix)
+            continue
+        q = np.asarray(ix.charges)
+        q_sorted = np.sort(q, kind="stable")
+        if np.array_equal(q, q_sorted):
+            new_indices.append(ix)
+            continue
+        changed = True
+        new_indices.append(
+            TensorIndex.from_charges(ix.symmetry, q_sorted, ix.flow, label=ix.label)
+        )
+    if not changed:
+        return t
+    return SymmetricTensor._raw(
+        indices=tuple(new_indices),
+        data=t._data,
+        block_keys=t._block_keys,
+        block_shapes=t._block_shapes,
+        block_offsets=t._block_offsets,
+    )
+
+
+def _charge_sorted_envs(envs: dict[Coord, CTMTensorEnv]) -> dict[Coord, CTMTensorEnv]:
+    """Apply :func:`_charge_sorted_chi_legs` to every symmetric env tensor."""
+    return {
+        c: type(env)(
+            *(
+                _charge_sorted_chi_legs(t) if isinstance(t, SymmetricTensor) else t
+                for t in env
+            )
+        )
+        for c, env in envs.items()
+    }
+
+
+# Layout of the cold init, per (site index metadata, chi); the init's chi
+# charges are a function of the site legs and chi alone.
+_COLD_LAYOUT_CACHE: dict = {}
+
+
+def _cold_init_layout(site_tensors: dict[Coord, Tensor], chi: int) -> tuple:
+    """``_chi_layout`` of ``initialize_ctm_tensor_env`` for these sites."""
+    key = (
+        chi,
+        tuple((c, tuple(site_tensors[c].indices)) for c in sorted(site_tensors)),
+    )
+    cached = _COLD_LAYOUT_CACHE.get(key)
+    if cached is None:
+        cached = _chi_layout(
+            {c: initialize_ctm_tensor_env(A, chi) for c, A in site_tensors.items()}
+        )
+        _COLD_LAYOUT_CACHE[key] = cached
+    return cached
+
+
 def _needs_eager_layout_phase(site_tensors, env_init) -> bool:
     """True for concrete symmetric input: the only case the traced cut freezes.
 
@@ -232,6 +307,7 @@ def _adapt_symmetric_layout(
     *,
     max_sweeps: int,
     gauge_pair,
+    compare_input: bool,
     **sweep_kwargs,
 ):
     """Eager sweeps until the chi-leg layout stops changing (#1098).
@@ -242,21 +318,30 @@ def _adapt_symmetric_layout(
     ``_tile_fused_to_chi``.  This phase lets the eager projector choose the
     layout; the jitted sweeps that follow inherit it.
 
-    The phase is stable when two consecutive eager sweeps produce the same
-    layout, so it takes at least two sweeps (a warm start with a settled
-    layout takes exactly two).  The input env's layout is deliberately not
-    one of the pair: from the rank-1 cold init the first sweep can return the
-    initial tiling unchanged and only move it on the second (measured, Z2
-    D=2 chi=8: (0:6, 1:2) -> (0:6, 1:2) -> (0:4, 1:4)).  The gauge is applied
-    only on the stable sweep (it pairs legs index by index, which needs one
-    layout); mixing is not applied here.
+    Stop rule:
+
+    * ``compare_input=True`` (a warm start whose layout is not the cold-init
+      tiling): stable as soon as an eager sweep returns the input's layout, so
+      a settled warm start costs one eager sweep.
+    * ``compare_input=False`` (a cold start, or any env with the cold-init
+      layout): stable when two consecutive eager *outputs* agree; the input
+      does not count.  From the rank-1 cold init the first sweep can return
+      the initial tiling unchanged and only move it on the second (measured,
+      Z2 D=2 chi=8: (0:6, 1:2) -> (0:6, 1:2) -> (0:4, 1:4)).
+
+    Each eager output's chi legs are put in ascending-charge order
+    (:func:`_charge_sorted_envs`), so equal layouts give equal pytree
+    structures and the jitted consumers do not recompile per call.  The gauge
+    is applied only on the stable sweep (it pairs legs index by index, which
+    needs one layout); mixing is not applied here.
 
     Returns ``(envs, n_sweeps, stable)``.
     """
-    prev = None
+    prev = _chi_layout(envs) if compare_input else None
     for n in range(1, max_sweeps + 1):
         start = envs
         envs, _, _ = _eager_ctm_sweep(site_tensors, start, **sweep_kwargs)
+        envs = _charge_sorted_envs(envs)
         layout = _chi_layout(envs)
         if layout == prev:
             if gauge_pair is not None:
@@ -383,21 +468,29 @@ def python_loop_ctm_converge(
                            projector keeps the global top-``chi`` singular
                            values and so can move chi slots between charge
                            sectors; the jitted projector keeps each sector's
-                           size (#929).  The eager phase ends when two
-                           consecutive eager sweeps give every chi leg the
-                           same per-sector sizes -- after two sweeps for a
-                           warm start whose layout has settled (so a value
-                           of 1 can never certify, and always warns).  If
-                           the layout is still changing after this many
-                           sweeps, a warning
-                           is issued and the jitted sweeps continue from
-                           there.  Eager sweeps count toward ``max_iter``,
+                           size (#929).  Stop rule: a warm start whose
+                           layout is off the cold-init tiling stops after
+                           the first eager sweep that returns its layout
+                           (one sweep once settled); a cold start, or an env
+                           with the cold-init layout, stops when two
+                           consecutive eager sweeps agree (so a value of 1
+                           cannot certify it, and warns).  If the layout is
+                           still changing when this cap or ``max_iter`` ends
+                           the phase, a warning is issued and any jitted
+                           sweeps continue from there.  Eager outputs are put
+                           in ascending-charge order along each chi leg, so
+                           the jitted step does not recompile per call.
+                           Eager sweeps count toward ``max_iter``,
                            ``min_iter`` and the returned iteration counts.
                            The gauge is applied on the final (stable) eager
                            sweep only, and ``mixing`` only to jitted sweeps.
                            Dense input never enters this phase.  ``0``
                            disables it (the pre-#1098 behaviour).  Applied
-                           per stage under ``chi_ramp``.
+                           per stage under ``chi_ramp``.  Not covered: chi
+                           slots added by the in-loop chi bump
+                           (``ctmrg_heuristic_increase_chi``) are padded
+                           inside the jitted loop and keep a frozen layout
+                           (follow-up issue to be filed).
 
     Returns:
         ``(envs, CTMConvergeInfo)`` — converged environments and info.
@@ -557,11 +650,17 @@ def python_loop_ctm_converge(
     eager = 0
     eager_budget = min(eager_layout_sweeps, max_iter - warmup)
     if eager_budget > 0 and _needs_eager_layout_phase(site_tensors, envs):
+        # A warm start whose layout is already off the cold-init tiling needs
+        # one eager sweep to confirm it; a cold(-shaped) env needs two.
+        compare_input = env_init is not None and _chi_layout(envs) != _cold_init_layout(
+            site_tensors, chi_current
+        )
         envs, eager, stable = _adapt_symmetric_layout(
             site_tensors,
             envs,
             max_sweeps=eager_budget,
             gauge_pair=_gauge_pair,
+            compare_input=compare_input,
             neighbors=neighbors,
             recipe=recipe,
             device_mesh=device_mesh,
@@ -571,14 +670,19 @@ def python_loop_ctm_converge(
             projector_backward=projector_backward,
             chunk_size=ctm_chunk_size,
         )
-        if not stable and eager == eager_layout_sweeps:
+        if not stable:
+            cause = (
+                f"eager_layout_sweeps={eager_layout_sweeps}"
+                if eager == eager_layout_sweeps
+                else f"the iteration budget (max_iter={max_iter})"
+            )
             warnings.warn(
                 "python_loop_ctm_converge: the symmetric chi-leg layout was "
-                f"still changing after eager_layout_sweeps={eager_layout_sweeps} "
-                "eager sweeps (#1098).  The jitted sweeps continue from the "
+                f"still changing when {cause} ended the eager phase after "
+                f"{eager} sweeps (#1098).  Any jitted sweeps continue from the "
                 "last eager environment and keep its layout, so the result "
                 "may be the energy of a restricted layout; raise "
-                "eager_layout_sweeps.",
+                "eager_layout_sweeps or max_iter.",
                 stacklevel=2,
             )
     pre = warmup + eager
