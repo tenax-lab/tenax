@@ -36,7 +36,7 @@ from tenax.algorithms.ipeps_simple_update import (
 )
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import U1Symmetry
+from tenax.core.symmetry import U1Symmetry, ZnSymmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
@@ -181,6 +181,75 @@ def xxz_gate(delta: float = 1.0, dtype=jnp.float64) -> DenseTensor:
         ),
     )
     return DenseTensor(H.reshape(2, 2, 2, 2), indices)
+
+
+def _xxz_matrix(delta: float, dtype) -> jax.Array:
+    Sz = jnp.array([[0.5, 0.0], [0.0, -0.5]], dtype=dtype)
+    Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]], dtype=dtype)
+    Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]], dtype=dtype)
+    H = delta * jnp.kron(Sz, Sz) + 0.5 * (jnp.kron(Sp, Sm) + jnp.kron(Sm, Sp))
+    return H.reshape(2, 2, 2, 2)
+
+
+def _symmetric_gate(H: jax.Array, sym, charges: np.ndarray) -> SymmetricTensor:
+    indices = (
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="si"),
+        TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="sj"),
+        TensorIndex.from_charges(
+            sym, charges.copy(), FlowDirection.OUT, label="si_out"
+        ),
+        TensorIndex.from_charges(
+            sym, charges.copy(), FlowDirection.OUT, label="sj_out"
+        ),
+    )
+    return SymmetricTensor.from_dense(H, indices)
+
+
+def xxz_gate_u1sz(delta: float = 1.0, dtype=jnp.float64) -> SymmetricTensor:
+    """2-site XXZ Hamiltonian as a U(1)-Sz SymmetricTensor.
+
+    Same numerics as :func:`xxz_gate`; physical charges ``[+1, -1]`` (2*Sz).
+    Unrotated: the sublattice-rotated gate does not conserve Sz (#939).
+    """
+    return _symmetric_gate(
+        _xxz_matrix(delta, dtype), U1Symmetry(), np.array([1, -1], dtype=np.int32)
+    )
+
+
+def xxz_gate_z2(delta: float = 1.0, dtype=jnp.float64) -> SymmetricTensor:
+    """2-site XXZ Hamiltonian as a Z2 SymmetricTensor.
+
+    The Z2 charge is the number of down spins mod 2 (up=0, down=1); the
+    Sz Sz term keeps it and S+S- / S-S+ change it by 0, so XXZ conserves it.
+    """
+    return _symmetric_gate(
+        _xxz_matrix(delta, dtype), ZnSymmetry(2), np.array([0, 1], dtype=np.int32)
+    )
+
+
+def xxz_z2_init_pair(D: int, key: jax.Array) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """Random Z2-symmetric 2-site iPEPS pair ``(A, B)``.
+
+    Legs ``(u, d, l, r, phys)`` with flows as :func:`heisenberg_u1sz_init_pair`;
+    virtual charges alternate ``[0, 1, 0, 1, ...]``, physical ``[0, 1]``.
+    """
+    if D < 2:
+        raise ValueError(f"D must be >= 2 for non-trivial Z2 blocks; got D={D}")
+    sym = ZnSymmetry(2)
+    virt = np.array([i % 2 for i in range(D)], dtype=np.int32)
+    phys = np.array([0, 1], dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="u"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.IN, label="d"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.OUT, label="l"),
+        TensorIndex.from_charges(sym, virt.copy(), FlowDirection.IN, label="r"),
+        TensorIndex.from_charges(sym, phys.copy(), FlowDirection.IN, label="phys"),
+    )
+    kA, kB = jax.random.split(key)
+    return (
+        SymmetricTensor.random_normal(indices, kA),
+        SymmetricTensor.random_normal(indices, kB),
+    )
 
 
 def symmetrize_c4v(A: jax.Array) -> jax.Array:
