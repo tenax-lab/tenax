@@ -45,6 +45,12 @@ Each entry links to its guide page; the full documentation is at [tenax.readthed
 - `xxz_gate_z2` — Z2 block-sparse XXZ with charges `[0, 1]` (spin-down parity).
 - `xxz_z2_init_pair` — Random Z2-symmetric 2-site iPEPS pair.
 
+**CTM chi layout**
+
+- `symmetric_layout_seed(A, B, gate, ctm_cfg)` — converge an eager 2-site CTM, check it with forced sweeps, and return it as `envs_init` (with its layout and a `stable` flag) for AD with a frozen chi sector layout.
+- `layout_of(envs)` — per-sector size of every environment leg.
+- `same_layout(a, b)` — True if two layouts have the same (charge, size) pairs on every leg.
+
 **Classical statistical mechanics**
 
 - **TRG and Gilt-TNR** — coarse-graining of 2D partition functions ([TRG](docs/guide/algorithms/trg.md))
