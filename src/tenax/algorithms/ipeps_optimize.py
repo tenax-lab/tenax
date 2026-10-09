@@ -1237,6 +1237,7 @@ def optimize_gs_ad(
     # Refuse rather than thread: threading would make nine forwards
     # genuinely non-convergent, since '1x1' reaches no fixed point (#911).
     _reject_mislabelled_1x1(config)
+    _refuse_sign_free_fermionic(hamiltonian_gate, A_init, config)
 
     # Root implicit AD (#715).  Placed ahead of the unit-cell branches because
     # the variant (dense 1x1 vs dense cell vs symmetric) is selected from the
@@ -1330,6 +1331,51 @@ def optimize_gs_ad(
 def _use_reference_c4v_path(config: iPEPSConfig) -> bool:
     """Compatibility wrapper around the shared AD policy helper."""
     return use_reference_c4v_path(config)
+
+
+def _refuse_sign_free_fermionic(hamiltonian_gate, A_init, config: iPEPSConfig) -> None:
+    """Refuse fermionic input on a path that would drop its signs (#1059).
+
+    Grading lives in the tensor type: a fermionic ``SymmetricTensor`` made
+    dense, or contracted next to non-fermionic sites, falls silently to
+    hard-core-boson semantics, and the run optimises (and reports) the
+    boson model.  Two such paths:
+
+    - ``gs_c4v=True`` (#1059 finding 2): the 1-site and 2-site C4v branches
+      rebuild the site from a dense C4v basis and make the gate dense.
+    - A fermionic gate with sites that are not fermionic, including
+      ``A_init=None``, which builds a random dense site (or a simple-update
+      one from the dense gate).
+
+    ``ctm_ad_mode="root_implicit_symmetric"`` (finding 3) is refused by its
+    own entry point, ``optimize_gs_ad_root_implicit``.
+    """
+    from tenax.algorithms._ctm_graded import is_fermionic, site_tensors_of
+
+    sites = site_tensors_of(A_init)
+    fermionic_sites = [is_fermionic(t) for t in sites]
+    fermionic = is_fermionic(hamiltonian_gate) or any(fermionic_sites)
+    if not fermionic:
+        return
+    if config.gs_c4v:
+        raise NotImplementedError(
+            "gs_c4v=True is not supported for fermionic tensors (#1059): the "
+            "C4v path rebuilds the site from a dense C4v basis and makes the "
+            "gate dense, which drops the fermionic signs and optimises the "
+            "hard-core-boson model. Use gs_c4v=False."
+        )
+    if is_fermionic(hamiltonian_gate) and not (sites and all(fermionic_sites)):
+        raise NotImplementedError(
+            "A fermionic gate needs fermionic site tensors (#1059): with "
+            + (
+                "A_init=None the optimizer builds a dense site"
+                if not sites
+                else "a non-fermionic site the contractions carry no signs"
+            )
+            + ", and the run optimises the hard-core-boson model. Pass "
+            "FermionParity SymmetricTensors as A_init (optimize_fpeps_ad "
+            "builds them from an FPEPSConfig)."
+        )
 
 
 def _reject_mislabelled_1x1(config: iPEPSConfig) -> None:

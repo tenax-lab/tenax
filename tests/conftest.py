@@ -16,6 +16,9 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor
 _FILE_MARKERS = {
     "test_eps_t_blindness_727.py": "core",
     "test_gs_recipe_explicit_rejection_755.py": "core",
+    # #1059 findings 2 and 3 + fermionic gate on non-fermionic sites: the
+    # refusals fire before any tensor work, and the branch targets are spies.
+    "test_fermionic_refusals_1059.py": "core",
     "test_tensor.py": "core",
     # PR #986 Phase 1: the swap-gate primitive.  Pure block-metadata sign
     # tests, no CTM, ~1s; the graded-transpose cross-check is the mutation

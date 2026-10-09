@@ -431,6 +431,20 @@ def optimize_gs_ad_root_implicit(
     # variant the caller *must* supply the state, so that is a precondition on
     # the call rather than something to discover after converting a gate.
     A_start = _initial_symmetric_tensor(A_init) if symmetric else None
+    if symmetric:
+        from tenax.algorithms._ctm_graded import is_fermionic
+
+        if is_fermionic(A_start) or is_fermionic(hamiltonian_gate):
+            # #1059 finding 3: the engine builds a graded double layer, then
+            # contracts it with the sign-free contractor, so its gradient is
+            # the hard-core-boson one while the final energy is graded.
+            raise NotImplementedError(
+                "ctm_ad_mode='root_implicit_symmetric' is not supported for "
+                "fermionic tensors (#1059): its quadrant contractions carry no "
+                "fermionic signs, so the optimiser would descend the "
+                "hard-core-boson energy. Use the default (fixed-point implicit) "
+                "AD path."
+            )
 
     gate = (
         hamiltonian_gate.todense()
