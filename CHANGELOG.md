@@ -450,9 +450,9 @@
   each charge sector's size from the leg it overwrites (#929).  So a cold
   start never left the initial tiling (the D² fused charges padded with
   q=0), and the converged energy was the energy of that restricted layout.
-  Now, for symmetric input, eager (un-jitted) sweeps run first, until a
-  sweep leaves the per-sector sizes of every chi leg unchanged; the jitted
-  sweeps then keep that layout.  New keyword `eager_layout_sweeps` (default
+  Now, for symmetric input, eager (un-jitted) sweeps run first, until two
+  consecutive sweeps give every chi leg the same per-sector sizes; the
+  jitted sweeps then keep that layout.  New keyword `eager_layout_sweeps` (default
   20, `0` = old behaviour) caps the eager phase and warns if the layout is
   still changing at the cap.  Eager sweeps count toward `max_iter` and the
   returned iteration counts.  Dense input is unchanged.  This reaches the
@@ -465,8 +465,8 @@
     In a fresh process the U(1) cold start above took 105 s (was 9.6 s with
     the jitted sweeps only), most of it first-use compiles paid once per
     process; repeated in the same process, it took 4.5 s.  A warm start whose
-    layout has settled runs one eager sweep (about 1.4 s here) before the
-    jitted ones.
+    layout has settled runs two eager sweeps (about 1.4 s each here) before
+    the jitted ones.
 
   (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
   start from the previous probe's env (the #502 write-back), so the env a

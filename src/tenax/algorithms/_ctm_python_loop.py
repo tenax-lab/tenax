@@ -179,7 +179,9 @@ def _chi_layout(envs: dict[Coord, CTMTensorEnv]) -> tuple:
 
     The layout of a ``SymmetricTensor`` chi leg is what the traced projector
     can never change (it reuses the leg's sector sizes, #929).  Dense tensors
-    have no layout and contribute nothing.
+    have no layout and contribute nothing.  Keyed by leg label and sorted, so
+    a sweep that only reorders a tensor's legs (the cold-init corners come
+    back with their two legs swapped) is not a layout change.
     """
     out = []
     for c in sorted(envs):
@@ -194,7 +196,7 @@ def _chi_layout(envs: dict[Coord, CTMTensorEnv]) -> tuple:
                     np.asarray(ix.multiplicities).tolist(),
                 )
                 out.append((c, field, ix.label, tuple(sorted(pairs))))
-    return tuple(out)
+    return tuple(sorted(out))
 
 
 def _needs_eager_layout_phase(site_tensors, env_init) -> bool:
@@ -240,13 +242,18 @@ def _adapt_symmetric_layout(
     ``_tile_fused_to_chi``.  This phase lets the eager projector choose the
     layout; the jitted sweeps that follow inherit it.
 
-    A sweep counts as stable when its output layout equals its input layout.
-    The gauge is applied only on a stable sweep (it pairs legs index by index,
-    which needs one layout); mixing is not applied here.
+    The phase is stable when two consecutive eager sweeps produce the same
+    layout, so it takes at least two sweeps (a warm start with a settled
+    layout takes exactly two).  The input env's layout is deliberately not
+    one of the pair: from the rank-1 cold init the first sweep can return the
+    initial tiling unchanged and only move it on the second (measured, Z2
+    D=2 chi=8: (0:6, 1:2) -> (0:6, 1:2) -> (0:4, 1:4)).  The gauge is applied
+    only on the stable sweep (it pairs legs index by index, which needs one
+    layout); mixing is not applied here.
 
     Returns ``(envs, n_sweeps, stable)``.
     """
-    prev = _chi_layout(envs)
+    prev = None
     for n in range(1, max_sweeps + 1):
         start = envs
         envs, _, _ = _eager_ctm_sweep(site_tensors, start, **sweep_kwargs)
@@ -376,11 +383,13 @@ def python_loop_ctm_converge(
                            projector keeps the global top-``chi`` singular
                            values and so can move chi slots between charge
                            sectors; the jitted projector keeps each sector's
-                           size (#929).  The eager phase ends at the first
-                           sweep that leaves the per-sector sizes of every
-                           chi leg unchanged -- after one sweep for a warm
-                           start whose layout has settled.  If the layout is
-                           still changing after this many sweeps, a warning
+                           size (#929).  The eager phase ends when two
+                           consecutive eager sweeps give every chi leg the
+                           same per-sector sizes -- after two sweeps for a
+                           warm start whose layout has settled (so a value
+                           of 1 can never certify, and always warns).  If
+                           the layout is still changing after this many
+                           sweeps, a warning
                            is issued and the jitted sweeps continue from
                            there.  Eager sweeps count toward ``max_iter``,
                            ``min_iter`` and the returned iteration counts.

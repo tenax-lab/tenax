@@ -232,12 +232,25 @@ def test_the_dense_path_never_enters_the_eager_phase(case, monkeypatch):
     assert info.iterations == info_off.iterations == 200
 
 
-def test_the_cap_warns_and_the_eager_sweeps_count_toward_max_iter(case):
+def test_the_cap_warns_and_the_eager_sweeps_count_toward_max_iter(case, monkeypatch):
+    """A cap of 1 cannot certify a layout (that needs two consecutive eager
+    sweeps), so it warns; and the eager sweep is spent from ``max_iter``."""
     name, A, B = case.name, case.A, case.B
+    loop_calls = []
+    real_loop = cpl._run_ctm_loop_with_bump
+
+    def _loop_spy(*a, **k):
+        res = real_loop(*a, **k)
+        loop_calls.append((k["max_iter"], res.iterations))
+        return res
+
+    monkeypatch.setattr(cpl, "_run_ctm_loop_with_bump", _loop_spy)
     with pytest.warns(UserWarning, match=r"eager_layout_sweeps=1 .*#1098"):
         _, info = _run(
             A, B, max_iter=4, min_iter=0, conv_tol=0.0, eager_layout_sweeps=1
         )
-    # 1 eager sweep + 3 jitted sweeps: the eager one is inside the budget.
+    # 1 eager sweep + 3 jitted sweeps: the eager one is inside the budget and
+    # inside the reported counts.
+    assert loop_calls == [(3, 3)], (name, loop_calls)
     assert info.iterations == 4, (name, info)
     assert info.best_iteration == 4, (name, info)
