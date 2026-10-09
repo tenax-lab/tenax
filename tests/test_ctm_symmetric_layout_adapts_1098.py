@@ -8,8 +8,9 @@ converged energy was the energy of that restricted layout.  The fix runs eager
 sweeps first, until the layout stops changing, and then the jitted step.
 
 Fixture: D=2 XXZ Delta=0.3, 2-site simple update (200 steps, dt=0.05,
-``PRNGKey(0)``), chi=8, float64, ``CHECKERBOARD_NEIGHBORS``.  Measured before the
-fix: symmetric minus dense energy 6.9e-6 (U(1)-Sz) and 8.3e-5 (Z2).
+``PRNGKey(0)``), float64, ``CHECKERBOARD_NEIGHBORS``; CTM chi=6 (U(1)-Sz) and
+chi=8 (Z2).  Measured before the fix: symmetric minus dense energy 6.6e-6
+(U(1)-Sz, chi=6) and 8.3e-5 (Z2, chi=8).
 """
 
 from __future__ import annotations
@@ -37,7 +38,11 @@ jax.config.update("jax_enable_x64", True)
 
 D = 2
 DELTA = 0.3
-CHI = 8
+# chi per symmetry.  U(1): chi=6 cuts the eager C1 spectrum in a clean gap
+# (relative 0.62); chi=8 cuts a three-fold degenerate set (0.00937 x3, two
+# kept) where which two survive moves E by ~6e-11.  Z2 chi=8 cuts cleanly.
+CHI = {"u1": 6, "z2": 8}
+SU_CHI = 8
 GATE = xxz_gate(DELTA)
 
 
@@ -67,7 +72,7 @@ def _su_pair(case):
     }[case]
     A0, B0 = init(jax.random.PRNGKey(0))
     su = iPEPSConfig(
-        max_bond_dim=D, num_imaginary_steps=200, dt=0.05, ctm=CTMConfig(chi=CHI)
+        max_bond_dim=D, num_imaginary_steps=200, dt=0.05, ctm=CTMConfig(chi=SU_CHI)
     )
     _, (A, B), _ = ipeps(GATE, (A0, B0), su, compute_energy=False)
     A = A * (1.0 / (A.norm() + 1e-10))
@@ -76,9 +81,9 @@ def _su_pair(case):
     return A, B
 
 
-def _kwargs(max_iter=1000, min_iter=10, conv_tol=1e-12, env_init=None):
+def _kwargs(chi, max_iter=1000, min_iter=10, conv_tol=1e-12, env_init=None):
     cfg = dataclasses.replace(
-        CTMConfig(chi=CHI),
+        CTMConfig(chi=chi),
         conv_tol=conv_tol,
         max_iter=max_iter,
         min_iter=min_iter,
@@ -88,10 +93,10 @@ def _kwargs(max_iter=1000, min_iter=10, conv_tol=1e-12, env_init=None):
     return ctm_converge_kwargs(cfg, env_init=env_init)
 
 
-def _run(A, B, **kw):
+def _run(A, B, chi, **kw):
     extra = {k: kw.pop(k) for k in ("eager_layout_sweeps",) if k in kw}
     return python_loop_ctm_converge(
-        {(0, 0): A, (1, 0): B}, CHECKERBOARD_NEIGHBORS, **_kwargs(**kw), **extra
+        {(0, 0): A, (1, 0): B}, CHECKERBOARD_NEIGHBORS, **_kwargs(chi, **kw), **extra
     )
 
 
@@ -132,14 +137,16 @@ def case(request):
     """One symmetry's SU state, its dense reference, and the symmetric CTM
     under test (cold start, default ``eager_layout_sweeps``).  Built once."""
     A, B = _su_pair(request.param)
+    chi = CHI[request.param]
     Ad = DenseTensor(A.todense(), A.indices)
     Bd = DenseTensor(B.todense(), B.indices)
     # 200 dense sweeps: the energy equals the 1000-sweep value to 1e-16 here
     # (measured; the dense criterion never certifies on this fixture).
-    envs_d, _ = _run(Ad, Bd, max_iter=200)
-    envs, info = _run(A, B)
+    envs_d, _ = _run(Ad, Bd, chi, max_iter=200)
+    envs, info = _run(A, B, chi)
     return SimpleNamespace(
         name=request.param,
+        chi=chi,
         A=A,
         B=B,
         Ad=Ad,
@@ -165,13 +172,13 @@ def test_the_jitted_symmetric_ctm_reaches_the_dense_energy(case):
     assert abs(E_sym - E_dense) < 1e-10, (name, E_sym, E_dense, E_sym - E_dense)
 
     # The layout moved off the cold-init tiling (D^2 fused charges + q=0 pad).
-    cold = initialize_ctm_tensor_env(A, CHI)
+    cold = initialize_ctm_tensor_env(A, case.chi)
     assert _layout(envs[(0, 0)].C1) != _layout(cold.C1), name
 
     # Regime guard: the traced-only path (the pre-fix behaviour, reachable
     # through the opt-out) still sits on the frozen layout with a real gap.
     # If this ever fails, the fixture no longer exercises #1098.
-    envs_frozen, _ = _run(A, B, eager_layout_sweeps=0)
+    envs_frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
     gap_frozen = abs(_energy(A, B, envs_frozen) - E_dense)
     assert gap_frozen > 1e-7, (name, gap_frozen)
     assert _layout(envs_frozen[(0, 0)].C1) == _layout(cold.C1), name
@@ -182,29 +189,23 @@ def test_the_kept_corner_spectrum_is_the_dense_top_chi(case):
     holds an empty (zero) singular value while the dense spectrum still has
     weight there, and the kept spectrum is the dense top-chi spectrum.
 
-    Z2 matches to 1e-8.  The U(1) chi=8 cut falls inside a near-degenerate
-    set (three values at 9.36e-3 of the maximum, two kept), and the dense
-    corner there is not exactly block-structured: it splits the +-2 pair at
-    2.47e-2 by 4.8e-5, where the symmetric corner keeps it exactly degenerate
-    (measured largest difference 2.39e-5).  The energies still agree to
-    1e-10 (the test above).  Before the fix the last two U(1) values were
-    0.0 against 9.36e-3 dense, so 5e-5 still separates the two by 190x.
+    Both cuts sit in a clean gap of the spectrum (see ``CHI``).  At the
+    degenerate U(1) chi=8 cut the dense corner splits a +-2 pair by 4.8e-5
+    that the symmetric corner keeps exactly degenerate, so this comparison
+    would need ~5e-5 there.
     """
     name, envs, envs_d = case.name, case.envs, case.envs_d
-    atol = {"z2": 1e-8, "u1": 5e-5}[name]
+    atol = 1e-8
     for c in envs:
         s_sym = _corner_spectrum(envs[c].C1)
         s_dense = _corner_spectrum(envs_d[c].C1)
-        assert s_sym.shape == (CHI,) and s_dense.shape == (CHI,)
+        assert s_sym.shape == (case.chi,) and s_dense.shape == (case.chi,)
         assert s_dense[-1] > 1e-6, (name, c, s_dense)  # regime: no dense zero
         assert s_sym[-1] > 1e-12 * s_sym[0], (name, c, s_sym)
         np.testing.assert_allclose(s_sym, s_dense, atol=atol, err_msg=f"{name}{c}")
 
 
-def test_a_converged_warm_start_ends_the_eager_phase_within_two_sweeps(
-    case, monkeypatch
-):
-    name, A, B, envs = case.name, case.A, case.B, case.envs
+def _count_eager(monkeypatch):
     calls = []
     real = cpl._eager_ctm_sweep
 
@@ -213,9 +214,42 @@ def test_a_converged_warm_start_ends_the_eager_phase_within_two_sweeps(
         return real(*a, **k)
 
     monkeypatch.setattr(cpl, "_eager_ctm_sweep", _spy)
-    envs2, _ = _run(A, B, env_init=envs, max_iter=20)
-    assert 1 <= len(calls) <= 2, (name, len(calls))
+    return calls
+
+
+def test_a_settled_warm_start_costs_one_eager_sweep_and_no_recompile(case, monkeypatch):
+    """Requirement 4, and the cost measured in a 2-site optimize_gs_ad: a warm
+    start whose layout has settled confirms it with one eager sweep, and a
+    second warm start at perturbed tensors (a line-search probe) compiles
+    nothing new -- the eager output's chi legs come back in the charge order
+    the jitted step was compiled for."""
+    name, A, B, envs = case.name, case.A, case.B, case.envs
+    calls = _count_eager(monkeypatch)
+    envs2, _ = _run(A, B, case.chi, env_init=envs, max_iter=20)
+    assert len(calls) == 1, (name, len(calls))
     assert abs(_energy(A, B, envs2) - _energy(A, B, envs)) < 1e-10
+
+    step = cpl._make_jit_ctm_step(CHECKERBOARD_NEIGHBORS)
+    n_compiled = step._cache_size()
+    kA, kB = jax.random.split(jax.random.PRNGKey(7))
+    Ap = A + SymmetricTensor.random_normal(A.indices, kA) * 1e-3
+    Bp = B + SymmetricTensor.random_normal(B.indices, kB) * 1e-3
+    _run(Ap, Bp, case.chi, env_init=envs2, max_iter=20)
+    assert len(calls) == 2, (name, len(calls))
+    assert step._cache_size() == n_compiled, (name, n_compiled, step._cache_size())
+
+
+def test_a_warm_start_from_the_frozen_layout_still_adapts(case, monkeypatch):
+    """Requirement 4: an env with the cold-init layout (here the fixed point
+    of the traced-only path) is the bug, not a settled warm start; it gets
+    the two-sweep rule and reaches the dense energy."""
+    name, A, B, E_dense = case.name, case.A, case.B, case.E_dense
+    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    calls = _count_eager(monkeypatch)
+    envs, info = _run(A, B, case.chi, env_init=frozen)
+    assert len(calls) >= 2, (name, len(calls))
+    assert info.converged, (name, info)
+    assert abs(_energy(A, B, envs) - E_dense) < 1e-10, name
 
 
 def test_the_dense_path_never_enters_the_eager_phase(case, monkeypatch):
@@ -226,8 +260,8 @@ def test_the_dense_path_never_enters_the_eager_phase(case, monkeypatch):
         raise AssertionError("eager layout phase entered on dense input")
 
     monkeypatch.setattr(cpl, "_eager_ctm_sweep", _boom)
-    envs, info = _run(Ad, Bd, max_iter=200)
-    envs_off, info_off = _run(Ad, Bd, max_iter=200, eager_layout_sweeps=0)
+    envs, info = _run(Ad, Bd, case.chi, max_iter=200)
+    envs_off, info_off = _run(Ad, Bd, case.chi, max_iter=200, eager_layout_sweeps=0)
     assert _energy(Ad, Bd, envs) == E_dense == _energy(Ad, Bd, envs_off)
     assert info.iterations == info_off.iterations == 200
 
@@ -254,3 +288,12 @@ def test_the_cap_warns_and_the_eager_sweeps_count_toward_max_iter(case, monkeypa
     assert loop_calls == [(3, 3)], (name, loop_calls)
     assert info.iterations == 4, (name, info)
     assert info.best_iteration == 4, (name, info)
+
+
+def test_running_out_of_max_iter_inside_the_eager_phase_warns(case):
+    """A cold start needs two eager sweeps to certify; ``max_iter=1`` ends
+    the phase first, and says so (not only the ``eager_layout_sweeps`` cap)."""
+    name, A, B = case.name, case.A, case.B
+    with pytest.warns(UserWarning, match=r"max_iter=1\).*#1098"):
+        _, info = _run(A, B, case.chi, max_iter=1, min_iter=0, conv_tol=0.0)
+    assert info.iterations == 1, (name, info)

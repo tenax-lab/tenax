@@ -80,3 +80,27 @@ def test_the_layout_ignores_the_d2_legs_and_dense_tensors():
     assert labels.isdisjoint({"u2", "r2", "d2", "l2"})
     assert len(layout) == 4 * 2 + 4 * 2  # two chi legs per corner and edge
     assert _chi_layout({(0, 0): CTMTensorEnv(*[None] * 8)}) == ()
+
+
+def test_charge_sorting_a_chi_leg_is_a_faithful_basis_permutation():
+    """The eager outputs' chi legs are put in ascending-charge order so that
+    equal layouts give equal pytree structures (no per-call recompile).  The
+    relabelling must be the dense permutation ``argsort(charges, stable)`` on
+    every chi leg, leave the D^2 leg alone, and reuse the block data."""
+    from tenax.algorithms._ctm_python_loop import _charge_sorted_chi_legs
+
+    shuffled = np.array([0, 2, -2, 0, -2, 2, -4, 4], dtype=np.int32)
+    idx = (
+        TensorIndex.from_charges(SYM, shuffled, IN, label="t1_l"),
+        TensorIndex.from_charges(SYM, D2[::-1].copy(), OUT, label="u2"),
+        TensorIndex.from_charges(SYM, shuffled[::-1].copy(), OUT, label="t1_r"),
+    )
+    t = SymmetricTensor.random_normal(idx, jax.random.PRNGKey(3))
+    s = _charge_sorted_chi_legs(t)
+    p0 = np.argsort(shuffled, kind="stable")
+    p2 = np.argsort(shuffled[::-1], kind="stable")
+    np.testing.assert_array_equal(
+        np.asarray(s.todense()), np.asarray(t.todense())[p0][:, :, p2]
+    )
+    assert np.array_equal(np.asarray(s.indices[1].charges), D2[::-1])
+    assert s._data is t._data
