@@ -430,21 +430,25 @@ def optimize_gs_ad_root_implicit(
     # Resolved before anything else touches its arguments: on the symmetric
     # variant the caller *must* supply the state, so that is a precondition on
     # the call rather than something to discover after converting a gate.
-    A_start = _initial_symmetric_tensor(A_init) if symmetric else None
-    if symmetric:
-        from tenax.algorithms._ctm_graded import is_fermionic
+    # #1059: no root-implicit engine has fermionic signs.  The symmetric one
+    # builds a graded double layer, then contracts its quadrants with the
+    # sign-free contractor (finding 3); the dense ones make the gate dense.
+    # Either way the optimiser would descend the hard-core-boson energy.
+    # Checked here, not only in optimize_gs_ad, so direct callers are covered.
+    from tenax.algorithms._ctm_graded import is_fermionic, site_tensors_of
 
-        if is_fermionic(A_start) or is_fermionic(hamiltonian_gate):
-            # #1059 finding 3: the engine builds a graded double layer, then
-            # contracts it with the sign-free contractor, so its gradient is
-            # the hard-core-boson one while the final energy is graded.
-            raise NotImplementedError(
-                "ctm_ad_mode='root_implicit_symmetric' is not supported for "
-                "fermionic tensors (#1059): its quadrant contractions carry no "
-                "fermionic signs, so the optimiser would descend the "
-                "hard-core-boson energy. Use the default (fixed-point implicit) "
-                "AD path."
-            )
+    if is_fermionic(hamiltonian_gate) or any(
+        is_fermionic(t) for t in site_tensors_of(A_init)
+    ):
+        raise NotImplementedError(
+            f"ctm_ad_mode={config.ctm.ctm_ad_mode!r} is not supported for "
+            "fermionic tensors (#1059): no root-implicit engine carries "
+            "fermionic signs, so the optimiser would descend the "
+            "hard-core-boson energy. Use the default (fixed-point implicit) "
+            "AD path."
+        )
+
+    A_start = _initial_symmetric_tensor(A_init) if symmetric else None
 
     gate = (
         hamiltonian_gate.todense()

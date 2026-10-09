@@ -159,3 +159,36 @@ def test_root_implicit_symmetric_gets_past_the_guard_on_a_bosonic_site():
     with pytest.raises(TypeError) as exc:
         rim.optimize_gs_ad_root_implicit(object(), _u1_site(), _root_symmetric(_cfg()))
     assert "#1059" not in str(exc.value)
+
+
+# --- Codex review of #1097 --------------------------------------------------
+
+
+def test_the_dense_root_entry_refuses_a_fermionic_gate():
+    """``root_implicit`` (dense) called directly with a fermionic gate and a
+    dense site would make the gate dense and run the boson model."""
+    cfg = _cfg(gs_line_search=False, gs_metric_precond=False)
+    cfg = replace(cfg, ctm=replace(cfg.ctm, ctm_ad_mode="root_implicit"))
+    A = jax.random.normal(jax.random.PRNGKey(0), (2, 2, 2, 2, 2))
+    with pytest.raises(NotImplementedError, match=r"'root_implicit'.*#1059"):
+        rim.optimize_gs_ad_root_implicit(_H_F, A, cfg)
+
+
+def test_fpeps_entry_refuses_c4v(spy):
+    """``optimize_fpeps_ad`` does not go through ``optimize_gs_ad`` on this
+    branch, so it must run the guard itself."""
+    with pytest.raises(NotImplementedError, match=r"gs_c4v.*#1059"):
+        iom.optimize_fpeps_ad(_H_F, _f(), _cfg(gs_c4v=True))
+    assert spy == []
+
+
+def test_fpeps_entry_refuses_a_dense_site(spy):
+    A = jax.random.normal(jax.random.PRNGKey(0), (2, 2, 2, 2, 2))
+    with pytest.raises(NotImplementedError, match="fermionic site tensors"):
+        iom.optimize_fpeps_ad(_H_F, A, _cfg())
+    assert spy == []
+
+
+def test_fpeps_entry_accepts_a_fermionic_site(spy):
+    iom.optimize_fpeps_ad(_H_F, _f(), _cfg())
+    assert spy == ["_optimize_gs_ad_tensor"]

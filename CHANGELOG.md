@@ -12,12 +12,15 @@
   fires, before any tensor work, for:
   - `gs_c4v=True` with a fermionic gate or site (1-site and 2-site): the
     C4v branches rebuild the site from a dense C4v basis;
-  - `ctm_ad_mode="root_implicit_symmetric"` with a fermionic gate or site:
-    the engine contracts its graded double layer without signs.  The check
-    sits in `optimize_gs_ad_root_implicit`, so direct callers get it too;
+  - any root-implicit `ctm_ad_mode` with a fermionic gate or site:
+    `"root_implicit_symmetric"` contracts its graded double layer without
+    signs, and the dense engines make the gate dense.  The check sits in
+    `optimize_gs_ad_root_implicit`, so direct callers get it too;
   - a fermionic gate with sites that are not all fermionic, including
     `A_init=None`, which built a random dense site.  Pass `FermionParity`
     `SymmetricTensor`s, or use `optimize_fpeps_ad` with an `FPEPSConfig`.
+
+  `optimize_fpeps_ad` runs the same checks.
 
 - **The 1-site metric L-BFGS now has a memory.**  On the 1-site
   `optimize_gs_ad` path the metric L-BFGS built its curvature pair from

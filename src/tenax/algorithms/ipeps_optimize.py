@@ -1347,8 +1347,9 @@ def _refuse_sign_free_fermionic(hamiltonian_gate, A_init, config: iPEPSConfig) -
       ``A_init=None``, which builds a random dense site (or a simple-update
       one from the dense gate).
 
-    ``ctm_ad_mode="root_implicit_symmetric"`` (finding 3) is refused by its
-    own entry point, ``optimize_gs_ad_root_implicit``.
+    Every ``ctm_ad_mode`` root-implicit engine (finding 3) is refused by its
+    own entry point, ``optimize_gs_ad_root_implicit``.  ``optimize_fpeps_ad``
+    calls this helper too.
     """
     from tenax.algorithms._ctm_graded import is_fermionic, site_tensors_of
 
@@ -6294,6 +6295,9 @@ def optimize_fpeps_ad(
 
     # Dispatches straight to the private optimizer, so it must run the #938
     # recipe guard itself -- _optimize_gs_ad_tensor threads gs_recipe into
-    # the implicit loss while its warm-start and final evaluations drop it.
+    # the implicit loss while its warm-start and final evaluations drop it --
+    # and the #1059 fermionic refusals (gs_c4v makes the site dense; a
+    # non-fermionic site gets no signs).
     _reject_mislabelled_1x1(config)
+    _refuse_sign_free_fermionic(hamiltonian_gate, A_init, config)
     return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
