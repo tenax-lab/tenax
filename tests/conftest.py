@@ -19,6 +19,9 @@ _FILE_MARKERS = {
     # #1059 finding 1: optimize_fpeps_ad dispatch; spies on the branch
     # targets, so no tensor work (the one end-to-end test is marked slow).
     "test_fpeps_ad_dispatch_1059.py": "core",
+    # #1059 findings 2 and 3 + fermionic gate on non-fermionic sites: the
+    # refusals fire before any tensor work, and the branch targets are spies.
+    "test_fermionic_refusals_1059.py": "core",
     "test_tensor.py": "core",
     # PR #986 Phase 1: the swap-gate primitive.  Pure block-metadata sign
     # tests, no CTM, ~1s; the graded-transpose cross-check is the mutation
@@ -794,6 +797,10 @@ _FILE_MARKERS = {
     # differed by ~40%).  ``core``: it shapes every default (gs_metric_precond
     # =True) L-BFGS/CG direction.  D=2 chi=8 SU fixture, no AD.
     "test_metric_precond_env_norm.py": "core",
+    # Hager-Zhang phi probes warm-start CTM from the step's env, not the last
+    # probe's.  ``core``: it sets the env every L-BFGS + HZ probe starts from.
+    # Mechanism tests only (spied env_init, a scripted line search), D=2 chi=4.
+    "test_hz_probe_warm_start.py": "core",
     "test_metric_precond_1site_current_params.py": "core",
 }
 
