@@ -444,6 +444,25 @@
 
 ### Fixed
 
+- **Hager-Zhang `phi` probes warm-start CTM from the step's env**
+  (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
+  start from the previous probe's env (the #502 write-back), so the env a
+  probe at alpha started from depended on the order HZ probed in, and
+  `phi(alpha)` was not a function of alpha alone.  Now every `phi` probe
+  starts from the step's env; the `dphi` probe at the same alpha still
+  reuses that probe's env.  Seen at a 2-site D=3 Heisenberg stall (chi=16,
+  E=-0.6681622484, |grad|=4.4e-4): HZ bisected down from alpha = 1, every
+  probe at alpha <= 2.4e-4 failed to converge in 100 sweeps from the last
+  probe's env and was rejected as +inf (#1059), and the search returned
+  alpha = 0 five times; from the alpha = 0 env the same probes converge in
+  10 sweeps.  D=2 chi=16: 2-site reaches the same energy (-0.66251430) in
+  77 steps, was 154 (one start); 1x1 and C4v are identical.
+  - **Not shown at D=3.**  With the default CTM (`conv_tol` 1e-8,
+    `plateau_patience` 20) the CTM stops early at 2-site D=3 chi=16 with an
+    energy bias of about 1e-7 that depends on the start env -- larger than
+    the decreases HZ resolves near the minimum there.  Whether this change
+    lowers the D=3 energy is open.
+
 - **The metric preconditioner's GMRES solve compiles once per
   configuration** (`_metric_precond.py`).  `precondition_gradient` handed
   JAX's GMRES a `matvec` closure built fresh on every call, so the Krylov

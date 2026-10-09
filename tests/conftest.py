@@ -791,6 +791,10 @@ _FILE_MARKERS = {
     # differed by ~40%).  ``core``: it shapes every default (gs_metric_precond
     # =True) L-BFGS/CG direction.  D=2 chi=8 SU fixture, no AD.
     "test_metric_precond_env_norm.py": "core",
+    # Hager-Zhang phi probes warm-start CTM from the step's env, not the last
+    # probe's.  ``core``: it sets the env every L-BFGS + HZ probe starts from.
+    # Mechanism tests only (spied env_init, a scripted line search), D=2 chi=4.
+    "test_hz_probe_warm_start.py": "core",
     "test_metric_precond_1site_current_params.py": "core",
 }
 
