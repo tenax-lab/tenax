@@ -473,3 +473,70 @@ def test_a_different_captured_tenax_function_changes_the_key():
     k_a = _key(factory(te.compute_energy_ctm_tensor))
     assert k_a == _key(factory(te.compute_energy_ctm_tensor))
     assert k_a != _key(factory(te.compute_energy_ctm_tensor_2site))
+
+
+# --------------------------------------------------------------------------
+# Codex round 6 on #1090
+# --------------------------------------------------------------------------
+
+
+def test_frozensets_are_keyed_by_value_and_sets_are_not():
+    a = frozenset({("A", "right"), ("B", "left")})
+    b = frozenset({("B", "left"), ("A", "right")})
+    assert _exact(a) and _key(a) == _key(b)
+    assert _key(a) != _key(frozenset({("A", "right"), ("C", "left")}))
+    assert not _exact({("A", "right")})  # a mutable set
+    assert not _exact(frozenset({object()}))
+
+
+def test_np_dtype_objects_are_keyed_exactly():
+    e4 = jnp.zeros(1, jnp.float8_e4m3fnuz).dtype
+    e5 = jnp.zeros(1, jnp.float8_e5m2fnuz).dtype
+    assert np.dtype(e4).str == np.dtype(e5).str
+    assert _key(np.dtype(e4)) != _key(np.dtype(e5))
+
+
+def test_multisite_pess_energy_callback_is_keyed_by_value(monkeypatch):
+    """Its captured bond gates are keyed by frozenset bond IDs; before, the
+    whole callback fell back to identity and every build missed."""
+    from tenax.algorithms import pess_optimize as po
+    from tenax.algorithms._pess_multisite_energy import kagome_3site_bond_gates
+    from tenax.algorithms.ipeps_config import CTMConfig
+
+    seen = []
+    real = po.declare_cache_key
+    monkeypatch.setattr(
+        po, "declare_cache_key", lambda fn, *data: seen.append(real(fn, *data))
+    )
+    cfg = CTMConfig(chi=4)
+    po.build_pess_loss_3site_multisite(kagome_3site_bond_gates(), cfg)
+    po.build_pess_loss_3site_multisite(kagome_3site_bond_gates(), cfg)
+    k1, k2 = (_key(fn) for fn in seen)
+    assert k1[0] == "val" and k1 == k2
+
+
+def test_a_user_callback_keys_its_inputs_by_identity():
+    """A user callback may branch on ``gate is X``, so two equal gate objects
+    must not share a backward; default and declared callbacks still do."""
+    from tenax.algorithms._cache_fingerprint import callback_key_parts
+
+    g1, g2 = heisenberg_gate(), heisenberg_gate()
+
+    def user(site_tensors, envs, gate):
+        return 0.0
+
+    _, (k1,), _ = callback_key_parts(user, g1)
+    _, (k2,), _ = callback_key_parts(user, g2)
+    assert k1 != k2 and k1[0] == "id"
+
+    _, (k1,), _ = callback_key_parts(None, g1)
+    _, (k2,), _ = callback_key_parts(None, g2)
+    assert k1 == k2 and k1[0] == "val"
+
+    def declared(site_tensors, envs, gate):
+        return 0.0
+
+    declare_cache_key(declared)
+    _, (k1,), _ = callback_key_parts(declared, g1)
+    _, (k2,), _ = callback_key_parts(declared, g2)
+    assert k1 == k2 and k1[0] == "val"

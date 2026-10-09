@@ -38,7 +38,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
-from tenax.algorithms._cache_fingerprint import cache_key_part, lru_get, lru_put
+from tenax.algorithms._cache_fingerprint import callback_key_parts, lru_get, lru_put
 from tenax.algorithms._ctm_honeycomb_energy import compute_honeycomb_energy
 from tenax.algorithms._ctm_honeycomb_env import HoneycombCTMEnv
 from tenax.algorithms._ctm_honeycomb_forward import (
@@ -212,9 +212,11 @@ def _honeycomb_ctm_energy_implicit_dispatch(
     """
     # Value fingerprints, not ids (#1049): the backward bakes the Hamiltonian
     # and energy callback in at trace time, so equal fingerprints trace the
-    # same program, while a fresh-but-equal object no longer misses.
-    hamiltonian_fp, keep_h = cache_key_part(hamiltonian)
-    energy_fn_fp, keep_e = cache_key_part(energy_fn)
+    # same program, while a fresh-but-equal object no longer misses.  A user
+    # callback keeps identity keys for itself and the Hamiltonian it gets.
+    energy_fn_fp, (hamiltonian_fp,), keepalive = callback_key_parts(
+        energy_fn, hamiltonian
+    )
     cache_key = (
         tuple(coords),
         chi,
@@ -266,7 +268,7 @@ def _honeycomb_ctm_energy_implicit_dispatch(
     )
     # Objects the key holds only by id must outlive the entry (see
     # ``fingerprint``).
-    mutables["_cache_keepalive"] = keep_h + keep_e
+    mutables["_cache_keepalive"] = keepalive
     lru_put(_VJP_CACHE, cache_key, (f, mutables))
     return f(params_data_tuple)
 

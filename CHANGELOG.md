@@ -478,16 +478,18 @@
   compile takes hours on CPU) and left the old entry behind for good.  The
   key now uses values where the value is the whole story
   (`_cache_fingerprint.py`): data -- Python scalars by exact type (floats
-  by bit pattern), strings, tuples, lists, dicts in order, `jax.Array`s
+  by bit pattern), strings, tuples, lists, dicts in order, frozensets
+  (sorted), `jax.Array`s
   (shape, exact dtype, weak-type bit, placement -- `committed` and `sharding` --,
   contents), and tenax-owned types walked
   field by field, NumPy metadata inside them included (`TensorIndex.__eq__`
   ignores `fuse_info`, so equality is never trusted)
   -- and the optimizers' own energy callbacks, which declare exactly what
   they capture with `declare_cache_key` (checked at declaration).  User
-  callbacks, bound methods, sets, a user's NumPy arrays and scalars (whose
-  flags and strides are observable too) and foreign objects keep the old identity
-  key, since their behaviour can depend on state no fingerprint sees; that
+  callbacks, bound methods, mutable sets, a user's NumPy arrays and scalars
+  (whose flags and strides are observable too) and foreign objects keep the
+  old identity key -- and a user callback's gate and neighbors do too, since
+  it may branch on their identity -- since their behaviour can depend on state no fingerprint sees; that
   can only miss.  A gate with different values still gets its own compiled
   backward.  Entries are shared by runs with equal configurations, so each
   run's start re-arms the once-per-run warning latches.  The cache is now an

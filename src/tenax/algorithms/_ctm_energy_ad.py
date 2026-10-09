@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
-from tenax.algorithms._cache_fingerprint import cache_key_part, lru_get, lru_put
+from tenax.algorithms._cache_fingerprint import callback_key_parts, lru_get, lru_put
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
     _validate_chi_bump_args,
@@ -1119,10 +1119,12 @@ def _ctm_energy_implicit_dispatch(
     """
     # Build a hashable key from the static configuration.
     # Gate and energy_fn must be in the key because the JIT backward
-    # captures them at trace time as compile-time constants.
-    neighbors_fp, keep_n = cache_key_part(neighbors)
-    gate_fp, keep_g = cache_key_part(gate)
-    energy_fn_fp, keep_e = cache_key_part(energy_fn)
+    # captures them at trace time as compile-time constants.  Value keys for
+    # the default and declared callbacks; a user callback keeps identity keys
+    # for itself and its inputs (#1049, ``callback_key_parts``).
+    energy_fn_fp, (neighbors_fp, gate_fp), keepalive = callback_key_parts(
+        energy_fn, neighbors, gate
+    )
     cache_key = (
         tuple(coords),
         chi,
@@ -1206,7 +1208,7 @@ def _ctm_energy_implicit_dispatch(
     )
     # Objects the key holds only by id must outlive the entry, or a recycled
     # id could match it (see ``fingerprint``).
-    mutables["_cache_keepalive"] = keep_n + keep_g + keep_e
+    mutables["_cache_keepalive"] = keepalive
     lru_put(_VJP_CACHE, cache_key, (f, mutables))
     return f(params_data_tuple)
 

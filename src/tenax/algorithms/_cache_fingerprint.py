@@ -117,6 +117,27 @@ def cache_key_part(obj) -> tuple[tuple, list]:
         return ("id", id(obj)), [obj]
 
 
+def callback_key_parts(energy_fn, *inputs) -> tuple[tuple, list, list]:
+    """``(fn_key, input_keys, keepalive)`` for an energy callback and the
+    inputs it receives (gate, neighbors, ...).
+
+    An arbitrary callback keeps the identity key, and it may also branch on
+    the *identity* of what it receives (``gate is X``, an id-indexed
+    registry), so its inputs keep identity keys too: the pre-#1049 key.
+    Only the default callback (``None``) and declared ones -- whose trace is
+    fixed by their code and declared data -- get value keys for their inputs.
+    """
+    fn_key, keep = cache_key_part(energy_fn)
+    if fn_key[0] == "id":
+        return fn_key, [("id", id(x)) for x in inputs], keep + list(inputs)
+    input_keys = []
+    for x in inputs:
+        k, kx = cache_key_part(x)
+        input_keys.append(k)
+        keep = keep + kx
+    return fn_key, input_keys, keep
+
+
 def _tenax_owned(t: type) -> bool:
     return (getattr(t, "__module__", "") or "").split(".")[0] == "tenax"
 
@@ -136,7 +157,7 @@ def _key(obj, depth, inner=False):
     if isinstance(obj, enum.Enum):
         return ("enum", type(obj), obj.value)
     if isinstance(obj, np.dtype):
-        return ("dtype", obj.str)
+        return ("dtype", obj)  # not ``obj.str``; see ``_key_numpy``
     if isinstance(obj, jax.Array):
         return _key_array(obj)
     if isinstance(obj, (np.generic, np.ndarray)):
@@ -165,6 +186,12 @@ def _key(obj, depth, inner=False):
             "dict",
             tuple((_key(k, d, inner), _key(v, d, inner)) for k, v in obj.items()),
         )
+    if type(obj) is frozenset:
+        # Unordered, so the element keys are sorted.  The multisite PESS bond
+        # IDs are frozensets of ``(site, direction)`` tuples.  An element
+        # with no value key makes the whole set inexact; a ``set`` (mutable)
+        # always keeps the identity key.
+        return ("frozenset", tuple(sorted((_key(e, d, inner) for e in obj), key=repr)))
     if not _tenax_owned(type(obj)):
         raise _Inexact
     # A tenax pytree node (DenseTensor, SymmetricTensor, CTMTensorEnv, ...):
