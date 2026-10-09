@@ -243,12 +243,23 @@ def _key_array(x):
     # The shape is read before the conversion: ``np.ascontiguousarray``
     # promotes a 0-d array to shape ``(1,)``.
     shape = tuple(x.shape)
+    # Placement is observable too (a callback may branch on ``.committed`` or
+    # ``.sharding``), so equal values placed differently get different keys.
+    # Shardings hash and compare by value; one that does not hash falls back
+    # to the identity key.
+    sharding = getattr(x, "sharding", None)
+    try:
+        hash(sharding)
+    except TypeError:
+        raise _Inexact from None
     a = np.ascontiguousarray(np.asarray(x))
     return (
         "arr",
         shape,
         a.dtype.str,
         bool(x.weak_type),
+        getattr(x, "committed", None),
+        sharding,
         hashlib.sha1(a.tobytes()).hexdigest(),
     )
 

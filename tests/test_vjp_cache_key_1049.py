@@ -429,6 +429,23 @@ def test_zero_dimensional_shape_is_part_of_the_array_key():
     assert _key(x) == _key(jnp.asarray(2.0, dtype=jnp.float64))
 
 
+def test_placement_is_part_of_the_array_key():
+    """A callback may branch on ``.committed`` or ``.sharding`` (Codex review
+    of #1090): equal values placed differently must not share a key."""
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
+    x = jnp.arange(3.0)
+    dev = jax.devices()[0]
+    committed = jax.device_put(x, dev)
+    assert not x.committed and committed.committed
+    assert _key(x) != _key(committed)
+    named = jax.device_put(x, NamedSharding(Mesh([dev], ("i",)), PartitionSpec()))
+    assert _key(committed) != _key(named)
+    # Same value, same placement: still one key.
+    assert _key(committed) == _key(jax.device_put(jnp.arange(3.0), dev))
+    assert _key(x) == _key(jnp.arange(3.0))
+
+
 def test_a_different_captured_tenax_function_changes_the_key():
     """Captured module-level tenax functions are part of the declared key."""
     from tenax.algorithms import _ctm_tensor_energy as te
