@@ -468,6 +468,7 @@
     layout has settled runs two eager sweeps (about 1.4 s each here) before
     the jitted ones.
 
+- **Hager-Zhang `phi` probes warm-start CTM from the step's env**
   (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
   start from the previous probe's env (the #502 write-back), so the env a
   probe at alpha started from depended on the order HZ probed in, and
