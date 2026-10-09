@@ -36,6 +36,8 @@ _FILE_MARKERS = {
     "test_graded_ctm.py": "core",
     "test_graded_simple_update.py": "core",
     "test_dmrg.py": "algorithm",
+    "test_layout_helpers.py": "core",  # ~6 s
+    "test_symmetric_layout_seed.py": "algorithm",  # ~105 s
     "test_idmrg.py": "algorithm",
     "test_itebd.py": "algorithm",
     "test_trg.py": "algorithm",
