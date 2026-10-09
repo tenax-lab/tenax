@@ -16,6 +16,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from tenax import CTMConfig, ipeps, iPEPSConfig
+from tenax.algorithms._ctm_energy_ad import get_last_implicit_ad_diagnostics
 from tenax.algorithms._symmetric_ad_validation import (
     fd_directional,
     grad_dot,
@@ -76,6 +77,12 @@ def test_gradient_matches_a_converged_fd(point):
     _, A, B, gate, seed = point
     loss, _ = make_2site_loss(gate, _ctm(), seed.envs_init)
     e, (gA, gB) = jax.value_and_grad(loss)((A, B))
+    diag = get_last_implicit_ad_diagnostics()
+    # Flow backward, not the frozen fallback (#1028).
+    assert diag["projector_backward_used"] == "flow", diag
+    # The loss starts from envs_init: a seeded forward stops at min_iter,
+    # a cold one repeats the seed's cold solve (measured 10 vs 14 / 24).
+    assert diag["forward_iterations"] < seed.cold_iterations, diag
     # The loss is the seed's fixed point: same energy as the eager forward.
     assert abs(float(e) - seed.energy_cold) < 1e-10
     for k in range(2):
