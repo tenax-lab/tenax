@@ -272,6 +272,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "xxz_gate_u1sz": ("tenax.algorithms.ipeps", "xxz_gate_u1sz"),
     "xxz_gate_z2": ("tenax.algorithms.ipeps", "xxz_gate_z2"),
     "xxz_z2_init_pair": ("tenax.algorithms.ipeps", "xxz_z2_init_pair"),
+    # ctm_layout
+    "layout_of": ("tenax.algorithms.ctm_layout", "layout_of"),
+    "same_layout": ("tenax.algorithms.ctm_layout", "same_layout"),
+    "symmetric_layout_seed": ("tenax.algorithms.ctm_layout", "symmetric_layout_seed"),
     # ipeps_bp_gauge
     "BPGaugeInfo": ("tenax.algorithms.ipeps_bp_gauge", "BPGaugeInfo"),
     "BondWeights": ("tenax.algorithms.ipeps_simple_update", "BondWeights"),
@@ -528,6 +532,9 @@ __all__ = [
     "resolve_forward_gauge",
     "aligned_ctm_schedules",
     "heisenberg_gate",
+    "layout_of",
+    "same_layout",
+    "symmetric_layout_seed",
     "heisenberg_gate_u1sz",
     "heisenberg_u1sz_init_pair",
     "ipeps",
