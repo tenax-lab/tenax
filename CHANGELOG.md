@@ -525,6 +525,35 @@
   call, so the same warnings -- or, under warnings-as-errors, the same
   `RuntimeWarning` -- reach the caller.  The line search's and final
   evaluation's own energy calls outside the dispatch are unchanged.
+
+- **A second `optimize_gs_ad` call no longer recompiles the implicit-AD
+  backward** (#1049, `_ctm_energy_ad.py`, `_ctm_honeycomb_ad.py`).  The
+  compile cache keyed the backward on `id(gate)`, `id(energy_fn)` and
+  `id(neighbors)`, and the optimizer builds its energy callback as a fresh
+  closure per call, so every call missed, re-traced and re-compiled the
+  backward (measured ~82-92 s per extra call at D=2 chi=8; a D=3 backward
+  compile takes hours on CPU) and left the old entry behind for good.  The
+  key now uses values where the value is the whole story
+  (`_cache_fingerprint.py`): data -- Python scalars by exact type (floats
+  by bit pattern), strings, tuples, lists, dicts in order, frozensets
+  (sorted), `jax.Array`s
+  (shape, exact dtype, weak-type bit, placement -- `committed` and `sharding` --,
+  contents), and tenax-owned types walked
+  field by field, NumPy metadata inside them included (`TensorIndex.__eq__`
+  ignores `fuse_info`, so equality is never trusted)
+  -- and the optimizers' own energy callbacks, which declare exactly what
+  they capture with `declare_cache_key` (checked at declaration).  User
+  callbacks, bound methods, mutable sets, a user's NumPy arrays and scalars
+  (whose flags and strides are observable too) and foreign objects keep the
+  old identity key -- and a user callback's gate and neighbors do too, since
+  it may branch on their identity -- since their behaviour can depend on state no fingerprint sees; that
+  can only miss.  A gate with different values still gets its own compiled
+  backward.  Entries are shared by runs with equal configurations, so each
+  run's start -- and each switch to a different `build_pess_loss*` loss --
+  resets the adjoint seed and re-arms the once-per-run warning latches.  The cache is now an
+  LRU of at most 8 entries.  On the 2-site D=2 chi=4 repro, the second call drops
+  from 7.7 s (backward re-traced, a second cache entry) to 1.3 s (no
+  backward trace, one entry).
 - **The implicit-AD backward compiles its chain rule once, not once per
   solver** (`_ctm_energy_ad.py`).  The chain rule -- the params-VJP of the
   CTM sweep, most of the backward's compile -- lived inside the fused

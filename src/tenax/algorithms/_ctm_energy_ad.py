@@ -9,6 +9,7 @@ __all__ = [
     "set_implicit_ad_norm_diagnostics",
 ]
 
+import collections
 import contextlib
 import itertools
 import logging
@@ -20,6 +21,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
+from tenax.algorithms._cache_fingerprint import callback_key_parts, lru_get, lru_put
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
     _validate_chi_bump_args,
@@ -848,7 +850,9 @@ def _sigma_gauged_ctm_converge(
     return result.envs, result.final_chi, result.converged
 
 
-_VJP_CACHE: dict = {}
+# LRU-bounded (``VJP_CACHE_MAXSIZE``) and keyed by value, not object identity
+# (#1049): see ``_cache_fingerprint``.
+_VJP_CACHE: collections.OrderedDict = collections.OrderedDict()
 
 # Per-call ids for the forward energy's RDM-check replay (see
 # ``_ctm_tensor_energy.recording_traced_rdms``).  ``next`` on a count is
@@ -856,7 +860,7 @@ _VJP_CACHE: dict = {}
 _RDM_CALL_TOKENS = itertools.count(1)
 
 
-def invalidate_implicit_ad_warm_start() -> int:
+def invalidate_implicit_ad_warm_start(*, run_start: bool = False) -> int:
     """Clear cached Neumann warm-start seeds across the implicit-AD VJP cache.
 
     The implicit-AD backward (``adjoint_method="fixed_point"`` and the
@@ -886,6 +890,13 @@ def invalidate_implicit_ad_warm_start() -> int:
     compiled VJP functions stay cached, so the cost is one cold adjoint
     solve per run, not a recompile.
 
+    ``run_start=True`` (the run-entry calls only) also re-arms the entry's
+    once-per-run warning latches (the #841 stationarity warning and the #1028
+    flow-fallback warning).  Since #1049 an entry is shared by every run with
+    an equal configuration, so without this a warning emitted by one run
+    would stay silent in every later one.  The mid-run calls (stall reset,
+    chi change) leave the latches alone, so a run still warns once.
+
     Returns
     -------
     int
@@ -898,6 +909,12 @@ def invalidate_implicit_ad_warm_start() -> int:
         if cb is not None:
             cb()
             n += 1
+        # #1049: an entry is now shared by every run with an equal
+        # configuration, so its once-per-run warning latches must be re-armed
+        # when a run starts -- not on a mid-run reset, which would re-warn.
+        reset = mutables.get("_reset_run_latches") if run_start else None
+        if reset is not None:
+            reset()
     return n
 
 
@@ -1102,7 +1119,12 @@ def _ctm_energy_implicit_dispatch(
     """
     # Build a hashable key from the static configuration.
     # Gate and energy_fn must be in the key because the JIT backward
-    # captures them at trace time as compile-time constants.
+    # captures them at trace time as compile-time constants.  Value keys for
+    # the default and declared callbacks; a user callback keeps identity keys
+    # for itself and its inputs (#1049, ``callback_key_parts``).
+    energy_fn_fp, (neighbors_fp, gate_fp), keepalive = callback_key_parts(
+        energy_fn, neighbors, gate
+    )
     cache_key = (
         tuple(coords),
         chi,
@@ -1118,9 +1140,13 @@ def _ctm_energy_implicit_dispatch(
         gmres_tol,
         gmres_maxiter,
         gmres_restart,
-        id(neighbors),  # same dict object across optimizer steps
-        id(gate),  # different Hamiltonian → different backward
-        id(energy_fn),  # different energy callback → different backward
+        # Value fingerprints, not ids (#1049): the backward bakes the gate
+        # and energy callback in at trace time, so equal fingerprints trace
+        # the same program.  ``optimize_gs_ad`` builds its energy callback as
+        # a fresh closure per call, so an ``id`` key recompiled every call.
+        neighbors_fp,
+        gate_fp,
+        energy_fn_fp,
         arnoldi_precheck,
         adjoint_method,
         plateau_patience,
@@ -1134,7 +1160,7 @@ def _ctm_energy_implicit_dispatch(
         mixing,  # the forward closure reads it (#1060)
     )
 
-    entry = _VJP_CACHE.get(cache_key)
+    entry = lru_get(_VJP_CACHE, cache_key)
     if entry is not None:
         f, mutables = entry
         # Update per-call mutable state
@@ -1180,7 +1206,10 @@ def _ctm_energy_implicit_dispatch(
         ctm_chunk_size=ctm_chunk_size,
         mixing=mixing,
     )
-    _VJP_CACHE[cache_key] = (f, mutables)
+    # Objects the key holds only by id must outlive the entry, or a recycled
+    # id could match it (see ``fingerprint``).
+    mutables["_cache_keepalive"] = keepalive
+    lru_put(_VJP_CACHE, cache_key, (f, mutables))
     return f(params_data_tuple)
 
 
@@ -1266,6 +1295,13 @@ def _make_implicit_vjp_fn(
         _cached["prev_lam_leaves"] = None
 
     mutables["_invalidate_warm_start"] = _invalidate_warm_start
+
+    def _reset_run_latches() -> None:
+        """Re-arm the once-per-run warnings (#1049): called at run start only."""
+        _cached["stationarity_warned"] = False
+        _cached["flow_fallback_warned"] = False
+
+    mutables["_reset_run_latches"] = _reset_run_latches
 
     # Step function for the #841 stationarity check below: the exact step the
     # forward loop runs (same recipe, mesh, and chunking — memoised, so this

@@ -31,12 +31,14 @@ from __future__ import annotations
 
 __all__ = ["honeycomb_ctm_energy_implicit"]
 
+import collections
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
+from tenax.algorithms._cache_fingerprint import callback_key_parts, lru_get, lru_put
 from tenax.algorithms._ctm_honeycomb_energy import compute_honeycomb_energy
 from tenax.algorithms._ctm_honeycomb_env import HoneycombCTMEnv
 from tenax.algorithms._ctm_honeycomb_forward import (
@@ -177,7 +179,9 @@ def _validate_honeycomb_sites(sites: dict[Coord, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-_VJP_CACHE: dict = {}
+# LRU-bounded and keyed by value, not object identity (#1049); see
+# ``_cache_fingerprint``.
+_VJP_CACHE: collections.OrderedDict = collections.OrderedDict()
 
 
 def _honeycomb_ctm_energy_implicit_dispatch(
@@ -206,6 +210,13 @@ def _honeycomb_ctm_energy_implicit_dispatch(
     in a ``mutables`` dict and updated per call so the JIT'd backward
     survives optimizer steps even when the gate or initial env changes.
     """
+    # Value fingerprints, not ids (#1049): the backward bakes the Hamiltonian
+    # and energy callback in at trace time, so equal fingerprints trace the
+    # same program, while a fresh-but-equal object no longer misses.  A user
+    # callback keeps identity keys for itself and the Hamiltonian it gets.
+    energy_fn_fp, (hamiltonian_fp,), keepalive = callback_key_parts(
+        energy_fn, hamiltonian
+    )
     cache_key = (
         tuple(coords),
         chi,
@@ -219,12 +230,12 @@ def _honeycomb_ctm_energy_implicit_dispatch(
         gmres_tol,
         gmres_maxiter,
         gmres_restart,
-        id(hamiltonian),
-        id(energy_fn),
+        hamiltonian_fp,
+        energy_fn_fp,
         arnoldi_precheck,
     )
 
-    entry = _VJP_CACHE.get(cache_key)
+    entry = lru_get(_VJP_CACHE, cache_key)
     if entry is not None:
         f, mutables = entry
         mutables["hamiltonian"] = hamiltonian
@@ -255,7 +266,10 @@ def _honeycomb_ctm_energy_implicit_dispatch(
         gmres_restart=gmres_restart,
         arnoldi_precheck=arnoldi_precheck,
     )
-    _VJP_CACHE[cache_key] = (f, mutables)
+    # Objects the key holds only by id must outlive the entry (see
+    # ``fingerprint``).
+    mutables["_cache_keepalive"] = keepalive
+    lru_put(_VJP_CACHE, cache_key, (f, mutables))
     return f(params_data_tuple)
 
 

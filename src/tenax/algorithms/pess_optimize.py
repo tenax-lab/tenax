@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._cache_fingerprint import declare_cache_key
 from tenax.algorithms._ctm_energy_ad import (
     ctm_energy_implicit,
     invalidate_implicit_ad_warm_start,
@@ -75,6 +76,26 @@ def _make_supersite_indices(D: int, d_eff: int) -> tuple[TensorIndex, ...]:
     )
 
 
+# The loss that used the implicit-AD cache last (#1049).
+_run_state_owner: object | None = None
+
+
+def _claim_run_state(owner: object) -> None:
+    """Start a fresh run when a different PESS loss uses the cache.
+
+    Since #1049, equal losses share one ``_VJP_CACHE`` entry, so they share
+    its adjoint seed and its once-per-run warning latches.  Each loss built by
+    a ``build_pess_loss*`` factory passes its own ``owner``.  When the owner
+    changes, the seed is cleared and the latches are re-armed, as at the start
+    of an optimizer run.  Consecutive calls of one loss keep the seed.  Under
+    ``jax.jit`` this runs at trace time only.
+    """
+    global _run_state_owner
+    if _run_state_owner is not owner:
+        invalidate_implicit_ad_warm_start(run_start=True)
+        _run_state_owner = owner
+
+
 def build_pess_loss(
     cg_gates: CGGates,
     config: CTMConfig,
@@ -93,7 +114,10 @@ def build_pess_loss(
         scalar energy per kagome site. Differentiable via ``jax.grad``
         through the implicit-AD square CTM.
     """
+    owner = object()  # this loss's run; see _claim_run_state
     d_eff = int(cg_gates.h_intra.shape[0])
+    # Without map_fn/init_fn, so the callback is keyed by value (#1049).
+    energy_gates = cg_gates._energy_gates()
 
     def _energy_fn(site_tensors, envs, _gate):
         # Custom energy function for ctm_energy_implicit's energy_fn hook.
@@ -101,9 +125,13 @@ def build_pess_loss(
         # compute_energy_cg, which handles intra (1-site RDM × h_intra)
         # plus 3 inter (h/v/diag 2-site RDM × h_inter) terms.
         A_norm = site_tensors[(0, 0)]
-        return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, d_eff)
+        return compute_energy_cg(A_norm, envs[(0, 0)], energy_gates, d_eff)
+
+    # #1049: keyed by value; lists exactly what the closure captures.
+    declare_cache_key(_energy_fn, energy_gates, d_eff)
 
     def loss_fn(state: IPESSState) -> jnp.ndarray:
+        _claim_run_state(owner)
         A_super = pess_to_kagome_supersite(
             state.R_a, state.R_b, state.R_c, state.T_u, state.lambdas
         )
@@ -185,13 +213,20 @@ def build_pess_loss_exact(
     """
     from tenax.algorithms.pess import pess_to_kagome_supersite_exact
 
+    owner = object()  # this loss's run; see _claim_run_state
     d_eff = int(cg_gates.h_intra.shape[0])
+    # Without map_fn/init_fn, so the callback is keyed by value (#1049).
+    energy_gates = cg_gates._energy_gates()
 
     def _energy_fn(site_tensors, envs, _gate):
         A_norm = site_tensors[(0, 0)]
-        return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, d_eff)
+        return compute_energy_cg(A_norm, envs[(0, 0)], energy_gates, d_eff)
+
+    # #1049: keyed by value; lists exactly what the closure captures.
+    declare_cache_key(_energy_fn, energy_gates, d_eff)
 
     def loss_fn(state: IPESSState) -> jnp.ndarray:
+        _claim_run_state(owner)
         A_super = pess_to_kagome_supersite_exact(
             state.R_a, state.R_b, state.R_c, state.T_u, state.T_d, state.lambdas
         )
@@ -520,7 +555,7 @@ def optimize_pess_ad(
     """
     # #973: drop any previous run's adjoint seed before this run's first
     # gradient -- see invalidate_implicit_ad_warm_start's docstring.
-    invalidate_implicit_ad_warm_start()
+    invalidate_implicit_ad_warm_start(run_start=True)
     import optax
 
     if loss_builder == "convc":
@@ -685,6 +720,7 @@ def build_pess_loss_3site_multisite(
         gradient.
     """
     validate_ctm_for_implicit_ad(config)
+    owner = object()  # this loss's run; see _claim_run_state
     # Promote Tensor-valued gates to ndarray at entry so the rest of the
     # closure (and the .shape inference below) sees a uniform jax.Array
     # type — issue #402.  ``compute_energy_pess_3site_multisite`` accepts
@@ -710,7 +746,11 @@ def build_pess_loss_3site_multisite(
             d=d,
         )
 
+    # #1049: keyed by value; lists exactly what the closure captures.
+    declare_cache_key(_energy_fn, bond_gates_arr, d)
+
     def loss_fn(state: IPESSState) -> jnp.ndarray:
+        _claim_run_state(owner)
         sites = pess_to_kagome_3site_multisite(
             state.R_a,
             state.R_b,
@@ -802,7 +842,7 @@ def optimize_pess_3site_multisite_ad(
     """
     # #973: drop any previous run's adjoint seed before this run's first
     # gradient -- see invalidate_implicit_ad_warm_start's docstring.
-    invalidate_implicit_ad_warm_start()
+    invalidate_implicit_ad_warm_start(run_start=True)
     import optax
 
     # Promote Tensor-valued gates to ndarray once at the optimizer entry
