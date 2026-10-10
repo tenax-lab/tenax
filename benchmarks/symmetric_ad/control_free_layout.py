@@ -3,7 +3,7 @@
 The loss is built with an empty cache (``cache = {}``), i.e. a cold-started
 implicit-AD loss, which keeps the frozen cold-init layout (R16).
 Twenty plain-GD steps (step 0.01 on normalised tensors); after each step we
-record the loss energy, the converged CTM energy at the same tensors
+record the loss energy, the converged CTM energy at the same tensors (before the step)
 (``converged_energy`` adapts the layout), their gap, the forward verdict and
 the wall time.  This measures what seeding buys.  Nothing is gated.
 
@@ -22,7 +22,7 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from benchmarks.symmetric_ad.pipeline import MODELS, SYMS, _ctm  # noqa: E402
+from benchmarks.symmetric_ad.pipeline import MODELS, REF_TOL, SYMS, _ctm  # noqa: E402
 from tenax import CTMConfig, ipeps, iPEPSConfig  # noqa: E402
 from tenax.algorithms import _ctm_energy_ad  # noqa: E402
 from tenax.algorithms._symmetric_ad_validation import (  # noqa: E402
@@ -59,14 +59,15 @@ def run_control(model, sym, D, chi, seed, out_dir, *, su_steps=400, steps=STEPS)
         t0 = time.time()
         e, (gA, gB) = jax.value_and_grad(loss)((A, B))
         diag = _ctm_energy_ad.get_last_implicit_ad_diagnostics()
+        # Converged CTM at the tensors the loss was evaluated at, then step.
+        e_conv, conv = converged_energy(A, B, gate, _ctm(chi), None, REF_TOL)
         A, B = A - LR * gA, B - LR * gB
         A, B = normalized_pair(A, B)
-        e_conv, conv = converged_energy(A, B, gate, _ctm(chi), None)
         rows.append(
             {
                 "step": k,
                 "loss_E": float(e),
-                "converged_E_after_step": e_conv,
+                "converged_E": e_conv,
                 "gap": float(e) - e_conv,
                 "converged": conv,
                 "forward_converged": diag.get("forward_converged"),
