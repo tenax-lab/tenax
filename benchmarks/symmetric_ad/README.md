@@ -27,6 +27,11 @@ and `wall`.  A failed stage stops the point; later stages are written as
 | S4 Gradient | flow implicit-AD `value_and_grad` | 3 random unit directions: \|g.d - FD\| < max(1e-6 \|FD\|, fd_unc) at the best h, and fd_unc < 1e-3 \|FD\|. Oracle (`oracle_rel` per site, its forward stationarity and backward-used) is reported, never gated. On a near-degenerate point the gate is reported only. |
 | S5 Optimize | `optimize_gs_ad` from `envs_init`, up to 3 layout stages; drift check by the S2 procedure | layout settled and the final seed stable. Cold, warm and dense energies are reported. |
 
+`--skip-dense` drops the dense arm of S5 (its `E_dense` is then null).  On the
+Z2 XXZ chi=8 point the dense optimizer's CTM does not reach a stationary
+environment (warm-start refresh sv_diff 0.7-1.4 after 300 sweeps), and 10
+dense steps took over an hour on a GPU.
+
 The reference CTMs (S1, S4 FD, S5) use `conv_tol=1e-10` on the element-wise
 singular values (`REF_TOL`): some states sit on a floor near 3e-11 where
 1e-12 never reports convergence although the energy is fixed to 2e-16.

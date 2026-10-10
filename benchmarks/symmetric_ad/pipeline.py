@@ -109,7 +109,17 @@ def _unit_direction(A, B, key):
 
 
 def run_point(
-    model, sym, D, chi, seed, out_dir, *, su_steps=400, opt_steps=200, fd_dirs=3
+    model,
+    sym,
+    D,
+    chi,
+    seed,
+    out_dir,
+    *,
+    su_steps=400,
+    opt_steps=200,
+    fd_dirs=3,
+    dense_arm=True,
 ):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -268,13 +278,16 @@ def run_point(
         e_warm, c_warm = converged_energy(
             A, B, gate, _ctm(chi), {(0, 0): env_A, (1, 0): env_B}, REF_TOL
         )
-        _log("S5 warm converged energy done; dense arm start")
-        Ad, Bd = st["dense_start"]  # the dense SU state of S1
-        cfg_d = dataclasses.replace(cfg, ctm=_ctm(chi))
-        (Adf, Bdf), _, _, _ = optimize_gs_ad(gate_dense, (Ad, Bd), cfg_d)
-        e_dense, c_dense = converged_energy(
-            Adf, Bdf, gate_dense, _ctm(chi), None, REF_TOL
-        )
+        e_dense = c_dense = None
+        if dense_arm:
+            _log("S5 warm converged energy done; dense arm start")
+            Ad, Bd = st["dense_start"]  # the dense SU state of S1
+            cfg_d = dataclasses.replace(cfg, ctm=_ctm(chi))
+            (Adf, Bdf), _, _, _ = optimize_gs_ad(gate_dense, (Ad, Bd), cfg_d)
+            _log("S5 dense optimizer done")
+            e_dense, c_dense = converged_energy(
+                Adf, Bdf, gate_dense, _ctm(chi), None, REF_TOL
+            )
         settled = same_layout(drift.layout, layouts[-1])
         ok = settled and drift.stable
         return (
@@ -289,7 +302,9 @@ def run_point(
                 "warm_converged": c_warm,
                 "E_dense": e_dense,
                 "dense_converged": c_dense,
-                "dE_sym_minus_dense": min(e_cold, e_warm) - e_dense,
+                "dE_sym_minus_dense": (
+                    None if e_dense is None else min(e_cold, e_warm) - e_dense
+                ),
                 "energies": hist_all,
             },
             {},
@@ -316,6 +331,11 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--su-steps", type=int, default=400)
     ap.add_argument("--opt-steps", type=int, default=200)
+    ap.add_argument(
+        "--skip-dense",
+        action="store_true",
+        help="skip the dense arm of S5 (hours at chi=8: its CTM is not stationary)",
+    )
     ap.add_argument("--cache-dir", type=Path, default=None)
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
@@ -334,6 +354,7 @@ def main():
                 a.out,
                 su_steps=a.su_steps,
                 opt_steps=a.opt_steps,
+                dense_arm=not a.skip_dense,
             )
         )
     )
