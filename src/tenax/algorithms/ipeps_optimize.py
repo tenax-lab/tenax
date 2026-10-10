@@ -1238,6 +1238,7 @@ def optimize_gs_ad(
     # genuinely non-convergent, since '1x1' reaches no fixed point (#911).
     _reject_mislabelled_1x1(config)
     _refuse_sign_free_fermionic(hamiltonian_gate, A_init, config)
+    config = _drop_metric_precond_for_fermions(hamiltonian_gate, A_init, config)
 
     # Root implicit AD (#715).  Placed ahead of the unit-cell branches because
     # the variant (dense 1x1 vs dense cell vs symmetric) is selected from the
@@ -1377,6 +1378,64 @@ def _refuse_sign_free_fermionic(hamiltonian_gate, A_init, config: iPEPSConfig) -
             "FermionParity SymmetricTensors as A_init (optimize_fpeps_ad "
             "builds them from an FPEPSConfig)."
         )
+
+
+def _resumed_params_are_fermionic(config: iPEPSConfig) -> bool:
+    """True if ``gs_resume`` will restore fermionic tensors.
+
+    A resume restores ``params`` from the checkpoint, not from ``A_init``,
+    so a run with a dense gate and ``A_init=None`` can still optimize
+    fermionic tensors.
+    """
+    from tenax.algorithms._checkpoint import checkpoint_exists, load_checkpoint
+    from tenax.algorithms._ctm_graded import is_fermionic
+
+    if not config.gs_resume or not checkpoint_exists(config.gs_checkpoint_path):
+        return False
+    bundle = load_checkpoint(config.gs_checkpoint_path)
+    leaves = jax.tree_util.tree_leaves(
+        (bundle.get("params"), bundle.get("best_params")),
+        is_leaf=lambda x: isinstance(x, SymmetricTensor),
+    )
+    return any(is_fermionic(t) for t in leaves)
+
+
+def _drop_metric_precond_for_fermions(
+    hamiltonian_gate, A_init, config: iPEPSConfig
+) -> iPEPSConfig:
+    """Turn off metric preconditioning for fermionic input, with a warning.
+
+    The metric's norm matrix (``_metric_precond``) is built with the
+    sign-free contractor and ``.todense()``, so on fermionic tensors it is
+    the hard-core-boson metric (#1059 finding 27).  The descent guard keeps
+    it from changing the fixed point or the reported energy, but L-BFGS and
+    CG can lose efficiency or fall back to steepest descent repeatedly.  The
+    split and ``cg_gates`` map_fn paths drop it the same way.
+    """
+    if not config.gs_metric_precond or config.gs_optimizer.lower() not in (
+        "lbfgs",
+        "cg",
+    ):
+        return config
+    from tenax.algorithms._ctm_graded import is_fermionic, site_tensors_of
+
+    if not (
+        is_fermionic(hamiltonian_gate)
+        or any(is_fermionic(t) for t in site_tensors_of(A_init))
+        or _resumed_params_are_fermionic(config)
+    ):
+        return config
+    import warnings
+    from dataclasses import replace
+
+    warnings.warn(
+        "gs_metric_precond=True is not supported for fermionic tensors "
+        "(#1059): the metric's norm matrix is built without fermionic signs. "
+        "Falling back to non-preconditioned optimization. Set "
+        "gs_metric_precond=False to silence this.",
+        stacklevel=3,
+    )
+    return replace(config, gs_metric_precond=False)
 
 
 def _reject_mislabelled_1x1(config: iPEPSConfig) -> None:
