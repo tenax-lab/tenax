@@ -1122,7 +1122,13 @@ def optimize_gs_ad(
                           optimisation -- pass the output of an eager
                           ``ctm_tensor_2site`` on the initial tensors. Its
                           keys must equal the 2-site cell's,
-                          ``{(0, 0), (1, 0)}``.
+                          ``{(0, 0), (1, 0)}``.  The grad-free forward
+                          CTMs of a seeded run (the warm-start refresh and
+                          the line-search probes) pass
+                          ``eager_layout_sweeps=0`` to
+                          ``python_loop_ctm_converge``, so the #1098 layout
+                          phase does not move the seed's layout either.  The
+                          final cold evaluation (#899) still adapts.
 
                           Also accepted with ``config.gs_implicit_ad=False``
                           (the explicit-AD path): it seeds that path's first
@@ -3600,6 +3606,13 @@ def _optimize_gs_ad_tensor_2site(
         # (#1035) instead of cold-starting from a tiled/identity env.
         _env_cache_2s["envs"] = envs_init
 
+    # #1098 vs #1035 (ruling R21): a seeded run freezes the layout for the
+    # whole optimisation, so its grad-free forwards (the warm-start refresh
+    # and the line-search probes) skip the eager layout phase.  Without the
+    # seed they adapt the layout as usual.  ``_eval_fresh_2site`` is a cold
+    # evaluation (#899) and is not frozen.
+    _seeded_layout_kw = {"eager_layout_sweeps": 0} if envs_init is not None else {}
+
     if use_c4v:
         from tenax.algorithms.ipeps import (
             build_c4v_basis,
@@ -3700,6 +3713,7 @@ def _optimize_gs_ad_tensor_2site(
             site_tensors,
             CHECKERBOARD_NEIGHBORS,
             **ctm_converge_kwargs(ctm_cfg_2s, env_init=_env_cache_2s.get("envs", None)),
+            **_seeded_layout_kw,
         )
         _refresh_env_cache(_env_cache_2s, envs, info, ctm_cfg_2s, params)
         # Capture ``info.max_truncation_error`` so the end-of-step
@@ -3901,6 +3915,7 @@ def _optimize_gs_ad_tensor_2site(
                 env_init=_env_cache_2s.get("envs", None),
                 for_probe=True,
             ),
+            **_seeded_layout_kw,
         )
         if _site3_reject(info, ctm_cfg_2s):
             return float("inf")

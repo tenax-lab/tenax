@@ -490,7 +490,16 @@
     the check fails, the eager phase and the jitted loop run again from the
     returned env, at most twice and within `max_iter`; if it still fails, a
     warning names #1098 and the env is returned with `converged` as the loop
-    reported it.  Cost: one extra sweep per symmetric call.  Measured (CPU, D=2, the
+    reported it.  The check is skipped when the layout phase already ended
+    unstable or in a two-cycle (it has warned), and on non-final `chi_ramp`
+    stages.  An eager phase whose cut alternates between two layouts now
+    stops at the first repeat, keeps the earlier layout and warns, instead
+    of running to the cap.  Every probe (accepted or rejected), eager and
+    check sweep is counted in `iterations`, and `best_iteration` trails
+    `iterations` only after a plateau bail.  A run seeded with
+    `optimize_gs_ad(envs_init=...)` keeps its seed's layout: its warm-start
+    refresh and line-search probes pass `eager_layout_sweeps=0` (the final
+    cold evaluation still adapts).  Cost: one extra sweep per symmetric call.  Measured (CPU, D=2, the
     fixtures above, same process): the first check pays the probe compile
     (U(1) chi=6 4.7 s, Z2 chi=8 3.3 s); after that a check takes 3-4 ms, on
     cold calls (3.7 s / 2.4 s total) and settled warm calls (~0.04 s total).
