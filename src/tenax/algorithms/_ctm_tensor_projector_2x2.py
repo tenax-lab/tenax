@@ -66,6 +66,41 @@ __all__ = ["_build_enlarged_corner", "_compute_2x2_projector"]
 # fixture before #841: 0.229..0.928 frozen against 0.944..0.994 flowing.
 _PROJECTOR_BACKWARD_FLOW = "flow"
 
+# #1098 layout probe.  While ``_ctm_python_loop``'s jitted step traces with
+# ``probe=True`` this is a list, and every traced symmetric chi cut appends one
+# record (see :func:`_layout_probe_record`); the step returns the list as an
+# extra output.  ``None`` otherwise, so no other trace changes.
+_LAYOUT_PROBE: list | None = None
+
+
+def _layout_probe_record(M_prime_T, left_labels, right_labels, U_Mp_T, base_charges):
+    """What the host needs to tell whether this traced cut is the eager cut.
+
+    The traced cut keeps each sector's size from the leg it overwrites (#929);
+    the eager cut keeps the global top-``chi`` with a one-slot floor per
+    charge in ``base_charges`` (:func:`_ctm_utils._select_chi_slots`).  The
+    record holds every sector's full spectrum (including sectors the traced
+    cut gives nothing), the traced allocation, and the floor.  Shapes are
+    static per layout, so recording adds no recompile per call.
+    """
+    from tenax.algorithms._ctm_utils import _sector_floor
+    from tenax.linalg import sector_singular_values
+
+    spectra = sector_singular_values(M_prime_T, left_labels, right_labels)
+    bond = U_Mp_T.indices[-1]
+    alloc = {
+        int(q): int(m)
+        for q, m in zip(np.asarray(bond.sectors), np.asarray(bond.multiplicities))
+    }
+    floor = _sector_floor(base_charges, floor=1)
+    qs = sorted(spectra)
+    return {
+        "q": np.asarray(qs, dtype=np.int32),
+        "alloc": np.asarray([alloc.get(q, 0) for q in qs], dtype=np.int32),
+        "floor": np.asarray([floor.get(q, 0) for q in qs], dtype=np.int32),
+        "s": tuple(jax.lax.stop_gradient(spectra[q]) for q in qs),
+    }
+
 
 @jax.custom_vjp
 def _regularized_dense_svd(M: jax.Array):
@@ -1385,6 +1420,12 @@ def _compute_2x2_projector_symmetric(
                 max_singular_values=chi,
                 base_charges=traced_base,
             )
+            if _LAYOUT_PROBE is not None:
+                _LAYOUT_PROBE.append(
+                    _layout_probe_record(
+                        M_prime_T, mp_left_labels, mp_right_labels, U_Mp_T, base_charges
+                    )
+                )
         else:
             U_Mp_T, S_Mp, Vh_Mp_T, _ = G.svd(
                 M_prime_T,
