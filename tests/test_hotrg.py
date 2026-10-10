@@ -369,7 +369,10 @@ class TestHOTRGProjector:
         cplx = rng.normal(size=(2, 2, 2, 2)) + 1j * rng.normal(size=(2, 2, 2, 2))
         return {"asymmetric real": real, "complex": cplx}
 
-    @pytest.mark.parametrize("isometry,side", [("svd", "auto")])
+    @pytest.mark.parametrize(
+        "isometry,side",
+        [("svd", "auto"), ("eigh", "first"), ("eigh", "second"), ("eigh", "auto")],
+    )
     def test_untruncated_move_is_exact(self, isometry, side):
         exact = {
             _hotrg_step_horizontal: lambda a: np.einsum(
@@ -394,3 +397,12 @@ class TestHOTRGProjector:
         arr = self._tensors()["complex"]
         out, _ = _hotrg_step_horizontal(_make_dense_tensor(arr), 4)
         assert np.iscomplexobj(np.asarray(out.todense()))
+
+    def test_eigh_requires_valid_options(self):
+        T = _make_dense_tensor(self._tensors()["asymmetric real"])
+        with pytest.raises(ValueError):
+            _hotrg_step_horizontal(T, 4, isometry="qr")
+        with pytest.raises(ValueError):
+            _hotrg_step_horizontal(T, 4, isometry="eigh", side="left")
+        with pytest.raises(ValueError):
+            hotrg(T, HOTRGConfig(max_bond_dim=4, num_steps=1, isometry="qr"))
