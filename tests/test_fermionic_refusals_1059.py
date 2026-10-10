@@ -175,8 +175,8 @@ def test_the_dense_root_entry_refuses_a_fermionic_gate():
 
 
 def test_fpeps_entry_refuses_c4v(spy):
-    """``optimize_fpeps_ad`` does not go through ``optimize_gs_ad`` on this
-    branch, so it must run the guard itself."""
+    """``optimize_fpeps_ad`` reaches the guard through ``optimize_gs_ad``
+    (#1094); before that it ran the guard itself."""
     with pytest.raises(NotImplementedError, match=r"gs_c4v.*#1059"):
         iom.optimize_fpeps_ad(_H_F, _f(), _cfg(gs_c4v=True))
     assert spy == []

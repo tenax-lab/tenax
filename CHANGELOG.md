@@ -22,6 +22,26 @@
 
   `optimize_fpeps_ad` runs the same checks.
 
+- **`optimize_fpeps_ad` now goes through `optimize_gs_ad`** (#1059
+  finding 1).  It called the private 1-site loop directly, so
+  `unit_cell="2site"` or a `Lattice` silently ran a uniform 1-site ansatz
+  (which cannot hold a CDW), `CTMConfig.ctm_ad_mode` was ignored, and none
+  of `optimize_gs_ad`'s config checks ran.  Now:
+  - every unit cell and AD engine `optimize_gs_ad` has is reachable, and
+    the return value has `optimize_gs_ad`'s shape for that unit cell
+    (`((A, B), (env_A, env_B), E)` for `"2site"`);
+  - `A_init=None` builds an `(A, B)` pair from `fpeps_config` for
+    `"2site"`, and is refused for a `Lattice`;
+  - a new keyword `envs_init` is passed through (the frozen-layout seed,
+    #1051);
+  - the default `unit_cell="1x1"` still runs the same 1-site loop with
+    the same gradients (its `projector_backward` was already resolved
+    inside that loop).  What it gains is the config validation: an
+    implicit-AD combination `optimize_gs_ad` refuses (e.g.
+    `projector_method="eigh"`, `forward_gauge="sigma"`, or a
+    `ctm_conv_method` other than `"elementwise"`) is now refused here too,
+    instead of running unchecked.
+
 - **The 1-site metric L-BFGS now has a memory.**  On the 1-site
   `optimize_gs_ad` path the metric L-BFGS built its curvature pair from
   the initial tensor, not the current iterate, so `s = 0` at every step and
