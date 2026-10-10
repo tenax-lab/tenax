@@ -90,3 +90,35 @@ def test_no_warning_when_the_metric_would_not_run(seen, overrides):
         warnings.simplefilter("error")
         iom.optimize_gs_ad(_H_F, _f(), _cfg(**overrides))
     assert len(seen) == 1
+
+
+def _write_checkpoint(path, params):
+    from tenax.algorithms._checkpoint import save_checkpoint
+
+    save_checkpoint({"params": params, "best_params": params}, str(path))
+
+
+def test_a_resumed_fermionic_checkpoint_drops_the_metric(seen, tmp_path):
+    # The gate and A_init are dense; only the checkpoint holds fermions.
+    _write_checkpoint(tmp_path, _f())
+    cfg = _cfg(
+        gs_metric_precond=True,
+        gs_resume=True,
+        gs_checkpoint_path=str(tmp_path),
+    )
+    with pytest.warns(UserWarning, match=r"gs_metric_precond.*#1059"):
+        iom.optimize_gs_ad(heisenberg_gate(), None, cfg)
+    assert seen[0].gs_metric_precond is False
+
+
+def test_a_resumed_bosonic_checkpoint_keeps_the_metric(seen, tmp_path):
+    _write_checkpoint(tmp_path, jax.random.normal(jax.random.PRNGKey(0), (2,) * 5))
+    cfg = _cfg(
+        gs_metric_precond=True,
+        gs_resume=True,
+        gs_checkpoint_path=str(tmp_path),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        iom.optimize_gs_ad(heisenberg_gate(), None, cfg)
+    assert seen[0].gs_metric_precond is True

@@ -11,7 +11,7 @@
   the fixed point or the reported energy, but L-BFGS and CG could lose
   efficiency or fall back to steepest descent.  `optimize_gs_ad` (and so
   `optimize_fpeps_ad`) now sets `gs_metric_precond=False` for a fermionic
-  gate or site under L-BFGS or CG, with a `UserWarning`, as the split and
+  gate, site or `gs_resume` checkpoint under L-BFGS or CG, with a `UserWarning`, as the split and
   `cg_gates` map_fn paths already do.  Fermionic L-BFGS trajectories change.
 
 - **Fermionic input is refused where its signs would be dropped**

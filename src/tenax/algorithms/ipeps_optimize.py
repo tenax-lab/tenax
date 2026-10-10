@@ -1380,6 +1380,26 @@ def _refuse_sign_free_fermionic(hamiltonian_gate, A_init, config: iPEPSConfig) -
         )
 
 
+def _resumed_params_are_fermionic(config: iPEPSConfig) -> bool:
+    """True if ``gs_resume`` will restore fermionic tensors.
+
+    A resume restores ``params`` from the checkpoint, not from ``A_init``,
+    so a run with a dense gate and ``A_init=None`` can still optimize
+    fermionic tensors.
+    """
+    from tenax.algorithms._checkpoint import checkpoint_exists, load_checkpoint
+    from tenax.algorithms._ctm_graded import is_fermionic
+
+    if not config.gs_resume or not checkpoint_exists(config.gs_checkpoint_path):
+        return False
+    bundle = load_checkpoint(config.gs_checkpoint_path)
+    leaves = jax.tree_util.tree_leaves(
+        (bundle.get("params"), bundle.get("best_params")),
+        is_leaf=lambda x: isinstance(x, SymmetricTensor),
+    )
+    return any(is_fermionic(t) for t in leaves)
+
+
 def _drop_metric_precond_for_fermions(
     hamiltonian_gate, A_init, config: iPEPSConfig
 ) -> iPEPSConfig:
@@ -1402,6 +1422,7 @@ def _drop_metric_precond_for_fermions(
     if not (
         is_fermionic(hamiltonian_gate)
         or any(is_fermionic(t) for t in site_tensors_of(A_init))
+        or _resumed_params_are_fermionic(config)
     ):
         return config
     import warnings
