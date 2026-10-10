@@ -177,7 +177,7 @@ def _hotrg_step_horizontal(
 
     # Step 2: Isometries via SVD of environment
     # Group (up, U) vs (down, D) → get paired isometries
-    U_iso, _, Vh_iso, _ = truncated_svd(
+    U_iso, _, _, _ = truncated_svd(
         M,
         left_labels=["up", "U"],
         right_labels=["down", "D"],
@@ -197,8 +197,15 @@ def _hotrg_step_horizontal(
     # which is required for SymmetricTensor charge conservation.
     # Use two-step contraction (multi-tensor symmetric contraction has
     # limitations when different tensor pairs share different bonds).
+    # ONE isometry on both ends of the coarse bond: U^dagger on (up, U), the same U on
+    # (down, D), so every bond carries the projector U U^dagger.  V from the SVD of M on
+    # the down side would insert V U^dagger, a projector only when V = U (a real,
+    # reflection-symmetric T); for a reflection-asymmetric or complex T the move was
+    # inexact even untruncated.
     U_iso_dag = U_iso.dagger()  # (up_out, U_out, a_in)
-    Vh_iso_b = Vh_iso.relabel("a", "b").dagger()  # (b_out, down_in, D_in)
+    Vh_iso_b = U_iso.relabels(
+        {"up": "down", "U": "D", "a": "b"}
+    )  # (down_in, D_in, b_out)
     T_tmp = contract(U_iso_dag, T_merged)  # contracts up, U → (a, down, left, D, right)
     T_new = contract(T_tmp, Vh_iso_b, output_labels=("a", "b", "left", "right"))
     T_new = T_new.relabels({"a": "up", "b": "down"})
@@ -235,7 +242,7 @@ def _hotrg_step_vertical(
     M = contract(T, T_copy)  # contracts up↔up, down↔down → (left, right, L, R)
 
     # Step 2: Isometries via SVD of environment
-    U_iso, _, Vh_iso, _ = truncated_svd(
+    U_iso, _, _, _ = truncated_svd(
         M,
         left_labels=["left", "L"],
         right_labels=["right", "R"],
@@ -254,7 +261,9 @@ def _hotrg_step_vertical(
     # Dagger flips flow directions for SymmetricTensor charge conservation.
     # Use two-step contraction (see horizontal step comment).
     U_iso_dag = U_iso.dagger()
-    Vh_iso_b = Vh_iso.relabel("a", "b").dagger()
+    Vh_iso_b = U_iso.relabels(
+        {"left": "right", "L": "R", "a": "b"}
+    )  # one isometry, as above
     T_tmp = contract(U_iso_dag, T_merged)  # contracts left, L → (up, right, down, R, a)
     T_new = contract(T_tmp, Vh_iso_b, output_labels=("up", "down", "a", "b"))
     T_new = T_new.relabels({"a": "left", "b": "right"})
