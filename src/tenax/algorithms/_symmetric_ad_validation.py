@@ -94,6 +94,19 @@ def oracle_value_and_grad(A, B, gate, ctm_cfg, envs_init):
     dense SVD backward fills it with ``1/(s_i^2 - s_j^2)`` noise (measured
     |g_off| ~ 1.7e4 against |g| ~ 0.13 on the U(1) D=2 chi=4 fixture).
 
+    Where it is a valid reference: only where the dense ``bond_phase``-gauged
+    CTM is element-wise stationary at the densified fixed point and keeps the
+    flow backward.  Check ``get_last_implicit_ad_diagnostics()`` after the
+    call (``forward_stationarity_residual``, ``projector_backward_used``).
+    Where it is NOT: states with singular values degenerate across charge
+    sectors (spin-flip pairs +-q in U(1), 0/1 pairs in Z2), which includes
+    every D=2 XXZ simple-update fixture measured (2026-10-10, after #1098):
+    the energy matches the block-sparse loss (<= 2e-16), but the dense
+    forward is not stationary (residual 0.43 U(1) chi=6, 1.4 Z2 chi=8; Z2
+    also drops to frozen projectors) and the gradient is off by 0.31 / 1.0
+    relative, while the block-sparse gradient matches a converged FD to
+    3e-7.  Use the FD (:func:`fd_directional`) as the reference there.
+
     Returns ``(energy, (gA, gB))`` with the gradients as dense arrays.  The
     loss is real, so the raw cotangent is the Euclidean gradient
     (``_euclidean_grads`` is ``conj``, the identity on real leaves).
