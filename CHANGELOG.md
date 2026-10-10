@@ -444,6 +444,44 @@
 
 ### Fixed
 
+- **A symmetric `python_loop_ctm_converge` now chooses its chi-leg charge
+  layout** (#1098, `_ctm_python_loop.py`).  Every sweep ran under
+  `jax.jit`, and for `SymmetricTensor` input the jitted 2x2 projector keeps
+  each charge sector's size from the leg it overwrites (#929).  So a cold
+  start never left the initial tiling (the D² fused charges padded with
+  q=0), and the converged energy was the energy of that restricted layout.
+  Now the layout is chosen before the jitted sweeps.  A warm start already
+  off the initial tiling runs one jitted *probe* sweep that also returns
+  each cut's per-sector singular values; if every cut kept a global top-chi
+  (ties within 1e-10 of the largest value accepted), that sweep is kept and
+  nothing else changes.  Otherwise -- and always for a cold start or an env
+  with the initial tiling -- eager (un-jitted) sweeps choose the layout
+  (a cold start stops when two consecutive eager sweeps agree), and the
+  jitted sweeps then keep it.  Eager outputs are put in ascending-charge
+  order along each chi leg so the jitted step does not recompile per call;
+  the probe compiles once per layout.  New keyword `eager_layout_sweeps`
+  (default 20, `0` = old behaviour) caps the eager phase; it warns if the
+  layout is still changing when the cap or `max_iter` ends the phase.  Probe
+  and eager sweeps count toward `max_iter` and the returned iteration
+  counts.  Dense input is unchanged.  This reaches the optimizer's symmetric
+  warm starts, line-search probes and final evaluations, which all call this
+  function.  Measured (D=2 XXZ Delta=0.3, 2-site SU, cold start), symmetric
+  minus dense energy: U(1)-Sz chi=6 6.6e-6 -> 1e-16, chi=8 6.9e-6 -> 5.8e-11
+  (a three-fold degenerate cut: the residual is which two of the three are
+  kept); Z2 chi=8 8.3e-5 -> 0.0.
+  - **Cost.**  A cold start runs eager sweeps op by op and compiles each
+    primitive per new block shape on first use (U(1) chi=8: ~100 s in a
+    fresh process, was ~10 s).  In a 10-step symmetric 2-site
+    `optimize_gs_ad` (U(1), D=2, chi=8, CPU) the warm calls ran no eager
+    sweep (0.03-0.11 s each, was 0.03-0.07 s), and the steady-state steps
+    took 1.6-3.1 s against 1.2-4.7 s before.  Step 2 took 385 s against
+    14 s: the first AD step still runs on the cold, frozen layout (the
+    implicit-AD forward is not seeded from this function), and step 2 is
+    the first on the adapted layout.  Final energy -0.5024173361 against
+    -0.5023729185.
+  - **Not covered:** chi slots added by the in-loop chi bump
+    (`ctmrg_heuristic_increase_chi`) keep a frozen layout.
+
 - **Hager-Zhang `phi` probes warm-start CTM from the step's env**
   (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
   start from the previous probe's env (the #502 write-back), so the env a
