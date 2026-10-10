@@ -94,6 +94,9 @@ def build_pess_loss(
         scalar energy per kagome site. Differentiable via ``jax.grad``
         through the implicit-AD square CTM.
     """
+    # #1049: an equal loss built later shares this cache entry, so reset its
+    # adjoint seed and warning latches, as the optimizers do at run start.
+    invalidate_implicit_ad_warm_start(run_start=True)
     d_eff = int(cg_gates.h_intra.shape[0])
     # Without map_fn/init_fn, so the callback is keyed by value (#1049).
     energy_gates = cg_gates._energy_gates()
@@ -191,6 +194,9 @@ def build_pess_loss_exact(
     """
     from tenax.algorithms.pess import pess_to_kagome_supersite_exact
 
+    # #1049: an equal loss built later shares this cache entry, so reset its
+    # adjoint seed and warning latches, as the optimizers do at run start.
+    invalidate_implicit_ad_warm_start(run_start=True)
     d_eff = int(cg_gates.h_intra.shape[0])
     # Without map_fn/init_fn, so the callback is keyed by value (#1049).
     energy_gates = cg_gates._energy_gates()
@@ -696,6 +702,9 @@ def build_pess_loss_3site_multisite(
         gradient.
     """
     validate_ctm_for_implicit_ad(config)
+    # #1049: an equal loss built later shares this cache entry, so reset its
+    # adjoint seed and warning latches, as the optimizers do at run start.
+    invalidate_implicit_ad_warm_start(run_start=True)
     # Promote Tensor-valued gates to ndarray at entry so the rest of the
     # closure (and the .shape inference below) sees a uniform jax.Array
     # type — issue #402.  ``compute_energy_pess_3site_multisite`` accepts

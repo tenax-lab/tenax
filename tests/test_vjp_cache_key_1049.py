@@ -540,3 +540,47 @@ def test_a_user_callback_keys_its_inputs_by_identity():
     _, (k1,), _ = callback_key_parts(declared, g1)
     _, (k2,), _ = callback_key_parts(declared, g2)
     assert k1 == k2 and k1[0] == "val"
+
+
+@pytest.mark.parametrize(
+    "builder", ["build_pess_loss", "build_pess_loss_exact", "multisite"]
+)
+def test_a_standalone_pess_loss_starts_a_fresh_run(builder):
+    """Codex review of #1090: an equal PESS loss built later shares the cache
+    entry, so each builder resets the seed and re-arms the warning latches,
+    as the optimizers do at run start."""
+    from tenax.algorithms import pess_optimize as po
+    from tenax.algorithms._pess_multisite_energy import kagome_3site_bond_gates
+    from tenax.algorithms.ipeps_config import CTMConfig
+    from tenax.algorithms.pess import (
+        kagome_xxz_pess_cg_gates,
+        kagome_xxz_pess_cg_gates_exact,
+    )
+
+    build = {
+        "build_pess_loss": lambda c: po.build_pess_loss(kagome_xxz_pess_cg_gates(), c),
+        "build_pess_loss_exact": lambda c: po.build_pess_loss_exact(
+            kagome_xxz_pess_cg_gates_exact(), c
+        ),
+        "multisite": lambda c: po.build_pess_loss_3site_multisite(
+            kagome_3site_bond_gates(), c
+        ),
+    }[builder]
+    calls = {"seed": 0, "latch": 0}
+    key = "_test_1049_pess_builder_sentinel"
+
+    def _seed():
+        calls["seed"] += 1
+
+    def _latch():
+        calls["latch"] += 1
+
+    cea._VJP_CACHE[key] = (
+        None,
+        {"_invalidate_warm_start": _seed, "_reset_run_latches": _latch},
+    )
+    try:
+        build(CTMConfig(chi=4))
+        assert calls == {"seed": 1, "latch": 1}
+    finally:
+        cea._VJP_CACHE.pop(key, None)
