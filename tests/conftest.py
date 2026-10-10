@@ -41,6 +41,7 @@ _FILE_MARKERS = {
     "test_symmetric_ad_validation_guards.py": "core",  # 2 tests ~28 s CPU
     # FD tests are @slow (~16 min GPU, both cases); the regime guard is fast.
     "test_symmetric_2site_ad_gradient.py": "algorithm",
+    "test_symmetric_ad_harness_smoke.py": "algorithm",  # ~635 s CPU (compile bound; 1 FD direction)
     "test_idmrg.py": "algorithm",
     "test_itebd.py": "algorithm",
     "test_trg.py": "algorithm",

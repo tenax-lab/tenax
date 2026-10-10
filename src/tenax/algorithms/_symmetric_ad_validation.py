@@ -132,12 +132,17 @@ def grad_dot(g, d) -> float:
     )
 
 
-def converged_energy(A, B, gate, ctm_cfg, env_init):
+def converged_energy(A, B, gate, ctm_cfg, env_init, conv_tol=1e-12):
     """Energy at normalised (A, B) from a tight eager CTM warm-started at
-    ``env_init``; returns ``(energy, converged)``."""
+    ``env_init``; returns ``(energy, converged)``.
+
+    ``conv_tol`` is the element-wise singular-value tolerance.  Some states
+    sit on a floor of ~3e-11 (Z2 XXZ delta=0.3 chi=8 after 400 SU steps:
+    1000 sweeps stay at sv_diff 2.9e-11 while the energy is fixed to 2e-16),
+    where the default 1e-12 never reports convergence."""
     tight = dataclasses.replace(
         ctm_cfg,
-        conv_tol=1e-12,
+        conv_tol=conv_tol,
         max_iter=1000,
         plateau_patience=None,
         on_unconverged="warn",
@@ -151,7 +156,7 @@ def converged_energy(A, B, gate, ctm_cfg, env_init):
     return energy_2site(A_n, B_n, envs, gate), bool(info.converged)
 
 
-def fd_directional(A, B, dA, dB, gate, ctm_cfg, envs_init, hs=_FD_HS):
+def fd_directional(A, B, dA, dB, gate, ctm_cfg, envs_init, hs=_FD_HS, conv_tol=1e-12):
     """Central FD of the loss along (dA, dB) with an h scan.
 
     Each E(+-h) is a converged CTM.  Over the h values whose two solves both
@@ -160,8 +165,12 @@ def fd_directional(A, B, dA, dB, gate, ctm_cfg, envs_init, hs=_FD_HS):
     """
     scan = []
     for h in hs:
-        ep, cp = converged_energy(A + h * dA, B + h * dB, gate, ctm_cfg, envs_init)
-        em, cm = converged_energy(A - h * dA, B - h * dB, gate, ctm_cfg, envs_init)
+        ep, cp = converged_energy(
+            A + h * dA, B + h * dB, gate, ctm_cfg, envs_init, conv_tol
+        )
+        em, cm = converged_energy(
+            A - h * dA, B - h * dB, gate, ctm_cfg, envs_init, conv_tol
+        )
         scan.append((h, (ep - em) / (2 * h), cp and cm))
     ok = [s for s in scan if s[2]]
     best = None
