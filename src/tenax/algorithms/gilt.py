@@ -358,9 +358,15 @@ def _optimal_q(gram: _BondGram, eps: float) -> jax.Array:
     fidx0, w0, U0 = sector_eigs
     sh = jnp.sqrt(jnp.clip(w0, 0.0, None)) / total
     eye_flat = jnp.eye(ra, rb, dtype=gram.dtype).reshape(ra * rb)
-    tvec = U0.conj().T @ eye_flat[fidx0]
+    # The gram carries the KET (unconjugated) index pair first -- M[ij, IJ] = sum E[ij] conj(E[IJ])
+    # (``_double_layer``: ket = T, bra = T.bar()) -- which is the complex conjugate of the gram
+    # G = E^dagger E of the GILT objective |E vec(Q) - E vec(1)|^2.  Its eigenvectors are
+    # therefore conj(U_G), and the optimum Q = U_G w U_G^dagger vec(1) reads
+    # conj(U0) w U0^T vec(1) in this basis.  ``U0 w U0^dagger vec(1)`` is the complex
+    # conjugate of the optimum: identical for real tensors, wrong for complex ones.
+    tvec = U0.T @ eye_flat[fidx0]
     tp = tvec * sh**2 / (sh**2 + eps**2)
-    q_flat = jnp.zeros(ra * rb, dtype=gram.dtype).at[fidx0].set(U0 @ tp)
+    q_flat = jnp.zeros(ra * rb, dtype=gram.dtype).at[fidx0].set(U0.conj() @ tp)
     return q_flat.reshape(ra, rb)
 
 
