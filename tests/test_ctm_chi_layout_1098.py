@@ -144,11 +144,11 @@ def test_the_probe_accepts_a_top_chi_cut_and_rejects_a_frozen_one():
 
 
 def test_a_seeded_optimizer_freezes_the_layout_in_its_forward_ctms(monkeypatch):
-    """With ``envs_init`` the 2-site optimizer's grad-free forwards (the
-    warm-start refresh and the line-search probes) pass
-    ``eager_layout_sweeps=0``, so the #1098 layout phase cannot move the
-    seed's layout; without ``envs_init`` they leave the default (adapt).
-    The final cold evaluation (#899) adapts in both.
+    """With ``envs_init`` every grad-free forward of the 2-site optimizer
+    (the warm-start refresh, the line-search probes and the final
+    evaluation) passes ``eager_layout_sweeps=0``, so the #1098 layout phase
+    cannot move the seed's layout; without ``envs_init`` they leave the
+    default (adapt).
 
     No CTM and no AD run: ``python_loop_ctm_converge`` is a spy that returns
     its ``env_init`` (or the seed) as converged, and the step gradient is a
@@ -212,7 +212,7 @@ def test_a_seeded_optimizer_freezes_the_layout_in_its_forward_ctms(monkeypatch):
         gs_line_search_method="armijo",
         ctm=CTMConfig(chi=chi, max_iter=50, conv_tol=1e-9),
     )
-    sites = ("_update_env_cache_2s", "loss_fn_fwd")
+    sites = ("_update_env_cache_2s", "loss_fn_fwd", "_eval_fresh_2site")
     for seeded in (True, False):
         calls.clear()
         with warnings.catch_warnings():
@@ -221,7 +221,5 @@ def test_a_seeded_optimizer_freezes_the_layout_in_its_forward_ctms(monkeypatch):
         by_site = {c for c, _ in calls}
         assert set(sites) <= by_site, (seeded, calls)  # regime: both sites ran
         for caller, kw in calls:
-            if caller in sites:
-                assert kw == (0 if seeded else unset), (seeded, caller, kw)
-            else:
-                assert caller == "_eval_fresh_2site" and kw is unset, (caller, kw)
+            assert caller in sites, (seeded, caller)
+            assert kw == (0 if seeded else unset), (seeded, caller, kw)
