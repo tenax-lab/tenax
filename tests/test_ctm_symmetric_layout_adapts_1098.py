@@ -16,6 +16,7 @@ chi=8 (Z2).  Measured before the fix: symmetric minus dense energy 6.6e-6
 from __future__ import annotations
 
 import dataclasses
+import warnings
 from types import SimpleNamespace
 
 import jax
@@ -94,7 +95,7 @@ def _kwargs(chi, max_iter=1000, min_iter=10, conv_tol=1e-12, env_init=None):
 
 
 def _run(A, B, chi, **kw):
-    extra = {k: kw.pop(k) for k in ("eager_layout_sweeps",) if k in kw}
+    extra = {k: kw.pop(k) for k in ("eager_layout_sweeps", "recipe") if k in kw}
     return python_loop_ctm_converge(
         {(0, 0): A, (1, 0): B}, CHECKERBOARD_NEIGHBORS, **_kwargs(chi, **kw), **extra
     )
@@ -345,3 +346,31 @@ def test_running_out_of_max_iter_inside_the_eager_phase_warns(case):
     with pytest.warns(UserWarning, match=r"max_iter=1\).*#1098"):
         _, info = _run(A, B, case.chi, max_iter=1, min_iter=0, conv_tol=0.0)
     assert info.iterations == 1, (name, info)
+
+
+def test_a_1x1_warm_start_runs_no_probe_sweep(case, monkeypatch):
+    """The probe records only the traced 2x2 cut, so under ``recipe="1x1"``
+    it could never certify a layout; it must be skipped, not run in front of
+    the eager sweeps on every warm call (#1098 review, R14)."""
+    name, A, B, envs = case.name, case.A, case.B, case.envs
+    st = {(0, 0): A, (1, 0): B}
+    # Regime: off the cold tiling, so a probe *would* be attempted for 2x2.
+    assert cpl._chi_layout(envs) != cpl._cold_init_layout(st, case.chi), name
+    assert cpl._probe_can_certify(st, "2x2"), name
+    decisions = []
+    real = cpl._probe_says_layout_is_eager
+
+    def _spy(*a, **k):
+        decisions.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(cpl, "_probe_says_layout_is_eager", _spy)
+    eager = _count_eager(monkeypatch)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # max_iter=1: the budget ends inside the eager phase, so no jitted
+        # 1x1 sweep runs (on the U(1) fixture the jitted 1x1 sweep raises a
+        # label-size mismatch in _ctm_tensor_move_bottom, unrelated to #1098).
+        _run(A, B, case.chi, env_init=envs, max_iter=1, min_iter=0, recipe="1x1")
+    assert decisions == [], (name, len(decisions))
+    assert len(eager) >= 1, (name, len(eager))  # round-1 eager phase instead

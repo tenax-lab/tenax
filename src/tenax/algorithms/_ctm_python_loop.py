@@ -293,6 +293,36 @@ def _cold_init_layout(site_tensors: dict[Coord, Tensor], chi: int) -> tuple:
     return cached
 
 
+# Whether the layout probe can certify a cut, per (recipe, site index
+# metadata): the double layer's charges depend on the site legs alone.
+_PROBE_CAPABLE_CACHE: dict = {}
+
+
+def _probe_can_certify(site_tensors: dict[Coord, Tensor], recipe: str) -> bool:
+    """True when the jitted probe step will record every chi cut (#1098).
+
+    The probe records only the traced 2x2 projector's ``base_charges``
+    branch: ``recipe="1x1"`` never reaches it, and the sweep passes
+    ``base_charges=None`` when no double layer carries a non-trivial ``u2``
+    charge (``_get_base_charges``).  In those cases a probe sweep returns no
+    records, cannot certify anything, and would only add a jitted sweep in
+    front of the eager ones -- so it is skipped.
+    """
+    if recipe != "2x2":
+        return False
+    key = tuple((c, tuple(site_tensors[c].indices)) for c in sorted(site_tensors))
+    cached = _PROBE_CAPABLE_CACHE.get(key)
+    if cached is None:
+        from tenax.algorithms._ctm_tensor_convergence import _get_base_charges
+
+        cached = any(
+            _get_base_charges(_build_double_layer_tensor(A)) is not None
+            for A in site_tensors.values()
+        )
+        _PROBE_CAPABLE_CACHE[key] = cached
+    return cached
+
+
 def _needs_eager_layout_phase(site_tensors, env_init) -> bool:
     """True for concrete symmetric input: the only case the traced cut freezes.
 
@@ -534,7 +564,8 @@ def python_loop_ctm_converge(
                            values and so can move chi slots between charge
                            sectors; the jitted projector keeps each sector's
                            size (#929).  A warm start off the cold-init
-                           tiling first runs one jitted *probe* sweep that
+                           tiling (``recipe="2x2"`` with a charged double
+                           layer) first runs one jitted *probe* sweep that
                            also returns every traced cut's per-sector
                            spectrum; if each cut kept a global top-``chi``
                            (ties within ``1e-10 * s_max`` accepted) the
@@ -728,7 +759,7 @@ def python_loop_ctm_converge(
             site_tensors, chi_current
         )
         probed = False
-        if compare_input:
+        if compare_input and _probe_can_certify(site_tensors, recipe):
             envs_p, _, _, records = jit_step(
                 site_tensors,
                 envs,
