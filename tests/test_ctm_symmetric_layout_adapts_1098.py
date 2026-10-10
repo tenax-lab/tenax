@@ -677,3 +677,92 @@ def test_a_two_cycle_in_the_eager_phase_stops_and_warns_once(case, monkeypatch):
     assert cpl._chi_layout(envs) == cpl._chi_layout(X), name  # the earlier one
     (loop,) = loops
     assert info.iterations == 3 + loop.iterations, (name, info)
+
+
+def test_a_re_entry_that_settles_on_the_last_sweep_does_not_warn(case, monkeypatch):
+    """Review M6: after a failed check, a re-entry whose eager phase certifies
+    the layout but spends the last of ``max_iter`` leaves the loop no sweep.
+    The returned env is the phase's certified output, so no "failed the
+    end-of-call layout check" warning.  ``max_iter`` is set from an unlimited
+    run of the same forced case: 2 (forced phase) + loop + 1 check + the
+    re-entry's eager sweeps."""
+    name, A, B = case.name, case.A, case.B
+    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+
+    with monkeypatch.context() as mp:
+        _force_frozen_pre_loop_layout(mp, frozen)
+        loops = _spy_loop(mp)
+        eager = _count_eager(mp)
+        _, info_big = _run(A, B, case.chi)
+    k = loops[0].iterations
+    n_eager = len(eager)
+    assert n_eager >= 1, name  # regime: the re-entry ran eager sweeps
+    max_iter = 2 + k + 1 + n_eager
+    assert max_iter < info_big.iterations, (name, max_iter, info_big)
+
+    adapt_calls = _force_frozen_pre_loop_layout(monkeypatch, frozen)
+    checks = _spy(monkeypatch, "_end_of_call_layout_check")
+    loops = _spy_loop(monkeypatch)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        envs, info = _run(A, B, case.chi, max_iter=max_iter)
+    msgs = [str(w.message) for w in caught if "end-of-call" in str(w.message)]
+    assert msgs == [], (name, msgs)
+    assert adapt_calls == [False, True], (name, adapt_calls)
+    assert checks == [(False, 1)], (name, checks)
+    assert [r.iterations for r in loops] == [k, 0], (name, loops)
+    assert info.iterations == max_iter, (name, info)
+    assert cpl._chi_layout(envs) != cpl._chi_layout(frozen), name
+
+
+def test_iterations_never_exceed_max_iter(case, monkeypatch):
+    """Review M7: with probes that record no cut (forced), the check's eager
+    fallback needs a second sweep.  When the loop has used its budget only
+    the reserved sweep is left, so the check stops after the probe and the
+    call reports exactly ``max_iter`` (and warns: nothing certified it)."""
+    name, A, B = case.name, case.A, case.B
+    _watch_probes(monkeypatch, drop_records=True)
+    checks = _spy(monkeypatch, "_end_of_call_layout_check")
+    max_iter = 8
+    with pytest.warns(UserWarning, match=r"end-of-call layout check.*#1098"):
+        _, info = _run(
+            A,
+            B,
+            case.chi,
+            env_init=case.envs,
+            max_iter=max_iter,
+            min_iter=0,
+            conv_tol=0.0,
+        )
+    assert checks == [(False, 1)], (name, checks)
+    assert info.iterations == max_iter, (name, info)
+
+
+def test_a_cold_two_cycle_through_the_cold_tiling_keeps_the_other_layout(
+    case, monkeypatch
+):
+    """Review M8: from the rank-1 cold init the first eager output can be the
+    cold-init tiling T, so a cold ``T, X, T`` is a two-cycle whose earlier
+    layout is T -- the #1098 defect layout.  The phase must keep X."""
+    name, A, B = case.name, case.A, case.B
+    st = {(0, 0): A, (1, 0): B}
+    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    T_env, X_env = frozen, case.envs
+    cold = cpl._cold_init_layout(st, case.chi)
+    assert cpl._chi_layout(T_env) == cold, name  # regime: T is the tiling
+    assert cpl._chi_layout(X_env) != cold, name
+    seq = []
+
+    def _alt(site_tensors, envs, **k):
+        out = (T_env, X_env)[len(seq) % 2]
+        seq.append(1)
+        return out, 0.0, 0.0
+
+    monkeypatch.setattr(cpl, "_eager_ctm_sweep", _alt)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        envs, _ = _run(A, B, case.chi)  # cold: T, X, T
+    msgs = [str(w.message) for w in caught if "#1098" in str(w.message)]
+    assert len(msgs) == 1 and "alternated" in msgs[0], (name, msgs)
+    assert len(seq) == 3, (name, len(seq))
+    assert cpl._chi_layout(envs) == cpl._chi_layout(X_env), name

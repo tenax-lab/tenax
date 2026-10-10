@@ -402,6 +402,7 @@ def _adapt_symmetric_layout(
     max_sweeps: int,
     gauge_pair,
     compare_input: bool,
+    avoid_layout: tuple | None = None,
     **sweep_kwargs,
 ):
     """Eager sweeps until the chi-leg layout stops changing (#1098).
@@ -434,8 +435,12 @@ def _adapt_symmetric_layout(
     two layouts and more sweeps will not settle it (observed on a fermionic
     Z2 D=2 chi=8 input: ``{0:3,1:5}`` / ``{0:4,1:4}`` on one C1 leg, 20 sweeps
     to the cap).  The phase stops there and keeps the current output, whose
-    layout is the *earlier* of the two (``A``, the first one seen).  The
-    gauge is not applied: the previous output has the other layout.
+    layout is the *earlier* of the two (``A``, the first one seen) -- unless
+    ``A`` is ``avoid_layout`` (the caller passes the cold-init tiling, the
+    restricted layout #1098 exists to leave) and ``B`` is not: then it keeps
+    the previous output, with ``B``.  From the rank-1 cold init the first
+    output can be that tiling, so a cold ``T, X, T`` keeps ``X``.  The gauge
+    is not applied: the two outputs have different layouts.
 
     Returns ``(envs, n_sweeps, outcome)`` with ``outcome`` one of
     ``"stable"``, ``"cycle"`` (two-cycle, see above) or ``"cap"`` (still
@@ -454,6 +459,8 @@ def _adapt_symmetric_layout(
                 envs = gauge_pair(envs, start)
             return envs, n, "stable"
         if before is not None and layout == before:
+            if layout == avoid_layout and prev != avoid_layout:
+                return start, n, "cycle"
             return envs, n, "cycle"
         before, prev = prev, layout
     return envs, max_sweeps, "cap"
@@ -477,12 +484,14 @@ def _end_of_call_layout_check(
     projector_method: str,
     renormalize: bool,
     projector_backward: str,
+    budget: int | None = None,
     **sweep_kwargs,
-) -> bool:
+) -> tuple[bool, int]:
     """True when ``envs``'s chi layout is still a global top-``chi`` cut (#1098).
 
     Returns ``(certified, n_sweeps)``.  Runs one sweep from ``envs`` (two
-    if the probe recorded nothing) and discards its output:
+    if the probe recorded nothing, and only if ``budget`` allows two; else
+    the layout is not certified) and discards its output:
 
     * where the probe can certify (:func:`_probe_can_certify`): one jitted
       probe sweep, certified iff :func:`_probe_says_layout_is_eager`;
@@ -506,6 +515,10 @@ def _end_of_call_layout_check(
         )
         if records:
             return _probe_says_layout_is_eager(records), n
+        if budget is not None and budget < 2:
+            # No sweep left for the eager fallback: never run past
+            # ``max_iter``.  Nothing certified the layout.
+            return False, n
     n += 1
     out, _, _ = _eager_ctm_sweep(
         site_tensors,
@@ -658,7 +671,8 @@ def python_loop_ctm_converge(
                            it, and warns).  If an eager output repeats the
                            layout two sweeps back (a two-cycle), the phase
                            stops there, keeps the earlier of the two layouts
-                           and warns.  If the layout is still changing
+                           (the other one if the earlier is the cold-init
+                           tiling) and warns.  If the layout is still changing
                            when this cap or ``max_iter`` ends the phase, a
                            warning is issued and any jitted sweeps continue
                            from there.  Eager outputs are put in
@@ -901,6 +915,7 @@ def python_loop_ctm_converge(
                 max_sweeps=eager_budget,
                 gauge_pair=_gauge_pair,
                 compare_input=compare_input,
+                avoid_layout=_cold_init_layout(site_tensors, chi_current),
                 chi=chi_current,
                 **sweep_kwargs,
             )
@@ -910,7 +925,8 @@ def python_loop_ctm_converge(
                     "python_loop_ctm_converge: the symmetric chi-leg layout "
                     f"alternated between two layouts in the eager phase after "
                     f"{eager} sweeps (#1098).  The jitted sweeps continue from "
-                    "the earlier of the two and keep it, so the result may be "
+                    "the earlier of the two (the other one if the earlier is "
+                    "the cold-init tiling) and keep it, so the result may be "
                     "the energy of a restricted layout.",
                     stacklevel=2,
                 )
@@ -992,6 +1008,7 @@ def python_loop_ctm_converge(
                 result.envs,
                 jit_step=jit_step,
                 chi=result.final_chi,
+                budget=max_iter - total,
                 **sweep_kwargs,
             )
             checked = True
@@ -1006,6 +1023,7 @@ def python_loop_ctm_converge(
                 max_sweeps=min(eager_layout_sweeps, max_iter - total),
                 gauge_pair=_gauge_pair,
                 compare_input=True,
+                avoid_layout=_cold_init_layout(site_tensors, chi_current),
                 chi=chi_current,
                 **sweep_kwargs,
             )
@@ -1017,6 +1035,12 @@ def python_loop_ctm_converge(
                 # another round starts from the same place.  Stop; the
                 # result is not certified.
                 certified = False
+                break
+            if result.iterations == 0:
+                # The re-entered phase settled and used the rest of the
+                # budget: no jitted sweep followed, so the returned env is
+                # the phase's own output, which the phase certified.
+                certified = True
                 break
         if not certified and checked:
             warnings.warn(

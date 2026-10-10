@@ -493,9 +493,10 @@
     reported it.  The check is skipped when the layout phase already ended
     unstable or in a two-cycle (it has warned), and on non-final `chi_ramp`
     stages.  An eager phase whose cut alternates between two layouts now
-    stops at the first repeat, keeps the earlier layout and warns, instead
+    stops at the first repeat, keeps the earlier layout (the other one
+    if the earlier is the cold-init tiling) and warns, instead
     of running to the cap.  Every probe (accepted or rejected), eager and
-    check sweep is counted in `iterations`, and `best_iteration` trails
+    check sweep is counted in `iterations`, which never exceeds `max_iter`, and `best_iteration` trails
     `iterations` only after a plateau bail.  A run seeded with
     `optimize_gs_ad(envs_init=...)` keeps its seed's layout: its warm-start
     refresh and line-search probes pass `eager_layout_sweeps=0`.  The final
