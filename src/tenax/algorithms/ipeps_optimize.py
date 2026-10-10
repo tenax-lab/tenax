@@ -1122,12 +1122,16 @@ def optimize_gs_ad(
                           optimisation -- pass the output of an eager
                           ``ctm_tensor_2site`` on the initial tensors. Its
                           keys must equal the 2-site cell's,
-                          ``{(0, 0), (1, 0)}``.  Every grad-free forward CTM
-                          of a seeded run (the warm-start refresh, the
-                          line-search probes and the final evaluation)
-                          passes ``eager_layout_sweeps=0`` to
+                          ``{(0, 0), (1, 0)}``.  The warm-start refresh and
+                          the line-search probes of a seeded run pass
+                          ``eager_layout_sweeps=0`` to
                           ``python_loop_ctm_converge``, so the #1098 layout
-                          phase does not move the layout either.
+                          phase does not move the seed's layout either.  The
+                          final evaluation is cold (no ``env_init``, #899):
+                          it does not start from the seed, and it adapts its
+                          layout like an unseeded call (an unconverged one
+                          falls back to the warm cache, see
+                          ``_final_eval_use_warm``).
 
                           Also accepted with ``config.gs_implicit_ad=False``
                           (the explicit-AD path): it seeds that path's first
@@ -3605,14 +3609,14 @@ def _optimize_gs_ad_tensor_2site(
         # (#1035) instead of cold-starting from a tiled/identity env.
         _env_cache_2s["envs"] = envs_init
 
-    # #1098 vs #1035 (ruling R21): a seeded run freezes the layout for the
-    # whole optimisation, so every forward CTM it runs through
-    # ``python_loop_ctm_converge`` -- the warm-start refresh, the line-search
-    # probes and the final evaluation ``_eval_fresh_2site`` -- skips the eager
-    # layout phase.  Without the seed they adapt the layout as usual.  The
-    # final evaluation is cold (#899), so a seeded run's returned env sits on
-    # the cold tiling, as before #1098; adapting it there would return an
-    # energy on a layout the optimisation never saw.
+    # #1098 vs #1035 (rulings R21, R23): a seeded run freezes the seed's
+    # layout in the forward CTMs that start from it -- the warm-start refresh
+    # and the line-search probes -- so they skip the eager layout phase.
+    # The final evaluation ``_eval_fresh_2site`` is cold (no env_init, #899):
+    # it never sees the seed, and freezing it would pin the cold-init tiling
+    # (the #1098 defect), so it adapts as an unseeded call does.  An
+    # unconverged final evaluation falls back via ``_final_eval_use_warm``.
+    # Without the seed every call adapts.
     _seeded_layout_kw = {"eager_layout_sweeps": 0} if envs_init is not None else {}
 
     if use_c4v:
@@ -5162,7 +5166,6 @@ def _optimize_gs_ad_tensor_2site(
                 st,
                 CHECKERBOARD_NEIGHBORS,
                 **ctm_converge_kwargs(ctm_cfg_2s, env_init=env_init),
-                **_seeded_layout_kw,
             )
             verdict = _final_eval_use_warm(
                 info, warm_cache, ctm_cfg_2s, params=p, skippable=skippable

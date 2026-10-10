@@ -144,11 +144,11 @@ def test_the_probe_accepts_a_top_chi_cut_and_rejects_a_frozen_one():
 
 
 def test_a_seeded_optimizer_freezes_the_layout_in_its_forward_ctms(monkeypatch):
-    """With ``envs_init`` every grad-free forward of the 2-site optimizer
-    (the warm-start refresh, the line-search probes and the final
-    evaluation) passes ``eager_layout_sweeps=0``, so the #1098 layout phase
-    cannot move the seed's layout; without ``envs_init`` they leave the
-    default (adapt).
+    """With ``envs_init`` the 2-site optimizer's forwards that start from the
+    seed (the warm-start refresh and the line-search probes) pass
+    ``eager_layout_sweeps=0``, so the #1098 layout phase cannot move the
+    seed's layout; without ``envs_init`` they leave the default (adapt).
+    The final evaluation is cold (#899) and adapts in both (ruling R23).
 
     No CTM and no AD run: ``python_loop_ctm_converge`` is a spy that returns
     its ``env_init`` (or the seed) as converged, and the step gradient is a
@@ -212,14 +212,16 @@ def test_a_seeded_optimizer_freezes_the_layout_in_its_forward_ctms(monkeypatch):
         gs_line_search_method="armijo",
         ctm=CTMConfig(chi=chi, max_iter=50, conv_tol=1e-9),
     )
-    sites = ("_update_env_cache_2s", "loss_fn_fwd", "_eval_fresh_2site")
+    frozen = ("_update_env_cache_2s", "loss_fn_fwd")
+    sites = (*frozen, "_eval_fresh_2site")
     for seeded in (True, False):
         calls.clear()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             ipo.optimize_gs_ad(H, (A, B), config, envs_init=seed if seeded else None)
         by_site = {c for c, _ in calls}
-        assert set(sites) <= by_site, (seeded, calls)  # regime: both sites ran
+        assert set(sites) <= by_site, (seeded, calls)  # regime: all three ran
         for caller, kw in calls:
             assert caller in sites, (seeded, caller)
-            assert kw == (0 if seeded else unset), (seeded, caller, kw)
+            want = 0 if seeded and caller in frozen else unset
+            assert kw == want, (seeded, caller, kw)
