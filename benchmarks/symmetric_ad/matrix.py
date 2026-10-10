@@ -11,9 +11,40 @@ import subprocess
 import sys
 from pathlib import Path
 
+from benchmarks.symmetric_ad.codehash import code_hash
+
 POINTS = list(
     itertools.product(("xxz03", "heis"), ("u1", "z2"), (2, 3), (8, 16), (0, 1))
 )
+
+
+def _read(d, name):
+    f = d / name
+    try:
+        return json.loads(f.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _complete(d, chash):
+    s = _read(d, "summary.json")
+    return s is not None and s.get("complete") and s.get("code_hash") == chash
+
+
+def _row(name, rc, d):
+    s = _read(d, "summary.json") or {}
+    stages = []
+    for k in ("S1", "S2", "S3", "S4", "S5"):
+        r = _read(d, f"{k}.json")
+        stages.append("?" if r is None else ("P" if r["passed"] else "F"))
+    if rc != 0 or not s.get("complete"):
+        status = f"CRASHED(rc={rc})"
+    elif s.get("stopped_at"):
+        err = " error" if s.get("error_stage") else ""
+        status = f"FAILED at {s['stopped_at']}{err}"
+    else:
+        status = "vacuous (chi not binding)" if s.get("vacuous") else "PASS"
+    return (name, status, "".join(stages), s.get("near_degenerate"), s.get("vacuous"))
 
 
 def main():
@@ -21,7 +52,13 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--cache-dir", type=Path, required=True)
     ap.add_argument("--only", default=None, help="substring filter on the point name")
+    ap.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="rerun points that already have a complete summary of the current code",
+    )
     a = ap.parse_args()
+    chash = code_hash()
     env = dict(os.environ, JAX_PLATFORMS="cuda,cpu", CUDA_VISIBLE_DEVICES="0")
     rows = []
     for model, sym, D, chi, seed in POINTS:
@@ -30,6 +67,18 @@ def main():
             continue
         d = a.out / name
         d.mkdir(parents=True, exist_ok=True)
+        if not a.no_resume and _complete(d, chash):
+            rows.append(_row(name, 0, d))
+            continue
+        for f in (
+            "summary.json",
+            "S1.json",
+            "S2.json",
+            "S3.json",
+            "S4.json",
+            "S5.json",
+        ):
+            (d / f).unlink(missing_ok=True)  # never report a stale result
         with open(d / "run.log", "w") as log:
             rc = subprocess.call(
                 [
@@ -55,14 +104,12 @@ def main():
                 stderr=subprocess.STDOUT,
                 env=env,
             )
-        s = (
-            json.loads((d / "summary.json").read_text())
-            if (d / "summary.json").exists()
-            else {}
-        )
-        rows.append((name, rc, s.get("stopped_at"), s.get("near_degenerate")))
-    lines = ["| point | rc | stopped at | near-degenerate |", "|---|---|---|---|"]
-    lines += [f"| {n} | {rc} | {st or '-'} | {nd} |" for n, rc, st, nd in rows]
+        rows.append(_row(name, rc, d))
+    lines = [
+        "| point | status | S1-S5 (P/F/?) | near-degenerate | vacuous |",
+        "|---|---|---|---|---|",
+    ]
+    lines += [f"| {n} | {st} | {sg} | {nd} | {v} |" for n, st, sg, nd, v in rows]
     (a.out / "matrix_summary.md").write_text("\n".join(lines) + "\n")
 
 

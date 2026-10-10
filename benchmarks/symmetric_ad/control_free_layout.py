@@ -29,10 +29,7 @@ from tenax.algorithms._symmetric_ad_validation import (  # noqa: E402
     converged_energy,
 )
 from tenax.algorithms.ctm_layout import (  # noqa: E402
-    layout_of,
     normalized_pair,
-    same_layout,
-    symmetric_layout_seed,
 )
 from tenax.algorithms.ipeps import xxz_gate  # noqa: E402
 
@@ -40,7 +37,7 @@ STEPS = 20
 LR = 0.01
 
 
-def run_control(model, sym, D, chi, seed, out_dir, *, su_steps=400, steps=STEPS):
+def run_control(model, sym, D, chi, seed, out_dir, *, su_steps=200, steps=STEPS):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     init, gate_fn = SYMS[sym]
@@ -50,9 +47,8 @@ def run_control(model, sym, D, chi, seed, out_dir, *, su_steps=400, steps=STEPS)
         max_bond_dim=D, num_imaginary_steps=su_steps, dt=0.05, ctm=CTMConfig(chi=chi)
     )
     _, (A, B), _ = ipeps(gate_dense, (A0, B0), cfg, compute_energy=False)
-    seed_r = symmetric_layout_seed(A, B, gate, _ctm(chi))
     # AD without the seed: cold-started loss (empty cache).
-    loss, cache = _cold_loss(gate, _ctm(chi))
+    loss, _ = _cold_loss(gate, _ctm(chi))
     A, B = normalized_pair(A, B)
     rows = []
     for k in range(steps):
@@ -74,15 +70,15 @@ def run_control(model, sym, D, chi, seed, out_dir, *, su_steps=400, steps=STEPS)
                 "wall": time.time() - t0,
             }
         )
+        (out_dir / "control_partial.json").write_text(
+            json.dumps({"steps": rows}, indent=2, default=str)
+        )
     rec = {
         "model": model,
         "sym": sym,
         "D": D,
         "chi": chi,
         "seed": seed,
-        "cache_layout_matches_seed": bool(cache.get("envs"))
-        and same_layout(layout_of(cache["envs"]), seed_r.layout),
-        "E_seed_cold": seed_r.energy_cold,
         "steps": rows,
     }
     (out_dir / "control.json").write_text(json.dumps(rec, indent=2, default=str))
@@ -138,13 +134,14 @@ def main():
     ap.add_argument("--D", type=int, required=True)
     ap.add_argument("--chi", type=int, required=True)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--su-steps", type=int, default=400)
+    ap.add_argument("--su-steps", type=int, default=200)
     ap.add_argument("--cache-dir", type=Path, default=None)
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
     if a.cache_dir is not None:
         a.cache_dir.mkdir(parents=True, exist_ok=True)
         jax.config.update("jax_compilation_cache_dir", str(a.cache_dir))
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)
     run_control(a.model, a.sym, a.D, a.chi, a.seed, a.out, su_steps=a.su_steps)
 
 

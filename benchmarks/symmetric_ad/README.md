@@ -22,15 +22,10 @@ and `wall`.  A failed stage stops the point; later stages are written as
 | Stage | Runs | Gate |
 |---|---|---|
 | S1 SU | symmetric 2-site SU, and the same run on densified tensors; converged eager-CTM energy of each | \|E_sym - E_dense\| < 1e-8 and every site tensor has a non-empty block. The convergence flags are reported, not gated. |
-| S2 Seed | `symmetric_layout_seed` | `stable`. `cut_gap` <= 1e-2 flags the point near-degenerate (not a failure). |
+| S2 Seed | `symmetric_layout_seed`; per-corner `chi_binding` (rank of each corner at chi+4 above 1e-12 max, more than chi) | `stable`, cold CTM converged, `cut_gap` not NaN. `cut_gap` <= 1e-2 flags near-degenerate (not a failure). If no corner is binding the point is marked `vacuous` in `summary.json` (not failed, not a pass). |
 | S3 Forward | the AD loss started from the seed | layout unchanged and E equals S2's cold energy to 1e-10 |
-| S4 Gradient | flow implicit-AD `value_and_grad` | 3 random unit directions: \|g.d - FD\| < max(1e-6 \|FD\|, fd_unc) at the best h, and fd_unc < 1e-3 \|FD\|. Oracle (`oracle_rel` per site, its forward stationarity and backward-used) is reported, never gated. On a near-degenerate point the gate is reported only. |
-| S5 Optimize | `optimize_gs_ad` from `envs_init`, up to 3 layout stages; drift check by the S2 procedure | layout settled and the final seed stable. Cold, warm and dense energies are reported. |
-
-`--skip-dense` drops the dense arm of S5 (its `E_dense` is then null).  On the
-Z2 XXZ chi=8 point the dense optimizer's CTM does not reach a stationary
-environment (warm-start refresh sv_diff 0.7-1.4 after 300 sweeps), and 10
-dense steps took over an hour on a GPU.
+| S4 Gradient | flow implicit-AD `value_and_grad` | 3 random unit directions: \|g.d - FD\| < max(1e-6 \|FD\|, fd_unc) at the best h, and fd_unc < 1e-3 \|FD\|. Oracle (`oracle_rel` per site, its forward stationarity and backward-used) is reported, never gated. The symmetric backward must be `flow`; all values finite. On a near-degenerate point the tolerance comparison is reported only. |
+| S5 Optimize | `optimize_gs_ad` from `envs_init`, up to 3 layout stages; drift check by the S2 procedure; one dense converged CTM energy at the densified final tensors | layout settled, drift seed stable, all energies finite, final E <= start E, cold (forced) and warm energies agree to 1e-10 with the warm CTM converged, and \|E_sym - E_dense\| < 1e-8. There is no dense optimizer arm (its CTM is not stationary here: hours per 10 steps). |
 
 The reference CTMs (S1, S4 FD, S5) use `conv_tol=1e-10` on the element-wise
 singular values (`REF_TOL`): some states sit on a floor near 3e-11 where
@@ -41,6 +36,8 @@ singular values (`REF_TOL`): some states sit on a floor near 3e-11 where
 ```bash
 uv run python -m benchmarks.symmetric_ad.matrix --out OUT --cache-dir CACHE [--only SUBSTR]
 ```
+
+Resumable: a point is skipped when its `summary.json` is complete and has the current code hash (`--no-resume` reruns). Before a point starts its old records are deleted, so a crashed point never shows a stale result. The table shows PASS / vacuous / FAILED at S# / CRASHED(rc) and the five stage flags.
 
 Runs the 32 points (model x sym x D in {2,3} x chi in {8,16} x seed in {0,1})
 one subprocess at a time with the GPU environment above, then writes

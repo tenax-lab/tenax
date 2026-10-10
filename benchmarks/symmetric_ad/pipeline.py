@@ -15,6 +15,7 @@ jax.config.update("jax_enable_x64", True)
 
 import numpy as np  # noqa: E402
 
+from benchmarks.symmetric_ad.codehash import code_hash  # noqa: E402
 from tenax import CTMConfig, ipeps, iPEPSConfig, optimize_gs_ad  # noqa: E402
 from tenax.algorithms import _ctm_energy_ad  # noqa: E402
 from tenax.algorithms._symmetric_ad_validation import (  # noqa: E402
@@ -25,8 +26,11 @@ from tenax.algorithms._symmetric_ad_validation import (  # noqa: E402
     make_2site_loss,
     oracle_value_and_grad,
 )
-from tenax.algorithms.ctm_layout import (  # noqa: E402
+from tenax.algorithms.ctm_layout import (  # noqa: E402  # noqa: E402
+    _converge,
+    _corner_values,
     layout_of,
+    normalized_pair,
     same_layout,
     symmetric_layout_seed,
 )
@@ -49,6 +53,10 @@ MAX_STAGES = 3
 # Element-wise sv tolerance of the reference CTMs.  1e-12 is unreachable on
 # some states (sv_diff floor ~3e-11 with the energy fixed to 2e-16).
 REF_TOL = 1e-10
+# S4 measures the gradient tighter than the optimizer needs: with the default
+# gmres_tol=1e-6 the adjoint residual (4e-6 on the Z2 chi=8 point) alone put
+# one direction 1.6e-6 (relative) off the converged FD.
+GRAD_GMRES_TOL = 1e-9
 _DIAG_KEYS = (
     "forward_converged",
     "forward_stationarity_residual",
@@ -58,13 +66,14 @@ _DIAG_KEYS = (
 )
 
 
-def _ctm(chi):
+def _ctm(chi, **kw):
     return dataclasses.replace(
         CTMConfig(chi=chi),
         conv_tol=1e-10,
         max_iter=300,
         plateau_patience=None,
         on_unconverged="warn",
+        **kw,
     )
 
 
@@ -100,6 +109,67 @@ def _stage(out_dir, name, fn):
     return _write(out_dir, name, passed, measured, wall=time.time() - t0, **extra)
 
 
+def gate_s2(stable, cold_converged, cut_gap):
+    """S2 passes: stable seed, converged cold CTM, a real (non-NaN) cut gap."""
+    return bool(stable and cold_converged and not np.isnan(cut_gap))
+
+
+def gate_s4_direction(gd, fd, fd_unc, near_degenerate=False):
+    """One FD direction (R15).  Returns (finite, plateau, within, ok).
+
+    ``within``: |gd - fd| < max(1e-6 |fd|, fd_unc).  ``plateau``:
+    fd_unc < 1e-3 |fd|.  Non-finite values always fail; a near-degenerate
+    point reports ``within``/``plateau`` without gating them."""
+    finite = all(np.isfinite(x) for x in (gd, fd, fd_unc))
+    if not finite:
+        return False, False, False, False
+    within = bool(abs(gd - fd) < max(1e-6 * abs(fd), fd_unc))
+    plateau = bool(fd_unc < 1e-3 * abs(fd))
+    return True, plateau, within, bool(near_degenerate or (within and plateau))
+
+
+def gate_s5(
+    *, settled, drift_stable, e_start, e_ret, e_cold, e_warm, warm_converged, e_dense
+):
+    """S5 (R18).  Returns (ok, parts)."""
+    parts = {
+        "settled": bool(settled),
+        "drift_stable": bool(drift_stable),
+        "finite": all(
+            np.isfinite(x) for x in (e_start, e_ret, e_cold, e_warm, e_dense)
+        ),
+        "descended": bool(e_ret <= e_start + 1e-10),
+        "agree": bool(abs(e_cold - e_warm) < 1e-10),
+        "warm_converged": bool(warm_converged),
+        "dense_ok": bool(abs(e_cold - e_dense) < 1e-8),
+    }
+    return all(parts.values()), parts
+
+
+def _all_sectors_populated(t):
+    """Every sector of every leg carries at least one block."""
+    for i, idx in enumerate(t.indices):
+        used = {k[i] for k in t.blocks}
+        if not {int(c) for c in np.asarray(idx.charges)} <= used:
+            return False
+    return True
+
+
+def _chi_binding(A, B, chi, tol=1e-12):
+    """Is the truncation chi binding?  Per corner: more than chi singular
+    values above ``tol * max`` at chi + 4.  ``any`` is the point-level flag."""
+    A_n, B_n = normalized_pair(A, B)
+    big = dataclasses.replace(_ctm(chi), chi=chi + 4)
+    envs, _ = _converge({(0, 0): A_n, (1, 0): B_n}, big, None)
+    per = {}
+    for c, env in envs.items():
+        for f in ("C1", "C2", "C3", "C4"):
+            s = _corner_values(getattr(env, f))
+            n = int(np.sum(s > tol * s[0])) if len(s) else 0
+            per[f"{c}{f}"] = {"rank": n, "binding": n > chi}
+    return {"corners": per, "any": any(v["binding"] for v in per.values())}
+
+
 def _unit_direction(A, B, key):
     kA, kB = jax.random.split(key)
     dA = SymmetricTensor.random_normal(A.indices, kA)
@@ -116,11 +186,11 @@ def run_point(
     seed,
     out_dir,
     *,
-    su_steps=400,
+    su_steps=200,
     opt_steps=200,
     fd_dirs=3,
-    dense_arm=True,
 ):
+    assert fd_dirs >= 1, "fd_dirs must be at least 1"
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     delta = MODELS[model]
@@ -135,6 +205,10 @@ def run_point(
         "seed": seed,
         "stopped_at": None,
         "near_degenerate": False,
+        "vacuous": False,
+        "error_stage": None,
+        "complete": False,
+        "code_hash": code_hash(),
     }
 
     def s1():
@@ -151,8 +225,8 @@ def run_point(
         )
         e_s, cs = converged_energy(A, B, gate, _ctm(chi), None, REF_TOL)
         e_d, cd = converged_energy(Ad, Bd, gate_dense, _ctm(chi), None, REF_TOL)
-        nonempty = all(len(t.blocks) > 0 for t in (A, B))
-        st.update(A=A, B=B, dense_start=(Ad, Bd))
+        nonempty = all(_all_sectors_populated(t) for t in (A, B))
+        st.update(A=A, B=B)
         return (
             abs(e_s - e_d) < 1e-8
             and nonempty,  # conv flags reported, not gated (ruling S1)
@@ -170,10 +244,13 @@ def run_point(
     def s2():
         seed_r = symmetric_layout_seed(st["A"], st["B"], gate, _ctm(chi))
         st["seed"] = seed_r
-        near = not seed_r.cut_gap > 1e-2
+        nan_gap = bool(np.isnan(seed_r.cut_gap))
+        near = (not nan_gap) and not seed_r.cut_gap > 1e-2
+        binding = _chi_binding(st["A"], st["B"], chi)
         summary["near_degenerate"] = near
+        summary["vacuous"] = not binding["any"]
         return (
-            seed_r.stable,
+            gate_s2(seed_r.stable, seed_r.cold_converged, seed_r.cut_gap),
             {
                 "E_cold": seed_r.energy_cold,
                 "E_forced": seed_r.energy_forced,
@@ -181,6 +258,7 @@ def run_point(
                 "cut_gap": seed_r.cut_gap,
                 "cold_converged": seed_r.cold_converged,
                 "cold_iterations": seed_r.cold_iterations,
+                "chi_binding": binding,
                 "layout": {str(k): v for k, v in seed_r.layout.items()},
             },
             {"near_degenerate": near},
@@ -202,13 +280,20 @@ def run_point(
 
     def s4():
         A, B, sd = st["A"], st["B"], st["seed"]
-        loss, _ = make_2site_loss(gate, _ctm(chi), sd.envs_init)
+        loss, _ = make_2site_loss(
+            gate, _ctm(chi, gmres_tol=GRAD_GMRES_TOL), sd.envs_init
+        )
         t0 = time.time()
         _, (gA, gB) = jax.value_and_grad(loss)((A, B))
         jax.block_until_ready(jax.tree_util.tree_leaves((gA, gB)))
         t_grad = time.time() - t0
         sym_diag = _diag()
-        measured = {"first_grad_wall": t_grad, "sym_diag": sym_diag}
+        flow = sym_diag.get("projector_backward_used") == "flow"
+        measured = {
+            "first_grad_wall": t_grad,
+            "sym_diag": sym_diag,
+            "flow_backward": flow,
+        }
         # Oracle: reported, never gated (valid only without cross-sector
         # degenerate singular values; see its docstring).
         try:
@@ -228,9 +313,9 @@ def run_point(
                 A, B, dA, dB, gate, _ctm(chi), sd.envs_init, conv_tol=REF_TOL
             )
             gd = grad_dot((gA, gB), (dA, dB))
-            tol = max(1e-6 * abs(r["fd"]), r["fd_unc"])
-            plateau = bool(r["fd_unc"] < 1e-3 * abs(r["fd"]))
-            ok_k = bool(abs(gd - r["fd"]) < tol) and plateau
+            finite, plateau, within, ok_k = gate_s4_direction(
+                gd, r["fd"], r["fd_unc"], summary["near_degenerate"]
+            )
             fds.append(
                 {
                     "gd": gd,
@@ -238,15 +323,15 @@ def run_point(
                     "fd_unc": r["fd_unc"],
                     "h_best": r["h_best"],
                     "plateau": plateau,
+                    "within_tol": within,
+                    "finite": finite,
                     "pass": ok_k,
                 }
             )
             ok = ok and ok_k
         measured["fd"] = fds
-        measured["gate_met"] = ok
-        if summary["near_degenerate"]:
-            ok = True  # reported, not gated (spec §5)
-        return ok, measured, {}
+        measured["gate_met"] = ok and flow
+        return ok and flow, measured, {}
 
     def s5():
         layouts, stages = [st["seed"].layout], 0
@@ -278,33 +363,42 @@ def run_point(
         e_warm, c_warm = converged_energy(
             A, B, gate, _ctm(chi), {(0, 0): env_A, (1, 0): env_B}, REF_TOL
         )
-        e_dense = c_dense = None
-        if dense_arm:
-            _log("S5 warm converged energy done; dense arm start")
-            Ad, Bd = st["dense_start"]  # the dense SU state of S1
-            cfg_d = dataclasses.replace(cfg, ctm=_ctm(chi))
-            (Adf, Bdf), _, _, _ = optimize_gs_ad(gate_dense, (Ad, Bd), cfg_d)
-            _log("S5 dense optimizer done")
-            e_dense, c_dense = converged_energy(
-                Adf, Bdf, gate_dense, _ctm(chi), None, REF_TOL
-            )
+        t_d = time.time()
+        Ad, Bd = densify_pair(A, B)
+        e_dense, c_dense = converged_energy(
+            Ad, Bd, gate_dense, _ctm(chi), None, REF_TOL
+        )
+        wall_dense = time.time() - t_d
+        _log("S5 dense final energy done")
+        e_start = hist_all[0][0]
+        e_sym = e_cold
         settled = same_layout(drift.layout, layouts[-1])
-        ok = settled and drift.stable
+        ok, parts = gate_s5(
+            settled=settled,
+            drift_stable=drift.stable,
+            e_start=e_start,
+            e_ret=E_ret,
+            e_cold=e_cold,
+            e_warm=e_warm,
+            warm_converged=c_warm,
+            e_dense=e_dense,
+        )
         return (
             ok,
             {
                 "stages": stages,
                 "layout_settled": settled,
-                "drift_stable": drift.stable,
+                "gate_parts": parts,
+                "E_start": e_start,
                 "E_returned": E_ret,
                 "E_cold": e_cold,
                 "E_warm": e_warm,
+                "cold_warm_diff": e_cold - e_warm,
                 "warm_converged": c_warm,
-                "E_dense": e_dense,
+                "E_dense_final": e_dense,
                 "dense_converged": c_dense,
-                "dE_sym_minus_dense": (
-                    None if e_dense is None else min(e_cold, e_warm) - e_dense
-                ),
+                "dE_sym_minus_dense": e_sym - e_dense,
+                "dense_final_wall": wall_dense,
                 "energies": hist_all,
             },
             {},
@@ -315,9 +409,12 @@ def run_point(
         _log(f"{name} passed={rec['passed']} wall={rec.get('wall', 0):.0f}s")
         if not rec["passed"]:
             summary["stopped_at"] = name
+            if "error" in rec["measured"]:
+                summary["error_stage"] = name
             for later in STAGES[STAGES.index(name) + 1 :]:
                 _write(out_dir, later, False, {"skipped": f"stopped at {name}"})
             break
+    summary["complete"] = True
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     return summary
 
@@ -329,13 +426,8 @@ def main():
     ap.add_argument("--D", type=int, required=True)
     ap.add_argument("--chi", type=int, required=True)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--su-steps", type=int, default=400)
+    ap.add_argument("--su-steps", type=int, default=200)
     ap.add_argument("--opt-steps", type=int, default=200)
-    ap.add_argument(
-        "--skip-dense",
-        action="store_true",
-        help="skip the dense arm of S5 (hours at chi=8: its CTM is not stationary)",
-    )
     ap.add_argument("--cache-dir", type=Path, default=None)
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
@@ -354,7 +446,6 @@ def main():
                 a.out,
                 su_steps=a.su_steps,
                 opt_steps=a.opt_steps,
-                dense_arm=not a.skip_dense,
             )
         )
     )
