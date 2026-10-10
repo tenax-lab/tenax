@@ -293,6 +293,7 @@ def run_point(
             "first_grad_wall": t_grad,
             "sym_diag": sym_diag,
             "flow_backward": flow,
+            "gmres_tol": GRAD_GMRES_TOL,
         }
         # Oracle: reported, never gated (valid only without cross-sector
         # degenerate singular values; see its docstring).

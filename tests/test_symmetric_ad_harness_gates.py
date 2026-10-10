@@ -90,3 +90,36 @@ def test_matrix_row_marks_crash_failure_and_vacuous(tmp_path):
     assert matrix._row("p", 0, tmp_path)[1] == "FAILED at S4 error"
     _summary(tmp_path, complete=True, stopped_at=None, vacuous=True)
     assert "vacuous" in matrix._row("p", 0, tmp_path)[1]
+
+
+def test_code_hash_covers_commits_and_uncommitted_edits(tmp_path):
+    import subprocess
+
+    from benchmarks.symmetric_ad.codehash import code_hash
+
+    def git(*a):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *a],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "benchmarks").mkdir()
+    f = tmp_path / "src" / "lib.py"
+    f.write_text("x = 1\n")
+    git("add", ".")
+    git("commit", "-qm", "a")
+    h0 = code_hash(tmp_path)
+    assert code_hash(tmp_path) == h0
+    f.write_text("x = 2\n")  # uncommitted edit of a library file
+    h1 = code_hash(tmp_path)
+    assert h1 != h0
+    (tmp_path / "benchmarks" / "new.py").write_text("y = 1\n")  # untracked
+    h2 = code_hash(tmp_path)
+    assert h2 != h1
+    git("add", ".")
+    git("commit", "-qm", "b")
+    assert code_hash(tmp_path) != h2  # HEAD moved
