@@ -267,11 +267,10 @@ def test_optimizer_refuses_1x1_on_the_2site_zero_step_path():
 
 @pytest.mark.core
 def test_fpeps_entry_point_runs_the_938_guard():
-    """optimize_fpeps_ad dispatches straight to the private tensor optimizer,
-    bypassing optimize_gs_ad's validation -- it must run the shared guard
-    itself, or fPEPS + fused + '1x1' reproduces the mislabel (Codex round 5
-    on #972). The sentinel A_init proves rejection happens before any tensor
-    work."""
+    """fPEPS + fused + '1x1' must not reproduce the mislabel (Codex round 5
+    on #972). optimize_fpeps_ad now goes through optimize_gs_ad (#1059), which
+    runs the guard; before that it ran the guard itself. The sentinel A_init
+    proves rejection happens before any tensor work."""
     from tenax.algorithms.ipeps_optimize import optimize_fpeps_ad
 
     with pytest.raises(ValueError, match="#938"):

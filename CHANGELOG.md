@@ -4,6 +4,44 @@
 
 ### Behavior Changes
 
+- **Fermionic input is refused where its signs would be dropped**
+  (#1059 findings 2 and 3).  Grading lives in the tensor type, so a
+  fermionic tensor made dense, or contracted without signs, silently
+  becomes a hard-core boson: the run optimised the boson model and
+  reported its energy as the fermionic one.  `NotImplementedError` now
+  fires, before any tensor work, for:
+  - `gs_c4v=True` with a fermionic gate or site (1-site and 2-site): the
+    C4v branches rebuild the site from a dense C4v basis;
+  - any root-implicit `ctm_ad_mode` with a fermionic gate or site:
+    `"root_implicit_symmetric"` contracts its graded double layer without
+    signs, and the dense engines make the gate dense.  The check sits in
+    `optimize_gs_ad_root_implicit`, so direct callers get it too;
+  - a fermionic gate with sites that are not all fermionic, including
+    `A_init=None`, which built a random dense site.  Pass `FermionParity`
+    `SymmetricTensor`s, or use `optimize_fpeps_ad` with an `FPEPSConfig`.
+
+  `optimize_fpeps_ad` runs the same checks.
+
+- **`optimize_fpeps_ad` now goes through `optimize_gs_ad`** (#1059
+  finding 1).  It called the private 1-site loop directly, so
+  `unit_cell="2site"` or a `Lattice` silently ran a uniform 1-site ansatz
+  (which cannot hold a CDW), `CTMConfig.ctm_ad_mode` was ignored, and none
+  of `optimize_gs_ad`'s config checks ran.  Now:
+  - every unit cell and AD engine `optimize_gs_ad` has is reachable, and
+    the return value has `optimize_gs_ad`'s shape for that unit cell
+    (`((A, B), (env_A, env_B), E)` for `"2site"`);
+  - `A_init=None` builds an `(A, B)` pair from `fpeps_config` for
+    `"2site"`, and is refused for a `Lattice`;
+  - a new keyword `envs_init` is passed through (the frozen-layout seed,
+    #1051);
+  - the default `unit_cell="1x1"` still runs the same 1-site loop with
+    the same gradients (its `projector_backward` was already resolved
+    inside that loop).  What it gains is the config validation: an
+    implicit-AD combination `optimize_gs_ad` refuses (e.g.
+    `projector_method="eigh"`, `forward_gauge="sigma"`, or a
+    `ctm_conv_method` other than `"elementwise"`) is now refused here too,
+    instead of running unchecked.
+
 - **The 1-site metric L-BFGS now has a memory.**  On the 1-site
   `optimize_gs_ad` path the metric L-BFGS built its curvature pair from
   the initial tensor, not the current iterate, so `s = 0` at every step and
@@ -443,6 +481,25 @@
   and a `SymmetricTensor` pair still takes the eager route bit-identically.
 
 ### Fixed
+
+- **Hager-Zhang `phi` probes warm-start CTM from the step's env**
+  (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
+  start from the previous probe's env (the #502 write-back), so the env a
+  probe at alpha started from depended on the order HZ probed in, and
+  `phi(alpha)` was not a function of alpha alone.  Now every `phi` probe
+  starts from the step's env; the `dphi` probe at the same alpha still
+  reuses that probe's env.  Seen at a 2-site D=3 Heisenberg stall (chi=16,
+  E=-0.6681622484, |grad|=4.4e-4): HZ bisected down from alpha = 1, every
+  probe at alpha <= 2.4e-4 failed to converge in 100 sweeps from the last
+  probe's env and was rejected as +inf (#1059), and the search returned
+  alpha = 0 five times; from the alpha = 0 env the same probes converge in
+  10 sweeps.  D=2 chi=16: 2-site reaches the same energy (-0.66251430) in
+  77 steps, was 154 (one start); 1x1 and C4v are identical.
+  - **Not shown at D=3.**  With the default CTM (`conv_tol` 1e-8,
+    `plateau_patience` 20) the CTM stops early at 2-site D=3 chi=16 with an
+    energy bias of about 1e-7 that depends on the start env -- larger than
+    the decreases HZ resolves near the minimum there.  Whether this change
+    lowers the D=3 energy is open.
 
 - **The metric preconditioner's GMRES solve compiles once per
   configuration** (`_metric_precond.py`).  `precondition_gradient` handed
