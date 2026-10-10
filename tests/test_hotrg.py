@@ -337,3 +337,72 @@ class TestHOTRGFermionic:
         result = float(hotrg(tensor, config))
         assert np.isfinite(result)
         assert abs(result) < 10, f"Fermionic HOTRG result {result} out of range"
+
+
+def _ring_invariants(arr: np.ndarray) -> np.ndarray:
+    """Scale-free gauge invariants of a (up, down, left, right) tensor: tr M^2 / (tr M)^2
+    and tr M^3 / (tr M)^3 of the two-site vertical ring transfer matrix M."""
+    d = arr.shape[2]
+    m = np.einsum("abcd,baef->cedf", arr, arr).reshape(d * d, d * d)
+    t1 = np.trace(m)
+    return np.array([np.trace(m @ m) / t1**2, np.trace(m @ m @ m) / t1**3])
+
+
+def _as_udlr(t) -> np.ndarray:
+    arr = np.asarray(t.todense())
+    labels = list(t.labels())
+    return np.transpose(arr, [labels.index(x) for x in ("up", "down", "left", "right")])
+
+
+class TestHOTRGProjector:
+    """The coarse bond must carry ONE projector W W^dagger.  Untruncated, a move is then a
+    change of basis of the exact two-site contraction, whatever the tensor's symmetry or
+    dtype.  Applying U^dagger on one end and V (from the SVD of the ring tensor) on the
+    other inserts V U^dagger instead, a projector only for a reflection-symmetric real
+    tensor (V = U): 5e-4 off on a reflection-asymmetric real tensor, 3e-2 on a complex one.
+    """
+
+    @staticmethod
+    def _tensors():
+        rng = np.random.default_rng(0)
+        real = rng.normal(size=(2, 2, 2, 2))
+        cplx = rng.normal(size=(2, 2, 2, 2)) + 1j * rng.normal(size=(2, 2, 2, 2))
+        return {"asymmetric real": real, "complex": cplx}
+
+    @pytest.mark.parametrize(
+        "isometry,side",
+        [("svd", "auto"), ("eigh", "first"), ("eigh", "second"), ("eigh", "auto")],
+    )
+    def test_untruncated_move_is_exact(self, isometry, side):
+        exact = {
+            _hotrg_step_horizontal: lambda a: np.einsum(
+                "udlk,UDkr->uUdDlr", a, a
+            ).reshape(4, 4, 2, 2),
+            _hotrg_step_vertical: lambda a: np.einsum(
+                "uklr,kdLR->udlLrR", a, a
+            ).reshape(2, 2, 4, 4),
+        }
+        for name, arr in self._tensors().items():
+            for step, ref_fn in exact.items():
+                T = _make_dense_tensor(arr)
+                if isometry == "svd":  # the default path, no new keywords
+                    out, _ = step(T, 4)
+                else:
+                    out, _ = step(T, 4, isometry=isometry, side=side)
+                ref = _ring_invariants(ref_fn(arr))
+                got = _ring_invariants(_as_udlr(out))
+                np.testing.assert_allclose(got, ref, rtol=1e-11, err_msg=name)
+
+    def test_complex_input_stays_complex(self):
+        arr = self._tensors()["complex"]
+        out, _ = _hotrg_step_horizontal(_make_dense_tensor(arr), 4)
+        assert np.iscomplexobj(np.asarray(out.todense()))
+
+    def test_eigh_requires_valid_options(self):
+        T = _make_dense_tensor(self._tensors()["asymmetric real"])
+        with pytest.raises(ValueError):
+            _hotrg_step_horizontal(T, 4, isometry="qr")
+        with pytest.raises(ValueError):
+            _hotrg_step_horizontal(T, 4, isometry="eigh", side="left")
+        with pytest.raises(ValueError):
+            hotrg(T, HOTRGConfig(max_bond_dim=4, num_steps=1, isometry="qr"))
