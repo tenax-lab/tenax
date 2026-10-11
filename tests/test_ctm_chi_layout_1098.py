@@ -136,3 +136,92 @@ def test_the_probe_accepts_a_top_chi_cut_and_rejects_a_frozen_one():
     assert not ok([_rec([2, 1], spectra), _rec([3, 0], spectra)])
     assert not ok([])
     assert not ok([_rec([1, 1], ([0.0, 0.0], [0.0]))])  # blind: all zero
+
+
+# ---------------------------------------------------------------------------
+# Ruling R21 (#1098 vs #1035): a seeded optimize_gs_ad keeps its layout.
+# ---------------------------------------------------------------------------
+
+
+def test_a_seeded_optimizer_freezes_the_layout_in_its_forward_ctms(monkeypatch):
+    """With ``envs_init`` the 2-site optimizer's forwards that start from the
+    seed (the warm-start refresh and the line-search probes) pass
+    ``eager_layout_sweeps=0``, so the #1098 layout phase cannot move the
+    seed's layout; without ``envs_init`` they leave the default (adapt).
+    The final evaluation is cold (#899) and adapts in both (ruling R23).
+
+    No CTM and no AD run: ``python_loop_ctm_converge`` is a spy that returns
+    its ``env_init`` (or the seed) as converged, and the step gradient is a
+    fixed random direction, so this checks only the keyword at each site.
+    The Armijo line search reaches ``loss_fn_fwd`` without a gradient."""
+    import sys
+    import warnings
+
+    import tenax.algorithms._ctm_python_loop as cpl
+    import tenax.algorithms.ipeps_optimize as ipo
+    from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
+    from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+    from tenax.algorithms.fermionic_ipeps import (
+        FPEPSConfig,
+        _initialize_fpeps,
+        spinless_fermion_gate,
+    )
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+
+    chi = 8
+    cfg = FPEPSConfig(D=2, t=1.0, V=0.0, dt=0.05)
+    H = spinless_fermion_gate(cfg)
+    A = _initialize_fpeps(cfg, jax.random.PRNGKey(0))
+    B = _initialize_fpeps(cfg, jax.random.PRNGKey(1))
+    seed = {
+        (0, 0): initialize_ctm_tensor_env(A, chi),
+        (1, 0): initialize_ctm_tensor_env(B, chi),
+    }
+    unset = object()
+    calls = []
+
+    def _spy(site_tensors, neighbors, **kw):
+        caller = sys._getframe(1).f_code.co_name
+        calls.append((caller, kw.get("eager_layout_sweeps", unset)))
+        env = kw.get("env_init") or seed
+        info = CTMConvergeInfo(
+            converged=True,
+            iterations=1,
+            sv_diff=0.0,
+            max_truncation_error=0.0,
+            best_iteration=1,
+        )
+        return env, info
+
+    def _value_and_grad(loss_fn, params, **_):
+        g = tuple(
+            SymmetricTensor.random_normal(t.indices, jax.random.PRNGKey(10 + i)) * 1e-2
+            for i, t in enumerate(params)
+        )
+        return 0.0, g
+
+    monkeypatch.setattr(cpl, "python_loop_ctm_converge", _spy)
+    monkeypatch.setattr(ipo, "_site1_value_and_grad", _value_and_grad)
+    config = iPEPSConfig(
+        max_bond_dim=2,
+        unit_cell="2site",
+        su_init=False,
+        gs_implicit_ad=True,
+        gs_num_steps=1,
+        gs_verbose=False,
+        gs_line_search_method="armijo",
+        ctm=CTMConfig(chi=chi, max_iter=50, conv_tol=1e-9),
+    )
+    frozen = ("_update_env_cache_2s", "loss_fn_fwd")
+    sites = (*frozen, "_eval_fresh_2site")
+    for seeded in (True, False):
+        calls.clear()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ipo.optimize_gs_ad(H, (A, B), config, envs_init=seed if seeded else None)
+        by_site = {c for c, _ in calls}
+        assert set(sites) <= by_site, (seeded, calls)  # regime: all three ran
+        for caller, kw in calls:
+            assert caller in sites, (seeded, caller)
+            want = 0 if seeded and caller in frozen else unset
+            assert kw == want, (seeded, caller, kw)

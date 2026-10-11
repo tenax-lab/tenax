@@ -402,6 +402,7 @@ def _adapt_symmetric_layout(
     max_sweeps: int,
     gauge_pair,
     compare_input: bool,
+    avoid_layout: tuple | None = None,
     **sweep_kwargs,
 ):
     """Eager sweeps until the chi-leg layout stops changing (#1098).
@@ -429,9 +430,25 @@ def _adapt_symmetric_layout(
     is applied only on the stable sweep (it pairs legs index by index, which
     needs one layout); mixing is not applied here.
 
-    Returns ``(envs, n_sweeps, stable)``.
+    Two-cycle: if an output's layout equals the layout two sweeps back but
+    not the previous one (``A, B, A``), the eager cut is alternating between
+    two layouts and more sweeps will not settle it (observed on a fermionic
+    Z2 D=2 chi=8 input: ``{0:3,1:5}`` / ``{0:4,1:4}`` on one C1 leg, 20 sweeps
+    to the cap).  The phase stops there and keeps the current output, whose
+    layout is the *earlier* of the two (``A``, the first one seen) -- unless
+    ``A`` is ``avoid_layout`` (the caller passes the cold-init tiling, the
+    restricted layout #1098 exists to leave) and ``B`` is not: then it keeps
+    the previous output, with ``B``.  From the rank-1 cold init the first
+    output can be that tiling, so a cold ``T, X, T`` keeps ``X``.  The gauge
+    is not applied: the two outputs have different layouts.
+
+    Returns ``(envs, n_sweeps, outcome)`` with ``outcome`` one of
+    ``"stable"``, ``"cycle"`` (two-cycle, see above) or ``"cap"`` (still
+    changing after ``max_sweeps``).
     """
     prev = _chi_layout(envs) if compare_input else None
+    before = None  # the layout two outputs back (the input counts as one
+    # only under ``compare_input``)
     for n in range(1, max_sweeps + 1):
         start = envs
         envs, _, _ = _eager_ctm_sweep(site_tensors, start, **sweep_kwargs)
@@ -440,9 +457,83 @@ def _adapt_symmetric_layout(
         if layout == prev:
             if gauge_pair is not None:
                 envs = gauge_pair(envs, start)
-            return envs, n, True
-        prev = layout
-    return envs, max_sweeps, False
+            return envs, n, "stable"
+        if before is not None and layout == before:
+            if layout == avoid_layout and prev != avoid_layout:
+                return start, n, "cycle"
+            return envs, n, "cycle"
+        before, prev = prev, layout
+    return envs, max_sweeps, "cap"
+
+
+# How many times the end-of-call check may send ``python_loop_ctm_converge``
+# back into the layout phase (#1098).  A layout that the check still rejects
+# after two more rounds of "eager sweeps, then jitted sweeps" is not settling
+# (for example a near-degenerate cut the eager rule flips across); more
+# rounds would spend the budget without a better answer, so the call warns.
+_LAYOUT_RECHECK_REENTRIES = 2
+
+
+def _end_of_call_layout_check(
+    site_tensors,
+    envs,
+    *,
+    jit_step,
+    chi: int,
+    recipe: str,
+    projector_method: str,
+    renormalize: bool,
+    projector_backward: str,
+    budget: int | None = None,
+    **sweep_kwargs,
+) -> tuple[bool, int]:
+    """True when ``envs``'s chi layout is still a global top-``chi`` cut (#1098).
+
+    Returns ``(certified, n_sweeps)``.  Runs one sweep from ``envs`` (two
+    if the probe recorded nothing, and only if ``budget`` allows two; else
+    the layout is not certified) and discards its output:
+
+    * where the probe can certify (:func:`_probe_can_certify`): one jitted
+      probe sweep, certified iff :func:`_probe_says_layout_is_eager`;
+    * otherwise (``recipe="1x1"``, a double layer without a charged ``u2``
+      leg), or if the probe recorded no cut: one eager sweep, certified iff
+      its output has the same :func:`_chi_layout` as ``envs``.
+
+    Module-level so tests can count the checks.
+    """
+    n = 0
+    if _probe_can_certify(site_tensors, recipe):
+        n += 1
+        _, _, _, records = jit_step(
+            site_tensors,
+            envs,
+            chi=chi,
+            projector_method=projector_method,
+            renormalize=renormalize,
+            projector_backward=projector_backward,
+            probe=True,
+        )
+        if records:
+            return _probe_says_layout_is_eager(records), n
+        if budget is not None and budget < 2:
+            # No sweep left for the eager fallback: never run past
+            # ``max_iter``.  Nothing certified the layout.
+            return False, n
+    n += 1
+    out, _, _ = _eager_ctm_sweep(
+        site_tensors,
+        envs,
+        chi=chi,
+        recipe=recipe,
+        projector_method=projector_method,
+        renormalize=renormalize,
+        projector_backward=projector_backward,
+        **sweep_kwargs,
+    )
+    same = _chi_layout(_charge_sorted_envs(out)) == _chi_layout(
+        _charge_sorted_envs(envs)
+    )
+    return same, n
 
 
 def python_loop_ctm_converge(
@@ -473,6 +564,7 @@ def python_loop_ctm_converge(
     mixing: float = 0.0,
     eager_layout_sweeps: int = 20,
     _recipe_warning_emitted: bool = False,
+    _end_of_call_check: bool = True,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM to convergence using a Python for-loop over JIT'd sweeps.
 
@@ -486,6 +578,7 @@ def python_loop_ctm_converge(
     otherwise keep the initial tiling and converge to the energy of that
     restricted layout (#1098).  A warm start is checked by a jitted probe
     sweep and runs eager sweeps only when the probe finds a non-top-chi cut.
+    The returned env's layout is checked once more at the end of the call.
 
     Args:
         site_tensors:      Map from coordinate to iPEPS site tensor.
@@ -575,17 +668,44 @@ def python_loop_ctm_converge(
                            warm start stops at the first one that returns its
                            layout, a cold(-shaped) one when two consecutive
                            eager sweeps agree (so a value of 1 cannot certify
-                           it, and warns).  If the layout is still changing
+                           it, and warns).  If an eager output repeats the
+                           layout two sweeps back (a two-cycle), the phase
+                           stops there, keeps the earlier of the two layouts
+                           (the other one if the earlier is the cold-init
+                           tiling) and warns.  If the layout is still changing
                            when this cap or ``max_iter`` ends the phase, a
                            warning is issued and any jitted sweeps continue
                            from there.  Eager outputs are put in
                            ascending-charge order along each chi leg, so the
                            jitted step does not recompile per call.  The probe
                            compiles once per layout.
-                           Probe and eager sweeps count toward ``max_iter``,
-                           ``min_iter`` and the returned iteration counts.
+                           At the end of the call the returned env's layout
+                           is checked again, since the spectrum can move after
+                           the layout was chosen: one jitted probe sweep where
+                           the probe can certify, else (or if the probe
+                           records no cut) one eager sweep whose layout must
+                           equal the env's.  Its output is discarded.  This
+                           costs one extra sweep per symmetric call, and one
+                           sweep of ``max_iter`` is held back for it.  The
+                           check is skipped when the jitted loop ran no sweep,
+                           when no budget is left, when the layout phase
+                           already ended unstable or in a two-cycle (it has
+                           warned), and on non-final ``chi_ramp`` stages.  If
+                           the check fails, the eager phase and the jitted
+                           loop run again from the returned env, within the
+                           remaining ``max_iter`` and at most twice (stopping
+                           early if a re-entered phase does not settle); if
+                           the layout still fails the check, a warning is
+                           issued and the last env is returned with
+                           ``converged`` as the loop reported it.
+                           Every probe (accepted or not), eager and check
+                           sweep counts toward ``max_iter``, ``min_iter`` and
+                           the returned iteration counts.  ``best_iteration``
+                           trails ``iterations`` only after a plateau bail,
+                           as without the phase.
                            The gauge is applied on the probe sweep and the
-                           final (stable) eager sweep only, and ``mixing`` only to jitted sweeps.
+                           final (stable) eager sweep only, and ``mixing``
+                           only to jitted sweeps.
                            Dense input never enters this phase.  ``0``
                            disables it (the pre-#1098 behaviour).  Applied
                            per stage under ``chi_ramp``.  Not covered: chi
@@ -751,10 +871,23 @@ def python_loop_ctm_converge(
     # choose it first.  A warm start already off the cold-init tiling is
     # checked by one jitted probe sweep; only if the probe finds a traced cut
     # that is not the eager top-chi cut (or for a cold or cold-shaped env)
-    # do eager sweeps run.
-    eager = 0
+    # do eager sweeps run.  At the end the converged env's layout is checked
+    # again (``_end_of_call_layout_check``), and the phase re-entered from it
+    # if the check fails.
+    sweep_kwargs = dict(
+        neighbors=neighbors,
+        recipe=recipe,
+        device_mesh=device_mesh,
+        projector_method=projector_method,
+        renormalize=renormalize,
+        projector_backward=projector_backward,
+        chunk_size=ctm_chunk_size,
+    )
+    pre = warmup
     eager_budget = min(eager_layout_sweeps, max_iter - warmup)
-    if eager_budget > 0 and _needs_eager_layout_phase(site_tensors, envs):
+    layout_phase = eager_budget > 0 and _needs_eager_layout_phase(site_tensors, envs)
+    outcome = "stable"
+    if layout_phase:
         compare_input = env_init is not None and _chi_layout(envs) != _cold_init_layout(
             site_tensors, chi_current
         )
@@ -769,26 +902,35 @@ def python_loop_ctm_converge(
                 projector_backward=projector_backward,
                 probe=True,
             )
+            # The probe sweep counts whether or not it certifies.
+            pre += 1
             if _probe_says_layout_is_eager(records):
                 envs = envs_p if _gauge_pair is None else _gauge_pair(envs_p, envs)
-                eager, probed = 1, True
-        if not probed:
-            envs, eager, stable = _adapt_symmetric_layout(
+                probed = True
+        eager_budget = min(eager_layout_sweeps, max_iter - pre)
+        if not probed and eager_budget > 0:
+            envs, eager, outcome = _adapt_symmetric_layout(
                 site_tensors,
                 envs,
                 max_sweeps=eager_budget,
                 gauge_pair=_gauge_pair,
                 compare_input=compare_input,
-                neighbors=neighbors,
-                recipe=recipe,
-                device_mesh=device_mesh,
+                avoid_layout=_cold_init_layout(site_tensors, chi_current),
                 chi=chi_current,
-                projector_method=projector_method,
-                renormalize=renormalize,
-                projector_backward=projector_backward,
-                chunk_size=ctm_chunk_size,
+                **sweep_kwargs,
             )
-            if not stable:
+            pre += eager
+            if outcome == "cycle":
+                warnings.warn(
+                    "python_loop_ctm_converge: the symmetric chi-leg layout "
+                    f"alternated between two layouts in the eager phase after "
+                    f"{eager} sweeps (#1098).  The jitted sweeps continue from "
+                    "the earlier of the two (the other one if the earlier is "
+                    "the cold-init tiling) and keep it, so the result may be "
+                    "the energy of a restricted layout.",
+                    stacklevel=2,
+                )
+            elif outcome == "cap":
                 cause = (
                     f"eager_layout_sweeps={eager_layout_sweeps}"
                     if eager == eager_layout_sweeps
@@ -803,38 +945,125 @@ def python_loop_ctm_converge(
                     "eager_layout_sweeps or max_iter.",
                     stacklevel=2,
                 )
-    pre = warmup + eager
+        elif not probed:
+            # The rejected probe used up the budget; nothing certified it.
+            outcome = "cap"
+            warnings.warn(
+                "python_loop_ctm_converge: the iteration budget "
+                f"(max_iter={max_iter}) ended the layout phase after a probe "
+                "sweep that rejected the layout (#1098); raise max_iter.",
+                stacklevel=2,
+            )
+    # The end-of-call check runs only where the layout phase certified the
+    # layout: re-checking a phase that ended unstable or in a two-cycle
+    # cannot certify it (re-entry starts from the same cycle) and would warn
+    # twice.  Non-final ``chi_ramp`` stages skip it (``_end_of_call_check``):
+    # the next stage refines or re-initialises their env anyway.
+    check_on = layout_phase and outcome == "stable" and _end_of_call_check
+
+    def _loop(envs_start, chi_start, done):
+        # ``done`` sweeps are spent.  With the check on, one sweep of the
+        # budget is held back for it -- unless only one is left, which the
+        # loop then uses (a check after zero jitted sweeps is skipped).
+        reserve = 1 if check_on and max_iter - done >= 2 else 0
+        return _run_ctm_loop_with_bump(
+            jit_step,
+            site_tensors,
+            envs_start,
+            chi_current=chi_start,
+            chi_max=chi_max,
+            bump_enabled=ctmrg_heuristic_increase_chi,
+            bump_threshold=ctmrg_heuristic_increase_chi_threshold,
+            bump_step_size=ctmrg_heuristic_increase_chi_step_size,
+            projector_method=projector_method,
+            renormalize=renormalize,
+            projector_backward=projector_backward,
+            gauge_fix_fn=_gauge_pair,
+            max_iter=max(0, max_iter - done - reserve),
+            min_iter=max(0, min_iter - done),
+            conv_tol=conv_tol,
+            conv_method=conv_method,
+            plateau_patience=plateau_patience,
+            mixing=mixing,
+        )
 
     # Run the bump-aware loop via shared helper.
-    result = _run_ctm_loop_with_bump(
-        jit_step,
-        site_tensors,
-        envs,
-        chi_current=chi_current,
-        chi_max=chi_max,
-        bump_enabled=ctmrg_heuristic_increase_chi,
-        bump_threshold=ctmrg_heuristic_increase_chi_threshold,
-        bump_step_size=ctmrg_heuristic_increase_chi_step_size,
-        projector_method=projector_method,
-        renormalize=renormalize,
-        projector_backward=projector_backward,
-        gauge_fix_fn=_gauge_pair,
-        max_iter=max_iter - pre,
-        min_iter=max(0, min_iter - pre),
-        conv_tol=conv_tol,
-        conv_method=conv_method,
-        plateau_patience=plateau_patience,
-        mixing=mixing,
-    )
+    result = _loop(envs, chi_current, pre)
+    total = pre + result.iterations
 
+    if check_on:
+        # #1098 end-of-call check: the layout chosen before the loop may not
+        # be a top-chi cut of the env the loop converged to (the spectrum can
+        # move after the choice).  Check the returned env; if it fails, run
+        # the layout phase again from it and then the loop, up to
+        # ``_LAYOUT_RECHECK_REENTRIES`` times and within ``max_iter``.  The
+        # check is skipped when the loop ran no sweep (the env is the layout
+        # phase's own, certified output) or no budget is left.
+        checked = False
+        certified = True
+        reentries = 0
+        while result.iterations > 0 and total < max_iter:
+            certified, n_check = _end_of_call_layout_check(
+                site_tensors,
+                result.envs,
+                jit_step=jit_step,
+                chi=result.final_chi,
+                budget=max_iter - total,
+                **sweep_kwargs,
+            )
+            checked = True
+            total += n_check
+            if certified or reentries >= _LAYOUT_RECHECK_REENTRIES or total >= max_iter:
+                break
+            reentries += 1
+            chi_current = result.final_chi
+            envs, eager, outcome = _adapt_symmetric_layout(
+                site_tensors,
+                result.envs,
+                max_sweeps=min(eager_layout_sweeps, max_iter - total),
+                gauge_pair=_gauge_pair,
+                compare_input=True,
+                avoid_layout=_cold_init_layout(site_tensors, chi_current),
+                chi=chi_current,
+                **sweep_kwargs,
+            )
+            total += eager
+            result = _loop(envs, chi_current, total)
+            total += result.iterations
+            if outcome != "stable":
+                # The re-entered phase did not settle (cap or two-cycle):
+                # another round starts from the same place.  Stop; the
+                # result is not certified.
+                certified = False
+                break
+            if result.iterations == 0:
+                # The re-entered phase settled and used the rest of the
+                # budget: no jitted sweep followed, so the returned env is
+                # the phase's own output, which the phase certified.
+                certified = True
+                break
+        if not certified and checked:
+            warnings.warn(
+                "python_loop_ctm_converge: the returned symmetric chi-leg "
+                f"layout failed the end-of-call layout check after {reentries} "
+                f"re-entries of the layout phase and {total} sweeps (#1098).  "
+                "It may not be a global top-chi cut of the returned "
+                "environment, so the result may be the energy of a restricted "
+                "layout; raise max_iter or eager_layout_sweeps.",
+                stacklevel=2,
+            )
+
+    # ``best_iteration`` keeps the loop's own gap to ``iterations``: equal
+    # unless the loop bailed on a plateau (``_plateau_bailed``).  Check
+    # sweeps run after the returned env and do not open a gap.
     return result.envs, CTMConvergeInfo(
         converged=result.converged,
-        iterations=pre + result.iterations,
+        iterations=total,
         sv_diff=result.sv_diff,
         max_truncation_error=result.max_truncation_error,
         max_smallest_S=result.max_smallest_S,
         final_chi=result.final_chi,
-        best_iteration=pre + result.best_iteration,
+        best_iteration=total - (result.iterations - result.best_iteration),
         step_multiplier=result.step_multiplier,
     )
 
@@ -917,6 +1146,10 @@ def _python_loop_chi_ramp(
             # this convergence; without this a ramped 1x1 run emits N+1
             # deprecations, N of them attributed here (#921 review r4).
             _recipe_warning_emitted=True,
+            # #1098: the end-of-call layout check only on the final stage;
+            # a non-final stage spends exactly its budget at its chi (#439)
+            # and the next stage refines or re-initialises its env.
+            _end_of_call_check=is_last,
             device_mesh=device_mesh,
             ctm_chunk_size=ctm_chunk_size,
             mixing=mixing,

@@ -25,6 +25,8 @@ import pytest
 
 import tenax.algorithms._ctm_python_loop as cpl
 from tenax import CTMConfig, ipeps, iPEPSConfig
+from tenax.algorithms._ctm_convergence_policy import _plateau_bailed
+from tenax.algorithms._ctm_loop_core import CTMLoopResult
 from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
 from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
@@ -206,6 +208,29 @@ def test_the_kept_corner_spectrum_is_the_dense_top_chi(case):
         np.testing.assert_allclose(s_sym, s_dense, atol=atol, err_msg=f"{name}{c}")
 
 
+def _watch_probes(monkeypatch, drop_records=False):
+    """Record every ``probe=True`` call of the jitted step; with
+    ``drop_records`` the probe returns no records (as if it saw no cut)."""
+    real_make = cpl._make_jit_ctm_step
+    probes = []
+
+    def _make(*a, **k):
+        step = real_make(*a, **k)
+
+        def _w(*aa, **kk):
+            out = step(*aa, **kk)
+            if kk.get("probe"):
+                probes.append(1)
+                if drop_records:
+                    return (*out[:3], ())
+            return out
+
+        return _w
+
+    monkeypatch.setattr(cpl, "_make_jit_ctm_step", _make)
+    return probes
+
+
 def _count_eager(monkeypatch):
     calls = []
     real = cpl._eager_ctm_sweep
@@ -302,22 +327,36 @@ def test_a_warm_start_from_the_cold_init_env_still_adapts(case):
 
 
 def test_the_dense_path_never_enters_the_eager_phase(case, monkeypatch):
-    """Requirement: dense input keeps its behaviour and its compiled code."""
+    """Requirement: dense input keeps its behaviour and its compiled code --
+    no eager phase, no end-of-call check sweep, no new ``_step`` compile."""
     Ad, Bd, E_dense = case.Ad, case.Bd, case.E_dense
 
     def _boom(*a, **k):
         raise AssertionError("eager layout phase entered on dense input")
 
+    def _boom_check(*a, **k):
+        raise AssertionError("end-of-call layout check ran on dense input")
+
     monkeypatch.setattr(cpl, "_eager_ctm_sweep", _boom)
+    monkeypatch.setattr(cpl, "_end_of_call_layout_check", _boom_check)
+    step = cpl._make_jit_ctm_step(CHECKERBOARD_NEIGHBORS)
+    probes = _watch_probes(monkeypatch)
     envs, info = _run(Ad, Bd, case.chi, max_iter=200)
+    n_compiled = step._cache_size()
     envs_off, info_off = _run(Ad, Bd, case.chi, max_iter=200, eager_layout_sweeps=0)
     assert _energy(Ad, Bd, envs) == E_dense == _energy(Ad, Bd, envs_off)
     assert info.iterations == info_off.iterations == 200
+    assert info.best_iteration == 200, info
+    # The opt-out (pre-#1098) run reuses every executable the default run
+    # compiled: no probe step, no new trace.
+    assert step._cache_size() == n_compiled, (n_compiled, step._cache_size())
+    assert probes == [], len(probes)  # no probe sweep, so no probe compile
 
 
 def test_the_cap_warns_and_the_eager_sweeps_count_toward_max_iter(case, monkeypatch):
     """A cap of 1 cannot certify a layout (that needs two consecutive eager
-    sweeps), so it warns; and the eager sweep is spent from ``max_iter``."""
+    sweeps), so it warns; and the eager sweep is spent from ``max_iter``, as
+    is the end-of-call check sweep, which the loop leaves room for."""
     name, A, B = case.name, case.A, case.B
     loop_calls = []
     real_loop = cpl._run_ctm_loop_with_bump
@@ -333,7 +372,8 @@ def test_the_cap_warns_and_the_eager_sweeps_count_toward_max_iter(case, monkeypa
             A, B, case.chi, max_iter=4, min_iter=0, conv_tol=0.0, eager_layout_sweeps=1
         )
     # 1 eager sweep + 3 jitted sweeps: the eager one is inside the budget and
-    # inside the reported counts.
+    # inside the reported counts.  The phase ended unstable (and warned), so
+    # no end-of-call check runs and no sweep is held back for one.
     assert loop_calls == [(3, 3)], (name, loop_calls)
     assert info.iterations == 4, (name, info)
     assert info.best_iteration == 4, (name, info)
@@ -374,3 +414,355 @@ def test_a_1x1_warm_start_runs_no_probe_sweep(case, monkeypatch):
         _run(A, B, case.chi, env_init=envs, max_iter=1, min_iter=0, recipe="1x1")
     assert decisions == [], (name, len(decisions))
     assert len(eager) >= 1, (name, len(eager))  # round-1 eager phase instead
+
+
+# ---------------------------------------------------------------------------
+# End-of-call layout check (#1098 fix round 4).
+# ---------------------------------------------------------------------------
+
+
+def _spy(monkeypatch, name):
+    """Record every return value of the module-level function ``name``."""
+    out = []
+    real = getattr(cpl, name)
+
+    def _s(*a, **k):
+        r = real(*a, **k)
+        out.append(r)
+        return r
+
+    monkeypatch.setattr(cpl, name, _s)
+    return out
+
+
+def _spy_loop(monkeypatch):
+    out = []
+    real = cpl._run_ctm_loop_with_bump
+
+    def _s(*a, **k):
+        r = real(*a, **k)
+        out.append(r)
+        return r
+
+    monkeypatch.setattr(cpl, "_run_ctm_loop_with_bump", _s)
+    return out
+
+
+def test_the_end_of_call_check_passes_on_a_converged_call(case, monkeypatch):
+    """A cold and a settled warm call each end with exactly one check sweep
+    (here the jitted probe), it certifies the layout, the energy is the dense
+    one, and the check sweep is counted but not returned."""
+    name, A, B, E_dense = case.name, case.A, case.B, case.E_dense
+    checks = _spy(monkeypatch, "_end_of_call_layout_check")
+    decisions = _spy(monkeypatch, "_probe_says_layout_is_eager")
+    loops = _spy_loop(monkeypatch)
+    eager = _count_eager(monkeypatch)
+
+    envs, info = _run(A, B, case.chi)
+    assert checks == [(True, 1)], (name, checks)
+    assert decisions == [True], (name, decisions)  # the check's; cold: no pre-probe
+    assert info.converged, (name, info)
+    assert abs(_energy(A, B, envs) - E_dense) < 1e-10, name
+    (loop,) = loops
+    assert info.iterations == len(eager) + loop.iterations + 1, (name, info)
+    assert info.best_iteration == info.iterations, (name, info)  # no plateau
+
+    checks.clear(), decisions.clear(), loops.clear(), eager.clear()
+    envs2, info2 = _run(A, B, case.chi, env_init=envs, max_iter=20)
+    assert checks == [(True, 1)], (name, checks)
+    assert decisions == [True, True], (name, decisions)  # pre-loop probe + check
+    assert eager == [], (name, len(eager))
+    (loop,) = loops
+    assert info2.iterations == 1 + loop.iterations + 1, (name, info2)
+    assert info2.best_iteration == info2.iterations, (name, info2)
+    assert abs(_energy(A, B, envs2) - E_dense) < 1e-10, name
+
+
+def _force_frozen_pre_loop_layout(monkeypatch, frozen):
+    """Make the *pre-loop* layout phase return ``frozen`` as if two eager
+    sweeps had certified it.  Later (re-entry) calls run the real phase.
+
+    This forces the hazard the end-of-call check exists for -- the loop
+    converging on a layout that is not a top-chi cut of its own fixed point
+    -- without waiting for a spectrum that moves after the choice.  The
+    frozen layout is the traced-only fixed point (the cold tiling), whose
+    energy gap is asserted by ``test_the_jitted_symmetric_ctm_reaches...``.
+    """
+    real = cpl._adapt_symmetric_layout
+    calls = []
+
+    def _fake(site_tensors, envs, **kw):
+        calls.append(kw["compare_input"])
+        if len(calls) == 1:
+            return frozen, 2, "stable"
+        return real(site_tensors, envs, **kw)
+
+    monkeypatch.setattr(cpl, "_adapt_symmetric_layout", _fake)
+    return calls
+
+
+def test_the_end_of_call_check_catches_a_layout_the_loop_left_behind(case, monkeypatch):
+    name, A, B, E_dense = case.name, case.A, case.B, case.E_dense
+    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    assert abs(_energy(A, B, frozen) - E_dense) > 1e-7, name  # regime
+
+    adapt_calls = _force_frozen_pre_loop_layout(monkeypatch, frozen)
+    checks = _spy(monkeypatch, "_end_of_call_layout_check")
+    loops = _spy_loop(monkeypatch)
+    eager = _count_eager(monkeypatch)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        envs, info = _run(A, B, case.chi)
+    assert not [w for w in caught if "end-of-call" in str(w.message)], name
+
+    # The check rejected the frozen layout, the phase re-entered once (from
+    # the returned env, one-sweep rule), and the second check passed.
+    assert adapt_calls == [False, True], (name, adapt_calls)
+    assert checks == [(False, 1), (True, 1)], (name, checks)
+    assert info.converged, (name, info)
+    assert abs(_energy(A, B, envs) - E_dense) < 1e-10, name
+    # Counts: 2 (forced phase) + loop + check + eager re-entry + loop + check.
+    l0, l1 = loops
+    n_eager = len(eager)  # the checks are probes here, so all eager = re-entry
+    assert n_eager >= 1, name
+    assert info.iterations == 2 + l0.iterations + 1 + n_eager + l1.iterations + 1
+    assert info.best_iteration == info.iterations, (name, info)
+
+
+def test_a_failed_check_with_no_budget_left_warns(case, monkeypatch):
+    """Same forced layout, but ``max_iter`` ends at the check: no re-entry,
+    a warning, and the loop's env and counts are returned."""
+    name, A, B = case.name, case.A, case.B
+    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    adapt_calls = _force_frozen_pre_loop_layout(monkeypatch, frozen)
+    checks = _spy(monkeypatch, "_end_of_call_layout_check")
+    with pytest.warns(UserWarning, match=r"end-of-call layout check.*#1098"):
+        envs, info = _run(A, B, case.chi, max_iter=10, min_iter=0, conv_tol=0.0)
+    assert adapt_calls == [False], (name, adapt_calls)
+    assert checks == [(False, 1)], (name, checks)
+    # 2 (forced phase) + 7 jitted + 1 check.  The budget ended the run, so
+    # it must not read as a plateau bail (#781): best == iterations.
+    assert info.iterations == 10, (name, info)
+    assert info.best_iteration == 10, (name, info)
+    assert not _plateau_bailed(info), (name, info)
+    assert not info.converged, (name, info)
+    assert cpl._chi_layout(envs) == cpl._chi_layout(frozen), name
+
+
+def test_the_re_entries_are_capped(case, monkeypatch):
+    """A check that never certifies stops after the cap of re-entries, with
+    budget left, and warns."""
+    name, A, B = case.name, case.A, case.B
+    cap = cpl._LAYOUT_RECHECK_REENTRIES
+    assert cap == 2
+    real = cpl._end_of_call_layout_check
+    checks = []
+
+    def _never(*a, **k):
+        r = real(*a, **k)
+        checks.append(r)
+        return False, r[1]
+
+    monkeypatch.setattr(cpl, "_end_of_call_layout_check", _never)
+    adapt = _spy(monkeypatch, "_adapt_symmetric_layout")
+    with pytest.warns(UserWarning, match=r"after 2 re-entries.*#1098"):
+        _, info = _run(A, B, case.chi, env_init=case.envs, max_iter=500)
+    assert len(checks) == cap + 1, (name, checks)
+    assert len(adapt) == cap, (name, len(adapt))  # warm: the probe certified
+    assert info.iterations < 500, (name, info)
+
+
+def test_a_1x1_call_checks_with_one_eager_sweep_and_no_probe(case, monkeypatch):
+    """Where the probe cannot certify (``recipe="1x1"``), the end-of-call
+    check is one eager sweep.  The jitted 1x1 loop is replaced by a stand-in
+    that returns its input after one counted sweep: on this fixture the
+    jitted 1x1 sweep raises a label-size mismatch in
+    ``_ctm_tensor_move_bottom`` (pre-existing, also on base 847480e)."""
+    name, A, B, envs = case.name, case.A, case.B, case.envs
+
+    def _fake_loop(jit_step, site_tensors, envs_init, **k):
+        return CTMLoopResult(
+            envs=envs_init,
+            converged=True,
+            iterations=1,
+            sv_diff=0.0,
+            max_truncation_error=0.0,
+            max_smallest_S=0.0,
+            final_chi=k["chi_current"],
+            bump_extra_sweeps=0,
+            best_iteration=1,
+        )
+
+    monkeypatch.setattr(cpl, "_run_ctm_loop_with_bump", _fake_loop)
+    decisions = _spy(monkeypatch, "_probe_says_layout_is_eager")
+    eager = _count_eager(monkeypatch)
+    real = cpl._end_of_call_layout_check
+    checks = []
+
+    def _check(*a, **k):
+        n0 = len(eager)
+        r = real(*a, **k)
+        checks.append((*r, len(eager) - n0))
+        return r
+
+    monkeypatch.setattr(cpl, "_end_of_call_layout_check", _check)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _, info = _run(A, B, case.chi, env_init=envs, max_iter=100, recipe="1x1")
+    assert decisions == [], (name, decisions)
+    # One check, one eager sweep inside it, and it certifies the layout the
+    # eager phase settled on (the stand-in loop returns that env unchanged).
+    assert checks == [(True, 1, 1)], (name, checks)
+    n_phase = len(eager) - 1
+    assert n_phase >= 1, (name, len(eager))
+    assert info.iterations == n_phase + 1 + 1, (name, info)
+    assert info.best_iteration == info.iterations, (name, info)
+
+
+def test_every_sweep_that_runs_is_counted(case, monkeypatch):
+    """Review I2: a probe that records no cut (forced here) is a sweep that
+    ran -- counted when the pre-loop phase rejects it, and counted with the
+    eager sweep the end-of-call check then falls back to."""
+    name, A, B = case.name, case.A, case.B
+    probes = _watch_probes(monkeypatch, drop_records=True)
+    eager = _count_eager(monkeypatch)
+    loops = _spy_loop(monkeypatch)
+    real = cpl._end_of_call_layout_check
+    checks = []
+
+    def _check(*a, **k):
+        n0 = len(eager)
+        r = real(*a, **k)
+        checks.append((*r, len(eager) - n0))
+        return r
+
+    monkeypatch.setattr(cpl, "_end_of_call_layout_check", _check)
+    _, info = _run(A, B, case.chi, env_init=case.envs, max_iter=100)
+    assert len(probes) == 2, (name, len(probes))  # pre-loop + check
+    # The check: one (empty) probe + one eager sweep, both counted.
+    assert checks == [(True, 2, 1)], (name, checks)
+    (loop,) = loops
+    n_phase = len(eager) - 1
+    assert n_phase >= 1, (name, len(eager))
+    # rejected probe + eager phase + jitted loop + check (2 sweeps)
+    assert info.iterations == 1 + n_phase + loop.iterations + 2, (name, info)
+
+
+def test_a_two_cycle_in_the_eager_phase_stops_and_warns_once(case, monkeypatch):
+    """Review I3: an eager phase whose cut alternates between two layouts
+    stops at the first repeat (not at the cap), keeps the earlier layout,
+    warns once, and runs no end-of-call check or re-entry.  The eager sweep
+    is a stand-in that alternates two real envs with different layouts."""
+    name, A, B = case.name, case.A, case.B
+    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    X, Y = case.envs, frozen
+    assert cpl._chi_layout(X) != cpl._chi_layout(Y), name  # regime
+    seq = []
+
+    def _alt(site_tensors, envs, **k):
+        out = (X, Y)[len(seq) % 2]
+        seq.append(1)
+        return out, 0.0, 0.0
+
+    monkeypatch.setattr(cpl, "_eager_ctm_sweep", _alt)
+    checks = _spy(monkeypatch, "_end_of_call_layout_check")
+    loops = _spy_loop(monkeypatch)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        envs, info = _run(A, B, case.chi)  # cold: X, Y, X
+    msgs = [str(w.message) for w in caught if "#1098" in str(w.message)]
+    assert len(msgs) == 1 and "alternated" in msgs[0], (name, msgs)
+    assert len(seq) == 3, (name, len(seq))  # stopped at the repeat
+    assert checks == [], (name, checks)
+    assert cpl._chi_layout(envs) == cpl._chi_layout(X), name  # the earlier one
+    (loop,) = loops
+    assert info.iterations == 3 + loop.iterations, (name, info)
+
+
+def test_a_re_entry_that_settles_on_the_last_sweep_does_not_warn(case, monkeypatch):
+    """Review M6: after a failed check, a re-entry whose eager phase certifies
+    the layout but spends the last of ``max_iter`` leaves the loop no sweep.
+    The returned env is the phase's certified output, so no "failed the
+    end-of-call layout check" warning.  ``max_iter`` is set from an unlimited
+    run of the same forced case: 2 (forced phase) + loop + 1 check + the
+    re-entry's eager sweeps."""
+    name, A, B = case.name, case.A, case.B
+    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+
+    with monkeypatch.context() as mp:
+        _force_frozen_pre_loop_layout(mp, frozen)
+        loops = _spy_loop(mp)
+        eager = _count_eager(mp)
+        _, info_big = _run(A, B, case.chi)
+    k = loops[0].iterations
+    n_eager = len(eager)
+    assert n_eager >= 1, name  # regime: the re-entry ran eager sweeps
+    max_iter = 2 + k + 1 + n_eager
+    assert max_iter < info_big.iterations, (name, max_iter, info_big)
+
+    adapt_calls = _force_frozen_pre_loop_layout(monkeypatch, frozen)
+    checks = _spy(monkeypatch, "_end_of_call_layout_check")
+    loops = _spy_loop(monkeypatch)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        envs, info = _run(A, B, case.chi, max_iter=max_iter)
+    msgs = [str(w.message) for w in caught if "end-of-call" in str(w.message)]
+    assert msgs == [], (name, msgs)
+    assert adapt_calls == [False, True], (name, adapt_calls)
+    assert checks == [(False, 1)], (name, checks)
+    assert [r.iterations for r in loops] == [k, 0], (name, loops)
+    assert info.iterations == max_iter, (name, info)
+    assert cpl._chi_layout(envs) != cpl._chi_layout(frozen), name
+
+
+def test_iterations_never_exceed_max_iter(case, monkeypatch):
+    """Review M7: with probes that record no cut (forced), the check's eager
+    fallback needs a second sweep.  When the loop has used its budget only
+    the reserved sweep is left, so the check stops after the probe and the
+    call reports exactly ``max_iter`` (and warns: nothing certified it)."""
+    name, A, B = case.name, case.A, case.B
+    _watch_probes(monkeypatch, drop_records=True)
+    checks = _spy(monkeypatch, "_end_of_call_layout_check")
+    max_iter = 8
+    with pytest.warns(UserWarning, match=r"end-of-call layout check.*#1098"):
+        _, info = _run(
+            A,
+            B,
+            case.chi,
+            env_init=case.envs,
+            max_iter=max_iter,
+            min_iter=0,
+            conv_tol=0.0,
+        )
+    assert checks == [(False, 1)], (name, checks)
+    assert info.iterations == max_iter, (name, info)
+
+
+def test_a_cold_two_cycle_through_the_cold_tiling_keeps_the_other_layout(
+    case, monkeypatch
+):
+    """Review M8: from the rank-1 cold init the first eager output can be the
+    cold-init tiling T, so a cold ``T, X, T`` is a two-cycle whose earlier
+    layout is T -- the #1098 defect layout.  The phase must keep X."""
+    name, A, B = case.name, case.A, case.B
+    st = {(0, 0): A, (1, 0): B}
+    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    T_env, X_env = frozen, case.envs
+    cold = cpl._cold_init_layout(st, case.chi)
+    assert cpl._chi_layout(T_env) == cold, name  # regime: T is the tiling
+    assert cpl._chi_layout(X_env) != cold, name
+    seq = []
+
+    def _alt(site_tensors, envs, **k):
+        out = (T_env, X_env)[len(seq) % 2]
+        seq.append(1)
+        return out, 0.0, 0.0
+
+    monkeypatch.setattr(cpl, "_eager_ctm_sweep", _alt)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        envs, _ = _run(A, B, case.chi)  # cold: T, X, T
+    msgs = [str(w.message) for w in caught if "#1098" in str(w.message)]
+    assert len(msgs) == 1 and "alternated" in msgs[0], (name, msgs)
+    assert len(seq) == 3, (name, len(seq))
+    assert cpl._chi_layout(envs) == cpl._chi_layout(X_env), name

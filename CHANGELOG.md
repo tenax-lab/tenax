@@ -479,6 +479,32 @@
     implicit-AD forward is not seeded from this function), and step 2 is
     the first on the adapted layout.  Final energy -0.5024173361 against
     -0.5023729185.
+  - **End-of-call check.**  The layout is chosen once, before the jitted
+    sweeps, and the spectrum can move after that.  So at the end of every
+    symmetric call the returned env's layout is checked again: one jitted
+    probe sweep where the probe can certify, else (`recipe="1x1"`, an
+    uncharged double layer) one eager sweep whose layout must equal the
+    env's.  The check sweep's output is discarded; it counts toward
+    `max_iter` (the jitted loop leaves one sweep for it) and toward
+    `iterations`, and `best_iteration` still points at the returned env.  If
+    the check fails, the eager phase and the jitted loop run again from the
+    returned env, at most twice and within `max_iter`; if it still fails, a
+    warning names #1098 and the env is returned with `converged` as the loop
+    reported it.  The check is skipped when the layout phase already ended
+    unstable or in a two-cycle (it has warned), and on non-final `chi_ramp`
+    stages.  An eager phase whose cut alternates between two layouts now
+    stops at the first repeat, keeps the earlier layout (the other one
+    if the earlier is the cold-init tiling) and warns, instead
+    of running to the cap.  Every probe (accepted or rejected), eager and
+    check sweep is counted in `iterations`, which never exceeds `max_iter`, and `best_iteration` trails
+    `iterations` only after a plateau bail.  A run seeded with
+    `optimize_gs_ad(envs_init=...)` keeps its seed's layout: its warm-start
+    refresh and line-search probes pass `eager_layout_sweeps=0`.  The final
+    evaluation is cold (#899), does not start from the seed, and adapts its
+    layout as an unseeded call does.  Cost: one extra sweep per symmetric call.  Measured (CPU, D=2, the
+    fixtures above, same process): the first check pays the probe compile
+    (U(1) chi=6 4.7 s, Z2 chi=8 3.3 s); after that a check takes 3-4 ms, on
+    cold calls (3.7 s / 2.4 s total) and settled warm calls (~0.04 s total).
   - **Not covered:** chi slots added by the in-loop chi bump
     (`ctmrg_heuristic_increase_chi`) keep a frozen layout.
 
