@@ -26,6 +26,7 @@ GOOD5 = dict(
     e_warm=-0.56,
     warm_converged=True,
     e_dense=-0.56,
+    viol=0.0,
 )
 
 
@@ -136,3 +137,17 @@ def test_s1_gate_table():
     assert not gate_s1(1e-12, 0.0, False)  # empty blocks
     assert not gate_s1(-4e-3, 0.13, False)
     assert gate_s1(1e-12, 1e-7, True) and not gate_s1(1e-6, 1e-7, True)
+    assert gate_s1(1e-12, 1e-5, True) and not gate_s1(1e-6, 1e-5, True)  # gated
+    assert gate_s1(1e-6, 1e-3, True)  # above 1e-4: broken, not gated
+
+
+def test_s5_dense_gate_follows_viol():
+    big = {**GOOD5, "e_dense": -0.56 + 1e-3}
+    assert not gate_s5(**{**big, "viol": 0.0})[0]  # kept symmetry: gated
+    assert not gate_s5(**{**big, "viol": 1e-5})[0]
+    ok, parts = gate_s5(**{**big, "viol": 0.6})  # broken: recorded, not gated
+    assert ok and parts["dense_ok"] is False
+    assert not gate_s5(**{**GOOD5, "viol": nan})[0]
+    assert not gate_s5(**{**big, "viol": nan})[0]
+    # the other parts still gate when the symmetry is broken
+    assert not gate_s5(**{**big, "viol": 0.6, "settled": False})[0]

@@ -63,6 +63,9 @@ MAX_STAGES = 3
 # Element-wise sv tolerance of the reference CTMs.  1e-12 is unreachable on
 # some states (sv_diff floor ~3e-11 with the energy fixed to 2e-16).
 REF_TOL = 1e-10
+# A dense reference env with charge-violation weight below this kept the
+# symmetry (R26): the energy error is ~viol**2, so 1e-4 -> ~1e-8.
+VIOL_TOL = 1e-4
 # S4 measures the gradient tighter than the optimizer needs: with the default
 # gmres_tol=1e-6 the adjoint residual (4e-6 on the Z2 chi=8 point) alone put
 # one direction 1.6e-6 (relative) off the converged FD.
@@ -139,9 +142,24 @@ def gate_s4_direction(gd, fd, fd_unc, near_degenerate=False):
 
 
 def gate_s5(
-    *, settled, drift_stable, e_start, e_ret, e_cold, e_warm, warm_converged, e_dense
+    *,
+    settled,
+    drift_stable,
+    e_start,
+    e_ret,
+    e_cold,
+    e_warm,
+    warm_converged,
+    e_dense,
+    viol,
+    viol_tol=VIOL_TOL,
 ):
-    """S5 (R18).  Returns (ok, parts)."""
+    """S5 (R18, R27).  Returns (ok, parts).
+
+    ``dense_ok`` (|e_cold - e_dense| < 1e-8) is part of the pass only where
+    the dense reference env kept the symmetry (``viol < viol_tol``, see
+    :func:`gate_s1`); otherwise it is recorded in ``parts`` only.  NaN
+    ``viol`` fails."""
     parts = {
         "settled": bool(settled),
         "drift_stable": bool(drift_stable),
@@ -153,16 +171,23 @@ def gate_s5(
         "warm_converged": bool(warm_converged),
         "dense_ok": bool(abs(e_cold - e_dense) < 1e-8),
     }
-    return all(parts.values()), parts
+    if not np.isfinite(viol):
+        return False, {**parts, "viol_finite": False}
+    gated = {k: v for k, v in parts.items() if k != "dense_ok" or viol < viol_tol}
+    return all(gated.values()), parts
 
 
-def gate_s1(diff, viol, nonempty, viol_tol=1e-6):
-    """S1 (ruling R25).
+def gate_s1(diff, viol, nonempty, viol_tol=VIOL_TOL):
+    """S1 (rulings R25, R26).
 
     The dense reference CTM of the densified symmetric SU state is a fixed
     point of the dense CTM, which need not keep the symmetry.  Where its
     environment keeps it (``viol < viol_tol``) the energies must agree to
-    1e-8.  Where it broke it, it is a different fixed point: the energy
+    1e-8.  ``viol_tol = 1e-4`` (R26): the symmetric point is stationary, so the
+    energy error of a dense env that is off the symmetric subspace by ``viol``
+    scales as ``viol**2``; ``viol = 1e-4`` gives ~1e-8, the gate itself.
+    Measured: unbroken D=2 point 1.4e-7 (diff 7e-15), broken D=3 point 0.637.
+    Where it broke it, it is a different fixed point: the energy
     comparison is reported, not gated.  NaN ``diff`` or ``viol`` and empty
     blocks always fail."""
     if not nonempty or not np.isfinite(diff) or not np.isfinite(viol):
@@ -287,7 +312,8 @@ def run_point(
         "seed": seed,
         "stopped_at": None,
         "near_degenerate": False,
-        "s1_symmetry_broken": False,
+        "s1_symmetry_broken": None,
+        "s5_symmetry_broken": None,
         "vacuous": False,
         "error_stage": None,
         "complete": False,
@@ -321,7 +347,7 @@ def run_point(
         )
         diff = e_s - e_d
         ok = gate_s1(diff, viol, nonempty)
-        broken = bool(np.isfinite(viol) and viol >= 1e-6)
+        broken = bool(np.isfinite(viol) and viol >= VIOL_TOL)
         summary["s1_symmetry_broken"] = broken
         st.update(A=A, B=B)
         return (
@@ -467,9 +493,11 @@ def run_point(
         )
         t_d = time.time()
         Ad, Bd = densify_pair(A, B)
-        e_dense, c_dense = converged_energy(
-            Ad, Bd, gate_dense, _ctm(chi), None, REF_TOL
+        e_dense, c_dense, Ad_n, Bd_n, envs_d = _dense_converged_env(
+            Ad, Bd, gate_dense, _ctm(chi), REF_TOL
         )
+        viol = charge_violation(Ad_n, Bd_n, envs_d)
+        summary["s5_symmetry_broken"] = bool(np.isfinite(viol) and viol >= VIOL_TOL)
         wall_dense = time.time() - t_d
         _log("S5 dense final energy done")
         e_start = hist_all[0][0]
@@ -484,6 +512,7 @@ def run_point(
             e_warm=e_warm,
             warm_converged=c_warm,
             e_dense=e_dense,
+            viol=viol,
         )
         return (
             ok,
@@ -499,6 +528,8 @@ def run_point(
                 "warm_converged": c_warm,
                 "E_dense_final": e_dense,
                 "dense_converged": c_dense,
+                "viol": viol,
+                "symmetry_broken": summary["s5_symmetry_broken"],
                 "dE_sym_minus_dense": e_sym - e_dense,
                 "dense_final_wall": wall_dense,
                 "energies": hist_all,

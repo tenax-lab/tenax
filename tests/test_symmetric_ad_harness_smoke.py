@@ -95,13 +95,20 @@ def test_charge_violation_measure_sees_only_violating_weight(sym):
     denv = densify_envs(envs)
     assert charge_violation(Ad, Bd, denv) < 1e-12
 
-    T1 = denv[(0, 0)].T1
-    sym_data = np.asarray(T1.todense())
-    noise = np.asarray(jax.random.normal(jax.random.PRNGKey(7), sym_data.shape))
-    pert = sym_data + 0.3 * noise
-    # regime: the noise has weight where the symmetric tensor is exactly 0
-    off = sym_data == 0
-    assert off.any() and np.linalg.norm(noise[off]) > 0
-    bad = dict(denv)
-    bad[(0, 0)] = denv[(0, 0)]._replace(T1=DenseTensor(jnp.asarray(pert), T1.indices))
-    assert charge_violation(Ad, Bd, bad) > 1e-3
+    # Every env tensor of both sites enters some bond RDM; perturbing each
+    # must be seen (a measure that drops the B-side or the vertical bonds
+    # would miss some).  Regime: the noise has weight where the symmetric
+    # tensor is exactly 0.
+    for site in ((0, 0), (1, 0)):
+        for field in denv[site]._fields:
+            T = getattr(denv[site], field)
+            sym_data = np.asarray(T.todense())
+            noise = np.asarray(jax.random.normal(jax.random.PRNGKey(7), sym_data.shape))
+            off = sym_data == 0
+            assert off.any() and np.linalg.norm(noise[off]) > 0
+            bad = dict(denv)
+            bad[site] = denv[site]._replace(
+                **{field: DenseTensor(jnp.asarray(sym_data + 0.3 * noise), T.indices)}
+            )
+            v = charge_violation(Ad, Bd, bad)
+            assert v > 1e-6, (site, field, v)  # symmetric: < 1e-12
