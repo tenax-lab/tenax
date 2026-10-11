@@ -650,13 +650,21 @@ def test_every_sweep_that_runs_is_counted(case, monkeypatch):
 
 def test_a_two_cycle_in_the_eager_phase_stops_and_warns_once(case, monkeypatch):
     """Review I3: an eager phase whose cut alternates between two layouts
-    stops at the first repeat (not at the cap), keeps the earlier layout,
-    warns once, and runs no end-of-call check or re-entry.  The eager sweep
-    is a stand-in that alternates two real envs with different layouts."""
+    stops at the first repeat (not at the cap), warns once, and runs no
+    end-of-call check or re-entry.  The eager sweep is a stand-in that
+    alternates two real envs with different layouts.
+
+    Cold ``X, Y, X, Y`` with ``Y`` the cold-init tiling (regime asserted).
+    The first cold output does not count (round 7), so sweep 3 (``X`` again)
+    is no cycle; sweep 4 repeats ``o_2 = Y`` and is.  The earlier layout of
+    the detected pair is ``Y`` = the tiling, and ``o_3 = X`` is not, so the
+    M8 rule keeps ``X``."""
     name, A, B = case.name, case.A, case.B
+    st = {(0, 0): A, (1, 0): B}
     frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
     X, Y = case.envs, frozen
     assert cpl._chi_layout(X) != cpl._chi_layout(Y), name  # regime
+    assert cpl._chi_layout(Y) == cpl._cold_init_layout(st, case.chi), name
     seq = []
 
     def _alt(site_tensors, envs, **k):
@@ -669,14 +677,14 @@ def test_a_two_cycle_in_the_eager_phase_stops_and_warns_once(case, monkeypatch):
     loops = _spy_loop(monkeypatch)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        envs, info = _run(A, B, case.chi)  # cold: X, Y, X
+        envs, info = _run(A, B, case.chi)  # cold: X, Y, X, Y
     msgs = [str(w.message) for w in caught if "#1098" in str(w.message)]
     assert len(msgs) == 1 and "alternated" in msgs[0], (name, msgs)
-    assert len(seq) == 3, (name, len(seq))  # stopped at the repeat
+    assert len(seq) == 4, (name, len(seq))  # stopped at the repeat of o_2
     assert checks == [], (name, checks)
-    assert cpl._chi_layout(envs) == cpl._chi_layout(X), name  # the earlier one
+    assert cpl._chi_layout(envs) == cpl._chi_layout(X), name  # M8: not Y
     (loop,) = loops
-    assert info.iterations == 3 + loop.iterations, (name, info)
+    assert info.iterations == 4 + loop.iterations, (name, info)
 
 
 def test_a_re_entry_that_settles_on_the_last_sweep_does_not_warn(case, monkeypatch):
@@ -741,9 +749,12 @@ def test_iterations_never_exceed_max_iter(case, monkeypatch):
 def test_a_cold_two_cycle_through_the_cold_tiling_keeps_the_other_layout(
     case, monkeypatch
 ):
-    """Review M8: from the rank-1 cold init the first eager output can be the
-    cold-init tiling T, so a cold ``T, X, T`` is a two-cycle whose earlier
-    layout is T -- the #1098 defect layout.  The phase must keep X."""
+    """Review M8, under the round-7 rule: from the rank-1 cold init the first
+    eager output can be the cold-init tiling T, and it does not take part in
+    the two-cycle test.  So a cold ``T, X, T, X`` is no cycle at sweep 3; it
+    is one at sweep 4 (``o_4 = o_2 = X``, ``o_3 = T``).  The earlier layout
+    of the detected pair is ``X``, not the tiling, so the phase keeps the
+    current output (``X``) by the plain rule; M8 does not fire."""
     name, A, B = case.name, case.A, case.B
     st = {(0, 0): A, (1, 0): B}
     frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
@@ -761,8 +772,44 @@ def test_a_cold_two_cycle_through_the_cold_tiling_keeps_the_other_layout(
     monkeypatch.setattr(cpl, "_eager_ctm_sweep", _alt)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        envs, _ = _run(A, B, case.chi)  # cold: T, X, T
+        envs, _ = _run(A, B, case.chi)  # cold: T, X, T, X
     msgs = [str(w.message) for w in caught if "#1098" in str(w.message)]
     assert len(msgs) == 1 and "alternated" in msgs[0], (name, msgs)
-    assert len(seq) == 3, (name, len(seq))
+    assert len(seq) == 4, (name, len(seq))
     assert cpl._chi_layout(envs) == cpl._chi_layout(X_env), name
+
+
+def test_a_cold_first_output_that_echoes_the_tiling_is_not_a_two_cycle(
+    case, monkeypatch
+):
+    """Round 7 (measured, U(1) XXZ Delta=0.3 D=3 chi=9, every sweep eager:
+    ``T, X, T, T, ...`` settling on the tiling T).  The first cold output
+    does not take part in the two-cycle test, so a cold ``T, X, T, T, T``
+    is stable at sweep 4 with ``T``: no "alternated" warning, and the
+    end-of-call check runs (it is skipped after a cycle)."""
+    name, A, B = case.name, case.A, case.B
+    st = {(0, 0): A, (1, 0): B}
+    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    T_env, X_env = frozen, case.envs
+    cold = cpl._cold_init_layout(st, case.chi)
+    assert cpl._chi_layout(T_env) == cold, name  # regime: T is the tiling
+    assert cpl._chi_layout(X_env) != cold, name
+    seq = []
+
+    def _settle(site_tensors, envs, **k):
+        out = (T_env, X_env, T_env)[len(seq)] if len(seq) < 3 else T_env
+        seq.append(1)
+        return out, 0.0, 0.0
+
+    monkeypatch.setattr(cpl, "_eager_ctm_sweep", _settle)
+    phases = _spy(monkeypatch, "_adapt_symmetric_layout")
+    checks = _spy(monkeypatch, "_end_of_call_layout_check")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        envs, _ = _run(A, B, case.chi)  # cold: T, X, T, T, ...
+    msgs = [str(w.message) for w in caught if "alternated" in str(w.message)]
+    assert msgs == [], (name, msgs)
+    _, n, outcome = phases[0]
+    assert (n, outcome) == (4, "stable"), (name, n, outcome)
+    assert checks, name  # the end-of-call check ran
+    assert cpl._chi_layout(envs) == cold, name
