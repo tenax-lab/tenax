@@ -18,6 +18,14 @@ import numpy as np  # noqa: E402
 from benchmarks.symmetric_ad.codehash import code_hash  # noqa: E402
 from tenax import CTMConfig, ipeps, iPEPSConfig, optimize_gs_ad  # noqa: E402
 from tenax.algorithms import _ctm_energy_ad  # noqa: E402
+from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge  # noqa: E402
+from tenax.algorithms._ctm_tensor_convergence import (  # noqa: E402
+    CHECKERBOARD_NEIGHBORS,
+)
+from tenax.algorithms._ctm_tensor_energy import (  # noqa: E402
+    _rdm1x2_tensor_2site,
+    _rdm2x1_tensor_2site,
+)
 from tenax.algorithms._symmetric_ad_validation import (  # noqa: E402
     converged_energy,
     densify_pair,
@@ -26,9 +34,10 @@ from tenax.algorithms._symmetric_ad_validation import (  # noqa: E402
     make_2site_loss,
     oracle_value_and_grad,
 )
-from tenax.algorithms.ctm_layout import (  # noqa: E402  # noqa: E402
+from tenax.algorithms.ctm_layout import (  # noqa: E402
     _converge,
     _corner_values,
+    energy_2site,
     layout_of,
     normalized_pair,
     same_layout,
@@ -41,6 +50,7 @@ from tenax.algorithms.ipeps import (  # noqa: E402
     xxz_gate_z2,
     xxz_z2_init_pair,
 )
+from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs  # noqa: E402
 from tenax.core.tensor import SymmetricTensor  # noqa: E402
 
 MODELS = {"xxz03": 0.3, "heis": 1.0}
@@ -146,6 +156,78 @@ def gate_s5(
     return all(parts.values()), parts
 
 
+def gate_s1(diff, viol, nonempty, viol_tol=1e-6):
+    """S1 (ruling R25).
+
+    The dense reference CTM of the densified symmetric SU state is a fixed
+    point of the dense CTM, which need not keep the symmetry.  Where its
+    environment keeps it (``viol < viol_tol``) the energies must agree to
+    1e-8.  Where it broke it, it is a different fixed point: the energy
+    comparison is reported, not gated.  NaN ``diff`` or ``viol`` and empty
+    blocks always fail."""
+    if not nonempty or not np.isfinite(diff) or not np.isfinite(viol):
+        return False
+    if viol < viol_tol:
+        return bool(abs(diff) < 1e-8)
+    return True
+
+
+def _dense_converged_env(A, B, gate, ctm_cfg, conv_tol):
+    """Dense tight eager CTM at dense ``(A, B)`` (same config as
+    ``converged_energy``).  Returns ``(energy, converged, A_n, B_n, envs)``."""
+    tight = dataclasses.replace(
+        ctm_cfg,
+        conv_tol=conv_tol,
+        max_iter=1000,
+        plateau_patience=None,
+        on_unconverged="warn",
+    )
+    A_n, B_n = normalized_pair(A, B)
+    envs, info = python_loop_ctm_converge(
+        {(0, 0): A_n, (1, 0): B_n},
+        CHECKERBOARD_NEIGHBORS,
+        **ctm_converge_kwargs(tight),
+    )
+    return energy_2site(A_n, B_n, envs, gate), bool(info.converged), A_n, B_n, envs
+
+
+def charge_violation(A_n, B_n, envs):
+    """Charge-violating weight ``||P(rho)||_F / ||rho||_F`` of the 2-site RDMs.
+
+    ``rho[a, b, c, d]`` is the RDM of one bond (ket ``a, b``; bra ``c, d``).
+    ``P`` keeps the elements whose charge is not conserved, i.e. whose net
+    charge ``sym.net_charge([qa, qb, qc, qd], [f, f, -f, -f])`` (``f`` the flow
+    of A's ``phys`` leg) is not the identity; the arithmetic is the
+    symmetry's own (Z_n wraps).  All four bonds of the checkerboard cell
+    (h AB, h BA, v AB, v BA) enter, as one Frobenius norm over their stack.
+    They are used one by one, not through ``compute_energy_ctm_tensor_2site``
+    (a sum over the four bonds, divided by two): in that sum an order
+    parameter that is staggered between A-B and B-A bonds would cancel.
+    An environment that keeps the symmetry gives exactly 0."""
+    phys = next(i for i in A_n.indices if i.label == "phys")
+    sym, f = phys.symmetry, int(phys.flow)
+    q = [int(c) for c in np.asarray(phys.charges)]
+    d = len(q)
+    mask = np.zeros((d, d, d, d), dtype=bool)  # True: charge NOT conserved
+    for a in range(d):
+        for b in range(d):
+            for c in range(d):
+                for e in range(d):
+                    mask[a, b, c, e] = not sym.is_conserved(
+                        [q[a], q[b], q[c], q[e]], [f, f, -f, -f]
+                    )
+    ea, eb = envs[(0, 0)], envs[(1, 0)]
+    rdms = [
+        _rdm2x1_tensor_2site(A_n, B_n, ea, eb),
+        _rdm2x1_tensor_2site(B_n, A_n, eb, ea),
+        _rdm1x2_tensor_2site(A_n, B_n, ea, eb),
+        _rdm1x2_tensor_2site(B_n, A_n, eb, ea),
+    ]
+    stack = np.stack([np.asarray(r) for r in rdms])
+    num = np.linalg.norm(stack[:, mask])
+    return float(num / np.linalg.norm(stack))
+
+
 def _all_sectors_populated(t):
     """Every sector of every leg carries at least one block."""
     for i, idx in enumerate(t.indices):
@@ -205,6 +287,7 @@ def run_point(
         "seed": seed,
         "stopped_at": None,
         "near_degenerate": False,
+        "s1_symmetry_broken": False,
         "vacuous": False,
         "error_stage": None,
         "complete": False,
@@ -220,22 +303,40 @@ def run_point(
             ctm=CTMConfig(chi=chi),
         )
         _, (A, B), _ = ipeps(gate_dense, (A0, B0), cfg, compute_energy=False)
-        _, (Ad, Bd), _ = ipeps(
+        e_s, cs = converged_energy(A, B, gate, _ctm(chi), None, REF_TOL)
+        # Same-state dense reference: the dense CTM of the densified (A, B).
+        Ad0, Bd0 = densify_pair(A, B)
+        e_d, cd, Ad_n, Bd_n, envs_d = _dense_converged_env(
+            Ad0, Bd0, gate_dense, _ctm(chi), REF_TOL
+        )
+        viol = charge_violation(Ad_n, Bd_n, envs_d)
+        nonempty = all(_all_sectors_populated(t) for t in (A, B))
+        # Dense SU from the same start: a different state at delta=0.3 (it
+        # drifts to a U(1)-broken one).  Recorded only, never gated.
+        _, (Asu, Bsu), _ = ipeps(
             gate_dense, densify_pair(A0, B0), cfg, compute_energy=False
         )
-        e_s, cs = converged_energy(A, B, gate, _ctm(chi), None, REF_TOL)
-        e_d, cd = converged_energy(Ad, Bd, gate_dense, _ctm(chi), None, REF_TOL)
-        nonempty = all(_all_sectors_populated(t) for t in (A, B))
+        e_dsu, cdsu = converged_energy(
+            Asu, Bsu, gate_dense, _ctm(chi), None, REF_TOL
+        )
+        diff = e_s - e_d
+        ok = gate_s1(diff, viol, nonempty)
+        broken = bool(np.isfinite(viol) and viol >= 1e-6)
+        summary["s1_symmetry_broken"] = broken
         st.update(A=A, B=B)
         return (
-            abs(e_s - e_d) < 1e-8
-            and nonempty,  # conv flags reported, not gated (ruling S1)
+            ok,  # conv flags reported, not gated (ruling S1)
             {
                 "E_sym": e_s,
                 "E_dense": e_d,
-                "diff": e_s - e_d,
+                "diff": diff,
                 "conv_sym": cs,
                 "conv_dense": cd,
+                "viol": viol,
+                "symmetry_broken": broken,
+                "E_dense_su": e_dsu,
+                "diff_su": e_s - e_dsu,
+                "conv_dense_su": cdsu,
                 "blocks_nonempty": nonempty,
             },
             {},

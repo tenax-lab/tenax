@@ -10,6 +10,7 @@ import pytest  # noqa: E402
 
 from benchmarks.symmetric_ad import matrix  # noqa: E402
 from benchmarks.symmetric_ad.pipeline import (  # noqa: E402
+    gate_s1,
     gate_s2,
     gate_s4_direction,
     gate_s5,
@@ -123,3 +124,15 @@ def test_code_hash_covers_commits_and_uncommitted_edits(tmp_path):
     git("add", ".")
     git("commit", "-qm", "b")
     assert code_hash(tmp_path) != h2  # HEAD moved
+
+
+def test_s1_gate_table():
+    assert gate_s1(1e-12, 0.0, True)  # symmetry kept, energies agree
+    assert not gate_s1(1e-6, 0.0, True)  # symmetry kept, energies differ
+    assert gate_s1(-4e-3, 0.13, True)  # symmetry broken: reported, not gated
+    assert not gate_s1(nan, 0.0, True)
+    assert not gate_s1(nan, 0.13, True)
+    assert not gate_s1(1e-12, nan, True)
+    assert not gate_s1(1e-12, 0.0, False)  # empty blocks
+    assert not gate_s1(-4e-3, 0.13, False)
+    assert gate_s1(1e-12, 1e-7, True) and not gate_s1(1e-6, 1e-7, True)

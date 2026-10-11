@@ -3,6 +3,7 @@
 import json
 
 import jax
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -55,3 +56,52 @@ def test_a_failing_stage_stops_the_point(tmp_path, monkeypatch):
     assert s1["passed"] is False and "forced" in s1["measured"]["error"]
     s2 = _rec(tmp_path, "S2")
     assert s2["passed"] is False and "skipped" in s2["measured"]
+
+
+def _sym_env(sym):
+    """A few eager symmetric CTM sweeps at a random D=2 pair (the measure is
+    tested as a mechanism, not at a fixed point)."""
+    import dataclasses
+
+    from benchmarks.symmetric_ad.pipeline import SYMS, _ctm
+    from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
+    from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
+    from tenax.algorithms.ctm_layout import normalized_pair
+    from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
+
+    A, B = SYMS[sym][0](2, jax.random.PRNGKey(0))
+    A_n, B_n = normalized_pair(A, B)
+    cfg = dataclasses.replace(_ctm(4), max_iter=6, conv_tol=1e-30)
+    envs, _ = python_loop_ctm_converge(
+        {(0, 0): A_n, (1, 0): B_n}, CHECKERBOARD_NEIGHBORS, **ctm_converge_kwargs(cfg)
+    )
+    return A_n, B_n, envs
+
+
+@pytest.mark.parametrize("sym", ["z2", "u1"])
+def test_charge_violation_measure_sees_only_violating_weight(sym):
+    """A symmetric env has viol = 0; a charge-violating perturbation of one
+    env tensor gives viol >> 0.  The regime is asserted: the perturbation
+    adds weight outside the symmetric blocks."""
+    import jax.numpy as jnp
+    import numpy as np
+
+    from benchmarks.symmetric_ad.pipeline import charge_violation
+    from tenax.algorithms._symmetric_ad_validation import densify_envs, densify_pair
+    from tenax.core.tensor import DenseTensor
+
+    A_n, B_n, envs = _sym_env(sym)
+    Ad, Bd = densify_pair(A_n, B_n)
+    denv = densify_envs(envs)
+    assert charge_violation(Ad, Bd, denv) < 1e-12
+
+    T1 = denv[(0, 0)].T1
+    sym_data = np.asarray(T1.todense())
+    noise = np.asarray(jax.random.normal(jax.random.PRNGKey(7), sym_data.shape))
+    pert = sym_data + 0.3 * noise
+    # regime: the noise has weight where the symmetric tensor is exactly 0
+    off = sym_data == 0
+    assert off.any() and np.linalg.norm(noise[off]) > 0
+    bad = dict(denv)
+    bad[(0, 0)] = denv[(0, 0)]._replace(T1=DenseTensor(jnp.asarray(pert), T1.indices))
+    assert charge_violation(Ad, Bd, bad) > 1e-3
