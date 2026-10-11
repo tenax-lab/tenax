@@ -430,17 +430,26 @@ def _adapt_symmetric_layout(
     is applied only on the stable sweep (it pairs legs index by index, which
     needs one layout); mixing is not applied here.
 
-    Two-cycle: if an output's layout equals the layout two sweeps back but
-    not the previous one (``A, B, A``), the eager cut is alternating between
-    two layouts and more sweeps will not settle it (observed on a fermionic
-    Z2 D=2 chi=8 input: ``{0:3,1:5}`` / ``{0:4,1:4}`` on one C1 leg, 20 sweeps
-    to the cap).  The phase stops there and keeps the current output, whose
-    layout is the *earlier* of the two (``A``, the first one seen) -- unless
-    ``A`` is ``avoid_layout`` (the caller passes the cold-init tiling, the
-    restricted layout #1098 exists to leave) and ``B`` is not: then it keeps
-    the previous output, with ``B``.  From the rank-1 cold init the first
-    output can be that tiling, so a cold ``T, X, T`` keeps ``X``.  The gauge
-    is not applied: the two outputs have different layouts.
+    Two-cycle: if output ``o_n``'s layout equals ``o_{n-2}``'s but not
+    ``o_{n-1}``'s (``A, B, A``), the eager cut is alternating between two
+    layouts and more sweeps will not settle it (observed on a fermionic Z2
+    D=2 chi=8 input: ``{0:3,1:5}`` / ``{0:4,1:4}`` on one C1 leg, 20 sweeps
+    to the cap).  Under ``compare_input=True`` the input counts as ``o_0``.
+    Under ``compare_input=False`` the first output does not take part: it
+    can echo the cold-init tiling (see above), so it is not evidence of a
+    cycle, and a cold two-cycle needs ``n - 2 >= 2`` (the earliest is at
+    sweep 4).  Measured (U(1) XXZ Delta=0.3 D=3 chi=9, every sweep eager):
+    ``T, X, T, T, ...`` with ``T`` the tiling, settling on ``T``; the old
+    rule called sweep 3 a cycle, kept ``X`` and lost ~6e-4 in energy.  Now
+    sweep 4 is stable on ``T``.  On a cycle the phase stops and keeps the
+    current output, whose layout is the *earlier* of the detected pair
+    (``o_n = o_{n-2}``) -- unless that layout is ``avoid_layout`` (the
+    caller passes the cold-init tiling, the restricted layout #1098 exists
+    to leave) and ``o_{n-1}``'s is not: then it keeps the previous output.
+    So a cold ``X, T, X, T`` stops at sweep 4 and keeps ``X``; a cold
+    ``T, X, T, X`` stops at sweep 4 on the pair ``(X, T)`` and keeps ``X``
+    by the first rule.  The gauge is not applied: the two outputs have
+    different layouts.
 
     Returns ``(envs, n_sweeps, outcome)`` with ``outcome`` one of
     ``"stable"``, ``"cycle"`` (two-cycle, see above) or ``"cap"`` (still
@@ -448,7 +457,7 @@ def _adapt_symmetric_layout(
     """
     prev = _chi_layout(envs) if compare_input else None
     before = None  # the layout two outputs back (the input counts as one
-    # only under ``compare_input``)
+    # only under ``compare_input``; the first cold output never does)
     for n in range(1, max_sweeps + 1):
         start = envs
         envs, _, _ = _eager_ctm_sweep(site_tensors, start, **sweep_kwargs)
@@ -462,7 +471,11 @@ def _adapt_symmetric_layout(
             if layout == avoid_layout and prev != avoid_layout:
                 return start, n, "cycle"
             return envs, n, "cycle"
-        before, prev = prev, layout
+        # Cold: the first output may echo the tiling, so it is never
+        # ``before``: the next test compares o_{n+1} with o_{n-1} only if
+        # n - 1 >= 2 (warm: the input is o_0 and always counts).
+        before = prev if (compare_input or n >= 3) else None
+        prev = layout
     return envs, max_sweeps, "cap"
 
 
@@ -669,7 +682,9 @@ def python_loop_ctm_converge(
                            layout, a cold(-shaped) one when two consecutive
                            eager sweeps agree (so a value of 1 cannot certify
                            it, and warns).  If an eager output repeats the
-                           layout two sweeps back (a two-cycle), the phase
+                           layout two sweeps back (a two-cycle; on a cold
+                           start the first eager output, which can echo the
+                           tiling, does not count), the phase
                            stops there, keeps the earlier of the two layouts
                            (the other one if the earlier is the cold-init
                            tiling) and warns.  If the layout is still changing

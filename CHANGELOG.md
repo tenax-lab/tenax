@@ -495,7 +495,13 @@
     stages.  An eager phase whose cut alternates between two layouts now
     stops at the first repeat, keeps the earlier layout (the other one
     if the earlier is the cold-init tiling) and warns, instead
-    of running to the cap.  Every probe (accepted or rejected), eager and
+    of running to the cap.  On a cold start the first eager output does not
+    take part in that test: it can echo the cold-init tiling, so a cold
+    two-cycle needs `o_n == o_{n-2} != o_{n-1}` with `n - 2 >= 2`.  Measured
+    (U(1) XXZ Delta=0.3, D=3, chi=9, every sweep eager): the layouts went
+    T, X, T, T, ... (T = the tiling) and the energy settled on T at
+    -0.5529793; the earlier rule called sweep 3 a two-cycle, kept X and
+    converged to -0.552384.  Now sweep 4 is stable on T.  Every probe (accepted or rejected), eager and
     check sweep is counted in `iterations`, which never exceeds `max_iter`, and `best_iteration` trails
     `iterations` only after a plateau bail.  A run seeded with
     `optimize_gs_ad(envs_init=...)` keeps its seed's layout: its warm-start
