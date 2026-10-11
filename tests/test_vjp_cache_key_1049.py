@@ -250,6 +250,9 @@ def test_second_optimize_call_reuses_the_compiled_backward(_fresh_cache):
         warnings.simplefilter("ignore")
         optimize_gs_ad(H, (A, B), conf)
         n_entries = len(cea._VJP_CACHE)
+        # One optimizer run is one run per entry, so the adjoint seed carries
+        # from step to step (#501).
+        assert [len(m["_runs"]) for _f, m in cea._VJP_CACHE.values()] == [1] * n_entries
         mark = len(_TRACED)
         # A NEW but equal gate object, as a restart or a scan would pass.
         optimize_gs_ad(heisenberg_gate(), (A, B), conf)
@@ -542,75 +545,61 @@ def test_a_user_callback_keys_its_inputs_by_identity():
     assert k1 == k2 and k1[0] == "val"
 
 
-@pytest.fixture
-def run_starts(monkeypatch):
-    """Count run starts, via a sentinel cache entry."""
-    from tenax.algorithms import pess_optimize as po
-
-    monkeypatch.setattr(po, "_run_state_owner", None)
-    calls = {"seed": 0, "latch": 0}
-    key = "_test_1049_pess_owner_sentinel"
-
-    def _seed():
-        calls["seed"] += 1
-
-    def _latch():
-        calls["latch"] += 1
-
-    cea._VJP_CACHE[key] = (
-        None,
-        {"_invalidate_warm_start": _seed, "_reset_run_latches": _latch},
-    )
-    yield calls
-    cea._VJP_CACHE.pop(key, None)
+def _runs():
+    (entry,) = [m for k, (_f, m) in cea._VJP_CACHE.items() if isinstance(k, tuple)]
+    return [state for _token, state, _objects in entry["_runs"].values()]
 
 
-def test_a_different_pess_loss_starts_a_fresh_run(run_starts):
-    """Codex review of #1090: equal losses share a cache entry, so the run
-    state resets whenever the loss using it changes, in any call order."""
-    from tenax.algorithms import pess_optimize as po
+def test_equal_gates_share_the_backward_but_not_the_run(_fresh_cache):
+    """Codex review of #1090: two direct gradients with new, value-equal gates
+    share the compiled backward, but each starts its own run -- no inherited
+    adjoint seed, no spent warning latches.  The same gate again keeps its
+    run, and so its seed (#501)."""
+    rng = np.random.default_rng(0)
+    A0 = jnp.asarray(rng.standard_normal((2, 2, 2, 2, 2)))
+    A0 = A0 / jnp.linalg.norm(A0)
+    g1, g2 = heisenberg_gate(), heisenberg_gate()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        jax.grad(_energy)(A0, g1)
+        (run1,) = _runs()
+        seed1 = run1["prev_lam_leaves"]
+        assert seed1 is not None
+        run1["stationarity_warned"] = True  # as if run 1 had warned
+        jax.grad(_energy)(A0, g2)
+        assert len(_runs()) == 2, "a new gate must start its own run"
+        run2 = _runs()[1]
+        assert run2 is not run1 and not run2["stationarity_warned"]
+        assert run1["prev_lam_leaves"] is seed1, "run 2 wrote run 1's seed"
+        jax.grad(_energy)(A0, g1)
+    assert len(_runs()) == 2, "the same gate again must reuse its run"
 
-    a, b = object(), object()
-    for owner, starts in [(a, 1), (a, 1), (b, 2), (a, 3), (a, 3)]:
-        po._claim_run_state(owner)
-        assert run_starts == {"seed": starts, "latch": starts}
+
+def test_a_backward_uses_the_run_of_its_own_forward(_fresh_cache):
+    """Forward 1, forward 2, then backward 1: the run travels with the
+    residuals, not with whichever forward ran last."""
+    rng = np.random.default_rng(0)
+    A0 = jnp.asarray(rng.standard_normal((2, 2, 2, 2, 2)))
+    A0 = A0 / jnp.linalg.norm(A0)
+    g1, g2 = heisenberg_gate(), heisenberg_gate()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _, vjp1 = jax.vjp(lambda A: _energy(A, g1), A0)
+        _, vjp2 = jax.vjp(lambda A: _energy(A, g2), A0)
+        run1, run2 = _runs()
+        vjp1(jnp.ones(()))
+    assert run1["prev_lam_leaves"] is not None
+    assert run2["prev_lam_leaves"] is None, "backward 1 wrote run 2's seed"
 
 
-class _Claimed(Exception):
-    pass
-
-
-@pytest.mark.parametrize(
-    "builder", ["build_pess_loss", "build_pess_loss_exact", "multisite"]
-)
-def test_each_pess_loss_claims_its_run_before_any_work(monkeypatch, builder):
-    from tenax.algorithms import pess_optimize as po
-    from tenax.algorithms._pess_multisite_energy import kagome_3site_bond_gates
-    from tenax.algorithms.ipeps_config import CTMConfig
-    from tenax.algorithms.pess import (
-        kagome_xxz_pess_cg_gates,
-        kagome_xxz_pess_cg_gates_exact,
-    )
-
-    build = {
-        "build_pess_loss": lambda c: po.build_pess_loss(kagome_xxz_pess_cg_gates(), c),
-        "build_pess_loss_exact": lambda c: po.build_pess_loss_exact(
-            kagome_xxz_pess_cg_gates_exact(), c
-        ),
-        "multisite": lambda c: po.build_pess_loss_3site_multisite(
-            kagome_3site_bond_gates(), c
-        ),
-    }[builder]
-    owners = []
-
-    def spy(owner):
-        owners.append(owner)
-        raise _Claimed
-
-    monkeypatch.setattr(po, "_claim_run_state", spy)
-    loss_a, loss_b = build(CTMConfig(chi=4)), build(CTMConfig(chi=4))
-    assert owners == []  # building claims nothing
-    for loss in (loss_a, loss_b, loss_a):
-        with pytest.raises(_Claimed):
-            loss(None)
-    assert owners[0] is owners[2] and owners[0] is not owners[1]
+def test_runs_are_bounded_and_an_evicted_run_starts_fresh():
+    mutables = {"_runs": collections.OrderedDict()}
+    objects = [object() for _ in range(cea._RUNS_PER_ENTRY + 1)]
+    cea._select_run(mutables, objects[0], None, None)
+    first = mutables["run_token"]
+    cea._run_state(mutables, first)["prev_lam_leaves"] = "seed"
+    assert cea._run_state(mutables, first)["prev_lam_leaves"] == "seed"
+    for obj in objects[1:]:
+        cea._select_run(mutables, obj, None, None)
+    assert len(mutables["_runs"]) == cea._RUNS_PER_ENTRY
+    assert cea._run_state(mutables, first)["prev_lam_leaves"] is None

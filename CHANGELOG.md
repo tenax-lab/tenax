@@ -548,9 +548,11 @@
   old identity key -- and a user callback's gate and neighbors do too, since
   it may branch on their identity -- since their behaviour can depend on state no fingerprint sees; that
   can only miss.  A gate with different values still gets its own compiled
-  backward.  Entries are shared by runs with equal configurations, so each
-  run's start -- and each switch to a different `build_pess_loss*` loss --
-  resets the adjoint seed and re-arms the once-per-run warning latches.  The cache is now an
+  backward.  Only the compiled code is shared: the adjoint warm-start seed and
+  the once-per-run warning latches belong to one run -- one energy callback,
+  gate and neighbors by identity, which is what the key was before -- so a
+  new gate or callback starts cold even when it hits the cache, and a
+  backward uses the run of its own forward.  Each entry keeps at most 8 runs.  The cache is now an
   LRU of at most 8 entries.  On the 2-site D=2 chi=4 repro, the second call drops
   from 7.7 s (backward re-traced, a second cache entry) to 1.3 s (no
   backward trace, one entry).

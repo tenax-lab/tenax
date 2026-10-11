@@ -579,7 +579,7 @@ def test_sigma_gauge_fix_ctm_tensor_is_a_pure_gauge_transform():
 
 
 def test_stationarity_warning_fires_once_per_cached_build():
-    """#841 guard noise control: warn once per cached vjp-fn build.
+    """#841 guard noise control: warn once per run, not per call.
 
     ``optimize_gs_ad`` (``gs_implicit_ad`` defaults True) reuses one cached
     energy function across every optimizer iteration, and the residual it
@@ -626,6 +626,6 @@ def test_stationarity_warning_fires_once_per_cached_build():
         "the warning is deduplicated"
     )
     assert not second, (
-        f"guard must warn once per cached build, not on every call: second "
+        f"guard must warn once per run, not on every call: second "
         f"call emitted {len(second)} stationarity warning(s)"
     )
