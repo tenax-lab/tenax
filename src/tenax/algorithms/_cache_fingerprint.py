@@ -187,11 +187,14 @@ def _key(obj, depth, inner=False):
             tuple((_key(k, d, inner), _key(v, d, inner)) for k, v in obj.items()),
         )
     if type(obj) is frozenset:
-        # Unordered, so the element keys are sorted.  The multisite PESS bond
-        # IDs are frozensets of ``(site, direction)`` tuples.  An element
-        # with no value key makes the whole set inexact; a ``set`` (mutable)
-        # always keeps the identity key.
-        return ("frozenset", tuple(sorted((_key(e, d, inner) for e in obj), key=repr)))
+        # Keyed in iteration order, not sorted: equal frozensets built in a
+        # different order can iterate differently, and a callback that loops
+        # over one traces in that order.  Frozensets built the same way
+        # iterate the same way within a process, so the multisite PESS bond
+        # IDs -- frozensets of ``(site, direction)`` tuples -- still share a
+        # key.  An element with no value key makes the whole set inexact; a
+        # ``set`` (mutable) always keeps the identity key.
+        return ("frozenset", tuple(_key(e, d, inner) for e in obj))
     if not _tenax_owned(type(obj)):
         raise _Inexact
     # A tenax pytree node (DenseTensor, SymmetricTensor, CTMTensorEnv, ...):

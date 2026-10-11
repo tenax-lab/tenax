@@ -536,7 +536,7 @@
   key now uses values where the value is the whole story
   (`_cache_fingerprint.py`): data -- Python scalars by exact type (floats
   by bit pattern), strings, tuples, lists, dicts in order, frozensets
-  (sorted), `jax.Array`s
+  (in iteration order), `jax.Array`s
   (shape, exact dtype, weak-type bit, placement -- `committed` and `sharding` --,
   contents), and tenax-owned types walked
   field by field, NumPy metadata inside them included (`TensorIndex.__eq__`

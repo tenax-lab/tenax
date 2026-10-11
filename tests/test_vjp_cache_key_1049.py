@@ -485,11 +485,19 @@ def test_a_different_captured_tenax_function_changes_the_key():
 
 def test_frozensets_are_keyed_by_value_and_sets_are_not():
     a = frozenset({("A", "right"), ("B", "left")})
-    b = frozenset({("B", "left"), ("A", "right")})
+    b = frozenset(tuple(a))  # equal, and built in a's iteration order
     assert _exact(a) and _key(a) == _key(b)
     assert _key(a) != _key(frozenset({("A", "right"), ("C", "left")}))
     assert not _exact({("A", "right")})  # a mutable set
     assert not _exact(frozenset({object()}))
+
+
+def test_frozenset_iteration_order_is_part_of_the_key():
+    """Codex review of #1090: equal frozensets can iterate differently, and a
+    callback looping over one traces in that order."""
+    a, b = frozenset([1, 9]), frozenset([9, 1])  # 1 and 9 share a hash slot
+    assert a == b and list(a) != list(b)
+    assert _key(a) != _key(b)
 
 
 def test_np_dtype_objects_are_keyed_exactly():
