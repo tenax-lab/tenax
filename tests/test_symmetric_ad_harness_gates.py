@@ -1,20 +1,23 @@
 """Pure gate logic and matrix bookkeeping of the symmetric-AD harness."""
 
 import json
+from types import SimpleNamespace
 
 import jax
 
 jax.config.update("jax_enable_x64", True)
 
+import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-from benchmarks.symmetric_ad import matrix  # noqa: E402
+from benchmarks.symmetric_ad import matrix, pipeline  # noqa: E402
 from benchmarks.symmetric_ad.pipeline import (  # noqa: E402
     gate_s1,
     gate_s2,
     gate_s4_direction,
     gate_s5,
 )
+from tenax.core.symmetry import U1Symmetry, ZnSymmetry  # noqa: E402
 
 nan = float("nan")
 GOOD5 = dict(
@@ -151,3 +154,101 @@ def test_s5_dense_gate_follows_viol():
     assert not gate_s5(**{**big, "viol": nan})[0]
     # the other parts still gate when the symmetry is broken
     assert not gate_s5(**{**big, "viol": 0.6, "settled": False})[0]
+
+
+# ---- R28: S5 CTM budget, split legs, resume across hashes -------------------
+
+
+def test_ctm_budget_and_policy():
+    c = pipeline._ctm(8)
+    assert c.max_iter == 1000
+    assert c.on_unconverged == "warn"
+
+
+def test_s5_config_raises_on_unconverged_others_warn():
+    cfg = pipeline._s5_config(3, 8, 5)
+    assert cfg.ctm.on_unconverged == "raise"
+    assert cfg.ctm.max_iter == 1000 and cfg.ctm.chi == 8
+    assert cfg.gs_num_steps == 5 and cfg.return_history
+
+
+def test_s5_optimizer_exception_is_a_failed_record(monkeypatch):
+    from tenax.algorithms._ctm_convergence_policy import (
+        CTMConvergeInfo,
+        CTMNotConvergedError,
+    )
+
+    info = CTMConvergeInfo(False, 1000, 1e-6)
+
+    def boom(*a, **k):
+        raise CTMNotConvergedError(info, "gradient", 3, conv_tol=1e-10, chi=8)
+
+    monkeypatch.setattr(pipeline, "optimize_gs_ad", boom)
+    out, failed = pipeline._optimize_or_fail(None, (1, 2), None, None, 2, [[0.1]])
+    assert out is None
+    passed, measured, extra = failed
+    assert passed is False
+    exc = measured["optimizer_exception"]
+    assert exc["type"] == "CTMNotConvergedError" and exc["stage"] == 2
+    assert "did not converge" in exc["message"]
+    assert measured["error"].startswith("CTMNotConvergedError: ")
+    assert "traceback" in extra
+
+
+def test_s5_optimizer_success_passes_through(monkeypatch):
+    seen = {}
+
+    def ok(gate, ab, cfg, envs_init=None):
+        seen["cfg"] = cfg
+        return "result"
+
+    monkeypatch.setattr(pipeline, "optimize_gs_ad", ok)
+    out, failed = pipeline._optimize_or_fail(None, (1, 2), "CFG", None, 1, [])
+    assert (out, failed) == ("result", None) and seen["cfg"] == "CFG"
+
+
+def test_leg_is_split_u1_and_z2():
+    u1, z2 = U1Symmetry(), ZnSymmetry(2)
+    assert not pipeline._leg_is_split(((-1, 2), (0, 3), (1, 2)), u1)
+    assert pipeline._leg_is_split(((-1, 2), (0, 3), (1, 3)), u1)
+    assert pipeline._leg_is_split(((0, 3), (1, 2)), u1)  # 1 has no partner -1
+    # Z2 is self-dual: every layout is unsplit
+    assert not pipeline._leg_is_split(((0, 3), (1, 2)), z2)
+
+
+def _fake_env(legs):
+    ix = [
+        SimpleNamespace(
+            label=f"l{i}",
+            sectors=np.array([q for q, _ in p]),
+            multiplicities=np.array([m for _, m in p]),
+        )
+        for i, p in enumerate(legs)
+    ]
+    t = SimpleNamespace(indices=ix)
+    return SimpleNamespace(
+        **{f: t for f in ("C1", "C2", "C3", "C4")},
+        **{f: t for f in ("T1", "T2", "T3", "T4")},
+    )
+
+
+def test_split_legs_counts_end_to_end():
+    sym_leg, split_leg = ((-1, 2), (1, 2)), ((-1, 2), (1, 3))
+    envs = {(0, 0): _fake_env([sym_leg, split_leg])}
+    assert pipeline.split_legs(envs, U1Symmetry()) == (8, 16)
+    z2_envs = {(0, 0): _fake_env([((0, 2), (1, 3)), ((0, 1), (1, 4))])}
+    assert pipeline.split_legs(z2_envs, ZnSymmetry(2)) == (0, 16)
+
+
+def test_accept_hash_decides_done_and_table_shows_hash(tmp_path):
+    old, new = tmp_path / "old", tmp_path / "new"
+    _summary(old, complete=True, code_hash="H_OLD", stopped_at=None)
+    _summary(new, complete=True, code_hash="H_CUR", stopped_at=None)
+    assert not matrix._complete(old, "H_CUR")
+    assert matrix._complete(old, "H_CUR", ["H_OLD"])
+    assert matrix._complete(new, "H_CUR", ["H_OLD"])
+    assert not matrix._complete(old, "H_CUR", ["H_OTHER"])
+    _summary(old, complete=False, code_hash="H_OLD")
+    assert not matrix._complete(old, "H_CUR", ["H_OLD"])
+    _summary(new, complete=True, code_hash="H_CUR", stopped_at=None)
+    assert matrix._row("p", 0, new)[-1] == "H_CUR"

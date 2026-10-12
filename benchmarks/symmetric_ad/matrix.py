@@ -26,9 +26,14 @@ def _read(d, name):
         return None
 
 
-def _complete(d, chash):
+def _complete(d, chash, accepted=()):
+    """Done when complete and its hash is the current one or an accepted one."""
     s = _read(d, "summary.json")
-    return s is not None and s.get("complete") and s.get("code_hash") == chash
+    return (
+        s is not None
+        and bool(s.get("complete"))
+        and s.get("code_hash") in (chash, *accepted)
+    )
 
 
 def _row(name, rc, d):
@@ -44,7 +49,14 @@ def _row(name, rc, d):
         status = f"FAILED at {s['stopped_at']}{err}"
     else:
         status = "vacuous (chi not binding)" if s.get("vacuous") else "PASS"
-    return (name, status, "".join(stages), s.get("near_degenerate"), s.get("vacuous"))
+    return (
+        name,
+        status,
+        "".join(stages),
+        s.get("near_degenerate"),
+        s.get("vacuous"),
+        s.get("code_hash"),
+    )
 
 
 def main():
@@ -57,6 +69,13 @@ def main():
         action="store_true",
         help="rerun points that already have a complete summary of the current code",
     )
+    ap.add_argument(
+        "--accept-hash",
+        action="append",
+        default=[],
+        metavar="HASH",
+        help="also count a complete summary of this code hash as done (repeatable)",
+    )
     a = ap.parse_args()
     chash = code_hash()
     env = dict(os.environ, JAX_PLATFORMS="cuda,cpu", CUDA_VISIBLE_DEVICES="0")
@@ -67,7 +86,7 @@ def main():
             continue
         d = a.out / name
         d.mkdir(parents=True, exist_ok=True)
-        if not a.no_resume and _complete(d, chash):
+        if not a.no_resume and _complete(d, chash, a.accept_hash):
             rows.append(_row(name, 0, d))
             continue
         for f in (
@@ -106,10 +125,12 @@ def main():
             )
         rows.append(_row(name, rc, d))
     lines = [
-        "| point | status | S1-S5 (P/F/?) | near-degenerate | vacuous |",
-        "|---|---|---|---|---|",
+        "| point | status | S1-S5 (P/F/?) | near-degenerate | vacuous | code_hash |",
+        "|---|---|---|---|---|---|",
     ]
-    lines += [f"| {n} | {st} | {sg} | {nd} | {v} |" for n, st, sg, nd, v in rows]
+    lines += [
+        f"| {n} | {st} | {sg} | {nd} | {v} | {h} |" for n, st, sg, nd, v, h in rows
+    ]
     (a.out / "matrix_summary.md").write_text("\n".join(lines) + "\n")
 
 

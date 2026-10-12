@@ -83,11 +83,73 @@ def _ctm(chi, **kw):
     return dataclasses.replace(
         CTMConfig(chi=chi),
         conv_tol=1e-10,
-        max_iter=300,
+        max_iter=1000,
         plateau_patience=None,
         on_unconverged="warn",
         **kw,
     )
+
+
+def _leg_is_split(pairs, sym):
+    """True when the leg's (charge -> size) map is not invariant under the dual.
+
+    The dual charge comes from the symmetry object (U(1): -q, Z2: q), so a Z2
+    leg is never split.
+    """
+    size = {int(q): int(m) for q, m in pairs}
+    for q, m in size.items():
+        dq = int(np.asarray(sym.dual(np.asarray([q])))[0])
+        if size.get(dq, 0) != m:
+            return True
+    return False
+
+
+def split_legs(envs, sym):
+    """``(n_split, n_legs)`` over all chi legs of ``envs`` (recorded, never gated)."""
+    layout = layout_of(envs)
+    return sum(_leg_is_split(p, sym) for p in layout.values()), len(layout)
+
+
+def _s5_config(D, chi, opt_steps):
+    """Optimizer config of S5: unconverged CTM forwards raise (#1059)."""
+    return iPEPSConfig(
+        max_bond_dim=D,
+        unit_cell="2site",
+        ctm=dataclasses.replace(_ctm(chi), on_unconverged="raise"),
+        gs_num_steps=opt_steps,
+        gs_conv_criterion="grad_norm",
+        gs_grad_norm_tol=1e-5,
+        return_history=True,
+    )
+
+
+def _sym_of(t):
+    return t.indices[0].symmetry
+
+
+def _optimize_or_fail(gate_dense, AB, cfg, envs_init, stage, hist_all):
+    """Run the optimizer; ``(out, None)`` or ``(None, failed S5 stage result)``.
+
+    Under ``on_unconverged="raise"`` the optimizer can raise
+    ``CTMNotConvergedError`` out of ``optimize_gs_ad``; that is a result.
+    """
+    try:
+        return optimize_gs_ad(gate_dense, AB, cfg, envs_init=envs_init), None
+    except Exception as e:
+        _log(f"S5 stage {stage}: optimizer raised {type(e).__name__}")
+        return None, (
+            False,
+            {
+                "error": f"{type(e).__name__}: {e}",
+                "optimizer_exception": {
+                    "type": type(e).__name__,
+                    "message": str(e),
+                    "stage": stage,
+                },
+                "energies": hist_all,
+            },
+            {"traceback": traceback.format_exc()},
+        )
 
 
 def _diag():
@@ -342,9 +404,7 @@ def run_point(
         _, (Asu, Bsu), _ = ipeps(
             gate_dense, densify_pair(A0, B0), cfg, compute_energy=False
         )
-        e_dsu, cdsu = converged_energy(
-            Asu, Bsu, gate_dense, _ctm(chi), None, REF_TOL
-        )
+        e_dsu, cdsu = converged_energy(Asu, Bsu, gate_dense, _ctm(chi), None, REF_TOL)
         diff = e_s - e_d
         ok = gate_s1(diff, viol, nonempty)
         broken = bool(np.isfinite(viol) and viol >= VIOL_TOL)
@@ -387,6 +447,7 @@ def run_point(
                 "cold_iterations": seed_r.cold_iterations,
                 "chi_binding": binding,
                 "layout": {str(k): v for k, v in seed_r.layout.items()},
+                "split_legs": split_legs(seed_r.envs_init, _sym_of(st["A"])),
             },
             {"near_degenerate": near},
         )
@@ -464,22 +525,20 @@ def run_point(
     def s5():
         layouts, stages = [st["seed"].layout], 0
         A, B, envs_init = st["A"], st["B"], st["seed"].envs_init
-        hist_all = []
+        hist_all, ctm_conv_all = [], []
         while True:
             stages += 1
-            cfg = iPEPSConfig(
-                max_bond_dim=D,
-                unit_cell="2site",
-                ctm=_ctm(chi),
-                gs_num_steps=opt_steps,
-                gs_conv_criterion="grad_norm",
-                gs_grad_norm_tol=1e-5,
-                return_history=True,
+            cfg = _s5_config(D, chi, opt_steps)
+            out, failed = _optimize_or_fail(
+                gate_dense, (A, B), cfg, envs_init, stages, hist_all
             )
-            (A, B), (env_A, env_B), E_ret, hist = optimize_gs_ad(
-                gate_dense, (A, B), cfg, envs_init=envs_init
-            )
+            if failed is not None:
+                return failed
+            (A, B), (env_A, env_B), E_ret, hist = out
             hist_all.append(hist["energies"])
+            ctm_conv = hist.get("ctm_converged")
+            if ctm_conv is not None:
+                ctm_conv_all.append([bool(c) for c in ctm_conv])
             _log(f"S5 stage {stages}: optimizer done, {len(hist['energies'])} steps")
             drift = symmetric_layout_seed(A, B, gate, _ctm(chi))
             if same_layout(drift.layout, layouts[-1]) or stages >= MAX_STAGES:
@@ -533,6 +592,13 @@ def run_point(
                 "dE_sym_minus_dense": e_sym - e_dense,
                 "dense_final_wall": wall_dense,
                 "energies": hist_all,
+                # Gradient-forward verdicts per step; the line-search probe
+                # reject / abort counts are not exposed by the optimizer.
+                "gradient_forward_converged": ctm_conv_all,
+                "split_legs_warm": split_legs(
+                    {(0, 0): env_A, (1, 0): env_B}, _sym_of(A)
+                ),
+                "split_legs_drift_seed": split_legs(drift.envs_init, _sym_of(A)),
             },
             {},
         )
