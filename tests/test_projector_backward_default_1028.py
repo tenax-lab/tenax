@@ -209,12 +209,9 @@ def test_unsolvable_flowing_adjoint_falls_back_to_frozen():
     g_flow, diag_flow, caught = grad_with("flow")
     # The fallback's frozen solve must not leave its lambda as the warm start
     # of the next (flowing, different) adjoint system.
-    (f_flow, _mutables) = next(iter(_VJP_CACHE.values()))
-    cached = next(
-        c.cell_contents
-        for c in f_flow.bwd.__closure__
-        if isinstance(c.cell_contents, dict) and "prev_lam_leaves" in c.cell_contents
-    )
+    (_f_flow, mutables) = next(iter(_VJP_CACHE.values()))
+    # The seed lives in the entry's run state (#1049); one gate is one run.
+    (cached,) = [state for _token, state, _objects in mutables["_runs"].values()]
     assert cached["prev_lam_leaves"] is None
     g_frozen, diag_frozen, _ = grad_with("auto")
 

@@ -9,6 +9,7 @@ __all__ = [
     "set_implicit_ad_norm_diagnostics",
 ]
 
+import collections
 import contextlib
 import itertools
 import logging
@@ -20,6 +21,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
+from tenax.algorithms._cache_fingerprint import callback_key_parts, lru_get, lru_put
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
     _validate_chi_bump_args,
@@ -848,15 +850,55 @@ def _sigma_gauged_ctm_converge(
     return result.envs, result.final_chi, result.converged
 
 
-_VJP_CACHE: dict = {}
+# LRU-bounded (``VJP_CACHE_MAXSIZE``) and keyed by value, not object identity
+# (#1049): see ``_cache_fingerprint``.
+_VJP_CACHE: collections.OrderedDict = collections.OrderedDict()
 
 # Per-call ids for the forward energy's RDM-check replay (see
 # ``_ctm_tensor_energy.recording_traced_rdms``).  ``next`` on a count is
 # atomic under the GIL, so concurrent calls never share an id.
 _RDM_CALL_TOKENS = itertools.count(1)
 
+# Per-run state of a cached implicit-AD function (#1049).  The compiled
+# backward is shared by every call with an equal configuration, but the
+# adjoint seed and the once-per-run warning latches belong to one run: one
+# (energy callback, gate, neighbors) triple by identity, which is what the
+# cache key was before #1049.  Each entry keeps its runs in a small LRU; the
+# record holds the three objects, so a recycled ``id`` cannot match it.
+_RUN_TOKENS = itertools.count(1)
+_RUNS_PER_ENTRY = 8
 
-def invalidate_implicit_ad_warm_start() -> int:
+
+def _fresh_run_state() -> dict:
+    return {
+        "prev_lam_leaves": None,
+        "stationarity_warned": False,
+        "flow_fallback_warned": False,
+    }
+
+
+def _select_run(mutables: dict, energy_fn, gate, neighbors) -> None:
+    """Make the run of ``(energy_fn, gate, neighbors)`` the entry's current one."""
+    runs = mutables["_runs"]
+    key = (id(energy_fn), id(gate), id(neighbors))
+    record = lru_get(runs, key)
+    if record is None:
+        record = (next(_RUN_TOKENS), _fresh_run_state(), (energy_fn, gate, neighbors))
+        runs[key] = record
+        while len(runs) > _RUNS_PER_ENTRY:
+            runs.popitem(last=False)
+    mutables["run_token"] = record[0]
+
+
+def _run_state(mutables: dict, token: int) -> dict:
+    """The state of run ``token``; a fresh one if it was evicted."""
+    for record_token, state, _objects in mutables["_runs"].values():
+        if record_token == token:
+            return state
+    return _fresh_run_state()
+
+
+def invalidate_implicit_ad_warm_start(*, run_start: bool = False) -> int:
     """Clear cached Neumann warm-start seeds across the implicit-AD VJP cache.
 
     The implicit-AD backward (``adjoint_method="fixed_point"`` and the
@@ -886,6 +928,14 @@ def invalidate_implicit_ad_warm_start() -> int:
     compiled VJP functions stay cached, so the cost is one cold adjoint
     solve per run, not a recompile.
 
+    ``run_start=True`` (the run-entry calls only) also re-arms the entry's
+    once-per-run warning latches (the #841 stationarity warning and the #1028
+    flow-fallback warning).  Since #1049 an entry is shared by equal
+    configurations, and the latches live per run (``_select_run``), so a new
+    callback or gate already starts with them armed; this also re-arms a run
+    whose objects are reused.  The mid-run calls (stall reset, chi change)
+    leave the latches alone, so a run still warns once.
+
     Returns
     -------
     int
@@ -898,6 +948,11 @@ def invalidate_implicit_ad_warm_start() -> int:
         if cb is not None:
             cb()
             n += 1
+        # Re-arm the once-per-run warning latches when a run starts -- not on
+        # a mid-run reset, which would re-warn.
+        reset = mutables.get("_reset_run_latches") if run_start else None
+        if reset is not None:
+            reset()
     return n
 
 
@@ -1102,7 +1157,12 @@ def _ctm_energy_implicit_dispatch(
     """
     # Build a hashable key from the static configuration.
     # Gate and energy_fn must be in the key because the JIT backward
-    # captures them at trace time as compile-time constants.
+    # captures them at trace time as compile-time constants.  Value keys for
+    # the default and declared callbacks; a user callback keeps identity keys
+    # for itself and its inputs (#1049, ``callback_key_parts``).
+    energy_fn_fp, (neighbors_fp, gate_fp), keepalive = callback_key_parts(
+        energy_fn, neighbors, gate
+    )
     cache_key = (
         tuple(coords),
         chi,
@@ -1118,9 +1178,13 @@ def _ctm_energy_implicit_dispatch(
         gmres_tol,
         gmres_maxiter,
         gmres_restart,
-        id(neighbors),  # same dict object across optimizer steps
-        id(gate),  # different Hamiltonian → different backward
-        id(energy_fn),  # different energy callback → different backward
+        # Value fingerprints, not ids (#1049): the backward bakes the gate
+        # and energy callback in at trace time, so equal fingerprints trace
+        # the same program.  ``optimize_gs_ad`` builds its energy callback as
+        # a fresh closure per call, so an ``id`` key recompiled every call.
+        neighbors_fp,
+        gate_fp,
+        energy_fn_fp,
         arnoldi_precheck,
         adjoint_method,
         plateau_patience,
@@ -1134,7 +1198,7 @@ def _ctm_energy_implicit_dispatch(
         mixing,  # the forward closure reads it (#1060)
     )
 
-    entry = _VJP_CACHE.get(cache_key)
+    entry = lru_get(_VJP_CACHE, cache_key)
     if entry is not None:
         f, mutables = entry
         # Update per-call mutable state
@@ -1142,6 +1206,7 @@ def _ctm_energy_implicit_dispatch(
         mutables["chi_ramp"] = chi_ramp
         mutables["env_init"] = env_init
         mutables["energy_fn"] = energy_fn
+        _select_run(mutables, energy_fn, gate, neighbors)
         return f(params_data_tuple)
 
     # First call with this config — build and cache
@@ -1180,7 +1245,12 @@ def _ctm_energy_implicit_dispatch(
         ctm_chunk_size=ctm_chunk_size,
         mixing=mixing,
     )
-    _VJP_CACHE[cache_key] = (f, mutables)
+    # Objects the key holds only by id must outlive the entry, or a recycled
+    # id could match it (see ``fingerprint``).
+    mutables["_cache_keepalive"] = keepalive
+    mutables["_runs"] = collections.OrderedDict()
+    _select_run(mutables, energy_fn, gate, neighbors)
+    lru_put(_VJP_CACHE, cache_key, (f, mutables))
     return f(params_data_tuple)
 
 
@@ -1239,18 +1309,12 @@ def _make_implicit_vjp_fn(
             f"{_IMPLICIT_FORWARD_GAUGES}"
         )
 
-    # Mutable cache for treedef from forward (needed in backward).
-    # ``prev_lam_leaves`` caches the implicit-AD adjoint solution across
-    # consecutive ``f_bwd`` calls.  Consecutive L-BFGS steps usually take small
-    # site-tensor steps, so the adjoint problem ``(I - J^T) λ = b`` is "close"
-    # to the previous one — using the previous ``λ`` as a warm seed for the
-    # Neumann iteration converges in fewer iterations (#501).  Cleared on
-    # divergence/non-convergence so the next call gets a fresh start.
-    _cached = {
-        "prev_lam_leaves": None,
-        "stationarity_warned": False,
-        "flow_fallback_warned": False,
-    }
+    # The forward's env treedef, read by the backward's helpers at trace time.
+    # The per-run adjoint seed and warning latches live in ``mutables["_runs"]``
+    # (``_select_run``): ``prev_lam_leaves`` caches the adjoint solution across
+    # consecutive backwards of one run, so the Neumann iteration starts close
+    # to the answer (#501).  Cleared on divergence/non-convergence.
+    _cached: dict = {}
 
     def _invalidate_warm_start() -> None:
         """Drop the cached ``prev_lam_leaves`` warm-start seed.
@@ -1263,9 +1327,18 @@ def _make_implicit_vjp_fn(
         preserved by the in-loop divergence guard, but convergence costs
         extra iterations (see issue #501).
         """
-        _cached["prev_lam_leaves"] = None
+        for _token, state, _objects in mutables["_runs"].values():
+            state["prev_lam_leaves"] = None
 
     mutables["_invalidate_warm_start"] = _invalidate_warm_start
+
+    def _reset_run_latches() -> None:
+        """Re-arm the once-per-run warnings (#1049): called at run start only."""
+        for _token, state, _objects in mutables["_runs"].values():
+            state["stationarity_warned"] = False
+            state["flow_fallback_warned"] = False
+
+    mutables["_reset_run_latches"] = _reset_run_latches
 
     # Step function for the #841 stationarity check below: the exact step the
     # forward loop runs (same recipe, mesh, and chunking — memoised, so this
@@ -1384,9 +1457,9 @@ def _make_implicit_vjp_fn(
         Cost: one extra jitted sweep + gauge fix per forward, ~1/max_iter of
         the forward's own cost.
 
-        Warns ONCE per cached vjp-fn build (the lifetime of the warm-start
-        cache): ``optimize_gs_ad`` reuses one build across every optimizer
-        iteration, and the residual embedded in the message drifts, so
+        Warns ONCE per run (one energy callback, gate and neighbors, by
+        identity; see ``_select_run``): ``optimize_gs_ad`` reuses one run
+        across every optimizer iteration, and the residual embedded in the message drifts, so
         Python's default warning dedup never collapses repeats -- a
         per-call warning floods stderr for hundreds of iterations, buries
         the genuinely discriminative "adjoint solve did not converge"
@@ -1422,12 +1495,13 @@ def _make_implicit_vjp_fn(
         # unconverged loop is left to the caller's #1059 policy when one owns
         # it (``policy_owns_unconverged_forward``); the latch stays unspent.
         deferred = _F3_POLICY_OWNS_UNCONVERGED and not forward_converged
+        run = _run_state(mutables, mutables["run_token"])
         if (
             not (residual <= threshold)
             and not deferred
-            and not _cached["stationarity_warned"]
+            and not run["stationarity_warned"]
         ):
-            _cached["stationarity_warned"] = True
+            run["stationarity_warned"] = True
             warnings.warn(
                 f"Implicit-AD CTM: the forward environment is not an "
                 f"element-wise fixed point of the gauged CTM step: one more "
@@ -1447,9 +1521,9 @@ def _make_implicit_vjp_fn(
                 f"help. The residual is also readable from "
                 f"get_last_implicit_ad_diagnostics()"
                 f"['forward_stationarity_residual'] -- it stays updated on "
-                f"every call, while this warning is emitted once per cached "
-                f"energy function (further occurrences are suppressed to "
-                f"keep optimizer loops readable).",
+                f"every call, while this warning is emitted once per run "
+                f"(further occurrences are suppressed to keep optimizer "
+                f"loops readable).",
                 RuntimeWarning,
                 stacklevel=4,
             )
@@ -1515,7 +1589,9 @@ def _make_implicit_vjp_fn(
 
         _cached["env_treedef"] = jax.tree.structure(envs)
         env_leaves = tuple(jax.tree.leaves(envs))
-        residuals = (params_data_tuple, env_leaves, chi_post)
+        # The run token travels with the residuals, so a backward finds its
+        # own run even if another forward ran in between.
+        residuals = (params_data_tuple, env_leaves, chi_post, mutables["run_token"])
         return energy, residuals
 
     # Build JIT'd sweep step for backward (same recipe as forward, so the
@@ -1862,7 +1938,8 @@ def _make_implicit_vjp_fn(
         ``static_argnames`` parameter so JAX traces one compiled binary
         per distinct chi value visited (#516 chi-lock).
         """
-        params_data_tuple, env_leaves, chi_post = residuals
+        params_data_tuple, env_leaves, chi_post, run_token = residuals
+        run = _run_state(mutables, int(run_token))
 
         # Drop the previous backward's residual before any branch can return.
         # ``_F3_LAST_DIAGNOSTICS`` is module-global, so a path that fails to
@@ -1948,7 +2025,7 @@ def _make_implicit_vjp_fn(
             # initial guess.  Cold start (first call, or after a
             # divergence reset) seeds from ``dE_denv`` itself —
             # equivalent to the previous behaviour.
-            prev_lam = _cached.get("prev_lam_leaves")
+            prev_lam = run.get("prev_lam_leaves")
             invalidated_by_shape = False
             if prev_lam is not None:
                 # Validate shapes match current env_leaves.  Without this, a D-sweep
@@ -1959,7 +2036,7 @@ def _make_implicit_vjp_fn(
                 if len(prev_lam) != len(env_leaves) or any(
                     a.shape != b.shape for a, b in zip(prev_lam, env_leaves)
                 ):
-                    _cached["prev_lam_leaves"] = None
+                    run["prev_lam_leaves"] = None
                     invalidated_by_shape = True
                     prev_lam = None
             if prev_lam is None:
@@ -2046,7 +2123,7 @@ def _make_implicit_vjp_fn(
                 # Invalidate the stale warm-start cache before the
                 # eager fallback fires; the eager GMRES result then
                 # becomes the new seed for the next call.
-                _cached["prev_lam_leaves"] = None
+                run["prev_lam_leaves"] = None
                 _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = True
                 rhs = _eager_dE_denv()
                 _GMRES_LOGGER.debug(
@@ -2080,7 +2157,7 @@ def _make_implicit_vjp_fn(
                 )
                 _F3_LAST_DIAGNOSTICS["adjoint_residual"] = _rel
                 lam_leaves = tuple(jax.tree.leaves(lam))
-                _cached["prev_lam_leaves"] = lam_leaves
+                run["prev_lam_leaves"] = lam_leaves
                 return (
                     _jit_chain_rule(
                         params_data_tuple,
@@ -2102,7 +2179,7 @@ def _make_implicit_vjp_fn(
             # *is* a residual criterion -- what it lacked was reporting, not a
             # guard.  Pinned by
             # test_the_fused_happy_path_is_residual_gated_by_construction.
-            _cached["prev_lam_leaves"] = tuple(jax.tree.leaves(lam_final))
+            run["prev_lam_leaves"] = tuple(jax.tree.leaves(lam_final))
             # The same compiled chain rule as the fallback above: the fused
             # program returns lam only, so the D=3-sized params-VJP compiles
             # once per (chi, pb) whichever solver produced lam.
@@ -2118,12 +2195,12 @@ def _make_implicit_vjp_fn(
             # x0 otherwise.  The shape check matches the fixed-point
             # branch above.
             rhs = _eager_dE_denv()
-            prev_lam = _cached.get("prev_lam_leaves")
+            prev_lam = run.get("prev_lam_leaves")
             if prev_lam is not None and (
                 len(prev_lam) != len(env_leaves)
                 or any(a.shape != b.shape for a, b in zip(prev_lam, env_leaves))
             ):
-                _cached["prev_lam_leaves"] = None
+                run["prev_lam_leaves"] = None
                 prev_lam = None
             # Warm start first, then the Neumann term, then zero -- but chosen
             # by measured residual, not by preference order (#858).  Both
@@ -2166,7 +2243,7 @@ def _make_implicit_vjp_fn(
             )
             _F3_LAST_DIAGNOSTICS["adjoint_residual"] = _rel
             lam_leaves = tuple(jax.tree.leaves(lam))
-            _cached["prev_lam_leaves"] = lam_leaves
+            run["prev_lam_leaves"] = lam_leaves
             return (
                 _jit_chain_rule(
                     params_data_tuple, env_leaves, lam_leaves, g, chi=chi_post, pb=pb
@@ -2205,6 +2282,7 @@ def _make_implicit_vjp_fn(
         """
         _F3_LAST_DIAGNOSTICS.pop("flow_adjoint_residual", None)
         _F3_LAST_DIAGNOSTICS.pop("flow_fallback_reason", None)
+        run = _run_state(mutables, int(residuals[3]))
         deferred = _policy_defers_backward_warnings()
         if projector_backward != _PROJECTOR_BACKWARD_FLOW:
             grads, _ = _bwd_core(residuals, g, projector_backward, warn=not deferred)
@@ -2237,17 +2315,17 @@ def _make_implicit_vjp_fn(
             return grads
         # The cached lambda solves the flowing system (or is garbage); the
         # frozen solve must not be seeded from it.
-        _cached["prev_lam_leaves"] = None
+        run["prev_lam_leaves"] = None
         # Deferred to the caller's policy, the latch stays unspent.
-        if not deferred and not _cached["flow_fallback_warned"]:
-            _cached["flow_fallback_warned"] = True
+        if not deferred and not run["flow_fallback_warned"]:
+            run["flow_fallback_warned"] = True
             warnings.warn(
                 "Implicit-AD CTM: the flowing-projector backward "
                 '(projector_backward="flow", the default under '
                 'forward_gauge="bond_phase") was discarded because '
                 f"{reason}; this gradient uses frozen projectors instead, "
                 "which are biased (#1028) but bounded.  Warned once per "
-                "cached energy function; the diagnostics report "
+                "run; the diagnostics report "
                 "'projector_backward_used' on every call.",
                 RuntimeWarning,
                 stacklevel=3,
@@ -2257,7 +2335,7 @@ def _make_implicit_vjp_fn(
         )
         # That solve cached the FROZEN system's lambda; the next call tries
         # flowing again, a different linear system, so it must start cold.
-        _cached["prev_lam_leaves"] = None
+        run["prev_lam_leaves"] = None
         _F3_LAST_DIAGNOSTICS["projector_backward_used"] = "frozen_fallback"
         _F3_LAST_DIAGNOSTICS["flow_adjoint_residual"] = flow_residual
         _F3_LAST_DIAGNOSTICS["flow_fallback_reason"] = reason
