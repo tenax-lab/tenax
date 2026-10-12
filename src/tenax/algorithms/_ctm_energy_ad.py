@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
+from tenax.algorithms._block_sparse_jit import block_sparse_jit
 from tenax.algorithms._cache_fingerprint import callback_key_parts, lru_get, lru_put
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
@@ -192,7 +193,8 @@ def _best_adjoint_seed(matvec, rhs, candidates):
 
 
 @partial(
-    jax.jit, static_argnames=("apply_Jt", "chi", "pb", "tol", "maxiter", "restart")
+    block_sparse_jit,
+    static_argnames=("apply_Jt", "chi", "pb", "tol", "maxiter", "restart"),
 )
 def _jit_eager_gmres_solve(
     params_data_tuple, env_leaves, rhs, x0, *, apply_Jt, chi, pb, tol, maxiter, restart
@@ -1622,7 +1624,7 @@ def _make_implicit_vjp_fn(
         else:
             return e_out
 
-    @jax.jit
+    @block_sparse_jit
     def _jit_dE_denv(params_data_tuple, env_leaves):
         """Step 1: compute dE/denv (GMRES RHS)."""
         gate_ = mutables["gate"]
@@ -1639,7 +1641,7 @@ def _make_implicit_vjp_fn(
         _, vjp_fn = jax.vjp(energy_from_env, env_leaves)
         return vjp_fn(jnp.ones(()))[0]
 
-    @partial(jax.jit, static_argnames=("chi", "pb"))
+    @partial(block_sparse_jit, static_argnames=("chi", "pb"))
     def _jit_apply_Jt(params_data_tuple, env_leaves, v, *, chi, pb):
         """Apply the GMRES matvec ``(I - J^T) v`` (NOT just ``J^T v``).
 
@@ -1675,7 +1677,7 @@ def _make_implicit_vjp_fn(
         jt_v = vjp_fn(v)[0]
         return tuple(vi - ji for vi, ji in zip(v, jt_v))
 
-    @partial(jax.jit, static_argnames=("chi", "pb"))
+    @partial(block_sparse_jit, static_argnames=("chi", "pb"))
     def _jit_chain_rule(params_data_tuple, env_leaves, lam, g_scalar, *, chi, pb):
         """Steps 3-4: direct gradient + indirect (J_params^T @ lam).
 
@@ -1718,7 +1720,7 @@ def _make_implicit_vjp_fn(
         total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
         return (total,)
 
-    @partial(jax.jit, static_argnames=("chi", "pb"))
+    @partial(block_sparse_jit, static_argnames=("chi", "pb"))
     def _jit_fused_fixed_point_bwd(
         params_data_tuple,
         env_leaves,
@@ -1884,7 +1886,7 @@ def _make_implicit_vjp_fn(
 
         return diverged, converged, n_iter, lam_final, abs_resid, b_norm
 
-    @partial(jax.jit, static_argnames=("chi",))
+    @partial(block_sparse_jit, static_argnames=("chi",))
     def _jit_gmres_solve(params_data_tuple, env_leaves, rhs, *, chi):
         """GMRES solve compiled into a single XLA program.
 

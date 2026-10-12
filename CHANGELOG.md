@@ -4,6 +4,32 @@
 
 ### Behavior Changes
 
+- **Large block-sparse CTM-AD backward programs compile without XLA's CPU
+  fusion pass** (`_block_sparse_jit.py`; #566).  A `SymmetricTensor`
+  contraction traces one small op per pair of charge blocks.  The
+  implicit-AD backward of a symmetric state is therefore mostly reshapes,
+  transposes, scatters and `1x1` dots, and XLA's CPU instruction fusion
+  grows superlinearly on it.  The backward programs (`dE/denv`, the `J^T`
+  product, the chain rule, the fused fixed-point backward and the GMRES
+  solve) now compile with `xla_disable_hlo_passes=fusion` when called at top
+  level on CPU with site tensors holding at least 40 charge blocks in total
+  (`NO_FUSION_MIN_BLOCKS`; a D=2 U(1) 2-site state has 10, D=3 has 70).
+  The forward sweep and the forward energy keep the default pipeline at
+  every size.  Measured, U(1) (StableHLO ops; compile and warm run, fused
+  against unfused):
+
+  | Program | Ops | Compile | Warm run |
+  |---|---|---|---|
+  | sweep VJP, D=2 chi=8 | 64k | 20 s / 38 s | 6.4 ms / 8.7 ms |
+  | sweep VJP, D=3 chi=6 | 203k | 464 s / 429 s | 23.1 ms / 18.5 ms |
+  | `dE/denv`, D=3 chi=6 | 570k | 546 s / 308 s | 14.7 ms / 10.5 ms |
+  | `dE/denv`, D=3 chi=9 | 627k | 8569 s / 905 s | 92 ms / 62 ms |
+  | sweep, D=3 chi=9 | 225k | 145 s / 517 s | 15.9 ms / 19.8 ms |
+
+  Dense programs, other backends, and calls inside an enclosing trace keep
+  the default pipeline.  Results are unchanged (D=2 U(1) `dE/denv`: maximum
+  difference 1.4e-17).
+
 - **Metric preconditioning is turned off for fermionic input** (#1059
   finding 27).  `gs_metric_precond` (on by default) builds its norm matrix
   with the sign-free contractor and `.todense()`, so on fermionic tensors it
