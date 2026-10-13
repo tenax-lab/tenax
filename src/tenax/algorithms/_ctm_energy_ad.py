@@ -194,6 +194,7 @@ def _best_adjoint_seed(matvec, rhs, candidates):
 
 @partial(
     block_sparse_jit,
+    by_bond_dim=False,
     static_argnames=("apply_Jt", "chi", "pb", "tol", "maxiter", "restart"),
 )
 def _jit_eager_gmres_solve(
@@ -1641,7 +1642,7 @@ def _make_implicit_vjp_fn(
         _, vjp_fn = jax.vjp(energy_from_env, env_leaves)
         return vjp_fn(jnp.ones(()))[0]
 
-    @partial(block_sparse_jit, static_argnames=("chi", "pb"))
+    @partial(block_sparse_jit, by_bond_dim=False, static_argnames=("chi", "pb"))
     def _jit_apply_Jt(params_data_tuple, env_leaves, v, *, chi, pb):
         """Apply the GMRES matvec ``(I - J^T) v`` (NOT just ``J^T v``).
 
@@ -1886,7 +1887,7 @@ def _make_implicit_vjp_fn(
 
         return diverged, converged, n_iter, lam_final, abs_resid, b_norm
 
-    @partial(block_sparse_jit, static_argnames=("chi",))
+    @partial(block_sparse_jit, by_bond_dim=False, static_argnames=("chi",))
     def _jit_gmres_solve(params_data_tuple, env_leaves, rhs, *, chi):
         """GMRES solve compiled into a single XLA program.
 

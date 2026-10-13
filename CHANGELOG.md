@@ -9,12 +9,19 @@
   contraction traces one small op per pair of charge blocks.  The
   implicit-AD backward of a symmetric state is therefore mostly reshapes,
   transposes, scatters and small dots, which XLA's CPU instruction fusion
-  handles badly.  The backward programs (`dE/denv`, the `J^T` product, the
-  chain rule, the fused fixed-point backward and the GMRES solve) now
-  compile with `xla_disable_hlo_passes=fusion` when called at top level on
-  CPU with a site tensor that has a virtual bond of dimension 3 or more, or
-  with at least 40 charge blocks in total.  D=2 states and the forward sweep
-  and forward energy keep the default pipeline at every size.
+  handles badly.  On CPU, at top level:
+
+  - `dE/denv`, the chain rule and the fused fixed-point backward compile
+    with `xla_disable_hlo_passes=fusion` when a site tensor has a virtual
+    bond of dimension 3 or more, or 20 or more charge blocks.
+  - The `J^T` product and the two GMRES solves, which contain only the
+    sweep VJP, go unfused only on the 20-block test (many-sector U(1)).
+    For graded states they compile about 2x faster fused.
+
+  Blocks are counted per site tensor, so D=2 states stay fused for any unit
+  cell.  The forward sweep and forward energy keep the default pipeline at
+  every size.  The chain rule, fermionic, compiled 89 / 1062 s fused /
+  unfused at D=2, 9363 / 2793 s at D=3, and more than 8000 / 3018 s at D=4.
 
   From D=3 up, `dE/denv` runs faster unfused for every symmetry measured.
   Warm run, fused against unfused:
@@ -28,10 +35,9 @@
 
   The U(1) D=3 chi=9 `dE/denv` also compiled in 905 s unfused against
   8569 s fused.  At D=2 every program favours fusion: the backward programs
-  of a D=2 U(1) `optimize_gs_ad` step compiled 1.8-3.5x slower unfused.  The
-  forward sweep and the sweep VJP inside the other backward programs compile
-  1.5-3.6x faster fused, and their run time differs by less than 15% at
-  D>=3.
+  of a D=2 U(1) `optimize_gs_ad` step compiled 1.8-3.5x slower unfused.  At
+  D>=3 the forward sweep, and the sweep VJP of graded states, compile
+  1.5-3.6x faster fused, and their run time differs by less than 15%.
 
   Dense programs, other backends, calls inside an enclosing trace, and every
   call on JAX older than 0.4.36 (no `compiler_options` on `jax.jit`) keep the

@@ -279,13 +279,21 @@ place that uses them, so the program grows.  On the D=3 U(1) chi=9
 compile took 8569 s fused and 905 s unfused, and the compiled program ran in
 92 ms fused and 62 ms unfused.
 
-So on CPU the implicit-AD backward programs of a large symmetric state are
-compiled unfused automatically.  "Large" means a site tensor has a virtual
-leg (`u`, `d`, `l`, `r`) of dimension 3 or more, or the state has 40 or more
-charge blocks.  Everything else keeps the default pipeline:
+So on CPU some implicit-AD backward programs of a large symmetric state are
+compiled unfused automatically:
+
+- `dE/denv`, the chain rule and the fused fixed-point backward go unfused
+  when a site tensor has a virtual leg (`u`, `d`, `l`, `r`) of dimension 3
+  or more, or 20 or more charge blocks.
+- The `J^T` product and the two GMRES solves contain only the sweep VJP.
+  They go unfused only when a site tensor has 20 or more charge blocks (a
+  many-sector U(1) state; a D=3 U(1) site has 35).
+
+Blocks are counted per site tensor, not per unit cell.  Everything else keeps
+the default pipeline:
 
 - the forward CTM sweep and the forward energy, at every size;
-- D=2 states;
+- D=2 states, for any unit cell;
 - dense tensors;
 - GPU and TPU (not measured);
 - calls inside another `jax.jit`, `grad` or `vmap` trace;
@@ -297,8 +305,13 @@ The rule follows measurements on U(1), Z2 and fermionic 2-site states (CPU,
 | Program | D=2 | D>=3 |
 |---|---|---|
 | Forward sweep | fused faster | fused compiles 1.5-3.6x faster; run time within 8% |
-| Sweep VJP (inside the GMRES and chain-rule programs) | fused faster | fused compiles faster; run time within 15% either way |
+| Sweep VJP (`J^T` product, GMRES) | fused faster | graded: fused compiles about 2x faster, run time within 15% or faster fused; many-sector U(1): unfused faster |
 | `dE/denv` | fused faster or a tie | unfused runs 1.2-2.4x faster |
+| Chain rule | fused 12x faster to compile | unfused compiles 3.4x faster and runs 2x faster |
+
+The chain rule is the largest backward program.  Fermionic, fused / unfused
+compile: 89 / 1062 s at D=2, 9363 / 2793 s at D=3, more than 8000 / 3018 s
+at D=4.  Even unfused it is now the main compile cost of a D>=3 gradient.
 
 The `dE/denv` warm run, fused / unfused:
 
@@ -313,8 +326,8 @@ Two measurements explain why the rule is not "unfused everywhere":
 
 - With every block-sparse program unfused, a D=2 U(1) `optimize_gs_ad` step
   took 3388 s against 1396 s.
-- At D>=3 the forward sweep gains nothing at run time unfused, and compiles
-  slower.
+- At D>=3 the forward sweep and, for graded states, the sweep VJP gain
+  nothing at run time unfused, and compile slower.
 
 The operation count alone does not predict the outcome: a 52k-operation D=2
 sweep favours fusion, while a 30k-operation D=2 `dE/denv` ties.  The block

@@ -51,7 +51,7 @@ def _norm2(t):
 @pytest.fixture
 def any_size(monkeypatch):
     """Drop the size threshold, so the D=2 fixture dispatches as a large state."""
-    monkeypatch.setattr(_block_sparse_jit, "NO_FUSION_MIN_BLOCKS", 1)
+    monkeypatch.setattr(_block_sparse_jit, "NO_FUSION_MIN_SITE_BLOCKS", 1)
 
 
 # Each test jits a fresh function: jit objects over one Python function share
@@ -68,20 +68,24 @@ def test_a_small_symmetric_state_keeps_the_default_pipeline(u1_pair):
     """A D=2 U(1) 2-site state (10 blocks): fusion still wins there."""
     f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
     A, B = u1_pair
-    assert len(A.blocks) + len(B.blocks) < _block_sparse_jit.NO_FUSION_MIN_BLOCKS
+    assert (
+        max(len(A.blocks), len(B.blocks)) < _block_sparse_jit.NO_FUSION_MIN_SITE_BLOCKS
+    )
     f(A, B)
     assert f.dense._cache_size() == 1
     assert f.block_sparse._cache_size() == 0
 
 
 def test_a_d3_graded_state_takes_the_no_fusion_variant():
-    """A D=3 fermionic 2-site state has 32 blocks, under the block threshold,
-    but its ``dE/denv`` runs 2.4x faster unfused (26.3 ms against 10.9 ms)."""
+    """A D=3 fermionic site has 16 blocks, under the block threshold, but its
+    ``dE/denv`` runs 2.4x faster unfused (26.3 ms against 10.9 ms)."""
     f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
     cfg = FPEPSConfig(D=3)
     A = _build_initial_fpeps_tensor(cfg, jax.random.PRNGKey(0))
     B = _build_initial_fpeps_tensor(cfg, jax.random.PRNGKey(1))
-    assert len(A.blocks) + len(B.blocks) < _block_sparse_jit.NO_FUSION_MIN_BLOCKS
+    assert (
+        max(len(A.blocks), len(B.blocks)) < _block_sparse_jit.NO_FUSION_MIN_SITE_BLOCKS
+    )
     f(A, B)
     assert f.block_sparse._cache_size() == 1
     assert f.dense._cache_size() == 0
@@ -137,6 +141,37 @@ def test_an_unpinned_call_follows_the_default_backend(d3_fermion_pair, gpu_defau
     f(*d3_fermion_pair)
     assert f.dense._cache_size() == 1
     assert f.block_sparse._cache_size() == 0
+
+
+def test_a_d2_cell_of_any_size_keeps_the_default_pipeline():
+    """Blocks are counted per site: three D=2 parity sites (48 blocks in all)
+    stay fused, as every D=2 measurement favours fusion."""
+    cfg = FPEPSConfig(D=2)
+    sites = [_build_initial_fpeps_tensor(cfg, jax.random.PRNGKey(k)) for k in range(3)]
+    assert sum(len(t.blocks) for t in sites) >= 40
+    f = block_sparse_jit(lambda *ts: sum(_norm2(t) for t in ts))
+    f(*sites)
+    assert f.dense._cache_size() == 1
+    assert f.block_sparse._cache_size() == 0
+
+
+def test_without_the_bond_dim_test_a_d3_graded_state_keeps_fusion(d3_fermion_pair):
+    """``by_bond_dim=False`` is for programs that are only the sweep VJP,
+    which compiles faster fused for graded states at every D measured."""
+    f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b), by_bond_dim=False)
+    f(*d3_fermion_pair)
+    assert f.dense._cache_size() == 1
+    assert f.block_sparse._cache_size() == 0
+
+
+def test_without_the_bond_dim_test_a_many_sector_u1_state_goes_unfused():
+    """A D=3 U(1) site has 35 blocks; its sweep VJP is faster unfused."""
+    A, B = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
+    assert len(A.blocks) >= _block_sparse_jit.NO_FUSION_MIN_SITE_BLOCKS
+    f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b), by_bond_dim=False)
+    f(A, B)
+    assert f.block_sparse._cache_size() == 1
+    assert f.dense._cache_size() == 0
 
 
 def test_a_large_physical_leg_alone_keeps_the_default_pipeline():

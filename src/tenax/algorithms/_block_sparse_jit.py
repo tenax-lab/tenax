@@ -46,16 +46,33 @@ D, chi    Z2 ``dE/denv``       fermionic ``dE/denv``
 6, 36     11.5 / 10.0 s        33.0 / 16.2 s
 ========  ===================  ===================
 
-The sweep VJP inside the other backward programs runs within 15% either way
-at D>=3 and compiles 1.5-1.9x faster fused, so ``dE/denv`` decides.  The
-size measure is the virtual bond dimension: a ``SymmetricTensor`` argument
-with a virtual leg (``u``, ``d``, ``l``, ``r``) of dimension at least
-``NO_FUSION_MIN_BOND_DIM``.  The block count alone misses the graded
-states, which have 16 blocks per site at every D.  A U(1) state with many
-charge sectors also qualifies from ``NO_FUSION_MIN_BLOCKS`` blocks: there
-the fused compile is superlinear (D=3 chi=9 ``dE/denv``: 8569 s against
-905 s).  Both tests are free; counting ops would trace and lower the program
-a second time.
+The chain rule behaves the same way.  Measured on fermionic states (compile,
+fused against unfused): 89 / 1062 s at D=2, 9363 / 2793 s at D=3 (and
+runs 500 / 264 ms), and more than 8000 / 3018 s at D=4.  ``dE/denv``, the
+chain rule and the fused fixed-point backward, which contains both, use the
+default size test below.
+
+The programs that are only the sweep VJP (the ``J^T`` product and the two
+GMRES solves, which take ``dE/denv`` as an input) are different: for
+graded states they compile about 2x faster fused at D=3 and D=4 and run
+within 15% either way, or faster fused.  Only many-sector U(1) states run
+them faster unfused (D=3 chi=6: 464 / 429 s compile, 23.1 / 18.5 ms run).
+They use ``by_bond_dim=False``.
+
+The size test has two parts:
+
+- Virtual bond dimension: a ``SymmetricTensor`` argument with a virtual leg
+  (``u``, ``d``, ``l``, ``r``) of dimension at least
+  ``NO_FUSION_MIN_BOND_DIM``.  ``by_bond_dim=False`` drops this part.  The
+  block count alone misses the graded states, which have 16 blocks per site
+  at every D.
+- Block count: one site tensor with ``NO_FUSION_MIN_SITE_BLOCKS`` blocks or
+  more (U(1): 5 at D=2, 35 at D=3).  There the fused compile is superlinear
+  (D=3 chi=9 ``dE/denv``: 8569 s against 905 s).  The count is per site,
+  not per unit cell, so a D=2 cell of any size stays fused.
+
+Both tests are free; counting ops would trace and lower the program a second
+time.
 
 A wrapped call that is block-sparse, that large, and on CPU goes to
 a variant compiled without the ``fusion`` pass.  Dense calls and every call on another backend
@@ -90,7 +107,7 @@ JIT_TAKES_COMPILER_OPTIONS = "compiler_options" in inspect.signature(jax.jit).pa
 # Virtual bond dimension from which the unfused backward runs faster, and the
 # total charge blocks from which it compiles faster (see the module docstring).
 NO_FUSION_MIN_BOND_DIM = 3
-NO_FUSION_MIN_BLOCKS = 40
+NO_FUSION_MIN_SITE_BLOCKS = 20
 _VIRTUAL_LABELS = frozenset({"u", "d", "l", "r"})
 
 
@@ -124,10 +141,10 @@ def _call_platform(args, kwargs, pinned) -> str:
     return _platform_of(device)
 
 
-def _is_large(symmetric) -> bool:
-    if sum(len(t.blocks) for t in symmetric) >= NO_FUSION_MIN_BLOCKS:
+def _is_large(symmetric, by_bond_dim: bool) -> bool:
+    if any(len(t.blocks) >= NO_FUSION_MIN_SITE_BLOCKS for t in symmetric):
         return True
-    return any(
+    return by_bond_dim and any(
         ix.dim >= NO_FUSION_MIN_BOND_DIM
         for t in symmetric
         for ix in t.indices
@@ -135,10 +152,11 @@ def _is_large(symmetric) -> bool:
     )
 
 
-def _wants_no_fusion(args, kwargs, pinned=None) -> bool:
-    """A top-level CPU call with a large ``SymmetricTensor`` argument: a
-    virtual leg of dimension ``NO_FUSION_MIN_BOND_DIM`` or more, or
-    ``NO_FUSION_MIN_BLOCKS`` charge blocks in total.
+def _wants_no_fusion(args, kwargs, pinned=None, by_bond_dim=True) -> bool:
+    """A top-level CPU call with a large ``SymmetricTensor`` argument: one with
+    ``NO_FUSION_MIN_SITE_BLOCKS`` charge blocks or more, or (if
+    ``by_bond_dim``) a virtual leg of dimension ``NO_FUSION_MIN_BOND_DIM`` or
+    more.
 
     Inside another trace the call is a nested jit, which JAX compiles as part
     of the enclosing program and refuses ``compiler_options`` for; the
@@ -150,20 +168,26 @@ def _wants_no_fusion(args, kwargs, pinned=None) -> bool:
         return False
     leaves = jax.tree.leaves((args, kwargs), is_leaf=_is_symmetric)
     symmetric = [leaf for leaf in leaves if _is_symmetric(leaf)]
-    if not _is_large(symmetric):
+    if not _is_large(symmetric, by_bond_dim):
         return False
     return _call_platform(args, kwargs, pinned) == "cpu"
 
 
-def block_sparse_jit(fn=None, /, **jit_kwargs):
+def block_sparse_jit(fn=None, /, *, by_bond_dim=True, **jit_kwargs):
     """``jax.jit(fn, **jit_kwargs)``, without XLA fusion for block-sparse CPU calls.
 
     Usable as ``@block_sparse_jit`` or
     ``@partial(block_sparse_jit, static_argnames=...)``.  The returned function
     exposes both variants as ``.dense`` and ``.block_sparse``.
+
+    ``by_bond_dim=False`` drops the bond-dimension test and keeps only the
+    block-count one, for programs that are only the sweep VJP: that compiles
+    faster fused for every state measured except many-sector U(1).
     """
     if fn is None:
-        return functools.partial(block_sparse_jit, **jit_kwargs)
+        return functools.partial(
+            block_sparse_jit, by_bond_dim=by_bond_dim, **jit_kwargs
+        )
     dense = jax.jit(fn, **jit_kwargs)
     pinned = jit_kwargs.get("device") or jit_kwargs.get("backend")
     if JIT_TAKES_COMPILER_OPTIONS:
@@ -175,7 +199,7 @@ def block_sparse_jit(fn=None, /, **jit_kwargs):
 
     @functools.wraps(fn)
     def call(*args, **kwargs):
-        if _wants_no_fusion(args, kwargs, pinned):
+        if _wants_no_fusion(args, kwargs, pinned, by_bond_dim):
             return block_sparse(*args, **kwargs)
         return dense(*args, **kwargs)
 
