@@ -4,7 +4,9 @@ On a SymmetricTensor CTM-AD backward program the CPU fusion pass is
 superlinear: the D=3 U(1) ``dE/denv`` program compiled in 8569 s with it and
 905 s without, and ran faster without it (see ``_block_sparse_jit``).  The
 forward sweep is the other way round, so it keeps the fused pipeline.  These
-tests pin the dispatch and that the two pipelines compute the same numbers.
+tests pin the dispatch.  ``test_block_sparse_jit_numerics.py`` checks that
+the two pipelines compute the same numbers; it compiles a real program
+twice, so it is not in the ``core`` gate.
 """
 
 from __future__ import annotations
@@ -18,7 +20,6 @@ from tenax.algorithms import _block_sparse_jit
 from tenax.algorithms._block_sparse_jit import block_sparse_jit
 from tenax.algorithms._ctm_python_loop import _make_jit_ctm_step
 from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
-from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
 from tenax.algorithms.fermionic_ipeps import FPEPSConfig, _build_initial_fpeps_tensor
 from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
 from tenax.core.index import FlowDirection, TensorIndex
@@ -243,24 +244,3 @@ def test_the_forward_sweep_keeps_the_fused_pipeline():
     unfused, and ran 15.9 ms against 19.8 ms."""
     step = _make_jit_ctm_step(CHECKERBOARD_NEIGHBORS, "2x2")
     assert not hasattr(step, "block_sparse")
-
-
-def test_a_sweep_gradient_is_the_same_with_and_without_fusion(u1_pair):
-    """A real block-sparse backward program, compiled both ways."""
-    A, B = u1_pair
-    sites = {(0, 0): A, (1, 0): B}
-    envs = {c: initialize_ctm_tensor_env(t, 8) for c, t in sites.items()}
-    sweep = _make_jit_ctm_step(CHECKERBOARD_NEIGHBORS, "2x2").__wrapped__
-
-    def loss(sites):
-        new_envs, _, _ = sweep(
-            sites, envs, chi=8, projector_method="svd", renormalize=True
-        )
-        return _norm2(new_envs)
-
-    grad = block_sparse_jit(jax.grad(loss))
-    a = jax.tree.leaves(grad.block_sparse(sites))
-    b = jax.tree.leaves(grad.dense(sites))
-    assert len(a) == len(b)
-    for x, y in zip(a, b):
-        np.testing.assert_allclose(np.asarray(x), np.asarray(y), rtol=1e-11, atol=1e-13)
