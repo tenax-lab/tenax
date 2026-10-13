@@ -258,6 +258,74 @@ runs unless you set `gs_implicit_ad=False`. Reach for Path 1 when you want
 backprop through the unrolled sweeps — for a gauge other than `"phase"`, or
 to avoid the implicit backward entirely — not as a general default.
 
+#### Symmetric tensors: compile time and XLA fusion (CPU)
+
+When JAX compiles a program, XLA runs an *instruction-fusion* pass by
+default.  It merges chains of small operations into one combined kernel: a
+reshape, a multiply, an add and a transpose become a single loop over the
+data, and the intermediate arrays are never written to memory.  "Fused" below
+means compiled with this pass (the default); "unfused" means compiled with
+`xla_disable_hlo_passes=fusion`.  The numerical results are the same either
+way.
+
+Fusion helps a program made of a few large array operations, such as a dense
+CTM sweep.  It hurts a block-sparse backward.  A `SymmetricTensor`
+contraction emits one small operation per pair of charge blocks, so the
+implicit-AD backward of a symmetric state is hundreds of thousands of
+reshapes, scatters and small dots.  On a program that size the fusion pass
+scales worse than linearly.  It also copies cheap operations into every
+place that uses them, so the program grows.  On the D=3 U(1) chi=9
+`dE/denv` program (329k HLO instructions) the optimized module grew 7x, the
+compile took 8569 s fused and 905 s unfused, and the compiled program ran in
+92 ms fused and 62 ms unfused.
+
+So on CPU the implicit-AD backward programs of a large symmetric state are
+compiled unfused automatically.  "Large" means a site tensor has a virtual
+leg (`u`, `d`, `l`, `r`) of dimension 3 or more, or the state has 40 or more
+charge blocks.  Everything else keeps the default pipeline:
+
+- the forward CTM sweep and the forward energy, at every size;
+- D=2 states;
+- dense tensors;
+- GPU and TPU (not measured);
+- calls inside another `jax.jit`, `grad` or `vmap` trace;
+- JAX older than 0.4.36.
+
+The rule follows measurements on U(1), Z2 and fermionic 2-site states (CPU,
+8 cores; fused / unfused):
+
+| Program | D=2 | D>=3 |
+|---|---|---|
+| Forward sweep | fused faster | fused compiles 1.5-3.6x faster; run time within 8% |
+| Sweep VJP (inside the GMRES and chain-rule programs) | fused faster | fused compiles faster; run time within 15% either way |
+| `dE/denv` | fused faster or a tie | unfused runs 1.2-2.4x faster |
+
+The `dE/denv` warm run, fused / unfused:
+
+| D, chi | U(1) | Z2 | fermionic |
+|---|---|---|---|
+| 2, 4-16 | 4.4 / 3.1 ms (chi=16) | 1.35 / 1.49 ms | 1.68 / 2.32 ms |
+| 3, 6-9 | 14.7 / 10.5 ms (chi=6) | 8.65 / 7.41 ms | 26.3 / 10.9 ms |
+| 4, 16 | - | 170 / 127 ms | 446 / 287 ms |
+| 6, 36 | - | 11.5 / 10.0 s | 33.0 / 16.2 s |
+
+Two measurements explain why the rule is not "unfused everywhere":
+
+- With every block-sparse program unfused, a D=2 U(1) `optimize_gs_ad` step
+  took 3388 s against 1396 s.
+- At D>=3 the forward sweep gains nothing at run time unfused, and compiles
+  slower.
+
+The operation count alone does not predict the outcome: a 52k-operation D=2
+sweep favours fusion, while a 30k-operation D=2 `dE/denv` ties.  The block
+count alone misses Z2 and fermionic states, which have 16 blocks per site at
+every D.  Hence the bond-dimension rule.
+
+The dispatch lives in `tenax.algorithms._block_sparse_jit` (#566, #1102).
+Do not set `XLA_FLAGS=--xla_disable_hlo_passes=fusion` process-wide: that
+also drops fusion for the forward sweep and for every small eager operation.
+In one measurement it doubled the setup time, 582 s to 1249 s.
+
 ### Path 3: 2-site Shared-Tensor C4v (Checkerboard AFM)
 
 For antiferromagnetic models on the square lattice where the Néel order is

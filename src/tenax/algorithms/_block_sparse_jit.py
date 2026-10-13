@@ -1,5 +1,11 @@
 """``jax.jit`` that skips XLA's CPU fusion pass for block-sparse arguments.
 
+XLA's instruction-fusion pass, on by default, merges chains of small
+operations into one kernel: a reshape, a multiply and a transpose become one
+loop over the data, with no intermediate arrays in memory.  "Fused" below
+means compiled with it (the default); "unfused" means compiled with
+``xla_disable_hlo_passes=fusion``.  Results are the same either way.
+
 A block-sparse contraction traces one small op per pair of charge blocks.
 The implicit-AD backward of a ``SymmetricTensor`` state is therefore mostly
 reshapes, transposes, scatters and ``1x1`` dots: the D=3 U(1) chi=9
