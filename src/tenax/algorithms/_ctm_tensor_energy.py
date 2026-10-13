@@ -498,7 +498,9 @@ def _rdm_diagonal_tensor_4site(
     return rdm_mat.reshape(d, d, d, d)
 
 
-def _rdm2x1_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
+def _rdm2x1_tensor(
+    A: Tensor, env: CTMTensorEnv, *, ao: Tensor | None = None
+) -> jax.Array:
     """Horizontal 2×1 RDM using label-based Tensor contractions.
 
     Contracts the network::
@@ -519,7 +521,8 @@ def _rdm2x1_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
         C4[1]=c4_u ↔ T3[0]=t3_r,  C4[0]=c4_r ↔ T4[2]=t4_u
         T3[2]=t3_l ↔ C3[1]=c3_l,  T2[2]=t2_d ↔ C3[0]=c3_u
     """
-    ao = _build_double_layer_open_tensor(A)  # (u2, d2, l2, r2, phys, phys_bra)
+    if ao is None:
+        ao = _build_double_layer_open_tensor(A)  # (u2, d2, l2, r2, phys, phys_bra)
 
     # Right-side copies: relabel to avoid conflicts
     T1_R = env.T1.relabels({"t1_l": "t1_lR", "u2": "u2R", "t1_r": "t1_rR"})
@@ -587,7 +590,9 @@ def _rdm2x1_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     return rdm_mat.reshape(d, d, d, d)
 
 
-def _rdm1x2_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
+def _rdm1x2_tensor(
+    A: Tensor, env: CTMTensorEnv, *, ao: Tensor | None = None
+) -> jax.Array:
     """Vertical 1×2 RDM using label-based Tensor contractions.
 
     Contracts the network::
@@ -609,7 +614,8 @@ def _rdm1x2_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     is bounded by ``(chi · chi · D² · d · d)`` instead of the
     ``(chi² · D⁴ · d²)`` blow-up that an "all-rows-then-ao" path produces.
     """
-    ao = _build_double_layer_open_tensor(A)
+    if ao is None:
+        ao = _build_double_layer_open_tensor(A)
 
     # Bottom copies: relabel with "B" suffix
     T4_B = env.T4.relabels({"t4_d": "t4_dB", "l2": "l2B", "t4_u": "t4_uB"})
@@ -704,8 +710,10 @@ def compute_energy_ctm_tensor(
     else:
         H = hamiltonian_gate.reshape(d, d, d, d)
 
-    rdm_h = _rdm2x1_tensor(A, env)
-    rdm_v = _rdm1x2_tensor(A, env)
+    # Build the open double layer once; both RDMs reuse it.
+    ao = _build_double_layer_open_tensor(A)
+    rdm_h = _rdm2x1_tensor(A, env, ao=ao)
+    rdm_v = _rdm1x2_tensor(A, env, ao=ao)
     E_h = jnp.einsum("ijkl,klij->", rdm_h, H)
     E_v = jnp.einsum("ijkl,klij->", rdm_v, H)
     return (E_h + E_v).real
@@ -716,6 +724,9 @@ def _rdm2x1_tensor_2site(
     B: Tensor,
     env_A: CTMTensorEnv,
     env_B: CTMTensorEnv,
+    *,
+    ao_A: Tensor | None = None,
+    ao_B: Tensor | None = None,
 ) -> jax.Array:
     """Horizontal 2×1 RDM for checkerboard (A left, B right).
 
@@ -727,8 +738,10 @@ def _rdm2x1_tensor_2site(
         |        |       |       |
         C4_A — T3_A — T3_B — C3_B
     """
-    ao_A = _build_double_layer_open_tensor(A)
-    ao_B = _build_double_layer_open_tensor(B)
+    if ao_A is None:
+        ao_A = _build_double_layer_open_tensor(A)
+    if ao_B is None:
+        ao_B = _build_double_layer_open_tensor(B)
 
     # Right-side copies from env_B
     T1_R = env_B.T1.relabels({"t1_l": "t1_lR", "u2": "u2R", "t1_r": "t1_rR"})
@@ -785,6 +798,9 @@ def _rdm1x2_tensor_2site(
     B: Tensor,
     env_A: CTMTensorEnv,
     env_B: CTMTensorEnv,
+    *,
+    ao_A: Tensor | None = None,
+    ao_B: Tensor | None = None,
 ) -> jax.Array:
     """Vertical 1×2 RDM for checkerboard (A top, B bottom).
 
@@ -803,8 +819,10 @@ def _rdm1x2_tensor_2site(
     three boundary D² legs are still attached, so the peak intermediate
     is bounded by ``(chi · chi · D² · d · d)``.
     """
-    ao_A = _build_double_layer_open_tensor(A)
-    ao_B = _build_double_layer_open_tensor(B)
+    if ao_A is None:
+        ao_A = _build_double_layer_open_tensor(A)
+    if ao_B is None:
+        ao_B = _build_double_layer_open_tensor(B)
 
     # Bottom copies from env_B
     T4_B = env_B.T4.relabels({"t4_d": "t4_dB", "l2": "l2B", "t4_u": "t4_uB"})
@@ -912,10 +930,14 @@ def compute_energy_ctm_tensor_2site(
     else:
         H = hamiltonian_gate.reshape(d, d, d, d)
 
-    rdm_h_AB = _rdm2x1_tensor_2site(A, B, env_A, env_B)
-    rdm_h_BA = _rdm2x1_tensor_2site(B, A, env_B, env_A)
-    rdm_v_AB = _rdm1x2_tensor_2site(A, B, env_A, env_B)
-    rdm_v_BA = _rdm1x2_tensor_2site(B, A, env_B, env_A)
+    # Two distinct open double layers serve all four bonds; the swapped
+    # (B, A) calls take them swapped.
+    ao_A = _build_double_layer_open_tensor(A)
+    ao_B = _build_double_layer_open_tensor(B)
+    rdm_h_AB = _rdm2x1_tensor_2site(A, B, env_A, env_B, ao_A=ao_A, ao_B=ao_B)
+    rdm_h_BA = _rdm2x1_tensor_2site(B, A, env_B, env_A, ao_A=ao_B, ao_B=ao_A)
+    rdm_v_AB = _rdm1x2_tensor_2site(A, B, env_A, env_B, ao_A=ao_A, ao_B=ao_B)
+    rdm_v_BA = _rdm1x2_tensor_2site(B, A, env_B, env_A, ao_A=ao_B, ao_B=ao_A)
     rdms = {"h AB": rdm_h_AB, "h BA": rdm_h_BA, "v AB": rdm_v_AB, "v BA": rdm_v_BA}
     E = sum(jnp.einsum("ijkl,klij->", rdm, H) for rdm in rdms.values())
     if nan_on_invalid_rdm and _any_invalid_rdm(rdms, psd_tol):
