@@ -4,27 +4,34 @@
 
 ### Behavior Changes
 
-- **Large block-sparse CTM-AD backward programs compile without XLA's CPU
-  fusion pass** (`_block_sparse_jit.py`; #566).  A `SymmetricTensor`
+- **Block-sparse CTM-AD backward programs compile without XLA's CPU fusion
+  pass from D=3** (`_block_sparse_jit.py`; #566).  A `SymmetricTensor`
   contraction traces one small op per pair of charge blocks.  The
   implicit-AD backward of a symmetric state is therefore mostly reshapes,
-  transposes, scatters and `1x1` dots, and XLA's CPU instruction fusion
-  grows superlinearly on it.  The backward programs (`dE/denv`, the `J^T`
-  product, the chain rule, the fused fixed-point backward and the GMRES
-  solve) now compile with `xla_disable_hlo_passes=fusion` when called at top
-  level on CPU with site tensors holding at least 40 charge blocks in total
-  (`NO_FUSION_MIN_BLOCKS`; a D=2 U(1) 2-site state has 10, D=3 has 70).
-  The forward sweep and the forward energy keep the default pipeline at
-  every size.  Measured, U(1) (StableHLO ops; compile and warm run, fused
-  against unfused):
+  transposes, scatters and small dots, which XLA's CPU instruction fusion
+  handles badly.  The backward programs (`dE/denv`, the `J^T` product, the
+  chain rule, the fused fixed-point backward and the GMRES solve) now
+  compile with `xla_disable_hlo_passes=fusion` when called at top level on
+  CPU with a site tensor that has a virtual bond of dimension 3 or more, or
+  with at least 40 charge blocks in total.  D=2 states and the forward sweep
+  and forward energy keep the default pipeline at every size.
 
-  | Program | Ops | Compile | Warm run |
+  From D=3 up, `dE/denv` runs faster unfused for every symmetry measured.
+  Warm run, fused against unfused:
+
+  | D, chi | U(1) | Z2 | fermionic |
   |---|---|---|---|
-  | sweep VJP, D=2 chi=8 | 64k | 20 s / 38 s | 6.4 ms / 8.7 ms |
-  | sweep VJP, D=3 chi=6 | 203k | 464 s / 429 s | 23.1 ms / 18.5 ms |
-  | `dE/denv`, D=3 chi=6 | 570k | 546 s / 308 s | 14.7 ms / 10.5 ms |
-  | `dE/denv`, D=3 chi=9 | 627k | 8569 s / 905 s | 92 ms / 62 ms |
-  | sweep, D=3 chi=9 | 225k | 145 s / 517 s | 15.9 ms / 19.8 ms |
+  | 2, 4-16 | 4.4 / 3.1 ms (chi=16) | 1.35 / 1.49 ms | 1.68 / 2.32 ms |
+  | 3, 6-9 | 14.7 / 10.5 ms (chi=6) | 8.65 / 7.41 ms | 26.3 / 10.9 ms |
+  | 4, 16 | - | 170 / 127 ms | 446 / 287 ms |
+  | 6, 36 | - | 11.5 / 10.0 s | 33.0 / 16.2 s |
+
+  The U(1) D=3 chi=9 `dE/denv` also compiled in 905 s unfused against
+  8569 s fused.  At D=2 every program favours fusion: the backward programs
+  of a D=2 U(1) `optimize_gs_ad` step compiled 1.8-3.5x slower unfused.  The
+  forward sweep and the sweep VJP inside the other backward programs compile
+  1.5-3.6x faster fused, and their run time differs by less than 15% at
+  D>=3.
 
   Dense programs, other backends, calls inside an enclosing trace, and every
   call on JAX older than 0.4.36 (no `compiler_options` on `jax.jit`) keep the

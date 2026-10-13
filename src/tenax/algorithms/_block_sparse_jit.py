@@ -24,18 +24,34 @@ into the SVDs and the large absorption contractions, which fusion helps.  So
 the decision is per program: wrap the backward programs with this function,
 and keep plain ``jax.jit`` for the forward.
 
-For the backward it is also per size.  At D=2 fusion still wins: the D=2
-U(1) sweep VJP (64k ops) compiled in 20 s fused and 38 s unfused, and the
-backward programs of a D=2 ``optimize_gs_ad`` step compiled 1.8-3.5x slower
-unfused.  At D=3 the same sweep VJP (203k ops) compiled in 464 s fused and
-429 s unfused, and ran 23.1 ms against 18.5 ms.  Op count grows with the
-number of charge-block pairs, so the size measure is the total number of
-blocks of the ``SymmetricTensor`` arguments (the site tensors): 10 for a
-D=2 U(1) 2-site state, 70 at D=3.  Fusion is dropped from
-``NO_FUSION_MIN_BLOCKS`` blocks, between the two.  Counting blocks is free;
-counting ops would trace and lower the program a second time.
+For the backward it is also per size.  At D=2 fusion wins for every
+symmetry: the D=2 U(1) sweep VJP (64k ops) compiled in 20 s fused and 38 s
+unfused, and the backward programs of a D=2 ``optimize_gs_ad`` step compiled
+1.8-3.5x slower unfused.  From D=3 up ``dE/denv`` runs faster unfused for
+U(1), Z2 and fermionic states alike, at a similar compile cost (warm run,
+fused against unfused):
 
-A wrapped call that is block-sparse, at least that size, and on CPU goes to
+========  ===================  ===================
+D, chi    Z2 ``dE/denv``       fermionic ``dE/denv``
+========  ===================  ===================
+2, 4      1.35 / 1.49 ms       1.68 / 2.32 ms
+3, 9      8.65 / 7.41 ms       26.3 / 10.9 ms
+4, 16     170 / 127 ms         446 / 287 ms
+6, 36     11.5 / 10.0 s        33.0 / 16.2 s
+========  ===================  ===================
+
+The sweep VJP inside the other backward programs runs within 15% either way
+at D>=3 and compiles 1.5-1.9x faster fused, so ``dE/denv`` decides.  The
+size measure is the virtual bond dimension: a ``SymmetricTensor`` argument
+with a virtual leg (``u``, ``d``, ``l``, ``r``) of dimension at least
+``NO_FUSION_MIN_BOND_DIM``.  The block count alone misses the graded
+states, which have 16 blocks per site at every D.  A U(1) state with many
+charge sectors also qualifies from ``NO_FUSION_MIN_BLOCKS`` blocks: there
+the fused compile is superlinear (D=3 chi=9 ``dE/denv``: 8569 s against
+905 s).  Both tests are free; counting ops would trace and lower the program
+a second time.
+
+A wrapped call that is block-sparse, that large, and on CPU goes to
 a variant compiled without the ``fusion`` pass.  Dense calls and every call on another backend
 keep the default pipeline: on GPU the effect is unmeasured.  A call inside
 another trace also takes the default variant: JAX compiles a nested jit into
@@ -65,9 +81,11 @@ BLOCK_SPARSE_COMPILER_OPTIONS = {"xla_disable_hlo_passes": "fusion"}
 # is 0.4.30.
 JIT_TAKES_COMPILER_OPTIONS = "compiler_options" in inspect.signature(jax.jit).parameters
 
-# Total charge blocks of the SymmetricTensor arguments from which the
-# unfused variant compiles and runs faster (see the module docstring).
+# Virtual bond dimension from which the unfused backward runs faster, and the
+# total charge blocks from which it compiles faster (see the module docstring).
+NO_FUSION_MIN_BOND_DIM = 3
 NO_FUSION_MIN_BLOCKS = 40
+_VIRTUAL_LABELS = frozenset({"u", "d", "l", "r"})
 
 
 def _is_symmetric(x) -> bool:
@@ -75,7 +93,8 @@ def _is_symmetric(x) -> bool:
 
 
 def _wants_no_fusion(args, kwargs) -> bool:
-    """A top-level CPU call whose ``SymmetricTensor`` arguments hold at least
+    """A top-level CPU call with a large ``SymmetricTensor`` argument: a
+    virtual leg of dimension ``NO_FUSION_MIN_BOND_DIM`` or more, or
     ``NO_FUSION_MIN_BLOCKS`` charge blocks in total.
 
     Inside another trace the call is a nested jit, which JAX compiles as part
@@ -90,7 +109,14 @@ def _wants_no_fusion(args, kwargs) -> bool:
         return False
     leaves = jax.tree.leaves((args, kwargs), is_leaf=_is_symmetric)
     symmetric = [leaf for leaf in leaves if _is_symmetric(leaf)]
-    return sum(len(t.blocks) for t in symmetric) >= NO_FUSION_MIN_BLOCKS
+    if sum(len(t.blocks) for t in symmetric) >= NO_FUSION_MIN_BLOCKS:
+        return True
+    return any(
+        ix.dim >= NO_FUSION_MIN_BOND_DIM
+        for t in symmetric
+        for ix in t.indices
+        if ix.label in _VIRTUAL_LABELS
+    )
 
 
 def block_sparse_jit(fn=None, /, **jit_kwargs):

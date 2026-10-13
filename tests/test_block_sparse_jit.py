@@ -19,8 +19,11 @@ from tenax.algorithms._block_sparse_jit import block_sparse_jit
 from tenax.algorithms._ctm_python_loop import _make_jit_ctm_step
 from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
 from tenax.algorithms._ctm_tensor_init import initialize_ctm_tensor_env
+from tenax.algorithms.fermionic_ipeps import FPEPSConfig, _build_initial_fpeps_tensor
 from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
-from tenax.core.tensor import DenseTensor
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import FermionParity
+from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 jax.config.update("jax_enable_x64", True)
 
@@ -61,11 +64,48 @@ def test_a_symmetric_call_takes_the_no_fusion_variant(u1_pair, any_size):
 
 
 def test_a_small_symmetric_state_keeps_the_default_pipeline(u1_pair):
-    """A D=2 U(1) 2-site state is 10 blocks: fusion still wins there."""
+    """A D=2 U(1) 2-site state (10 blocks): fusion still wins there."""
     f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
     A, B = u1_pair
     assert len(A.blocks) + len(B.blocks) < _block_sparse_jit.NO_FUSION_MIN_BLOCKS
     f(A, B)
+    assert f.dense._cache_size() == 1
+    assert f.block_sparse._cache_size() == 0
+
+
+def test_a_d3_graded_state_takes_the_no_fusion_variant():
+    """A D=3 fermionic 2-site state has 32 blocks, under the block threshold,
+    but its ``dE/denv`` runs 2.4x faster unfused (26.3 ms against 10.9 ms)."""
+    f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
+    cfg = FPEPSConfig(D=3)
+    A = _build_initial_fpeps_tensor(cfg, jax.random.PRNGKey(0))
+    B = _build_initial_fpeps_tensor(cfg, jax.random.PRNGKey(1))
+    assert len(A.blocks) + len(B.blocks) < _block_sparse_jit.NO_FUSION_MIN_BLOCKS
+    f(A, B)
+    assert f.block_sparse._cache_size() == 1
+    assert f.dense._cache_size() == 0
+
+
+def test_a_large_physical_leg_alone_keeps_the_default_pipeline():
+    """Only the virtual legs count: D=2 with a 3-dim physical leg stays fused."""
+    sym = FermionParity()
+    virt = np.array([0, 1], dtype=np.int32)
+    indices = tuple(
+        TensorIndex.from_charges(sym, virt, flow, label=label)
+        for label, flow in (
+            ("u", FlowDirection.OUT),
+            ("d", FlowDirection.IN),
+            ("l", FlowDirection.OUT),
+            ("r", FlowDirection.IN),
+        )
+    ) + (
+        TensorIndex.from_charges(
+            sym, np.array([0, 1, 1], dtype=np.int32), FlowDirection.IN, label="phys"
+        ),
+    )
+    A = SymmetricTensor.random_normal(indices, jax.random.PRNGKey(0))
+    f = block_sparse_jit(lambda t: _norm2(t))
+    f(A)
     assert f.dense._cache_size() == 1
     assert f.block_sparse._cache_size() == 0
 
