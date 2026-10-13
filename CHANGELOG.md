@@ -26,8 +26,9 @@
   | `dE/denv`, D=3 chi=9 | 627k | 8569 s / 905 s | 92 ms / 62 ms |
   | sweep, D=3 chi=9 | 225k | 145 s / 517 s | 15.9 ms / 19.8 ms |
 
-  Dense programs, other backends, and calls inside an enclosing trace keep
-  the default pipeline.  Results are unchanged (D=2 U(1) `dE/denv`: maximum
+  Dense programs, other backends, calls inside an enclosing trace, and every
+  call on JAX older than 0.4.36 (no `compiler_options` on `jax.jit`) keep the
+  default pipeline.  Results are unchanged (D=2 U(1) `dE/denv`: maximum
   difference 1.4e-17).
 
 - **Metric preconditioning is turned off for fermionic input** (#1059

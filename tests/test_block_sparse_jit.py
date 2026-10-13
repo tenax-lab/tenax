@@ -24,9 +24,15 @@ from tenax.core.tensor import DenseTensor
 
 jax.config.update("jax_enable_x64", True)
 
-pytestmark = pytest.mark.skipif(
-    jax.default_backend() != "cpu", reason="the no-fusion variant is CPU-only"
-)
+pytestmark = [
+    pytest.mark.skipif(
+        jax.default_backend() != "cpu", reason="the no-fusion variant is CPU-only"
+    ),
+    pytest.mark.skipif(
+        not _block_sparse_jit.JIT_TAKES_COMPILER_OPTIONS,
+        reason="jax.jit takes compiler_options from JAX 0.4.36",
+    ),
+]
 
 
 @pytest.fixture(scope="module")
@@ -83,6 +89,51 @@ def test_a_call_inside_another_trace_takes_the_default_variant(u1_pair, any_size
     assert np.isclose(outer, float(_norm2(A)))
     assert all(np.all(np.isfinite(np.asarray(x))) for x in jax.tree.leaves(g))
     assert f.block_sparse._cache_size() == 0
+
+
+def test_a_closure_inside_an_outer_jit_takes_the_default_variant(u1_pair, any_size):
+    """An outer ``jax.jit`` that closes over a concrete tensor passes no
+    tracer in, so the check reads the trace state, not the arguments."""
+    f = block_sparse_jit(lambda t: _norm2(t))
+    A, _ = u1_pair
+    out = jax.jit(lambda x: f(A) + x)(1.0)
+    assert np.isclose(float(out), float(_norm2(A)) + 1.0)
+    assert f.block_sparse._cache_size() == 0
+
+
+def test_a_custom_vjp_backward_takes_the_no_fusion_variant(u1_pair, any_size):
+    """The implicit-AD backward programs run inside a ``custom_vjp`` backward.
+    ``jax.grad`` calls it outside any trace, so it gets the unfused variant."""
+    inner = block_sparse_jit(lambda t: _norm2(t))
+
+    @jax.custom_vjp
+    def energy(t):
+        return _norm2(t)
+
+    def fwd(t):
+        return _norm2(t), t
+
+    def bwd(t, g):
+        inner(t)
+        return (jax.tree.map(lambda x: 2 * g * x, t),)
+
+    energy.defvjp(fwd, bwd)
+    A, _ = u1_pair
+    jax.grad(energy)(A)
+    assert inner.block_sparse._cache_size() == 1
+    assert inner.dense._cache_size() == 0
+
+
+def test_without_compiler_options_every_call_keeps_the_default(
+    u1_pair, any_size, monkeypatch
+):
+    """JAX 0.4.30-0.4.35 have no ``compiler_options`` on ``jax.jit``."""
+    monkeypatch.setattr(_block_sparse_jit, "JIT_TAKES_COMPILER_OPTIONS", False)
+    f = block_sparse_jit(lambda t: _norm2(t))
+    A, _ = u1_pair
+    f(A)
+    assert f.block_sparse is f.dense
+    assert f.dense._cache_size() == 1
 
 
 def test_static_argnames_pass_through(u1_pair):

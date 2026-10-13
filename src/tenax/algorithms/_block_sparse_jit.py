@@ -41,7 +41,8 @@ keep the default pipeline: on GPU the effect is unmeasured.  A call inside
 another trace also takes the default variant: JAX compiles a nested jit into
 the enclosing program and accepts ``compiler_options`` only at the top
 level.  The two variants are separate ``jax.jit`` objects, so each keeps its
-own trace cache.
+own trace cache.  ``jax.jit`` takes ``compiler_options`` from JAX 0.4.36; on
+an older JAX every call keeps the default pipeline.
 """
 
 from __future__ import annotations
@@ -49,14 +50,20 @@ from __future__ import annotations
 __all__ = ["block_sparse_jit"]
 
 import functools
+import inspect
 
 import jax
+from jax._src import core as _jax_core
 
 from tenax.core.tensor import SymmetricTensor
 
 # Passed per compile, not through XLA_FLAGS: a process-wide flag would also
 # drop fusion for dense programs and for every eager op's compile.
 BLOCK_SPARSE_COMPILER_OPTIONS = {"xla_disable_hlo_passes": "fusion"}
+
+# ``jax.jit`` takes ``compiler_options`` from JAX 0.4.36; the dependency floor
+# is 0.4.30.
+JIT_TAKES_COMPILER_OPTIONS = "compiler_options" in inspect.signature(jax.jit).parameters
 
 # Total charge blocks of the SymmetricTensor arguments from which the
 # unfused variant compiles and runs faster (see the module docstring).
@@ -71,18 +78,19 @@ def _wants_no_fusion(args, kwargs) -> bool:
     """A top-level CPU call whose ``SymmetricTensor`` arguments hold at least
     ``NO_FUSION_MIN_BLOCKS`` charge blocks in total.
 
-    Inside another trace (an argument is a tracer) the call is a nested jit,
-    which JAX compiles as part of the enclosing program and refuses
-    ``compiler_options`` for; the enclosing compile decides fusion there.
+    Inside another trace the call is a nested jit, which JAX compiles as part
+    of the enclosing program and refuses ``compiler_options`` for; the
+    enclosing compile decides fusion there.  The trace state is checked, not
+    the arguments: an outer ``jax.jit`` that closes over a concrete tensor
+    passes no tracer in.
     """
-    if jax.default_backend() != "cpu":
+    if not JIT_TAKES_COMPILER_OPTIONS or jax.default_backend() != "cpu":
+        return False
+    if not _jax_core.trace_state_clean():
         return False
     leaves = jax.tree.leaves((args, kwargs), is_leaf=_is_symmetric)
     symmetric = [leaf for leaf in leaves if _is_symmetric(leaf)]
-    if sum(len(t.blocks) for t in symmetric) < NO_FUSION_MIN_BLOCKS:
-        return False
-    inner = jax.tree.leaves((args, kwargs))
-    return not any(isinstance(x, jax.core.Tracer) for x in inner)
+    return sum(len(t.blocks) for t in symmetric) >= NO_FUSION_MIN_BLOCKS
 
 
 def block_sparse_jit(fn=None, /, **jit_kwargs):
@@ -95,9 +103,12 @@ def block_sparse_jit(fn=None, /, **jit_kwargs):
     if fn is None:
         return functools.partial(block_sparse_jit, **jit_kwargs)
     dense = jax.jit(fn, **jit_kwargs)
-    block_sparse = jax.jit(
-        fn, compiler_options=BLOCK_SPARSE_COMPILER_OPTIONS, **jit_kwargs
-    )
+    if JIT_TAKES_COMPILER_OPTIONS:
+        block_sparse = jax.jit(
+            fn, compiler_options=BLOCK_SPARSE_COMPILER_OPTIONS, **jit_kwargs
+        )
+    else:
+        block_sparse = dense
 
     @functools.wraps(fn)
     def call(*args, **kwargs):
