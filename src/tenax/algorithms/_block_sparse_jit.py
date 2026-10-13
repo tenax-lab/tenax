@@ -98,6 +98,37 @@ def _is_symmetric(x) -> bool:
     return isinstance(x, SymmetricTensor)
 
 
+def _call_platform(args, kwargs) -> str:
+    """The platform this call compiles for.
+
+    JAX places a jit call on the device of its committed arguments, and
+    otherwise on the ``jax.default_device`` setting, and otherwise on the
+    default backend.  ``jax.default_backend()`` alone is the process-wide
+    default: in a process with both CPU and GPU it misses a call pinned to
+    the other platform.
+    """
+    for x in jax.tree.leaves((args, kwargs)):
+        if isinstance(x, jax.Array) and getattr(x, "committed", False):
+            return next(iter(x.devices())).platform
+    device = jax.config.jax_default_device
+    if device is None:
+        return jax.default_backend()
+    if isinstance(device, str):
+        return jax.devices(device)[0].platform
+    return device.platform
+
+
+def _is_large(symmetric) -> bool:
+    if sum(len(t.blocks) for t in symmetric) >= NO_FUSION_MIN_BLOCKS:
+        return True
+    return any(
+        ix.dim >= NO_FUSION_MIN_BOND_DIM
+        for t in symmetric
+        for ix in t.indices
+        if ix.label in _VIRTUAL_LABELS
+    )
+
+
 def _wants_no_fusion(args, kwargs) -> bool:
     """A top-level CPU call with a large ``SymmetricTensor`` argument: a
     virtual leg of dimension ``NO_FUSION_MIN_BOND_DIM`` or more, or
@@ -109,20 +140,13 @@ def _wants_no_fusion(args, kwargs) -> bool:
     the arguments: an outer ``jax.jit`` that closes over a concrete tensor
     passes no tracer in.
     """
-    if not JIT_TAKES_COMPILER_OPTIONS or jax.default_backend() != "cpu":
-        return False
-    if not _jax_core.trace_state_clean():
+    if not JIT_TAKES_COMPILER_OPTIONS or not _jax_core.trace_state_clean():
         return False
     leaves = jax.tree.leaves((args, kwargs), is_leaf=_is_symmetric)
     symmetric = [leaf for leaf in leaves if _is_symmetric(leaf)]
-    if sum(len(t.blocks) for t in symmetric) >= NO_FUSION_MIN_BLOCKS:
-        return True
-    return any(
-        ix.dim >= NO_FUSION_MIN_BOND_DIM
-        for t in symmetric
-        for ix in t.indices
-        if ix.label in _VIRTUAL_LABELS
-    )
+    if not _is_large(symmetric):
+        return False
+    return _call_platform(args, kwargs) == "cpu"
 
 
 def block_sparse_jit(fn=None, /, **jit_kwargs):

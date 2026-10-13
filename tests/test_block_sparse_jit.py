@@ -86,6 +86,48 @@ def test_a_d3_graded_state_takes_the_no_fusion_variant():
     assert f.dense._cache_size() == 0
 
 
+@pytest.fixture(scope="module")
+def d3_fermion_pair():
+    cfg = FPEPSConfig(D=3)
+    return (
+        _build_initial_fpeps_tensor(cfg, jax.random.PRNGKey(0)),
+        _build_initial_fpeps_tensor(cfg, jax.random.PRNGKey(1)),
+    )
+
+
+@pytest.fixture
+def gpu_default(monkeypatch):
+    """Report a GPU default backend, as in a process with CPU and GPU."""
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+
+
+def test_a_call_pinned_to_cpu_by_default_device_goes_unfused(
+    d3_fermion_pair, gpu_default
+):
+    """The decision follows where the call runs, not the process default."""
+    f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
+    with jax.default_device(jax.devices("cpu")[0]):
+        f(*d3_fermion_pair)
+    assert f.block_sparse._cache_size() == 1
+    assert f.dense._cache_size() == 0
+
+
+def test_a_call_on_committed_cpu_arrays_goes_unfused(d3_fermion_pair, gpu_default):
+    f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
+    A, B = jax.device_put(d3_fermion_pair, jax.devices("cpu")[0])
+    f(A, B)
+    assert f.block_sparse._cache_size() == 1
+    assert f.dense._cache_size() == 0
+
+
+def test_an_unpinned_call_follows_the_default_backend(d3_fermion_pair, gpu_default):
+    """With nothing pinned, a GPU default keeps the default pipeline."""
+    f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
+    f(*d3_fermion_pair)
+    assert f.dense._cache_size() == 1
+    assert f.block_sparse._cache_size() == 0
+
+
 def test_a_large_physical_leg_alone_keeps_the_default_pipeline():
     """Only the virtual legs count: D=2 with a 3-dim physical leg stays fused."""
     sym = FermionParity()
