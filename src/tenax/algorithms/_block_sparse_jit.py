@@ -98,24 +98,30 @@ def _is_symmetric(x) -> bool:
     return isinstance(x, SymmetricTensor)
 
 
-def _call_platform(args, kwargs) -> str:
+def _platform_of(device) -> str:
+    if isinstance(device, str):
+        return jax.devices(device)[0].platform
+    return device.platform
+
+
+def _call_platform(args, kwargs, pinned) -> str:
     """The platform this call compiles for.
 
-    JAX places a jit call on the device of its committed arguments, and
-    otherwise on the ``jax.default_device`` setting, and otherwise on the
-    default backend.  ``jax.default_backend()`` alone is the process-wide
-    default: in a process with both CPU and GPU it misses a call pinned to
-    the other platform.
+    JAX places a jit call on the jit's own ``device`` or ``backend`` if it
+    has one, then on the device of its committed arguments, then on the
+    ``jax.default_device`` setting, then on the default backend.
+    ``jax.default_backend()`` alone is the process-wide default: in a process
+    with both CPU and GPU it misses a call pinned to the other platform.
     """
+    if pinned is not None:
+        return _platform_of(pinned)
     for x in jax.tree.leaves((args, kwargs)):
         if isinstance(x, jax.Array) and getattr(x, "committed", False):
             return next(iter(x.devices())).platform
     device = jax.config.jax_default_device
     if device is None:
         return jax.default_backend()
-    if isinstance(device, str):
-        return jax.devices(device)[0].platform
-    return device.platform
+    return _platform_of(device)
 
 
 def _is_large(symmetric) -> bool:
@@ -129,7 +135,7 @@ def _is_large(symmetric) -> bool:
     )
 
 
-def _wants_no_fusion(args, kwargs) -> bool:
+def _wants_no_fusion(args, kwargs, pinned=None) -> bool:
     """A top-level CPU call with a large ``SymmetricTensor`` argument: a
     virtual leg of dimension ``NO_FUSION_MIN_BOND_DIM`` or more, or
     ``NO_FUSION_MIN_BLOCKS`` charge blocks in total.
@@ -146,7 +152,7 @@ def _wants_no_fusion(args, kwargs) -> bool:
     symmetric = [leaf for leaf in leaves if _is_symmetric(leaf)]
     if not _is_large(symmetric):
         return False
-    return _call_platform(args, kwargs) == "cpu"
+    return _call_platform(args, kwargs, pinned) == "cpu"
 
 
 def block_sparse_jit(fn=None, /, **jit_kwargs):
@@ -159,6 +165,7 @@ def block_sparse_jit(fn=None, /, **jit_kwargs):
     if fn is None:
         return functools.partial(block_sparse_jit, **jit_kwargs)
     dense = jax.jit(fn, **jit_kwargs)
+    pinned = jit_kwargs.get("device") or jit_kwargs.get("backend")
     if JIT_TAKES_COMPILER_OPTIONS:
         block_sparse = jax.jit(
             fn, compiler_options=BLOCK_SPARSE_COMPILER_OPTIONS, **jit_kwargs
@@ -168,7 +175,7 @@ def block_sparse_jit(fn=None, /, **jit_kwargs):
 
     @functools.wraps(fn)
     def call(*args, **kwargs):
-        if _wants_no_fusion(args, kwargs):
+        if _wants_no_fusion(args, kwargs, pinned):
             return block_sparse(*args, **kwargs)
         return dense(*args, **kwargs)
 

@@ -120,6 +120,16 @@ def test_a_call_on_committed_cpu_arrays_goes_unfused(d3_fermion_pair, gpu_defaul
     assert f.dense._cache_size() == 0
 
 
+@pytest.mark.filterwarnings("ignore:backend and device argument on jit is deprecated")
+@pytest.mark.parametrize("pin", ["device", "backend"])
+def test_a_jit_pinned_to_cpu_goes_unfused(d3_fermion_pair, gpu_default, pin):
+    value = jax.devices("cpu")[0] if pin == "device" else "cpu"
+    f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b), **{pin: value})
+    f(*d3_fermion_pair)
+    assert f.block_sparse._cache_size() == 1
+    assert f.dense._cache_size() == 0
+
+
 def test_an_unpinned_call_follows_the_default_backend(d3_fermion_pair, gpu_default):
     """With nothing pinned, a GPU default keeps the default pipeline."""
     f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
