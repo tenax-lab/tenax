@@ -111,7 +111,10 @@ def split_legs(envs, sym):
 
 
 def _s5_config(D, chi, opt_steps):
-    """Optimizer config of S5: unconverged CTM forwards raise (#1059)."""
+    """Optimizer config of S5: unconverged CTM forwards raise (#1059).
+
+    ``gs_verbose`` with ``gs_log_interval=1`` prints one line per step to stdout.
+    """
     return iPEPSConfig(
         max_bond_dim=D,
         unit_cell="2site",
@@ -120,6 +123,8 @@ def _s5_config(D, chi, opt_steps):
         gs_conv_criterion="grad_norm",
         gs_grad_norm_tol=1e-5,
         return_history=True,
+        gs_verbose=True,
+        gs_log_interval=1,
     )
 
 

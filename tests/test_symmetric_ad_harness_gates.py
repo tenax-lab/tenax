@@ -170,6 +170,8 @@ def test_s5_config_raises_on_unconverged_others_warn():
     assert cfg.ctm.on_unconverged == "raise"
     assert cfg.ctm.max_iter == 1000 and cfg.ctm.chi == 8
     assert cfg.gs_num_steps == 5 and cfg.return_history
+    assert cfg.gs_verbose is True
+    assert cfg.gs_log_interval == 1
 
 
 def test_s5_optimizer_exception_is_a_failed_record(monkeypatch):
