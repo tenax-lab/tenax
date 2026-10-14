@@ -492,6 +492,16 @@
 
 ### Fixed
 
+- **`SymmetricTensor.blocks` no longer caches tracers on a concrete tensor**
+  (#1103).  The block dict is cached on the tensor the first time it is
+  read.  When that first read happened inside a `jax.jit` that closes over a
+  concrete tensor, the cached slices were tracers, and the next eager use of
+  the tensor raised `UnexpectedTracerError`.  It hit `ctm_energy_implicit`
+  with a `SymmetricTensor` gate, which the compiled energy programs close
+  over: `jax.grad` failed in the backward.  Traced slices of concrete data
+  are now returned uncached.  A tensor whose data is itself traced, or that
+  is read eagerly, still caches as before.
+
 - **Hager-Zhang `phi` probes warm-start CTM from the step's env**
   (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
   start from the previous probe's env (the #502 write-back), so the env a

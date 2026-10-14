@@ -1163,6 +1163,11 @@ class SymmetricTensor(Tensor):
         The cache is valid because ``_data`` (a JAX array) is immutable.
         Eliminates redundant slice+reshape calls when ``blocks`` is
         accessed multiple times (e.g. during ``_blockwise_contract``).
+
+        A concrete tensor read for the first time inside a trace (a
+        ``jax.jit`` that closes over it) gets traced slices.  Those are not
+        cached: the tensor outlives the trace, and a cached tracer would
+        raise ``UnexpectedTracerError`` at its next eager use (#1103).
         """
         try:
             return self._blocks_cache
@@ -1171,7 +1176,10 @@ class SymmetricTensor(Tensor):
                 self._block_keys[i]: self._get_block(i)
                 for i in range(len(self._block_keys))
             }
-            object.__setattr__(self, "_blocks_cache", cache)
+            if isinstance(self._data, jax.core.Tracer) or not any(
+                isinstance(b, jax.core.Tracer) for b in cache.values()
+            ):
+                object.__setattr__(self, "_blocks_cache", cache)
             return cache
 
     def todense(self) -> jax.Array:
