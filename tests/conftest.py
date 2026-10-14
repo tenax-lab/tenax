@@ -272,6 +272,8 @@ _FILE_MARKERS = {
     # #1049: the implicit-AD compile cache is keyed by value and bounded (~45s).
     "test_vjp_cache_key_1049.py": "algorithm",
     "test_blocks_cache_tracer_1103.py": "core",
+    "test_block_sparse_jit.py": "core",
+    "test_block_sparse_jit_numerics.py": "algorithm",
     # The implicit-AD forward jits its energy and replays the RDM checks (~60s).
     "test_jit_forward_energy.py": "algorithm",
     "test_metric_precond_no_recompile.py": "core",
