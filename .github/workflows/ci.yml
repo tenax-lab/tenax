@@ -591,6 +591,77 @@ jobs:
           fi
           echo "All macOS core shards passed."
 
+  # The declared JAX floor, tested (#1105).  Every other job resolves the
+  # newest JAX, so nothing ever ran against ``jax>=<floor>`` in pyproject: the
+  # floor said 0.4.30 while ``import tenax`` needed 0.4.35 (``SvdAlgorithm``,
+  # #691), and nothing reported it.  The floor is READ from pyproject, so the
+  # job follows it instead of drifting from a copy here.
+  #
+  # The second pin is 0.4.36, the first JAX whose ``jax.jit`` takes
+  # ``compiler_options``: from there tenax's no-fusion dispatch (#1102) is
+  # live, and test_block_sparse_jit.py runs instead of skipping.  On 0.4.36 it
+  # fails ("Protocol Buffer reflection usage error", 8 tests, measured
+  # 2026-10-14), so an import-only check on the floor would not catch it.
+  #
+  # Not a branch-protection context; skipped on ``merge_group`` for the same
+  # scheduling reason as the docs job below.
+  min-jax:
+    name: Minimum JAX (${{ matrix.jax }}, Python 3.11)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'merge_group'
+    strategy:
+      fail-fast: false
+      matrix:
+        jax: ["floor", "0.4.36"]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --python 3.11 --extra dev
+
+      - name: Pin JAX
+        env:
+          PIN: ${{ matrix.jax }}
+        run: |
+          if [ "$PIN" = "floor" ]; then
+            PIN=$(python3 - <<'PY'
+          import re, tomllib
+          deps = tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]
+          (spec,) = [d for d in deps if re.match(r"jax\s*>=", d)]
+          print(re.search(r">=\s*([0-9][0-9.]*)", spec).group(1))
+          PY
+            )
+          fi
+          echo "Pinning jax==$PIN jaxlib==$PIN"
+          uv pip install "jax==$PIN" "jaxlib==$PIN"
+          echo "JAX_PIN=$PIN" >> "$GITHUB_ENV"
+
+      # ``--no-sync`` throughout: a plain ``uv run`` re-syncs the environment
+      # and silently undoes the pin.
+      - name: Check the pinned version and the import
+        run: |
+          uv run --no-sync python -c "import jax, sys; print('jax', jax.__version__); sys.exit(jax.__version__ != '$JAX_PIN')"
+          uv run --no-sync python -c "import tenax"
+
+      - name: Run smoke tests
+        env:
+          JAX_PLATFORMS: cpu
+        run: >
+          uv run --no-sync pytest -m core --no-cov -q
+          tests/test_index.py tests/test_symmetry.py tests/test_tensor.py
+          tests/test_block_sparse_jit.py
+
   docs:
     name: Build documentation
     runs-on: ubuntu-latest
