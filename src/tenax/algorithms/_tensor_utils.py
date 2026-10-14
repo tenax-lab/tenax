@@ -6,6 +6,8 @@ via the Tensor protocol.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -330,6 +332,102 @@ def _compute_fused_sectors(
     return sectors.astype(np.int32), multiplicities.astype(np.int32)
 
 
+class _FuseLayout(NamedTuple):
+    """Where each ``(qa, qb)`` sub-block lands inside its fused block.
+
+    ``todense()`` puts the elements of fused sector ``q_f`` at the positions
+    ``i * db + j`` with that charge, in ascending order.  The ``(qa, qb)``
+    sub-blocks of one ``q_f`` own disjoint sets of those positions.
+
+    Attributes:
+        qf_of:   ``(qa, qb) -> q_f``, from :func:`_fused_sector_map`.
+        pieces:  ``q_f -> ((qa, qb), ...)`` in concatenation order: by the
+                 smallest fused position each sub-block owns.
+        perm:    ``q_f -> perm`` with ``fused[k] = concat[perm[k]]``, or
+                 ``None`` when the concatenation already is the fused order.
+                 For charge-grouped legs it is ``None``: each row ``i`` of
+                 ``qa`` meets exactly one ``qb`` of a given ``q_f``.
+        offsets: ``(qa, qb) -> offsets``, the fused-block position of each
+                 element of the row-major sub-block.
+        fused_dim: ``q_f -> size`` of the fused block along the fused axis.
+    """
+
+    qf_of: dict[tuple[int, int], int]
+    pieces: dict[int, tuple[tuple[int, int], ...]]
+    perm: dict[int, np.ndarray | None]
+    offsets: dict[tuple[int, int], np.ndarray]
+    fused_dim: dict[int, int]
+
+
+def _fuse_layout(
+    idx_a: TensorIndex,
+    idx_b: TensorIndex,
+    fused_flow: FlowDirection,
+    sym: BaseSymmetry,
+) -> _FuseLayout:
+    """Compute the :class:`_FuseLayout` of fusing ``idx_a`` with ``idx_b``."""
+    db = len(idx_b.charges)
+    positions_a = {int(q): np.flatnonzero(idx_a.charges == q) for q in idx_a.sectors}
+    positions_b = {int(q): np.flatnonzero(idx_b.charges == q) for q in idx_b.sectors}
+
+    # The same map names the fused blocks and groups the pairs, so the two
+    # cannot disagree (#734).
+    qf_of = _fused_sector_map(idx_a, idx_b, fused_flow, sym)
+    flat_of: dict[int, list[tuple[tuple[int, int], np.ndarray]]] = {}
+    for qa in idx_a.sectors:
+        for qb in idx_b.sectors:
+            pair = (int(qa), int(qb))
+            flat = (positions_a[pair[0]][:, None] * db + positions_b[pair[1]]).ravel()
+            if flat.size:
+                flat_of.setdefault(qf_of[pair], []).append((pair, flat))
+
+    pieces: dict[int, tuple[tuple[int, int], ...]] = {}
+    perm: dict[int, np.ndarray | None] = {}
+    offsets: dict[tuple[int, int], np.ndarray] = {}
+    fused_dim: dict[int, int] = {}
+    for q_f, entries in flat_of.items():
+        entries.sort(key=lambda e: int(e[1][0]))
+        cat = np.concatenate([flat for _, flat in entries])
+        order = np.argsort(cat, kind="stable")
+        rank = np.empty_like(order)
+        rank[order] = np.arange(order.size)
+        start = 0
+        for pair, flat in entries:
+            offsets[pair] = rank[start : start + flat.size]
+            start += flat.size
+        pieces[q_f] = tuple(pair for pair, _ in entries)
+        perm[q_f] = None if np.array_equal(order, np.arange(order.size)) else order
+        fused_dim[q_f] = int(cat.size)
+    return _FuseLayout(qf_of, pieces, perm, offsets, fused_dim)
+
+
+def _permute_axis(x: jax.Array, perm: np.ndarray, axis: int) -> jax.Array:
+    """``jnp.take(x, perm, axis)`` for a permutation ``perm``.
+
+    The VJP takes the inverse permutation.  A plain ``take`` transposes to a
+    scatter-add, which is one more scatter in every backward program.
+    """
+    inv = np.empty_like(perm)
+    inv[perm] = np.arange(perm.size)
+    fwd_idx, bwd_idx = jnp.asarray(perm), jnp.asarray(inv)
+
+    def take(y, idx):
+        return jnp.take(y, idx, axis=axis, mode="clip", unique_indices=True)
+
+    @jax.custom_vjp
+    def permute(y):
+        return take(y, fwd_idx)
+
+    def permute_fwd(y):
+        return take(y, fwd_idx), None
+
+    def permute_bwd(_, g):
+        return (take(g, bwd_idx),)
+
+    permute.defvjp(permute_fwd, permute_bwd)
+    return permute(x)
+
+
 def _fuse_indices_symmetric(
     T: SymmetricTensor,
     axis_a: int,
@@ -339,9 +437,12 @@ def _fuse_indices_symmetric(
 ) -> SymmetricTensor:
     """Fuse two axes of a SymmetricTensor.
 
-    Computes product charges, then for each block, reshapes the two
-    fused axes into one and places the data at the correct position
-    in the fused block.
+    Each block is transposed so the two axes are adjacent and reshaped to
+    merge them.  The sub-blocks of one fused sector are then joined with one
+    ``concatenate`` (absent sub-blocks are zeros) and, only for legs whose
+    charges are not grouped by sector, reordered with one permutation.  This
+    emits no scatter: the old per-block ``.at[].set`` was one scatter per
+    input block, ~63k of them in a D=3 U(1) backward (#566).
     """
     a, b = sorted([axis_a, axis_b])
     ndim = T.ndim
@@ -366,136 +467,43 @@ def _fuse_indices_symmetric(
     )
     object.__setattr__(fused_idx, "_charges_cache", fused_charges)
 
-    # Compute where each (i, j) element lands in the fused block.
-    #
-    # todense() scatters block data to positions np.where(charges == q_f)
-    # in ascending order, so block[k] must hold the data for the k-th
-    # smallest position with charge q_f.  The fused charges array has
-    # charge q_f at positions {i*db + j : charges_a[i]=qa, charges_b[j]=qb}
-    # for each (qa, qb) pair mapping to q_f.  We must interleave the
-    # (qa, qb) sub-blocks by ascending i*db+j order, NOT group them
-    # contiguously.
+    layout = _fuse_layout(idx_a, idx_b, fused_flow, sym)
 
-    db = len(idx_b.charges)
-    unique_qa = idx_a.sectors
-    unique_qb = idx_b.sectors
-
-    # For each (qa, qb) pair, find which positions in idx_a/idx_b have those charges
-    positions_a: dict[int, np.ndarray] = {}
-    for q in unique_qa:
-        positions_a[int(q)] = np.where(idx_a.charges == q)[0]
-    positions_b: dict[int, np.ndarray] = {}
-    for q in unique_qb:
-        positions_b[int(q)] = np.where(idx_b.charges == q)[0]
-
-    # Group (qa, qb) pairs by fused charge q_f.  The map is built once and then
-    # reused when rewriting the block keys below, so the grouping (which sizes
-    # and lays out the fused blocks) and the keys (which name them) cannot
-    # disagree -- they used to be two independent copies of the same wrong
-    # ``flow * q`` arithmetic (#734).
-    qf_of = _fused_sector_map(idx_a, idx_b, fused_flow, sym)
-    fused_groups: dict[int, list[tuple[int, int]]] = {}
-    for qa in unique_qa:
-        for qb in unique_qb:
-            fused_groups.setdefault(qf_of[(int(qa), int(qb))], []).append(
-                (int(qa), int(qb))
-            )
-
-    # For each fused charge q_f, compute:
-    #   fused_dim[q_f]: total number of elements in this block
-    #   scatter_map[(qa, qb)]: array of target offsets within the fused block
-    #     for each element of the (qa, qb) sub-block (in row-major order
-    #     over positions_a[qa] x positions_b[qb]).
-    fused_dim: dict[int, int] = {}
-    scatter_map: dict[tuple[int, int], np.ndarray] = {}
-
-    for q_f, pairs in fused_groups.items():
-        # Collect all (i*db + j) positions for this q_f, along with which
-        # (qa, qb) pair and local index each belongs to.
-        all_positions: list[
-            tuple[int, int, int, int]
-        ] = []  # (flat_pos, qa, qb, local_idx)
-        for qa, qb in pairs:
-            local_idx = 0
-            for i in positions_a[qa]:
-                for j in positions_b[qb]:
-                    all_positions.append((int(i) * db + int(j), qa, qb, local_idx))
-                    local_idx += 1
-
-        # Sort by flat position (ascending) — this is the order todense() expects
-        all_positions.sort(key=lambda x: x[0])
-        fused_dim[q_f] = len(all_positions)
-
-        # Build scatter arrays: for each (qa, qb) pair, scatter_map[(qa, qb)][local]
-        # = target offset in the fused block
-        tmp: dict[
-            tuple[int, int], list[tuple[int, int]]
-        ] = {}  # (qa,qb) -> [(local, target)]
-        for target_offset, (_, qa, qb, local_idx) in enumerate(all_positions):
-            tmp.setdefault((qa, qb), []).append((local_idx, target_offset))
-
-        for qa, qb in pairs:
-            if (qa, qb) in tmp:
-                entries = tmp[(qa, qb)]
-                entries.sort(key=lambda x: x[0])  # sort by local_idx
-                scatter_map[(qa, qb)] = np.array(
-                    [t for _, t in entries], dtype=np.int64
-                )
-            else:
-                scatter_map[(qa, qb)] = np.array([], dtype=np.int64)
-
-    # Build new indices list (axes a and b replaced by fused_idx at position a)
     other_axes = [i for i in range(ndim) if i not in (a, b)]
     new_indices = list(T.indices[i] for i in other_axes)
     new_indices.insert(a, fused_idx)
     new_indices = tuple(new_indices)
+    perm_axes = other_axes[:a] + [a, b] + other_axes[a:]
 
-    # Reassemble blocks
-    new_blocks: dict[BlockKey, jax.Array] = {}
-
+    # Merge the two axes of every block, grouped by the fused block it joins.
+    # Dict order follows the first input block of each fused block.
+    parts: dict[BlockKey, dict[tuple[int, int], jax.Array]] = {}
     for key, block in T.blocks.items():
-        qa = int(key[a])
-        qb = int(key[b])
-
-        # Same map that built ``fused_groups``/``scatter_map`` above.
-        q_f = qf_of[(qa, qb)]
-
-        # Transpose block to bring axes a and b adjacent
-        other_block_axes = [i for i in range(ndim) if i not in (a, b)]
-        perm = other_block_axes[:a] + [a, b] + other_block_axes[a:]
-        block_t = jnp.transpose(block, perm)
-
-        # Reshape: merge the two axes into one (at position a)
-        shape = list(block_t.shape)
-        new_shape = shape[:a] + [shape[a] * shape[a + 1]] + shape[a + 2 :]
-        block_flat = block_t.reshape(new_shape)
-
-        # Build new key
+        pair = (int(key[a]), int(key[b]))
+        q_f = layout.qf_of[pair]
         other_charges = [key[i] for i in other_axes]
         new_key = tuple(other_charges[:a]) + (q_f,) + tuple(other_charges[a:])
+        block_t = jnp.transpose(block, perm_axes)
+        shape = list(block_t.shape)
+        merged = shape[:a] + [shape[a] * shape[a + 1]] + shape[a + 2 :]
+        parts.setdefault(new_key, {})[pair] = block_t.reshape(merged)
 
-        # Get the scatter offsets for this (qa, qb) pair
-        offsets = scatter_map[(qa, qb)]
-
-        if new_key not in new_blocks:
-            full_shape = list(new_shape)
-            full_shape[a] = fused_dim[q_f]
-            new_blocks[new_key] = jnp.zeros(full_shape, dtype=block.dtype)
-
-        # Scatter every sub-block slice along axis a in ONE vectorized op:
-        #   existing[..., offsets[k], ...] = block_flat[..., k, ...]  for all k.
-        # The offsets are distinct (each local index maps to a unique target),
-        # so there are no scatter collisions; and different (qa, qb) pairs own
-        # disjoint offset ranges within the fused block, so successive `.set()`
-        # calls accumulate correctly without clobbering. This replaces a
-        # per-element Python loop (one `.at[].set()` primitive per element —
-        # hundreds at large bond dim, which bloats the jaxpr/XLA compile) with
-        # a single scatter primitive (#569, Milestone A). Numerically identical
-        # to the loop (same data movement) and differentiable (scatter VJP).
-        existing = new_blocks[new_key]
-        dst = [slice(None)] * len(new_shape)
-        dst[a] = jnp.asarray(offsets)
-        new_blocks[new_key] = existing.at[tuple(dst)].set(block_flat)
+    new_blocks: dict[BlockKey, jax.Array] = {}
+    for new_key, have in parts.items():
+        q_f = int(new_key[a])
+        like = next(iter(have.values()))
+        seq = []
+        for pair in layout.pieces[q_f]:
+            piece = have.get(pair)
+            if piece is None:
+                shape = list(like.shape)
+                shape[a] = layout.offsets[pair].size
+                piece = jnp.zeros(shape, dtype=like.dtype)
+            seq.append(piece)
+        fused = seq[0] if len(seq) == 1 else jnp.concatenate(seq, axis=a)
+        if layout.perm[q_f] is not None:
+            fused = _permute_axis(fused, layout.perm[q_f], a)
+        new_blocks[new_key] = fused
 
     obj = object.__new__(SymmetricTensor)
     obj._indices = new_indices
@@ -571,8 +579,10 @@ def _split_index_dense(T: DenseTensor, axis: int) -> DenseTensor:
 def _split_index_symmetric(T: SymmetricTensor, axis: int) -> SymmetricTensor:
     """Split a fused axis of a SymmetricTensor back into two axes.
 
-    Inverts the scatter logic from ``_fuse_indices_symmetric``: for each
-    fused block, extracts sub-blocks for each (qa, qb) pair.
+    Inverts :func:`_fuse_indices_symmetric` with the same
+    :func:`_fuse_layout`: each ``(qa, qb)`` sub-block is a static slice of the
+    fused block, or for legs whose charges are not grouped by sector, one
+    gather of its offsets.
     """
     fused_idx = T.indices[axis]
     parent_a, parent_b = fused_idx.fuse_info.parent_indices
@@ -587,90 +597,36 @@ def _split_index_symmetric(T: SymmetricTensor, axis: int) -> SymmetricTensor:
         if fused_idx.fuse_info.fused_flow is not None
         else fused_idx.flow
     )
+    layout = _fuse_layout(parent_a, parent_b, split_flow, sym)
+    mult_a = {int(q): int(m) for q, m in zip(parent_a.sectors, parent_a.multiplicities)}
+    mult_b = {int(q): int(m) for q, m in zip(parent_b.sectors, parent_b.multiplicities)}
 
-    # Reconstruct the scatter map from fuse (same logic as _fuse_indices_symmetric)
-    db = parent_b.dim
-    positions_a: dict[int, np.ndarray] = {}
-    for q in parent_a.sectors:
-        positions_a[int(q)] = np.where(parent_a.charges == q)[0]
-    positions_b: dict[int, np.ndarray] = {}
-    for q in parent_b.sectors:
-        positions_b[int(q)] = np.where(parent_b.charges == q)[0]
-
-    # Group (qa, qb) pairs by fused charge q_f -- through the same helper the
-    # forward direction uses, so the split inverts the fuse exactly (#734).
-    qf_of = _fused_sector_map(parent_a, parent_b, split_flow, sym)
-    fused_groups: dict[int, list[tuple[int, int]]] = {}
-    for qa in parent_a.sectors:
-        for qb in parent_b.sectors:
-            fused_groups.setdefault(qf_of[(int(qa), int(qb))], []).append(
-                (int(qa), int(qb))
-            )
-
-    # Rebuild scatter_map (same as fuse)
-    scatter_map: dict[tuple[int, int], np.ndarray] = {}
-    for q_f, pairs in fused_groups.items():
-        all_positions: list[tuple[int, int, int, int]] = []
-        for qa, qb in pairs:
-            local_idx = 0
-            for i in positions_a[qa]:
-                for j in positions_b[qb]:
-                    all_positions.append((int(i) * db + int(j), qa, qb, local_idx))
-                    local_idx += 1
-        all_positions.sort(key=lambda x: x[0])
-        tmp: dict[tuple[int, int], list[tuple[int, int]]] = {}
-        for target_offset, (_, qa, qb, local_idx) in enumerate(all_positions):
-            tmp.setdefault((qa, qb), []).append((local_idx, target_offset))
-        for qa, qb in pairs:
-            if (qa, qb) in tmp:
-                entries = tmp[(qa, qb)]
-                entries.sort(key=lambda x: x[0])
-                scatter_map[(qa, qb)] = np.array(
-                    [t for _, t in entries], dtype=np.int64
-                )
-            else:
-                scatter_map[(qa, qb)] = np.array([], dtype=np.int64)
-
-    # Build new indices: replace fused axis with (parent_a, parent_b)
     other_axes = [i for i in range(ndim) if i != axis]
     new_indices = (
         tuple(T.indices[:axis]) + (parent_a, parent_b) + tuple(T.indices[axis + 1 :])
     )
 
-    # Gather blocks: for each fused block, extract sub-blocks for each (qa, qb)
     new_blocks: dict[BlockKey, jax.Array] = {}
-
     for key, block in T.blocks.items():
         q_f = int(key[axis])
         other_charges = tuple(key[i] for i in other_axes)
-
-        # Which (qa, qb) pairs produce this q_f?
-        if q_f not in fused_groups:
-            continue
-        for qa, qb in fused_groups[q_f]:
-            offsets = scatter_map[(qa, qb)]
-            if len(offsets) == 0:
-                continue
-
-            ma = len(positions_a[qa])
-            mb = len(positions_b[qb])
-
-            # Gather every sub-block slice along the fused axis in ONE
-            # vectorized op: sub[..., k, ...] = block[..., offsets[k], ...].
-            # A single advanced-index gather (the gathered dim stays at `axis`
-            # since it is the only advanced index) replaces a per-element
-            # Python gather + jnp.stack (#569). Numerically identical and
-            # differentiable (gather VJP = scatter-add).
-            src = [slice(None)] * ndim
-            src[axis] = jnp.asarray(offsets)
-            sub_block = block[tuple(src)]
+        for qa, qb in layout.pieces.get(q_f, ()):
+            offsets = layout.offsets[(qa, qb)]
+            start = int(offsets[0])
+            if np.array_equal(offsets, np.arange(start, start + offsets.size)):
+                sub_block = jax.lax.slice_in_dim(
+                    block, start, start + offsets.size, axis=axis
+                )
+            else:
+                # Gather VJP = scatter-add; only legs whose charges are not
+                # grouped by sector get here.
+                src = [slice(None)] * ndim
+                src[axis] = jnp.asarray(offsets)
+                sub_block = block[tuple(src)]
             shape = list(sub_block.shape)
-            new_shape = shape[:axis] + [ma, mb] + shape[axis + 1 :]
-            sub_block = sub_block.reshape(new_shape)
-
-            # Build new key
+            new_shape = shape[:axis] + [mult_a[qa], mult_b[qb]] + shape[axis + 1 :]
             new_key = other_charges[:axis] + (qa, qb) + other_charges[axis:]
-            new_blocks[new_key] = sub_block
+            new_blocks[new_key] = sub_block.reshape(new_shape)
 
     obj = object.__new__(SymmetricTensor)
     obj._indices = new_indices
