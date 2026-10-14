@@ -48,8 +48,9 @@
   (`_tensor_utils.py`; #566).  `fuse_indices` on a `SymmetricTensor` built
   each fused block with one `.at[].set` scatter per input block.  It now
   joins the sub-blocks of a fused block with one `concatenate`.  Legs whose
-  charges are not grouped by sector also get one fixed permutation, whose
-  VJP is the inverse permutation.  `split_index` takes static slices where
+  charges are not grouped by sector also get one fixed permutation (a
+  `take`; its backward is the only scatter left, one per reordered block).
+  `split_index` takes static slices where
   the layout is contiguous.  Blocks are bit-identical to the old
   implementation.  U(1) D=3 chi=9 `dE/denv`, before / after, measured side
   by side:

@@ -404,28 +404,12 @@ def _fuse_layout(
 def _permute_axis(x: jax.Array, perm: np.ndarray, axis: int) -> jax.Array:
     """``jnp.take(x, perm, axis)`` for a permutation ``perm``.
 
-    The VJP takes the inverse permutation.  A plain ``take`` transposes to a
-    scatter-add, which is one more scatter in every backward program.
+    A plain ``take``, so ``jvp``, ``vjp``, ``vmap`` and higher orders all
+    work; its transpose is one scatter-add.  A ``custom_vjp`` taking the
+    inverse permutation would avoid that scatter but breaks forward mode.
+    Only legs whose charges are not grouped by sector get here.
     """
-    inv = np.empty_like(perm)
-    inv[perm] = np.arange(perm.size)
-    fwd_idx, bwd_idx = jnp.asarray(perm), jnp.asarray(inv)
-
-    def take(y, idx):
-        return jnp.take(y, idx, axis=axis, mode="clip", unique_indices=True)
-
-    @jax.custom_vjp
-    def permute(y):
-        return take(y, fwd_idx)
-
-    def permute_fwd(y):
-        return take(y, fwd_idx), None
-
-    def permute_bwd(_, g):
-        return (take(g, bwd_idx),)
-
-    permute.defvjp(permute_fwd, permute_bwd)
-    return permute(x)
+    return jnp.take(x, jnp.asarray(perm), axis=axis, mode="clip", unique_indices=True)
 
 
 def _fuse_indices_symmetric(
@@ -440,9 +424,10 @@ def _fuse_indices_symmetric(
     Each block is transposed so the two axes are adjacent and reshaped to
     merge them.  The sub-blocks of one fused sector are then joined with one
     ``concatenate`` (absent sub-blocks are zeros) and, only for legs whose
-    charges are not grouped by sector, reordered with one permutation.  This
-    emits no scatter: the old per-block ``.at[].set`` was one scatter per
-    input block, ~63k of them in a D=3 U(1) backward (#566).
+    charges are not grouped by sector, reordered with one permutation.  The
+    forward emits no scatter, and for grouped legs the backward emits none
+    either: the old per-block ``.at[].set`` was one scatter per input block,
+    31k of them in the jaxpr of a D=3 U(1) ``dE/denv`` (#566).
     """
     a, b = sorted([axis_a, axis_b])
     ndim = T.ndim

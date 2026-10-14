@@ -420,19 +420,49 @@ def _primitives(fn, *args):
     return names
 
 
+def _fuse_loss(t):
+    f = fuse_indices(t, 1, 3, "f", OUT)
+    return sum(jnp.sum(jnp.sin(b)) for b in f.blocks.values())
+
+
 @pytest.mark.parametrize("grouped", [True, False])
-def test_fuse_and_its_gradient_emit_no_scatter(grouped):
+def test_fuse_emits_no_scatter(grouped):
     T = _tensor("u1", grouped)
-
-    def loss(t):
-        f = fuse_indices(t, 1, 3, "f", OUT)
-        return sum(jnp.sum(jnp.sin(b)) for b in f.blocks.values())
-
-    prims = _primitives(jax.grad(loss), T)
+    prims = _primitives(_fuse_loss, T)
     assert not [p for p in prims if p.startswith("scatter")], prims
     # Charge-grouped legs need no permutation; interleaved ones need one per
     # reordered block, which this fixture exercises.
     assert ("gather" in prims) is (not grouped)
+
+
+@pytest.mark.parametrize("grouped", [True, False])
+def test_fuse_gradient_scatters_only_to_undo_a_permutation(grouped):
+    """Grouped legs: no scatter in the gradient.  Interleaved legs: exactly
+    one scatter-add per permutation, the transpose of its ``take``."""
+    T = _tensor("u1", grouped)
+    prims = _primitives(jax.grad(_fuse_loss), T)
+    scatters = [p for p in prims if p.startswith("scatter")]
+    assert all(p == "scatter-add" for p in scatters), scatters
+    assert len(scatters) == prims.count("gather")
+    assert (len(scatters) > 0) is (not grouped)
+
+
+@pytest.mark.parametrize("grouped", [True, False])
+def test_fuse_forward_mode_matches_reference(grouped):
+    """``jvp`` works through the permutation (a ``custom_vjp`` would refuse)."""
+    T = _tensor("u1", grouped)
+    dT = _tensor("u1", grouped, seed=3)
+
+    def loss(fuse):
+        def f(t):
+            g = fuse(t, 1, 3, "f", OUT)
+            return sum(jnp.sum(jnp.sin(b)) for b in g.blocks.values())
+
+        return f
+
+    _, t_new = jax.jvp(loss(fuse_indices), (T,), (dT,))
+    _, t_ref = jax.jvp(loss(_reference_fuse), (T,), (dT,))
+    np.testing.assert_allclose(float(t_new), float(t_ref), rtol=1e-13)
 
 
 @pytest.mark.parametrize("grouped", [True, False])
