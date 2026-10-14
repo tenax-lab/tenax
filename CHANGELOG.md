@@ -4,6 +4,46 @@
 
 ### Behavior Changes
 
+- **Block-sparse CTM-AD backward programs compile without XLA's CPU fusion
+  pass from D=3** (`_block_sparse_jit.py`; #566).  A `SymmetricTensor`
+  contraction traces one small op per pair of charge blocks.  The
+  implicit-AD backward of a symmetric state is therefore mostly reshapes,
+  transposes, scatters and small dots, which XLA's CPU instruction fusion
+  handles badly.  On CPU, at top level:
+
+  - `dE/denv`, the chain rule and the fused fixed-point backward compile
+    with `xla_disable_hlo_passes=fusion` when a site tensor has a virtual
+    bond of dimension 3 or more, or 20 or more charge blocks.
+  - The `J^T` product and the two GMRES solves, which contain only the
+    sweep VJP, go unfused only on the 20-block test (many-sector U(1)).
+    For graded states they compile about 2x faster fused.
+
+  Blocks are counted per site tensor, so D=2 states stay fused for any unit
+  cell.  The forward sweep and forward energy keep the default pipeline at
+  every size.  The chain rule, fermionic, compiled 89 / 1062 s fused /
+  unfused at D=2, 9363 / 2793 s at D=3, and more than 8000 / 3018 s at D=4.
+
+  From D=3 up, `dE/denv` runs faster unfused for every symmetry measured.
+  Warm run, fused against unfused:
+
+  | D, chi | U(1) | Z2 | fermionic |
+  |---|---|---|---|
+  | 2, 4-16 | 4.4 / 3.1 ms (chi=16) | 1.35 / 1.49 ms | 1.68 / 2.32 ms |
+  | 3, 6-9 | 14.7 / 10.5 ms (chi=6) | 8.65 / 7.41 ms | 26.3 / 10.9 ms |
+  | 4, 16 | - | 170 / 127 ms | 446 / 287 ms |
+  | 6, 36 | - | 11.5 / 10.0 s | 33.0 / 16.2 s |
+
+  The U(1) D=3 chi=9 `dE/denv` also compiled in 905 s unfused against
+  8569 s fused.  At D=2 every program favours fusion: the backward programs
+  of a D=2 U(1) `optimize_gs_ad` step compiled 1.8-3.5x slower unfused.  At
+  D>=3 the forward sweep, and the sweep VJP of graded states, compile
+  1.5-3.6x faster fused, and their run time differs by less than 15%.
+
+  Dense programs, other backends, calls inside an enclosing trace, and every
+  call on JAX older than 0.4.36 (no `compiler_options` on `jax.jit`) keep the
+  default pipeline.  Results are unchanged (D=2 U(1) `dE/denv`: maximum
+  difference 1.4e-17).
+
 - **Metric preconditioning is turned off for fermionic input** (#1059
   finding 27).  `gs_metric_precond` (on by default) builds its norm matrix
   with the sign-free contractor and `.todense()`, so on fermionic tensors it
