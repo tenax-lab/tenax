@@ -259,18 +259,20 @@ def test_accept_hash_decides_done_and_table_shows_hash(tmp_path):
 SYM_DIAG = dict(
     forward_converged=True,
     forward_stationarity_residual=1.3263834475196745e-12,
+    forward_stationarity_threshold=1e-8,
     projector_backward_used="flow",
 )
 ORACLE_DIAG = dict(
     forward_converged=False,
     forward_stationarity_residual=1.1928425420313273,
+    forward_stationarity_threshold=1e-8,
     projector_backward_used="frozen_fallback",
 )
 
 
 def test_oracle_valid_measured_diags():
-    assert pipeline._oracle_valid(SYM_DIAG, 1e-10) is True
-    assert pipeline._oracle_valid(ORACLE_DIAG, 1e-10) is False
+    assert pipeline._oracle_valid(SYM_DIAG) is True
+    assert pipeline._oracle_valid(ORACLE_DIAG) is False
 
 
 @pytest.mark.parametrize(
@@ -281,25 +283,34 @@ def test_oracle_valid_measured_diags():
         dict(forward_stationarity_residual=nan),
         dict(forward_stationarity_residual=None),
         dict(forward_stationarity_residual=1.0001e-8),
+        dict(forward_stationarity_threshold=None),
+        dict(forward_stationarity_threshold=nan),
         dict(projector_backward_used="frozen_fallback"),
     ],
 )
 def test_oracle_valid_rejects(patch):
-    assert pipeline._oracle_valid({**SYM_DIAG, **patch}, 1e-10) is False
+    assert pipeline._oracle_valid({**SYM_DIAG, **patch}) is False
 
 
 def test_oracle_valid_threshold_and_missing_key():
     assert pipeline._oracle_valid(
-        {**SYM_DIAG, "forward_stationarity_residual": 0.9999e-8}, 1e-10
+        {**SYM_DIAG, "forward_stationarity_residual": 0.9999e-8}
     )
-    # conv_tol=1e-9 -> threshold 1e-7; residual equal to it is rejected.
-    thr = max(100.0 * 1e-9, 1e-8)
+    # Residual equal to the recorded threshold is rejected.
     assert not pipeline._oracle_valid(
-        {**SYM_DIAG, "forward_stationarity_residual": thr}, 1e-9
+        {**SYM_DIAG, "forward_stationarity_residual": 1e-8}
+    )
+    # The recorded threshold is read, not recomputed.
+    assert pipeline._oracle_valid(
+        {
+            **SYM_DIAG,
+            "forward_stationarity_residual": 5e-8,
+            "forward_stationarity_threshold": 1e-7,
+        }
     )
     for k in SYM_DIAG:
         d = {kk: v for kk, v in SYM_DIAG.items() if kk != k}
-        assert pipeline._oracle_valid(d, 1e-10) is False
+        assert pipeline._oracle_valid(d) is False
 
 
 class _FakeGrad:
@@ -328,6 +339,12 @@ def test_oracle_skipped_when_s1_broken(monkeypatch):
     rec, calls = _record(monkeypatch, True, SYM_DIAG)
     assert calls == []
     assert rec == {"oracle_skipped": "s1_symmetry_broken", "oracle_valid": False}
+
+
+def test_oracle_skipped_when_s1_unknown(monkeypatch):
+    rec, calls = _record(monkeypatch, None, SYM_DIAG)
+    assert calls == []
+    assert rec == {"oracle_skipped": "s1_unknown", "oracle_valid": False}
 
 
 def test_oracle_runs_and_marks_validity(monkeypatch):

@@ -73,6 +73,7 @@ GRAD_GMRES_TOL = 1e-9
 _DIAG_KEYS = (
     "forward_converged",
     "forward_stationarity_residual",
+    "forward_stationarity_threshold",
     "projector_backward_used",
     "forward_iterations",
     "adjoint_residual",
@@ -162,12 +163,13 @@ def _diag():
     return {k: d.get(k) for k in _DIAG_KEYS}
 
 
-def _oracle_valid(diag, conv_tol):
+def _oracle_valid(diag):
     """True only if the dense oracle's CTM was a flow-backward fixed point.
 
     The oracle is a valid reference only where the dense bond_phase-gauged CTM
     is element-wise stationary and keeps the flow backward (see
-    ``oracle_value_and_grad``).  Missing keys or None fail closed.
+    ``oracle_value_and_grad``).  The threshold is the one the library recorded
+    (``forward_stationarity_threshold``).  Missing keys or None fail closed.
     """
     try:
         if diag["forward_converged"] is not True:
@@ -175,23 +177,26 @@ def _oracle_valid(diag, conv_tol):
         if diag["projector_backward_used"] != "flow":
             return False
         residual = float(diag["forward_stationarity_residual"])
+        threshold = float(diag["forward_stationarity_threshold"])
     except (KeyError, TypeError, ValueError):
         return False
-    # Same formula as the library's "not an element-wise fixed point" warning:
-    # src/tenax/algorithms/_ctm_energy_ad.py:1410.
-    threshold = max(100.0 * conv_tol, 1e-8)
-    return bool(np.isfinite(residual) and residual < threshold)
+    return bool(
+        np.isfinite(residual) and np.isfinite(threshold) and residual < threshold
+    )
 
 
 def _oracle_record(A, B, gate, cfg, envs_init, broken, grads):
     """Measured fields for the S4 dense oracle (reported, never gated)."""
-    if broken:
-        return {"oracle_skipped": "s1_symmetry_broken", "oracle_valid": False}
+    if broken is not False:
+        # True: S1 found the dense env broken.  None: S1 errored, so there is
+        # no verdict to interpret a 1000-sweep dense run with.
+        why = "s1_symmetry_broken" if broken is True else "s1_unknown"
+        return {"oracle_skipped": why, "oracle_valid": False}
     out = {}
     try:
         _, (oA, oB) = oracle_value_and_grad(A, B, gate, cfg, envs_init)
         out["oracle_diag"] = _diag()
-        out["oracle_valid"] = _oracle_valid(out["oracle_diag"], cfg.conv_tol)
+        out["oracle_valid"] = _oracle_valid(out["oracle_diag"])
         gAd, gBd = np.asarray(grads[0].todense()), np.asarray(grads[1].todense())
         out["oracle_rel"] = {
             "A": float(np.linalg.norm(gAd - oA) / np.linalg.norm(oA)),
@@ -537,7 +542,7 @@ def run_point(
                 gate,
                 _ctm(chi),
                 sd.envs_init,
-                bool(summary["s1_symmetry_broken"]),
+                summary["s1_symmetry_broken"],
                 (gA, gB),
             )
         )
