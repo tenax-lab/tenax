@@ -532,6 +532,16 @@
 
 ### Fixed
 
+- **The block-sparse no-fusion dispatch no longer raises on JAX
+  0.4.36-0.5.3** (#1102 follow-up).  `jax.jit` accepts `compiler_options` from
+  0.4.36, but XLA rejects `xla_disable_hlo_passes` as a string until 0.6.0
+  (`RuntimeError: ... Field is repeated`).  On those versions every D>=3
+  symmetric implicit-AD backward raised instead of compiling.  The dispatch
+  now compiles one scalar program with the option on the first call that
+  would go unfused, and if that fails every call keeps the default pipeline
+  (`no_fusion_compiles`).  Checked with real JAX 0.4.35, 0.4.36, 0.5.3, 0.6.0
+  and 0.10.2.
+
 - **Hager-Zhang `phi` probes warm-start CTM from the step's env**
   (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
   start from the previous probe's env (the #502 write-back), so the env a

@@ -25,8 +25,8 @@ pytestmark = [
         jax.default_backend() != "cpu", reason="the no-fusion variant is CPU-only"
     ),
     pytest.mark.skipif(
-        not _block_sparse_jit.JIT_TAKES_COMPILER_OPTIONS,
-        reason="jax.jit takes compiler_options from JAX 0.4.36",
+        not _block_sparse_jit.no_fusion_compiles(),
+        reason="XLA here rejects xla_disable_hlo_passes (JAX 0.4.36-0.5.3)",
     ),
 ]
 
