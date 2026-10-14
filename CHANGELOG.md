@@ -532,6 +532,14 @@
 
 ### Fixed
 
+- **The JAX floor is now `jax>=0.4.35`, the oldest version tenax imports
+  on** (#1105).  `pyproject.toml` declared `jax>=0.4.30`, but
+  `src/tenax/linalg.py` imports `jax.lax.linalg.SvdAlgorithm` (#691), which
+  exists only from 0.4.35, so `import tenax` failed on 0.4.30-0.4.34.  The
+  floor of `dependencies` and of every accelerator extra is raised.  On
+  0.4.35 the tensor, contraction, linalg, SVD, DMRG and block-sparse-jit
+  tests pass (306 passed, 20 skipped).
+
 - **Hager-Zhang `phi` probes warm-start CTM from the step's env**
   (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
   start from the previous probe's env (the #502 write-back), so the env a
