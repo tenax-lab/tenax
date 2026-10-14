@@ -36,7 +36,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-    "jax>=0.4.30",
+    "jax>=0.4.35",
     "opt-einsum>=3.3.0",
     "numpy>=1.26",
     "networkx>=3.0",
@@ -45,11 +45,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-cuda12 = ["jax[cuda12]>=0.4.30; sys_platform == 'linux'"]
-cuda13 = ["jax[cuda13]>=0.4.30; sys_platform == 'linux'"]
-cuda12-local = ["jax[cuda12-local]>=0.4.30; sys_platform == 'linux'"]
-cuda13-local = ["jax[cuda13-local]>=0.4.30; sys_platform == 'linux'"]
-tpu = ["jax[tpu]>=0.4.30; sys_platform == 'linux'"]
+cuda12 = ["jax[cuda12]>=0.4.35; sys_platform == 'linux'"]
+cuda13 = ["jax[cuda13]>=0.7.0; sys_platform == 'linux'"]
+cuda12-local = ["jax[cuda12-local]>=0.4.35; sys_platform == 'linux'"]
+cuda13-local = ["jax[cuda13-local]>=0.7.0; sys_platform == 'linux'"]
+tpu = ["jax[tpu]>=0.4.35; sys_platform == 'linux'"]
 metal = ["jax-metal>=0.1.1; sys_platform == 'darwin'"]
 dev = [
     "pytest>=8.0",

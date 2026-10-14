@@ -532,6 +532,17 @@
 
 ### Fixed
 
+- **The JAX floor is now `jax>=0.4.35`, the oldest version tenax imports
+  on** (#1105).  `pyproject.toml` declared `jax>=0.4.30`, but
+  `src/tenax/linalg.py` imports `jax.lax.linalg.SvdAlgorithm` (#691), which
+  exists only from 0.4.35, so `import tenax` failed on 0.4.30-0.4.34.  The
+  floor of `dependencies` and of every accelerator extra is raised.  The
+  `cuda13` and `cuda13-local` extras get `jax>=0.7.0`, the first JAX that
+  defines those extras; an older JAX skips them with only a warning and
+  installs no CUDA 13 plugin.  On
+  0.4.35 the tensor, contraction, linalg, SVD, DMRG and block-sparse-jit
+  tests pass (306 passed, 20 skipped).
+
 - **The block-sparse no-fusion dispatch no longer raises on JAX
   0.4.36-0.5.3** (#1102 follow-up).  `jax.jit` accepts `compiler_options` from
   0.4.36, but XLA rejects `xla_disable_hlo_passes` as a string until 0.6.0
