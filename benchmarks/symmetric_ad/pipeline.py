@@ -162,6 +162,47 @@ def _diag():
     return {k: d.get(k) for k in _DIAG_KEYS}
 
 
+def _oracle_valid(diag, conv_tol):
+    """True only if the dense oracle's CTM was a flow-backward fixed point.
+
+    The oracle is a valid reference only where the dense bond_phase-gauged CTM
+    is element-wise stationary and keeps the flow backward (see
+    ``oracle_value_and_grad``).  Missing keys or None fail closed.
+    """
+    try:
+        if diag["forward_converged"] is not True:
+            return False
+        if diag["projector_backward_used"] != "flow":
+            return False
+        residual = float(diag["forward_stationarity_residual"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    # Same formula as the library's "not an element-wise fixed point" warning:
+    # src/tenax/algorithms/_ctm_energy_ad.py:1410.
+    threshold = max(100.0 * conv_tol, 1e-8)
+    return bool(np.isfinite(residual) and residual < threshold)
+
+
+def _oracle_record(A, B, gate, cfg, envs_init, broken, grads):
+    """Measured fields for the S4 dense oracle (reported, never gated)."""
+    if broken:
+        return {"oracle_skipped": "s1_symmetry_broken", "oracle_valid": False}
+    out = {}
+    try:
+        _, (oA, oB) = oracle_value_and_grad(A, B, gate, cfg, envs_init)
+        out["oracle_diag"] = _diag()
+        out["oracle_valid"] = _oracle_valid(out["oracle_diag"], cfg.conv_tol)
+        gAd, gBd = np.asarray(grads[0].todense()), np.asarray(grads[1].todense())
+        out["oracle_rel"] = {
+            "A": float(np.linalg.norm(gAd - oA) / np.linalg.norm(oA)),
+            "B": float(np.linalg.norm(gBd - oB) / np.linalg.norm(oB)),
+        }
+    except Exception as e:
+        out["oracle_error"] = f"{type(e).__name__}: {e}"
+        out["oracle_valid"] = False
+    return out
+
+
 def _log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -488,18 +529,18 @@ def run_point(
             "flow_backward": flow,
             "gmres_tol": GRAD_GMRES_TOL,
         }
-        # Oracle: reported, never gated (valid only without cross-sector
-        # degenerate singular values; see its docstring).
-        try:
-            _, (oA, oB) = oracle_value_and_grad(A, B, gate, _ctm(chi), sd.envs_init)
-            measured["oracle_diag"] = _diag()
-            gAd, gBd = np.asarray(gA.todense()), np.asarray(gB.todense())
-            measured["oracle_rel"] = {
-                "A": float(np.linalg.norm(gAd - oA) / np.linalg.norm(oA)),
-                "B": float(np.linalg.norm(gBd - oB) / np.linalg.norm(oB)),
-            }
-        except Exception as e:
-            measured["oracle_error"] = f"{type(e).__name__}: {e}"
+        # Oracle: reported, never gated; _oracle_record marks when it is valid.
+        measured.update(
+            _oracle_record(
+                A,
+                B,
+                gate,
+                _ctm(chi),
+                sd.envs_init,
+                bool(summary["s1_symmetry_broken"]),
+                (gA, gB),
+            )
+        )
         fds, ok = [], True
         for k in range(fd_dirs):
             dA, dB = _unit_direction(A, B, jax.random.PRNGKey(1000 * (seed + 1) + k))

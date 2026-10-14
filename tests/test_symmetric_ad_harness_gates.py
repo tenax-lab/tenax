@@ -254,3 +254,91 @@ def test_accept_hash_decides_done_and_table_shows_hash(tmp_path):
     assert not matrix._complete(old, "H_CUR", ["H_OLD"])
     _summary(new, complete=True, code_hash="H_CUR", stopped_at=None)
     assert matrix._row("p", 0, new)[-1] == "H_CUR"
+
+
+SYM_DIAG = dict(
+    forward_converged=True,
+    forward_stationarity_residual=1.3263834475196745e-12,
+    projector_backward_used="flow",
+)
+ORACLE_DIAG = dict(
+    forward_converged=False,
+    forward_stationarity_residual=1.1928425420313273,
+    projector_backward_used="frozen_fallback",
+)
+
+
+def test_oracle_valid_measured_diags():
+    assert pipeline._oracle_valid(SYM_DIAG, 1e-10) is True
+    assert pipeline._oracle_valid(ORACLE_DIAG, 1e-10) is False
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        dict(forward_converged=False),
+        dict(forward_converged=None),
+        dict(forward_stationarity_residual=nan),
+        dict(forward_stationarity_residual=None),
+        dict(forward_stationarity_residual=1.0001e-8),
+        dict(projector_backward_used="frozen_fallback"),
+    ],
+)
+def test_oracle_valid_rejects(patch):
+    assert pipeline._oracle_valid({**SYM_DIAG, **patch}, 1e-10) is False
+
+
+def test_oracle_valid_threshold_and_missing_key():
+    assert pipeline._oracle_valid(
+        {**SYM_DIAG, "forward_stationarity_residual": 0.9999e-8}, 1e-10
+    )
+    # conv_tol=1e-9 -> threshold 1e-7; residual equal to it is rejected.
+    thr = max(100.0 * 1e-9, 1e-8)
+    assert not pipeline._oracle_valid(
+        {**SYM_DIAG, "forward_stationarity_residual": thr}, 1e-9
+    )
+    for k in SYM_DIAG:
+        d = {kk: v for kk, v in SYM_DIAG.items() if kk != k}
+        assert pipeline._oracle_valid(d, 1e-10) is False
+
+
+class _FakeGrad:
+    def todense(self):
+        return np.ones(3)
+
+
+def _record(monkeypatch, broken, diag, raises=False):
+    calls = []
+
+    def fake_oracle(A, B, gate, cfg, envs):
+        calls.append(1)
+        if raises:
+            raise RuntimeError("boom")
+        return 0.0, (np.ones(3) * 2, np.ones(3) * 2)
+
+    monkeypatch.setattr(pipeline, "oracle_value_and_grad", fake_oracle)
+    monkeypatch.setattr(pipeline, "_diag", lambda: diag)
+    cfg = SimpleNamespace(conv_tol=1e-10)
+    g = (_FakeGrad(), _FakeGrad())
+    rec = pipeline._oracle_record(None, None, None, cfg, None, broken, g)
+    return rec, calls
+
+
+def test_oracle_skipped_when_s1_broken(monkeypatch):
+    rec, calls = _record(monkeypatch, True, SYM_DIAG)
+    assert calls == []
+    assert rec == {"oracle_skipped": "s1_symmetry_broken", "oracle_valid": False}
+
+
+def test_oracle_runs_and_marks_validity(monkeypatch):
+    rec, calls = _record(monkeypatch, False, SYM_DIAG)
+    assert calls == [1] and rec["oracle_valid"] is True
+    assert rec["oracle_rel"]["A"] == pytest.approx(0.5)
+    rec, _ = _record(monkeypatch, False, ORACLE_DIAG)
+    assert rec["oracle_valid"] is False and "oracle_rel" in rec
+    assert "oracle_skipped" not in rec
+
+
+def test_oracle_error_marks_invalid(monkeypatch):
+    rec, _ = _record(monkeypatch, False, SYM_DIAG, raises=True)
+    assert rec["oracle_valid"] is False and "RuntimeError" in rec["oracle_error"]
