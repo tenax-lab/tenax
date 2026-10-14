@@ -80,8 +80,9 @@ keep the default pipeline: on GPU the effect is unmeasured.  A call inside
 another trace also takes the default variant: JAX compiles a nested jit into
 the enclosing program and accepts ``compiler_options`` only at the top
 level.  The two variants are separate ``jax.jit`` objects, so each keeps its
-own trace cache.  ``jax.jit`` takes ``compiler_options`` from JAX 0.4.36; on
-an older JAX every call keeps the default pipeline.
+own trace cache.  ``jax.jit`` takes ``compiler_options`` from JAX 0.4.36, and XLA
+accepts this option from 0.6.0; where it does not, every call keeps the
+default pipeline (``no_fusion_compiles``).
 """
 
 from __future__ import annotations
@@ -92,6 +93,7 @@ import functools
 import inspect
 
 import jax
+import jax.numpy as jnp
 from jax._src import core as _jax_core
 
 from tenax.core.tensor import SymmetricTensor
@@ -103,6 +105,40 @@ BLOCK_SPARSE_COMPILER_OPTIONS = {"xla_disable_hlo_passes": "fusion"}
 # ``jax.jit`` takes ``compiler_options`` from JAX 0.4.36; the dependency floor
 # is 0.4.30.
 JIT_TAKES_COMPILER_OPTIONS = "compiler_options" in inspect.signature(jax.jit).parameters
+
+# Whether XLA accepts BLOCK_SPARSE_COMPILER_OPTIONS; set on first need.
+_NO_FUSION_COMPILES: bool | None = None
+
+
+def no_fusion_compiles() -> bool:
+    """Whether a CPU compile with ``BLOCK_SPARSE_COMPILER_OPTIONS`` works here.
+
+    ``jax.jit`` accepts ``compiler_options`` from JAX 0.4.36, but XLA
+    rejects this option on 0.4.36-0.5.3 (``xla_disable_hlo_passes`` is a
+    repeated field there and a string raises a protobuf ``RuntimeError``).
+    It works from 0.6.0.  Rather than pin that range, the first call that
+    would go unfused compiles one scalar program with the option.  If that
+    fails, every call keeps the default pipeline.  The result is cached for
+    the process.
+    """
+    global _NO_FUSION_COMPILES
+    if _NO_FUSION_COMPILES is None:
+        _NO_FUSION_COMPILES = _probe_no_fusion()
+    return _NO_FUSION_COMPILES
+
+
+def _probe_no_fusion() -> bool:
+    if not JIT_TAKES_COMPILER_OPTIONS:
+        return False
+    try:
+        x = jax.device_put(jnp.zeros((), jnp.float32), jax.devices("cpu")[0])
+        jax.jit(lambda v: v + 1, compiler_options=BLOCK_SPARSE_COMPILER_OPTIONS).lower(
+            x
+        ).compile()
+    except Exception:  # noqa: BLE001 - any rejection means: keep fusion
+        return False
+    return True
+
 
 # Virtual bond dimension from which the unfused backward runs faster, and the
 # total charge blocks from which it compiles faster (see the module docstring).
@@ -170,7 +206,7 @@ def _wants_no_fusion(args, kwargs, pinned=None, by_bond_dim=True) -> bool:
     symmetric = [leaf for leaf in leaves if _is_symmetric(leaf)]
     if not _is_large(symmetric, by_bond_dim):
         return False
-    return _call_platform(args, kwargs, pinned) == "cpu"
+    return _call_platform(args, kwargs, pinned) == "cpu" and no_fusion_compiles()
 
 
 def block_sparse_jit(fn=None, /, *, by_bond_dim=True, **jit_kwargs):

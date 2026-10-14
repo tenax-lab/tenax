@@ -532,6 +532,16 @@
 
 ### Fixed
 
+- **The block-sparse no-fusion dispatch no longer raises on JAX
+  0.4.36-0.5.3** (#1102 follow-up).  `jax.jit` accepts `compiler_options` from
+  0.4.36, but XLA rejects `xla_disable_hlo_passes` as a string until 0.6.0
+  (`RuntimeError: ... Field is repeated`).  On those versions every D>=3
+  symmetric implicit-AD backward raised instead of compiling.  The dispatch
+  now compiles one scalar program with the option on the first call that
+  would go unfused, and if that fails every call keeps the default pipeline
+  (`no_fusion_compiles`).  Checked with real JAX 0.4.35, 0.4.36, 0.5.3, 0.6.0
+  and 0.10.2.
+
 - **`SymmetricTensor.blocks` no longer caches tracers on a concrete tensor**
   (#1103).  The block dict is cached on the tensor the first time it is
   read.  When that first read happened inside a `jax.jit` that closes over a
