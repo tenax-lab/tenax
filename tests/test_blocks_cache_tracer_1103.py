@@ -81,3 +81,34 @@ def test_a_tensor_built_inside_a_trace_reads_its_blocks():
     np.testing.assert_allclose(
         float(out), 6.0 * float(_block_sum(_tensor())), rtol=1e-12
     )
+
+
+def test_an_inner_jit_over_an_outer_traced_tensor_leaves_no_tracer():
+    """The tensor's data belongs to the outer trace; slices taken inside the
+    inner jit belong to the inner one and must not be cached."""
+    base = _tensor()
+
+    def outer(x):
+        T = base * x
+        inner = jax.jit(lambda y: y * _block_sum(T))(1.0)
+        return inner + _block_sum(T)
+
+    out = jax.jit(outer)(2.0)
+    np.testing.assert_allclose(float(out), 4.0 * float(_block_sum(base)), rtol=1e-12)
+
+
+def test_a_tensor_built_inside_a_trace_caches_within_it():
+    """Slices of the tensor's own trace are still cached, so repeated reads
+    inside one program do not re-slice (where ``Tracer._trace`` is shared)."""
+    same = {}
+
+    def f(x):
+        T = _tensor() * x
+        first = T.blocks
+        same["cached"] = T.blocks is first
+        return _block_sum(T)
+
+    jax.jit(f)(1.0)
+    if not hasattr(jax.core.Tracer, "_trace"):
+        pytest.skip("this JAX does not expose Tracer._trace")
+    assert same["cached"]
