@@ -1,5 +1,5 @@
-"""Run the spec §6 matrix: one subprocess per point, sequentially, on GPU 0,
-then a summary table."""
+"""Run the spec §6 matrix: one subprocess per point, sequentially, on GPU 0
+(or ``$MATRIX_GPU``), then a summary table."""
 
 from __future__ import annotations
 
@@ -78,7 +78,11 @@ def main():
     )
     a = ap.parse_args()
     chash = code_hash()
-    env = dict(os.environ, JAX_PLATFORMS="cuda,cpu", CUDA_VISIBLE_DEVICES="0")
+    env = dict(
+        os.environ,
+        JAX_PLATFORMS="cuda,cpu",
+        CUDA_VISIBLE_DEVICES=os.environ.get("MATRIX_GPU", "0"),
+    )
     rows = []
     for model, sym, D, chi, seed in POINTS:
         name = f"{model}_{sym}_D{D}_chi{chi}_s{seed}"
