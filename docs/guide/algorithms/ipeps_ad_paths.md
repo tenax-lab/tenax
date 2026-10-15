@@ -346,6 +346,10 @@ compiled program that took 1 s or more to compile to disk, and a later
 process that compiles the same program loads it from there instead.  The
 default directory is `~/.cache/jax`; to use another one, set
 `JAX_COMPILATION_CACHE_DIR` in the environment before Python starts.
+JAX loads the cached programs and runs them without checking where they
+came from, so anyone who can write to the cache directory can run code in
+your process.  Do not point it at a directory that an untrusted user can
+write to, such as a shared scratch area.
 
 The cache can help the second and later runs only.  It does not shorten the
 first compile of a program, and nothing else does: ahead-of-time
@@ -381,6 +385,9 @@ bound the directory, install `filelock` (not a tenax dependency) and set a
 limit in bytes after `import tenax` and before the first compile:
 
 ```python
+import jax
+import tenax
+
 jax.config.update("jax_compilation_cache_max_size", 20 * 2**30)  # 20 GiB
 ```
 
