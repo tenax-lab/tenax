@@ -644,7 +644,12 @@ jobs:
             )
           fi
           echo "Pinning jax==$PIN jaxlib==$PIN"
-          uv pip install "jax==$PIN" "jaxlib==$PIN"
+          # Re-resolve the whole project under the pin, not just jax/jaxlib:
+          # the synced optax (0.2.8 needs jax>=0.5.3) must be swapped for one
+          # that accepts the pin, or the job tests an environment no user can
+          # resolve.
+          uv pip install -e ".[dev]" "jax==$PIN" "jaxlib==$PIN"
+          uv pip check
           echo "JAX_PIN=$PIN" >> "$GITHUB_ENV"
 
       # ``--no-sync`` throughout: a plain ``uv run`` re-syncs the environment
