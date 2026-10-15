@@ -44,6 +44,27 @@
   default pipeline.  Results are unchanged (D=2 U(1) `dE/denv`: maximum
   difference 1.4e-17).
 
+- **Block-sparse `fuse_indices` and `split_index` emit no scatter**
+  (`_tensor_utils.py`; #566).  `fuse_indices` on a `SymmetricTensor` built
+  each fused block with one `.at[].set` scatter per input block.  It now
+  joins the sub-blocks of a fused block with one `concatenate`.  Legs whose
+  charges are not grouped by sector also get one fixed permutation (a
+  `take`; its backward is the only scatter left, one per reordered block).
+  `split_index` takes static slices where
+  the layout is contiguous.  Blocks are bit-identical to the old
+  implementation.  U(1) D=3 chi=9 `dE/denv`, before / after, measured side
+  by side:
+
+  | | before | after |
+  |---|---|---|
+  | jaxpr equations | 496,986 | 320,738 |
+  | `scatter` | 31,392 | 0 |
+  | compile, unfused | 1165 s | 967 s |
+  | warm run | 80.3 ms | 67.6 ms |
+
+  The remaining equations are the per-block-pair reshapes, transposes and
+  dots of the contractions themselves.
+
 - **Metric preconditioning is turned off for fermionic input** (#1059
   finding 27).  `gs_metric_precond` (on by default) builds its norm matrix
   with the sign-free contractor and `.todense()`, so on fermionic tensors it

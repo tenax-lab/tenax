@@ -273,6 +273,7 @@ _FILE_MARKERS = {
     "test_vjp_cache_key_1049.py": "algorithm",
     "test_blocks_cache_tracer_1103.py": "core",
     "test_block_sparse_jit.py": "core",
+    "test_fuse_indices_concat.py": "core",
     "test_block_sparse_jit_numerics.py": "algorithm",
     # The implicit-AD forward jits its energy and replays the RDM checks (~60s).
     "test_jit_forward_energy.py": "algorithm",
