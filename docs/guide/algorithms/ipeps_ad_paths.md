@@ -391,9 +391,16 @@ import tenax
 jax.config.update("jax_compilation_cache_max_size", 20 * 2**30)  # 20 GiB
 ```
 
-JAX then evicts the least recently used entries.  To turn the cache off,
-call `jax.config.update("jax_enable_compilation_cache", False)` at the
-same point.  JAX reads both settings once, at the first compile.
+JAX then evicts the least recently used entries.  Set the limit on an empty
+or new directory: entries written without a limit lack the access-time files
+that eviction reads, so on an existing unbounded cache the eviction fails
+with `FileNotFoundError` (JAX reports it as a warning) and the limit is not
+applied.
+
+To turn the cache off, call
+`jax.config.update("jax_enable_compilation_cache", False)` after
+`import tenax` and before the first compile.  JAX reads both settings once,
+at the first compile.
 
 For a timing measurement, use an empty directory per run, so that a cached
 program does not appear as a fast compile.
