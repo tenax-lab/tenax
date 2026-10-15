@@ -28,15 +28,31 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 jax.config.update("jax_enable_x64", True)
 
-pytestmark = [
-    pytest.mark.skipif(
-        jax.default_backend() != "cpu", reason="the no-fusion variant is CPU-only"
-    ),
-    pytest.mark.skipif(
-        not _block_sparse_jit.JIT_TAKES_COMPILER_OPTIONS,
-        reason="jax.jit takes compiler_options from JAX 0.4.36",
-    ),
-]
+pytestmark = pytest.mark.skipif(
+    jax.default_backend() != "cpu", reason="the no-fusion variant is CPU-only"
+)
+
+# Below JAX 0.4.36 jax.jit has no compiler_options, so the two variants are
+# one jit object and there is no dispatch to test.  Only the tests named here
+# still run there.
+_ANY_JAX = {"test_a_large_symmetric_call_compiles_on_this_jax"}
+
+
+@pytest.fixture(autouse=True)
+def _needs_compiler_options(request):
+    if (
+        not _block_sparse_jit.JIT_TAKES_COMPILER_OPTIONS
+        and request.function.__name__ not in _ANY_JAX
+    ):
+        pytest.skip("jax.jit takes compiler_options from JAX 0.4.36")
+
+
+# Tests that check the unfused variant was used need a JAX whose XLA accepts
+# the option (0.6.0 on).  The fallback tests below run on every JAX.
+needs_no_fusion = pytest.mark.skipif(
+    not _block_sparse_jit.no_fusion_compiles(),
+    reason="XLA here rejects xla_disable_hlo_passes (JAX 0.4.36-0.5.3)",
+)
 
 
 @pytest.fixture(scope="module")
@@ -56,6 +72,7 @@ def any_size(monkeypatch):
 
 # Each test jits a fresh function: jit objects over one Python function share
 # a trace cache, so ``_cache_size()`` would count another test's traces.
+@needs_no_fusion
 def test_a_symmetric_call_takes_the_no_fusion_variant(u1_pair, any_size):
     f = block_sparse_jit(lambda t: _norm2(t))
     A, _ = u1_pair
@@ -76,6 +93,7 @@ def test_a_small_symmetric_state_keeps_the_default_pipeline(u1_pair):
     assert f.block_sparse._cache_size() == 0
 
 
+@needs_no_fusion
 def test_a_d3_graded_state_takes_the_no_fusion_variant():
     """A D=3 fermionic site has 16 blocks, under the block threshold, but its
     ``dE/denv`` runs 2.4x faster unfused (26.3 ms against 10.9 ms)."""
@@ -106,6 +124,7 @@ def gpu_default(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
 
 
+@needs_no_fusion
 def test_a_call_pinned_to_cpu_by_default_device_goes_unfused(
     d3_fermion_pair, gpu_default
 ):
@@ -117,6 +136,7 @@ def test_a_call_pinned_to_cpu_by_default_device_goes_unfused(
     assert f.dense._cache_size() == 0
 
 
+@needs_no_fusion
 def test_a_call_on_committed_cpu_arrays_goes_unfused(d3_fermion_pair, gpu_default):
     f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
     A, B = jax.device_put(d3_fermion_pair, jax.devices("cpu")[0])
@@ -125,6 +145,7 @@ def test_a_call_on_committed_cpu_arrays_goes_unfused(d3_fermion_pair, gpu_defaul
     assert f.dense._cache_size() == 0
 
 
+@needs_no_fusion
 @pytest.mark.filterwarnings("ignore:backend and device argument on jit is deprecated")
 @pytest.mark.parametrize("pin", ["device", "backend"])
 def test_a_jit_pinned_to_cpu_goes_unfused(d3_fermion_pair, gpu_default, pin):
@@ -164,6 +185,7 @@ def test_without_the_bond_dim_test_a_d3_graded_state_keeps_fusion(d3_fermion_pai
     assert f.block_sparse._cache_size() == 0
 
 
+@needs_no_fusion
 def test_without_the_bond_dim_test_a_many_sector_u1_state_goes_unfused():
     """A D=3 U(1) site has 35 blocks; its sweep VJP is faster unfused."""
     A, B = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
@@ -229,6 +251,7 @@ def test_a_closure_inside_an_outer_jit_takes_the_default_variant(u1_pair, any_si
     assert f.block_sparse._cache_size() == 0
 
 
+@needs_no_fusion
 def test_a_custom_vjp_backward_takes_the_no_fusion_variant(u1_pair, any_size):
     """The implicit-AD backward programs run inside a ``custom_vjp`` backward.
     ``jax.grad`` calls it outside any trace, so it gets the unfused variant."""
@@ -279,3 +302,55 @@ def test_the_forward_sweep_keeps_the_fused_pipeline():
     unfused, and ran 15.9 ms against 19.8 ms."""
     step = _make_jit_ctm_step(CHECKERBOARD_NEIGHBORS, "2x2")
     assert not hasattr(step, "block_sparse")
+
+
+@pytest.fixture
+def fresh_probe(monkeypatch):
+    """Forget the cached probe result, so the next large call probes again."""
+    monkeypatch.setattr(_block_sparse_jit, "_NO_FUSION_COMPILES", None)
+
+
+def test_a_large_symmetric_call_compiles_on_this_jax(d3_fermion_pair):
+    """On every JAX, whichever variant it picks: on 0.4.36-0.5.3 the unfused
+    one used to raise a protobuf RuntimeError."""
+    f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
+    out = f(*d3_fermion_pair)
+    assert np.isfinite(float(out))
+
+
+def test_a_rejected_fusion_option_falls_back_to_the_default(
+    d3_fermion_pair, fresh_probe, monkeypatch
+):
+    """An option XLA rejects at compile time, as 0.4.36-0.5.3 reject the
+    real one, must leave every call on the default pipeline."""
+    monkeypatch.setattr(
+        _block_sparse_jit, "BLOCK_SPARSE_COMPILER_OPTIONS", {"xla_not_an_option": "x"}
+    )
+    f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
+    out = f(*d3_fermion_pair)
+    assert np.isfinite(float(out))
+    assert f.dense._cache_size() == 1
+    assert f.block_sparse._cache_size() == 0
+    assert _block_sparse_jit.no_fusion_compiles() is False
+
+
+def test_the_probe_runs_once(d3_fermion_pair, fresh_probe, monkeypatch):
+    calls = []
+    real = _block_sparse_jit._probe_no_fusion
+    monkeypatch.setattr(
+        _block_sparse_jit, "_probe_no_fusion", lambda: calls.append(1) or real()
+    )
+    f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
+    f(*d3_fermion_pair)
+    f(*d3_fermion_pair)
+    assert len(calls) == 1
+
+
+def test_a_small_call_does_not_probe(u1_pair, fresh_probe, monkeypatch):
+    """The probe compiles a program; D=2 calls, which keep fusion anyway, must
+    not pay for it."""
+    monkeypatch.setattr(
+        _block_sparse_jit, "_probe_no_fusion", lambda: pytest.fail("probed")
+    )
+    f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
+    f(*u1_pair)

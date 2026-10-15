@@ -44,6 +44,27 @@
   default pipeline.  Results are unchanged (D=2 U(1) `dE/denv`: maximum
   difference 1.4e-17).
 
+- **Block-sparse `fuse_indices` and `split_index` emit no scatter**
+  (`_tensor_utils.py`; #566).  `fuse_indices` on a `SymmetricTensor` built
+  each fused block with one `.at[].set` scatter per input block.  It now
+  joins the sub-blocks of a fused block with one `concatenate`.  Legs whose
+  charges are not grouped by sector also get one fixed permutation (a
+  `take`; its backward is the only scatter left, one per reordered block).
+  `split_index` takes static slices where
+  the layout is contiguous.  Blocks are bit-identical to the old
+  implementation.  U(1) D=3 chi=9 `dE/denv`, before / after, measured side
+  by side:
+
+  | | before | after |
+  |---|---|---|
+  | jaxpr equations | 496,986 | 320,738 |
+  | `scatter` | 31,392 | 0 |
+  | compile, unfused | 1165 s | 967 s |
+  | warm run | 80.3 ms | 67.6 ms |
+
+  The remaining equations are the per-block-pair reshapes, transposes and
+  dots of the contractions themselves.
+
 - **Metric preconditioning is turned off for fermionic input** (#1059
   finding 27).  `gs_metric_precond` (on by default) builds its norm matrix
   with the sign-free contractor and `.todense()`, so on fermionic tensors it
@@ -531,6 +552,38 @@
   and a `SymmetricTensor` pair still takes the eager route bit-identically.
 
 ### Fixed
+
+- **The JAX floor is now `jax>=0.4.35`, the oldest version tenax imports
+  on** (#1105).  `pyproject.toml` declared `jax>=0.4.30`, but
+  `src/tenax/linalg.py` imports `jax.lax.linalg.SvdAlgorithm` (#691), which
+  exists only from 0.4.35, so `import tenax` failed on 0.4.30-0.4.34.  The
+  floor of `dependencies` and of every accelerator extra is raised.  The
+  `cuda13` and `cuda13-local` extras get `jax>=0.7.0`, the first JAX that
+  defines those extras; an older JAX skips them with only a warning and
+  installs no CUDA 13 plugin.  On
+  0.4.35 the tensor, contraction, linalg, SVD, DMRG and block-sparse-jit
+  tests pass (306 passed, 20 skipped).
+
+- **The block-sparse no-fusion dispatch no longer raises on JAX
+  0.4.36-0.5.3** (#1102 follow-up).  `jax.jit` accepts `compiler_options` from
+  0.4.36, but XLA rejects `xla_disable_hlo_passes` as a string until 0.6.0
+  (`RuntimeError: ... Field is repeated`).  On those versions every D>=3
+  symmetric implicit-AD backward raised instead of compiling.  The dispatch
+  now compiles one scalar program with the option on the first call that
+  would go unfused, and if that fails every call keeps the default pipeline
+  (`no_fusion_compiles`).  Checked with real JAX 0.4.35, 0.4.36, 0.5.3, 0.6.0
+  and 0.10.2.
+
+- **`SymmetricTensor.blocks` no longer caches tracers on a concrete tensor**
+  (#1103).  The block dict is cached on the tensor the first time it is
+  read.  When that first read happened inside a `jax.jit` that closes over a
+  concrete tensor, the cached slices were tracers, and the next eager use of
+  the tensor raised `UnexpectedTracerError`.  It hit `ctm_energy_implicit`
+  with a `SymmetricTensor` gate, which the compiled energy programs close
+  over: `jax.grad` failed in the backward.  Slices are now cached only when
+  they are concrete or belong to the same trace as the tensor's data, so an
+  inner `jax.jit` over a tensor of an outer trace leaves no tracer either.
+  Eager reads, and repeated reads inside one trace, still use the cache.
 
 - **Hager-Zhang `phi` probes warm-start CTM from the step's env**
   (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
