@@ -339,6 +339,58 @@ Do not set `XLA_FLAGS=--xla_disable_hlo_passes=fusion` process-wide: that
 also drops fusion for the forward sweep and for every small eager operation.
 In one measurement it doubled the setup time, 582 s to 1249 s.
 
+#### Persistent compilation cache
+
+`import tenax` turns on JAX's persistent compilation cache.  JAX writes each
+compiled program that took 1 s or more to compile to disk, and a later
+process that compiles the same program loads it from there instead.  The
+default directory is `~/.cache/jax`; to use another one, set
+`JAX_COMPILATION_CACHE_DIR` in the environment before Python starts.
+
+The cache can help the second and later runs only.  It does not shorten the
+first compile of a program, and nothing else does: ahead-of-time
+compilation (`jit(...).lower(...).compile()`) is the same compile at an
+earlier time.
+
+Loading a cached program is not free, and on CPU a large block-sparse
+program costs most of a compile to load.  Measured on CPU, U(1) `dE/denv`
+unfused (#1109 code, 16 cores); the load times are confirmed cache hits in
+the JAX debug log:
+
+| D, chi | first compile | load from cache |
+|---|---|---|
+| 2, 8 | 15.7 s | 6.2 s, 6.3 s |
+| 3, 9 | 1048 s | 828 s, 872 s |
+
+So do not count on the cache to remove the compile wall of a D>=3 symmetric
+gradient on CPU: a repeat run saves about a fifth of it.  The cache also
+stores the many small eager programs of the forward CTM; with it, the
+setup of the D=3 run took 531-534 s against 700 s.  GPU is not measured.
+
+The cache key is the compiled program, so a run misses the cache when any
+of these changes:
+
+- D, chi, the symmetry or the unit cell;
+- the charge layout of a CTM chi leg, which sets the block shapes;
+- the tenax code that builds the program;
+- the JAX or jaxlib version, the backend, or the compiler options.
+
+The cache has no size limit by default and nothing removes old entries.
+One development machine had 32 GB in 25,555 entries, the largest 1.7 GB.  To
+bound the directory, install `filelock` (not a tenax dependency) and set a
+limit in bytes after `import tenax` and before the first compile:
+
+```python
+jax.config.update("jax_compilation_cache_max_size", 20 * 2**30)  # 20 GiB
+```
+
+JAX then evicts the least recently used entries.  To turn the cache off,
+call `jax.config.update("jax_enable_compilation_cache", False)` at the
+same point.  JAX reads both settings once, at the first compile.
+
+For a timing measurement, use an empty directory per run, so that a cached
+program does not appear as a fast compile.
+
 ### Path 3: 2-site Shared-Tensor C4v (Checkerboard AFM)
 
 For antiferromagnetic models on the square lattice where the Néel order is
