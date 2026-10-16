@@ -18,6 +18,12 @@
   Gradients agree with the previous solver to the solve tolerance, not bit
   for bit. Measured on CPU, D=2 chi=8 U(1), first gradient with
   `adjoint_method="gmres"`: 3,729 s -> 1,188 s.
+  The new solver also solves some flowing-projector adjoints that JAX's GMRES
+  stalled on, so `projector_backward="flow"` (the default under `bond_phase`)
+  is now accepted in cases where it used to fall back to frozen projectors.
+  On a non-stationary forward that flow gradient can be badly wrong (measured:
+  the D=2 #1028 fixture), and main already accepted such a gradient at D=3
+  chi=12; this is tracked in #1111.
 
 - **Block-sparse CTM-AD backward programs compile without XLA's CPU fusion
   pass from D=3** (`_block_sparse_jit.py`; #566).  A `SymmetricTensor`

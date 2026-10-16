@@ -263,3 +263,20 @@ Properties:
 | `_jit_dE_denv` on `fixed_point` | 48 s | not compiled |
 | first gradient, `gmres` | 3,729 s | 1,188 s |
 | first gradient, `fixed_point` | 1,349 s | 1,237 s |
+
+## Decision after review (2026-10-16)
+
+The #1028 flow/frozen retry code is unchanged, but its outcome changes: the
+new solver solves flow adjoints that JAX's GMRES stalled on, so the flow
+gradient is now accepted where it used to fall back to frozen. The maintainer
+approved shipping with the #1028 test rewritten (starved solve to exercise the
+fallback, plus a strict xfail pinning the wrong gradient) and tracking the
+flow-acceptance policy in #1111.
+
+| fixture | main returns | branch returns | flow FD error |
+|---|---|---|---|
+| D=2 #1028, max_iter=20 | frozen | flow | 1497/39 |
+| D=2, max_iter=30 | frozen | flow | 7128/48 |
+| D=3 chi=12, max_iter=20 | flow | flow | 86/25 |
+| D=2 limit cycle chi=4, max_iter=20 | frozen | flow | 0.014/0.005 |
+| random 1-site D=2 (5 seeds) | flow | flow | 0-0.76 |

@@ -342,9 +342,11 @@ In one measurement it doubled the setup time, 582 s to 1249 s.
 The GMRES adjoint (`adjoint_method="gmres"`, and the fallback when the fused
 Neumann loop does not converge) compiles the sweep VJP once, like the fused
 module.  JAX's own GMRES applied it at three places in one program, and XLA
-compiled each one; the solver tenax uses instead applies it at one.  At D=3
-the fallback is the common case near a slowly converging forward fixed point,
-so this is most of the backward compile there.
+compiled each one; the solver tenax uses instead applies it at one.  Measured
+on CPU at D=2 chi=8 (U(1)), the first gradient with `adjoint_method="gmres"`
+dropped from 3,729 s to 1,188 s.  At D=3 the fallback is common near a slowly
+converging forward; one D=3 chi=16 run spent 12,357 s compiling it before this
+change (not re-measured).
 
 #### Persistent compilation cache
 
