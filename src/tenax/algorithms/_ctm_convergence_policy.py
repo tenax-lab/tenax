@@ -39,6 +39,12 @@ class CTMConvergeInfo(NamedTuple):
     # near -1 flags a two-state cycle (retry with ``mixing > 0``), 0 < rho < 1
     # a slow contraction.  NaN when not measurable (``conv_method="sv"``).
     step_multiplier: float = float("nan")
+    # False when the symmetric chi-leg layout phase (#1098) ended without
+    # certifying the returned layout as a global top-chi cut: the eager phase
+    # hit its cap or a two-cycle, or the end-of-call check still failed.
+    # ``converged`` is the loop's sv verdict and can be True then.  True when
+    # no layout check runs (dense envs, ``eager_layout_sweeps=0``).
+    layout_certified: bool = True
 
 
 class GradientForwardInfo(NamedTuple):

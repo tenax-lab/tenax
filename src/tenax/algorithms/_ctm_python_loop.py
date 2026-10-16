@@ -917,6 +917,8 @@ def python_loop_ctm_converge(
     eager_budget = min(eager_layout_sweeps, max_iter - warmup)
     layout_phase = eager_budget > 0 and _needs_eager_layout_phase(site_tensors, envs)
     outcome = "stable"
+    # #1098: False on every branch below that warns the layout is uncertified.
+    layout_certified = True
     if layout_phase:
         compare_input = env_init is not None and _chi_layout(envs) != _cold_init_layout(
             site_tensors, chi_current
@@ -950,6 +952,8 @@ def python_loop_ctm_converge(
                 **sweep_kwargs,
             )
             pre += eager
+            if outcome != "stable":
+                layout_certified = False
             if outcome == "cycle":
                 warnings.warn(
                     "python_loop_ctm_converge: the symmetric chi-leg layout "
@@ -978,6 +982,7 @@ def python_loop_ctm_converge(
         elif not probed:
             # The rejected probe used up the budget; nothing certified it.
             outcome = "cap"
+            layout_certified = False
             warnings.warn(
                 "python_loop_ctm_converge: the iteration budget "
                 f"(max_iter={max_iter}) ended the layout phase after a probe "
@@ -1074,6 +1079,7 @@ def python_loop_ctm_converge(
                 certified = True
                 break
         if not certified and checked:
+            layout_certified = False
             warnings.warn(
                 "python_loop_ctm_converge: the returned symmetric chi-leg "
                 f"layout failed the end-of-call layout check after {reentries} "
@@ -1096,6 +1102,7 @@ def python_loop_ctm_converge(
         final_chi=result.final_chi,
         best_iteration=total - (result.iterations - result.best_iteration),
         step_multiplier=result.step_multiplier,
+        layout_certified=layout_certified,
     )
 
 
