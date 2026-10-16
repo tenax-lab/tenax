@@ -8,9 +8,12 @@
   backward's GMRES (`adjoint_method="gmres"`, and the fallback when the fused
   Neumann loop does not converge) used JAX's GMRES, whose program inlines the
   matvec at three call sites, and compiled a fourth standalone copy to choose
-  the seed and measure the residual. A new single-matvec GMRES does the seed
-  choice, the solve and the residual measurement in one program with one call
-  site, and the fixed-point path no longer compiles a separate `dE/denv`.
+  the seed and measure the residual (measured in the compiled HLO: four call
+  sites, and 2.42M instructions after XLA inlining, 2.8x the standalone
+  matvec's 852k). A new single-matvec GMRES does the seed choice, the solve
+  and the residual measurement in one program with one call site, and
+  `adjoint_method="fixed_point"` no longer compiles a separate `dE/denv` (the
+  `gmres` path still does).
   Gradients agree with the previous solver to the solve tolerance, not bit
   for bit. Measured on CPU, D=2 chi=8 U(1), first gradient with
   `adjoint_method="gmres"`: 3,729 s -> 1,188 s.
