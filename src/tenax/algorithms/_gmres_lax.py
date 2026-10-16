@@ -366,7 +366,14 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
       breakdown) the triangular solve and the update of ``x``.
 
     Every exit passes through ``_RESID``, so the returned ``abs_resid`` is the
-    measured ``||b - A x||`` of the returned ``x``, never an estimate.
+    measured ``||b - A x||`` of the returned ``x``, never an estimate.  The one
+    exception: if a ``_RESID`` residual is non-finite before any finite
+    residual of the operator has been measured (the operator produced NaN/inf),
+    the best iterate is returned but ``abs_resid`` is NaN, so the solve fails
+    closed (``best_res`` would then be the assumed ``||b||`` of ``x = 0``,
+    which was never measured).  A later non-finite cycle (e.g. a singular
+    system) keeps the best *measured* pair.  A non-finite *seed* candidate
+    residual does not set this: a bad warm start must not poison a good solve.
 
     Args:
         matvec: pytree -> pytree, the operator ``A``.
@@ -452,7 +459,10 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
         "j": jnp.int32(0),
         "cycles": jnp.int32(0),
         "done": jnp.array(False),
-        "abs_resid": jnp.asarray(jnp.inf, rdtype),
+        "nonfinite": jnp.array(False),
+        # True once any finite residual of the operator has been measured, so
+        # ``best_res`` is a measured value and not the assumed ``||b||``.
+        "measured": jnp.array(False),
     }
 
     def seed(s, y):
@@ -468,6 +478,7 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
             "k": k1,
             "best_x": best_x,
             "best_res": best_res,
+            "measured": s["measured"] | jnp.isfinite(res),
             "x": jnp.where(last, best_x, s["x"]),
             "v_in": jnp.where(last, best_x, nxt),
             "phase": jnp.where(last, _RESID, _SEED).astype(jnp.int32),
@@ -476,7 +487,8 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
     def resid(s, y):
         r = b - y
         rn = norm(r)
-        done = (rn <= thresh) | (s["cycles"] >= maxiter) | ~jnp.isfinite(rn)
+        bad = ~jnp.isfinite(rn)
+        done = (rn <= thresh) | (s["cycles"] >= maxiter) | bad
         v0 = r / jnp.where(rn > 0, rn, 1).astype(dtype)
         # Best *measured* iterate (strict <; NaN never wins): a bad cycle
         # must not replace a better x, and (x, abs_resid) stays a measured pair.
@@ -485,7 +497,8 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
             **s,
             "best_x": jnp.where(better, s["x"], s["best_x"]),
             "best_res": jnp.where(better, rn, s["best_res"]),
-            "abs_resid": rn,
+            "nonfinite": s["nonfinite"] | (bad & ~s["measured"]),
+            "measured": s["measured"] | ~bad,
             "done": done,
             "V": jnp.zeros_like(s["V"]).at[0].set(v0),
             "H": jnp.zeros_like(s["H"]),
@@ -567,4 +580,5 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
         return lax.switch(s["phase"], (seed, resid, arnoldi), s, y)
 
     out = lax.while_loop(lambda s: ~s["done"], body, state0)
-    return unflatten(out["best_x"]), out["best_res"], b_norm
+    abs_resid = jnp.where(out["nonfinite"], jnp.nan, out["best_res"])
+    return unflatten(out["best_x"]), abs_resid, b_norm

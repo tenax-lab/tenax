@@ -175,7 +175,18 @@ def test_nan_matvec_terminates_and_fails_closed():
             nan_matvec, bb, [bb], tol=1e-10, maxiter=50, restart=5
         )
     )((b,))
+    assert np.all(np.isfinite(np.asarray(x[0])))
+    assert np.isnan(float(res))
     assert not _adjoint_converged(float(res), float(bn), 1e-10)
+
+
+def test_nan_seed_candidate_does_not_poison_a_healthy_solve():
+    A, b = _system("well")
+    bad = jnp.full((N,), jnp.nan)
+    x, res, bn = _solve(A, b, [bad], tol=1e-10, maxiter=20, restart=N)
+    assert np.all(np.isfinite(x))
+    assert np.isfinite(res)
+    assert _adjoint_converged(res, bn, 1e-10)
 
 
 def test_multi_leaf_pytree():

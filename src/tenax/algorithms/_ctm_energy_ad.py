@@ -69,9 +69,9 @@ def _adjoint_converged(residual: float, b_norm: float, tol: float) -> bool:
 
     Two things this must get right.
 
-    *The criterion.*  ``gmres_pytree_jax`` configures JAX GMRES with
-    ``tol=tol, atol=tol``, and that solver stops at
-    ``‖r‖ <= max(tol·‖b‖, atol)``.  Gating on the relative residual alone
+    *The criterion.*  The eager adjoint solver ``gmres_single_matvec`` stops at
+    ``‖r‖ <= max(tol·‖b‖, tol)`` (the same rule JAX GMRES gets from
+    ``tol=tol, atol=tol``).  Gating on the relative residual alone
     (``‖r‖/‖b‖ <= tol``) is a *stricter* test, so whenever ``‖b‖ < 1`` the
     solver can legitimately stop above the gate and be reported as a failure.
     ``‖b‖`` is O(1) on this path (measured 1.285 on the D=2 chi=8 fixture), so
@@ -1786,9 +1786,12 @@ def _make_implicit_vjp_fn(
         evaluated a chain rule it threw away.
 
         ``init_lam`` is the warm-start seed for the Neumann iteration
-        (shape-matched to ``dE_denv``).  Cold start passes ``dE_denv``
-        itself; subsequent calls pass the previous ``lam_final`` so the
-        loop converges in fewer iterations (#501).
+        (shape-matched to ``dE_denv``).  On a cold start the caller passes
+        zeros with ``use_init=False`` and the program seeds the iteration
+        from its own ``dE_denv``; subsequent calls pass the previous
+        ``lam_final`` with ``use_init=True`` so the loop converges in fewer
+        iterations (#501).  ``use_init`` is a traced bool, so warm and cold
+        calls share one compiled program.
 
         Returns
         -------
@@ -1810,9 +1813,6 @@ def _make_implicit_vjp_fn(
             loop's ``diff`` is the *same step vector* in an ℓ1-of-ℓ2 sum over
             leaves; reporting that instead would not be comparable to
             anything.
-        dE_denv : tuple of leaves
-            The RHS, returned so the GMRES fallback does not recompute it.
-
             Free because the Neumann step *is* the residual,
 
                 λ_{k+1} - λ_k = b + Jᵀλ_k - λ_k = b - (I - Jᵀ)λ_k
@@ -1832,6 +1832,8 @@ def _make_implicit_vjp_fn(
             certificate for ``λ_final``.  It is not load-bearing for
             correctness: nothing gates on it, and the branch that returns it
             has already met ``diff <= gmres_tol`` (see the caller).
+        dE_denv : tuple of leaves
+            The RHS, returned so the GMRES fallback does not recompute it.
         """
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
