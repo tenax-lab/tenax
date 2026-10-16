@@ -309,6 +309,26 @@ def gate_s5(
     return all(gated.values()), parts
 
 
+def layout_recurred(keys) -> bool:
+    """True when a chi layout comes back after another one was visited.
+
+    ``keys`` is the S5 layout-key sequence in order (each stage's seed key,
+    then that stage's change keys).  ``None`` (no key recorded) is skipped,
+    and a key equal to the one just before it is a continuation (a stage
+    seeded on the layout the previous stage ended on), not a return.
+    Recorded, not gated.
+    """
+    seen, prev = set(), None
+    for k in keys:
+        if k is None or k == prev:
+            continue
+        if k in seen:
+            return True
+        seen.add(k)
+        prev = k
+    return False
+
+
 def gate_s1(diff, viol, nonempty, viol_tol=VIOL_TOL):
     """S1 (rulings R25, R26).
 
@@ -596,6 +616,9 @@ def run_point(
         layouts, stages = [st["seed"].layout], 0
         A, B, envs_init = st["A"], st["B"], st["seed"].envs_init
         hist_all, ctm_conv_all, layout_changes_all = [], [], []
+        # Per stage: the seed's layout key and each change's (final-review
+        # I2), so a flip-flop A -> B -> A is visible.  Recorded, not gated.
+        layout_seed_keys_all, layout_change_keys_all = [], []
         while True:
             stages += 1
             cfg = _s5_config(D, chi, opt_steps)
@@ -610,6 +633,8 @@ def run_point(
             if ctm_conv is not None:
                 ctm_conv_all.append([bool(c) for c in ctm_conv])
             layout_changes_all.append(list(hist.get("layout_changes") or []))
+            layout_seed_keys_all.append(hist.get("layout_seed_key"))
+            layout_change_keys_all.append(list(hist.get("layout_change_keys") or []))
             _log(f"S5 stage {stages}: optimizer done, {len(hist['energies'])} steps")
             drift = symmetric_layout_seed(A, B, gate, _ctm(chi))
             if same_layout(drift.layout, layouts[-1]) or stages >= MAX_STAGES:
@@ -662,6 +687,18 @@ def run_point(
                 "E_min": e_min,
                 "bound": bound,
                 "layout_changes": layout_changes_all,
+                "layout_seed_keys": layout_seed_keys_all,
+                "layout_change_keys": layout_change_keys_all,
+                "n_layout_changes": sum(len(c) for c in layout_changes_all),
+                "layout_recurred": layout_recurred(
+                    [
+                        k
+                        for seed_key, changes in zip(
+                            layout_seed_keys_all, layout_change_keys_all, strict=True
+                        )
+                        for k in (seed_key, *changes)
+                    ]
+                ),
                 "E_returned": E_ret,
                 "E_cold": e_cold,
                 "E_warm": e_warm,

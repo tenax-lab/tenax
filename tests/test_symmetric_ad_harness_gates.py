@@ -389,3 +389,30 @@ def test_oracle_runs_and_marks_validity(monkeypatch):
 def test_oracle_error_marks_invalid(monkeypatch):
     rec, _ = _record(monkeypatch, False, SYM_DIAG, raises=True)
     assert rec["oracle_valid"] is False and "RuntimeError" in rec["oracle_error"]
+
+
+# --- S5 layout flip-flop (final-review I2): recorded, not gated -------------
+
+
+def test_layout_recurred_sees_a_return_to_an_earlier_layout():
+    f = pipeline.layout_recurred
+    # A -> B -> A: the seed's layout comes back.
+    assert f(["A", "B", "A"]) is True
+    # A -> B -> C -> B: a change's layout comes back.
+    assert f(["A", "B", "C", "B"]) is True
+    # All distinct: no recurrence.
+    assert f(["A", "B", "C"]) is False
+    assert f(["A"]) is False
+    assert f([]) is False
+
+
+def test_layout_recurred_ignores_a_repeat_with_nothing_between():
+    # A stage seed equal to the previous stage's last layout continues it.
+    assert pipeline.layout_recurred(["A", "B", "B", "C"]) is False
+    assert pipeline.layout_recurred(["A", "B", "B", "A"]) is True
+
+
+def test_layout_recurred_skips_missing_keys():
+    # A stage without a re-check records no seed key (None).
+    assert pipeline.layout_recurred([None, "A", None, "B"]) is False
+    assert pipeline.layout_recurred(["A", None, "B", None, "A"]) is True
