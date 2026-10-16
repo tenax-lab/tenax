@@ -414,5 +414,5 @@ def test_layout_recurred_ignores_a_repeat_with_nothing_between():
 
 def test_layout_recurred_skips_missing_keys():
     # A stage without a re-check records no seed key (None).
-    assert pipeline.layout_recurred([None, "A", None, "B"]) is False
+    assert pipeline.layout_recurred([None, "A", None, "B", None]) is False
     assert pipeline.layout_recurred(["A", None, "B", None, "A"]) is True
