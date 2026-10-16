@@ -401,6 +401,24 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
     if m < 1:
         raise ValueError(f"restart must be >= 1, got {restart}")
 
+    # Fail closed on a real problem with complex data: ``.astype`` would drop
+    # the imaginary part and certify a residual that is not the true one.
+    if not jnp.issubdtype(dtype, jnp.complexfloating):
+        out_shapes = jax.eval_shape(matvec, b_tree)
+        if any(
+            jnp.issubdtype(leaf.dtype, jnp.complexfloating)
+            for leaf in jax.tree.leaves(out_shapes)
+        ):
+            raise TypeError("gmres_single_matvec: b is real but matvec returns complex")
+        for c in candidates:
+            if c is not None and any(
+                jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.complexfloating)
+                for leaf in jax.tree.leaves(c)
+            ):
+                raise TypeError(
+                    "gmres_single_matvec: b is real but a candidate is complex"
+                )
+
     def apply(v):
         return flatten(matvec(unflatten(v))).astype(dtype)
 
@@ -460,8 +478,13 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
         rn = norm(r)
         done = (rn <= thresh) | (s["cycles"] >= maxiter) | ~jnp.isfinite(rn)
         v0 = r / jnp.where(rn > 0, rn, 1).astype(dtype)
+        # Best *measured* iterate (strict <; NaN never wins): a bad cycle
+        # must not replace a better x, and (x, abs_resid) stays a measured pair.
+        better = rn < s["best_res"]
         return {
             **s,
+            "best_x": jnp.where(better, s["x"], s["best_x"]),
+            "best_res": jnp.where(better, rn, s["best_res"]),
             "abs_resid": rn,
             "done": done,
             "V": jnp.zeros_like(s["V"]).at[0].set(v0),
@@ -544,4 +567,4 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
         return lax.switch(s["phase"], (seed, resid, arnoldi), s, y)
 
     out = lax.while_loop(lambda s: ~s["done"], body, state0)
-    return unflatten(out["x"]), out["abs_resid"], b_norm
+    return unflatten(out["best_x"]), out["best_res"], b_norm

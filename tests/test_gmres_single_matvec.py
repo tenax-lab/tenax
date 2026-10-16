@@ -265,3 +265,37 @@ def test_the_counter_sees_jax_gmres_call_sites():
 def test_the_solver_applies_the_matvec_at_exactly_one_site():
     assert _jaxpr_call_sites(_new) == 1
     assert _stablehlo_call_sites(_new) == 1
+
+
+def test_a_singular_system_never_returns_worse_than_the_seed():
+    """No exact solution (b has a null-space component): a Krylov cycle can
+    blow up on a near-zero pivot.  The returned x must still be the best
+    measured iterate, never worse than the seed or zero."""
+    A = jnp.diag(jnp.asarray([1.0, 2.0, 3.0, 0.0, 0.0, 0.0]))
+    b = jnp.asarray([1.0, 1.0, 1.0, 1.0, 0.0, 0.0])
+    seed = jnp.asarray([1.0, 0.5, 1.0 / 3.0, 0.0, 0.0, 0.0])  # exact on range
+    seed_res = float(jnp.linalg.norm(b - A @ seed))
+    for restart in (3, 6):
+        x, res, bn = jax.jit(
+            lambda bb, cc, r=restart: gmres_single_matvec(
+                _mv(A), bb, list(cc), tol=1e-12, maxiter=10, restart=r
+            )
+        )((b,), ((seed,),))
+        xv = np.asarray(x[0])
+        assert np.all(np.isfinite(xv))
+        true = np.linalg.norm(np.asarray(b) - np.asarray(A) @ xv)
+        assert float(res) == pytest.approx(true, rel=1e-10)
+        assert float(res) <= seed_res * (1 + 1e-12)
+        assert float(res) <= float(bn)
+
+
+def test_real_rhs_with_complex_matvec_or_candidate_raises():
+    A, b = _system("well")
+    with pytest.raises(TypeError):
+        gmres_single_matvec(
+            _mv((1 + 1j) * A), (b,), [], tol=1e-10, maxiter=3, restart=4
+        )
+    with pytest.raises(TypeError):
+        gmres_single_matvec(
+            _mv(A), (b,), [(b.astype(jnp.complex128),)], tol=1e-10, maxiter=3, restart=4
+        )
