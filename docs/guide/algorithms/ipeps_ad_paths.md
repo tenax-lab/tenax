@@ -176,6 +176,16 @@ constants (#983). `"standard"` and `"lorentzian"` freeze them. `"auto"`
   `"flow"` or `"frozen_fallback"`.
 - The eager CTM forward is bit-identical either way — only the VJP changes.
 
+On a forward that is not a fixed point, a solved flowing adjoint can still
+give a gradient that is badly wrong (#1111). The backward therefore checks a
+flowing gradient there: it evaluates the energy once more along the
+gradient's descent direction and keeps the gradient only if the measured
+change is 0.5-2x the predicted one. Otherwise it falls back to frozen
+projectors. `get_last_implicit_ad_diagnostics()` reports the ratio as
+`flow_slope_ratio` and the reason as `flow_fallback_reason`. The check costs
+one extra forward CTM evaluation, and only on non-stationary forwards. For
+complex parameters it steps along `conj(G)`.
+
 **Why phase gauge works in backprop**: Each phase-gauge step is a
 Frobenius normalization plus a differentiable global-phase fix on each
 environment tensor. Applied inside the checkpointed unrolled graph, it

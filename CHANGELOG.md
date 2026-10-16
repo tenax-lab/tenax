@@ -4,6 +4,19 @@
 
 ### Behavior Changes
 
+- **Flowing-projector gradients are slope-checked on non-stationary forwards
+  (#1111).** A solved flowing adjoint can still give a gradient orders of
+  magnitude off on a forward that is not a fixed point (measured 1497x on the
+  #1028 fixture, 86x at D=3 chi=12). When the forward is not stationary, the
+  backward now evaluates the energy once more along the gradient's descent
+  direction and keeps the flowing gradient only if the measured change is
+  0.5-2x the predicted one; otherwise it falls back to frozen projectors with
+  the reason in `flow_fallback_reason` and the ratio in `flow_slope_ratio`.
+  Measured: garbage flowing gradients 0.000-0.002, good ones 0.97-1.24. Cost:
+  one extra forward CTM evaluation on non-stationary flowing steps; stationary
+  forwards are unchanged. For complex parameters the check steps along
+  `conj(G)`, JAX's descent convention.
+
 - **The eager-GMRES adjoint compiles the J^T matvec once.** The implicit-AD
   backward's GMRES (`adjoint_method="gmres"`, and the fallback when the fused
   Neumann loop does not converge) used JAX's GMRES, which applies the matvec

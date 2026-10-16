@@ -2449,6 +2449,17 @@ def _make_implicit_vjp_fn(
         1.6e-4.  A stationarity gate would trade flow for frozen exactly
         where frozen is no better.  The fallback targets the failure that is
         specific to flowing: an adjoint that cannot be solved at all.
+
+        A *solved* flowing adjoint is still not enough on a non-stationary
+        forward (#1111): the single-matvec GMRES solves adjoints JAX's GMRES
+        stalled on, and on the #1028 fixture the solved flowing gradient was
+        1497x off finite differences (86x at D=3 chi=12, already on main).
+        Neither stationarity nor the adjoint amplification separates those
+        from good flowing gradients; one extra forward evaluation along the
+        gradient's own descent direction does.  ``_flow_slope_check`` keeps
+        flow only if measured/predicted dE lies in [0.5, 2] (garbage
+        <= 0.002, good 0.97-1.24, frozen 1.00-1.54), and only spends that
+        forward when the forward was not stationary.
         """
         _F3_LAST_DIAGNOSTICS.pop("flow_adjoint_residual", None)
         _F3_LAST_DIAGNOSTICS.pop("flow_fallback_reason", None)
