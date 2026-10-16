@@ -206,6 +206,19 @@ def _drop_env_cache_for_reset(env_cache: dict) -> None:
     invalidate_implicit_ad_warm_start()
 
 
+def _layout_changed(old_envs, new_envs) -> bool:
+    """True when a step-boundary re-check returned a different chi layout.
+
+    ``None`` (no previous env) is never a change.  Module-level so tests can
+    script it.
+    """
+    if old_envs is None:
+        return False
+    from tenax.algorithms._ctm_python_loop import _chi_layout
+
+    return _chi_layout(old_envs) != _chi_layout(new_envs)
+
+
 def _should_restore_best_env(
     best_envs, chi, *, chi_max: int | None = None, in_ctm_growth: bool = False
 ) -> bool:
@@ -468,6 +481,17 @@ class _AcceptedProbeEval:
     def start(self) -> None:
         """Drop any probe left by an earlier line search."""
         self._probe = None
+
+    def discard(self) -> None:
+        """Drop the probe AND the result ``accept`` carried to the next step.
+
+        ``start`` leaves the carry alone (``take`` consumes it first in every
+        step).  A caller that changes the loss between ``accept`` and
+        ``take`` -- the 2-site layout re-check -- must drop the carry too, or
+        ``take`` hands back the old loss's value and gradient.
+        """
+        self._probe = None
+        self._carry = None
 
     def probe(self, loss_fn, alpha, trial, cfg):
         """``value_and_grad`` at the ``dφ`` trial point.
@@ -3733,6 +3757,51 @@ def _optimize_gs_ad_tensor_2site(
         # "norm_smallest_S"`` can match variPEPS's literal trigger.
         _env_cache_2s["max_smallest_S"] = float(info.max_smallest_S)
 
+    # Step-boundary layout re-check (layout-recheck plan; R32-R35): a seeded
+    # run freezes the seed's chi layout in every forward, and the frozen
+    # layout can stop being a top-chi cut as the tensors move -- the
+    # optimizer then follows a non-variational branch.  One warm,
+    # layout-adapting CTM call per step boundary moves the layout; the line
+    # search inside a step stays frozen so phi is one function of alpha.
+    # A dense seed has no chi layout (``_chi_layout`` is empty: it skips
+    # non-symmetric legs), so a re-check could never see a change -- it would
+    # only add one CTM to convergence per step.
+    from tenax.algorithms._ctm_python_loop import _chi_layout
+
+    _recheck_on = (
+        envs_init is not None
+        and config.gs_layout_recheck
+        and not use_split_2s
+        and bool(_chi_layout(envs_init))
+    )
+
+    def _recheck_layout_2s(params_) -> bool:
+        """Re-check the cached env's layout at ``params_``; True on a change.
+
+        An unconverged re-check is never acted on (its layout is not a
+        certified cut); ``_refresh_env_cache`` keeps the previous env then.
+        """
+        if use_c4v:
+            A_norm, B_norm = _c4v_AB(params_)
+        else:
+            A_p, B_p = params_
+            A_norm = A_p * (1.0 / (A_p.norm() + 1e-10))
+            B_norm = B_p * (1.0 / (B_p.norm() + 1e-10))
+        site_tensors = {(0, 0): A_norm, (1, 0): B_norm}
+        old = _env_cache_2s.get("envs", None)
+        envs, info = python_loop_ctm_converge(
+            site_tensors,
+            CHECKERBOARD_NEIGHBORS,
+            **ctm_converge_kwargs(ctm_cfg_2s, env_init=old),
+            layout_tie_rtol=config.gs_layout_tie_rtol,
+        )
+        changed = bool(info.converged) and _layout_changed(old, envs)
+        if changed:
+            # New shapes: the implicit-AD lambda seed is stale too.
+            _drop_env_cache_for_reset(_env_cache_2s)
+        _refresh_env_cache(_env_cache_2s, envs, info, ctm_cfg_2s, params_)
+        return changed
+
     params = c4v_coeffs if use_c4v else (A, B)
     is_metric_lbfgs = (
         config.gs_metric_precond
@@ -3850,6 +3919,8 @@ def _optimize_gs_ad_tensor_2site(
     _hist_ctm_sv_diff: list[float] = []
     _hist_ctm_mult: list = []
     _hist_ctm_stationarity: list[float] = []
+    # 1-based steps at which a step-boundary layout change was acted on.
+    _layout_changes: list[int] = []
     # The implicit-AD fused forward writes ``forward_converged``; the split
     # and explicit-AD paths do not, so skip the check (and the pop) there.
     _site1_check_2s = config.gs_implicit_ad and not use_split_2s
@@ -4182,6 +4253,42 @@ def _optimize_gs_ad_tensor_2site(
             if config.return_history:
                 _step_t0 = _time.perf_counter()
             try:
+                if _recheck_on and step > start_step and _recheck_layout_2s(params):
+                    _layout_changes.append(step + 1)
+                    # The HZ dphi evaluation carried from the last line search
+                    # was computed on the old layout: drop it so
+                    # value_and_grad runs on the new one.
+                    _ls_eval.discard()
+                    if is_metric_lbfgs:
+                        lbfgs_history.clear()
+                        prev_params_flat = None
+                        prev_grad_flat = None
+                    if is_cg:
+                        cg_direction = None
+                        prev_grad = None
+                        prev_precond_grad = None
+                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                        opt_state = optimizer.init(params)
+                    # Energies on different layouts are not comparable: the
+                    # old best may sit on the branch the old layout made.
+                    best_energy = float("inf")
+                    best_params = params
+                    # Never empty: a rollback must restore THIS layout, not
+                    # fall back to envs_init (_reset_env_cache_2s).
+                    best_env_cache_2s = dict(_env_cache_2s)
+                    # The next dE is across layouts.  prev_energy is kept
+                    # finite: the metric preconditioner takes |dE| as its
+                    # shift, and an infinite one zeroes the direction.
+                    _rolled_back = True
+                    recent_gnorms_2s.clear()
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD:2site-tensor] step {step + 1}/"
+                            f"{config.gs_num_steps} chi layout changed -- "
+                            "re-evaluating on the new layout, optimizer "
+                            "state cleared",
+                            flush=True,
+                        )
                 _reused = _ls_eval.take(params, ctm_cfg_2s)
                 _reused_diag = None
                 if _reused is not None:
@@ -5231,6 +5338,7 @@ def _optimize_gs_ad_tensor_2site(
                 "ctm_step_multiplier": _hist_ctm_mult,
                 "ctm_stationarity": _hist_ctm_stationarity,
                 "final_env_source": _final_env_source,
+                "layout_changes": _layout_changes,
             }
             return (A_final, B_final), (env_A, env_B), E_gs, history
         return (A_final, B_final), (env_A, env_B), E_gs

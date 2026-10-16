@@ -498,6 +498,7 @@ def _end_of_call_layout_check(
     renormalize: bool,
     projector_backward: str,
     budget: int | None = None,
+    tie_rtol: float = _PROBE_TIE_RTOL,
     **sweep_kwargs,
 ) -> tuple[bool, int]:
     """True when ``envs``'s chi layout is still a global top-``chi`` cut (#1098).
@@ -527,7 +528,7 @@ def _end_of_call_layout_check(
             probe=True,
         )
         if records:
-            return _probe_says_layout_is_eager(records), n
+            return _probe_says_layout_is_eager(records, rtol=tie_rtol), n
         if budget is not None and budget < 2:
             # No sweep left for the eager fallback: never run past
             # ``max_iter``.  Nothing certified the layout.
@@ -576,6 +577,7 @@ def python_loop_ctm_converge(
     forward_gauge: str | None = None,
     mixing: float = 0.0,
     eager_layout_sweeps: int = 20,
+    layout_tie_rtol: float = _PROBE_TIE_RTOL,
     _recipe_warning_emitted: bool = False,
     _end_of_call_check: bool = True,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
@@ -728,6 +730,14 @@ def python_loop_ctm_converge(
                            (``ctmrg_heuristic_increase_chi``) are padded
                            inside the jitted loop and keep a frozen layout
                            (follow-up issue to be filed).
+        layout_tie_rtol:   Tie tolerance of the probe that certifies a warm
+                           start's chi layout and of the end-of-call check,
+                           relative to the cut's largest value.  A dropped
+                           value at most this much above a kept one counts
+                           as a tie, so the layout is kept.  Default
+                           ``1e-10``; the optimizer's step-boundary re-check
+                           passes ``iPEPSConfig.gs_layout_tie_rtol`` (1e-8)
+                           as a hysteresis margin against mirror-layout flips.
 
     Returns:
         ``(envs, CTMConvergeInfo)`` — converged environments and info.
@@ -767,6 +777,10 @@ def python_loop_ctm_converge(
         raise ValueError(
             f"eager_layout_sweeps must be >= 0, got {eager_layout_sweeps!r}"
         )
+    if not (np.isfinite(layout_tie_rtol) and layout_tie_rtol >= 0.0):
+        raise ValueError(
+            f"layout_tie_rtol must be finite and >= 0, got {layout_tie_rtol!r}"
+        )
 
     # Reject ``ctmrg_heuristic_increase_chi`` + ``chi_ramp`` BEFORE the
     # chi_ramp early-return, otherwise the bump flag is silently ignored
@@ -802,6 +816,7 @@ def python_loop_ctm_converge(
             ctm_chunk_size=ctm_chunk_size,
             mixing=mixing,
             eager_layout_sweeps=eager_layout_sweeps,
+            layout_tie_rtol=layout_tie_rtol,
         )
 
     # Build the JIT'd step function (captures neighbors + device_mesh in closure)
@@ -919,7 +934,7 @@ def python_loop_ctm_converge(
             )
             # The probe sweep counts whether or not it certifies.
             pre += 1
-            if _probe_says_layout_is_eager(records):
+            if _probe_says_layout_is_eager(records, rtol=layout_tie_rtol):
                 envs = envs_p if _gauge_pair is None else _gauge_pair(envs_p, envs)
                 probed = True
         eager_budget = min(eager_layout_sweeps, max_iter - pre)
@@ -1024,6 +1039,7 @@ def python_loop_ctm_converge(
                 jit_step=jit_step,
                 chi=result.final_chi,
                 budget=max_iter - total,
+                tie_rtol=layout_tie_rtol,
                 **sweep_kwargs,
             )
             checked = True
@@ -1105,6 +1121,7 @@ def _python_loop_chi_ramp(
     ctm_chunk_size: int | None = None,
     mixing: float = 0.0,
     eager_layout_sweeps: int = 20,
+    layout_tie_rtol: float = _PROBE_TIE_RTOL,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM with chi-ramp schedule."""
     envs = env_init
@@ -1169,6 +1186,7 @@ def _python_loop_chi_ramp(
             ctm_chunk_size=ctm_chunk_size,
             mixing=mixing,
             eager_layout_sweeps=eager_layout_sweeps,
+            layout_tie_rtol=layout_tie_rtol,
         )
         prev_chi = stage_chi
 

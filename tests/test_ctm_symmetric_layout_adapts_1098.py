@@ -97,7 +97,11 @@ def _kwargs(chi, max_iter=1000, min_iter=10, conv_tol=1e-12, env_init=None):
 
 
 def _run(A, B, chi, **kw):
-    extra = {k: kw.pop(k) for k in ("eager_layout_sweeps", "recipe") if k in kw}
+    extra = {
+        k: kw.pop(k)
+        for k in ("eager_layout_sweeps", "recipe", "layout_tie_rtol")
+        if k in kw
+    }
     return python_loop_ctm_converge(
         {(0, 0): A, (1, 0): B}, CHECKERBOARD_NEIGHBORS, **_kwargs(chi, **kw), **extra
     )
@@ -262,6 +266,30 @@ def test_a_settled_warm_start_runs_no_eager_sweep_and_no_recompile(case, monkeyp
     _run(Ap, Bp, case.chi, env_init=envs2, max_iter=20)
     assert len(calls) == 0, (name, len(calls))
     assert step._cache_size() == n_compiled, (name, n_compiled, step._cache_size())
+
+
+def test_layout_tie_rtol_reaches_the_probe_and_the_end_of_call_check(case, monkeypatch):
+    """The warm-start probe and the end-of-call check both decide with the
+    caller's ``layout_tie_rtol``, not the module default."""
+    seen = []
+    real = cpl._probe_says_layout_is_eager
+
+    def _spy(records, rtol=cpl._PROBE_TIE_RTOL):
+        seen.append(rtol)
+        return real(records, rtol=rtol)
+
+    monkeypatch.setattr(cpl, "_probe_says_layout_is_eager", _spy)
+    _run(
+        case.A,
+        case.B,
+        case.chi,
+        env_init=case.envs,
+        max_iter=20,
+        layout_tie_rtol=3e-7,
+    )
+    # One warm-start probe plus at least one end-of-call check.
+    assert len(seen) >= 2, seen
+    assert set(seen) == {3e-7}, seen
 
 
 def test_a_warm_start_on_a_suboptimal_layout_is_caught_by_the_probe(case, monkeypatch):
