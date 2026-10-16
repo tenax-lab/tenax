@@ -162,6 +162,11 @@ Properties:
 - It also returns that vector, and the fallback uses it as `rhs`.
 - The fallback no longer needs `_eager_dE_denv()`, so `_jit_dE_denv` is not
   compiled on that path.
+- The fused branch also called `_eager_dE_denv()` for its cold-start seed.
+  The fused module therefore takes a traced `use_init` flag and seeds from
+  its own `dE_denv` when the flag is false, so the fixed-point path never
+  compiles `_jit_dE_denv`. The seed value is identical. (Ruling made while
+  planning.)
 - `adjoint_method="gmres"` still calls `_eager_dE_denv()`. It has no other
   source.
 
