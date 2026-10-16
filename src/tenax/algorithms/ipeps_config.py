@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import KW_ONLY, dataclass, field
 from typing import Literal, NamedTuple
 
@@ -776,6 +777,11 @@ class iPEPSConfig:
                                energies strictly below this value are
                                rejected as non-variational CTM artifacts.
                                ``None`` (default) disables the check.
+        gs_layout_recheck:     Seeded 2-site runs only: re-check the CTM
+                               chi-leg layout at every step boundary and
+                               restart the optimizer state when it changes.
+        gs_layout_tie_rtol:    Hysteresis margin of that re-check (relative
+                               to the cut's largest singular value).
     """
 
     max_bond_dim: int = 2
@@ -889,6 +895,17 @@ class iPEPSConfig:
     # candidate energy strictly below this value is rejected as a non-
     # variational CTM artifact (see issue #298).  None disables the check.
     gs_energy_floor: float | None = None
+    # Seeded (``envs_init``) 2-site runs: re-check the CTM chi-leg layout at
+    # the start of every optimizer step after the first, with one warm,
+    # layout-adapting CTM call.  On a change the step is evaluated on the new
+    # layout and the optimizer state (L-BFGS/CG history, best tracking) is
+    # cleared.  False keeps the seed's layout frozen for the whole run.
+    gs_layout_recheck: bool = True
+    # Hysteresis margin of that re-check, relative to the cut's largest
+    # singular value: a dropped value at most this much above a kept one is a
+    # tie and the layout is kept.  Measured partner noise <= 1.5e-15 s_max,
+    # closest real gap 5.6e-5 s_max (diag (j)).
+    gs_layout_tie_rtol: float = 1e-8
     # Implicit differentiation through the CTM fixed point (iterative VJP
     # backward).  The gauge is ``ctm.forward_gauge``, whose default
     # ``"auto"`` resolves to ``"bond_phase"`` on this path (fused, no
@@ -1149,6 +1166,13 @@ class iPEPSConfig:
             )
         if self.gs_resume and self.gs_checkpoint_path is None:
             raise ValueError("gs_resume=True requires gs_checkpoint_path to be set")
+        if not (
+            math.isfinite(self.gs_layout_tie_rtol) and self.gs_layout_tie_rtol >= 0.0
+        ):
+            raise ValueError(
+                "gs_layout_tie_rtol must be finite and >= 0, got "
+                f"{self.gs_layout_tie_rtol!r}"
+            )
         if self.gs_conv_criterion == "dE":
             warnings.warn(
                 "gs_conv_criterion='dE' is deprecated; it was the default "

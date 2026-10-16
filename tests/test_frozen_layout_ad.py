@@ -551,7 +551,7 @@ def seeded_d2():
     return A, B, H, 2, {(0, 0): eA, (1, 0): eB}
 
 
-def _ad_config(steps, **ctm):
+def _ad_config(steps, gs=None, **ctm):
     return iPEPSConfig(
         max_bond_dim=2,
         unit_cell="2site",
@@ -560,6 +560,7 @@ def _ad_config(steps, **ctm):
         gs_num_steps=steps,
         gs_verbose=False,
         ctm=CTMConfig(chi=CHI_D2, **{"max_iter": 50, "conv_tol": 1e-9, **ctm}),
+        **(gs or {}),
     )
 
 
@@ -931,6 +932,9 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
     confirmed to still exercise the L-BFGS stall path on this fixture (see
     the report's Fix round 1 section for whether it fired and how many
     calls were recorded).
+
+    Runs with ``gs_layout_recheck=False``: the step-boundary re-check may
+    move the layout by design; this test pins the frozen path.
     """
     A, B, H, d, envs = seeded_d2
     E0 = _E(A, B, envs, H, d)
@@ -950,7 +954,10 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
         # the #1059 reset fired and E1 (-0.53714) ended above E0 (-0.53767);
         # 150 still ended above E0 (-0.537567 vs -0.537672); 400 passes.
         (A1, B1), (_env_A1, _env_B1), E1 = optimize_gs_ad(
-            H, (A, B), _ad_config(5, max_iter=400), envs_init=envs
+            H,
+            (A, B),
+            _ad_config(5, gs={"gs_layout_recheck": False}, max_iter=400),
+            envs_init=envs,
         )
     seed_layout = _layout(envs)
     assert seen_layouts and all(lay == seed_layout for lay in seen_layouts)
@@ -958,6 +965,278 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
     assert tree((A1, B1)) == tree((A, B))  # site layout frozen
     assert E1 <= E0 + 1e-6, (E0, E1)
     assert E1 >= -8 / np.pi**2 - 1e-3  # V=0 free-fermion bound, one-sided only
+
+
+# ------------------------------------------------------------------ #
+# Step-boundary layout re-check (layout-recheck plan, Task 2)         #
+# ------------------------------------------------------------------ #
+
+
+def _caller():
+    import sys
+
+    return sys._getframe(2).f_code.co_name
+
+
+def test_layout_changed_compares_chi_layouts(seeded_d2, light_envs):
+    import tenax.algorithms._ctm_python_loop as cpl
+
+    *_, envs = seeded_d2
+    assert cpl._chi_layout(envs) != cpl._chi_layout(light_envs)  # regime
+    assert not ipo._layout_changed(None, envs)
+    assert not ipo._layout_changed(envs, envs)
+    assert ipo._layout_changed(light_envs, envs)
+
+
+def test_the_recheck_runs_unfrozen_with_the_configured_tie_rtol(seeded_d2, monkeypatch):
+    """Steps 2..N each run one re-check: warm (env_init = the cache the
+    previous step left), eager phase on (no ``eager_layout_sweeps=0``),
+    the configured tie tolerance.  Refresh and line-search probes stay
+    frozen.  ``layout_changes`` lists exactly the steps whose re-check
+    returned a different layout."""
+    import tenax.algorithms._ctm_python_loop as cpl
+
+    A, B, H, _d, envs = seeded_d2
+    real = cpl.python_loop_ctm_converge
+    calls = []
+
+    def _spy(*a, **kw):
+        out = real(*a, **kw)
+        calls.append((_caller(), kw, out))
+        return out
+
+    real_changed = ipo._layout_changed
+    verdicts = []
+
+    def _changed_spy(old, new):
+        v = real_changed(old, new)
+        verdicts.append(v)
+        return v
+
+    monkeypatch.setattr(cpl, "python_loop_ctm_converge", _spy)
+    monkeypatch.setattr(ipo, "_layout_changed", _changed_spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        *_, hist = optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(
+                3,
+                gs={"gs_layout_tie_rtol": 2e-8, "return_history": True},
+                max_iter=400,
+            ),
+            envs_init=envs,
+        )
+    rechecks = [kw for who, kw, _ in calls if who == "_recheck_layout_2s"]
+    assert len(rechecks) == 2, [who for who, *_ in calls]  # steps 2 and 3
+    for kw in rechecks:
+        assert kw["layout_tie_rtol"] == 2e-8
+        assert "eager_layout_sweeps" not in kw
+        assert kw["env_init"] is not None
+    frozen = [
+        kw for who, kw, _ in calls if who in ("_update_env_cache_2s", "loss_fn_fwd")
+    ]
+    assert frozen and all(kw.get("eager_layout_sweeps") == 0 for kw in frozen)
+    assert len(verdicts) == 2
+    assert hist["layout_changes"] == [k + 2 for k, v in enumerate(verdicts) if v]
+
+
+@pytest.mark.parametrize("metric", [True, False], ids=["metric_lbfgs", "optax_lbfgs"])
+def test_a_layout_change_resets_the_optimizer_state(seeded_d2, monkeypatch, metric):
+    """Script a change at the step-3 re-check (step 2 has an empty L-BFGS
+    history anyway, so a reset there proves nothing).  Then, before the
+    step-4 re-check: a fresh value_and_grad runs (the HZ reuse is dropped),
+    the L-BFGS state restarts, and best tracking restarts at +inf.
+
+    ``gs_metric_precond`` (default True) uses ``lbfgs_history`` and
+    ``lbfgs_two_loop``: the first two-loop call after the change must see an
+    empty history (no stale pairs, and no new pair built from the pre-change
+    params).  ``gs_metric_precond=False`` uses the optax optimizer: its
+    ``init`` must run again."""
+    import tenax.algorithms._metric_precond as mp
+
+    A, B, H, _d, envs = seeded_d2
+    events = []
+
+    def _changed(old, new):
+        v = len([e for e in events if e[0] == "check"]) == 1  # 2nd check = step 3
+        events.append(("check", v))
+        return v
+
+    real_vg = ipo._site1_value_and_grad
+
+    def _vg(*a, **kw):
+        events.append(("vg",))
+        return real_vg(*a, **kw)
+
+    real_build = ipo._build_optimizer
+
+    def _build(cfg):
+        opt = real_build(cfg)
+        if opt is None:
+            return None
+
+        def init(p):
+            events.append(("init",))
+            return opt.init(p)
+
+        return SimpleNamespace(init=init, update=opt.update)
+
+    real_two_loop = mp.lbfgs_two_loop
+
+    def _two_loop(g, history, h0):
+        events.append(("two_loop", len(history)))
+        return real_two_loop(g, history, h0)
+
+    real_accept = ipo._should_accept_best
+
+    def _accept(**kw):
+        events.append(("accept", kw["current_best"]))
+        return real_accept(**kw)
+
+    monkeypatch.setattr(ipo, "_layout_changed", _changed)
+    monkeypatch.setattr(ipo, "_site1_value_and_grad", _vg)
+    monkeypatch.setattr(ipo, "_build_optimizer", _build)
+    monkeypatch.setattr(mp, "lbfgs_two_loop", _two_loop)
+    monkeypatch.setattr(ipo, "_should_accept_best", _accept)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        *_, hist = optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(
+                4,
+                gs={"return_history": True, "gs_metric_precond": metric},
+                max_iter=400,
+            ),
+            envs_init=envs,
+        )
+    assert hist["layout_changes"] == [3]
+    i = events.index(("check", True))
+    nxt = events.index(("check", False), i)
+    window = events[i + 1 : nxt]
+    assert ("vg",) in window, events
+    accepts = [e for e in window if e[0] == "accept"]
+    assert accepts and accepts[0][1] == float("inf"), events
+    if metric:
+        # Regime: before the change the history was not empty, so an empty
+        # one after it is the reset, not the start of the run.
+        before = [e[1] for e in events[:i] if e[0] == "two_loop"]
+        assert before and before[-1] >= 1, events
+        loops = [e for e in window if e[0] == "two_loop"]
+        assert loops and loops[0][1] == 0, events
+    else:
+        assert ("init",) in window, events
+
+
+def test_an_unconverged_recheck_is_not_a_change(seeded_d2, monkeypatch):
+    """A re-check that does not converge is never acted on, even if its
+    layout differs."""
+    import tenax.algorithms._ctm_python_loop as cpl
+
+    A, B, H, _d, envs = seeded_d2
+    real = cpl.python_loop_ctm_converge
+
+    def _spy(*a, **kw):
+        out_envs, info = real(*a, **kw)
+        if _caller() == "_recheck_layout_2s":
+            info = info._replace(converged=False)
+        return out_envs, info
+
+    monkeypatch.setattr(cpl, "python_loop_ctm_converge", _spy)
+    monkeypatch.setattr(ipo, "_layout_changed", lambda old, new: True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        *_, hist = optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(3, gs={"return_history": True}, max_iter=400),
+            envs_init=envs,
+        )
+    assert hist["layout_changes"] == []
+
+
+def test_a_rollback_after_a_change_restores_the_new_layout(seeded_d2, monkeypatch):
+    """After an acted-on change, a rollback restores the re-checked env,
+    never the seed: ``_reset_env_cache_2s`` falls back to ``envs_init``
+    only when no best snapshot exists, and the change clears best tracking,
+    so the change itself must leave a snapshot.
+
+    The rollback is forced on the first gradient after the change (step 2),
+    before any best is accepted on the new layout -- the only point where
+    the change's own snapshot is what a rollback restores.  (The brief's
+    grad-spike version could not do this: the config refuses
+    ``gs_grad_spike_ratio <= 1``, and a step-3 rollback restores step 2's
+    accepted snapshot, whatever the change left.)
+
+    The step-3 re-check is warm from whatever the rollback restored, so it
+    tells whether the rollback fell back to the seed: its ``old`` env must
+    not be ``envs_init``.  The gradient forward gets ``env_cache["envs"]``
+    itself as ``env_init`` (``ipeps_ad_policy._ctm_energy_fn``), so no
+    forward after the change may be seeded with the seed object either.
+    ``make_ctm_energy_fn`` imports ``ctm_energy_implicit`` from
+    ``_ctm_energy_ad`` (``ea``) when the optimizer builds its loss, so
+    patching ``ea`` before the call is seen."""
+    from tenax.algorithms._ad_primitives import CTMRGGradientError
+
+    A, B, H, _d, envs = seeded_d2
+    events = []
+    real_drop = ipo._drop_env_cache_for_reset
+
+    def _drop(cache):
+        events.append(("drop",))
+        real_drop(cache)
+
+    def _changed(old, new):
+        v = not any(e[0] == "check" for e in events)  # first check = step 2
+        events.append(("check", v, old is envs))
+        return v
+
+    real_vg = ipo._site1_value_and_grad
+
+    def _vg(*a, **kw):
+        changed = any(e[:2] == ("check", True) for e in events)
+        if changed and not any(e[0] == "raised" for e in events):
+            events.append(("raised",))
+            raise CTMRGGradientError(1.5)
+        return real_vg(*a, **kw)
+
+    real_accept = ipo._should_accept_best
+
+    def _accept(**kw):
+        events.append(("accept",))
+        return real_accept(**kw)
+
+    real_fwd = ea.ctm_energy_implicit
+
+    def _fwd(*a, **kw):
+        events.append(("fwd", kw.get("env_init") is envs))
+        return real_fwd(*a, **kw)
+
+    monkeypatch.setattr(ipo, "_layout_changed", _changed)
+    monkeypatch.setattr(ipo, "_drop_env_cache_for_reset", _drop)
+    monkeypatch.setattr(ipo, "_site1_value_and_grad", _vg)
+    monkeypatch.setattr(ipo, "_should_accept_best", _accept)
+    monkeypatch.setattr(ea, "ctm_energy_implicit", _fwd)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(3, gs={"gs_stall_recovery": "reset"}, max_iter=400),
+            envs_init=envs,
+        )
+    i = next(k for k, e in enumerate(events) if e[:2] == ("check", True))
+    after = events[i + 1 :]
+    # Regime: the forced error fired, and a rollback drop followed it before
+    # any best was accepted on the new layout.
+    r = after.index(("raised",))
+    assert ("drop",) in after[r:], events
+    assert ("accept",) not in after[: after.index(("drop",), r)], events
+    checks = [e for e in after if e[0] == "check"]
+    assert checks and not any(e[2] for e in checks), events  # step 3's re-check
+    fwds = [e[1] for e in after if e[0] == "fwd"]
+    assert fwds and not any(fwds), events
 
 
 @pytest.mark.slow
