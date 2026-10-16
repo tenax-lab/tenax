@@ -978,6 +978,28 @@ def _caller():
     return sys._getframe(2).f_code.co_name
 
 
+def _certify_rechecks(monkeypatch):
+    """Report every step-boundary re-check as layout-certified.
+
+    The scripted-change tests force ``_layout_changed``; the optimizer acts
+    on a change only when the re-check also certified its layout (final
+    review I1).  On this fixture the real re-checks end in an eager
+    two-cycle (measured: RuntimeWarning "alternated" from the re-check
+    call), so they must script the certificate too.
+    """
+    import tenax.algorithms._ctm_python_loop as cpl
+
+    real = cpl.python_loop_ctm_converge
+
+    def _spy(*a, **kw):
+        out_envs, info = real(*a, **kw)
+        if _caller() == "_recheck_layout_2s":
+            info = info._replace(layout_certified=True)
+        return out_envs, info
+
+    monkeypatch.setattr(cpl, "python_loop_ctm_converge", _spy)
+
+
 def test_layout_changed_compares_chi_layouts(seeded_d2, light_envs):
     import tenax.algorithms._ctm_python_loop as cpl
 
@@ -1101,6 +1123,7 @@ def test_a_layout_change_resets_the_optimizer_state(seeded_d2, monkeypatch, metr
         events.append(("accept", kw["current_best"]))
         return real_accept(**kw)
 
+    _certify_rechecks(monkeypatch)
     monkeypatch.setattr(ipo, "_layout_changed", _changed)
     monkeypatch.setattr(ipo, "_site1_value_and_grad", _vg)
     monkeypatch.setattr(ipo, "_build_optimizer", _build)
@@ -1230,6 +1253,7 @@ def test_a_rollback_after_a_change_restores_the_new_layout(seeded_d2, monkeypatc
         events.append(("fwd", kw.get("env_init") is envs))
         return real_fwd(*a, **kw)
 
+    _certify_rechecks(monkeypatch)
     monkeypatch.setattr(ipo, "_layout_changed", _changed)
     monkeypatch.setattr(ipo, "_drop_env_cache_for_reset", _drop)
     monkeypatch.setattr(ipo, "_site1_value_and_grad", _vg)
