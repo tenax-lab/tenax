@@ -133,6 +133,10 @@ def test_fallback_gradient_matches_gmres_branch():
 def test_fused_gradient_matches_gmres_branch():
     a = _site(_FUSED_SEED)
     g_fp = jax.grad(lambda x: _energy(x, "fixed_point", gmres_tol=1e-11))(a)
+    d = get_last_implicit_ad_diagnostics()
+    assert d.get("converged") and not d.get("diverged"), (
+        "premise: the fused loop solved this fixture at gmres_tol=1e-11"
+    )
     g_gm = jax.grad(lambda x: _energy(x, "gmres", gmres_tol=1e-11))(a)
     np.testing.assert_allclose(
         np.asarray(g_fp), np.asarray(g_gm), rtol=1e-7, atol=1e-10

@@ -138,6 +138,10 @@ def test_fused_and_gmres_adjoints_give_the_same_gradient():
     # ~1e-7 (the single-matvec GMRES stops at the threshold instead of
     # overshooting it).  The comparison is of the solutions, not of the stops.
     g_fused = jax.grad(lambda a: _energy(a, "fixed_point", 1e-11))(A0)
+    d = get_last_implicit_ad_diagnostics()
+    assert d.get("converged") and not d.get("diverged"), (
+        "premise: the fused loop solved this fixture at gmres_tol=1e-11"
+    )
     g_gmres = jax.grad(lambda a: _energy(a, "gmres", 1e-11))(A0)
     np.testing.assert_allclose(
         np.asarray(g_fused),
