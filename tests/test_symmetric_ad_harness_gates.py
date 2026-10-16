@@ -30,7 +30,33 @@ GOOD5 = dict(
     warm_converged=True,
     e_dense=-0.56,
     viol=0.0,
+    e_min=-0.56,
+    bound=-0.585,
 )
+
+
+def test_s5_fails_below_the_variational_bound():
+    # Point 6 (R35): E reached -0.5969 against the bound -0.5850.
+    ok, parts = gate_s5(**{**GOOD5, "e_min": -0.5969})
+    assert not ok and parts["above_bound"] is False
+    # At the bound, within BOUND_TOL: passes.
+    assert gate_s5(**{**GOOD5, "e_min": -0.585 - 0.5 * pipeline.BOUND_TOL})[0]
+    # The gate is the bound, not e_ret: a low e_min fails a good e_ret.
+    assert not gate_s5(**{**GOOD5, "e_min": -0.59, "e_ret": -0.56})[0]
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("-inf")])
+def test_s5_bound_fails_closed_on_non_finite(bad):
+    assert not gate_s5(**{**GOOD5, "e_min": bad})[0]
+
+
+def test_the_energy_bounds_are_the_qmc_numbers():
+    # Concavity of E_GS(Delta): E(0.3) >= 0.7 E_XY + 0.3 E_Heis.
+    assert pipeline.ENERGY_BOUND["xxz03"] == pytest.approx(
+        0.7 * -0.548824 + 0.3 * -0.669437, abs=1e-12
+    )
+    assert pipeline.ENERGY_BOUND["heis"] == -0.669437
+    assert set(pipeline.ENERGY_BOUND) == set(pipeline.MODELS)
 
 
 def test_s2_rejects_nan_gap_and_unconverged_cold():

@@ -66,6 +66,17 @@ REF_TOL = 1e-10
 # A dense reference env with charge-violation weight below this kept the
 # symmetry (R26): the energy error is ~viol**2, so 1e-4 -> ~1e-8.
 VIOL_TOL = 1e-4
+# Variational lower bounds per site (J=1).  Heisenberg: QMC E_GS
+# -0.669437(5) (Sandvik, PRB 56, 11678 (1997)).  XXZ Delta=0.3: E_GS(Delta)
+# is concave (H is affine in Delta), so it lies above the chord between the
+# XY point -0.548824(2) (Sandvik & Hamer, PRB 60, 6588 (1999)) and the
+# Heisenberg point: E(0.3) >= 0.7 E_XY + 0.3 E_Heis = -0.5850078.
+ENERGY_BOUND = {
+    "xxz03": 0.7 * -0.548824 + 0.3 * -0.669437,
+    "heis": -0.669437,
+}
+# Slack for the QMC error bars (<= 5e-6) and roundoff.
+BOUND_TOL = 1e-5
 # S4 measures the gradient tighter than the optimizer needs: with the default
 # gmres_tol=1e-6 the adjoint residual (4e-6 on the Z2 chi=8 point) alone put
 # one direction 1.6e-6 (relative) off the converged FD.
@@ -265,6 +276,8 @@ def gate_s5(
     warm_converged,
     e_dense,
     viol,
+    e_min,
+    bound,
     viol_tol=VIOL_TOL,
 ):
     """S5 (R18, R27).  Returns (ok, parts).
@@ -272,7 +285,9 @@ def gate_s5(
     ``dense_ok`` (|e_cold - e_dense| < 1e-8) is part of the pass only where
     the dense reference env kept the symmetry (``viol < viol_tol``, see
     :func:`gate_s1`); otherwise it is recorded in ``parts`` only.  NaN
-    ``viol`` fails."""
+    ``viol`` fails.  ``above_bound``: no S5 energy (history, returned, cold,
+    warm) is below the variational bound ``bound`` by more than
+    ``BOUND_TOL``."""
     parts = {
         "settled": bool(settled),
         "drift_stable": bool(drift_stable),
@@ -283,6 +298,7 @@ def gate_s5(
         "agree": bool(abs(e_cold - e_warm) < 1e-10),
         "warm_converged": bool(warm_converged),
         "dense_ok": bool(abs(e_cold - e_dense) < 1e-8),
+        "above_bound": bool(np.isfinite(e_min) and e_min >= bound - BOUND_TOL),
     }
     if not np.isfinite(viol):
         return False, {**parts, "viol_finite": False}
@@ -576,7 +592,7 @@ def run_point(
     def s5():
         layouts, stages = [st["seed"].layout], 0
         A, B, envs_init = st["A"], st["B"], st["seed"].envs_init
-        hist_all, ctm_conv_all = [], []
+        hist_all, ctm_conv_all, layout_changes_all = [], [], []
         while True:
             stages += 1
             cfg = _s5_config(D, chi, opt_steps)
@@ -590,6 +606,7 @@ def run_point(
             ctm_conv = hist.get("ctm_converged")
             if ctm_conv is not None:
                 ctm_conv_all.append([bool(c) for c in ctm_conv])
+            layout_changes_all.append(list(hist.get("layout_changes") or []))
             _log(f"S5 stage {stages}: optimizer done, {len(hist['energies'])} steps")
             drift = symmetric_layout_seed(A, B, gate, _ctm(chi))
             if same_layout(drift.layout, layouts[-1]) or stages >= MAX_STAGES:
@@ -613,6 +630,12 @@ def run_point(
         e_start = hist_all[0][0]
         e_sym = e_cold
         settled = same_layout(drift.layout, layouts[-1])
+        all_e = [float(e) for stage in hist_all for e in stage]
+        all_e += [float(E_ret), float(e_cold), float(e_warm)]
+        # min() with a NaN in the list returns an order-dependent value, so
+        # fail closed explicitly: any non-finite energy makes e_min NaN.
+        e_min = min(all_e) if all(np.isfinite(x) for x in all_e) else float("nan")
+        bound = ENERGY_BOUND[model]
         ok, parts = gate_s5(
             settled=settled,
             drift_stable=drift.stable,
@@ -623,6 +646,8 @@ def run_point(
             warm_converged=c_warm,
             e_dense=e_dense,
             viol=viol,
+            e_min=e_min,
+            bound=bound,
         )
         return (
             ok,
@@ -631,6 +656,9 @@ def run_point(
                 "layout_settled": settled,
                 "gate_parts": parts,
                 "E_start": e_start,
+                "E_min": e_min,
+                "bound": bound,
+                "layout_changes": layout_changes_all,
                 "E_returned": E_ret,
                 "E_cold": e_cold,
                 "E_warm": e_warm,
