@@ -253,3 +253,13 @@ Properties:
   branches are vector operations of size n, negligible next to a CTM-sweep
   VJP.
 - **Memory.** `V` is `(restart + 1) x n`, the same as JAX's GMRES today.
+
+## Measured (CPU AMD EPYC 7742, D=2 chi=8 U(1), first gradient)
+
+| module | before | after |
+|---|---|---|
+| GMRES solve | 2,458 s (`_jit_eager_gmres_solve`) | 463 s (`_jit_gmres_one_matvec_solve`) |
+| standalone `_jit_apply_Jt` | 435 s | not compiled |
+| `_jit_dE_denv` on `fixed_point` | 48 s | not compiled |
+| first gradient, `gmres` | 3,729 s | 1,188 s |
+| first gradient, `fixed_point` | 1,349 s | 1,237 s |

@@ -4,6 +4,17 @@
 
 ### Behavior Changes
 
+- **The eager-GMRES adjoint compiles the J^T matvec once.** The implicit-AD
+  backward's GMRES (`adjoint_method="gmres"`, and the fallback when the fused
+  Neumann loop does not converge) used JAX's GMRES, whose program inlines the
+  matvec at three call sites, and compiled a fourth standalone copy to choose
+  the seed and measure the residual. A new single-matvec GMRES does the seed
+  choice, the solve and the residual measurement in one program with one call
+  site, and the fixed-point path no longer compiles a separate `dE/denv`.
+  Gradients agree with the previous solver to the solve tolerance, not bit
+  for bit. Measured on CPU, D=2 chi=8 U(1), first gradient with
+  `adjoint_method="gmres"`: 3,729 s -> 1,188 s.
+
 - **Block-sparse CTM-AD backward programs compile without XLA's CPU fusion
   pass from D=3** (`_block_sparse_jit.py`; #566).  A `SymmetricTensor`
   contraction traces one small op per pair of charge blocks.  The

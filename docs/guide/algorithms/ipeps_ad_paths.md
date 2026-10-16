@@ -339,6 +339,13 @@ Do not set `XLA_FLAGS=--xla_disable_hlo_passes=fusion` process-wide: that
 also drops fusion for the forward sweep and for every small eager operation.
 In one measurement it doubled the setup time, 582 s to 1249 s.
 
+The GMRES adjoint (`adjoint_method="gmres"`, and the fallback when the fused
+Neumann loop does not converge) compiles the sweep VJP once, like the fused
+module.  JAX's own GMRES applied it at three places in one program, and XLA
+compiled each one; the solver tenax uses instead applies it at one.  At D=3
+the fallback is the common case near a slowly converging forward fixed point,
+so this is most of the backward compile there.
+
 #### Persistent compilation cache
 
 `import tenax` turns on JAX's persistent compilation cache.  JAX writes each
