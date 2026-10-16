@@ -40,7 +40,10 @@ def test_s5_fails_below_the_variational_bound():
     ok, parts = gate_s5(**{**GOOD5, "e_min": -0.5969})
     assert not ok and parts["above_bound"] is False
     # At the bound, within BOUND_TOL: passes.
-    assert gate_s5(**{**GOOD5, "e_min": -0.585 - 0.5 * pipeline.BOUND_TOL})[0]
+    # Literal numbers, not BOUND_TOL, so a changed slack cannot hide itself.
+    assert gate_s5(**{**GOOD5, "e_min": -0.585 - 5e-6})[0]
+    assert not gate_s5(**{**GOOD5, "e_min": -0.585 - 2e-5})[0]
+    assert pipeline.BOUND_TOL == 1e-5
     # The gate is the bound, not e_ret: a low e_min fails a good e_ret.
     assert not gate_s5(**{**GOOD5, "e_min": -0.59, "e_ret": -0.56})[0]
 
