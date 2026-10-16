@@ -313,3 +313,109 @@ def test_slope_check_rejects_the_d3_chi12_flow_gradient():
     assert d["projector_backward_used"] == "frozen_fallback", d
     assert "slope check" in d["flow_fallback_reason"], d
     assert d["flow_slope_ratio"] < 0.5
+
+
+def _single_energy_with(p, *, gate=_H1, env_init=None):
+    """``_single_energy`` with the per-call inputs exposed: same config, so the
+    same implicit-AD cache entry, whatever ``gate`` object or ``env_init``."""
+    return jnp.real(
+        ctm_energy_implicit(
+            {(0, 0): _wrap_as_dense_tensor(p[0])},
+            SINGLE_SITE_NEIGHBORS,
+            gate,
+            chi=4,
+            max_iter=20,
+            conv_tol=1e-10,
+            forward_gauge="bond_phase",
+            projector_backward="flow",
+            env_init=env_init,
+        )
+    )
+
+
+def _foreign_env():
+    """A converged chi=4 env of other params (seed 3).  As the probe's start
+    it moves the limit-cycle fixture's r from 1.002 to 0.276."""
+    from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
+
+    (other,) = _single_params(seed=3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        envs, _info = python_loop_ctm_converge(
+            {(0, 0): _wrap_as_dense_tensor(other)},
+            SINGLE_SITE_NEIGHBORS,
+            chi=4,
+            max_iter=20,
+            renormalize=True,
+        )
+    return envs
+
+
+def test_late_pullback_uses_its_own_forward_inputs():
+    """Codex on #1114: a pullback called after another call on the same cache
+    entry probed with that call's ``env_init``.  Measured without the fix:
+    flow r = 1.0022 immediately, but frozen_fallback r = 0.276 late."""
+    p = _single_params()
+    envs = _foreign_env()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _, now = jax.vjp(_single_energy_with, p)
+        g_now = now(jnp.ones(()))
+        d_now = dict(get_last_implicit_ad_diagnostics())
+        _, late = jax.vjp(_single_energy_with, p)
+        n_entries = len(cea._VJP_CACHE)
+        _single_energy_with(p, env_init=envs)  # same entry, other env_init
+        assert len(cea._VJP_CACHE) == n_entries, "premise: same cache entry"
+        g_late = late(jnp.ones(()))
+        d_late = dict(get_last_implicit_ad_diagnostics())
+    assert d_now["projector_backward_used"] == "flow", d_now
+    assert d_late["projector_backward_used"] == d_now["projector_backward_used"], d_late
+    np.testing.assert_allclose(
+        d_late["flow_slope_ratio"], d_now["flow_slope_ratio"], rtol=1e-10
+    )
+    for a, b in zip(jax.tree.leaves(g_late), jax.tree.leaves(g_now)):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-12)
+
+
+def test_late_pullback_spends_no_latch_of_the_current_run():
+    """Codex on #1114: the probe's forward recorded its stationarity latch
+    against the run current at pullback time, which the probe did not
+    restore.  A gate copy (equal value, new object) selects a new run on the
+    same cache entry."""
+    p = _single_params()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _, pullback = jax.vjp(_single_energy_with, p)
+        n_entries = len(cea._VJP_CACHE)
+        n_runs = len(_all_latches())
+        _single_energy_with(p, gate=jnp.array(_H1))  # run B
+    assert len(cea._VJP_CACHE) == n_entries, "premise: same cache entry"
+    assert len(_all_latches()) == n_runs + 1, "premise: a second run"
+    for entry in cea._VJP_CACHE.values():
+        if isinstance(entry, tuple):
+            for _tok, state, _objs in entry[1].get("_runs", {}).values():
+                for k in list(state):
+                    if k.endswith("_warned"):
+                        state[k] = False
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pullback(jnp.ones(()))
+    d = get_last_implicit_ad_diagnostics()
+    assert "flow_slope_ratio" in d, "premise: the check ran"
+    assert d["projector_backward_used"] == "flow", d
+    for k, v in _all_latches().items():
+        assert not any(v.values()), (k, v)
+
+
+def test_evicted_forward_inputs_make_the_check_inconclusive(monkeypatch):
+    monkeypatch.setattr(cea, "_PROBE_INPUTS_PER_ENTRY", 1)
+    p = _single_params()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _, first = jax.vjp(_single_energy_with, p)
+        _, _second = jax.vjp(_single_energy_with, p)  # evicts first's inputs
+        first(jnp.ones(()))
+    d = get_last_implicit_ad_diagnostics()
+    assert d["projector_backward_used"] == "frozen_fallback", d
+    assert "evicted" in d["flow_fallback_reason"], d["flow_fallback_reason"]
+    assert "flow_slope_ratio" not in d

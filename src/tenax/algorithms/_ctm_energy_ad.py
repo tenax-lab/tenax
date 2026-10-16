@@ -931,6 +931,16 @@ _RDM_CALL_TOKENS = itertools.count(1)
 _RUN_TOKENS = itertools.count(1)
 _RUNS_PER_ENTRY = 8
 
+# #1111 slope check: each forward's per-call inputs, kept under a serial that
+# travels with the residuals, so a pullback called after another forward on
+# the same cache entry probes with its own ``env_init``/``chi_ramp``/gate/
+# callback rather than the later call's.  A small per-entry LRU (read at
+# insert time, so tests can shrink it); an evicted entry is inconclusive.
+_FORWARD_SERIALS = itertools.count(1)
+_PROBE_INPUTS_PER_ENTRY = 8
+# The ``mutables`` keys ``_run_forward`` and ``_compute_energy`` read.
+_PROBE_INPUT_KEYS = ("env_init", "chi_ramp", "gate", "energy_fn")
+
 
 def _fresh_run_state() -> dict:
     return {
@@ -1382,6 +1392,8 @@ def _make_implicit_vjp_fn(
     # consecutive backwards of one run, so the Neumann iteration starts close
     # to the answer (#501).  Cleared on divergence/non-convergence.
     _cached: dict = {}
+    # Forward serial -> that forward's ``_PROBE_INPUT_KEYS`` values (#1111).
+    _probe_inputs: collections.OrderedDict = collections.OrderedDict()
 
     def _invalidate_warm_start() -> None:
         """Drop the cached ``prev_lam_leaves`` warm-start seed.
@@ -1666,7 +1678,12 @@ def _make_implicit_vjp_fn(
             <= _F3_LAST_DIAGNOSTICS.get("forward_stationarity_threshold", 0.0)
         )
         # The run token travels with the residuals, so a backward finds its
-        # own run even if another forward ran in between.
+        # own run even if another forward ran in between.  So does a serial
+        # naming this forward's per-call inputs, for the slope check's probe.
+        serial = next(_FORWARD_SERIALS)
+        _probe_inputs[serial] = {k: mutables[k] for k in _PROBE_INPUT_KEYS}
+        while len(_probe_inputs) > _PROBE_INPUTS_PER_ENTRY:
+            _probe_inputs.popitem(last=False)
         residuals = (
             params_data_tuple,
             env_leaves,
@@ -1674,6 +1691,7 @@ def _make_implicit_vjp_fn(
             mutables["run_token"],
             energy,
             nonstationary,
+            serial,
         )
         return energy, residuals
 
@@ -2346,18 +2364,31 @@ def _make_implicit_vjp_fn(
         energy by what the gradient predicts: r = dE_measured / dE_predicted
         in [_FLOW_SLOPE_RATIO_MIN, _FLOW_SLOPE_RATIO_MAX].  An inconclusive
         check (the probe raised, a non-finite value, a chi bump) discards flow
-        too -- frozen is biased (#1028) but bounded.  The probe leaves the
-        diagnostics, the warnings and the run's once-per-run latches as it
-        found them.  A pullback stored and called after another forward on the
-        same cache entry evaluates the probe with that later call's
-        ``env_init`` and run (the residual-carried flag and E0 are still this
-        forward's).
+        too -- frozen is biased (#1028) but bounded.  The probe evaluates with
+        this forward's own per-call inputs (``env_init``, ``chi_ramp``, gate,
+        energy callback) and run, even when the pullback is called after
+        another forward on the same cache entry; if those inputs were evicted
+        from the per-entry LRU (``_PROBE_INPUTS_PER_ENTRY``) the check is
+        inconclusive.  The probe leaves the diagnostics, the warnings, the
+        current per-call state and the once-per-run latches (of this forward's
+        run and of the run current when the backward started) as it found them.
         """
-        params_data_tuple, _env_leaves, chi_post, _token, energy0, nonstationary = (
-            residuals
-        )
+        (
+            params_data_tuple,
+            _env_leaves,
+            chi_post,
+            token,
+            energy0,
+            nonstationary,
+            serial,
+        ) = residuals
         if not nonstationary:
             return None
+        inputs = lru_get(_probe_inputs, int(serial))
+        if inputs is None:
+            return (
+                "the slope check could not evaluate (its forward inputs were evicted)"
+            )
         g_arr = jnp.asarray(g)
         if float(jax.device_get(jnp.abs(g_arr))) == 0.0:
             return None
@@ -2388,8 +2419,18 @@ def _make_implicit_vjp_fn(
         )
 
         diag_snapshot = dict(_F3_LAST_DIAGNOSTICS)
-        latch_snapshot = {k: v for k, v in run.items() if k.endswith("_warned")}
+        # ``run`` is this forward's; the probe's _run_forward is pointed at it
+        # below, but the run current at backward start may be a different one
+        # (another forward ran in between), so both runs' latches are kept.
+        current_run = _run_state(mutables, mutables["run_token"])
+        latch_snapshots = [
+            (state, {k: v for k, v in state.items() if k.endswith("_warned")})
+            for state in (run, current_run)
+        ]
+        state_snapshot = {k: mutables[k] for k in (*_PROBE_INPUT_KEYS, "run_token")}
         try:
+            mutables.update(inputs)
+            mutables["run_token"] = int(token)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 e_h, chi_h = _slope_probe_energy(
@@ -2403,7 +2444,9 @@ def _make_implicit_vjp_fn(
         finally:
             _F3_LAST_DIAGNOSTICS.clear()
             _F3_LAST_DIAGNOSTICS.update(diag_snapshot)
-            run.update(latch_snapshot)
+            mutables.update(state_snapshot)
+            for state, snapshot in latch_snapshots:
+                state.update(snapshot)
 
         if chi_h != int(chi_post):
             return (
