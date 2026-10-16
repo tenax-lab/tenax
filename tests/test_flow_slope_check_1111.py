@@ -247,6 +247,26 @@ def test_optimize_gs_ad_step_on_the_1028_fixture():
     assert np.isfinite(float(energy)), energy
 
 
+def test_slope_check_keeps_flow_for_complex_params():
+    """JAX's grad of a real function of complex z is the conjugate of the
+    steepest-ascent direction, so the probe must step along conj(G); without
+    that r was -0.04..-0.12 and flow was always discarded.
+
+    Kept after the real-dtype tests: the implicit-AD VJP cache is not keyed on
+    dtype, so a complex run first makes later real runs hit a dtype mismatch.
+    """
+    k1, k2 = jax.random.split(jax.random.PRNGKey(2026))
+    shape = (2, 2, 2, 2, 2)
+    A = jax.random.normal(k1, shape) + 1j * jax.random.normal(k2, shape)
+    params = (A / jnp.linalg.norm(A),)
+    _, d = _grad(_single_energy, params)
+    assert d["forward_stationarity_residual"] > d["forward_stationarity_threshold"], (
+        "premise"
+    )
+    assert d["projector_backward_used"] == "flow", d
+    assert 0.5 <= d["flow_slope_ratio"] <= 2.0, d["flow_slope_ratio"]
+
+
 @pytest.mark.slow
 def test_slope_check_rejects_the_d3_chi12_flow_gradient():
     """The hole #1111 found on main: D=3 chi=12 flow gradient 86x off FD,

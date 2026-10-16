@@ -2377,7 +2377,13 @@ def _make_implicit_vjp_fn(
         if not g_norm > 0.0:
             return "the slope check could not evaluate (the energy gradient is zero)"
         h = _FLOW_SLOPE_STEP * _norm(params_data_tuple)
-        x_h = jax.tree.map(lambda a, b: a - (h / g_norm) * b, params_data_tuple, G)
+        # JAX convention: grad of a real function of complex z is the conjugate
+        # of the steepest-ascent direction (grad |z|^2 at 1+1j is 2-2j), so the
+        # descent step is along conj(G).  jnp.conj is a no-op for real leaves;
+        # |G|^2 = sum |G_a|^2 is unchanged, so the predicted dE stays -h|G|.
+        x_h = jax.tree.map(
+            lambda a, b: a - (h / g_norm) * jnp.conj(b), params_data_tuple, G
+        )
 
         diag_snapshot = dict(_F3_LAST_DIAGNOSTICS)
         latch_snapshot = {k: v for k, v in run.items() if k.endswith("_warned")}
