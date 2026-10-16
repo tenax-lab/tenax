@@ -3963,8 +3963,16 @@ def _optimize_gs_ad_tensor_2site(
     # optimizer then follows a non-variational branch.  One warm,
     # layout-adapting CTM call per step boundary moves the layout; the line
     # search inside a step stays frozen so phi is one function of alpha.
+    # A dense seed has no chi layout (``_chi_layout`` is empty: it skips
+    # non-symmetric legs), so a re-check could never see a change -- it would
+    # only add one CTM to convergence per step.
+    from tenax.algorithms._ctm_python_loop import _chi_layout
+
     _recheck_on = (
-        envs_init is not None and config.gs_layout_recheck and not use_split_2s
+        envs_init is not None
+        and config.gs_layout_recheck
+        and not use_split_2s
+        and bool(_chi_layout(envs_init))
     )
 
     def _recheck_layout_2s(params_) -> bool:

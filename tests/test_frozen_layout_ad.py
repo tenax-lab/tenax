@@ -992,8 +992,9 @@ def test_the_recheck_runs_unfrozen_with_the_configured_tie_rtol(seeded_d2, monke
     """Steps 2..N each run one re-check: warm (env_init = the cache the
     previous step left), eager phase on (no ``eager_layout_sweeps=0``),
     the configured tie tolerance.  Refresh and line-search probes stay
-    frozen.  ``layout_changes`` lists exactly the steps whose re-check
-    returned a different layout."""
+    frozen.  On this fixture neither re-check moves the layout (measured:
+    verdicts ``[False, False]``), so ``layout_changes`` is ``[]``; the
+    scripted tests below own the change path."""
     import tenax.algorithms._ctm_python_loop as cpl
 
     A, B, H, _d, envs = seeded_d2
@@ -1037,8 +1038,10 @@ def test_the_recheck_runs_unfrozen_with_the_configured_tie_rtol(seeded_d2, monke
         kw for who, kw, _ in calls if who in ("_update_env_cache_2s", "loss_fn_fwd")
     ]
     assert frozen and all(kw.get("eager_layout_sweeps") == 0 for kw in frozen)
-    assert len(verdicts) == 2
-    assert hist["layout_changes"] == [k + 2 for k, v in enumerate(verdicts) if v]
+    # Regime (measured): on this fixture both re-checks keep the layout, so
+    # ``layout_changes`` is empty here; the scripted tests own the change path.
+    assert verdicts == [False, False], verdicts
+    assert hist["layout_changes"] == []
 
 
 @pytest.mark.parametrize("metric", [True, False], ids=["metric_lbfgs", "optax_lbfgs"])
@@ -1133,6 +1136,7 @@ def test_a_layout_change_resets_the_optimizer_state(seeded_d2, monkeypatch, metr
         # The restart must come before the optimizer's first use on the new
         # layout: a later init (a line-search stall reset in the same step)
         # does not show the change reset it.
+        assert ("update",) in window, window
         first_update = window.index(("update",))
         assert ("init",) in window[:first_update], events
 
@@ -1144,10 +1148,12 @@ def test_an_unconverged_recheck_is_not_a_change(seeded_d2, monkeypatch):
 
     A, B, H, _d, envs = seeded_d2
     real = cpl.python_loop_ctm_converge
+    n_rechecks = []
 
     def _spy(*a, **kw):
         out_envs, info = real(*a, **kw)
         if _caller() == "_recheck_layout_2s":
+            n_rechecks.append(1)
             info = info._replace(converged=False)
         return out_envs, info
 
@@ -1161,6 +1167,9 @@ def test_an_unconverged_recheck_is_not_a_change(seeded_d2, monkeypatch):
             _ad_config(3, gs={"return_history": True}, max_iter=400),
             envs_init=envs,
         )
+    # Regime: the re-check ran (steps 2 and 3), so [] is its verdict, not
+    # the absence of one.
+    assert len(n_rechecks) == 2, n_rechecks
     assert hist["layout_changes"] == []
 
 
