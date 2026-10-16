@@ -13,8 +13,14 @@
   0.5-2x the predicted one; otherwise it falls back to frozen projectors with
   the reason in `flow_fallback_reason` and the ratio in `flow_slope_ratio`.
   Measured: garbage flowing gradients 0.000-0.002, good ones 0.97-1.24. Cost:
-  one extra forward CTM evaluation on non-stationary flowing steps; stationary
-  forwards are unchanged. For complex parameters the check steps along
+  one extra forward CTM evaluation per non-stationary flowing step (often every
+  step at D>=3, #841), measured ~27% of the gradient's wall time at D=3 dense
+  chi=12 on CPU (2.39 s of 8.81 s), plus a one-time recompile of the forward's
+  programs inside the backward (per shape/chi; ~2.3 s at D=2 chi=4, 7.7 s cold
+  vs 2.4 s warm at D=3 chi=12). Stationary forwards are unchanged. The check
+  catches grossly wrong flow gradients; it does not certify that flow beats
+  frozen (on a raw-`SymmetricTensor` version of the #1028 fixture flow is kept
+  at r=0.746 with FD errors 35%/37% where frozen is 13%/4%). For complex parameters the check steps along
   `conj(G)`, JAX's descent convention.
 
 - **The eager-GMRES adjoint compiles the J^T matvec once.** The implicit-AD

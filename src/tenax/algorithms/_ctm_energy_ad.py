@@ -1168,7 +1168,6 @@ _FORWARD_DIAGNOSTIC_KEYS = (
     "forward_converged",
     "forward_stationarity_residual",
     "forward_stationarity_threshold",
-    "flow_slope_ratio",
     "forward_iterations",
     "forward_sv_diff",
     "forward_best_iteration",
@@ -2349,7 +2348,10 @@ def _make_implicit_vjp_fn(
         check (the probe raised, a non-finite value, a chi bump) discards flow
         too -- frozen is biased (#1028) but bounded.  The probe leaves the
         diagnostics, the warnings and the run's once-per-run latches as it
-        found them.
+        found them.  A pullback stored and called after another forward on the
+        same cache entry evaluates the probe with that later call's
+        ``env_init`` and run (the residual-carried flag and E0 are still this
+        forward's).
         """
         params_data_tuple, _env_leaves, chi_post, _token, energy0, nonstationary = (
             residuals

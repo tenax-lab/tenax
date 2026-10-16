@@ -104,6 +104,9 @@ def _all_latches():
 
 
 def test_slope_check_rejects_the_1028_flow_gradient():
+    # The rejection depends on the dense wrapping of the #1028 pair: with raw
+    # SymmetricTensor params the same fixture keeps flow (r = 0.746, FD errors
+    # 35%/37% vs frozen's 13%/4%) -- the check catches gross errors only.
     p = _pair_params()
     g, d = _grad(_pair_energy, p)
     assert d["forward_stationarity_residual"] > d["forward_stationarity_threshold"], (
@@ -174,6 +177,9 @@ def test_inconclusive_check_falls_back_to_frozen(monkeypatch):
 
 
 def test_the_check_spends_no_latch_and_emits_no_warning(monkeypatch):
+    """Discriminating: the forward and warm-up already trip the once-per-run
+    latches, so reset them between the forward and the pullback and require
+    that the probe leaves them reset."""
     real = cea._slope_probe_energy
 
     def noisy(*a, **k):
@@ -184,19 +190,26 @@ def test_the_check_spends_no_latch_and_emits_no_warning(monkeypatch):
     p = _single_params()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        _single_energy(p)  # make sure the cache entry and run exist
-    latches_before = _all_latches()
+        _, pullback = jax.vjp(lambda q: _single_energy(q), p)
+    n_runs = 0
+    for entry in cea._VJP_CACHE.values():
+        if not isinstance(entry, tuple):
+            continue
+        for _tok, state, _objs in entry[1].get("_runs", {}).values():
+            n_runs += 1
+            for k in list(state):
+                if k.endswith("_warned"):
+                    state[k] = False
+    assert n_runs, "premise: a run exists"
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        jax.grad(lambda q: _single_energy(q))(p)
+        pullback(jnp.ones(()))
     assert "flow_slope_ratio" in get_last_implicit_ad_diagnostics(), (
         "premise: the check ran"
     )
     assert not any("probe-forward warning" in str(w.message) for w in caught)
-    latches_after = _all_latches()
-    for k, v in latches_after.items():
-        if k in latches_before:
-            assert v == latches_before[k], (k, latches_before[k], v)
+    for k, v in _all_latches().items():
+        assert not any(v.values()), (k, v)
 
 
 def test_pullback_twice_gives_the_same_verdict():
@@ -217,10 +230,18 @@ def test_pullback_twice_gives_the_same_verdict():
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-12)
 
 
-def test_optimize_gs_ad_step_on_the_1028_fixture():
+def test_optimize_gs_ad_step_on_the_1028_fixture(monkeypatch):
     from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
     from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 
+    real_probe = cea._slope_probe_energy
+    probe_calls = []
+
+    def spy(*a, **k):
+        probe_calls.append(1)
+        return real_probe(*a, **k)
+
+    monkeypatch.setattr(cea, "_slope_probe_energy", spy)
     A, B = _pair_params()
     config = iPEPSConfig(
         max_bond_dim=2,
@@ -245,6 +266,16 @@ def test_optimize_gs_ad_step_on_the_1028_fixture():
     assert len(flow_warnings) <= 1
     _a_opt, _envs, energy = result  # 2-site: ((A, B), (env_A, env_B), E_gs)
     assert np.isfinite(float(energy)), energy
+    # Measured: through optimize_gs_ad the fixture's CTM is warm-started and
+    # the forward the optimizer differentiates is stationary (converged, 12
+    # sweeps), so the slope check is correctly skipped and flow is kept.  This
+    # pins that outcome (no probe, flow, no fallback reason) -- the check
+    # itself is exercised by the direct-gradient tests above, which is where
+    # the non-stationary forward exists.
+    assert probe_calls == [], "the check ran on a stationary optimizer forward"
+    d = get_last_implicit_ad_diagnostics()
+    assert d["projector_backward_used"] == "flow", d
+    assert "flow_fallback_reason" not in d, d
 
 
 def test_slope_check_keeps_flow_for_complex_params():
@@ -252,14 +283,18 @@ def test_slope_check_keeps_flow_for_complex_params():
     steepest-ascent direction, so the probe must step along conj(G); without
     that r was -0.04..-0.12 and flow was always discarded.
 
-    Kept after the real-dtype tests: the implicit-AD VJP cache is not keyed on
-    dtype, so a complex run first makes later real runs hit a dtype mismatch.
+    The implicit-AD VJP cache and warm start are not keyed on dtype (issue
+    #1113 fixes the underlying bug), so the warm start is invalidated in a
+    finally block and later real-dtype tests cannot pick up a complex seed.
     """
     k1, k2 = jax.random.split(jax.random.PRNGKey(2026))
     shape = (2, 2, 2, 2, 2)
     A = jax.random.normal(k1, shape) + 1j * jax.random.normal(k2, shape)
     params = (A / jnp.linalg.norm(A),)
-    _, d = _grad(_single_energy, params)
+    try:
+        _, d = _grad(_single_energy, params)
+    finally:
+        cea.invalidate_implicit_ad_warm_start()
     assert d["forward_stationarity_residual"] > d["forward_stationarity_threshold"], (
         "premise"
     )
@@ -272,5 +307,9 @@ def test_slope_check_rejects_the_d3_chi12_flow_gradient():
     """The hole #1111 found on main: D=3 chi=12 flow gradient 86x off FD,
     r = 0.002."""
     _, d = _grad(_pair_energy, _pair_params(D=3), chi=12)
+    assert d["forward_stationarity_residual"] > d["forward_stationarity_threshold"], (
+        "premise"
+    )
     assert d["projector_backward_used"] == "frozen_fallback", d
+    assert "slope check" in d["flow_fallback_reason"], d
     assert d["flow_slope_ratio"] < 0.5
