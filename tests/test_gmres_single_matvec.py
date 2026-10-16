@@ -72,7 +72,12 @@ def test_converges_to_the_tolerance(kind):
     tol = 1e-12 if kind == "well" else 1e-9
     x, res, bn = _solve(A, b, tol=tol, maxiter=20, restart=N)
     true = np.linalg.norm(np.asarray(b) - np.asarray(A) @ x)
-    assert res == pytest.approx(true, rel=1e-6, abs=1e-14)
+    # At that floor the residual is rounding noise, and two evaluations of it
+    # (XLA inside the solver, numpy here) differ by a few percent with the
+    # platform's BLAS: 4.888e-11 vs 4.990e-11 for "ill" on macOS CI.  5% still
+    # tells a measured residual from a Krylov estimate.
+    res_rtol = 1e-6 if kind == "well" else 0.05
+    assert res == pytest.approx(true, rel=res_rtol, abs=1e-14)
     assert true <= max(tol * bn, tol) * (1 + 1e-6)
     assert _adjoint_converged(res, bn, tol)
     if kind != "ill":
