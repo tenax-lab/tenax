@@ -1052,7 +1052,7 @@ def test_a_layout_change_resets_the_optimizer_state(seeded_d2, monkeypatch, metr
     ``lbfgs_two_loop``: the first two-loop call after the change must see an
     empty history (no stale pairs, and no new pair built from the pre-change
     params).  ``gs_metric_precond=False`` uses the optax optimizer: its
-    ``init`` must run again."""
+    ``init`` must run again before its first ``update`` on the new layout."""
     import tenax.algorithms._metric_precond as mp
 
     A, B, H, _d, envs = seeded_d2
@@ -1080,7 +1080,11 @@ def test_a_layout_change_resets_the_optimizer_state(seeded_d2, monkeypatch, metr
             events.append(("init",))
             return opt.init(p)
 
-        return SimpleNamespace(init=init, update=opt.update)
+        def update(*a, **kw):
+            events.append(("update",))
+            return opt.update(*a, **kw)
+
+        return SimpleNamespace(init=init, update=update)
 
     real_two_loop = mp.lbfgs_two_loop
 
@@ -1126,7 +1130,11 @@ def test_a_layout_change_resets_the_optimizer_state(seeded_d2, monkeypatch, metr
         loops = [e for e in window if e[0] == "two_loop"]
         assert loops and loops[0][1] == 0, events
     else:
-        assert ("init",) in window, events
+        # The restart must come before the optimizer's first use on the new
+        # layout: a later init (a line-search stall reset in the same step)
+        # does not show the change reset it.
+        first_update = window.index(("update",))
+        assert ("init",) in window[:first_update], events
 
 
 def test_an_unconverged_recheck_is_not_a_change(seeded_d2, monkeypatch):
