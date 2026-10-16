@@ -126,6 +126,8 @@ def _s5_config(D, chi, opt_steps):
     """Optimizer config of S5: unconverged CTM forwards raise (#1059).
 
     ``gs_verbose`` with ``gs_log_interval=1`` prints one line per step to stdout.
+    ``gs_layout_recheck`` is the default; it is stated so that a run on code
+    without the field fails loudly.
     """
     return iPEPSConfig(
         max_bond_dim=D,
@@ -137,6 +139,7 @@ def _s5_config(D, chi, opt_steps):
         return_history=True,
         gs_verbose=True,
         gs_log_interval=1,
+        gs_layout_recheck=True,
     )
 
 

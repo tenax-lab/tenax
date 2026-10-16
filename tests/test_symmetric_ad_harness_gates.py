@@ -201,6 +201,7 @@ def test_s5_config_raises_on_unconverged_others_warn():
     assert cfg.gs_num_steps == 5 and cfg.return_history
     assert cfg.gs_verbose is True
     assert cfg.gs_log_interval == 1
+    assert cfg.gs_layout_recheck is True
 
 
 def test_s5_optimizer_exception_is_a_failed_record(monkeypatch):
