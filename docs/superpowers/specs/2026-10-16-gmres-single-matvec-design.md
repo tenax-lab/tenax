@@ -211,6 +211,18 @@ Properties:
   #824 and #1028 tests and the gmres-vs-fixed_point parity tests (`-m "not
   slow"` regression set).
 
+### Existing tests that name the replaced function
+
+- `tests/test_adjoint_seed_858.py` spies on `_jit_eager_gmres_solve`. Its
+  wrapper test checks that the caller's `x0` reaches GMRES.
+- `tests/test_vjp_cache_key_1049.py` lists `_jit_eager_gmres_solve` among
+  the per-entry compiled functions.
+- Re-point both to `_jit_gmres_one_matvec_solve`, and keep what they assert:
+  - the #858 spy must still see the candidates arrive, and the chosen seed
+    must still never be worse than zero;
+  - the #1049 list must still name the compiled solver.
+- Do not delete either guard.
+
 ### Acceptance measurement (recorded in the PR)
 
 - Same probe as the spike: CPU, D=2 chi=8 U(1), `adjoint_method="gmres"`, a
