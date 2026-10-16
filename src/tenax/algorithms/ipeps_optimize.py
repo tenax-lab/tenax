@@ -6,6 +6,7 @@ Extracts optimize_gs_ad and related helpers from ipeps.py.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import math
 import time as _time
@@ -217,6 +218,18 @@ def _layout_changed(old_envs, new_envs) -> bool:
     from tenax.algorithms._ctm_python_loop import _chi_layout
 
     return _chi_layout(old_envs) != _chi_layout(new_envs)
+
+
+def _layout_key(envs) -> str:
+    """Short stable identity of ``envs``'s chi layout (12 hex digits).
+
+    Equal layouts give equal keys, so a run that returns to an earlier
+    layout (A -> B -> A) shows the same key twice in
+    ``history["layout_change_keys"]``.
+    """
+    from tenax.algorithms._ctm_python_loop import _chi_layout
+
+    return hashlib.sha1(repr(_chi_layout(envs)).encode()).hexdigest()[:12]
 
 
 def _should_restore_best_env(
@@ -1138,19 +1151,37 @@ def optimize_gs_ad(
                           initialized via simple update (``ipeps()``).
         config:           iPEPSConfig with AD optimization settings.
         envs_init:        A converged environment to seed the first forward
-                          CTM with.  Under tracing the CTM keeps the
-                          χ-sector layout it is given, and every
-                          optimizer-level rollback restores this seed
-                          (rather than cold-starting) too, so this fixes
-                          the environment layout for the whole
-                          optimisation -- pass the output of an eager
-                          ``ctm_tensor_2site`` on the initial tensors. Its
-                          keys must equal the 2-site cell's,
-                          ``{(0, 0), (1, 0)}``.  The warm-start refresh and
-                          the line-search probes of a seeded run pass
-                          ``eager_layout_sweeps=0`` to
-                          ``python_loop_ctm_converge``, so the #1098 layout
-                          phase does not move the seed's layout either.  The
+                          CTM with -- pass the output of an eager
+                          ``ctm_tensor_2site`` (or
+                          ``symmetric_layout_seed``) on the initial
+                          tensors.  Its keys must equal the 2-site cell's,
+                          ``{(0, 0), (1, 0)}``.  Under tracing the CTM
+                          keeps the χ-sector layout it is given, and the
+                          warm-start refresh and the line-search probes
+                          pass ``eager_layout_sweeps=0`` to
+                          ``python_loop_ctm_converge``, so within one
+                          optimizer step the layout is frozen (the line
+                          search sees one function of alpha).
+
+                          With ``config.gs_layout_recheck=True`` (the
+                          default) and a symmetric seed, every step
+                          boundary after the first runs one warm,
+                          layout-adapting CTM.  When it converges, certifies
+                          its layout (``CTMConvergeInfo.layout_certified``)
+                          and that layout differs from the cached one, the
+                          run moves to the new layout and clears the
+                          optimizer state and best tracking; later rollbacks
+                          restore the new layout, not the seed.  The steps
+                          of these changes and the layout keys are in
+                          ``history["layout_changes"]``,
+                          ``history["layout_change_keys"]`` and
+                          ``history["layout_seed_key"]``; a return to an
+                          earlier layout warns (``RuntimeWarning``).  With
+                          ``gs_layout_recheck=False`` the seed's layout is
+                          fixed for the whole optimisation and every
+                          optimizer-level rollback restores the seed
+                          (rather than cold-starting).  A dense seed has no
+                          χ layout and runs no re-check.  The
                           final evaluation is cold (no ``env_init``, #899):
                           it does not start from the seed, and it adapts its
                           layout like an unseeded call (an unconverged one
@@ -3778,8 +3809,15 @@ def _optimize_gs_ad_tensor_2site(
     def _recheck_layout_2s(params_) -> bool:
         """Re-check the cached env's layout at ``params_``; True on a change.
 
-        An unconverged re-check is never acted on (its layout is not a
-        certified cut); ``_refresh_env_cache`` keeps the previous env then.
+        A change is acted on only when the re-check converged (sv criterion)
+        AND certified its layout as a global top-chi cut
+        (``info.layout_certified``).  The two are separate: the CTM loop can
+        report ``converged=True`` after its layout phase hit the eager cap or
+        a two-cycle, or after the end-of-call check gave up -- that layout
+        is not a certified cut.  An uncertified re-check with a different
+        layout is not cached either (every frozen forward would inherit its
+        layout, without the reset a change makes); an unconverged one is
+        not cached by ``_refresh_env_cache`` itself.
         """
         if use_c4v:
             A_norm, B_norm = _c4v_AB(params_)
@@ -3795,7 +3833,13 @@ def _optimize_gs_ad_tensor_2site(
             **ctm_converge_kwargs(ctm_cfg_2s, env_init=old),
             layout_tie_rtol=config.gs_layout_tie_rtol,
         )
-        changed = bool(info.converged) and _layout_changed(old, envs)
+        moved = _layout_changed(old, envs)
+        changed = bool(info.converged) and bool(info.layout_certified) and moved
+        if info.converged and moved and not changed:
+            # Converged but uncertified: keep the previous env.  Caching this
+            # one would move the layout of every frozen forward without the
+            # reset below.  (Unconverged: ``_refresh_env_cache`` keeps it.)
+            return False
         if changed:
             # New shapes: the implicit-AD lambda seed is stale too.
             _drop_env_cache_for_reset(_env_cache_2s)
@@ -3921,6 +3965,10 @@ def _optimize_gs_ad_tensor_2site(
     _hist_ctm_stationarity: list[float] = []
     # 1-based steps at which a step-boundary layout change was acted on.
     _layout_changes: list[int] = []
+    # The new layout's key (``_layout_key``) per change, and the seed's: a
+    # key seen before (the seed included) is a recurrence, A -> B -> A.
+    _layout_change_keys: list[str] = []
+    _layout_seed_key = _layout_key(envs_init) if _recheck_on else None
     # The implicit-AD fused forward writes ``forward_converged``; the split
     # and explicit-AD paths do not, so skip the check (and the pop) there.
     _site1_check_2s = config.gs_implicit_ad and not use_split_2s
@@ -4255,6 +4303,23 @@ def _optimize_gs_ad_tensor_2site(
             try:
                 if _recheck_on and step > start_step and _recheck_layout_2s(params):
                     _layout_changes.append(step + 1)
+                    _new_key = _layout_key(_env_cache_2s["envs"])
+                    _recurred = _new_key == _layout_seed_key or (
+                        _new_key in _layout_change_keys
+                    )
+                    _layout_change_keys.append(_new_key)
+                    if _recurred:
+                        import warnings
+
+                        warnings.warn(
+                            f"optimize_gs_ad: at step {step + 1} the chi layout "
+                            f"{_new_key} recurred (seen earlier in this run; "
+                            f"seed {_layout_seed_key}, changes "
+                            f"{_layout_change_keys[:-1]}).  The step-boundary "
+                            "re-check is flip-flopping between layouts.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
                     # The HZ dphi evaluation carried from the last line search
                     # was computed on the old layout: drop it so
                     # value_and_grad runs on the new one.
@@ -4286,7 +4351,9 @@ def _optimize_gs_ad_tensor_2site(
                             f"[iPEPS-AD:2site-tensor] step {step + 1}/"
                             f"{config.gs_num_steps} chi layout changed -- "
                             "re-evaluating on the new layout, optimizer "
-                            "state cleared",
+                            f"state cleared (layout {_new_key}"
+                            + (", recurred" if _recurred else "")
+                            + ")",
                             flush=True,
                         )
                 _reused = _ls_eval.take(params, ctm_cfg_2s)
@@ -5339,6 +5406,8 @@ def _optimize_gs_ad_tensor_2site(
                 "ctm_stationarity": _hist_ctm_stationarity,
                 "final_env_source": _final_env_source,
                 "layout_changes": _layout_changes,
+                "layout_change_keys": _layout_change_keys,
+                "layout_seed_key": _layout_seed_key,
             }
             return (A_final, B_final), (env_A, env_B), E_gs, history
         return (A_final, B_final), (env_A, env_B), E_gs

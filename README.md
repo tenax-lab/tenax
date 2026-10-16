@@ -47,7 +47,7 @@ Each entry links to its guide page; the full documentation is at [tenax.readthed
 
 **CTM chi layout**
 
-- `symmetric_layout_seed(A, B, gate, ctm_cfg)` — converge an eager 2-site CTM, check it with forced sweeps, and return it as `envs_init` (with its layout and a `stable` flag) for AD with a frozen chi sector layout.
+- `symmetric_layout_seed(A, B, gate, ctm_cfg)` — converge an eager 2-site CTM, check it with forced sweeps, and return it as `envs_init` (with its layout and a `stable` flag) for AD seeded with that chi sector layout: frozen within each optimizer step, re-checked at every step boundary (`gs_layout_recheck=True`, the default), or frozen for the whole run with `gs_layout_recheck=False`.
 - `layout_of(envs)` — per-sector size of every environment leg.
 - `same_layout(a, b)` — True if two layouts have the same (charge, size) pairs on every leg.
 
