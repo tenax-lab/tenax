@@ -4006,8 +4006,13 @@ def _optimize_gs_ad_tensor_2site(
         and bool(_chi_layout(envs_init))
     )
 
-    def _recheck_layout_2s(params_) -> bool:
-        """Re-check the cached env's layout at ``params_``; True on a change.
+    def _recheck_layout_2s(params_) -> str:
+        """Re-check the cached env's layout at ``params_``.
+
+        Returns ``"changed"`` (a change acted on), ``"refused"`` (the layout
+        differs but the re-check is unconverged or uncertified, so it is not
+        acted on; recorded in ``history["layout_recheck_uncertified"]``) or
+        ``"kept"`` (same layout).
 
         A change is acted on only when the re-check converged (sv criterion)
         AND certified its layout as a global top-chi cut
@@ -4039,12 +4044,14 @@ def _optimize_gs_ad_tensor_2site(
             # Converged but uncertified: keep the previous env.  Caching this
             # one would move the layout of every frozen forward without the
             # reset below.  (Unconverged: ``_refresh_env_cache`` keeps it.)
-            return False
+            return "refused"
         if changed:
             # New shapes: the implicit-AD lambda seed is stale too.
             _drop_env_cache_for_reset(_env_cache_2s)
         _refresh_env_cache(_env_cache_2s, envs, info, ctm_cfg_2s, params_)
-        return changed
+        if changed:
+            return "changed"
+        return "refused" if moved else "kept"
 
     params = c4v_coeffs if use_c4v else (A, B)
     is_metric_lbfgs = (
@@ -4169,6 +4176,9 @@ def _optimize_gs_ad_tensor_2site(
     # key seen before (the seed included) is a recurrence, A -> B -> A.
     _layout_change_keys: list[str] = []
     _layout_seed_key = _layout_key(envs_init) if _recheck_on else None
+    # 1-based steps whose re-check found a different layout but was not acted
+    # on (unconverged or uncertified, R10).  Visibility only.
+    _layout_recheck_uncertified: list[int] = []
     # The implicit-AD fused forward writes ``forward_converged``; the split
     # and explicit-AD paths do not, so skip the check (and the pop) there.
     _site1_check_2s = config.gs_implicit_ad and not use_split_2s
@@ -4506,7 +4516,22 @@ def _optimize_gs_ad_tensor_2site(
                 _step_t0 = _time.perf_counter()
             _site1_ok = None
             try:
-                if _recheck_on and step > start_step and _recheck_layout_2s(params):
+                _recheck = (
+                    _recheck_layout_2s(params)
+                    if _recheck_on and step > start_step
+                    else "off"
+                )
+                if _recheck == "refused":
+                    _layout_recheck_uncertified.append(step + 1)
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD:2site-tensor] step {step + 1}/"
+                            f"{config.gs_num_steps} chi layout re-check found "
+                            "a different layout but it is not certified (or "
+                            "not converged) -- not acted on",
+                            flush=True,
+                        )
+                if _recheck == "changed":
                     _layout_changes.append(step + 1)
                     _new_key = _layout_key(_env_cache_2s["envs"])
                     _recurred = _new_key == _layout_seed_key or (
@@ -5628,6 +5653,7 @@ def _optimize_gs_ad_tensor_2site(
                 "layout_changes": _layout_changes,
                 "layout_change_keys": _layout_change_keys,
                 "layout_seed_key": _layout_seed_key,
+                "layout_recheck_uncertified": _layout_recheck_uncertified,
             }
             return (A_final, B_final), (env_A, env_B), E_gs, history
         return (A_final, B_final), (env_A, env_B), E_gs
