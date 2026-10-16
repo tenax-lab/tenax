@@ -33,3 +33,18 @@ def test_the_probe_tie_tolerance_is_the_hysteresis_margin():
 def test_python_loop_refuses_a_bad_layout_tie_rtol(bad):
     with pytest.raises(ValueError, match="layout_tie_rtol"):
         cpl.python_loop_ctm_converge({}, {}, chi=4, layout_tie_rtol=bad)
+
+
+from tenax.algorithms.ipeps_config import iPEPSConfig  # noqa: E402
+
+
+def test_the_layout_recheck_defaults():
+    cfg = iPEPSConfig()
+    assert cfg.gs_layout_recheck is True
+    assert cfg.gs_layout_tie_rtol == 1e-8
+
+
+@pytest.mark.parametrize("bad", [-1e-8, float("nan"), float("inf")])
+def test_the_config_refuses_a_bad_layout_tie_rtol(bad):
+    with pytest.raises(ValueError, match="gs_layout_tie_rtol"):
+        iPEPSConfig(gs_layout_tie_rtol=bad)
