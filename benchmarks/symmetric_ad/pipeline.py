@@ -619,6 +619,9 @@ def run_point(
         # Per stage: the seed's layout key and each change's (final-review
         # I2), so a flip-flop A -> B -> A is visible.  Recorded, not gated.
         layout_seed_keys_all, layout_change_keys_all = [], []
+        # Per stage: steps whose re-check found a different layout but was
+        # not acted on (unconverged or uncertified, R10).  Recorded only.
+        layout_uncertified_all = []
         while True:
             stages += 1
             cfg = _s5_config(D, chi, opt_steps)
@@ -635,6 +638,9 @@ def run_point(
             layout_changes_all.append(list(hist.get("layout_changes") or []))
             layout_seed_keys_all.append(hist.get("layout_seed_key"))
             layout_change_keys_all.append(list(hist.get("layout_change_keys") or []))
+            layout_uncertified_all.append(
+                list(hist.get("layout_recheck_uncertified") or [])
+            )
             _log(f"S5 stage {stages}: optimizer done, {len(hist['energies'])} steps")
             drift = symmetric_layout_seed(A, B, gate, _ctm(chi))
             if same_layout(drift.layout, layouts[-1]) or stages >= MAX_STAGES:
@@ -690,6 +696,10 @@ def run_point(
                 "layout_seed_keys": layout_seed_keys_all,
                 "layout_change_keys": layout_change_keys_all,
                 "n_layout_changes": sum(len(c) for c in layout_changes_all),
+                "layout_recheck_uncertified": layout_uncertified_all,
+                "n_layout_recheck_uncertified": sum(
+                    len(c) for c in layout_uncertified_all
+                ),
                 "layout_recurred": layout_recurred(
                     [
                         k
