@@ -209,7 +209,7 @@ _BACKWARD_FNS = {
     "_jit_dE_denv",
     "_jit_chain_rule",
     "_jit_apply_Jt",
-    "_jit_eager_gmres_solve",
+    "_jit_gmres_one_matvec_solve",
 }
 _TRACED: list[str] = []
 jm.register_event_duration_secs_listener(

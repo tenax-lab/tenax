@@ -42,7 +42,7 @@ jm.register_event_duration_secs_listener(
 _GATE = heisenberg_gate()
 
 
-def _energy(A_arr, adjoint_method):
+def _energy(A_arr, adjoint_method, gmres_tol=1e-6):
     return jnp.real(
         ctm_energy_implicit(
             {(0, 0): _wrap_as_dense_tensor(A_arr)},
@@ -54,6 +54,7 @@ def _energy(A_arr, adjoint_method):
             min_iter=8,
             conv_tol=1e-10,
             adjoint_method=adjoint_method,
+            gmres_tol=gmres_tol,
         )
     )
 
@@ -132,8 +133,12 @@ def test_fused_and_gmres_adjoints_give_the_same_gradient():
     """Numerical check only: ``adjoint_method`` is part of the cache key, so
     this compares two separate entries and says nothing about sharing."""
     A0 = _site(_FUSED_SEED)
-    g_fused = jax.grad(lambda a: _energy(a, "fixed_point"))(A0)
-    g_gmres = jax.grad(lambda a: _energy(a, "gmres"))(A0)
+    # Tight gmres_tol: each solver stops once its residual is below the
+    # tolerance, so at the 1e-6 default two correct gradients may differ by
+    # ~1e-7 (the single-matvec GMRES stops at the threshold instead of
+    # overshooting it).  The comparison is of the solutions, not of the stops.
+    g_fused = jax.grad(lambda a: _energy(a, "fixed_point", 1e-11))(A0)
+    g_gmres = jax.grad(lambda a: _energy(a, "gmres", 1e-11))(A0)
     np.testing.assert_allclose(
         np.asarray(g_fused),
         np.asarray(g_gmres),
