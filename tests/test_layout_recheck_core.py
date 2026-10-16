@@ -316,6 +316,8 @@ def test_a_converged_but_uncertified_recheck_is_not_a_change(monkeypatch):
         warnings.simplefilter("ignore")
         hist, calls, layout_of = _scripted_seeded_run(monkeypatch, recheck_info=info)
     assert hist["layout_changes"] == [], hist["layout_changes"]
+    # R10: the refused re-checks are visible (steps 2 and 3).
+    assert hist["layout_recheck_uncertified"] == [2, 3], hist
     later = [e for who, e in calls if who != "_recheck_layout_2s" and e is not None]
     assert later, calls  # regime: forwards ran after the re-checks
     assert all(layout_of.get(id(e), ("SEED",)) == ("SEED",) for e in later), calls
@@ -330,6 +332,7 @@ def test_a_certified_recheck_with_a_new_layout_is_a_change(monkeypatch):
         warnings.simplefilter("ignore")
         hist, calls, _ = _scripted_seeded_run(monkeypatch, recheck_info=info)
     assert hist["layout_changes"] == [2, 3], hist["layout_changes"]
+    assert hist["layout_recheck_uncertified"] == [], hist
 
 
 # --- I2: a layout flip-flop is visible -------------------------------------
@@ -373,3 +376,30 @@ def test_distinct_layouts_do_not_warn(monkeypatch):
     keys = hist["layout_change_keys"]
     assert len(set(keys + [hist["layout_seed_key"]])) == 3, (keys, hist)
     assert not [w for w in rec if "recurred" in str(w.message)], rec
+
+
+def test_an_unconverged_recheck_with_a_new_layout_is_recorded(monkeypatch):
+    """R10: an unconverged re-check whose layout differs is not acted on,
+    and is recorded like an uncertified one."""
+    from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
+
+    info = CTMConvergeInfo(False, 1, 1.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        hist, _, _ = _scripted_seeded_run(monkeypatch, recheck_info=info)
+    assert hist["layout_changes"] == [], hist
+    assert hist["layout_recheck_uncertified"] == [2, 3], hist
+
+
+def test_a_recheck_that_keeps_the_layout_is_not_recorded(monkeypatch):
+    """R10 control: an uncertified re-check on the SAME layout is no refusal."""
+    from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
+
+    info = CTMConvergeInfo(True, 1, 0.0, layout_certified=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        hist, _, _ = _scripted_seeded_run(
+            monkeypatch, recheck_info=info, layouts=[("SEED",), ("SEED",)]
+        )
+    assert hist["layout_changes"] == [], hist
+    assert hist["layout_recheck_uncertified"] == [], hist
