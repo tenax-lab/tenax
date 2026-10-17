@@ -859,85 +859,6 @@ def test_implicit_ad_qr_1x1_runs_and_is_differentiable():
     assert jnp.all(jnp.isfinite(g))
 
 
-# --------------------------------------------------------------------------- #
-# Phase 2, Task 6 — implicit-AD QR gradient *correctness* (parity tests).       #
-#                                                                              #
-# Task 5b proved recipe='1x1' + qr RUNS and yields a *finite* gradient.  This   #
-# validates the gradient is *correct* by two independent checks:                #
-#   (a) finite-difference parity — the implicit-AD gradient matches a central   #
-#       finite difference of the same energy (key correctness gate), and        #
-#   (b) eigh parity — the QR-AD gradient agrees with the eigh-AD gradient on     #
-#       the same state (same physics, a different isometric projector scheme),   #
-#       converging together as chi grows.                                        #
-#                                                                              #
-# IMPORTANT — what makes a *genuine* FD check at this size (D=2), and why the    #
-# spec's exact tolerances are not reachable here (a real finding, documented):   #
-#                                                                              #
-#  * Use a PHYSICAL, converged state.  The random tensor from                   #
-#    ``_build_single_site_dense`` is not a near-fixed-point iPEPS; its CTM       #
-#    fixed point is ill-conditioned and the implicit adjoint (the GMRES solve    #
-#    of ``(I - J)``) is near-singular, giving O(1e2) gradients that no FD        #
-#    tracks.  The C4v-symmetrized simple-update ``A`` from                       #
-#    ``_build_physical_state_heisenberg_D2`` (E0 ~ -0.48, near the 2D Heisenberg #
-#    ground state) gives sane O(1) gradients.                                   #
-#                                                                              #
-#  * The spec's first suggestion — a GLOBAL-SCALE parameter ``A -> A * theta``   #
-#    — is UNUSABLE: the CTM energy is a *normalized* expectation value           #
-#    ``<H>/<1>``, so the scale direction is NEARLY orthogonal to the gradient    #
-#    (measured ``<grad, A0>`` ~= -4e-3, only ~0.6% of ||grad||).  It is not an    #
-#    exact algebraic degeneracy — E does vary ~1.6e-3 across theta — but that     #
-#    tiny scale-FD signal (~1e-3) is swamped by the kink noise (O(1e2)) from      #
-#    projector reselection, so the scale FD cannot distinguish a correct          #
-#    gradient from a wrong one.  This probe is therefore NOT usable as the FD     #
-#    gate.                                                                        #
-#                                                                              #
-#  * A non-degenerate FD (perturbing along a real, energy-changing direction)    #
-#    at D=2/chi<=16 is dominated by piecewise-flat-with-kinks structure: the     #
-#    projector subspace is discretely reselected, so small-eps FD swings O(1e3)  #
-#    and small-eps single-entry FD is meaningless.  A LARGE step (eps~1e-2)       #
-#    along the AD gradient direction averages over the local flat regions and    #
-#    recovers the slope's SIGN and ORDER OF MAGNITUDE (good to ~tens of percent, #
-#    reproducibly) — the cleanest genuine FD available at this tiny size, used   #
-#    by the (since removed, #931) directional-FD gate.                           #
-#                                                                              #
-#  * qr-AD and eigh-AD gradients are NOT equal at finite chi (they amplify the   #
-#    ~1e-3 forward energy gap into a ~10-40% gradient gap); they agree in sign/   #
-#    structure (cosine ~0.8-0.9) and CONVERGE TOGETHER as chi grows, mirroring   #
-#    the forward ``test_reduced_qr_energy_gap_shrinks_with_chi``.  So the eigh    #
-#    parity is a directional + converge-with-chi statement, not an exact match.  #
-# --------------------------------------------------------------------------- #
-
-
-def _implicit_energy_of_A_phys(A_arr, *, recipe, projector_method, chi, **kw):
-    """Implicit-AD energy of a raw ``(d,D,D,D,D)`` array on the *physical*
-    (C4v-symmetrized simple-update) D=2 Heisenberg state's gate."""
-    from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
-    from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
-
-    _A, gate_rot = _build_physical_state_heisenberg_D2()
-    A = _wrap_single_site_dense(A_arr)
-    return jnp.real(
-        ctm_energy_implicit(
-            {(0, 0): A},
-            SINGLE_SITE_NEIGHBORS,
-            gate_rot,
-            recipe=recipe,
-            projector_method=projector_method,
-            chi=chi,
-            max_iter=kw.get("max_iter", 80),
-            min_iter=kw.get("min_iter", 20),
-            qr_warmup_steps=kw.get("qr_warmup_steps", 6),
-            conv_tol=kw.get("conv_tol", 1e-12),
-        )
-    )
-
-
-def _phys_A0():
-    """The physical C4v-symmetrized D=2 Heisenberg site tensor as a raw array."""
-    A, _gate = _build_physical_state_heisenberg_D2()
-    return A.todense()
-
-
 # test_implicit_qr_gradient_matches_fd was removed (#931).  It compared the
 # recipe='1x1' qr implicit-AD gradient with a directional finite difference at
 # chi=16, but that forward is a diverged rank-1 environment (adjoint residual
@@ -951,6 +872,12 @@ def _phys_A0():
 # backward at all.  Raising TOL would only hide the flake.  Re-pointing at
 # ctm_tensor_c4v is not valid either: it converges to a wrong environment
 # (#760).
+#
+# Coverage consequence: end-to-end QR-projector gradient correctness is now
+# UNTESTED -- only finiteness checks remain (test_qr_projector_gradient_finite_
+# dense, test_implicit_ad_qr_1x1_runs_and_is_differentiable; the primitive's FD
+# check lives in test_regularized_qr.py).  The QR projector only acts on
+# recipe='1x1', whose forward does not converge (#795).
 #
 # test_implicit_qr_gradient_matches_eigh was removed: it compared the qr and
 # eigh implicit-AD gradients on recipe='1x1' at chi=16, where BOTH forwards

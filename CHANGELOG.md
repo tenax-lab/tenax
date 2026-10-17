@@ -1804,7 +1804,9 @@
   locally 0.166) and `test_implicit_qr_eigh_gradient_gap_shrinks_with_chi` was
   an `xfail(strict=False)` that passed or failed by which chi pair it sampled;
   both ran on a diverged rank-1 forward and cannot be re-pointed at a converged
-  configuration (the QR projector is inert on `recipe="2x2"`).
+  configuration (the QR projector is inert on `recipe="2x2"`).  End-to-end
+  QR-projector gradient correctness is therefore now untested: the QR projector
+  only acts on `recipe="1x1"`, whose forward does not converge (#795).
   `tests/test_no_duplicate_definitions.py` now fails on any repeated
   class/function name at module or class scope in `src/tenax`.
 

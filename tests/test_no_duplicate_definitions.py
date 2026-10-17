@@ -10,6 +10,8 @@ to look.
 Scope: top-level and class-level ``class`` / ``def`` / ``async def`` names per
 module.  Property ``.setter`` / ``.getter`` / ``.deleter`` and
 ``typing.overload`` definitions legitimately repeat a name and are skipped.
+Definitions inside ``if`` / ``try`` blocks or nested in functions are not
+scanned (deliberate: conditional fallback definitions are legitimate).
 """
 
 from __future__ import annotations
