@@ -929,6 +929,20 @@ def _select_run(mutables: dict, energy_fn, gate, neighbors) -> None:
     mutables["run_token"] = record[0]
 
 
+def _seed_matches(prev_lam, env_leaves) -> bool:
+    """Whether a cached adjoint ``prev_lam`` can seed a solve over ``env_leaves``.
+
+    Leaf count, shapes AND dtypes must match.  The run state that holds the
+    seed is keyed on the energy_fn/gate/neighbors identities, not on the
+    tensors, so a D sweep, a representation switch or a real <-> complex switch
+    reuses the run; feeding it a seed of another shape or dtype makes the VJP
+    raise (#1113: complex lambda into a float64 backward).
+    """
+    return len(prev_lam) == len(env_leaves) and all(
+        a.shape == b.shape and a.dtype == b.dtype for a, b in zip(prev_lam, env_leaves)
+    )
+
+
 def _run_state(mutables: dict, token: int) -> dict:
     """The state of run ``token``; a fresh one if it was evicted."""
     for record_token, state, _objects in mutables["_runs"].values():
@@ -2070,14 +2084,13 @@ def _make_implicit_vjp_fn(
             prev_lam = run.get("prev_lam_leaves")
             invalidated_by_shape = False
             if prev_lam is not None:
-                # Validate shapes match current env_leaves.  Without this, a D-sweep
-                # or tensor-representation switch (with cache hit on coords/gate/
-                # neighbors) would feed a stale-shape init_lam into the JIT and
-                # raise a VJP tree/shape mismatch.  Cache structure: prev_lam is a
-                # flat tuple of leaves shaped like env_leaves.
-                if len(prev_lam) != len(env_leaves) or any(
-                    a.shape != b.shape for a, b in zip(prev_lam, env_leaves)
-                ):
+                # Validate shapes and dtypes match current env_leaves.  Without
+                # this, a D-sweep, a tensor-representation switch or a real <->
+                # complex switch (with cache hit on coords/gate/neighbors) would
+                # feed a stale init_lam into the JIT and raise a VJP mismatch
+                # (#1113).  Cache structure: prev_lam is a flat tuple of leaves
+                # shaped like env_leaves.
+                if not _seed_matches(prev_lam, env_leaves):
                     run["prev_lam_leaves"] = None
                     invalidated_by_shape = True
                     prev_lam = None
@@ -2236,16 +2249,12 @@ def _make_implicit_vjp_fn(
         else:
             # adjoint_method == "gmres": eager Krylov via JAX's built-in
             # solver.  Retained as an opt-out for divergent edge cases.
-            # Warm-start from the cached ``prev_lam_leaves`` when shape-
-            # compatible (issue #501); fall back to ``rhs`` as the cold
-            # x0 otherwise.  The shape check matches the fixed-point
-            # branch above.
+            # Warm-start from the cached ``prev_lam_leaves`` when shape- and
+            # dtype-compatible (issues #501, #1113); fall back to ``rhs`` as
+            # the cold x0 otherwise.  Same check as the fixed-point branch.
             rhs = _eager_dE_denv()
             prev_lam = run.get("prev_lam_leaves")
-            if prev_lam is not None and (
-                len(prev_lam) != len(env_leaves)
-                or any(a.shape != b.shape for a, b in zip(prev_lam, env_leaves))
-            ):
+            if prev_lam is not None and not _seed_matches(prev_lam, env_leaves):
                 run["prev_lam_leaves"] = None
                 prev_lam = None
             # Warm start first, then the Neumann term, then zero -- chosen by

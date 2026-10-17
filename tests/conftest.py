@@ -549,6 +549,7 @@ _FILE_MARKERS = {
     # short implicit-AD optimizations and sits with the other multi-run
     # optimizer integrations in slow.
     "test_warm_start_entry_invalidation_973.py": "core",
+    "test_warm_start_dtype_1113.py": "core",
     "test_optimizer_run_independence_973.py": "slow",
     # Block-sparse stacked-contraction backend seam (#200 / #566): fast,
     # mechanism-level (small even-D fermionic tensors, no CTM convergence).
