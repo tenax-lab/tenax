@@ -92,6 +92,7 @@ def _should_accept_best(
     current_best: float,
     candidate: float,
     floor: float | None,
+    remeasured: bool = False,
 ) -> bool:
     """Return True iff ``candidate`` should overwrite ``best_energy``.
 
@@ -99,12 +100,23 @@ def _should_accept_best(
     below ``current_best``, and candidates at or below ``floor``
     (treated as non-variational CTM artifacts per issue #298).  A
     ``None`` floor disables the floor check.
+
+    ``remeasured=True`` means ``candidate`` was measured at ``best_params``
+    itself (the caller passes ``params is best_params``, which every
+    rollback produces).  It is then a fresher measurement of the same state,
+    so it replaces ``best_energy`` even when it is *higher* (#1095): a single
+    in-loop forward that read low must not stay the best forever and rank
+    every later candidate against a value the state does not have.  The
+    finiteness and floor checks still apply; a floor-violating re-measure
+    keeps the previous value.
     """
     if not math.isfinite(candidate):
         return False
-    if candidate >= current_best:
-        return False
     if floor is not None and candidate <= floor:
+        return False
+    if remeasured:
+        return True
+    if candidate >= current_best:
         return False
     return True
 

@@ -2331,7 +2331,9 @@ def _optimize_gs_ad_tensor(
         if config.gs_checkpoint_path is None:
             return
         chi_changed = ctm_cfg.chi != chi_before
-        is_new_best = best_energy < e_prev and _ckpt_written_1s["best"] != step
+        # ``!=`` not ``<``: a re-measure of best_params can raise best_energy
+        # (#1095), and the on-disk best must follow it.
+        is_new_best = best_energy != e_prev and _ckpt_written_1s["best"] != step
         should_save_last = (
             force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
         ) and _ckpt_written_1s["last"] != step
@@ -2377,8 +2379,9 @@ def _optimize_gs_ad_tensor(
     _su_guard = _su_start_guard_armed(_init_from_su, start_step)
     for step in range(start_step, config.gs_num_steps):
         # Snapshots for checkpoint "did chi change / new best" detection.
-        # ``best_energy`` only decreases, so a strict < comparison after the
-        # step body identifies a freshly-accepted best.  Both snapshots are
+        # ``best_energy`` changes only when a best is accepted (a decrease, or
+        # a re-measure of best_params that may rise, #1095), so a ``!=``
+        # comparison after the step body identifies it.  Both snapshots are
         # passed to ``_maybe_save_1s_checkpoint`` at every save call site so
         # the helper can decide what to flush.
         _best_energy_at_step_start = best_energy
@@ -2622,6 +2625,9 @@ def _optimize_gs_ad_tensor(
             current_best=best_energy,
             candidate=energy_float,
             floor=config.gs_energy_floor,
+            # #1095: a re-measure of best_params (after a rollback) replaces
+            # best_energy even when higher.
+            remeasured=params is best_params,
         ):
             best_energy = energy_float
             best_params = params
@@ -4187,7 +4193,9 @@ def _optimize_gs_ad_tensor_2site(
         if config.gs_checkpoint_path is None:
             return
         chi_changed = ctm_cfg_2s.chi != chi_before
-        is_new_best = best_energy < e_prev and _ckpt_written_2s["best"] != step
+        # ``!=`` not ``<``: a re-measure of best_params can raise best_energy
+        # (#1095), and the on-disk best must follow it.
+        is_new_best = best_energy != e_prev and _ckpt_written_2s["best"] != step
         should_save_last = (
             force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
         ) and _ckpt_written_2s["last"] != step
@@ -4248,8 +4256,9 @@ def _optimize_gs_ad_tensor_2site(
         _su_guard = _su_start_guard_armed(_init_from_su, start_step)
         for step in range(start_step, config.gs_num_steps):
             # Snapshots for checkpoint "did chi change / new best" detection.
-            # ``best_energy`` only decreases, so a strict < comparison after
-            # the step body identifies a freshly-accepted best.  Both
+            # ``best_energy`` changes only when a best is accepted (a
+            # decrease, or a re-measure of best_params that may rise, #1095),
+            # so a ``!=`` comparison after the step body identifies it.  Both
             # snapshots are passed to ``_maybe_save_2s_checkpoint`` at every
             # save call site so the helper can decide what to flush.
             _best_energy_at_step_start = best_energy
@@ -4513,6 +4522,9 @@ def _optimize_gs_ad_tensor_2site(
                 current_best=best_energy,
                 candidate=energy_float,
                 floor=config.gs_energy_floor,
+                # #1095: a re-measure of best_params (after a rollback)
+                # replaces best_energy even when higher.
+                remeasured=params is best_params,
             ):
                 best_energy = energy_float
                 best_params = params
@@ -5708,6 +5720,9 @@ def _optimize_gs_ad_multisite(
             current_best=best_energy,
             candidate=energy_float,
             floor=config.gs_energy_floor,
+            # #1095: a re-measure of best_params (after a rollback) replaces
+            # best_energy even when higher.
+            remeasured=params is best_params,
         ):
             best_energy = energy_float
             best_params = params
