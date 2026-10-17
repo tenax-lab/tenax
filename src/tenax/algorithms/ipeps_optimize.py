@@ -2550,6 +2550,19 @@ def _optimize_gs_ad_tensor(
         energy_float = float(energy_val)
         grad_norm_val = _grad_l2_norm(grads)
 
+        # Record the step BEFORE the spike guard below can ``continue`` (#1082):
+        # the CTM-forward lists were already appended for this step, so a
+        # rolled-back step must still get its energy / timing, as in the
+        # 2-site loop, or ``energies`` drifts one short per rollback.
+        if config.return_history:
+            _step_dt = _time.perf_counter() - _step_t0
+            if _first_step:
+                _jit_compile_time = float(_step_dt)
+                _first_step = False
+            else:
+                _history_step_times.append(float(_step_dt))
+            _history_energies.append(energy_float)
+
         # Gradient-spike guard (ported from the 2-site path, #524): a
         # non-variational implicit-AD step shows up as a >Nx gradient blowup
         # (e.g. |g| jumping from ~0.2 to ~5e3) whose energy can dip below the
@@ -2604,15 +2617,6 @@ def _optimize_gs_ad_tensor(
         recent_gnorms.append(grad_norm_val)
         if len(recent_gnorms) > config.gs_grad_spike_window:
             recent_gnorms.pop(0)
-
-        if config.return_history:
-            _step_dt = _time.perf_counter() - _step_t0
-            if _first_step:
-                _jit_compile_time = float(_step_dt)
-                _first_step = False
-            else:
-                _history_step_times.append(float(_step_dt))
-            _history_energies.append(energy_float)
 
         # Update env cache for warm-starting next step
         _update_env_cache(params)

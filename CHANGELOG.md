@@ -553,6 +553,13 @@
 
 ### Fixed
 
+- **The 1-site `return_history` lists no longer drift after a gradient-spike
+  rollback** (`ipeps_optimize.py`; #1082).  The 1-site loop appended each
+  step's CTM-forward entries but skipped the energy and timing of a rolled-back
+  step, so `energies` ended one short of `ctm_converged` / `ctm_sv_diff` per
+  rollback (3 vs 4 on a 4-step run).  The rolled-back step is now recorded, as
+  the 2-site loop already did.
+
 - **The implicit-AD warm start no longer reuses an adjoint of another dtype
   (#1113).** The cached adjoint vector was reused when its leaf shapes matched,
   regardless of dtype. A `jax.grad` over `ctm_energy_implicit` that switched
