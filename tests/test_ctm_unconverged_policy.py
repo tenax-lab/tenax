@@ -1224,7 +1224,12 @@ def test_policy_scope_defers_flow_fallback_warning_for_unconverged_forward():
     RuntimeWarning inside the policy scope, so warnings-as-errors still sees
     the typed policy outcome.  The latch stays unspent: outside the scope
     the same call still warns.  Fixture of #1077's fallback test: the 2-site
-    U(1)-Sz start at max_iter=20 (stationarity residual 0.25)."""
+    U(1)-Sz start at max_iter=20 (stationarity residual 0.25).
+
+    The fixture starves the adjoint solve (gmres_tol=1e-12, gmres_maxiter=1,
+    gmres_restart=2): the single-matvec GMRES solves this flow adjoint
+    (relative residual 1.32e-6), which JAX's GMRES stalled on (2.75e-5), so
+    the flow attempt must be made to fail on purpose."""
     import jax
 
     from tenax.algorithms._ctm_energy_ad import _VJP_CACHE, ctm_energy_implicit
@@ -1247,6 +1252,9 @@ def test_policy_scope_defers_flow_fallback_warning_for_unconverged_forward():
             forward_gauge="bond_phase",
             conv_method="elementwise",
             projector_backward="flow",
+            gmres_tol=1e-12,
+            gmres_maxiter=1,
+            gmres_restart=2,
         )
 
     _VJP_CACHE.clear()

@@ -169,6 +169,11 @@ def test_unsolvable_flowing_adjoint_falls_back_to_frozen():
     finite differences (|g| = 82 against 1.5 frozen).  The backward must
     detect the unsolved adjoint and return exactly the frozen gradient,
     saying so in the diagnostics.
+
+    The single-matvec GMRES solves this flow adjoint (relative residual
+    1.32e-6) that JAX's GMRES stalled on, so the solve is starved here
+    (``gmres_maxiter=1, gmres_restart=2``) to exercise the fallback
+    mechanism; see #1111.
     """
     import warnings
 
@@ -196,6 +201,9 @@ def test_unsolvable_flowing_adjoint_falls_back_to_frozen():
                 forward_gauge="bond_phase",
                 conv_method="elementwise",
                 projector_backward=projector_backward,
+                gmres_tol=1e-12,
+                gmres_maxiter=1,
+                gmres_restart=2,
             )
 
         with warnings.catch_warnings(record=True) as caught:
@@ -221,3 +229,50 @@ def test_unsolvable_flowing_adjoint_falls_back_to_frozen():
     assert any("flowing-projector backward" in str(w.message) for w in caught)
     for a, b in zip(g_flow, g_frozen):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="#1111: a solved flow adjoint on a non-stationary forward can give a "
+    "garbage gradient; fallback only catches unsolved adjoints",
+)
+def test_flow_gradient_on_the_1028_fixture_is_wrong_issue_1111():
+    """The flow gradient on the #1028 fixture should match finite differences.
+
+    Today it does not (measured ~1500x off): the solver converges on the
+    adjoint of a non-stationary forward, so the fallback never fires.  When
+    #1111 is fixed this XPASSes and strict=True forces the test update.
+    """
+    from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+    from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
+    from tenax.algorithms.ipeps import heisenberg_gate, heisenberg_u1sz_init_pair
+    from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
+
+    A_sym, B_sym = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+    A0, B0 = jnp.asarray(A_sym.todense()), jnp.asarray(B_sym.todense())
+    gate = heisenberg_gate().todense()
+
+    def energy(A, B):
+        return ctm_energy_implicit(
+            {(0, 0): _wrap_as_dense_tensor(A), (1, 0): _wrap_as_dense_tensor(B)},
+            CHECKERBOARD_NEIGHBORS,
+            gate,
+            chi=8,
+            max_iter=20,
+            projector_method="svd",
+            forward_gauge="bond_phase",
+            conv_method="elementwise",
+            projector_backward="flow",
+        )
+
+    rng = np.random.default_rng(11)
+    dA = jnp.asarray(rng.standard_normal(A0.shape))
+    dB = jnp.asarray(rng.standard_normal(B0.shape))
+    gA, gB = jax.grad(energy, argnums=(0, 1))(A0, B0)
+    ad = float(jnp.vdot(gA, dA).real + jnp.vdot(gB, dB).real)
+    h = 1e-5
+    fd = (
+        float(energy(A0 + h * dA, B0 + h * dB))
+        - float(energy(A0 - h * dA, B0 - h * dB))
+    ) / (2 * h)
+    assert abs(ad - fd) <= 0.5 * abs(fd), f"ad={ad:.6e} fd={fd:.6e}"
