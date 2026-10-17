@@ -263,7 +263,8 @@ _FLOW_SLOPE_STEP = 1e-4  # h = _FLOW_SLOPE_STEP * ||x||
 # ``_bond_phase_fix_envs``, ``_jit_forward_energy``) and eager primitive the
 # forward had already compiled at top level compiled again inside the probe.
 # Measured on CPU (forward pre-warmed, one-time per process per signature):
-# the D=2 chi=4 1-site limit cycle spent 115 compiles / 3.7 s in the probe;
+# the D=2 chi=4 1-site limit cycle 115 compiles / 3.69 s in the probe ->
+# 0 / 0.08 s, its whole grad 9.68 s -> 5.90 s;
 # the D=2 chi=4 2-site pair 99 compiles / 4.4 s -> 0 / 0.15 s, its cold grad
 # 21.7 s -> 17.1 s.  The probe therefore runs with the key put back to the
 # top-level value.  Numerically nothing changes (the empty mesh is what the
@@ -334,7 +335,13 @@ def _top_level_mesh_context():
         yield
         return
     mgr, top_level = found
-    prev = mgr.swap_local(top_level)
+    try:
+        prev = mgr.swap_local(top_level)
+    except Exception:  # noqa: BLE001 -- private API; never fail the backward
+        swap = False
+    if not swap:
+        yield
+        return
     try:
         yield
     finally:

@@ -25,6 +25,20 @@ from test_flow_slope_check_1111 import _single_energy, _single_params
 import tenax.algorithms._ctm_energy_ad as cea
 from tenax.algorithms._ctm_energy_ad import get_last_implicit_ad_diagnostics
 
+try:
+    from jax._src import config as _private_config
+except ImportError:  # pragma: no cover
+    _private_config = None
+if not hasattr(jax.sharding, "use_abstract_mesh") or not hasattr(
+    _private_config, "abstract_mesh_context_manager"
+):
+    # E.g. JAX 0.4.35: no use_abstract_mesh, and AbstractMesh takes one
+    # shape_tuple, so nothing below can be built.  The helper is a no-op there.
+    pytest.skip(
+        "this JAX has no use_abstract_mesh / abstract_mesh_context_manager",
+        allow_module_level=True,
+    )
+
 _COMPILED: list[str] = []
 
 
@@ -116,12 +130,34 @@ def test_use_abstract_mesh_inside_the_helper_does_not_crash(monkeypatch):
     # With the true top-level value (``config_ext.unset``) this is clean.
     _enter_use_abstract_mesh_inside_helper()
     # The spike's literal ``None`` crashed here (mesh.py: ``prev.empty``),
-    # which is how 2 of 6 probes became inconclusive; pin that it would.
+    # which is how 2 of 6 probes became inconclusive.  That half pins JAX's
+    # behaviour, not tenax's, so a JAX that tolerates None skips it.
     real = cea._abstract_mesh_manager()
     assert real is not None, "premise: this JAX has the private API"
     monkeypatch.setattr(cea, "_abstract_mesh_manager", lambda: (real[0], None))
-    with pytest.raises(AttributeError, match="empty"):
+    try:
         _enter_use_abstract_mesh_inside_helper()
+    except AttributeError as exc:
+        assert "empty" in str(exc), exc
+    else:
+        pytest.skip("this JAX tolerates a literal None abstract-mesh value")
+
+
+def test_a_failing_swap_is_a_no_op(monkeypatch):
+    class _Mgr:
+        value = _EMPTY
+
+        def swap_local(self, v):
+            raise RuntimeError("private API changed")
+
+        def set_local(self, v):  # pragma: no cover - must not be reached
+            raise AssertionError("restored a swap that never happened")
+
+    monkeypatch.setattr(cea, "_abstract_mesh_manager", lambda: (_Mgr(), None))
+    ran = []
+    with cea._top_level_mesh_context():
+        ran.append(True)
+    assert ran == [True]
 
 
 def test_a_real_mesh_is_left_alone():

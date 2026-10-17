@@ -599,9 +599,11 @@
   abstract mesh where top-level calls use the unset default, so the probe's
   extra forward recompiled every program the forward had already compiled
   (`_step`, `_bond_phase_fix_envs`, `_jit_forward_energy`, and the eager
-  primitives): 115 compiles / 3.7 s on the D=2 chi=4 1-site limit cycle,
-  99 compiles / 4.4 s on the D=2 chi=4 2-site pair (cold gradient 21.7 s ->
-  17.1 s), once per process per signature.  The probe now runs under the
+  primitives), once per process per signature.  Measured on CPU with the
+  forward pre-warmed: on the D=2 chi=4 1-site limit cycle the probe went
+  from 115 compiles / 3.69 s to 0 / 0.08 s and the whole gradient from
+  9.68 s to 5.90 s; on the D=2 chi=4 2-site pair the probe went from 99
+  compiles / 4.4 s to 0 / 0.15 s (cold gradient 21.7 s -> 17.1 s).  The probe now runs under the
   top-level key; values, the slope ratio and the verdict are unchanged.  This
   uses a private JAX API and is a no-op on a JAX that lacks it or under a
   real (non-empty) mesh.
