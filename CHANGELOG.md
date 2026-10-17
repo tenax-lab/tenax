@@ -20,8 +20,8 @@
   vs 2.4 s warm at D=3 chi=12). Stationary forwards are unchanged. The check
   catches grossly wrong flow gradients; it does not certify that flow beats
   frozen (on a raw-`SymmetricTensor` version of the #1028 fixture flow is kept
-  at r=0.746 with FD errors 35%/37% where frozen is 13%/4%). For complex parameters the check steps along
-  `conj(G)`, JAX's descent convention.
+  at r=0.746 with FD errors 35%/37% where frozen is 13%/4%). For complex
+  parameters the check steps along `conj(G)`, JAX's descent convention.
 
 - **The eager-GMRES adjoint compiles the J^T matvec once.** The implicit-AD
   backward's GMRES (`adjoint_method="gmres"`, and the fallback when the fused
