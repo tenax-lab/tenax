@@ -898,7 +898,7 @@ def test_implicit_ad_qr_1x1_runs_and_is_differentiable():
 #    along the AD gradient direction averages over the local flat regions and    #
 #    recovers the slope's SIGN and ORDER OF MAGNITUDE (good to ~tens of percent, #
 #    reproducibly) — the cleanest genuine FD available at this tiny size, used   #
-#    as the ``test_implicit_qr_gradient_matches_fd`` correctness gate.           #
+#    by the (since removed, #931) directional-FD gate.                           #
 #                                                                              #
 #  * qr-AD and eigh-AD gradients are NOT equal at finite chi (they amplify the   #
 #    ~1e-3 forward energy gap into a ~10-40% gradient gap); they agree in sign/   #
@@ -938,184 +938,38 @@ def _phys_A0():
     return A.todense()
 
 
-def _implicit_energy_grad_scalar(recipe="1x1", projector_method="qr", chi=8):
-    """Implicit-AD directional derivative along the AD gradient direction on the
-    physical state — a single *scalar* gradient magnitude ``|g|`` per scheme.
-
-    NB: the spec's first suggestion (a GLOBAL-SCALE parameter ``A -> A*theta``)
-    is unusable here — the normalized CTM energy ``<H>/<1>`` makes the scale
-    direction NEARLY orthogonal to the gradient (``<grad, A0>`` ~= -4e-3, ~0.6%
-    of ||grad||), so its ~1e-3 scale-FD signal is swamped by O(1e2) kink noise
-    and cannot distinguish a correct gradient from a wrong one.  Instead we take
-    the energy derivative along the (energy-changing) gradient direction itself,
-    which is the largest-signal scalar and exactly equals ``|g|`` analytically.
-    """
-    A0 = _phys_A0()
-    g = np.asarray(
-        jax.grad(
-            lambda a: _implicit_energy_of_A_phys(
-                a, recipe=recipe, projector_method=projector_method, chi=chi
-            )
-        )(A0)
-    )
-    return float(np.linalg.norm(g))  # == directional derivative along +grad
-
-
-def _implicit_energy_grad_scalar_fd(
-    recipe="1x1", projector_method="qr", eps=4e-2, chi=16
-):
-    """Central finite difference of the energy along the AD gradient direction.
-
-    ``eps`` defaults to ``4e-2`` (large, plateau): at D=2 the energy landscape is
-    piecewise-flat with kinks where the projector subspace is discretely
-    reselected, so a small ``eps`` straddles individual kinks and is meaningless
-    (the measured error is non-monotonic and noisy below ~1e-2).  In the
-    large-step plateau ``eps in [2e-2, 8e-2]`` the central FD averages over the
-    local flat regions and recovers the analytic directional slope ``||g||``
-    stably to ~17% — the cleanest genuine FD available at this tiny, non-smooth
-    size.  The FD systematically undershoots ``||g||`` (real curvature, not
-    noise: it is reproducible and ~monotone across the plateau).
-    """
-    A0 = _phys_A0()
-    g = np.asarray(
-        jax.grad(
-            lambda a: _implicit_energy_of_A_phys(
-                a, recipe=recipe, projector_method=projector_method, chi=chi
-            )
-        )(A0)
-    )
-    d = g / np.linalg.norm(g)
-
-    def E(step):
-        return float(
-            _implicit_energy_of_A_phys(
-                A0 + step * d, recipe=recipe, projector_method=projector_method, chi=chi
-            )
-        )
-
-    return (E(eps) - E(-eps)) / (2.0 * eps)
-
-
-@pytest.mark.algorithm
-def test_implicit_qr_gradient_matches_fd():
-    """Implicit-AD gradient (recipe='1x1', qr) matches a directional finite diff.
-
-    Key correctness gate, robust form.  The analytic directional derivative of
-    the implicit-AD energy along the unit AD-gradient direction ``dir = g/||g||``
-    is exactly ``<g, dir> == ||g||``.  We compare that to a central FD of the
-    energy along the *same* direction with a LARGE plateau step.
-
-    Why directional + large-eps: at D=2 the CTM energy landscape is
-    kink-dominated (the projector subspace is discretely reselected), so a
-    small-eps central FD is meaningless — its error is non-monotonic and noisy.
-    Perturbing along the AD gradient and stepping into the large-eps plateau
-    averages over the local flat regions and converges to the true slope.
-
-    Measured (chi=16, eps=4e-2, deterministic across runs):
-        ||g_ad|| = 0.4679, fd = 0.3902, relative error = 0.166.
-    The plateau is stable: eps in {2e-2, 4e-2, 8e-2} -> rel {0.174, 0.166, 0.160}
-    (tight, monotone).  TOL=0.35 leaves a comfortable >2x margin (measured error
-    ~= half of TOL); it is NOT set just above the error.  A wrong backward (sign
-    error, or a spurious O(1) leak) would blow past 0.35.
-
-    NB: the spec's earlier suggestion of a ~0.3% plateau does not reproduce here;
-    the genuine, reproducible agreement at this tiny non-smooth size is ~17%.
-    """
-    chi, eps, TOL = 16, 4e-2, 0.35
-    g_ad = _implicit_energy_grad_scalar(
-        recipe="1x1", projector_method="qr", chi=chi
-    )  # == ||g||, the analytic directional derivative along +grad
-    g_fd = _implicit_energy_grad_scalar_fd(
-        recipe="1x1", projector_method="qr", eps=eps, chi=chi
-    )
-    assert np.isfinite(g_ad) and np.isfinite(g_fd)
-    assert g_ad > 0.0  # ||g||
-    assert g_fd > 0.0  # FD slope along +grad is positive (same sign as AD)
-    rel_err = abs(g_fd - g_ad) / g_ad
-    assert rel_err < TOL, f"directional FD off by {rel_err:.3f} (>= {TOL})"
-
-
+# test_implicit_qr_gradient_matches_fd was removed (#931).  It compared the
+# recipe='1x1' qr implicit-AD gradient with a directional finite difference at
+# chi=16, but that forward is a diverged rank-1 environment (adjoint residual
+# 3.4e-2 against a 1e-6 tolerance), so the FD gap was a property of the kinks,
+# not of the adjoint: it measured 0.166 locally and 0.364 on CI (> TOL 0.35),
+# failing main's fast-other job on runs 38679934939 and 38992626993 while the
+# docstring claimed a deterministic 0.166.  It cannot be re-pointed at a
+# converged configuration: projector_method is consulted only on the 1x1 recipe
+# (#795), and on recipe='2x2' qr and eigh give the same energy to 5e-15
+# (-0.48863666353257 both, chi=16), so a 2x2 test would not exercise the QR
+# backward at all.  Raising TOL would only hide the flake.  Re-pointing at
+# ctm_tensor_c4v is not valid either: it converges to a wrong environment
+# (#760).
+#
 # test_implicit_qr_gradient_matches_eigh was removed: it compared the qr and
 # eigh implicit-AD gradients on recipe='1x1' at chi=16, where BOTH forwards
 # diverge (stationarity residual 1.21 / 0.56 after 7 sweeps, #723) and BOTH
 # adjoint solves fail (relative residual 0.40 / 0.33).  Its rtol=0.2
 # directional "parity" was a coin flip: 17% on Linux, 42% on macOS, where it
 # failed every full run on main.  The question it asked -- does the qr adjoint
-# track the eigh reference? -- is kept, with the reason it cannot be answered
-# on any reachable configuration, by the #858 xfail below.
+# track the eigh reference? -- cannot be answered on any reachable
+# configuration (see the #931 removal note below).
 
 
-@pytest.mark.algorithm
-@pytest.mark.xfail(
-    reason=(
-        "#858: the premise cannot hold on this configuration. The assertion "
-        "'the gap does not grow as the environment is refined' requires the "
-        "environment to refine, and recipe='1x1' gives corner rank 1 at EVERY "
-        "chi (the #723/#726 chi_eff=1 collapse) while '2x2' grows 4->8->12->"
-        "16->21 on the same state. It cannot be switched to '2x2' either: "
-        "projector_method is 'Consulted only on the 1x1 recipe' (#795), so "
-        "there is no non-collapsing configuration in which the QR adjoint can "
-        "be compared at all. On top of that the implicit adjoint DIVERGES here "
-        "-- relative residuals 9.0e-02, 1.581e+00 and 2.103e+00, i.e. a lambda "
-        "that solves the adjoint equation worse than lambda=0 would -- so the "
-        "gradients being compared carry no information about the true "
-        "gradient. Measured gap vs chi: 0.0113, 0.0198, 0.0662, 0.0266, 0.531 "
-        "at chi=4/8/12/16/24; the sampled pair (8,16) fails, (8,12) fails "
-        "three times worse, and (12,16) PASSES. Re-tuning the pair would only "
-        "move which coin flip is recorded."
-    ),
-    strict=False,
-)
-def test_implicit_qr_eigh_gradient_gap_shrinks_with_chi():
-    """The qr-AD vs eigh-AD gradient gap does not grow as chi increases.
-
-    Mirrors the forward ``test_reduced_qr_energy_gap_shrinks_with_chi``: the two
-    isometric projector schemes are distinct at finite chi but converge to the
-    same physics, so their gradient disagreement (1 - cosine similarity) must
-    not grow with chi — confirming the qr backward tracks the eigh reference as
-    the environment is refined rather than diverging from it.
-
-    **Currently xfail (#858).** The intent is right and the design is sound --
-    comparing two independent implementations is how a real adjoint bug would
-    be caught -- but it asks the question on an environment that cannot answer
-    it, with gradients too inaccurate to resolve the difference::
-
-        chi  rank(1x1)  rank(2x2)   gap        |g_qr|     |g_eigh|
-          4      1          4     0.011297895  4.4009e-01 4.3609e-01
-          8      1          8     0.019805025  4.3434e-01 4.5293e-01
-         12      1         12     0.066223983  4.6575e-01 4.5824e-01
-         16      1         16     0.026562736  4.4307e-01 4.7237e-01
-         24      1         21     0.530718621  4.9620e-01 9.6011e-01
-
-    At chi=24 the two gradients are nearly orthogonal (cos ~ 0.47) with
-    magnitudes differing by ~2x.  ``strict=False`` so that fixing either
-    blocker flips this green without failing the suite in the meantime.
-    """
-
-    def cos_gap(chi):
-        A0 = _phys_A0()
-        g_qr = np.asarray(
-            jax.grad(
-                lambda a: _implicit_energy_of_A_phys(
-                    a, recipe="1x1", projector_method="qr", chi=chi
-                )
-            )(A0)
-        ).ravel()
-        g_eigh = np.asarray(
-            jax.grad(
-                lambda a: _implicit_energy_of_A_phys(
-                    a, recipe="1x1", projector_method="eigh", chi=chi
-                )
-            )(A0)
-        ).ravel()
-        cos = float(
-            np.dot(g_qr, g_eigh) / (np.linalg.norm(g_qr) * np.linalg.norm(g_eigh))
-        )
-        return 1.0 - cos  # 0 == identical direction
-
-    gap8 = cos_gap(8)
-    gap16 = cos_gap(16)
-    assert gap16 <= gap8 + 1e-9  # gap does not grow as chi increases
+# test_implicit_qr_eigh_gradient_gap_shrinks_with_chi was removed (#931).  It was
+# xfail(strict=False) on recipe='1x1', where the corners are rank 1 at every chi
+# and the implicit adjoint diverges (relative residuals 9.0e-02, 1.58, 2.10), so
+# the gradients compared carry no information.  Its outcome depended only on
+# which chi pair was sampled (gap at chi=4/8/12/16/24 = 0.0113, 0.0198, 0.0662,
+# 0.0266, 0.531): it XFAILed locally and XPASSed on main CI (run 38992626993).
+# It cannot be re-pointed at recipe='2x2' (the projector knob is inert there,
+# #795) nor at ctm_tensor_c4v (converges to a wrong environment, #760).
 
 
 # --------------------------------------------------------------------------- #
