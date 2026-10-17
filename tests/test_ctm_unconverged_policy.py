@@ -914,7 +914,13 @@ def test_site4_unconverged_best_point_yields_to_converged_last_iterate(
 ):
     """#1081: only the FIRST cold final evaluation (the best point) is
     unconverged; the last iterate converges.  The run must report the last
-    iterate instead of raising on the best point."""
+    iterate instead of raising on the best point.
+
+    Both verdicts are forced: the real last-iterate forward is borderline on
+    this fixture (CI Linux 3.11 measured sv_diff 4.51e-14 against conv_tol
+    1e-14, unconverged, so both evaluations failed and the run correctly
+    raised).  The test is about which point the policy reports, not about
+    whether this forward converges."""
     real = _cpl.python_loop_ctm_converge
     state = {"warm_seen": False, "armed": 0}
 
@@ -926,6 +932,8 @@ def test_site4_unconverged_best_point_yields_to_converged_last_iterate(
             state["armed"] += 1
             if state["armed"] == 1:
                 return envs, info._replace(converged=False)
+            if state["armed"] == 2:
+                return envs, info._replace(converged=True)
         return envs, info
 
     monkeypatch.setattr(_cpl, "python_loop_ctm_converge", spy)
