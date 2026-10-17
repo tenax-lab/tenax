@@ -553,6 +553,14 @@
 
 ### Fixed
 
+- **An unconverged best point no longer aborts the final evaluation when the
+  last iterate converges (#1081).** `optimize_gs_ad` re-evaluates the best
+  and the last parameters with a fresh CTM.  The best point was never allowed
+  to be dropped, so if its cold CTM missed the tolerance and no certified warm
+  environment existed, the run raised `CTMNotConvergedError` before the
+  converging last iterate was ever evaluated.  The best point is now skipped
+  in that case; the run still raises if both candidates are unconverged.
+
 - **The implicit-AD warm start no longer reuses an adjoint of another dtype
   (#1113).** The cached adjoint vector was reused when its leaf shapes matched,
   regardless of dtype. A `jax.grad` over `ctm_energy_implicit` that switched

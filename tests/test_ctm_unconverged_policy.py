@@ -909,6 +909,35 @@ def test_site4_raises_without_converged_warm(monkeypatch, unit_cell):
 
 
 @pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_site4_unconverged_best_point_yields_to_converged_last_iterate(
+    monkeypatch, unit_cell
+):
+    """#1081: only the FIRST cold final evaluation (the best point) is
+    unconverged; the last iterate converges.  The run must report the last
+    iterate instead of raising on the best point."""
+    real = _cpl.python_loop_ctm_converge
+    state = {"warm_seen": False, "armed": 0}
+
+    def spy(*a, **k):
+        envs, info = real(*a, **k)
+        if k.get("env_init") is not None:
+            state["warm_seen"] = True
+        elif state["warm_seen"]:
+            state["armed"] += 1
+            if state["armed"] == 1:
+                return envs, info._replace(converged=False)
+        return envs, info
+
+    monkeypatch.setattr(_cpl, "python_loop_ctm_converge", spy)
+    monkeypatch.setattr(_opt, "_should_restore_best_env", lambda *a, **k: False)
+    cfg = _cfg(unit_cell, "raise", max_iter=300, steps=1)
+    out = _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+    assert state["armed"] >= 2, "best point and last iterate were not both evaluated"
+    assert math.isfinite(out[2])
+    assert out[-1]["final_env_source"] == "fresh"
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
 def test_site4_warn_legacy(monkeypatch, unit_cell):
     state = _final_eval_unconverged(monkeypatch)
     monkeypatch.setattr(_opt, "_should_restore_best_env", lambda *a, **k: False)
