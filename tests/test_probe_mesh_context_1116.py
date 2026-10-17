@@ -105,23 +105,26 @@ def test_probe_does_not_recompile_the_warm_forward(monkeypatch):
 
 def test_helper_swaps_only_the_empty_mesh_and_restores_it():
     assert _mesh_key() is None
-    with cea._top_level_mesh_context():  # top level: nothing to change
+    with cea._top_level_mesh_context(True):  # top level: nothing to change
         assert _mesh_key() is None
     with jax.sharding.use_abstract_mesh(_EMPTY):
         assert _mesh_key() == _EMPTY
-        with cea._top_level_mesh_context():
+        with cea._top_level_mesh_context(True):
             assert _mesh_key() is None
         assert _mesh_key() == _EMPTY
         with contextlib.suppress(RuntimeError):
-            with cea._top_level_mesh_context():
+            with cea._top_level_mesh_context(True):
                 raise RuntimeError
         assert _mesh_key() == _EMPTY, "restored after an exception"
+        # A forward that did not run at top level: never swap.
+        with cea._top_level_mesh_context(False):
+            assert _mesh_key() == _EMPTY
 
 
 def _enter_use_abstract_mesh_inside_helper():
     """What ``jax.debug.callback`` does on the calling thread (debugging.py)."""
     with jax.sharding.use_abstract_mesh(_EMPTY):  # the backward's key
-        with cea._top_level_mesh_context():
+        with cea._top_level_mesh_context(True):
             with jax.sharding.use_abstract_mesh(_EMPTY):
                 pass
 
@@ -155,15 +158,65 @@ def test_a_failing_swap_is_a_no_op(monkeypatch):
 
     monkeypatch.setattr(cea, "_abstract_mesh_manager", lambda: (_Mgr(), None))
     ran = []
-    with cea._top_level_mesh_context():
+    with cea._top_level_mesh_context(True):
         ran.append(True)
     assert ran == [True]
+
+
+def _probe_mesh_values(monkeypatch):
+    """Spy recording the abstract-mesh local value inside each probe call."""
+    from jax._src import config
+
+    seen = []
+    orig = cea._slope_probe_energy
+
+    def spy(*a, **k):
+        seen.append(config.abstract_mesh_context_manager.get_local())
+        return orig(*a, **k)
+
+    monkeypatch.setattr(cea, "_slope_probe_energy", spy)
+    return seen
+
+
+def test_default_no_mesh_probe_runs_at_top_level(monkeypatch):
+    from jax._src import config
+
+    seen = _probe_mesh_values(monkeypatch)
+    _, d = _grad_and_diag(_single_params())
+    assert d["projector_backward_used"] == "flow", d.get("flow_fallback_reason")
+    assert len(seen) == 1 and seen[0] is config.config_ext.unset, seen
+
+
+def test_caller_empty_mesh_with_abstract_device_is_left_alone(monkeypatch):
+    # Codex on #1121: an empty mesh carrying an abstract device (cross-platform
+    # lowering) must reach the probe's forward unchanged.
+    device = jax.sharding.AbstractDevice(
+        device_kind="cpu", num_cores=None, platform="cpu"
+    )
+    mesh = jax.sharding.AbstractMesh((), (), abstract_device=device)
+    seen = _probe_mesh_values(monkeypatch)
+    with jax.sharding.use_abstract_mesh(mesh):
+        _, d = _grad_and_diag(_single_params())
+    assert d["projector_backward_used"] == "flow", d.get("flow_fallback_reason")
+    assert len(seen) == 1 and seen[0] == mesh, seen
+    assert seen[0].abstract_device == device
+
+
+def test_caller_canonical_empty_mesh_is_left_alone(monkeypatch):
+    # Inside the backward the caller's explicit AbstractMesh((), ()) is the
+    # same interned object as JAX's normalised no-mesh value, so only the
+    # forward-time record can tell them apart.
+    seen = _probe_mesh_values(monkeypatch)
+    with jax.sharding.use_abstract_mesh(_EMPTY):
+        _, d = _grad_and_diag(_single_params())
+    assert d["projector_backward_used"] == "flow", d.get("flow_fallback_reason")
+    assert len(seen) == 1 and seen[0] is _EMPTY, seen
 
 
 def test_a_real_mesh_is_left_alone():
     mesh = jax.sharding.AbstractMesh((1,), ("x",))
     with jax.sharding.use_abstract_mesh(mesh):
-        with cea._top_level_mesh_context():
+        with cea._top_level_mesh_context(True):
             assert _mesh_key() == mesh
         assert _mesh_key() == mesh
 
@@ -174,7 +227,7 @@ def test_missing_private_api_is_a_no_op(monkeypatch):
     for absent in (types.SimpleNamespace(), None):
         monkeypatch.setattr(cea, "_jax_src_config", absent)
         with jax.sharding.use_abstract_mesh(_EMPTY):
-            with cea._top_level_mesh_context():
+            with cea._top_level_mesh_context(True):
                 assert _mesh_key() == _EMPTY, "no-op without the private API"
     # A JAX without the ``config_ext.unset`` sentinel: no-op, not an error.
     from jax._src import config as real_config
@@ -187,7 +240,7 @@ def test_missing_private_api_is_a_no_op(monkeypatch):
         ),
     )
     with jax.sharding.use_abstract_mesh(_EMPTY):
-        with cea._top_level_mesh_context():
+        with cea._top_level_mesh_context(True):
             assert _mesh_key() == _EMPTY, "no-op without config_ext.unset"
     # A manager lacking the swap methods is a no-op too.
     monkeypatch.setattr(
@@ -195,7 +248,7 @@ def test_missing_private_api_is_a_no_op(monkeypatch):
         "_jax_src_config",
         types.SimpleNamespace(abstract_mesh_context_manager=types.SimpleNamespace()),
     )
-    with cea._top_level_mesh_context():
+    with cea._top_level_mesh_context(True):
         pass
     g, d = _grad_and_diag(p)
     assert d["projector_backward_used"] == d_ref["projector_backward_used"] == "flow"
@@ -207,7 +260,9 @@ def test_missing_private_api_is_a_no_op(monkeypatch):
 def test_verdict_and_ratio_unchanged_by_the_fix(monkeypatch):
     p = _single_params()
     g_fix, d_fix = _grad_and_diag(p)
-    monkeypatch.setattr(cea, "_top_level_mesh_context", contextlib.nullcontext)
+    monkeypatch.setattr(
+        cea, "_top_level_mesh_context", lambda *a, **k: contextlib.nullcontext()
+    )
     g_old, d_old = _grad_and_diag(p)
     assert d_fix["projector_backward_used"] == d_old["projector_backward_used"]
     assert d_fix.get("flow_fallback_reason") == d_old.get("flow_fallback_reason")
