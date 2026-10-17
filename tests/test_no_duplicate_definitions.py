@@ -12,8 +12,9 @@ module.  A property's getter, setter and deleter legitimately share one name:
 a plain ``def``, ``@property`` and ``@x.getter`` share the getter slot, and
 ``@x.setter`` / ``@x.deleter`` on ``def x`` each have their own (a setter
 decorated from another property's name rebinds ``x`` and counts as a getter),
-so a second definition in any slot is flagged; ``typing.overload``
-definitions and the throwaway name ``_`` are skipped.
+so a second definition in any slot is flagged.  ``typing.overload``
+declarations are allowed before their implementation (one after it replaces
+the implementation and is flagged), and the throwaway name ``_`` is skipped.
 Definitions inside ``if`` / ``try`` blocks or nested in functions are not
 scanned (deliberate: conditional fallback definitions are legitimate).
 """
@@ -66,10 +67,20 @@ def _scope_duplicates(body, scope):
             continue
         # ``_`` is the conventional throwaway name (e.g. repeated
         # ``@func.register def _(...)`` with functools.singledispatch).
-        if not _is_overload(node) and node.name != "_":
+        if node.name != "_":
             key = (node.name, _accessor_kind(node))
             label = node.name if key[1] == "get" else f"{node.name}.{key[1]}"
-            if key in seen:
+            if _is_overload(node):
+                # Overload declarations legitimately precede their
+                # implementation; one AFTER it replaces the implementation
+                # with typing's overload dummy (calls raise
+                # NotImplementedError), so it is flagged.
+                if key in seen:
+                    out.append(
+                        f"{scope}{label} (lines {seen[key]} and {node.lineno}, "
+                        "@overload after the implementation)"
+                    )
+            elif key in seen:
                 out.append(f"{scope}{label} (lines {seen[key]} and {node.lineno})")
             else:
                 seen[key] = node.lineno
@@ -125,6 +136,9 @@ def test_scanner_catches_a_duplicated_class_and_function(tmp_path):
         "    @property\n    def x(self): return 1\n"
         "    @property\n    def y(self): return 2\n"
         "    @y.setter\n    def x(self, v): pass\n"
+        "@overload\ndef h(a: int) -> int: ...\n"
+        "def h(a): return a\n"
+        "@overload\ndef h(a: str) -> str: ...\n"
     )
     dups = find_duplicate_definitions(tmp_path)
     assert any("Foo (lines 1 and 4)" in d for d in dups), dups
@@ -134,3 +148,6 @@ def test_scanner_catches_a_duplicated_class_and_function(tmp_path):
     assert any(d.endswith("Q.y (lines 16 and 18)") for d in dups), dups
     assert any(d.endswith("R.z (lines 20 and 22)") for d in dups), dups
     assert any(d.endswith("S.x (lines 25 and 29)") for d in dups), dups
+    assert any(
+        "h (lines 32 and 34, @overload after the implementation)" in d for d in dups
+    ), dups
