@@ -593,6 +593,20 @@
 
 ### Fixed
 
+- **The #1111 slope check's probe no longer recompiles the forward inside
+  the backward (#1116).**  A custom_vjp backward runs under JAX's recorded
+  equation context, which keys the jit and eager-dispatch caches on an empty
+  abstract mesh where top-level calls use the unset default, so the probe's
+  extra forward recompiled every program the forward had already compiled
+  (`_step`, `_bond_phase_fix_envs`, `_jit_forward_energy`, and the eager
+  primitives), once per process per signature.  Measured on CPU with the
+  forward pre-warmed: on the D=2 chi=4 1-site limit cycle the probe went
+  from 115 compiles / 3.69 s to 0 / 0.08 s and the whole gradient from
+  9.68 s to 5.90 s; on the D=2 chi=4 2-site pair the probe went from 99
+  compiles / 4.4 s to 0 / 0.15 s (cold gradient 21.7 s -> 17.1 s).  The probe now runs under the
+  top-level key; values, the slope ratio and the verdict are unchanged.  This
+  uses a private JAX API and is a no-op on a JAX that lacks it or under a
+  real (non-empty) mesh.
 - **The implicit-AD warm start no longer reuses an adjoint of another dtype
   (#1113).** The cached adjoint vector was reused when its leaf shapes matched,
   regardless of dtype. A `jax.grad` over `ctm_energy_implicit` that switched
