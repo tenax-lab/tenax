@@ -553,6 +553,14 @@
 
 ### Fixed
 
+- **The implicit-AD warm start no longer reuses an adjoint of another dtype
+  (#1113).** The cached adjoint vector was reused when its leaf shapes matched,
+  regardless of dtype. A `jax.grad` over `ctm_energy_implicit` that switched
+  between complex and real site tensors while reusing the same gate and
+  neighbours objects raised a dtype `ValueError`. The seed check now also
+  compares dtypes, so such a backward starts cold. `optimize_gs_ad` was not
+  affected: it clears the warm start at the start of every run (#973).
+
 - **The JAX floor is now `jax>=0.4.35`, the oldest version tenax imports
   on** (#1105).  `pyproject.toml` declared `jax>=0.4.30`, but
   `src/tenax/linalg.py` imports `jax.lax.linalg.SvdAlgorithm` (#691), which
