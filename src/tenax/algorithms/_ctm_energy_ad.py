@@ -241,6 +241,30 @@ def _jit_gmres_one_matvec_solve(
 _PROJECTOR_BACKWARD_FLOW = "flow"
 _PROJECTOR_BACKWARD_FROZEN = "auto"
 
+# #1111: a flowing-projector gradient on a non-stationary forward is checked
+# against one extra forward energy evaluation along its own descent
+# direction.  r = (E(x - h G/|G|) - E(x)) / (-h |G|) must lie in
+# [MIN, MAX].  Measured on 15 fixtures (h = 1e-4, CPU): garbage flow
+# gradients (1497x / 7128x / 86x off finite differences, the last at D=3
+# chi=12) gave r = 0.000 / 0.001 / 0.002; good flow 0.97-1.24; frozen
+# 1.00-1.54.  The upper bound catches a gradient that is too small, the
+# symmetric failure.
+_FLOW_SLOPE_RATIO_MIN = 0.5
+_FLOW_SLOPE_RATIO_MAX = 2.0
+_FLOW_SLOPE_STEP = 1e-4  # h = _FLOW_SLOPE_STEP * ||x||
+
+
+def _slope_probe_energy(run_forward, compute_energy, site_tensors):
+    """``(real energy, chi_post)`` of the implicit-AD forward at ``site_tensors``.
+
+    The #1111 slope check's one extra forward.  Module level so tests can
+    replace it; it is the same ``_run_forward`` + ``_compute_energy`` pair the
+    forward itself uses, so the check evaluates exactly the differentiated
+    function.
+    """
+    envs, chi_post = run_forward(site_tensors)
+    return float(jnp.real(compute_energy(site_tensors, envs))), int(chi_post)
+
 
 def _warn_if_adjoint_unconverged(
     matvec, lam, rhs, *, tol: float, maxiter: int, restart: int
@@ -907,6 +931,16 @@ _RDM_CALL_TOKENS = itertools.count(1)
 _RUN_TOKENS = itertools.count(1)
 _RUNS_PER_ENTRY = 8
 
+# #1111 slope check: each forward's per-call inputs, kept under a serial that
+# travels with the residuals, so a pullback called after another forward on
+# the same cache entry probes with its own ``env_init``/``chi_ramp``/gate/
+# callback rather than the later call's.  A small per-entry LRU (read at
+# insert time, so tests can shrink it); an evicted entry is inconclusive.
+_FORWARD_SERIALS = itertools.count(1)
+_PROBE_INPUTS_PER_ENTRY = 8
+# The ``mutables`` keys ``_run_forward`` and ``_compute_energy`` read.
+_PROBE_INPUT_KEYS = ("env_init", "chi_ramp", "gate", "energy_fn")
+
 
 def _fresh_run_state() -> dict:
     return {
@@ -1088,6 +1122,10 @@ def get_last_implicit_ad_diagnostics() -> dict:
       (#1060; NaN when not measurable).
     * ``forward_stationarity_threshold`` -- the #841 threshold the residual
       above is compared with, ``max(100 * conv_tol, 1e-8)``.
+    * ``flow_slope_ratio`` -- #1111: measured/predicted energy change along
+      the flowing gradient's descent direction; present only when the slope
+      check ran (non-stationary forward, flow accepted by the other tests)
+      and gave a finite value.
     * ``projector_backward_used`` -- the projector backward that produced
       this gradient: the configured value, or ``"frozen_fallback"`` when a
       ``"flow"`` backward's adjoint was not solvable and the step was redone
@@ -1368,6 +1406,8 @@ def _make_implicit_vjp_fn(
     # consecutive backwards of one run, so the Neumann iteration starts close
     # to the answer (#501).  Cleared on divergence/non-convergence.
     _cached: dict = {}
+    # Forward serial -> that forward's ``_PROBE_INPUT_KEYS`` values (#1111).
+    _probe_inputs: collections.OrderedDict = collections.OrderedDict()
 
     def _invalidate_warm_start() -> None:
         """Drop the cached ``prev_lam_leaves`` warm-start seed.
@@ -1642,9 +1682,31 @@ def _make_implicit_vjp_fn(
 
         _cached["env_treedef"] = jax.tree.structure(envs)
         env_leaves = tuple(jax.tree.leaves(envs))
+        # #1111: the slope check needs this forward's energy and whether it was
+        # stationary.  Read now, right after _run_forward wrote them, and carry
+        # them in the residuals -- another forward can overwrite the
+        # module-global diagnostics before this backward runs.  Written as
+        # ``not (r <= t)`` so a NaN residual counts as non-stationary.
+        nonstationary = not (
+            _F3_LAST_DIAGNOSTICS.get("forward_stationarity_residual", float("nan"))
+            <= _F3_LAST_DIAGNOSTICS.get("forward_stationarity_threshold", 0.0)
+        )
         # The run token travels with the residuals, so a backward finds its
-        # own run even if another forward ran in between.
-        residuals = (params_data_tuple, env_leaves, chi_post, mutables["run_token"])
+        # own run even if another forward ran in between.  So does a serial
+        # naming this forward's per-call inputs, for the slope check's probe.
+        serial = next(_FORWARD_SERIALS)
+        _probe_inputs[serial] = {k: mutables[k] for k in _PROBE_INPUT_KEYS}
+        while len(_probe_inputs) > _PROBE_INPUTS_PER_ENTRY:
+            _probe_inputs.popitem(last=False)
+        residuals = (
+            params_data_tuple,
+            env_leaves,
+            chi_post,
+            mutables["run_token"],
+            energy,
+            nonstationary,
+            serial,
+        )
         return energy, residuals
 
     # Build JIT'd sweep step for backward (same recipe as forward, so the
@@ -2002,7 +2064,7 @@ def _make_implicit_vjp_fn(
         ``static_argnames`` parameter so JAX traces one compiled binary
         per distinct chi value visited (#516 chi-lock).
         """
-        params_data_tuple, env_leaves, chi_post, run_token = residuals
+        params_data_tuple, env_leaves, chi_post, run_token = residuals[:4]
         run = _run_state(mutables, int(run_token))
 
         # Drop the previous backward's residual before any branch can return.
@@ -2303,6 +2365,116 @@ def _make_implicit_vjp_fn(
                 _solved,
             )
 
+    def _flow_slope_check(residuals, g, grads, run):
+        """#1111: ``None`` to keep the flowing gradient, else why to discard it.
+
+        Runs only on a non-stationary forward.  One extra forward energy
+        evaluation along the gradient's own descent direction must change the
+        energy by what the gradient predicts: r = dE_measured / dE_predicted
+        in [_FLOW_SLOPE_RATIO_MIN, _FLOW_SLOPE_RATIO_MAX].  An inconclusive
+        check (the probe raised, a non-finite value, a chi bump) discards flow
+        too -- frozen is biased (#1028) but bounded.  The probe evaluates with
+        this forward's own per-call inputs (``env_init``, ``chi_ramp``, gate,
+        energy callback) and run, even when the pullback is called after
+        another forward on the same cache entry; if those inputs were evicted
+        from the per-entry LRU (``_PROBE_INPUTS_PER_ENTRY``) the check is
+        inconclusive.  The probe leaves the diagnostics, the warnings, the
+        current per-call state and the once-per-run latches (of this forward's
+        run and of the run current when the backward started) as it found them.
+        """
+        (
+            params_data_tuple,
+            _env_leaves,
+            chi_post,
+            token,
+            energy0,
+            nonstationary,
+            serial,
+        ) = residuals
+        if not nonstationary:
+            return None
+        inputs = lru_get(_probe_inputs, int(serial))
+        if inputs is None:
+            return (
+                "the slope check could not evaluate (its forward inputs were evicted)"
+            )
+        g_arr = jnp.asarray(g)
+        if float(jax.device_get(jnp.abs(g_arr))) == 0.0:
+            return None
+
+        def _norm(tree):
+            return float(
+                jax.device_get(
+                    jnp.sqrt(
+                        sum(
+                            jnp.sum(jnp.abs(leaf) ** 2)
+                            for leaf in jax.tree.leaves(tree)
+                        )
+                    )
+                )
+            )
+
+        G = jax.tree.map(lambda leaf: leaf / g_arr, grads[0])
+        g_norm = _norm(G)
+        if not g_norm > 0.0:
+            return "the slope check could not evaluate (the energy gradient is zero)"
+        h = _FLOW_SLOPE_STEP * _norm(params_data_tuple)
+        # JAX convention: grad of a real function of complex z is the conjugate
+        # of the steepest-ascent direction (grad |z|^2 at 1+1j is 2-2j), so the
+        # descent step is along conj(G).  jnp.conj is a no-op for real leaves;
+        # |G|^2 = sum |G_a|^2 is unchanged, so the predicted dE stays -h|G|.
+        x_h = jax.tree.map(
+            lambda a, b: a - (h / g_norm) * jnp.conj(b), params_data_tuple, G
+        )
+
+        diag_snapshot = dict(_F3_LAST_DIAGNOSTICS)
+        # ``run`` is this forward's; the probe's _run_forward is pointed at it
+        # below, but the run current at backward start may be a different one
+        # (another forward ran in between), so both runs' latches are kept.
+        current_run = _run_state(mutables, mutables["run_token"])
+        latch_snapshots = [
+            (state, {k: v for k, v in state.items() if k.endswith("_warned")})
+            for state in (run, current_run)
+        ]
+        state_snapshot = {k: mutables[k] for k in (*_PROBE_INPUT_KEYS, "run_token")}
+        try:
+            mutables.update(inputs)
+            mutables["run_token"] = int(token)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                e_h, chi_h = _slope_probe_energy(
+                    _run_forward, _compute_energy, dict(zip(coords, x_h))
+                )
+        except Exception as exc:  # noqa: BLE001 -- any failure is inconclusive
+            return (
+                "the slope check could not evaluate (its forward raised "
+                f"{type(exc).__name__}: {exc})"
+            )
+        finally:
+            _F3_LAST_DIAGNOSTICS.clear()
+            _F3_LAST_DIAGNOSTICS.update(diag_snapshot)
+            mutables.update(state_snapshot)
+            for state, snapshot in latch_snapshots:
+                state.update(snapshot)
+
+        if chi_h != int(chi_post):
+            return (
+                "the slope check could not evaluate (its forward changed chi "
+                f"{int(chi_post)} -> {chi_h})"
+            )
+        e0 = float(jax.device_get(jnp.real(energy0)))
+        r = (e_h - e0) / (-h * g_norm)
+        if not math.isfinite(r):
+            return f"the slope check could not evaluate (non-finite ratio {r})"
+        _F3_LAST_DIAGNOSTICS["flow_slope_ratio"] = r
+        if _FLOW_SLOPE_RATIO_MIN <= r <= _FLOW_SLOPE_RATIO_MAX:
+            return None
+        return (
+            f"its gradient failed the slope check (measured/predicted dE = "
+            f"{r:.3g}, accepted range [{_FLOW_SLOPE_RATIO_MIN:g}, "
+            f"{_FLOW_SLOPE_RATIO_MAX:g}])"
+        )
+
     def f_bwd(residuals, g):
         """Backward with the #1028 frozen-projector fallback.
 
@@ -2331,9 +2503,21 @@ def _make_implicit_vjp_fn(
         1.6e-4.  A stationarity gate would trade flow for frozen exactly
         where frozen is no better.  The fallback targets the failure that is
         specific to flowing: an adjoint that cannot be solved at all.
+
+        A *solved* flowing adjoint is still not enough on a non-stationary
+        forward (#1111): the single-matvec GMRES solves adjoints JAX's GMRES
+        stalled on, and on the #1028 fixture the solved flowing gradient was
+        1497x off finite differences (86x at D=3 chi=12, already on main).
+        Neither stationarity nor the adjoint amplification separates those
+        from good flowing gradients; one extra forward evaluation along the
+        gradient's own descent direction does.  ``_flow_slope_check`` keeps
+        flow only if measured/predicted dE lies in [0.5, 2] (garbage
+        <= 0.002, good 0.97-1.24, frozen 1.00-1.54), and only spends that
+        forward when the forward was not stationary.
         """
         _F3_LAST_DIAGNOSTICS.pop("flow_adjoint_residual", None)
         _F3_LAST_DIAGNOSTICS.pop("flow_fallback_reason", None)
+        _F3_LAST_DIAGNOSTICS.pop("flow_slope_ratio", None)
         run = _run_state(mutables, int(residuals[3]))
         deferred = _policy_defers_backward_warnings()
         if projector_backward != _PROJECTOR_BACKWARD_FLOW:
@@ -2362,6 +2546,8 @@ def _make_implicit_vjp_fn(
             for leaf in jax.tree.leaves(grads)
         ):
             reason = "its gradient was non-finite"
+        if reason is None:
+            reason = _flow_slope_check(residuals, g, grads, run)
         if reason is None:
             _F3_LAST_DIAGNOSTICS["projector_backward_used"] = _PROJECTOR_BACKWARD_FLOW
             return grads
