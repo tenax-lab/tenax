@@ -1050,7 +1050,16 @@ acts on every forward's `converged` flag:
   params, and `history["final_env_source"]` records which.
 
 `CTMConfig(on_unconverged="warn")` keeps the old control flow and emits
-`CTMNotConvergedWarning` instead.
+`CTMNotConvergedWarning` instead.  Inside one `optimize_gs_ad` run it emits
+at most one warning per check site (gradient, warm-start cache, line search,
+final energy) and optimizer step (#1083); a step's further unconverged
+forwards at that site are counted, not shown.  The next warning that is shown
+says how many similar ones were suppressed, a run that ends with suppressed
+warnings still pending logs the count at INFO level, and
+`history["ctm_warnings_suppressed"]` (with `return_history=True`) holds the
+run's total.  The final best-point and last-iterate evaluations are counted
+separately.  Calls outside `optimize_gs_ad`, and `on_unconverged="raise"`, are
+unchanged.
 
 **Coverage.** All of this applies to the fused-CTM implicit-AD optimizers for
 `unit_cell="1x1"` and `"2site"`. With explicit AD (`gs_implicit_ad=False`)
