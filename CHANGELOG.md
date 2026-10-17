@@ -1838,6 +1838,18 @@
 
 ### CI / tests
 
+- **Removed two unfixable `recipe="1x1"` QR tests and added a duplicate-definition
+  guard** (#931, #926).  `test_implicit_qr_gradient_matches_fd` failed
+  intermittently on main CI (directional FD off by 0.364 against TOL 0.35,
+  locally 0.166) and `test_implicit_qr_eigh_gradient_gap_shrinks_with_chi` was
+  an `xfail(strict=False)` that passed or failed by which chi pair it sampled;
+  both ran on a diverged rank-1 forward and cannot be re-pointed at a converged
+  configuration (the QR projector is inert on `recipe="2x2"`).  End-to-end
+  QR-projector gradient correctness is therefore now untested: the QR projector
+  only acts on `recipe="1x1"`, whose forward does not converge (#795).
+  `tests/test_no_duplicate_definitions.py` now fails on any repeated
+  class/function name at module or class scope in `src/tenax`.
+
 - **`test_regularized_qr_backward_finite_at_rank_deficiency` now fails when the
   `diag(R)` floor is removed** (#927).  It previously did not: the input was
   built by zeroing singular values and reconstructing
