@@ -106,8 +106,35 @@ def _rand(seed):
     return jnp.asarray(a / np.linalg.norm(a))
 
 
-def test_optimize_gs_ad_warn_mode_dedupes_per_step():
-    steps = 3
+def _run_recording(monkeypatch, steps=3, noop_step=False):
+    import contextlib
+
+    import tenax.algorithms._ctm_convergence_policy as P
+
+    scopes = []
+    real_scope = _opt.ctm_warning_scope
+
+    @contextlib.contextmanager
+    def rec_scope():
+        with real_scope() as sc:
+            scopes.append(sc)
+            yield sc
+
+    monkeypatch.setattr(_opt, "ctm_warning_scope", rec_scope)
+    emitted = []
+    orig = P.check_ctm_converged
+
+    def rec(info, **kw):
+        sc = P._WARN_SCOPE.get()
+        before = len(sc.seen)
+        r = orig(info, **kw)
+        if len(sc.seen) > before:  # a new (site, step, key) => one emitted
+            emitted.append((kw.get("site"), sc.step, kw.get("key")))
+        return r
+
+    monkeypatch.setattr(P, "check_ctm_converged", rec)
+    if noop_step:
+        monkeypatch.setattr(_opt, "set_ctm_warning_step", lambda s: None)
     cfg = iPEPSConfig(
         unit_cell="1x1",
         max_bond_dim=2,
@@ -123,11 +150,33 @@ def test_optimize_gs_ad_warn_mode_dedupes_per_step():
         warnings.simplefilter("always")
         out = _opt.optimize_gs_ad(_gate(), _rand(0), cfg)
     ws = [x for x in w if issubclass(x.category, CTMNotConvergedWarning)]
+    return out, ws, emitted
+
+
+def _assert_per_step(out, ws, emitted, steps):
     sites = Counter(re.search(r"site=([a-z_]+)", str(x.message)).group(1) for x in ws)
-    # At most one per step for each per-step site (was ~4 line_search/step).
+    # conv_tol=1e-14 with max_iter=3: every forward is unconverged, so the
+    # counts are exact (a per-run dedupe would give 1 per site, not `steps`).
     for site in ("line_search", "env_cache", "gradient"):
-        assert sites[site] <= steps, sites
-    assert sites["final_energy"] <= 2, sites
-    h = out[-1]
-    assert h["ctm_warnings_suppressed"] > 0
+        assert sites[site] == steps, sites
+    assert sites["final_energy"] == 2, sites
+    assert len(ws) == len(emitted)
+    assert len(set(emitted)) == len(emitted)  # no (site, step, key) twice
+    assert {st for (site, st, _) in emitted if site == "gradient"} == set(range(steps))
+    assert {st for (site, st, _) in emitted if site == "line_search"} == set(
+        range(steps)
+    )
+    assert out[-1]["ctm_warnings_suppressed"] > 0
     assert any("similar suppressed" in str(x.message) for x in ws)
+
+
+def test_optimize_gs_ad_warn_mode_dedupes_per_step(monkeypatch):
+    out, ws, emitted = _run_recording(monkeypatch)
+    _assert_per_step(out, ws, emitted, 3)
+
+
+def test_per_step_check_fails_if_step_is_never_set(monkeypatch):
+    """Guard the guard: a no-op ``set_ctm_warning_step`` (per-run dedupe) fails."""
+    out, ws, emitted = _run_recording(monkeypatch, noop_step=True)
+    with pytest.raises(AssertionError):
+        _assert_per_step(out, ws, emitted, 3)

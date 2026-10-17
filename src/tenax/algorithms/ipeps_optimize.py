@@ -1101,6 +1101,13 @@ def _with_ctm_warning_scope(fn):
     def wrapper(*args, **kwargs):
         with ctm_warning_scope() as scope:
             out = fn(*args, **kwargs)
+        if scope.pending:
+            _logger.info(
+                "[iPEPS-AD] %d unconverged-CTM warning(s) suppressed after the "
+                "last one emitted (%d in total this run)",
+                scope.pending,
+                scope.suppressed,
+            )
         if isinstance(out, tuple) and out and isinstance(out[-1], dict):
             if "energies" in out[-1]:
                 out[-1]["ctm_warnings_suppressed"] = scope.suppressed
@@ -1173,6 +1180,12 @@ def optimize_gs_ad(
         For 1-site:    ``(A_opt, env, E_gs)``
         For 2-site:    ``((A_opt, B_opt), (env_A, env_B), E_gs)``
         For multi-site: ``(dict[str, Tensor], dict[str, CTMTensorEnv], E_gs)``
+
+        With ``config.return_history=True`` a ``history`` dict is appended as
+        the last element.  Besides ``energies``, ``step_times`` and the
+        ``ctm_*`` per-step lists, it holds ``ctm_warnings_suppressed`` (int):
+        how many repeated unconverged-CTM warnings ``on_unconverged="warn"``
+        swallowed (one warning is kept per site and step, #1083).
     """
     if envs_init is not None:
         if config.unit_cell != "2site":

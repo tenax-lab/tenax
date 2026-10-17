@@ -40,7 +40,7 @@ def _rand(seed):
 
 
 @pytest.mark.parametrize("uc", ["1x1", "2site"])
-def test_history_lists_aligned_after_spike_rollback(uc, monkeypatch):
+def test_history_lists_aligned_after_spike_rollback(uc, monkeypatch, caplog):
     real = _opt._grad_l2_norm
     calls = {"n": 0}
 
@@ -65,9 +65,10 @@ def test_history_lists_aligned_after_spike_rollback(uc, monkeypatch):
         gs_grad_spike_ratio=2.0,
     )
     init = (_rand(0), _rand(1)) if uc == "2site" else _rand(0)
-    with warnings.catch_warnings():
+    with warnings.catch_warnings(), caplog.at_level("WARNING"):
         warnings.simplefilter("ignore")
         out = _opt.optimize_gs_ad(_gate(), init, cfg)
     h = out[-1]
-    assert calls["n"] >= 2  # the spike was actually injected
+    assert "gradient spike" in caplog.text  # the rollback really fired
     assert len(h["energies"]) == len(h["ctm_converged"]) == len(h["ctm_sv_diff"])
+    assert len(h["step_times"]) == len(h["energies"]) - 1  # first step = compile
