@@ -131,3 +131,39 @@ class TestGiltHOTRGFreeEnergy:
 
         # smaller eps -> weaker filter -> closer to plain HOTRG's error
         assert err(1e-4) <= err(1e-3) + 1e-9
+
+
+class TestGiltHOTRGIsometry:
+    """``isometry`` / ``side`` are forwarded to the HOTRG move (see HOTRGConfig)."""
+
+    def test_eps_zero_equals_plain_hotrg_with_eigh(self):
+        beta, chi, ns = BETA_C, 8, 8
+        for side in ("first", "second", "auto"):
+            f_gilt = float(
+                gilt_hotrg(
+                    compute_ising_tensor(beta, symmetric=True),
+                    GiltHOTRGConfig(
+                        max_bond_dim=chi,
+                        num_steps=ns,
+                        gilt=GiltConfig(gilt_eps=0.0),
+                        isometry="eigh",
+                        side=side,
+                    ),
+                )
+            )
+            f_hotrg = float(
+                hotrg(
+                    compute_ising_tensor(beta, symmetric=True),
+                    HOTRGConfig(
+                        max_bond_dim=chi, num_steps=ns, isometry="eigh", side=side
+                    ),
+                )
+            )
+            assert f_gilt == pytest.approx(f_hotrg, abs=1e-12)
+
+    def test_invalid_isometry_rejected(self):
+        T = compute_ising_tensor(0.4, symmetric=True)
+        with pytest.raises(ValueError):
+            gilt_hotrg(T, GiltHOTRGConfig(num_steps=1, isometry="qr"))
+        with pytest.raises(ValueError):
+            gilt_hotrg(T, GiltHOTRGConfig(num_steps=1, isometry="eigh", side="up"))
