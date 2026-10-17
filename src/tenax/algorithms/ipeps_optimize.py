@@ -299,6 +299,10 @@ def _site1_forward_info(
     ``diagnostics`` overrides the module read: the step reused the accepted
     line-search probe's ``value_and_grad`` (#1062), whose forward diagnostics
     were snapshotted when the probe ran.
+
+    Returns the verdict (True converged / False unconverged under ``"warn"``),
+    or None when no forward wrote one.  #1095 gates a rising re-measure of
+    ``best_params`` on it.
     """
     import tenax.algorithms._ctm_energy_ad as _cea
     from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
@@ -310,7 +314,7 @@ def _site1_forward_info(
     )
     info = _gradient_forward_info(d)
     if info is None:
-        return
+        return None
     ok = check_ctm_converged(
         info,
         site="gradient",
@@ -326,6 +330,24 @@ def _site1_forward_info(
         m = float(info.step_multiplier)
         mult_list.append(None if m != m else m)  # NaN -> None (spec section 3)
         stat_list.append(float(info.stationarity_residual))
+    return bool(ok)
+
+
+def _remeasure_certified(site1_ok: bool | None, env_cache: dict) -> bool:
+    """May a re-measure of ``best_params`` RAISE ``best_energy``? (#1095)
+
+    The re-measure after a reset is usually a cold CTM, the forward most
+    likely to be unconverged under ``on_unconverged="warn"``.  An uncertified
+    high value must not raise the bar: a worse state could then become best
+    and the original ``best_params`` would be lost.  Uses this step's site-1
+    verdict when one was written (implicit AD); otherwise the env refresh's
+    verdict, accepting anything not positively unconverged (split paths and
+    explicit AD record none).  A LOWER re-measure is accepted by the normal
+    rule regardless.
+    """
+    if site1_ok is not None:
+        return site1_ok
+    return _cached_env_state(env_cache) != "unconverged"
 
 
 def _site1_value_and_grad(loss_fn, params, *, enabled: bool, step_index: int, ctm_cfg):
@@ -2367,7 +2389,9 @@ def _optimize_gs_ad_tensor(
         if config.gs_checkpoint_path is None:
             return
         chi_changed = ctm_cfg.chi != chi_before
-        is_new_best = best_energy < e_prev and _ckpt_written_1s["best"] != step
+        # ``!=`` not ``<``: a re-measure of best_params can raise best_energy
+        # (#1095), and the on-disk best must follow it.
+        is_new_best = best_energy != e_prev and _ckpt_written_1s["best"] != step
         should_save_last = (
             force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
         ) and _ckpt_written_1s["last"] != step
@@ -2414,8 +2438,9 @@ def _optimize_gs_ad_tensor(
     for step in range(start_step, config.gs_num_steps):
         set_ctm_warning_step(step)
         # Snapshots for checkpoint "did chi change / new best" detection.
-        # ``best_energy`` only decreases, so a strict < comparison after the
-        # step body identifies a freshly-accepted best.  Both snapshots are
+        # ``best_energy`` changes only when a best is accepted (a decrease, or
+        # a re-measure of best_params that may rise, #1095), so a ``!=``
+        # comparison after the step body identifies it.  Both snapshots are
         # passed to ``_maybe_save_1s_checkpoint`` at every save call site so
         # the helper can decide what to flush.
         _best_energy_at_step_start = best_energy
@@ -2440,6 +2465,7 @@ def _optimize_gs_ad_tensor(
                 ctm_cfg = _replace(ctm_cfg, plateau_patience=new_patience)
         if config.return_history:
             _step_t0 = _time.perf_counter()
+        _site1_ok = None
         try:
             _reused = _ls_eval.take(params, ctm_cfg)
             _reused_diag = None
@@ -2461,7 +2487,7 @@ def _optimize_gs_ad_tensor(
                 )
                 grads = _euclidean_grads(grads)
             if _site1_check:
-                _site1_forward_info(
+                _site1_ok = _site1_forward_info(
                     step + 1,
                     ctm_cfg,
                     (
@@ -2663,6 +2689,10 @@ def _optimize_gs_ad_tensor(
             current_best=best_energy,
             candidate=energy_float,
             floor=config.gs_energy_floor,
+            # #1095: a certified re-measure of best_params (after a rollback)
+            # replaces best_energy even when higher.
+            remeasured=params is best_params
+            and _remeasure_certified(_site1_ok, _env_cache),
         ):
             best_energy = energy_float
             best_params = params
@@ -4228,7 +4258,9 @@ def _optimize_gs_ad_tensor_2site(
         if config.gs_checkpoint_path is None:
             return
         chi_changed = ctm_cfg_2s.chi != chi_before
-        is_new_best = best_energy < e_prev and _ckpt_written_2s["best"] != step
+        # ``!=`` not ``<``: a re-measure of best_params can raise best_energy
+        # (#1095), and the on-disk best must follow it.
+        is_new_best = best_energy != e_prev and _ckpt_written_2s["best"] != step
         should_save_last = (
             force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
         ) and _ckpt_written_2s["last"] != step
@@ -4290,8 +4322,9 @@ def _optimize_gs_ad_tensor_2site(
         for step in range(start_step, config.gs_num_steps):
             set_ctm_warning_step(step)
             # Snapshots for checkpoint "did chi change / new best" detection.
-            # ``best_energy`` only decreases, so a strict < comparison after
-            # the step body identifies a freshly-accepted best.  Both
+            # ``best_energy`` changes only when a best is accepted (a
+            # decrease, or a re-measure of best_params that may rise, #1095),
+            # so a ``!=`` comparison after the step body identifies it.  Both
             # snapshots are passed to ``_maybe_save_2s_checkpoint`` at every
             # save call site so the helper can decide what to flush.
             _best_energy_at_step_start = best_energy
@@ -4319,6 +4352,7 @@ def _optimize_gs_ad_tensor_2site(
 
             if config.return_history:
                 _step_t0 = _time.perf_counter()
+            _site1_ok = None
             try:
                 _reused = _ls_eval.take(params, ctm_cfg_2s)
                 _reused_diag = None
@@ -4340,7 +4374,7 @@ def _optimize_gs_ad_tensor_2site(
                     )
                     grads = _euclidean_grads(grads)
                 if _site1_check_2s:
-                    _site1_forward_info(
+                    _site1_ok = _site1_forward_info(
                         step + 1,
                         ctm_cfg_2s,
                         (
@@ -4555,6 +4589,10 @@ def _optimize_gs_ad_tensor_2site(
                 current_best=best_energy,
                 candidate=energy_float,
                 floor=config.gs_energy_floor,
+                # #1095: a certified re-measure of best_params (after a
+                # rollback) replaces best_energy even when higher.
+                remeasured=params is best_params
+                and _remeasure_certified(_site1_ok, _env_cache_2s),
             ):
                 best_energy = energy_float
                 best_params = params
@@ -5500,6 +5538,9 @@ def _optimize_gs_ad_multisite(
             **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
         _env_cache["envs"] = envs
+        # #1095: record the refresh verdict so _remeasure_certified can
+        # refuse a rising re-measure from an unconverged forward.
+        _env_cache[_VERDICT_KEY] = (envs, bool(info.converged), params_)
         # See ``_update_env_cache_2s`` (#472, #474): the 2x2 plaquette
         # projector tracks ε_T directly so reactive bumps fire on the
         # multisite forward stack with the default recipe.
@@ -5751,6 +5792,10 @@ def _optimize_gs_ad_multisite(
             current_best=best_energy,
             candidate=energy_float,
             floor=config.gs_energy_floor,
+            # #1095: a certified re-measure of best_params (after a rollback)
+            # replaces best_energy even when higher.  No site-1 check here;
+            # the env refresh's verdict gates it.
+            remeasured=params is best_params and _remeasure_certified(None, _env_cache),
         ):
             best_energy = energy_float
             best_params = params

@@ -542,6 +542,7 @@ _FILE_MARKERS = {
     "test_chi_auto_bump.py": "core",
     "test_ctm_env_pad.py": "core",
     "test_ipeps_chi_bump_integration.py": "algorithm",
+    "test_ipeps_best_energy_remeasure_1095.py": "algorithm",
     "test_ctm_convergence_random_iPEPS.py": "algorithm",
     "test_ipeps_grad_spike_guard.py": "slow",
     # #973 cross-run warm-start leak: wiring tests are ms-scale (planted
@@ -784,6 +785,7 @@ _FILE_MARKERS = {
     # D=2 chi=4, 31.5s CPU for all eight tests (fused and split).
     "test_ctm_2x2_projector_backward_983.py": "core",
     "test_projector_backward_default_1028.py": "core",
+    "test_flow_slope_check_1111.py": "core",
     # #1024: the split-CTM chi-seam layout invariant.  ``core``: a charge
     # layout that disagrees across a chi bond kills the 2x2 projector with a
     # shape error on any state whose horizontal and vertical bonds differ --
