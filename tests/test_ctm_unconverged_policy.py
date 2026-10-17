@@ -1424,3 +1424,52 @@ def test_site1_checks_supplied_diagnostics_over_module(monkeypatch):
     assert ei.value.site == "gradient" and ei.value.step == 3
     # Without a snapshot the (converged) module diagnostics are read: no raise.
     _opt._site1_forward_info(3, cfg, None)
+
+
+# ── #1095: a re-measure of best_params may raise best_energy, if certified ──
+
+
+def test_should_accept_best_remeasured_accepts_higher():
+    """The ``remeasured`` exception to the strict-decrease rule (#1095)."""
+    from tenax.algorithms._ipeps_optimize_shared import _should_accept_best
+
+    assert not _should_accept_best(current_best=-1.0, candidate=-0.9, floor=None)
+    assert _should_accept_best(
+        current_best=-1.0, candidate=-0.9, floor=None, remeasured=True
+    )
+    # A re-measure still refuses non-finite values and floor violations.
+    for bad in (float("nan"), float("inf")):
+        assert not _should_accept_best(
+            current_best=-1.0, candidate=bad, floor=None, remeasured=True
+        )
+    assert not _should_accept_best(
+        current_best=-0.5, candidate=-0.8, floor=-0.7, remeasured=True
+    )
+
+
+def test_remeasure_certified_site1_verdict_then_refresh_verdict():
+    """#1095: the site-1 verdict wins; else anything not positively unconverged."""
+    env, other = object(), object()
+    ok = _opt._remeasure_certified
+    # Site-1 verdict present: it decides, whatever the cache says.
+    assert ok(True, {"envs": env, _opt._VERDICT_KEY: (env, False, None)})
+    assert not ok(False, {"envs": env, _opt._VERDICT_KEY: (env, True, None)})
+    # No site-1 verdict: refuse only a positively unconverged refresh.
+    assert not ok(None, {"envs": env, _opt._VERDICT_KEY: (env, False, None)})
+    assert ok(None, {"envs": env, _opt._VERDICT_KEY: (env, True, None)})
+    assert ok(None, {"envs": env, _opt._VERDICT_KEY: (other, False, None)})  # stale
+    assert ok(None, {"envs": env})  # unknown (split path: no verdict written)
+    assert ok(None, {})  # none
+
+
+def test_site1_forward_info_returns_verdict(monkeypatch):
+    """#1095 gates on the value ``_site1_forward_info`` returns."""
+    monkeypatch.setattr(_cea, "get_last_implicit_ad_diagnostics", lambda: {})
+    warn = CTMConfig(chi=4, conv_tol=1e-10, on_unconverged="warn")
+    assert _opt._site1_forward_info(1, warn, None) is None  # no forward wrote one
+    snap = {"forward_converged": False, "forward_iterations": 7, "forward_sv_diff": 0.5}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert _opt._site1_forward_info(1, warn, None, diagnostics=snap) is False
+    snap["forward_converged"] = True
+    assert _opt._site1_forward_info(1, warn, None, diagnostics=snap) is True
