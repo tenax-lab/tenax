@@ -6,6 +6,7 @@ Extracts optimize_gs_ad and related helpers from ipeps.py.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import math
 import time as _time
@@ -16,6 +17,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._cache_fingerprint import declare_cache_key
+from tenax.algorithms._ctm_convergence_policy import (
+    ctm_warning_scope,
+    set_ctm_warning_step,
+)
 from tenax.algorithms._ctm_energy_ad import invalidate_implicit_ad_warm_start
 from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
@@ -189,6 +194,8 @@ def _final_eval_use_warm(
         policy=ctm_cfg.on_unconverged,
         conv_tol=ctm_cfg.conv_tol,
         chi=ctm_cfg.chi,
+        # The best point and the last iterate are different evaluations.
+        key="last" if skippable else "best",
     )
     return "fresh"
 
@@ -1087,6 +1094,29 @@ def optimize_gs_ad_chi_schedule(
     return optimize_gs_ad(hamiltonian_gate, A_init, step_cfg)
 
 
+def _with_ctm_warning_scope(fn):
+    """Run ``fn`` inside a warn-dedupe scope and report the suppressed count (#1083)."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with ctm_warning_scope() as scope:
+            out = fn(*args, **kwargs)
+        if scope.pending:
+            _logger.info(
+                "[iPEPS-AD] %d unconverged-CTM warning(s) suppressed after the "
+                "last one emitted (%d in total this run)",
+                scope.pending,
+                scope.suppressed,
+            )
+        if isinstance(out, tuple) and out and isinstance(out[-1], dict):
+            if "energies" in out[-1]:
+                out[-1]["ctm_warnings_suppressed"] = scope.suppressed
+        return out
+
+    return wrapper
+
+
+@_with_ctm_warning_scope
 def optimize_gs_ad(
     hamiltonian_gate: jax.Array | Tensor,
     A_init: jax.Array | Tensor | tuple | dict | None,
@@ -1150,6 +1180,12 @@ def optimize_gs_ad(
         For 1-site:    ``(A_opt, env, E_gs)``
         For 2-site:    ``((A_opt, B_opt), (env_A, env_B), E_gs)``
         For multi-site: ``(dict[str, Tensor], dict[str, CTMTensorEnv], E_gs)``
+
+        With ``config.return_history=True`` a ``history`` dict is appended as
+        the last element.  Besides ``energies``, ``step_times`` and the
+        ``ctm_*`` per-step lists, it holds ``ctm_warnings_suppressed`` (int):
+        how many repeated unconverged-CTM warnings ``on_unconverged="warn"``
+        swallowed (one warning is kept per site and step, #1083).
     """
     if envs_init is not None:
         if config.unit_cell != "2site":
@@ -2376,6 +2412,7 @@ def _optimize_gs_ad_tensor(
     _chi_at_step_start = None
     _su_guard = _su_start_guard_armed(_init_from_su, start_step)
     for step in range(start_step, config.gs_num_steps):
+        set_ctm_warning_step(step)
         # Snapshots for checkpoint "did chi change / new best" detection.
         # ``best_energy`` only decreases, so a strict < comparison after the
         # step body identifies a freshly-accepted best.  Both snapshots are
@@ -2550,6 +2587,19 @@ def _optimize_gs_ad_tensor(
         energy_float = float(energy_val)
         grad_norm_val = _grad_l2_norm(grads)
 
+        # Record the step BEFORE the spike guard below can ``continue`` (#1082):
+        # the CTM-forward lists were already appended for this step, so a
+        # rolled-back step must still get its energy / timing, as in the
+        # 2-site loop, or ``energies`` drifts one short per rollback.
+        if config.return_history:
+            _step_dt = _time.perf_counter() - _step_t0
+            if _first_step:
+                _jit_compile_time = float(_step_dt)
+                _first_step = False
+            else:
+                _history_step_times.append(float(_step_dt))
+            _history_energies.append(energy_float)
+
         # Gradient-spike guard (ported from the 2-site path, #524): a
         # non-variational implicit-AD step shows up as a >Nx gradient blowup
         # (e.g. |g| jumping from ~0.2 to ~5e3) whose energy can dip below the
@@ -2604,15 +2654,6 @@ def _optimize_gs_ad_tensor(
         recent_gnorms.append(grad_norm_val)
         if len(recent_gnorms) > config.gs_grad_spike_window:
             recent_gnorms.pop(0)
-
-        if config.return_history:
-            _step_dt = _time.perf_counter() - _step_t0
-            if _first_step:
-                _jit_compile_time = float(_step_dt)
-                _first_step = False
-            else:
-                _history_step_times.append(float(_step_dt))
-            _history_energies.append(energy_float)
 
         # Update env cache for warm-starting next step
         _update_env_cache(params)
@@ -4247,6 +4288,7 @@ def _optimize_gs_ad_tensor_2site(
         _chi_at_step_start = None
         _su_guard = _su_start_guard_armed(_init_from_su, start_step)
         for step in range(start_step, config.gs_num_steps):
+            set_ctm_warning_step(step)
             # Snapshots for checkpoint "did chi change / new best" detection.
             # ``best_energy`` only decreases, so a strict < comparison after
             # the step body identifies a freshly-accepted best.  Both
@@ -5591,6 +5633,7 @@ def _optimize_gs_ad_multisite(
 
     # ── Optimization loop ────────────────────────────────────────────────
     for step in range(config.gs_num_steps):
+        set_ctm_warning_step(step)
         # Update conv_tol if schedule is active
         if _conv_tol_schedule is not None:
             new_tol = _get_scheduled_conv_tol(step, config.gs_num_steps)

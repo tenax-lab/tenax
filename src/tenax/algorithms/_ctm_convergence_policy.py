@@ -10,6 +10,8 @@ forward checks the flag.  ``CTMConfig.on_unconverged`` picks the response.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import math
 import warnings
 from typing import NamedTuple
@@ -185,6 +187,47 @@ class CTMNotConvergedWarning(UserWarning):
     """
 
 
+class _WarnScope:
+    """Run-scoped dedupe state for ``on_unconverged="warn"`` (#1083)."""
+
+    __slots__ = ("step", "seen", "suppressed", "pending")
+
+    def __init__(self) -> None:
+        self.step: int | None = None
+        self.seen: set = set()
+        self.suppressed = 0  # total warnings swallowed over the run
+        self.pending = 0  # swallowed since the last emitted warning
+
+
+_WARN_SCOPE: contextvars.ContextVar[_WarnScope | None] = contextvars.ContextVar(
+    "tenax_ctm_warn_scope", default=None
+)
+
+
+@contextlib.contextmanager
+def ctm_warning_scope():
+    """Scope one optimisation run: under ``warn``, emit only the first
+    unconverged-CTM warning per (site, step, key) and count the rest.
+
+    Outside a scope every call still warns.  The state lives in a
+    ``ContextVar`` reset in ``finally``, so a failed run cannot leak it and
+    nested or concurrent runs each get their own.
+    """
+    scope = _WarnScope()
+    token = _WARN_SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        _WARN_SCOPE.reset(token)
+
+
+def set_ctm_warning_step(step: int | None) -> None:
+    """Tell the active scope (if any) which optimisation step is running."""
+    scope = _WARN_SCOPE.get()
+    if scope is not None:
+        scope.step = step
+
+
 def check_ctm_converged(
     info,
     *,
@@ -193,8 +236,15 @@ def check_ctm_converged(
     step: int | None = None,
     conv_tol: float | None = None,
     chi: int | None = None,
+    key: str | None = None,
 ) -> bool:
-    """Return ``info.converged``; raise or warn per ``policy`` when False."""
+    """Return ``info.converged``; raise or warn per ``policy`` when False.
+
+    Inside :func:`ctm_warning_scope` a warning is emitted once per
+    (``site``, scope step, ``key``); repeats are counted and reported by the
+    next emitted warning.  ``key`` separates calls that evaluate different
+    points at the same site and step (e.g. the best point vs the last iterate).
+    """
     if policy not in _VALID_POLICIES:
         raise ValueError(
             f"on_unconverged must be one of {_VALID_POLICIES}, got {policy!r}"
@@ -203,7 +253,17 @@ def check_ctm_converged(
         return True
     if policy == "raise":
         raise CTMNotConvergedError(info, site, step, conv_tol=conv_tol, chi=chi)
-    warnings.warn(
-        _describe(info, site, step, conv_tol, chi), CTMNotConvergedWarning, stacklevel=2
-    )
+    msg = _describe(info, site, step, conv_tol, chi)
+    scope = _WARN_SCOPE.get()
+    if scope is not None:
+        ident = (site, scope.step, key)
+        if ident in scope.seen:
+            scope.suppressed += 1
+            scope.pending += 1
+            return False
+        scope.seen.add(ident)
+        if scope.pending:
+            msg += f" ({scope.pending} similar suppressed)"
+            scope.pending = 0
+    warnings.warn(msg, CTMNotConvergedWarning, stacklevel=2)
     return False
