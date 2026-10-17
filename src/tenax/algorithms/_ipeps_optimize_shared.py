@@ -97,18 +97,22 @@ def _should_accept_best(
     """Return True iff ``candidate`` should overwrite ``best_energy``.
 
     Rejects non-finite (NaN/inf) candidates, candidates not strictly
-    below ``current_best``, and candidates at or below ``floor``
-    (treated as non-variational CTM artifacts per issue #298).  A
-    ``None`` floor disables the floor check.
+    below ``current_best`` (unless ``remeasured``, below), and candidates
+    at or below ``floor`` (treated as non-variational CTM artifacts per
+    issue #298).  A ``None`` floor disables the floor check.
 
-    ``remeasured=True`` means ``candidate`` was measured at ``best_params``
-    itself (the caller passes ``params is best_params``, which every
-    rollback produces).  It is then a fresher measurement of the same state,
-    so it replaces ``best_energy`` even when it is *higher* (#1095): a single
-    in-loop forward that read low must not stay the best forever and rank
-    every later candidate against a value the state does not have.  The
-    finiteness and floor checks still apply; a floor-violating re-measure
-    keeps the previous value.
+    ``remeasured=True`` means ``candidate`` is a *certified* measurement at
+    ``best_params`` itself: the caller passes ``params is best_params and
+    _remeasure_certified(...)``.  ``params is best_params`` is what every
+    rollback produces -- spike, CTM-error and stall resets, and the chi-bump /
+    stage-advance rollbacks, so ``best_energy`` is re-based at the new chi
+    there.  A certified re-measure replaces ``best_energy`` even when it is
+    *higher* (#1095): a single in-loop forward that read low must not stay
+    the best forever and rank every later candidate against a value the
+    state does not have.  An uncertified re-measure (unconverged under
+    ``on_unconverged="warn"``) is not ``remeasured``, so it can only lower
+    the bar through the ordinary rule.  The finiteness and floor checks
+    still apply; a floor-violating re-measure keeps the previous value.
     """
     if not math.isfinite(candidate):
         return False
