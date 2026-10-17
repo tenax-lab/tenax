@@ -542,6 +542,7 @@ _FILE_MARKERS = {
     "test_chi_auto_bump.py": "core",
     "test_ctm_env_pad.py": "core",
     "test_ipeps_chi_bump_integration.py": "algorithm",
+    "test_ipeps_best_energy_remeasure_1095.py": "algorithm",
     "test_ctm_convergence_random_iPEPS.py": "algorithm",
     "test_ipeps_grad_spike_guard.py": "slow",
     # #973 cross-run warm-start leak: wiring tests are ms-scale (planted

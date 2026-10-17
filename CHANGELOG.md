@@ -593,6 +593,23 @@
 
 ### Fixed
 
+- **The AD optimizer's best energy now follows a re-measurement of the best
+  state (#1095).** `best_energy` could only go down, so one in-loop energy
+  that read too low (for example from an under-converged CTM environment)
+  stayed the best for the rest of the run. After a rollback re-solved the
+  best tensors and measured them honestly higher, the honest value was
+  rejected and every later step was ranked against a value the state does
+  not have. When the energy is measured at the best tensors themselves and
+  that CTM forward is certified (converged, or not known to be
+  unconverged), it now replaces the stored best even if it is higher (still
+  subject to the finiteness and `gs_energy_floor` checks), on the 1-site,
+  2-site and multisite paths, and the 1-site and 2-site best checkpoint is
+  rewritten to match. An unconverged re-measure under
+  `on_unconverged="warn"` can still lower the best but never raise it. This
+  happens after every rollback to the best tensors, including the chi-bump
+  and stage-advance rollbacks, so the logged `E_best` is re-based at the new
+  chi and can jump up at stage boundaries.
+
 - **The implicit-AD warm start no longer reuses an adjoint of another dtype
   (#1113).** The cached adjoint vector was reused when its leaf shapes matched,
   regardless of dtype. A `jax.grad` over `ctm_energy_implicit` that switched
