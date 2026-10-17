@@ -8,9 +8,10 @@ test scans the whole package so the next one is caught without anyone knowing
 to look.
 
 Scope: top-level and class-level ``class`` / ``def`` / ``async def`` names per
-module.  A property's getter, setter and deleter legitimately share one name,
-so each accessor kind counts once (a second ``@x.setter`` is flagged);
-``typing.overload`` definitions are skipped.
+module.  A property's getter, setter and deleter legitimately share one name:
+a plain ``def``, ``@property`` and ``@x.getter`` share the getter slot, and
+``@x.setter`` / ``@x.deleter`` each have their own, so a second definition in
+any slot is flagged; ``typing.overload`` definitions are skipped.
 Definitions inside ``if`` / ``try`` blocks or nested in functions are not
 scanned (deliberate: conditional fallback definitions are legitimate).
 """
@@ -22,8 +23,6 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "tenax"
 
-_ACCESSORS = ("setter", "getter", "deleter")
-
 
 def _is_overload(node) -> bool:
     for dec in getattr(node, "decorator_list", []):
@@ -34,28 +33,30 @@ def _is_overload(node) -> bool:
     return False
 
 
-def _accessor_kind(node) -> str | None:
-    """``"setter"`` for ``@x.setter def x``, etc.; ``None`` for a plain def.
+def _accessor_kind(node) -> str:
+    """The name slot a definition occupies: ``"setter"``, ``"deleter"`` or
+    ``"get"``.
 
-    A property's getter, setter and deleter share one name, so each kind is
-    its own slot: one of each is legitimate, a second of the same kind (two
-    ``@x.setter``) shadows the first and is flagged.
+    A property's getter, setter and deleter share one name.  A plain ``def``,
+    ``@property`` and ``@x.getter`` all occupy the getter slot (each replaces
+    the attribute's getter), so a second definition of any of them shadows
+    the first; ``@x.setter`` and ``@x.deleter`` each get a slot of their own.
     """
     for dec in getattr(node, "decorator_list", []):
-        if isinstance(dec, ast.Attribute) and dec.attr in _ACCESSORS:
+        if isinstance(dec, ast.Attribute) and dec.attr in ("setter", "deleter"):
             return dec.attr
-    return None
+    return "get"
 
 
 def _scope_duplicates(body, scope):
-    seen: dict[tuple[str, str | None], int] = {}
+    seen: dict[tuple[str, str], int] = {}
     out = []
     for node in body:
         if not isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         if not _is_overload(node):
             key = (node.name, _accessor_kind(node))
-            label = node.name if key[1] is None else f"{node.name}.{key[1]}"
+            label = node.name if key[1] == "get" else f"{node.name}.{key[1]}"
             if key in seen:
                 out.append(f"{scope}{label} (lines {seen[key]} and {node.lineno})")
             else:
@@ -102,9 +103,17 @@ def test_scanner_catches_a_duplicated_class_and_function(tmp_path):
         "    @property\n    def x(self): return 1\n"
         "    @x.setter\n    def x(self, v): pass\n"
         "    @x.setter\n    def x(self, v): pass\n"
+        "class Q:\n"
+        "    @property\n    def y(self): return 1\n"
+        "    @y.getter\n    def y(self): return 2\n"
+        "class R:\n"
+        "    def z(self): return 1\n"
+        "    @property\n    def z(self): return 2\n"
     )
     dups = find_duplicate_definitions(tmp_path)
     assert any("Foo (lines 1 and 4)" in d for d in dups), dups
     assert any("g (lines 5 and 6)" in d for d in dups), dups
     assert any("Foo.m" in d for d in dups), dups
     assert any("P.x.setter (lines 11 and 13)" in d for d in dups), dups
+    assert any(d.endswith("Q.y (lines 16 and 18)") for d in dups), dups
+    assert any(d.endswith("R.z (lines 20 and 22)") for d in dups), dups
