@@ -10,8 +10,10 @@ to look.
 Scope: top-level and class-level ``class`` / ``def`` / ``async def`` names per
 module.  A property's getter, setter and deleter legitimately share one name:
 a plain ``def``, ``@property`` and ``@x.getter`` share the getter slot, and
-``@x.setter`` / ``@x.deleter`` each have their own, so a second definition in
-any slot is flagged; ``typing.overload`` definitions are skipped.
+``@x.setter`` / ``@x.deleter`` on ``def x`` each have their own (a setter
+decorated from another property's name rebinds ``x`` and counts as a getter),
+so a second definition in any slot is flagged; ``typing.overload``
+definitions and the throwaway name ``_`` are skipped.
 Definitions inside ``if`` / ``try`` blocks or nested in functions are not
 scanned (deliberate: conditional fallback definitions are legitimate).
 """
@@ -43,8 +45,16 @@ def _accessor_kind(node) -> str:
     the first; ``@x.setter`` and ``@x.deleter`` each get a slot of their own.
     """
     for dec in getattr(node, "decorator_list", []):
-        if isinstance(dec, ast.Attribute) and dec.attr in ("setter", "deleter"):
+        if (
+            isinstance(dec, ast.Attribute)
+            and dec.attr in ("setter", "deleter")
+            and isinstance(dec.value, ast.Name)
+            and dec.value.id == node.name
+        ):
             return dec.attr
+    # Anything else rebinds the name: a plain def, @property, @x.getter, and
+    # also @y.setter on ``def x`` (which replaces x with a property derived
+    # from y, discarding x's getter -- a mistyped property name).
     return "get"
 
 
@@ -54,7 +64,9 @@ def _scope_duplicates(body, scope):
     for node in body:
         if not isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if not _is_overload(node):
+        # ``_`` is the conventional throwaway name (e.g. repeated
+        # ``@func.register def _(...)`` with functools.singledispatch).
+        if not _is_overload(node) and node.name != "_":
             key = (node.name, _accessor_kind(node))
             label = node.name if key[1] == "get" else f"{node.name}.{key[1]}"
             if key in seen:
@@ -109,6 +121,10 @@ def test_scanner_catches_a_duplicated_class_and_function(tmp_path):
         "class R:\n"
         "    def z(self): return 1\n"
         "    @property\n    def z(self): return 2\n"
+        "class S:\n"
+        "    @property\n    def x(self): return 1\n"
+        "    @property\n    def y(self): return 2\n"
+        "    @y.setter\n    def x(self, v): pass\n"
     )
     dups = find_duplicate_definitions(tmp_path)
     assert any("Foo (lines 1 and 4)" in d for d in dups), dups
@@ -117,3 +133,4 @@ def test_scanner_catches_a_duplicated_class_and_function(tmp_path):
     assert any("P.x.setter (lines 11 and 13)" in d for d in dups), dups
     assert any(d.endswith("Q.y (lines 16 and 18)") for d in dups), dups
     assert any(d.endswith("R.z (lines 20 and 22)") for d in dups), dups
+    assert any(d.endswith("S.x (lines 25 and 29)") for d in dups), dups
