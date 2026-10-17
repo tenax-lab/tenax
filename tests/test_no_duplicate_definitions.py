@@ -27,11 +27,41 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[1] / "src" / "tenax"
 
 
-def _is_overload(node) -> bool:
+def _overload_names(tree) -> tuple[set[str], set[str]]:
+    """Names that mean ``typing.overload`` in this module.
+
+    Returns ``(bare, modules)``: ``bare`` holds the local names bound by
+    ``from typing import overload [as ov]`` (also ``typing_extensions``), and
+    ``modules`` the local names of ``import typing [as t]``, so ``@ov`` and
+    ``@t.overload`` resolve like ``@overload`` and ``@typing.overload``.
+    """
+    bare, modules = {"overload"}, {"typing", "typing_extensions"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in (
+            "typing",
+            "typing_extensions",
+        ):
+            for alias in node.names:
+                if alias.name == "overload":
+                    bare.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in ("typing", "typing_extensions"):
+                    modules.add(alias.asname or alias.name)
+    return bare, modules
+
+
+def _is_overload(node, names) -> bool:
+    bare, modules = names
     for dec in getattr(node, "decorator_list", []):
-        if isinstance(dec, ast.Attribute) and dec.attr == "overload":
+        if isinstance(dec, ast.Name) and dec.id in bare:
             return True
-        if isinstance(dec, ast.Name) and dec.id == "overload":
+        if (
+            isinstance(dec, ast.Attribute)
+            and dec.attr == "overload"
+            and isinstance(dec.value, ast.Name)
+            and dec.value.id in modules
+        ):
             return True
     return False
 
@@ -59,7 +89,7 @@ def _accessor_kind(node) -> str:
     return "get"
 
 
-def _scope_duplicates(body, scope):
+def _scope_duplicates(body, scope, names):
     seen: dict[tuple[str, str], int] = {}
     out = []
     for node in body:
@@ -70,7 +100,7 @@ def _scope_duplicates(body, scope):
         if node.name != "_":
             key = (node.name, _accessor_kind(node))
             label = node.name if key[1] == "get" else f"{node.name}.{key[1]}"
-            if _is_overload(node):
+            if _is_overload(node, names):
                 # Overload declarations legitimately precede their
                 # implementation; one AFTER it replaces the implementation
                 # with typing's overload dummy (calls raise
@@ -85,7 +115,7 @@ def _scope_duplicates(body, scope):
             else:
                 seen[key] = node.lineno
         if isinstance(node, ast.ClassDef):
-            out.extend(_scope_duplicates(node.body, f"{scope}{node.name}."))
+            out.extend(_scope_duplicates(node.body, f"{scope}{node.name}.", names))
     return out
 
 
@@ -95,7 +125,8 @@ def find_duplicate_definitions(root: Path) -> list[str]:
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
         found.extend(
-            f"{path.relative_to(root)}: {d}" for d in _scope_duplicates(tree.body, "")
+            f"{path.relative_to(root)}: {d}"
+            for d in _scope_duplicates(tree.body, "", _overload_names(tree))
         )
     return found
 
@@ -115,6 +146,11 @@ def test_scanner_catches_a_duplicated_class_and_function(tmp_path):
         "@overload\ndef f(a: int) -> int: ...\n"
         "@overload\ndef f(a: str) -> str: ...\n"
         "def f(a): return a\n"
+        "from typing import overload as ov\n"
+        "import typing as t\n"
+        "@ov\ndef k(a: int) -> int: ...\n"
+        "@t.overload\ndef k(a: str) -> str: ...\n"
+        "def k(a): return a\n"
     )
     assert find_duplicate_definitions(tmp_path) == []
 
