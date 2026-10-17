@@ -213,8 +213,9 @@ class CTMConfig:
     #     geometrically when ρ(J^T) < 1, which the Arnoldi precheck
     #     guarantees.  Each iteration is one cached ``_jit_apply_Jt``
     #     matvec — no Krylov subspace, no per-iter compile cost.
-    #   "gmres" — eager Krylov solve via ``gmres_pytree_jax``.  Use as a
-    #     safety opt-out when the fixed-point loop diverges.
+    #   "gmres" — eager Krylov solve via ``gmres_single_matvec`` (one matvec
+    #     call site).  Use as a safety opt-out when the fixed-point loop
+    #     diverges.
     # Both paths reuse ``gmres_tol`` (residual / step tolerance) and
     # ``gmres_maxiter`` (step cap).  The fixed-point loop additionally
     # falls back to GMRES in-loop when ``diff > prev_diff`` after step 5.
