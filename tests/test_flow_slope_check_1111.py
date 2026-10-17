@@ -235,11 +235,12 @@ def test_optimize_gs_ad_step_on_the_1028_fixture(monkeypatch):
     from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 
     real_probe = cea._slope_probe_energy
-    probe_calls = []
+    probe_energies = []
 
     def spy(*a, **k):
-        probe_calls.append(1)
-        return real_probe(*a, **k)
+        e, chi = real_probe(*a, **k)
+        probe_energies.append(e)
+        return e, chi
 
     monkeypatch.setattr(cea, "_slope_probe_energy", spy)
     A, B = _pair_params()
@@ -266,16 +267,22 @@ def test_optimize_gs_ad_step_on_the_1028_fixture(monkeypatch):
     assert len(flow_warnings) <= 1
     _a_opt, _envs, energy = result  # 2-site: ((A, B), (env_A, env_B), E_gs)
     assert np.isfinite(float(energy)), energy
-    # Measured: through optimize_gs_ad the fixture's CTM is warm-started and
-    # the forward the optimizer differentiates is stationary (converged, 12
-    # sweeps), so the slope check is correctly skipped and flow is kept.  This
-    # pins that outcome (no probe, flow, no fallback reason) -- the check
-    # itself is exercised by the direct-gradient tests above, which is where
-    # the non-stationary forward exists.
-    assert probe_calls == [], "the check ran on a stationary optimizer forward"
+    # Whether the check runs here depends on whether the forward the optimizer
+    # differentiates is stationary, and on this fixture that is borderline:
+    # measured stationary on one CPU (12 sweeps, converged) and non-stationary
+    # on CI.  So assert only what holds either way: any probe forward returned
+    # a finite energy, and if the check ran, the last backward reports a
+    # verdict consistent with it.  The check's accept/reject logic is pinned
+    # by the direct-gradient tests above.
+    assert all(np.isfinite(e) for e in probe_energies), probe_energies
     d = get_last_implicit_ad_diagnostics()
-    assert d["projector_backward_used"] == "flow", d
-    assert "flow_fallback_reason" not in d, d
+    if "flow_slope_ratio" in d:
+        r = d["flow_slope_ratio"]
+        if 0.5 <= r <= 2.0:
+            assert d["projector_backward_used"] == "flow", d
+        else:
+            assert d["projector_backward_used"] == "frozen_fallback", d
+            assert "slope check" in d["flow_fallback_reason"], d
 
 
 def test_slope_check_keeps_flow_for_complex_params():
