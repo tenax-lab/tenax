@@ -47,7 +47,7 @@ from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms._gmres_lax import gmres_pytree, gmres_pytree_jax
+from tenax.algorithms._gmres_lax import gmres_pytree, gmres_single_matvec
 from tenax.algorithms.ad_utils import (
     CTMRGGradientError,
     _bond_gauge_families,
@@ -69,9 +69,9 @@ def _adjoint_converged(residual: float, b_norm: float, tol: float) -> bool:
 
     Two things this must get right.
 
-    *The criterion.*  ``gmres_pytree_jax`` configures JAX GMRES with
-    ``tol=tol, atol=tol``, and that solver stops at
-    ``‖r‖ <= max(tol·‖b‖, atol)``.  Gating on the relative residual alone
+    *The criterion.*  The eager adjoint solver ``gmres_single_matvec`` stops at
+    ``‖r‖ <= max(tol·‖b‖, tol)`` (the same rule JAX GMRES gets from
+    ``tol=tol, atol=tol``).  Gating on the relative residual alone
     (``‖r‖/‖b‖ <= tol``) is a *stricter* test, so whenever ``‖b‖ < 1`` the
     solver can legitimately stop above the gate and be reported as a failure.
     ``‖b‖`` is O(1) on this path (measured 1.285 on the D=2 chi=8 fixture), so
@@ -197,33 +197,42 @@ def _best_adjoint_seed(matvec, rhs, candidates):
     by_bond_dim=False,
     static_argnames=("apply_Jt", "chi", "pb", "tol", "maxiter", "restart"),
 )
-def _jit_eager_gmres_solve(
-    params_data_tuple, env_leaves, rhs, x0, *, apply_Jt, chi, pb, tol, maxiter, restart
+def _jit_gmres_one_matvec_solve(
+    params_data_tuple,
+    env_leaves,
+    rhs,
+    candidates,
+    *,
+    apply_Jt,
+    chi,
+    pb,
+    tol,
+    maxiter,
+    restart,
 ):
-    """The eager-GMRES adjoint solve, compiled once per static configuration.
+    """The eager-GMRES adjoint solve: one compiled program, one J^T matvec.
 
-    ``gmres_pytree_jax`` runs JAX's GMRES, a ``lax.while_loop``.  Called
-    outside a jit, that loop is traced and compiled on the spot, and its
-    matvec used to be a closure built fresh on every backward over that
-    call's ``params_data_tuple`` and ``env_leaves`` -- so JAX saw a new
-    function each time and re-compiled the whole Krylov loop on every
-    gradient: ~170 s per call against a 0.6 s solve at D=2 chi=8 on CPU,
-    3-5 min per call at D=3 (#1087).  This hit ``adjoint_method="gmres"``
-    on every call, and the fused fixed-point branch whenever it fell back.
+    Replaces JAX's GMRES here, whose program inlined the matvec at three call
+    sites, plus the standalone ``_jit_apply_Jt`` compile that chose the seed
+    and measured the residual: four compiled copies of the CTM-sweep VJP,
+    2,458 s + 435 s at D=2 chi=8 on CPU against 611 s for the fused Neumann
+    module.  :func:`gmres_single_matvec` chooses the seed among
+    ``candidates`` and zero by measured residual (#858) and returns the
+    measured true residual, all with one matvec call site.
 
-    Here the matvec is built inside the trace from ``apply_Jt`` (the
-    dispatch entry's cached ``_jit_apply_Jt``, static -- its identity is
-    stable for the life of the cache entry) and the per-call data arrive as
-    traced arguments, so a later backward with new parameter values reuses
-    the compiled loop.  The seed ``x0`` is still chosen outside, by
-    :func:`_best_adjoint_seed`, and the residual is still measured outside:
-    neither changes.  Returns ``gmres_pytree_jax``'s ``(lam, info)``.
+    ``apply_Jt`` is static and stable for the life of the dispatch entry, so a
+    later backward with new values reuses the compiled loop (#1087).
+    ``candidates`` must keep the same pytree structure from call to call --
+    pass zeros, never ``None``, for a missing warm start -- or it recompiles.
+    Returns ``(lam, abs_resid, b_norm)``.
     """
 
     def matvec(v):
         return apply_Jt(params_data_tuple, env_leaves, v, chi=chi, pb=pb)
 
-    return gmres_pytree_jax(matvec, rhs, x0, tol=tol, maxiter=maxiter, restart=restart)
+    return gmres_single_matvec(
+        matvec, rhs, list(candidates), tol=tol, maxiter=maxiter, restart=restart
+    )
 
 
 # #1028: the flowing projector backward, and the frozen value its backward
@@ -262,17 +271,22 @@ def _warn_if_adjoint_unconverged(
     )[0]
 
 
-def _measure_adjoint(
-    matvec, lam, rhs, *, tol: float, maxiter: int, restart: int, warn: bool
+def _report_adjoint(
+    abs_resid: float,
+    b_norm: float,
+    *,
+    tol: float,
+    maxiter: int,
+    restart: int,
+    warn: bool,
+    stacklevel: int = 3,
 ) -> tuple[float, bool]:
-    """``(relative residual, converged)`` of an adjoint solve; warn if asked.
+    """``(relative residual, converged)`` from a residual already measured.
 
-    The body of :func:`_warn_if_adjoint_unconverged`, with the warning made
-    optional: the flowing-projector attempt (#1028) measures silently, because
-    a failed solve there is retried with frozen projectors rather than
-    consumed.
+    The threshold and the warning of :func:`_measure_adjoint`, for a solver
+    that returns its own true residual (:func:`gmres_single_matvec`) and so
+    needs no extra matvec.  Fails closed on NaN via ``_adjoint_converged``.
     """
-    abs_resid, b_norm = _adjoint_residual_and_rhs_norm(matvec, lam, rhs)
     rel = abs_resid / b_norm if b_norm > 0 else abs_resid
     converged = _adjoint_converged(abs_resid, b_norm, tol)
     if warn and not converged:
@@ -286,9 +300,31 @@ def _measure_adjoint(
             "gmres_restart, or loosen gmres_tol if this residual is "
             "acceptable for your use.",
             RuntimeWarning,
-            stacklevel=3,
+            stacklevel=stacklevel,
         )
     return rel, converged
+
+
+def _measure_adjoint(
+    matvec, lam, rhs, *, tol: float, maxiter: int, restart: int, warn: bool
+) -> tuple[float, bool]:
+    """``(relative residual, converged)`` of an adjoint solve; warn if asked.
+
+    The body of :func:`_warn_if_adjoint_unconverged`, with the warning made
+    optional: the flowing-projector attempt (#1028) measures silently, because
+    a failed solve there is retried with frozen projectors rather than
+    consumed.
+    """
+    abs_resid, b_norm = _adjoint_residual_and_rhs_norm(matvec, lam, rhs)
+    return _report_adjoint(
+        abs_resid,
+        b_norm,
+        tol=tol,
+        maxiter=maxiter,
+        restart=restart,
+        warn=warn,
+        stacklevel=4,
+    )
 
 
 def _default_energy(site_tensors, envs, gate, coords, neighbors):
@@ -1740,6 +1776,7 @@ def _make_implicit_vjp_fn(
         params_data_tuple,
         env_leaves,
         init_lam,
+        use_init,
         *,
         chi,
         pb,
@@ -1763,9 +1800,12 @@ def _make_implicit_vjp_fn(
         evaluated a chain rule it threw away.
 
         ``init_lam`` is the warm-start seed for the Neumann iteration
-        (shape-matched to ``dE_denv``).  Cold start passes ``dE_denv``
-        itself; subsequent calls pass the previous ``lam_final`` so the
-        loop converges in fewer iterations (#501).
+        (shape-matched to ``dE_denv``).  On a cold start the caller passes
+        zeros with ``use_init=False`` and the program seeds the iteration
+        from its own ``dE_denv``; subsequent calls pass the previous
+        ``lam_final`` with ``use_init=True`` so the loop converges in fewer
+        iterations (#501).  ``use_init`` is a traced bool, so warm and cold
+        calls share one compiled program.
 
         Returns
         -------
@@ -1787,7 +1827,6 @@ def _make_implicit_vjp_fn(
             loop's ``diff`` is the *same step vector* in an ℓ1-of-ℓ2 sum over
             leaves; reporting that instead would not be comparable to
             anything.
-
             Free because the Neumann step *is* the residual,
 
                 λ_{k+1} - λ_k = b + Jᵀλ_k - λ_k = b - (I - Jᵀ)λ_k
@@ -1807,6 +1846,8 @@ def _make_implicit_vjp_fn(
             certificate for ``λ_final``.  It is not load-bearing for
             correctness: nothing gates on it, and the branch that returns it
             has already met ``diff <= gmres_tol`` (see the caller).
+        dE_denv : tuple of leaves
+            The RHS, returned so the GMRES fallback does not recompute it.
         """
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
@@ -1854,7 +1895,13 @@ def _make_implicit_vjp_fn(
         # The RHS ``b = dE_denv`` of the Neumann step ``λ_{k+1} = b + J^T λ_k``
         # is unchanged — only the initial guess is seeded from cache.
         real_dtype = jnp.real(dE_denv[0]).dtype if dE_denv else jnp.float64
-        init_lam_local = init_lam  # lambda_0 (warm or cold seed)
+        # Cold start seeds from this program's own dE_denv: passing it in
+        # from the standalone _jit_dE_denv compiled a second copy of the
+        # energy VJP just to make the seed.  ``use_init`` is traced, so warm
+        # and cold calls share this compiled program.
+        init_lam_local = tuple(
+            jnp.where(use_init, w, d) for w, d in zip(init_lam, dE_denv)
+        )
         init_diff = jnp.array(jnp.inf, dtype=real_dtype)
         init_k = jnp.array(0, dtype=jnp.int32)
         init_diverged = jnp.array(False)
@@ -1899,7 +1946,7 @@ def _make_implicit_vjp_fn(
             real_dtype
         )
 
-        return diverged, converged, n_iter, lam_final, abs_resid, b_norm
+        return diverged, converged, n_iter, lam_final, abs_resid, b_norm, dE_denv
 
     @partial(block_sparse_jit, by_bond_dim=False, static_argnames=("chi",))
     def _jit_gmres_solve(params_data_tuple, env_leaves, rhs, *, chi):
@@ -1993,8 +2040,7 @@ def _make_implicit_vjp_fn(
         # dE/denv is the RHS for the (I - J^T)·λ = b solve. F3's fused JIT
         # recomputes it internally, so the eager call is only needed by:
         # (a) the Arnoldi precheck (uses it as the Krylov seed), or
-        # (b) the eager-GMRES path — either the "gmres" branch below or
-        # the divergence-fallback path inside the "fixed_point" branch.
+        # (b) adjoint_method='gmres'.
         # Compute lazily so the normal F3 success path doesn't pay an
         # extra _jit_dE_denv trace/dispatch on every backward call.
         _dE_denv_cached: tuple | None = None
@@ -2023,13 +2069,6 @@ def _make_implicit_vjp_fn(
             if rho >= 1.0:
                 raise CTMRGGradientError(rho)
 
-        # Both eager-GMRES paths (fixed_point divergence fallback + the
-        # "gmres" branch) share the same cached _jit_apply_Jt matvec.  This
-        # closure is for the eager seed choice and residual measurement only;
-        # the solve itself goes through _jit_eager_gmres_solve (#1087).
-        def _eager_apply_I_minus_Jt(v):
-            return _jit_apply_Jt(params_data_tuple, env_leaves, v, chi=chi_post, pb=pb)
-
         if adjoint_method == "fixed_point":
             # F3 fused JIT: dE/denv + adjoint fixed-point + chain rule
             # in one trace. Returns final grads directly; if the fused
@@ -2056,9 +2095,11 @@ def _make_implicit_vjp_fn(
                     invalidated_by_shape = True
                     prev_lam = None
             if prev_lam is None:
-                init_lam = _eager_dE_denv()
+                init_lam = tuple(jnp.zeros_like(leaf) for leaf in env_leaves)
+                use_init = jnp.array(False)
             else:
                 init_lam = prev_lam
+                use_init = jnp.array(True)
 
             (
                 diverged,
@@ -2067,8 +2108,9 @@ def _make_implicit_vjp_fn(
                 lam_final,
                 _abs_resid,
                 _b_norm,
+                fused_rhs,
             ) = _jit_fused_fixed_point_bwd(
-                params_data_tuple, env_leaves, init_lam, chi=chi_post, pb=pb
+                params_data_tuple, env_leaves, init_lam, use_init, chi=chi_post, pb=pb
             )
             _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
@@ -2090,7 +2132,8 @@ def _make_implicit_vjp_fn(
                     float(jax.device_get(jnp.sum(jnp.abs(_l) ** 2))) for _l in lam_final
                 )
                 _init_lam_norm_sq = sum(
-                    float(jax.device_get(jnp.sum(jnp.abs(_l) ** 2))) for _l in init_lam
+                    float(jax.device_get(jnp.sum(jnp.abs(_l) ** 2)))
+                    for _l in (init_lam if prev_lam is not None else fused_rhs)
                 )
                 _F3_LAST_DIAGNOSTICS["lam_norm"] = _lam_norm_sq**0.5
                 _F3_LAST_DIAGNOSTICS["init_lam_norm"] = _init_lam_norm_sq**0.5
@@ -2141,18 +2184,21 @@ def _make_implicit_vjp_fn(
                 # becomes the new seed for the next call.
                 run["prev_lam_leaves"] = None
                 _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = True
-                rhs = _eager_dE_denv()
+                rhs = fused_rhs
                 _GMRES_LOGGER.debug(
                     "Eager GMRES: maxiter=%d tol=%g restart=%d",
                     gmres_maxiter,
                     gmres_tol,
                     gmres_restart,
                 )
-                lam, _info = _jit_eager_gmres_solve(
+                # Seed among [rhs] and zero by measured residual (#858), solve,
+                # and measure the true residual -- one compiled program, one
+                # matvec call site (gmres_single_matvec).
+                lam, _abs, _bn = _jit_gmres_one_matvec_solve(
                     params_data_tuple,
                     env_leaves,
                     rhs,
-                    _best_adjoint_seed(_eager_apply_I_minus_Jt, rhs, [rhs]),
+                    [rhs],
                     apply_Jt=_jit_apply_Jt,
                     chi=chi_post,
                     pb=pb,
@@ -2160,12 +2206,9 @@ def _make_implicit_vjp_fn(
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
                 )
-                # ``_info`` is not a convergence flag on this solver -- see
-                # _warn_if_adjoint_unconverged.  Measure the residual instead.
-                _rel, _solved = _measure_adjoint(
-                    _eager_apply_I_minus_Jt,
-                    lam,
-                    rhs,
+                _rel, _solved = _report_adjoint(
+                    float(jax.device_get(_abs)),
+                    float(jax.device_get(_bn)),
                     tol=gmres_tol,
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
@@ -2214,15 +2257,15 @@ def _make_implicit_vjp_fn(
             if prev_lam is not None and not _seed_matches(prev_lam, env_leaves):
                 run["prev_lam_leaves"] = None
                 prev_lam = None
-            # Warm start first, then the Neumann term, then zero -- but chosen
-            # by measured residual, not by preference order (#858).  Both
-            # non-zero seeds are good only where they beat zero, and where
-            # they do not GMRES cannot undo them.
-            warm = None
+            # Warm start first, then the Neumann term, then zero -- chosen by
+            # measured residual inside the solve (#858).  A missing warm start
+            # is passed as zeros, not None: zero ties the incumbent and loses,
+            # and the candidates' pytree structure stays fixed so the compiled
+            # solve is reused between cold and warm backwards (#1087).
             if prev_lam is not None:
-                # Unflatten back into the same pytree structure as rhs.
                 warm = jax.tree.unflatten(jax.tree.structure(rhs), prev_lam)
-            x0 = _best_adjoint_seed(_eager_apply_I_minus_Jt, rhs, [warm, rhs])
+            else:
+                warm = jax.tree.map(jnp.zeros_like, rhs)
             _GMRES_LOGGER.debug(
                 "Eager GMRES: maxiter=%d tol=%g restart=%d warm=%s",
                 gmres_maxiter,
@@ -2230,11 +2273,11 @@ def _make_implicit_vjp_fn(
                 gmres_restart,
                 prev_lam is not None,
             )
-            lam, _info = _jit_eager_gmres_solve(
+            lam, _abs, _bn = _jit_gmres_one_matvec_solve(
                 params_data_tuple,
                 env_leaves,
                 rhs,
-                x0,
+                [warm, rhs],
                 apply_Jt=_jit_apply_Jt,
                 chi=chi_post,
                 pb=pb,
@@ -2242,12 +2285,9 @@ def _make_implicit_vjp_fn(
                 maxiter=gmres_maxiter,
                 restart=gmres_restart,
             )
-            # ``_info`` is not a convergence flag on this solver -- see
-            # _warn_if_adjoint_unconverged.  Measure the residual instead.
-            _rel, _solved = _measure_adjoint(
-                _eager_apply_I_minus_Jt,
-                lam,
-                rhs,
+            _rel, _solved = _report_adjoint(
+                float(jax.device_get(_abs)),
+                float(jax.device_get(_bn)),
                 tol=gmres_tol,
                 maxiter=gmres_maxiter,
                 restart=gmres_restart,

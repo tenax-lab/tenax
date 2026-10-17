@@ -269,6 +269,8 @@ _FILE_MARKERS = {
     "test_adjoint_seed_858.py": "core",
     # #1087: a second eager-GMRES backward must compile nothing (~14s).
     "test_gmres_adjoint_no_recompile_1087.py": "core",
+    "test_gmres_single_matvec.py": "core",
+    "test_gmres_single_matvec_wiring.py": "core",
     # #1049: the implicit-AD compile cache is keyed by value and bounded (~45s).
     "test_vjp_cache_key_1049.py": "algorithm",
     "test_blocks_cache_tracer_1103.py": "core",
