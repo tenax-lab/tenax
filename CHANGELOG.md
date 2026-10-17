@@ -553,6 +553,15 @@
 
 ### Fixed
 
+- **`on_unconverged="warn"` no longer floods the log with one warning per
+  forward** (`_ctm_convergence_policy.py`, `ipeps_optimize.py`; #1083).  A
+  3-step run emitted ~19 near-identical warnings from five call sites, which
+  Python's once-per-location filter cannot merge.  `optimize_gs_ad` now emits
+  the first warning per (site, step) (best point and last iterate are kept
+  separate), the next warning says "(N similar suppressed)", and the total is
+  returned as `history["ctm_warnings_suppressed"]`.  Direct helper calls outside
+  a run still warn every time.
+
 - **The 1-site `return_history` lists no longer drift after a gradient-spike
   rollback** (`ipeps_optimize.py`; #1082).  The 1-site loop appended each
   step's CTM-forward entries but skipped the energy and timing of a rolled-back

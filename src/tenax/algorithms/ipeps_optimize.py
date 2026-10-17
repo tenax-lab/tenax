@@ -6,6 +6,7 @@ Extracts optimize_gs_ad and related helpers from ipeps.py.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import math
 import time as _time
@@ -16,6 +17,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._cache_fingerprint import declare_cache_key
+from tenax.algorithms._ctm_convergence_policy import (
+    ctm_warning_scope,
+    set_ctm_warning_step,
+)
 from tenax.algorithms._ctm_energy_ad import invalidate_implicit_ad_warm_start
 from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
@@ -189,6 +194,8 @@ def _final_eval_use_warm(
         policy=ctm_cfg.on_unconverged,
         conv_tol=ctm_cfg.conv_tol,
         chi=ctm_cfg.chi,
+        # The best point and the last iterate are different evaluations.
+        key="last" if skippable else "best",
     )
     return "fresh"
 
@@ -1087,6 +1094,22 @@ def optimize_gs_ad_chi_schedule(
     return optimize_gs_ad(hamiltonian_gate, A_init, step_cfg)
 
 
+def _with_ctm_warning_scope(fn):
+    """Run ``fn`` inside a warn-dedupe scope and report the suppressed count (#1083)."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with ctm_warning_scope() as scope:
+            out = fn(*args, **kwargs)
+        if isinstance(out, tuple) and out and isinstance(out[-1], dict):
+            if "energies" in out[-1]:
+                out[-1]["ctm_warnings_suppressed"] = scope.suppressed
+        return out
+
+    return wrapper
+
+
+@_with_ctm_warning_scope
 def optimize_gs_ad(
     hamiltonian_gate: jax.Array | Tensor,
     A_init: jax.Array | Tensor | tuple | dict | None,
@@ -2376,6 +2399,7 @@ def _optimize_gs_ad_tensor(
     _chi_at_step_start = None
     _su_guard = _su_start_guard_armed(_init_from_su, start_step)
     for step in range(start_step, config.gs_num_steps):
+        set_ctm_warning_step(step)
         # Snapshots for checkpoint "did chi change / new best" detection.
         # ``best_energy`` only decreases, so a strict < comparison after the
         # step body identifies a freshly-accepted best.  Both snapshots are
@@ -4251,6 +4275,7 @@ def _optimize_gs_ad_tensor_2site(
         _chi_at_step_start = None
         _su_guard = _su_start_guard_armed(_init_from_su, start_step)
         for step in range(start_step, config.gs_num_steps):
+            set_ctm_warning_step(step)
             # Snapshots for checkpoint "did chi change / new best" detection.
             # ``best_energy`` only decreases, so a strict < comparison after
             # the step body identifies a freshly-accepted best.  Both
@@ -5595,6 +5620,7 @@ def _optimize_gs_ad_multisite(
 
     # ── Optimization loop ────────────────────────────────────────────────
     for step in range(config.gs_num_steps):
+        set_ctm_warning_step(step)
         # Update conv_tol if schedule is active
         if _conv_tol_schedule is not None:
             new_tol = _get_scheduled_conv_tol(step, config.gs_num_steps)
