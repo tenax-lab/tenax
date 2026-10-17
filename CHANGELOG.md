@@ -4,6 +4,27 @@
 
 ### Behavior Changes
 
+- **The eager-GMRES adjoint compiles the J^T matvec once.** The implicit-AD
+  backward's GMRES (`adjoint_method="gmres"`, and the fallback when the fused
+  Neumann loop does not converge) used JAX's GMRES, which applies the matvec
+  at three call sites (initial residual, Arnoldi step, restart residual), and
+  also compiled a fourth, standalone copy (`_jit_apply_Jt`) to choose the seed
+  and measure the residual (pre-optimization HLO: 4 matvec call sites, 3 of
+  them from JAX's GMRES; after XLA inlining, 2.42M HLO instructions, 2.8x the
+  standalone matvec's 852k). A new single-matvec GMRES does the seed choice, the solve
+  and the residual measurement in one program with one call site, and
+  `adjoint_method="fixed_point"` no longer compiles a separate `dE/denv` (the
+  `gmres` path still does).
+  Gradients agree with the previous solver to the solve tolerance, not bit
+  for bit. Measured on CPU, D=2 chi=8 U(1), first gradient with
+  `adjoint_method="gmres"`: 3,729 s -> 1,188 s.
+  The new solver also solves some flowing-projector adjoints that JAX's GMRES
+  stalled on, so `projector_backward="flow"` (the default under `bond_phase`)
+  is now accepted in cases where it used to fall back to frozen projectors.
+  On a non-stationary forward that flow gradient can be badly wrong (measured:
+  the D=2 #1028 fixture), and main already accepted such a gradient at D=3
+  chi=12; this is tracked in #1111.
+
 - **Block-sparse CTM-AD backward programs compile without XLA's CPU fusion
   pass from D=3** (`_block_sparse_jit.py`; #566).  A `SymmetricTensor`
   contraction traces one small op per pair of charge blocks.  The
