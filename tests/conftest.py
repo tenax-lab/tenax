@@ -166,6 +166,8 @@ _FILE_MARKERS = {
     # on the default path -- so it belongs in the required gate for the same
     # reason.  Shares one D=2 chi=8 module fixture across every case (~9s).
     "test_ctm_tensor_return_info.py": "core",
+    # #926: AST scan of src/tenax for duplicate class/def names (~1 s).
+    "test_no_duplicate_definitions.py": "core",
     # #1035 hold test: mechanism tests on maps of known stability (~3 s) plus
     # one real dense D=2 CTM (~25 s).  Core because the hold is on by default
     # in ctm_tensor_2site / ctm_multisite: a regression that certifies a
@@ -744,6 +746,8 @@ _FILE_MARKERS = {
     "test_ipeps_ad_conv_criterion.py": "algorithm",  # 27.3s / 15
     "test_ipeps_ad_f3_fused_bwd.py": "algorithm",  # 18.5s / 3
     "test_ipeps_ad_history.py": "algorithm",
+    "test_ipeps_history_lengths_1082.py": "algorithm",
+    "test_ctm_warning_dedupe_1083.py": "algorithm",
     "test_ipeps_checkpoint_resume.py": "algorithm",  # 134s / 6
     "test_ipeps_u1sz.py": "algorithm",  # has a slow-marked case
     "test_metric_precond.py": "algorithm",  # 59s / 9
