@@ -788,6 +788,9 @@ _FILE_MARKERS = {
     "test_ctm_2x2_projector_backward_983.py": "core",
     "test_projector_backward_default_1028.py": "core",
     "test_flow_slope_check_1111.py": "core",
+    # #1116 item 2: the slope-check probe must not recompile the warm
+    # forward inside the backward (abstract-mesh cache key).  ~20 s CPU.
+    "test_probe_mesh_context_1116.py": "core",
     # #1024: the split-CTM chi-seam layout invariant.  ``core``: a charge
     # layout that disagrees across a chi bond kills the 2x2 projector with a
     # shape error on any state whose horizontal and vertical bonds differ --

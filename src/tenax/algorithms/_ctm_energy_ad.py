@@ -254,6 +254,130 @@ _FLOW_SLOPE_RATIO_MAX = 2.0
 _FLOW_SLOPE_STEP = 1e-4  # h = _FLOW_SLOPE_STEP * ||x||
 
 
+# #1116 item 2: the probe below runs inside a custom_vjp backward, and JAX
+# runs each backward equation under the context recorded at trace time
+# (``with eqn.ctx.manager:`` in jax/_src/interpreters/ad.py).  That context
+# sets the abstract-mesh config to ``get_abstract_mesh()``, which normalises
+# the top-level value to the empty ``AbstractMesh(())``; the jit and eager
+# dispatch caches key on the raw value, so every jit (``_step``,
+# ``_bond_phase_fix_envs``, ``_jit_forward_energy``) and eager primitive the
+# forward had already compiled at top level compiled again inside the probe.
+# Measured on CPU (forward pre-warmed, one-time per process per signature):
+# the D=2 chi=4 1-site limit cycle 115 compiles / 3.69 s in the probe ->
+# 0 / 0.08 s, its whole grad 9.68 s -> 5.90 s;
+# the D=2 chi=4 2-site pair 99 compiles / 4.4 s -> 0 / 0.15 s, its cold grad
+# 21.7 s -> 17.1 s.  The probe therefore runs with the key put back to the
+# top-level value.  Numerically nothing changes (the empty mesh is what the
+# top-level value means); only the cache key does.
+#
+# The top-level value is the thread-local ``config_ext.unset`` sentinel,
+# which reads as ``None`` only through the global default.  A literal
+# ``None`` is NOT equivalent: ``use_abstract_mesh.__enter__``
+# (jax/_src/mesh.py:619) accepts ``unset`` but calls ``prev.empty`` on
+# anything else, so a ``jax.debug.callback`` in the energy (it enters
+# ``use_abstract_mesh``) crashed with AttributeError whenever the CPU
+# callback ran on the calling thread -- measured 2 of 6 runs, each turning
+# the check inconclusive and the gradient frozen.  The swap and restore use
+# ``swap_local`` / ``set_local`` exactly as JAX's own ``JaxprEqnContext``
+# does (jax/_src/core.py:352/362).
+#
+# PRIVATE JAX API (``jax._src.config.abstract_mesh_context_manager`` with
+# ``value`` / ``swap_local`` / ``set_local``, and ``config_ext.unset``, on
+# JAX 0.10.2).  Guarded: if any of it is missing (older JAX such as the
+# 0.4.35 floor, or a future rename) the helper is a no-op, never an error.
+# It swaps only when BOTH (a) the forward of this backward ran with no mesh
+# set (the thread-local value was ``unset``; recorded in ``f_fwd``, because
+# inside the backward a caller's explicit ``use_abstract_mesh(AbstractMesh((),
+# ()))`` is the very same interned object as the normalised sentinel) and
+# (b) the current value is JAX's canonical ``empty_abstract_mesh`` with no
+# ``abstract_device``.  A caller's mesh -- with axes, with an abstract device
+# for cross-platform lowering, or an explicit empty one -- is left alone
+# (Codex on #1121).  Delete this once JAX normalises the key upstream (worth an
+# upstream issue: the unset key and the empty AbstractMesh should hit the
+# same cache entry).
+try:
+    from jax._src import config as _jax_src_config
+except ImportError:  # pragma: no cover - private module moved
+    _jax_src_config = None
+
+try:
+    from jax._src.mesh import empty_abstract_mesh as _CANONICAL_EMPTY_MESH
+except ImportError:  # pragma: no cover - private name moved
+    _CANONICAL_EMPTY_MESH = None
+
+_MISSING = object()
+
+
+def _abstract_mesh_manager():
+    """``(manager, top-level value)`` of the private abstract-mesh config, or
+    ``None`` if this JAX lacks any part of it."""
+    mgr = getattr(_jax_src_config, "abstract_mesh_context_manager", None)
+    unset = getattr(getattr(_jax_src_config, "config_ext", None), "unset", _MISSING)
+    if (
+        mgr is None
+        or unset is _MISSING
+        or not all(
+            hasattr(mgr, a) for a in ("value", "get_local", "swap_local", "set_local")
+        )
+    ):
+        return None
+    return mgr, unset
+
+
+def _mesh_at_top_level() -> bool:
+    """True iff no abstract mesh is set on this thread (the value is ``unset``).
+
+    Called in the forward; ``False`` whenever the private API is missing or a
+    caller set any mesh, so the backward's probe then never swaps."""
+    found = _abstract_mesh_manager()
+    if found is None:
+        return False
+    try:
+        return found[0].get_local() is found[1]
+    except Exception:  # noqa: BLE001 -- private API; never fail the forward
+        return False
+
+
+def _is_canonical_empty_mesh(value) -> bool:
+    """True only for JAX's normalised no-mesh value: the canonical
+    ``empty_abstract_mesh`` with no ``abstract_device``."""
+    return (
+        _CANONICAL_EMPTY_MESH is not None
+        and (value is _CANONICAL_EMPTY_MESH or value == _CANONICAL_EMPTY_MESH)
+        and getattr(value, "abstract_device", None) is None
+    )
+
+
+@contextlib.contextmanager
+def _top_level_mesh_context(forward_at_top_level: bool):
+    """Run the body under the top-level abstract-mesh key; see above.
+
+    ``forward_at_top_level`` is ``_mesh_at_top_level()`` recorded by the
+    forward this backward belongs to."""
+    found = _abstract_mesh_manager()
+    swap = False
+    if forward_at_top_level and found is not None:
+        try:
+            swap = _is_canonical_empty_mesh(found[0].value)
+        except Exception:  # noqa: BLE001 -- private API; never fail the backward
+            swap = False
+    if not swap:
+        yield
+        return
+    mgr, top_level = found
+    try:
+        prev = mgr.swap_local(top_level)
+    except Exception:  # noqa: BLE001 -- private API; never fail the backward
+        swap = False
+    if not swap:
+        yield
+        return
+    try:
+        yield
+    finally:
+        mgr.set_local(prev)
+
+
 def _slope_probe_energy(run_forward, compute_energy, site_tensors):
     """``(real energy, chi_post)`` of the implicit-AD forward at ``site_tensors``.
 
@@ -940,6 +1064,8 @@ _FORWARD_SERIALS = itertools.count(1)
 _PROBE_INPUTS_PER_ENTRY = 8
 # The ``mutables`` keys ``_run_forward`` and ``_compute_energy`` read.
 _PROBE_INPUT_KEYS = ("env_init", "chi_ramp", "gate", "energy_fn")
+# #1116: stored next to a forward's probe inputs (not a ``mutables`` key).
+_PROBE_MESH_KEY = "_forward_mesh_at_top_level"
 
 
 def _fresh_run_state() -> dict:
@@ -1696,6 +1822,9 @@ def _make_implicit_vjp_fn(
         # naming this forward's per-call inputs, for the slope check's probe.
         serial = next(_FORWARD_SERIALS)
         _probe_inputs[serial] = {k: mutables[k] for k in _PROBE_INPUT_KEYS}
+        # #1116: whether this forward ran with no abstract mesh set, so the
+        # probe only swaps the backward's key back when that is what it was.
+        _probe_inputs[serial][_PROBE_MESH_KEY] = _mesh_at_top_level()
         while len(_probe_inputs) > _PROBE_INPUTS_PER_ENTRY:
             _probe_inputs.popitem(last=False)
         residuals = (
@@ -2398,6 +2527,8 @@ def _make_implicit_vjp_fn(
             return (
                 "the slope check could not evaluate (its forward inputs were evicted)"
             )
+        inputs = dict(inputs)
+        forward_at_top_level = bool(inputs.pop(_PROBE_MESH_KEY, False))
         g_arr = jnp.asarray(g)
         if float(jax.device_get(jnp.abs(g_arr))) == 0.0:
             return None
@@ -2442,9 +2573,10 @@ def _make_implicit_vjp_fn(
             mutables["run_token"] = int(token)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                e_h, chi_h = _slope_probe_energy(
-                    _run_forward, _compute_energy, dict(zip(coords, x_h))
-                )
+                with _top_level_mesh_context(forward_at_top_level):  # #1116
+                    e_h, chi_h = _slope_probe_energy(
+                        _run_forward, _compute_energy, dict(zip(coords, x_h))
+                    )
         except Exception as exc:  # noqa: BLE001 -- any failure is inconclusive
             return (
                 "the slope check could not evaluate (its forward raised "
