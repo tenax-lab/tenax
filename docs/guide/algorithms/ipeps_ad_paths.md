@@ -373,8 +373,11 @@ params-VJP program (`_jit_chain_rule`, the largest single compile at D=3) is
 never built.  The GMRES solve returns `J_params^T` of its best iterate; the
 fused Neumann loop returns it for `λ_{K-1}`, the iterate its residual
 certifies, so its gradient can differ from `"separate"` by O(`gmres_tol`).
-Measured at D=2 chi=8 on CPU: GMRES-path compile −37% (Z2 −42%), warm
-matvec +16%.  The default stays `"separate"` until measured at D=3.
+Measured with `benchmarks/bench_chain_rule_compile.py` (D=2 chi=8 dense
+single-site, CPU), backward compile excluding the forward `_step`: −51% on the
+GMRES path (19.6→9.6 s), −50% fused (19.1→9.5 s), −28% fused-then-fallback
+(27.9→20.0 s); the warm gradient is unchanged within noise.  A spike on a
+two-site D=2 chi=8 fixture measured −37%.  The default stays `"separate"` until measured at D=3.
 
 #### Persistent compilation cache
 

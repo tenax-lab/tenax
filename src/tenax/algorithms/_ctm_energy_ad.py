@@ -2623,8 +2623,11 @@ def _make_implicit_vjp_fn(
                 )
             return grads_tuple, True
         else:
-            # adjoint_method == "gmres": eager Krylov via JAX's built-in
-            # solver.  Retained as an opt-out for divergent edge cases.
+            # adjoint_method == "gmres": eager Krylov solve through
+            # ``gmres_single_matvec`` (one J^T matvec call site, compiled
+            # once); under adjoint_chain_rule="joint" the matvec is the joint
+            # (params, env) VJP and the solve also returns J_params^T lambda.
+            # Retained as an opt-out for divergent edge cases.
             # Warm-start from the cached ``prev_lam_leaves`` when shape- and
             # dtype-compatible (issues #501, #1113); fall back to ``rhs`` as
             # the cold x0 otherwise.  Same check as the fixed-point branch.

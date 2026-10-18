@@ -149,6 +149,7 @@ def test_joint_gmres_matches_separate_flow():
     g_joint = _grad(A0, "joint", **kw)
     used_joint = get_last_implicit_ad_diagnostics().get("projector_backward_used")
     assert used_sep == used_joint, (used_sep, used_joint)
+    assert used_joint == "flow", used_joint
     np.testing.assert_allclose(
         np.asarray(g_joint), np.asarray(g_sep), rtol=1e-10, atol=1e-12
     )
@@ -196,7 +197,9 @@ def test_joint_fused_matches_separate():
 def test_joint_fused_at_the_default_tolerance():
     A0 = _site(_FUSED_SEED)
     g_sep = np.asarray(_grad(A0, "separate", tol=1e-6))
+    _fused_premise()
     g_joint = np.asarray(_grad(A0, "joint", tol=1e-6))
+    _fused_premise()
     assert np.max(np.abs(g_joint - g_sep)) <= 1e-4 * np.max(np.abs(g_sep))
 
 
@@ -215,7 +218,9 @@ def test_joint_fused_matches_separate_two_site():
     arrs = (_site(0), _site(1))
     kw = dict(neighbors=CHECKERBOARD_NEIGHBORS)
     g_sep = _grad(arrs, "separate", **kw)
+    _fused_premise()
     g_joint = _grad(arrs, "joint", **kw)
+    _fused_premise()
     for a, b in zip(g_joint, g_sep):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-7, atol=1e-9)
 
@@ -274,4 +279,54 @@ def test_joint_fused_matches_separate_u1():
     assert type(g_joint) is type(g_sep)
     np.testing.assert_allclose(
         np.asarray(g_joint._data), np.asarray(g_sep._data), rtol=1e-8, atol=1e-9
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("method", ["gmres", "fixed_point"])
+def test_joint_matches_separate_u1_multiblock(method):
+    """Multi-block U(1) site, built as benchmarks/bench_chain_rule_compile.py
+    ``_site(2, "u1", 0)`` does (copied: ``benchmarks`` is not a package)."""
+    from tenax.algorithms.ipeps import (
+        heisenberg_gate_u1sz,
+        heisenberg_u1sz_init_pair,
+    )
+    from tenax.core.tensor import SymmetricTensor
+
+    A, _ = heisenberg_u1sz_init_pair(2, jax.random.PRNGKey(0))
+    nrm = jnp.sqrt(sum(jnp.sum(b**2) for b in A.blocks.values()))
+    site = SymmetricTensor({k: b / nrm for k, b in A.blocks.items()}, A.indices)
+    assert len(site.blocks) > 1, "premise: multi-block site"
+    gate = heisenberg_gate_u1sz()
+
+    def grad(mode):
+        return jax.grad(
+            lambda A: jnp.real(
+                ctm_energy_implicit(
+                    {(0, 0): A},
+                    SINGLE_SITE_NEIGHBORS,
+                    gate,
+                    chi=4,
+                    max_iter=60,
+                    min_iter=8,
+                    conv_tol=1e-10,
+                    adjoint_method=method,
+                    gmres_tol=1e-11,
+                    adjoint_chain_rule=mode,
+                )
+            )
+        )(site)
+
+    g_sep = grad("separate")
+    if method == "fixed_point":
+        _fused_premise()
+    g_joint = grad("joint")
+    if method == "fixed_point":
+        _fused_premise()
+    assert type(g_joint) is type(g_sep)
+    np.testing.assert_allclose(
+        np.asarray(g_joint._data),
+        np.asarray(g_sep._data),
+        rtol=1e-10 if method == "gmres" else 1e-8,
+        atol=1e-9,
     )

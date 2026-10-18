@@ -227,8 +227,13 @@ class CTMConfig:
     #     (2,604 s at chi=16 on GPU).
     #   "joint" -- the adjoint solve's matvec is one VJP over (params, env),
     #     which yields J_params^T of the solve's own iterate; the separate
-    #     program never compiles.  Spike at D=2 chi=8 CPU: GMRES-path compile
-    #     -37% (Z2 -42%), gradient identical to 2e-16, warm matvec +16%.
+    #     program never compiles.  benchmarks/bench_chain_rule_compile.py,
+    #     D=2 chi=8 dense single-site CPU, backward compile (excluding the
+    #     forward step): -51% GMRES path (19.6->9.6 s), -50% fused
+    #     (19.1->9.5 s), -28% fused-then-fallback (27.9->20.0 s); warm
+    #     gradient unchanged within noise (a two-site D=2 chi=8 spike: -37%).
+    #     The gradient is identical to "separate" to ~2e-16 on the GMRES
+    #     paths; the fused path differs by O(gmres_tol) (it uses lambda_{K-1}).
     #     Opt-in until measured at D=3 (docs/superpowers/specs/
     #     2026-10-18-joint-vjp-chain-rule-design.md).
     adjoint_chain_rule: Literal["separate", "joint"] = "separate"
