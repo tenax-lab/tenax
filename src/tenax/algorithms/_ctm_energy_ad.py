@@ -235,6 +235,47 @@ def _jit_gmres_one_matvec_solve(
     )
 
 
+@partial(
+    block_sparse_jit,
+    static_argnames=("apply_joint", "chi", "pb", "tol", "maxiter", "restart"),
+)
+def _jit_gmres_joint_solve(
+    params_data_tuple,
+    env_leaves,
+    rhs,
+    candidates,
+    *,
+    apply_joint,
+    chi,
+    pb,
+    tol,
+    maxiter,
+    restart,
+):
+    """:func:`_jit_gmres_one_matvec_solve` with the joint-VJP matvec.
+
+    ``apply_joint`` returns ``((I - J_env^T) v, J_params^T v)`` from one VJP,
+    and :func:`gmres_single_matvec` (``aux=True``) carries ``J_params^T`` of
+    its best iterate, so the chain rule's indirect term comes out of the
+    solve and ``_jit_chain_rule`` never compiles.  Gated with the default
+    ``by_bond_dim=True`` (the chain rule's rule): this program contains the
+    params-VJP too.  Returns ``(lam, abs_resid, b_norm, indirect)``.
+    """
+
+    def matvec(v):
+        return apply_joint(params_data_tuple, env_leaves, v, chi=chi, pb=pb)
+
+    return gmres_single_matvec(
+        matvec,
+        rhs,
+        list(candidates),
+        tol=tol,
+        maxiter=maxiter,
+        restart=restart,
+        aux=True,
+    )
+
+
 # #1028: the flowing projector backward, and the frozen value its backward
 # falls back to when the flowing adjoint is not solvable (see ``f_bwd``).
 # "auto" is the frozen default every non-flow caller already runs.
@@ -1970,6 +2011,57 @@ def _make_implicit_vjp_fn(
         total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
         return (total,)
 
+    def _gauge_fixed_sweep_joint(p_tuple, env_leaves_flat, *, chi, pb):
+        """The gauge-fixed sweep as a function of (params, env).
+
+        The gauge reference is ``stop_gradient(env)``, as in ``_jit_apply_Jt``;
+        ``_jit_chain_rule`` uses the constant ``envs``, which has no params
+        dependence, so both cotangents equal today's programs'.
+        """
+        st = dict(zip(coords, p_tuple))
+        e = jax.tree.unflatten(_cached["env_treedef"], env_leaves_flat)
+        e_ref = jax.tree.map(jax.lax.stop_gradient, e)
+        e_out, _eps, _smin = jit_step_bwd(
+            st,
+            e,
+            chi=chi,
+            projector_method=projector_method,
+            renormalize=renormalize,
+            projector_backward=pb,
+        )
+        return tuple(jax.tree.leaves(_apply_gauge_fix(e_out, e_ref)))
+
+    @partial(block_sparse_jit, static_argnames=("chi", "pb"))
+    def _jit_apply_joint(params_data_tuple, env_leaves, v, *, chi, pb):
+        """``((I - J_env^T) v, J_params^T v)`` from ONE VJP of the sweep."""
+        _, vjp_fn = jax.vjp(
+            partial(_gauge_fixed_sweep_joint, chi=chi, pb=pb),
+            params_data_tuple,
+            env_leaves,
+        )
+        pc, jt_v = vjp_fn(v)
+        return tuple(vi - ji for vi, ji in zip(v, jt_v)), pc
+
+    @block_sparse_jit
+    def _jit_direct(params_data_tuple, env_leaves):
+        """dE/dparams at fixed env -- the chain rule's direct term, unscaled."""
+        gate_ = mutables["gate"]
+        energy_fn_ = mutables["energy_fn"]
+        envs = jax.tree.unflatten(_cached["env_treedef"], env_leaves)
+
+        def energy_from_params(p_tuple):
+            st = dict(zip(coords, p_tuple))
+            if energy_fn_ is not None:
+                return energy_fn_(st, envs, gate_)
+            return _default_energy(st, envs, gate_, coords, neighbors)
+
+        _, vjp_fn = jax.vjp(energy_from_params, params_data_tuple)
+        return vjp_fn(jnp.ones(()))[0]
+
+    def _combine(g, direct, indirect):
+        """``(g * (direct + indirect),)`` -- ``_jit_chain_rule``'s return form."""
+        return (jax.tree.map(lambda d, i: g * (d + i), direct, indirect),)
+
     @partial(block_sparse_jit, static_argnames=("chi", "pb"))
     def _jit_fused_fixed_point_bwd(
         params_data_tuple,
@@ -2472,18 +2564,33 @@ def _make_implicit_vjp_fn(
                 gmres_restart,
                 prev_lam is not None,
             )
-            lam, _abs, _bn = _jit_gmres_one_matvec_solve(
-                params_data_tuple,
-                env_leaves,
-                rhs,
-                [warm, rhs],
-                apply_Jt=_jit_apply_Jt,
-                chi=chi_post,
-                pb=pb,
-                tol=gmres_tol,
-                maxiter=gmres_maxiter,
-                restart=gmres_restart,
-            )
+            if adjoint_chain_rule == "joint":
+                lam, _abs, _bn, indirect = _jit_gmres_joint_solve(
+                    params_data_tuple,
+                    env_leaves,
+                    rhs,
+                    [warm, rhs],
+                    apply_joint=_jit_apply_joint,
+                    chi=chi_post,
+                    pb=pb,
+                    tol=gmres_tol,
+                    maxiter=gmres_maxiter,
+                    restart=gmres_restart,
+                )
+            else:
+                lam, _abs, _bn = _jit_gmres_one_matvec_solve(
+                    params_data_tuple,
+                    env_leaves,
+                    rhs,
+                    [warm, rhs],
+                    apply_Jt=_jit_apply_Jt,
+                    chi=chi_post,
+                    pb=pb,
+                    tol=gmres_tol,
+                    maxiter=gmres_maxiter,
+                    restart=gmres_restart,
+                )
+                indirect = None
             _rel, _solved = _report_adjoint(
                 float(jax.device_get(_abs)),
                 float(jax.device_get(_bn)),
@@ -2495,6 +2602,9 @@ def _make_implicit_vjp_fn(
             _F3_LAST_DIAGNOSTICS["adjoint_residual"] = _rel
             lam_leaves = tuple(jax.tree.leaves(lam))
             run["prev_lam_leaves"] = lam_leaves
+            if indirect is not None:
+                direct = _jit_direct(params_data_tuple, env_leaves)
+                return _combine(g, direct, indirect), _solved
             return (
                 _jit_chain_rule(
                     params_data_tuple, env_leaves, lam_leaves, g, chi=chi_post, pb=pb

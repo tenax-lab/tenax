@@ -117,3 +117,56 @@ def test_the_modes_get_separate_cache_entries():
     keys = list(cea._VJP_CACHE)
     assert len(keys) == 2
     assert {"separate", "joint"} <= {p for k in keys for p in k if isinstance(p, str)}
+
+
+# ----------------------------------------------------------- GMRES method
+
+
+def test_joint_gmres_matches_separate():
+    A0 = _site(_FUSED_SEED)
+    g_sep = _grad(A0, "separate", method="gmres")
+    g_joint = _grad(A0, "joint", method="gmres")
+    np.testing.assert_allclose(
+        np.asarray(g_joint), np.asarray(g_sep), rtol=1e-12, atol=1e-14
+    )
+
+
+def test_joint_gmres_matches_separate_complex():
+    A0 = _site(_FUSED_SEED, dtype=jnp.complex128)
+    g_sep = _grad(A0, "separate", method="gmres")
+    g_joint = _grad(A0, "joint", method="gmres")
+    assert g_joint.dtype == jnp.complex128
+    np.testing.assert_allclose(
+        np.asarray(g_joint), np.asarray(g_sep), rtol=1e-12, atol=1e-14
+    )
+
+
+def test_joint_gmres_matches_separate_flow():
+    A0 = _site(_FUSED_SEED)
+    kw = dict(method="gmres", projector_backward="flow", forward_gauge="bond_phase")
+    g_sep = _grad(A0, "separate", **kw)
+    used_sep = get_last_implicit_ad_diagnostics().get("projector_backward_used")
+    g_joint = _grad(A0, "joint", **kw)
+    used_joint = get_last_implicit_ad_diagnostics().get("projector_backward_used")
+    assert used_sep == used_joint, (used_sep, used_joint)
+    np.testing.assert_allclose(
+        np.asarray(g_joint), np.asarray(g_sep), rtol=1e-10, atol=1e-12
+    )
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_joint_gmres_never_traces_the_separate_chain_rule():
+    mark = len(_TRACED)
+    _grad(_site(_FUSED_SEED), "joint", method="gmres")
+    traced = set(_TRACED[mark:])
+    assert "_jit_chain_rule" not in traced, sorted(traced)
+    assert {"_jit_gmres_joint_solve", "_jit_direct"} <= traced, sorted(traced)
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_separate_gmres_never_traces_the_joint_programs():
+    mark = len(_TRACED)
+    _grad(_site(_FUSED_SEED), "separate", method="gmres")
+    traced = set(_TRACED[mark:])
+    assert "_jit_chain_rule" in traced
+    assert not traced & {"_jit_gmres_joint_solve", "_jit_direct", "_jit_apply_joint"}
