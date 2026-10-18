@@ -170,3 +170,108 @@ def test_separate_gmres_never_traces_the_joint_programs():
     traced = set(_TRACED[mark:])
     assert "_jit_chain_rule" in traced
     assert not traced & {"_jit_gmres_joint_solve", "_jit_direct", "_jit_apply_joint"}
+
+
+# ------------------------------------------------------- fused fixed point
+
+
+def _fused_premise():
+    d = get_last_implicit_ad_diagnostics()
+    assert d.get("converged") and not d.get("diverged"), d
+    return d
+
+
+def test_joint_fused_matches_separate():
+    """lambda_{K-1} vs lambda_K: within the solve tolerance."""
+    A0 = _site(_FUSED_SEED)
+    g_sep = _grad(A0, "separate")
+    _fused_premise()
+    g_joint = _grad(A0, "joint")
+    _fused_premise()
+    np.testing.assert_allclose(
+        np.asarray(g_joint), np.asarray(g_sep), rtol=1e-8, atol=1e-9
+    )
+
+
+def test_joint_fused_at_the_default_tolerance():
+    A0 = _site(_FUSED_SEED)
+    g_sep = np.asarray(_grad(A0, "separate", tol=1e-6))
+    g_joint = np.asarray(_grad(A0, "joint", tol=1e-6))
+    assert np.max(np.abs(g_joint - g_sep)) <= 1e-4 * np.max(np.abs(g_sep))
+
+
+def test_joint_fallback_matches_separate():
+    A0 = _site(_FALLBACK_SEED)
+    g_sep = _grad(A0, "separate", tol=1e-6)
+    d = get_last_implicit_ad_diagnostics()
+    assert d.get("diverged") or not d.get("converged"), "premise: fallback ran"
+    g_joint = _grad(A0, "joint", tol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(g_joint), np.asarray(g_sep), rtol=1e-10, atol=1e-12
+    )
+
+
+def test_joint_fused_matches_separate_two_site():
+    arrs = (_site(0), _site(1))
+    kw = dict(neighbors=CHECKERBOARD_NEIGHBORS)
+    g_sep = _grad(arrs, "separate", **kw)
+    g_joint = _grad(arrs, "joint", **kw)
+    for a, b in zip(g_joint, g_sep):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-7, atol=1e-9)
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_joint_fused_warm_start_is_used():
+    A0 = _site(_FUSED_SEED)
+    _grad(A0, "joint")
+    n_cold = _fused_premise()["n_iter"]
+    _grad(A0, "joint")
+    d = _fused_premise()
+    assert not d.get("warm_start_invalidated")
+    assert d["n_iter"] < n_cold, (d["n_iter"], n_cold)
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_joint_fused_and_fallback_never_trace_the_separate_chain_rule():
+    mark = len(_TRACED)
+    _grad(_site(_FUSED_SEED), "joint")
+    _fused_premise()
+    _grad(_site(_FALLBACK_SEED), "joint", tol=1e-6)
+    d = get_last_implicit_ad_diagnostics()
+    assert d.get("diverged") or not d.get("converged"), "premise: fallback ran"
+    traced = set(_TRACED[mark:])
+    assert "_jit_chain_rule" not in traced, sorted(traced)
+    assert "_jit_direct" not in traced, "the fallback must reuse the fused direct"
+    assert "_jit_gmres_joint_solve" in traced
+
+
+@pytest.mark.slow
+def test_joint_fused_matches_separate_u1():
+    """Block-sparse params: the cotangent is a SymmetricTensor pytree carried
+    through the while loop.  Trivial-charge U(1) fixture of
+    tests/test_block_sparse_ctm_ad.py (one block, full block-sparse path)."""
+    from tests.test_block_sparse_ctm_ad import _make_u1_symmetric_ipeps
+
+    A_sym = _make_u1_symmetric_ipeps()
+
+    def grad(mode):
+        return jax.grad(
+            lambda A: jnp.real(
+                ctm_energy_implicit(
+                    {(0, 0): A},
+                    SINGLE_SITE_NEIGHBORS,
+                    _GATE,
+                    chi=4,
+                    max_iter=30,
+                    conv_tol=1e-8,
+                    gmres_tol=1e-11,
+                    adjoint_chain_rule=mode,
+                )
+            )
+        )(A_sym)
+
+    g_sep, g_joint = grad("separate"), grad("joint")
+    assert type(g_joint) is type(g_sep)
+    np.testing.assert_allclose(
+        np.asarray(g_joint._data), np.asarray(g_sep._data), rtol=1e-8, atol=1e-9
+    )

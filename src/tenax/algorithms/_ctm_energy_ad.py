@@ -2062,7 +2062,7 @@ def _make_implicit_vjp_fn(
         """``(g * (direct + indirect),)`` -- ``_jit_chain_rule``'s return form."""
         return (jax.tree.map(lambda d, i: g * (d + i), direct, indirect),)
 
-    @partial(block_sparse_jit, static_argnames=("chi", "pb"))
+    @partial(block_sparse_jit, static_argnames=("chi", "pb", "joint"))
     def _jit_fused_fixed_point_bwd(
         params_data_tuple,
         env_leaves,
@@ -2071,6 +2071,7 @@ def _make_implicit_vjp_fn(
         *,
         chi,
         pb,
+        joint=False,
     ):
         """F3: fused dE/denv + adjoint fixed-point.  The chain rule is separate.
 
@@ -2097,6 +2098,15 @@ def _make_implicit_vjp_fn(
         ``lam_final`` with ``use_init=True`` so the loop converges in fewer
         iterations (#501).  ``use_init`` is a traced bool, so warm and cold
         calls share one compiled program.
+
+        ``joint=True`` (the ``adjoint_chain_rule="joint"`` path) differentiates
+        the energy and the sweep over ``(params, env)``.  The energy VJP gives
+        the direct term with ``dE_denv``; the loop body's one VJP gives
+        ``J_env^T lambda_k`` and ``J_params^T lambda_k``, carried as ``pc``.
+        On exit ``pc = J_params^T lambda_{K-1}``: the iterate whose residual
+        ``diff``/``abs_resid`` certify (the step is ``b - (I - J^T)
+        lambda_{K-1}``), at no extra iteration.  ``lambda_K`` is still returned
+        for the warm start.  Returns the 7-tuple plus ``(direct, indirect)``.
 
         Returns
         -------
@@ -2146,39 +2156,66 @@ def _make_implicit_vjp_fn(
         env_treedef = _cached["env_treedef"]
 
         # --- 1. dE/denv via VJP through the energy function ---
-        def energy_from_env(env_leaves_flat):
-            e = jax.tree.unflatten(env_treedef, env_leaves_flat)
-            if energy_fn_ is not None:
-                return energy_fn_(site_tensors, e, gate_)
-            return _default_energy(site_tensors, e, gate_, coords, neighbors)
+        if joint:
 
-        _, vjp_energy_env = jax.vjp(energy_from_env, env_leaves)
-        dE_denv = vjp_energy_env(jnp.ones(()))[0]
+            def energy_joint(p_tuple, env_leaves_flat):
+                st = dict(zip(coords, p_tuple))
+                e = jax.tree.unflatten(env_treedef, env_leaves_flat)
+                if energy_fn_ is not None:
+                    return energy_fn_(st, e, gate_)
+                return _default_energy(st, e, gate_, coords, neighbors)
+
+            _, vjp_energy = jax.vjp(energy_joint, params_data_tuple, env_leaves)
+            direct, dE_denv = vjp_energy(jnp.ones(()))
+        else:
+
+            def energy_from_env(env_leaves_flat):
+                e = jax.tree.unflatten(env_treedef, env_leaves_flat)
+                if energy_fn_ is not None:
+                    return energy_fn_(site_tensors, e, gate_)
+                return _default_energy(site_tensors, e, gate_, coords, neighbors)
+
+            _, vjp_energy_env = jax.vjp(energy_from_env, env_leaves)
+            dE_denv = vjp_energy_env(jnp.ones(()))[0]
 
         # --- 2. Build the J^T matvec closure ONCE inside this JIT ---
-        def gauge_fixed_sweep_from_env(env_leaves_flat):
-            e = jax.tree.unflatten(env_treedef, env_leaves_flat)
-            e_ref = jax.tree.map(jax.lax.stop_gradient, e)
-            e_out, _eps, _smin = jit_step_bwd(
-                site_tensors,
-                e,
-                chi=chi,
-                projector_method=projector_method,
-                renormalize=renormalize,
-                projector_backward=pb,
+        # step(v)[0] is the raw VJP through the gauge-fixed sweep, which
+        # equals J^T v. Note this differs from the surviving F2 helper
+        # _jit_apply_Jt — that one wraps the VJP as (I - J^T) v because GMRES
+        # needs the matvec for (I - J^T)·λ = b. The Neumann iteration here
+        # uses J^T directly: λ_{k+1} = b + J^T λ_k.  step(v)[1] is
+        # J_params^T v under ``joint``, else None.
+        if joint:
+            _, vjp_joint = jax.vjp(
+                partial(_gauge_fixed_sweep_joint, chi=chi, pb=pb),
+                params_data_tuple,
+                env_leaves,
             )
-            e_fixed = _apply_gauge_fix(e_out, e_ref)
-            return tuple(jax.tree.leaves(e_fixed))
 
-        _, vjp_env_fn = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
+            def step(v):
+                pc_v, jt_v = vjp_joint(v)
+                return jt_v, pc_v
 
-        def apply_Jt(v):
-            # vjp_env_fn(v)[0] is the raw VJP through gauge_fixed_sweep_from_env,
-            # which equals J^T v. Note this differs from the surviving F2
-            # helper _jit_apply_Jt — that one wraps the VJP as (I - J^T) v
-            # because GMRES needs the matvec for (I - J^T)·λ = b. The Neumann
-            # iteration here uses J^T directly: λ_{k+1} = b + J^T λ_k.
-            return vjp_env_fn(v)[0]
+        else:
+
+            def gauge_fixed_sweep_from_env(env_leaves_flat):
+                e = jax.tree.unflatten(env_treedef, env_leaves_flat)
+                e_ref = jax.tree.map(jax.lax.stop_gradient, e)
+                e_out, _eps, _smin = jit_step_bwd(
+                    site_tensors,
+                    e,
+                    chi=chi,
+                    projector_method=projector_method,
+                    renormalize=renormalize,
+                    projector_backward=pb,
+                )
+                e_fixed = _apply_gauge_fix(e_out, e_ref)
+                return tuple(jax.tree.leaves(e_fixed))
+
+            _, vjp_env_fn = jax.vjp(gauge_fixed_sweep_from_env, env_leaves)
+
+            def step(v):
+                return vjp_env_fn(v)[0], None
 
         # --- 3. Adjoint fixed-point inside lax.while_loop ---
         # ``init_lam`` is the caller-supplied warm-start seed (cold-start
@@ -2199,17 +2236,22 @@ def _make_implicit_vjp_fn(
         # Fails closed: if the body never runs (gmres_maxiter=0) this stays inf
         # and ``_adjoint_converged`` reports not-converged rather than nothing.
         init_resid = jnp.array(jnp.inf, dtype=real_dtype)
+        if joint:
+            pc_shape = jax.eval_shape(lambda v: step(v)[1], init_lam_local)
+            init_pc = jax.tree.map(lambda s: jnp.zeros(s.shape, s.dtype), pc_shape)
+        else:
+            init_pc = None
 
         tol_arr = jnp.array(gmres_tol, dtype=real_dtype)
         maxiter_arr = jnp.array(gmres_maxiter, dtype=jnp.int32)
 
         def cond_fn(carry):
-            _lam, prev_diff, k, diverged, _resid = carry
+            _lam, prev_diff, k, diverged, _resid, _pc = carry
             return (k < maxiter_arr) & (~diverged) & (prev_diff > tol_arr)
 
         def body_fn(carry):
-            lam, prev_diff, k, _diverged, _resid = carry
-            jt_lam = apply_Jt(lam)
+            lam, prev_diff, k, _diverged, _resid, _pc = carry
+            jt_lam, pc = step(lam)  # pc = J_params^T lam (None unless joint)
             new_lam = tuple(b + j for b, j in zip(dE_denv, jt_lam))
             delta = tuple(n - p for n, p in zip(new_lam, lam))
             diff = sum(jnp.linalg.norm(d) for d in delta).astype(real_dtype)
@@ -2225,19 +2267,31 @@ def _make_implicit_vjp_fn(
             )
             # Divergence guard: same trigger as F2 Python loop.
             new_diverged = (diff > prev_diff) & (k > jnp.array(5, jnp.int32))
-            return (new_lam, diff, k + jnp.array(1, jnp.int32), new_diverged, resid)
+            return (
+                new_lam,
+                diff,
+                k + jnp.array(1, jnp.int32),
+                new_diverged,
+                resid,
+                pc,
+            )
 
-        lam_final, final_diff, n_iter, diverged, abs_resid = jax.lax.while_loop(
+        lam_final, final_diff, n_iter, diverged, abs_resid, pc = jax.lax.while_loop(
             cond_fn,
             body_fn,
-            (init_lam_local, init_diff, init_k, init_diverged, init_resid),
+            (init_lam_local, init_diff, init_k, init_diverged, init_resid, init_pc),
         )
         converged = final_diff <= tol_arr
         b_norm = jnp.sqrt(sum(jnp.sum(jnp.abs(b) ** 2) for b in dE_denv)).astype(
             real_dtype
         )
 
-        return diverged, converged, n_iter, lam_final, abs_resid, b_norm, dE_denv
+        out = (diverged, converged, n_iter, lam_final, abs_resid, b_norm, dE_denv)
+        if joint:
+            # gmres_maxiter=0: the body never ran and pc is zero, but then
+            # converged is False and the caller falls back -- never consumed.
+            return out + (direct, pc)
+        return out
 
     @partial(block_sparse_jit, by_bond_dim=False, static_argnames=("chi",))
     def _jit_gmres_solve(params_data_tuple, env_leaves, rhs, *, chi):
@@ -2392,6 +2446,16 @@ def _make_implicit_vjp_fn(
                 init_lam = prev_lam
                 use_init = jnp.array(True)
 
+            joint = adjoint_chain_rule == "joint"
+            fused_out = _jit_fused_fixed_point_bwd(
+                params_data_tuple,
+                env_leaves,
+                init_lam,
+                use_init,
+                chi=chi_post,
+                pb=pb,
+                joint=joint,
+            )
             (
                 diverged,
                 _converged,
@@ -2400,9 +2464,8 @@ def _make_implicit_vjp_fn(
                 _abs_resid,
                 _b_norm,
                 fused_rhs,
-            ) = _jit_fused_fixed_point_bwd(
-                params_data_tuple, env_leaves, init_lam, use_init, chi=chi_post, pb=pb
-            )
+            ) = fused_out[:7]
+            fused_direct, fused_indirect = fused_out[7:] if joint else (None, None)
             _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
             _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
@@ -2485,18 +2548,32 @@ def _make_implicit_vjp_fn(
                 # Seed among [rhs] and zero by measured residual (#858), solve,
                 # and measure the true residual -- one compiled program, one
                 # matvec call site (gmres_single_matvec).
-                lam, _abs, _bn = _jit_gmres_one_matvec_solve(
-                    params_data_tuple,
-                    env_leaves,
-                    rhs,
-                    [rhs],
-                    apply_Jt=_jit_apply_Jt,
-                    chi=chi_post,
-                    pb=pb,
-                    tol=gmres_tol,
-                    maxiter=gmres_maxiter,
-                    restart=gmres_restart,
-                )
+                if joint:
+                    lam, _abs, _bn, indirect = _jit_gmres_joint_solve(
+                        params_data_tuple,
+                        env_leaves,
+                        rhs,
+                        [rhs],
+                        apply_joint=_jit_apply_joint,
+                        chi=chi_post,
+                        pb=pb,
+                        tol=gmres_tol,
+                        maxiter=gmres_maxiter,
+                        restart=gmres_restart,
+                    )
+                else:
+                    lam, _abs, _bn = _jit_gmres_one_matvec_solve(
+                        params_data_tuple,
+                        env_leaves,
+                        rhs,
+                        [rhs],
+                        apply_Jt=_jit_apply_Jt,
+                        chi=chi_post,
+                        pb=pb,
+                        tol=gmres_tol,
+                        maxiter=gmres_maxiter,
+                        restart=gmres_restart,
+                    )
                 _rel, _solved = _report_adjoint(
                     float(jax.device_get(_abs)),
                     float(jax.device_get(_bn)),
@@ -2508,6 +2585,9 @@ def _make_implicit_vjp_fn(
                 _F3_LAST_DIAGNOSTICS["adjoint_residual"] = _rel
                 lam_leaves = tuple(jax.tree.leaves(lam))
                 run["prev_lam_leaves"] = lam_leaves
+                if joint:
+                    # The fused program already formed the direct term.
+                    return _combine(g, fused_direct, indirect), _solved
                 return (
                     _jit_chain_rule(
                         params_data_tuple,
@@ -2530,12 +2610,17 @@ def _make_implicit_vjp_fn(
             # guard.  Pinned by
             # test_the_fused_happy_path_is_residual_gated_by_construction.
             run["prev_lam_leaves"] = tuple(jax.tree.leaves(lam_final))
-            # The same compiled chain rule as the fallback above: the fused
-            # program returns lam only, so the D=3-sized params-VJP compiles
-            # once per (chi, pb) whichever solver produced lam.
-            grads_tuple = _jit_chain_rule(
-                params_data_tuple, env_leaves, lam_final, g, chi=chi_post, pb=pb
-            )
+            # "separate": the same compiled chain rule as the fallback above:
+            # the fused program returns lam only, so the D=3-sized params-VJP
+            # compiles once per (chi, pb) whichever solver produced lam.
+            # "joint": the indirect term comes from the fused loop's own VJP,
+            # J_params^T lambda_{K-1} -- the iterate the residual certifies.
+            if joint:
+                grads_tuple = _combine(g, fused_direct, fused_indirect)
+            else:
+                grads_tuple = _jit_chain_rule(
+                    params_data_tuple, env_leaves, lam_final, g, chi=chi_post, pb=pb
+                )
             return grads_tuple, True
         else:
             # adjoint_method == "gmres": eager Krylov via JAX's built-in
