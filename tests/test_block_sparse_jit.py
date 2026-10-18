@@ -354,3 +354,52 @@ def test_a_small_call_does_not_probe(u1_pair, fresh_probe, monkeypatch):
     )
     f = block_sparse_jit(lambda a, b: _norm2(a) + _norm2(b))
     f(*u1_pair)
+
+
+# --------------------------------------------------------------------------
+# disable_passes (#1123): extra XLA passes skipped in both variants
+# --------------------------------------------------------------------------
+
+
+def _fusions(compiled) -> int:
+    return compiled.as_text().count(" fusion(")
+
+
+def _elementwise(x):
+    return jnp.sin(x) * 2 + jnp.cos(x)
+
+
+@needs_no_fusion
+def test_disable_passes_reaches_the_dense_variant():
+    x = jnp.ones(8)
+    f = block_sparse_jit(_elementwise, disable_passes=("fusion",))
+    unfused = jax.jit(
+        _elementwise, compiler_options={"xla_disable_hlo_passes": "fusion"}
+    )
+    assert _fusions(f.dense.lower(x).compile()) == _fusions(unfused.lower(x).compile())
+    assert _fusions(f.dense.lower(x).compile()) != _fusions(
+        jax.jit(_elementwise).lower(x).compile()
+    ), "premise: disabling fusion changes this program"
+
+
+@needs_no_fusion
+def test_disable_passes_keeps_fusion_off_in_the_block_sparse_variant():
+    x = jnp.ones(8)
+    f = block_sparse_jit(_elementwise, disable_passes=("hoist-fused-bitcasts",))
+    unfused = jax.jit(
+        _elementwise, compiler_options={"xla_disable_hlo_passes": "fusion"}
+    )
+    assert _fusions(f.block_sparse.lower(x).compile()) == _fusions(
+        unfused.lower(x).compile()
+    )
+
+
+def test_a_gpu_only_pass_name_is_harmless_on_cpu():
+    """``hoist-fused-bitcasts`` exists only in the GPU pipeline; naming it on
+    CPU must compile the default program and give the same result."""
+    x = jnp.linspace(0.0, 1.0, 8)
+    f = block_sparse_jit(_elementwise, disable_passes=("hoist-fused-bitcasts",))
+    np.testing.assert_array_equal(np.asarray(f(x)), np.asarray(_elementwise(x)))
+    assert _fusions(f.dense.lower(x).compile()) == _fusions(
+        jax.jit(_elementwise).lower(x).compile()
+    )

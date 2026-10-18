@@ -264,6 +264,9 @@
   noise. A spike on a two-site D=2 chi=8 fixture measured −37%. Gradient
   equal to the default to 1e-10 or better on the GMRES paths and within
   `gmres_tol` on the fused path. Default unchanged (`"separate"`).
+  The joint fused program skips XLA's GPU-only `hoist-fused-bitcasts`
+  pass, which aborts on it (jaxlib 0.10.2, D=3 chi=16 U(1); new
+  `block_sparse_jit(disable_passes=...)`).
 
 - **CTM hold test: a saddle is not converged** (#1035): `ctm_tensor_2site`
   and `ctm_multisite` compared successive sweeps only, and that cannot tell

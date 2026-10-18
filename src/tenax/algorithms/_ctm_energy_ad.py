@@ -2062,7 +2062,6 @@ def _make_implicit_vjp_fn(
         """``(g * (direct + indirect),)`` -- ``_jit_chain_rule``'s return form."""
         return (jax.tree.map(lambda d, i: g * (d + i), direct, indirect),)
 
-    @partial(block_sparse_jit, static_argnames=("chi", "pb", "joint"))
     def _jit_fused_fixed_point_bwd(
         params_data_tuple,
         env_leaves,
@@ -2293,6 +2292,27 @@ def _make_implicit_vjp_fn(
             return out + (direct, pc)
         return out
 
+    # #1123: XLA's GPU-only HoistFusedBitcasts pass aborts on the JOINT program
+    # (D=3 chi=16 U(1), jaxlib 0.10.2 cuda13): ``Check failed:
+    # ArrayDataSize(new_shape) == ArrayDataSize(instruction->shape()) (0 vs.
+    # 96)`` while hoisting the bitcasts of a triton-gemm fusion whose operand is
+    # an f64[2,3,2,1,1] concatenate from the jvp(_step) linearisation -- in the
+    # entry computation, before the loop.  The module before the pass has no
+    # zero-size array; the pass computes the bad f64[0,2,3,2] target itself.
+    # The separate programs compile cleanly, so only the joint variant skips
+    # the pass (it is a bitcast-placement optimisation; results are unchanged).
+    # Two jit objects because compiler options cannot depend on a static
+    # argument; both keep the function's name for trace events.
+    _JOINT_FUSED_DISABLED_PASSES = ("hoist-fused-bitcasts",)
+    _jit_fused_fixed_point_bwd_joint = partial(
+        block_sparse_jit,
+        static_argnames=("chi", "pb", "joint"),
+        disable_passes=_JOINT_FUSED_DISABLED_PASSES,
+    )(_jit_fused_fixed_point_bwd)
+    _jit_fused_fixed_point_bwd = partial(
+        block_sparse_jit, static_argnames=("chi", "pb", "joint")
+    )(_jit_fused_fixed_point_bwd)
+
     @partial(block_sparse_jit, by_bond_dim=False, static_argnames=("chi",))
     def _jit_gmres_solve(params_data_tuple, env_leaves, rhs, *, chi):
         """GMRES solve compiled into a single XLA program.
@@ -2447,7 +2467,12 @@ def _make_implicit_vjp_fn(
                 use_init = jnp.array(True)
 
             joint = adjoint_chain_rule == "joint"
-            fused_out = _jit_fused_fixed_point_bwd(
+            fused_bwd = (
+                _jit_fused_fixed_point_bwd_joint
+                if joint
+                else _jit_fused_fixed_point_bwd
+            )
+            fused_out = fused_bwd(
                 params_data_tuple,
                 env_leaves,
                 init_lam,

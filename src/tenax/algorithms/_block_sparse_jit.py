@@ -102,6 +102,12 @@ from tenax.core.tensor import SymmetricTensor
 # drop fusion for dense programs and for every eager op's compile.
 BLOCK_SPARSE_COMPILER_OPTIONS = {"xla_disable_hlo_passes": "fusion"}
 
+
+def _disabling(passes) -> dict:
+    """``compiler_options`` skipping ``passes`` (XLA takes a comma list)."""
+    return {"xla_disable_hlo_passes": ",".join(passes)}
+
+
 # ``jax.jit`` takes ``compiler_options`` from JAX 0.4.36; the dependency floor
 # is 0.4.30.
 JIT_TAKES_COMPILER_OPTIONS = "compiler_options" in inspect.signature(jax.jit).parameters
@@ -209,7 +215,7 @@ def _wants_no_fusion(args, kwargs, pinned=None, by_bond_dim=True) -> bool:
     return _call_platform(args, kwargs, pinned) == "cpu" and no_fusion_compiles()
 
 
-def block_sparse_jit(fn=None, /, *, by_bond_dim=True, **jit_kwargs):
+def block_sparse_jit(fn=None, /, *, by_bond_dim=True, disable_passes=(), **jit_kwargs):
     """``jax.jit(fn, **jit_kwargs)``, without XLA fusion for block-sparse CPU calls.
 
     Usable as ``@block_sparse_jit`` or
@@ -219,26 +225,49 @@ def block_sparse_jit(fn=None, /, *, by_bond_dim=True, **jit_kwargs):
     ``by_bond_dim=False`` drops the bond-dimension test and keeps only the
     block-count one, for programs that are only the sweep VJP: that compiles
     faster fused for every state measured except many-sector U(1).
+
+    ``disable_passes`` names further XLA passes to skip in BOTH variants, for
+    a program that trips a compiler bug (the joint fused adjoint, #1123).  A
+    pass the backend does not run is ignored by XLA, so a GPU-only pass name
+    is harmless on CPU.  On a JAX whose XLA rejects ``xla_disable_hlo_passes``
+    (see :func:`no_fusion_compiles`) they are dropped, as fusion is.
     """
     if fn is None:
         return functools.partial(
-            block_sparse_jit, by_bond_dim=by_bond_dim, **jit_kwargs
+            block_sparse_jit,
+            by_bond_dim=by_bond_dim,
+            disable_passes=disable_passes,
+            **jit_kwargs,
         )
-    dense = jax.jit(fn, **jit_kwargs)
+    disable_passes = tuple(disable_passes)
+    plain = jax.jit(fn, **jit_kwargs)
     pinned = jit_kwargs.get("device") or jit_kwargs.get("backend")
     if JIT_TAKES_COMPILER_OPTIONS:
         block_sparse = jax.jit(
-            fn, compiler_options=BLOCK_SPARSE_COMPILER_OPTIONS, **jit_kwargs
+            fn,
+            compiler_options=_disabling(("fusion",) + disable_passes),
+            **jit_kwargs,
+        )
+        dense_with_passes = (
+            jax.jit(fn, compiler_options=_disabling(disable_passes), **jit_kwargs)
+            if disable_passes
+            else plain
         )
     else:
-        block_sparse = dense
+        block_sparse = dense_with_passes = plain
+
+    def dense_variant():
+        # Only where XLA accepts the option at all; otherwise the default.
+        if disable_passes and no_fusion_compiles():
+            return dense_with_passes
+        return plain
 
     @functools.wraps(fn)
     def call(*args, **kwargs):
         if _wants_no_fusion(args, kwargs, pinned, by_bond_dim):
             return block_sparse(*args, **kwargs)
-        return dense(*args, **kwargs)
+        return dense_variant()(*args, **kwargs)
 
-    call.dense = dense
+    call.dense = dense_with_passes
     call.block_sparse = block_sparse
     return call
