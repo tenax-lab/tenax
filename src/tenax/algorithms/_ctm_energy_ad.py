@@ -648,6 +648,7 @@ def ctm_energy_implicit(
     device_mesh=None,
     ctm_chunk_size: int | None = None,
     mixing: float = 0.0,
+    adjoint_chain_rule: str = "separate",
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -769,6 +770,8 @@ def ctm_energy_implicit(
                            see ``python_loop_ctm_converge``.  The fixed point,
                            and so the adjoint's linearization point, is the
                            same as without mixing.
+        adjoint_chain_rule: ``"separate"`` (default) or ``"joint"``; see
+                           ``CTMConfig.adjoint_chain_rule``.
 
     Returns:
         Scalar energy per site.
@@ -872,6 +875,7 @@ def ctm_energy_implicit(
         device_mesh,
         ctm_chunk_size,
         mixing,
+        adjoint_chain_rule,
     )
 
 
@@ -1365,6 +1369,7 @@ def _ctm_energy_implicit_dispatch(
     device_mesh=None,
     ctm_chunk_size=None,
     mixing=0.0,
+    adjoint_chain_rule="separate",
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -1413,6 +1418,7 @@ def _ctm_energy_implicit_dispatch(
         device_mesh,  # sharded vs single → distinct cached forward+backward
         ctm_chunk_size,  # distinct chunk size → distinct forward lax.map shape
         mixing,  # the forward closure reads it (#1060)
+        adjoint_chain_rule,  # selects the backward's chain-rule programs
     )
 
     entry = lru_get(_VJP_CACHE, cache_key)
@@ -1461,6 +1467,7 @@ def _ctm_energy_implicit_dispatch(
         device_mesh=device_mesh,
         ctm_chunk_size=ctm_chunk_size,
         mixing=mixing,
+        adjoint_chain_rule=adjoint_chain_rule,
     )
     # Objects the key holds only by id must outlive the entry, or a recycled
     # id could match it (see ``fingerprint``).
@@ -1499,6 +1506,7 @@ def _make_implicit_vjp_fn(
     device_mesh=None,
     ctm_chunk_size: int | None = None,
     mixing: float = 0.0,
+    adjoint_chain_rule: str = "separate",
 ):
     """Build a custom_vjp-decorated function closed over static config.
 

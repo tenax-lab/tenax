@@ -594,6 +594,7 @@ def make_ctm_energy_fn(
             gmres_restart=ctm_cfg.gmres_restart,
             arnoldi_precheck=False,
             adjoint_method=ctm_cfg.adjoint_method,
+            adjoint_chain_rule=ctm_cfg.adjoint_chain_rule,
             energy_fn=energy_fn,
             # Flows through to the implicit-AD forward CTM.  Default 20
             # (variPEPS-style approximate AD: cheap on the plateau, the
