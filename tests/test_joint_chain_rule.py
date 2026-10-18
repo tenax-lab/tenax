@@ -330,3 +330,52 @@ def test_joint_matches_separate_u1_multiblock(method):
         rtol=1e-10 if method == "gmres" else 1e-8,
         atol=1e-9,
     )
+
+
+# ----------------------------------------------------------------- PESS
+
+
+class _Captured(Exception):
+    pass
+
+
+@pytest.mark.parametrize("builder", ["supersite", "exact", "3site"])
+def test_pess_loss_builders_forward_the_chain_rule_setting(builder, monkeypatch):
+    """Codex review of #1123: the PESS builders take a ``CTMConfig`` but did not
+    pass ``adjoint_chain_rule`` on, so ``"joint"`` was silently ignored."""
+    from tenax.algorithms import pess_optimize as po
+    from tenax.algorithms._pess_multisite_energy import kagome_3site_bond_gates
+    from tenax.algorithms.pess import (
+        IPESSState,
+        kagome_xxz_pess_cg_gates,
+        kagome_xxz_pess_cg_gates_exact,
+    )
+
+    seen = {}
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        raise _Captured
+
+    monkeypatch.setattr(po, "ctm_energy_implicit", spy)
+    cfg = CTMConfig(
+        chi=4,
+        projector_method="svd",
+        forward_gauge="phase",
+        chi_ramp=None,
+        adjoint_chain_rule="joint",
+    )
+    if builder == "supersite":
+        loss = po.build_pess_loss(kagome_xxz_pess_cg_gates(delta=1.0, d=3), cfg)
+        state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    elif builder == "exact":
+        loss = po.build_pess_loss_exact(kagome_xxz_pess_cg_gates_exact(1.0, 2), cfg)
+        state = IPESSState.random(D=2, d=2, key=jax.random.PRNGKey(0))
+    else:
+        loss = po.build_pess_loss_3site_multisite(
+            kagome_3site_bond_gates(delta=1.0, d=3), cfg
+        )
+        state = IPESSState.random(D=2, d=3, key=jax.random.PRNGKey(0))
+    with pytest.raises(_Captured):
+        loss(state)
+    assert seen.get("adjoint_chain_rule") == "joint", sorted(seen)

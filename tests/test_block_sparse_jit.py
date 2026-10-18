@@ -35,7 +35,10 @@ pytestmark = pytest.mark.skipif(
 # Below JAX 0.4.36 jax.jit has no compiler_options, so the two variants are
 # one jit object and there is no dispatch to test.  Only the tests named here
 # still run there.
-_ANY_JAX = {"test_a_large_symmetric_call_compiles_on_this_jax"}
+_ANY_JAX = {
+    "test_a_large_symmetric_call_compiles_on_this_jax",
+    "test_disable_passes_falls_back_where_xla_rejects_the_option",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -394,12 +397,22 @@ def test_disable_passes_keeps_fusion_off_in_the_block_sparse_variant():
     )
 
 
-def test_a_gpu_only_pass_name_is_harmless_on_cpu():
-    """``hoist-fused-bitcasts`` exists only in the GPU pipeline; naming it on
-    CPU must compile the default program and give the same result."""
+def test_disable_passes_falls_back_where_xla_rejects_the_option(monkeypatch):
+    """Where XLA rejects ``xla_disable_hlo_passes`` (JAX 0.4.36-0.5.3; forced
+    here on any JAX) the call must take the plain program, not the one
+    carrying the option, which would raise a protobuf error."""
+    monkeypatch.setattr(_block_sparse_jit, "_NO_FUSION_COMPILES", False)
     x = jnp.linspace(0.0, 1.0, 8)
     f = block_sparse_jit(_elementwise, disable_passes=("hoist-fused-bitcasts",))
     np.testing.assert_array_equal(np.asarray(f(x)), np.asarray(_elementwise(x)))
+
+
+@needs_no_fusion
+def test_a_gpu_only_pass_name_is_harmless_on_cpu():
+    """``hoist-fused-bitcasts`` exists only in the GPU pipeline; naming it on
+    CPU must compile the default program."""
+    x = jnp.linspace(0.0, 1.0, 8)
+    f = block_sparse_jit(_elementwise, disable_passes=("hoist-fused-bitcasts",))
     assert _fusions(f.dense.lower(x).compile()) == _fusions(
         jax.jit(_elementwise).lower(x).compile()
     )
