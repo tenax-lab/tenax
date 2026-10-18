@@ -366,6 +366,16 @@ dropped from 3,729 s to 1,188 s.  At D=3 the fallback is common near a slowly
 converging forward; one D=3 chi=16 run spent 12,357 s compiling it before this
 change (not re-measured).
 
+**Joint-VJP chain rule (opt-in).** `CTMConfig(adjoint_chain_rule="joint")`
+takes the chain rule's indirect term `J_params^T λ` from the adjoint solve's
+own matvec — one VJP of the CTM sweep over `(params, env)` — so the separate
+params-VJP program (`_jit_chain_rule`, the largest single compile at D=3) is
+never built.  The GMRES solve returns `J_params^T` of its best iterate; the
+fused Neumann loop returns it for `λ_{K-1}`, the iterate its residual
+certifies, so its gradient can differ from `"separate"` by O(`gmres_tol`).
+Measured at D=2 chi=8 on CPU: GMRES-path compile −37% (Z2 −42%), warm
+matvec +16%.  The default stays `"separate"` until measured at D=3.
+
 #### Persistent compilation cache
 
 `import tenax` turns on JAX's persistent compilation cache.  JAX writes each
