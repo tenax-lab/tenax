@@ -609,6 +609,14 @@
   rollback (3 vs 4 on a 4-step run).  The rolled-back step is now recorded, as
   the 2-site loop already did.
 
+- **An unconverged best point no longer aborts the final evaluation when the
+  last iterate converges (#1081).** `optimize_gs_ad` re-evaluates the best
+  and the last parameters with a fresh CTM.  The best point was never allowed
+  to be dropped, so if its cold CTM missed the tolerance and no certified warm
+  environment existed, the run raised `CTMNotConvergedError` before the
+  converging last iterate was ever evaluated.  The best point is now skipped
+  in that case; the run still raises if both candidates are unconverged.
+
 - **The AD optimizer's best energy now follows a re-measurement of the best
   state (#1095).** `best_energy` could only go down, so one in-loop energy
   that read too low (for example from an under-converged CTM environment)

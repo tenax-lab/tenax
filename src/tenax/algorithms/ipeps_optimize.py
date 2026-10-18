@@ -151,7 +151,13 @@ def _cache_env_known_converged(cache: dict | None, params=None) -> bool:
 
 
 def _final_eval_use_warm(
-    info, warm_cache: dict | None, ctm_cfg, *, params=None, skippable: bool = False
+    info,
+    warm_cache: dict | None,
+    ctm_cfg,
+    *,
+    params=None,
+    skippable: bool = False,
+    label: str = "last iterate",
 ) -> str:
     """Site 4 of #1059: decide how to handle an unconverged final evaluation.
 
@@ -182,8 +188,8 @@ def _final_eval_use_warm(
         return "warm"
     if skippable and ctm_cfg.on_unconverged == "raise":
         _logger.warning(
-            "[iPEPS-AD] fresh final CTM at the last iterate did not converge "
-            "and has no converged warm env; reporting the best params instead"
+            f"[iPEPS-AD] fresh final CTM at the {label} did not converge "
+            "and has no converged warm env; reporting the other candidate instead"
         )
         return "skip"
     from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
@@ -3311,7 +3317,9 @@ def _optimize_gs_ad_tensor(
     # (non-variational at finite chi), so we compare fresh evaluations only.
     # Match in-loop CTM tolerances (#317) by reusing ctm_cfg directly.
 
-    def _eval_fresh(p, env_init=None, warm_cache=None, skippable=False):
+    def _eval_fresh(
+        p, env_init=None, warm_cache=None, skippable=False, label="last iterate"
+    ):
         """Evaluate energy with fully converged fresh CTM.
 
         Returns ``(A, env, E, source)``; ``source`` is ``"warm_fallback"`` when
@@ -3332,7 +3340,7 @@ def _optimize_gs_ad_tensor(
             **ctm_converge_kwargs(ctm_cfg, env_init=env_init),
         )
         verdict = _final_eval_use_warm(
-            info, warm_cache, ctm_cfg, params=p, skippable=skippable
+            info, warm_cache, ctm_cfg, params=p, skippable=skippable, label=label
         )
         source = "fresh"
         if verdict == "warm":
@@ -3372,12 +3380,13 @@ def _optimize_gs_ad_tensor(
     # of the certified best point rather than failing the whole run.
     if best_params is not params:
         A_best, env_best, E_best_fresh, src_best = _eval_fresh(
-            best_params, warm_cache=best_env_cache
+            best_params, warm_cache=best_env_cache, skippable=True, label="best point"
         )
     A_final, env_final, E_final, src_final = _eval_fresh(
         params,
         warm_cache=_env_cache if params is best_params else None,
-        skippable=params is not best_params,
+        # skippable only while a finite best point is available to fall back on
+        skippable=params is not best_params and math.isfinite(E_best_fresh),
     )
     if best_params is params:
         E_best_fresh = E_final
@@ -5322,7 +5331,9 @@ def _optimize_gs_ad_tensor_2site(
         # unphysical values, so we compare fresh evaluations only.
         # Match in-loop CTM tolerances (#317) by reusing ctm_cfg_2s directly.
 
-        def _eval_fresh_2site(p, env_init=None, warm_cache=None, skippable=False):
+        def _eval_fresh_2site(
+            p, env_init=None, warm_cache=None, skippable=False, label="last iterate"
+        ):
             """Evaluate energy with fully converged fresh CTM.
 
             Returns ``(A, B, envs, E, source)``; see the 1-site ``_eval_fresh``.
@@ -5344,7 +5355,12 @@ def _optimize_gs_ad_tensor_2site(
                 **ctm_converge_kwargs(ctm_cfg_2s, env_init=env_init),
             )
             verdict = _final_eval_use_warm(
-                info, warm_cache, ctm_cfg_2s, params=p, skippable=skippable
+                info,
+                warm_cache,
+                ctm_cfg_2s,
+                params=p,
+                skippable=skippable,
+                label=label,
             )
             source = "fresh"
             if verdict == "warm":
@@ -5370,14 +5386,18 @@ def _optimize_gs_ad_tensor_2site(
         # converged warm env of its own is dropped (E = +inf) in favour of it.
         if best_params is not params:
             A_best, B_best, envs_best, E_best_fresh, src_best = _eval_fresh_2site(
-                best_params, warm_cache=best_env_cache_2s
+                best_params,
+                warm_cache=best_env_cache_2s,
+                skippable=True,
+                label="best point",
             )
             env_A_best = envs_best[(0, 0)]
             env_B_best = envs_best[(1, 0)]
         A_last, B_last, envs_last, E_last, src_last = _eval_fresh_2site(
             params,
             warm_cache=_env_cache_2s if params is best_params else None,
-            skippable=params is not best_params,
+            # skippable only while a finite best point is available
+            skippable=params is not best_params and math.isfinite(E_best_fresh),
         )
         env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
         if best_params is params:
