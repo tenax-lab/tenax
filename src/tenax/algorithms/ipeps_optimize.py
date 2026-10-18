@@ -200,8 +200,11 @@ def _final_eval_use_warm(
         policy=ctm_cfg.on_unconverged,
         conv_tol=ctm_cfg.conv_tol,
         chi=ctm_cfg.chi,
-        # The best point and the last iterate are different evaluations.
-        key="last" if skippable else "best",
+        # The best point and the last iterate are different evaluations, so
+        # each keeps its own warning (#1083).  Keyed by the label: since
+        # #1081 both can be skippable, so ``skippable`` no longer tells them
+        # apart.
+        key=label,
     )
     return "fresh"
 
