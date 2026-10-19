@@ -203,12 +203,24 @@ def test_joint_fused_at_the_default_tolerance():
     assert np.max(np.abs(g_joint - g_sep)) <= 1e-4 * np.max(np.abs(g_sep))
 
 
-def test_joint_fallback_matches_separate():
-    A0 = _site(_FALLBACK_SEED)
-    g_sep = _grad(A0, "separate", tol=1e-6)
+def _fallback_premise():
     d = get_last_implicit_ad_diagnostics()
     assert d.get("diverged") or not d.get("converged"), "premise: fallback ran"
-    g_joint = _grad(A0, "joint", tol=1e-6)
+    # A stationary forward, or the gradient is not reproducible across
+    # machines: on the seed-2 fixture (stationarity residual 0.795) Ubuntu CI
+    # gave gradients ~3e-3 off this host's in BOTH modes, and 3e-2 apart.
+    assert d.get("forward_converged"), d.get("forward_stationarity_residual")
+    assert d["forward_stationarity_residual"] < 1e-8, d
+
+
+def test_joint_fallback_matches_separate():
+    """The GMRES fallback on a converged forward: the fused loop is capped at
+    3 iterations (``gmres_maxiter`` caps it; GMRES gets 3 restart cycles)."""
+    A0 = _site(_FUSED_SEED)
+    g_sep = _grad(A0, "separate", tol=1e-6, gmres_maxiter=3)
+    _fallback_premise()
+    g_joint = _grad(A0, "joint", tol=1e-6, gmres_maxiter=3)
+    _fallback_premise()
     np.testing.assert_allclose(
         np.asarray(g_joint), np.asarray(g_sep), rtol=1e-10, atol=1e-12
     )
