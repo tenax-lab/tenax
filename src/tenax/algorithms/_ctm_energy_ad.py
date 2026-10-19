@@ -9,6 +9,7 @@ __all__ = [
     "set_implicit_ad_norm_diagnostics",
 ]
 
+import collections
 import contextlib
 import itertools
 import logging
@@ -20,6 +21,8 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
+from tenax.algorithms._block_sparse_jit import block_sparse_jit
+from tenax.algorithms._cache_fingerprint import callback_key_parts, lru_get, lru_put
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
     _validate_chi_bump_args,
@@ -44,7 +47,7 @@ from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms._gmres_lax import gmres_pytree, gmres_pytree_jax
+from tenax.algorithms._gmres_lax import gmres_pytree, gmres_single_matvec
 from tenax.algorithms.ad_utils import (
     CTMRGGradientError,
     _bond_gauge_families,
@@ -66,9 +69,9 @@ def _adjoint_converged(residual: float, b_norm: float, tol: float) -> bool:
 
     Two things this must get right.
 
-    *The criterion.*  ``gmres_pytree_jax`` configures JAX GMRES with
-    ``tol=tol, atol=tol``, and that solver stops at
-    ``‖r‖ <= max(tol·‖b‖, atol)``.  Gating on the relative residual alone
+    *The criterion.*  The eager adjoint solver ``gmres_single_matvec`` stops at
+    ``‖r‖ <= max(tol·‖b‖, tol)`` (the same rule JAX GMRES gets from
+    ``tol=tol, atol=tol``).  Gating on the relative residual alone
     (``‖r‖/‖b‖ <= tol``) is a *stricter* test, so whenever ``‖b‖ < 1`` the
     solver can legitimately stop above the gate and be reported as a failure.
     ``‖b‖`` is O(1) on this path (measured 1.285 on the D=2 chi=8 fixture), so
@@ -190,35 +193,46 @@ def _best_adjoint_seed(matvec, rhs, candidates):
 
 
 @partial(
-    jax.jit, static_argnames=("apply_Jt", "chi", "pb", "tol", "maxiter", "restart")
+    block_sparse_jit,
+    by_bond_dim=False,
+    static_argnames=("apply_Jt", "chi", "pb", "tol", "maxiter", "restart"),
 )
-def _jit_eager_gmres_solve(
-    params_data_tuple, env_leaves, rhs, x0, *, apply_Jt, chi, pb, tol, maxiter, restart
+def _jit_gmres_one_matvec_solve(
+    params_data_tuple,
+    env_leaves,
+    rhs,
+    candidates,
+    *,
+    apply_Jt,
+    chi,
+    pb,
+    tol,
+    maxiter,
+    restart,
 ):
-    """The eager-GMRES adjoint solve, compiled once per static configuration.
+    """The eager-GMRES adjoint solve: one compiled program, one J^T matvec.
 
-    ``gmres_pytree_jax`` runs JAX's GMRES, a ``lax.while_loop``.  Called
-    outside a jit, that loop is traced and compiled on the spot, and its
-    matvec used to be a closure built fresh on every backward over that
-    call's ``params_data_tuple`` and ``env_leaves`` -- so JAX saw a new
-    function each time and re-compiled the whole Krylov loop on every
-    gradient: ~170 s per call against a 0.6 s solve at D=2 chi=8 on CPU,
-    3-5 min per call at D=3 (#1087).  This hit ``adjoint_method="gmres"``
-    on every call, and the fused fixed-point branch whenever it fell back.
+    Replaces JAX's GMRES here, whose program inlined the matvec at three call
+    sites, plus the standalone ``_jit_apply_Jt`` compile that chose the seed
+    and measured the residual: four compiled copies of the CTM-sweep VJP,
+    2,458 s + 435 s at D=2 chi=8 on CPU against 611 s for the fused Neumann
+    module.  :func:`gmres_single_matvec` chooses the seed among
+    ``candidates`` and zero by measured residual (#858) and returns the
+    measured true residual, all with one matvec call site.
 
-    Here the matvec is built inside the trace from ``apply_Jt`` (the
-    dispatch entry's cached ``_jit_apply_Jt``, static -- its identity is
-    stable for the life of the cache entry) and the per-call data arrive as
-    traced arguments, so a later backward with new parameter values reuses
-    the compiled loop.  The seed ``x0`` is still chosen outside, by
-    :func:`_best_adjoint_seed`, and the residual is still measured outside:
-    neither changes.  Returns ``gmres_pytree_jax``'s ``(lam, info)``.
+    ``apply_Jt`` is static and stable for the life of the dispatch entry, so a
+    later backward with new values reuses the compiled loop (#1087).
+    ``candidates`` must keep the same pytree structure from call to call --
+    pass zeros, never ``None``, for a missing warm start -- or it recompiles.
+    Returns ``(lam, abs_resid, b_norm)``.
     """
 
     def matvec(v):
         return apply_Jt(params_data_tuple, env_leaves, v, chi=chi, pb=pb)
 
-    return gmres_pytree_jax(matvec, rhs, x0, tol=tol, maxiter=maxiter, restart=restart)
+    return gmres_single_matvec(
+        matvec, rhs, list(candidates), tol=tol, maxiter=maxiter, restart=restart
+    )
 
 
 # #1028: the flowing projector backward, and the frozen value its backward
@@ -226,6 +240,154 @@ def _jit_eager_gmres_solve(
 # "auto" is the frozen default every non-flow caller already runs.
 _PROJECTOR_BACKWARD_FLOW = "flow"
 _PROJECTOR_BACKWARD_FROZEN = "auto"
+
+# #1111: a flowing-projector gradient on a non-stationary forward is checked
+# against one extra forward energy evaluation along its own descent
+# direction.  r = (E(x - h G/|G|) - E(x)) / (-h |G|) must lie in
+# [MIN, MAX].  Measured on 15 fixtures (h = 1e-4, CPU): garbage flow
+# gradients (1497x / 7128x / 86x off finite differences, the last at D=3
+# chi=12) gave r = 0.000 / 0.001 / 0.002; good flow 0.97-1.24; frozen
+# 1.00-1.54.  The upper bound catches a gradient that is too small, the
+# symmetric failure.
+_FLOW_SLOPE_RATIO_MIN = 0.5
+_FLOW_SLOPE_RATIO_MAX = 2.0
+_FLOW_SLOPE_STEP = 1e-4  # h = _FLOW_SLOPE_STEP * ||x||
+
+
+# #1116 item 2: the probe below runs inside a custom_vjp backward, and JAX
+# runs each backward equation under the context recorded at trace time
+# (``with eqn.ctx.manager:`` in jax/_src/interpreters/ad.py).  That context
+# sets the abstract-mesh config to ``get_abstract_mesh()``, which normalises
+# the top-level value to the empty ``AbstractMesh(())``; the jit and eager
+# dispatch caches key on the raw value, so every jit (``_step``,
+# ``_bond_phase_fix_envs``, ``_jit_forward_energy``) and eager primitive the
+# forward had already compiled at top level compiled again inside the probe.
+# Measured on CPU (forward pre-warmed, one-time per process per signature):
+# the D=2 chi=4 1-site limit cycle 115 compiles / 3.69 s in the probe ->
+# 0 / 0.08 s, its whole grad 9.68 s -> 5.90 s;
+# the D=2 chi=4 2-site pair 99 compiles / 4.4 s -> 0 / 0.15 s, its cold grad
+# 21.7 s -> 17.1 s.  The probe therefore runs with the key put back to the
+# top-level value.  Numerically nothing changes (the empty mesh is what the
+# top-level value means); only the cache key does.
+#
+# The top-level value is the thread-local ``config_ext.unset`` sentinel,
+# which reads as ``None`` only through the global default.  A literal
+# ``None`` is NOT equivalent: ``use_abstract_mesh.__enter__``
+# (jax/_src/mesh.py:619) accepts ``unset`` but calls ``prev.empty`` on
+# anything else, so a ``jax.debug.callback`` in the energy (it enters
+# ``use_abstract_mesh``) crashed with AttributeError whenever the CPU
+# callback ran on the calling thread -- measured 2 of 6 runs, each turning
+# the check inconclusive and the gradient frozen.  The swap and restore use
+# ``swap_local`` / ``set_local`` exactly as JAX's own ``JaxprEqnContext``
+# does (jax/_src/core.py:352/362).
+#
+# PRIVATE JAX API (``jax._src.config.abstract_mesh_context_manager`` with
+# ``value`` / ``swap_local`` / ``set_local``, and ``config_ext.unset``, on
+# JAX 0.10.2).  Guarded: if any of it is missing (older JAX such as the
+# 0.4.35 floor, or a future rename) the helper is a no-op, never an error.
+# It swaps only when BOTH (a) the forward of this backward ran with no mesh
+# set (the thread-local value was ``unset``; recorded in ``f_fwd``, because
+# inside the backward a caller's explicit ``use_abstract_mesh(AbstractMesh((),
+# ()))`` is the very same interned object as the normalised sentinel) and
+# (b) the current value is JAX's canonical ``empty_abstract_mesh`` with no
+# ``abstract_device``.  A caller's mesh -- with axes, with an abstract device
+# for cross-platform lowering, or an explicit empty one -- is left alone
+# (Codex on #1121).  Delete this once JAX normalises the key upstream (worth an
+# upstream issue: the unset key and the empty AbstractMesh should hit the
+# same cache entry).
+try:
+    from jax._src import config as _jax_src_config
+except ImportError:  # pragma: no cover - private module moved
+    _jax_src_config = None
+
+try:
+    from jax._src.mesh import empty_abstract_mesh as _CANONICAL_EMPTY_MESH
+except ImportError:  # pragma: no cover - private name moved
+    _CANONICAL_EMPTY_MESH = None
+
+_MISSING = object()
+
+
+def _abstract_mesh_manager():
+    """``(manager, top-level value)`` of the private abstract-mesh config, or
+    ``None`` if this JAX lacks any part of it."""
+    mgr = getattr(_jax_src_config, "abstract_mesh_context_manager", None)
+    unset = getattr(getattr(_jax_src_config, "config_ext", None), "unset", _MISSING)
+    if (
+        mgr is None
+        or unset is _MISSING
+        or not all(
+            hasattr(mgr, a) for a in ("value", "get_local", "swap_local", "set_local")
+        )
+    ):
+        return None
+    return mgr, unset
+
+
+def _mesh_at_top_level() -> bool:
+    """True iff no abstract mesh is set on this thread (the value is ``unset``).
+
+    Called in the forward; ``False`` whenever the private API is missing or a
+    caller set any mesh, so the backward's probe then never swaps."""
+    found = _abstract_mesh_manager()
+    if found is None:
+        return False
+    try:
+        return found[0].get_local() is found[1]
+    except Exception:  # noqa: BLE001 -- private API; never fail the forward
+        return False
+
+
+def _is_canonical_empty_mesh(value) -> bool:
+    """True only for JAX's normalised no-mesh value: the canonical
+    ``empty_abstract_mesh`` with no ``abstract_device``."""
+    return (
+        _CANONICAL_EMPTY_MESH is not None
+        and (value is _CANONICAL_EMPTY_MESH or value == _CANONICAL_EMPTY_MESH)
+        and getattr(value, "abstract_device", None) is None
+    )
+
+
+@contextlib.contextmanager
+def _top_level_mesh_context(forward_at_top_level: bool):
+    """Run the body under the top-level abstract-mesh key; see above.
+
+    ``forward_at_top_level`` is ``_mesh_at_top_level()`` recorded by the
+    forward this backward belongs to."""
+    found = _abstract_mesh_manager()
+    swap = False
+    if forward_at_top_level and found is not None:
+        try:
+            swap = _is_canonical_empty_mesh(found[0].value)
+        except Exception:  # noqa: BLE001 -- private API; never fail the backward
+            swap = False
+    if not swap:
+        yield
+        return
+    mgr, top_level = found
+    try:
+        prev = mgr.swap_local(top_level)
+    except Exception:  # noqa: BLE001 -- private API; never fail the backward
+        swap = False
+    if not swap:
+        yield
+        return
+    try:
+        yield
+    finally:
+        mgr.set_local(prev)
+
+
+def _slope_probe_energy(run_forward, compute_energy, site_tensors):
+    """``(real energy, chi_post)`` of the implicit-AD forward at ``site_tensors``.
+
+    The #1111 slope check's one extra forward.  Module level so tests can
+    replace it; it is the same ``_run_forward`` + ``_compute_energy`` pair the
+    forward itself uses, so the check evaluates exactly the differentiated
+    function.
+    """
+    envs, chi_post = run_forward(site_tensors)
+    return float(jnp.real(compute_energy(site_tensors, envs))), int(chi_post)
 
 
 def _warn_if_adjoint_unconverged(
@@ -257,17 +419,22 @@ def _warn_if_adjoint_unconverged(
     )[0]
 
 
-def _measure_adjoint(
-    matvec, lam, rhs, *, tol: float, maxiter: int, restart: int, warn: bool
+def _report_adjoint(
+    abs_resid: float,
+    b_norm: float,
+    *,
+    tol: float,
+    maxiter: int,
+    restart: int,
+    warn: bool,
+    stacklevel: int = 3,
 ) -> tuple[float, bool]:
-    """``(relative residual, converged)`` of an adjoint solve; warn if asked.
+    """``(relative residual, converged)`` from a residual already measured.
 
-    The body of :func:`_warn_if_adjoint_unconverged`, with the warning made
-    optional: the flowing-projector attempt (#1028) measures silently, because
-    a failed solve there is retried with frozen projectors rather than
-    consumed.
+    The threshold and the warning of :func:`_measure_adjoint`, for a solver
+    that returns its own true residual (:func:`gmres_single_matvec`) and so
+    needs no extra matvec.  Fails closed on NaN via ``_adjoint_converged``.
     """
-    abs_resid, b_norm = _adjoint_residual_and_rhs_norm(matvec, lam, rhs)
     rel = abs_resid / b_norm if b_norm > 0 else abs_resid
     converged = _adjoint_converged(abs_resid, b_norm, tol)
     if warn and not converged:
@@ -281,9 +448,31 @@ def _measure_adjoint(
             "gmres_restart, or loosen gmres_tol if this residual is "
             "acceptable for your use.",
             RuntimeWarning,
-            stacklevel=3,
+            stacklevel=stacklevel,
         )
     return rel, converged
+
+
+def _measure_adjoint(
+    matvec, lam, rhs, *, tol: float, maxiter: int, restart: int, warn: bool
+) -> tuple[float, bool]:
+    """``(relative residual, converged)`` of an adjoint solve; warn if asked.
+
+    The body of :func:`_warn_if_adjoint_unconverged`, with the warning made
+    optional: the flowing-projector attempt (#1028) measures silently, because
+    a failed solve there is retried with frozen projectors rather than
+    consumed.
+    """
+    abs_resid, b_norm = _adjoint_residual_and_rhs_norm(matvec, lam, rhs)
+    return _report_adjoint(
+        abs_resid,
+        b_norm,
+        tol=tol,
+        maxiter=maxiter,
+        restart=restart,
+        warn=warn,
+        stacklevel=4,
+    )
 
 
 def _default_energy(site_tensors, envs, gate, coords, neighbors):
@@ -848,15 +1037,81 @@ def _sigma_gauged_ctm_converge(
     return result.envs, result.final_chi, result.converged
 
 
-_VJP_CACHE: dict = {}
+# LRU-bounded (``VJP_CACHE_MAXSIZE``) and keyed by value, not object identity
+# (#1049): see ``_cache_fingerprint``.
+_VJP_CACHE: collections.OrderedDict = collections.OrderedDict()
 
 # Per-call ids for the forward energy's RDM-check replay (see
 # ``_ctm_tensor_energy.recording_traced_rdms``).  ``next`` on a count is
 # atomic under the GIL, so concurrent calls never share an id.
 _RDM_CALL_TOKENS = itertools.count(1)
 
+# Per-run state of a cached implicit-AD function (#1049).  The compiled
+# backward is shared by every call with an equal configuration, but the
+# adjoint seed and the once-per-run warning latches belong to one run: one
+# (energy callback, gate, neighbors) triple by identity, which is what the
+# cache key was before #1049.  Each entry keeps its runs in a small LRU; the
+# record holds the three objects, so a recycled ``id`` cannot match it.
+_RUN_TOKENS = itertools.count(1)
+_RUNS_PER_ENTRY = 8
 
-def invalidate_implicit_ad_warm_start() -> int:
+# #1111 slope check: each forward's per-call inputs, kept under a serial that
+# travels with the residuals, so a pullback called after another forward on
+# the same cache entry probes with its own ``env_init``/``chi_ramp``/gate/
+# callback rather than the later call's.  A small per-entry LRU (read at
+# insert time, so tests can shrink it); an evicted entry is inconclusive.
+_FORWARD_SERIALS = itertools.count(1)
+_PROBE_INPUTS_PER_ENTRY = 8
+# The ``mutables`` keys ``_run_forward`` and ``_compute_energy`` read.
+_PROBE_INPUT_KEYS = ("env_init", "chi_ramp", "gate", "energy_fn")
+# #1116: stored next to a forward's probe inputs (not a ``mutables`` key).
+_PROBE_MESH_KEY = "_forward_mesh_at_top_level"
+
+
+def _fresh_run_state() -> dict:
+    return {
+        "prev_lam_leaves": None,
+        "stationarity_warned": False,
+        "flow_fallback_warned": False,
+    }
+
+
+def _select_run(mutables: dict, energy_fn, gate, neighbors) -> None:
+    """Make the run of ``(energy_fn, gate, neighbors)`` the entry's current one."""
+    runs = mutables["_runs"]
+    key = (id(energy_fn), id(gate), id(neighbors))
+    record = lru_get(runs, key)
+    if record is None:
+        record = (next(_RUN_TOKENS), _fresh_run_state(), (energy_fn, gate, neighbors))
+        runs[key] = record
+        while len(runs) > _RUNS_PER_ENTRY:
+            runs.popitem(last=False)
+    mutables["run_token"] = record[0]
+
+
+def _seed_matches(prev_lam, env_leaves) -> bool:
+    """Whether a cached adjoint ``prev_lam`` can seed a solve over ``env_leaves``.
+
+    Leaf count, shapes AND dtypes must match.  The run state that holds the
+    seed is keyed on the energy_fn/gate/neighbors identities, not on the
+    tensors, so a D sweep, a representation switch or a real <-> complex switch
+    reuses the run; feeding it a seed of another shape or dtype makes the VJP
+    raise (#1113: complex lambda into a float64 backward).
+    """
+    return len(prev_lam) == len(env_leaves) and all(
+        a.shape == b.shape and a.dtype == b.dtype for a, b in zip(prev_lam, env_leaves)
+    )
+
+
+def _run_state(mutables: dict, token: int) -> dict:
+    """The state of run ``token``; a fresh one if it was evicted."""
+    for record_token, state, _objects in mutables["_runs"].values():
+        if record_token == token:
+            return state
+    return _fresh_run_state()
+
+
+def invalidate_implicit_ad_warm_start(*, run_start: bool = False) -> int:
     """Clear cached Neumann warm-start seeds across the implicit-AD VJP cache.
 
     The implicit-AD backward (``adjoint_method="fixed_point"`` and the
@@ -886,6 +1141,14 @@ def invalidate_implicit_ad_warm_start() -> int:
     compiled VJP functions stay cached, so the cost is one cold adjoint
     solve per run, not a recompile.
 
+    ``run_start=True`` (the run-entry calls only) also re-arms the entry's
+    once-per-run warning latches (the #841 stationarity warning and the #1028
+    flow-fallback warning).  Since #1049 an entry is shared by equal
+    configurations, and the latches live per run (``_select_run``), so a new
+    callback or gate already starts with them armed; this also re-arms a run
+    whose objects are reused.  The mid-run calls (stall reset, chi change)
+    leave the latches alone, so a run still warns once.
+
     Returns
     -------
     int
@@ -898,6 +1161,11 @@ def invalidate_implicit_ad_warm_start() -> int:
         if cb is not None:
             cb()
             n += 1
+        # Re-arm the once-per-run warning latches when a run starts -- not on
+        # a mid-run reset, which would re-warn.
+        reset = mutables.get("_reset_run_latches") if run_start else None
+        if reset is not None:
+            reset()
     return n
 
 
@@ -980,6 +1248,10 @@ def get_last_implicit_ad_diagnostics() -> dict:
       (#1060; NaN when not measurable).
     * ``forward_stationarity_threshold`` -- the #841 threshold the residual
       above is compared with, ``max(100 * conv_tol, 1e-8)``.
+    * ``flow_slope_ratio`` -- #1111: measured/predicted energy change along
+      the flowing gradient's descent direction; present only when the slope
+      check ran (non-stationary forward, flow accepted by the other tests)
+      and gave a finite value.
     * ``projector_backward_used`` -- the projector backward that produced
       this gradient: the configured value, or ``"frozen_fallback"`` when a
       ``"flow"`` backward's adjoint was not solvable and the step was redone
@@ -1102,7 +1374,12 @@ def _ctm_energy_implicit_dispatch(
     """
     # Build a hashable key from the static configuration.
     # Gate and energy_fn must be in the key because the JIT backward
-    # captures them at trace time as compile-time constants.
+    # captures them at trace time as compile-time constants.  Value keys for
+    # the default and declared callbacks; a user callback keeps identity keys
+    # for itself and its inputs (#1049, ``callback_key_parts``).
+    energy_fn_fp, (neighbors_fp, gate_fp), keepalive = callback_key_parts(
+        energy_fn, neighbors, gate
+    )
     cache_key = (
         tuple(coords),
         chi,
@@ -1118,9 +1395,13 @@ def _ctm_energy_implicit_dispatch(
         gmres_tol,
         gmres_maxiter,
         gmres_restart,
-        id(neighbors),  # same dict object across optimizer steps
-        id(gate),  # different Hamiltonian → different backward
-        id(energy_fn),  # different energy callback → different backward
+        # Value fingerprints, not ids (#1049): the backward bakes the gate
+        # and energy callback in at trace time, so equal fingerprints trace
+        # the same program.  ``optimize_gs_ad`` builds its energy callback as
+        # a fresh closure per call, so an ``id`` key recompiled every call.
+        neighbors_fp,
+        gate_fp,
+        energy_fn_fp,
         arnoldi_precheck,
         adjoint_method,
         plateau_patience,
@@ -1134,7 +1415,7 @@ def _ctm_energy_implicit_dispatch(
         mixing,  # the forward closure reads it (#1060)
     )
 
-    entry = _VJP_CACHE.get(cache_key)
+    entry = lru_get(_VJP_CACHE, cache_key)
     if entry is not None:
         f, mutables = entry
         # Update per-call mutable state
@@ -1142,6 +1423,7 @@ def _ctm_energy_implicit_dispatch(
         mutables["chi_ramp"] = chi_ramp
         mutables["env_init"] = env_init
         mutables["energy_fn"] = energy_fn
+        _select_run(mutables, energy_fn, gate, neighbors)
         return f(params_data_tuple)
 
     # First call with this config — build and cache
@@ -1180,7 +1462,12 @@ def _ctm_energy_implicit_dispatch(
         ctm_chunk_size=ctm_chunk_size,
         mixing=mixing,
     )
-    _VJP_CACHE[cache_key] = (f, mutables)
+    # Objects the key holds only by id must outlive the entry, or a recycled
+    # id could match it (see ``fingerprint``).
+    mutables["_cache_keepalive"] = keepalive
+    mutables["_runs"] = collections.OrderedDict()
+    _select_run(mutables, energy_fn, gate, neighbors)
+    lru_put(_VJP_CACHE, cache_key, (f, mutables))
     return f(params_data_tuple)
 
 
@@ -1239,18 +1526,14 @@ def _make_implicit_vjp_fn(
             f"{_IMPLICIT_FORWARD_GAUGES}"
         )
 
-    # Mutable cache for treedef from forward (needed in backward).
-    # ``prev_lam_leaves`` caches the implicit-AD adjoint solution across
-    # consecutive ``f_bwd`` calls.  Consecutive L-BFGS steps usually take small
-    # site-tensor steps, so the adjoint problem ``(I - J^T) λ = b`` is "close"
-    # to the previous one — using the previous ``λ`` as a warm seed for the
-    # Neumann iteration converges in fewer iterations (#501).  Cleared on
-    # divergence/non-convergence so the next call gets a fresh start.
-    _cached = {
-        "prev_lam_leaves": None,
-        "stationarity_warned": False,
-        "flow_fallback_warned": False,
-    }
+    # The forward's env treedef, read by the backward's helpers at trace time.
+    # The per-run adjoint seed and warning latches live in ``mutables["_runs"]``
+    # (``_select_run``): ``prev_lam_leaves`` caches the adjoint solution across
+    # consecutive backwards of one run, so the Neumann iteration starts close
+    # to the answer (#501).  Cleared on divergence/non-convergence.
+    _cached: dict = {}
+    # Forward serial -> that forward's ``_PROBE_INPUT_KEYS`` values (#1111).
+    _probe_inputs: collections.OrderedDict = collections.OrderedDict()
 
     def _invalidate_warm_start() -> None:
         """Drop the cached ``prev_lam_leaves`` warm-start seed.
@@ -1263,9 +1546,18 @@ def _make_implicit_vjp_fn(
         preserved by the in-loop divergence guard, but convergence costs
         extra iterations (see issue #501).
         """
-        _cached["prev_lam_leaves"] = None
+        for _token, state, _objects in mutables["_runs"].values():
+            state["prev_lam_leaves"] = None
 
     mutables["_invalidate_warm_start"] = _invalidate_warm_start
+
+    def _reset_run_latches() -> None:
+        """Re-arm the once-per-run warnings (#1049): called at run start only."""
+        for _token, state, _objects in mutables["_runs"].values():
+            state["stationarity_warned"] = False
+            state["flow_fallback_warned"] = False
+
+    mutables["_reset_run_latches"] = _reset_run_latches
 
     # Step function for the #841 stationarity check below: the exact step the
     # forward loop runs (same recipe, mesh, and chunking — memoised, so this
@@ -1384,9 +1676,9 @@ def _make_implicit_vjp_fn(
         Cost: one extra jitted sweep + gauge fix per forward, ~1/max_iter of
         the forward's own cost.
 
-        Warns ONCE per cached vjp-fn build (the lifetime of the warm-start
-        cache): ``optimize_gs_ad`` reuses one build across every optimizer
-        iteration, and the residual embedded in the message drifts, so
+        Warns ONCE per run (one energy callback, gate and neighbors, by
+        identity; see ``_select_run``): ``optimize_gs_ad`` reuses one run
+        across every optimizer iteration, and the residual embedded in the message drifts, so
         Python's default warning dedup never collapses repeats -- a
         per-call warning floods stderr for hundreds of iterations, buries
         the genuinely discriminative "adjoint solve did not converge"
@@ -1422,12 +1714,13 @@ def _make_implicit_vjp_fn(
         # unconverged loop is left to the caller's #1059 policy when one owns
         # it (``policy_owns_unconverged_forward``); the latch stays unspent.
         deferred = _F3_POLICY_OWNS_UNCONVERGED and not forward_converged
+        run = _run_state(mutables, mutables["run_token"])
         if (
             not (residual <= threshold)
             and not deferred
-            and not _cached["stationarity_warned"]
+            and not run["stationarity_warned"]
         ):
-            _cached["stationarity_warned"] = True
+            run["stationarity_warned"] = True
             warnings.warn(
                 f"Implicit-AD CTM: the forward environment is not an "
                 f"element-wise fixed point of the gauged CTM step: one more "
@@ -1447,9 +1740,9 @@ def _make_implicit_vjp_fn(
                 f"help. The residual is also readable from "
                 f"get_last_implicit_ad_diagnostics()"
                 f"['forward_stationarity_residual'] -- it stays updated on "
-                f"every call, while this warning is emitted once per cached "
-                f"energy function (further occurrences are suppressed to "
-                f"keep optimizer loops readable).",
+                f"every call, while this warning is emitted once per run "
+                f"(further occurrences are suppressed to keep optimizer "
+                f"loops readable).",
                 RuntimeWarning,
                 stacklevel=4,
             )
@@ -1515,7 +1808,34 @@ def _make_implicit_vjp_fn(
 
         _cached["env_treedef"] = jax.tree.structure(envs)
         env_leaves = tuple(jax.tree.leaves(envs))
-        residuals = (params_data_tuple, env_leaves, chi_post)
+        # #1111: the slope check needs this forward's energy and whether it was
+        # stationary.  Read now, right after _run_forward wrote them, and carry
+        # them in the residuals -- another forward can overwrite the
+        # module-global diagnostics before this backward runs.  Written as
+        # ``not (r <= t)`` so a NaN residual counts as non-stationary.
+        nonstationary = not (
+            _F3_LAST_DIAGNOSTICS.get("forward_stationarity_residual", float("nan"))
+            <= _F3_LAST_DIAGNOSTICS.get("forward_stationarity_threshold", 0.0)
+        )
+        # The run token travels with the residuals, so a backward finds its
+        # own run even if another forward ran in between.  So does a serial
+        # naming this forward's per-call inputs, for the slope check's probe.
+        serial = next(_FORWARD_SERIALS)
+        _probe_inputs[serial] = {k: mutables[k] for k in _PROBE_INPUT_KEYS}
+        # #1116: whether this forward ran with no abstract mesh set, so the
+        # probe only swaps the backward's key back when that is what it was.
+        _probe_inputs[serial][_PROBE_MESH_KEY] = _mesh_at_top_level()
+        while len(_probe_inputs) > _PROBE_INPUTS_PER_ENTRY:
+            _probe_inputs.popitem(last=False)
+        residuals = (
+            params_data_tuple,
+            env_leaves,
+            chi_post,
+            mutables["run_token"],
+            energy,
+            nonstationary,
+            serial,
+        )
         return energy, residuals
 
     # Build JIT'd sweep step for backward (same recipe as forward, so the
@@ -1546,7 +1866,7 @@ def _make_implicit_vjp_fn(
         else:
             return e_out
 
-    @jax.jit
+    @block_sparse_jit
     def _jit_dE_denv(params_data_tuple, env_leaves):
         """Step 1: compute dE/denv (GMRES RHS)."""
         gate_ = mutables["gate"]
@@ -1563,7 +1883,7 @@ def _make_implicit_vjp_fn(
         _, vjp_fn = jax.vjp(energy_from_env, env_leaves)
         return vjp_fn(jnp.ones(()))[0]
 
-    @partial(jax.jit, static_argnames=("chi", "pb"))
+    @partial(block_sparse_jit, by_bond_dim=False, static_argnames=("chi", "pb"))
     def _jit_apply_Jt(params_data_tuple, env_leaves, v, *, chi, pb):
         """Apply the GMRES matvec ``(I - J^T) v`` (NOT just ``J^T v``).
 
@@ -1599,7 +1919,7 @@ def _make_implicit_vjp_fn(
         jt_v = vjp_fn(v)[0]
         return tuple(vi - ji for vi, ji in zip(v, jt_v))
 
-    @partial(jax.jit, static_argnames=("chi", "pb"))
+    @partial(block_sparse_jit, static_argnames=("chi", "pb"))
     def _jit_chain_rule(params_data_tuple, env_leaves, lam, g_scalar, *, chi, pb):
         """Steps 3-4: direct gradient + indirect (J_params^T @ lam).
 
@@ -1642,11 +1962,12 @@ def _make_implicit_vjp_fn(
         total = jax.tree.map(lambda d, ind: g_scalar * (d + ind), direct, indirect)
         return (total,)
 
-    @partial(jax.jit, static_argnames=("chi", "pb"))
+    @partial(block_sparse_jit, static_argnames=("chi", "pb"))
     def _jit_fused_fixed_point_bwd(
         params_data_tuple,
         env_leaves,
         init_lam,
+        use_init,
         *,
         chi,
         pb,
@@ -1670,9 +1991,12 @@ def _make_implicit_vjp_fn(
         evaluated a chain rule it threw away.
 
         ``init_lam`` is the warm-start seed for the Neumann iteration
-        (shape-matched to ``dE_denv``).  Cold start passes ``dE_denv``
-        itself; subsequent calls pass the previous ``lam_final`` so the
-        loop converges in fewer iterations (#501).
+        (shape-matched to ``dE_denv``).  On a cold start the caller passes
+        zeros with ``use_init=False`` and the program seeds the iteration
+        from its own ``dE_denv``; subsequent calls pass the previous
+        ``lam_final`` with ``use_init=True`` so the loop converges in fewer
+        iterations (#501).  ``use_init`` is a traced bool, so warm and cold
+        calls share one compiled program.
 
         Returns
         -------
@@ -1694,7 +2018,6 @@ def _make_implicit_vjp_fn(
             loop's ``diff`` is the *same step vector* in an ℓ1-of-ℓ2 sum over
             leaves; reporting that instead would not be comparable to
             anything.
-
             Free because the Neumann step *is* the residual,
 
                 λ_{k+1} - λ_k = b + Jᵀλ_k - λ_k = b - (I - Jᵀ)λ_k
@@ -1714,6 +2037,8 @@ def _make_implicit_vjp_fn(
             certificate for ``λ_final``.  It is not load-bearing for
             correctness: nothing gates on it, and the branch that returns it
             has already met ``diff <= gmres_tol`` (see the caller).
+        dE_denv : tuple of leaves
+            The RHS, returned so the GMRES fallback does not recompute it.
         """
         gate_ = mutables["gate"]
         energy_fn_ = mutables["energy_fn"]
@@ -1761,7 +2086,13 @@ def _make_implicit_vjp_fn(
         # The RHS ``b = dE_denv`` of the Neumann step ``λ_{k+1} = b + J^T λ_k``
         # is unchanged — only the initial guess is seeded from cache.
         real_dtype = jnp.real(dE_denv[0]).dtype if dE_denv else jnp.float64
-        init_lam_local = init_lam  # lambda_0 (warm or cold seed)
+        # Cold start seeds from this program's own dE_denv: passing it in
+        # from the standalone _jit_dE_denv compiled a second copy of the
+        # energy VJP just to make the seed.  ``use_init`` is traced, so warm
+        # and cold calls share this compiled program.
+        init_lam_local = tuple(
+            jnp.where(use_init, w, d) for w, d in zip(init_lam, dE_denv)
+        )
         init_diff = jnp.array(jnp.inf, dtype=real_dtype)
         init_k = jnp.array(0, dtype=jnp.int32)
         init_diverged = jnp.array(False)
@@ -1806,9 +2137,9 @@ def _make_implicit_vjp_fn(
             real_dtype
         )
 
-        return diverged, converged, n_iter, lam_final, abs_resid, b_norm
+        return diverged, converged, n_iter, lam_final, abs_resid, b_norm, dE_denv
 
-    @partial(jax.jit, static_argnames=("chi",))
+    @partial(block_sparse_jit, by_bond_dim=False, static_argnames=("chi",))
     def _jit_gmres_solve(params_data_tuple, env_leaves, rhs, *, chi):
         """GMRES solve compiled into a single XLA program.
 
@@ -1862,7 +2193,8 @@ def _make_implicit_vjp_fn(
         ``static_argnames`` parameter so JAX traces one compiled binary
         per distinct chi value visited (#516 chi-lock).
         """
-        params_data_tuple, env_leaves, chi_post = residuals
+        params_data_tuple, env_leaves, chi_post, run_token = residuals[:4]
+        run = _run_state(mutables, int(run_token))
 
         # Drop the previous backward's residual before any branch can return.
         # ``_F3_LAST_DIAGNOSTICS`` is module-global, so a path that fails to
@@ -1899,8 +2231,7 @@ def _make_implicit_vjp_fn(
         # dE/denv is the RHS for the (I - J^T)·λ = b solve. F3's fused JIT
         # recomputes it internally, so the eager call is only needed by:
         # (a) the Arnoldi precheck (uses it as the Krylov seed), or
-        # (b) the eager-GMRES path — either the "gmres" branch below or
-        # the divergence-fallback path inside the "fixed_point" branch.
+        # (b) adjoint_method='gmres'.
         # Compute lazily so the normal F3 success path doesn't pay an
         # extra _jit_dE_denv trace/dispatch on every backward call.
         _dE_denv_cached: tuple | None = None
@@ -1929,13 +2260,6 @@ def _make_implicit_vjp_fn(
             if rho >= 1.0:
                 raise CTMRGGradientError(rho)
 
-        # Both eager-GMRES paths (fixed_point divergence fallback + the
-        # "gmres" branch) share the same cached _jit_apply_Jt matvec.  This
-        # closure is for the eager seed choice and residual measurement only;
-        # the solve itself goes through _jit_eager_gmres_solve (#1087).
-        def _eager_apply_I_minus_Jt(v):
-            return _jit_apply_Jt(params_data_tuple, env_leaves, v, chi=chi_post, pb=pb)
-
         if adjoint_method == "fixed_point":
             # F3 fused JIT: dE/denv + adjoint fixed-point + chain rule
             # in one trace. Returns final grads directly; if the fused
@@ -1948,24 +2272,25 @@ def _make_implicit_vjp_fn(
             # initial guess.  Cold start (first call, or after a
             # divergence reset) seeds from ``dE_denv`` itself —
             # equivalent to the previous behaviour.
-            prev_lam = _cached.get("prev_lam_leaves")
+            prev_lam = run.get("prev_lam_leaves")
             invalidated_by_shape = False
             if prev_lam is not None:
-                # Validate shapes match current env_leaves.  Without this, a D-sweep
-                # or tensor-representation switch (with cache hit on coords/gate/
-                # neighbors) would feed a stale-shape init_lam into the JIT and
-                # raise a VJP tree/shape mismatch.  Cache structure: prev_lam is a
-                # flat tuple of leaves shaped like env_leaves.
-                if len(prev_lam) != len(env_leaves) or any(
-                    a.shape != b.shape for a, b in zip(prev_lam, env_leaves)
-                ):
-                    _cached["prev_lam_leaves"] = None
+                # Validate shapes and dtypes match current env_leaves.  Without
+                # this, a D-sweep, a tensor-representation switch or a real <->
+                # complex switch (with cache hit on coords/gate/neighbors) would
+                # feed a stale init_lam into the JIT and raise a VJP mismatch
+                # (#1113).  Cache structure: prev_lam is a flat tuple of leaves
+                # shaped like env_leaves.
+                if not _seed_matches(prev_lam, env_leaves):
+                    run["prev_lam_leaves"] = None
                     invalidated_by_shape = True
                     prev_lam = None
             if prev_lam is None:
-                init_lam = _eager_dE_denv()
+                init_lam = tuple(jnp.zeros_like(leaf) for leaf in env_leaves)
+                use_init = jnp.array(False)
             else:
                 init_lam = prev_lam
+                use_init = jnp.array(True)
 
             (
                 diverged,
@@ -1974,8 +2299,9 @@ def _make_implicit_vjp_fn(
                 lam_final,
                 _abs_resid,
                 _b_norm,
+                fused_rhs,
             ) = _jit_fused_fixed_point_bwd(
-                params_data_tuple, env_leaves, init_lam, chi=chi_post, pb=pb
+                params_data_tuple, env_leaves, init_lam, use_init, chi=chi_post, pb=pb
             )
             _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
@@ -1997,7 +2323,8 @@ def _make_implicit_vjp_fn(
                     float(jax.device_get(jnp.sum(jnp.abs(_l) ** 2))) for _l in lam_final
                 )
                 _init_lam_norm_sq = sum(
-                    float(jax.device_get(jnp.sum(jnp.abs(_l) ** 2))) for _l in init_lam
+                    float(jax.device_get(jnp.sum(jnp.abs(_l) ** 2)))
+                    for _l in (init_lam if prev_lam is not None else fused_rhs)
                 )
                 _F3_LAST_DIAGNOSTICS["lam_norm"] = _lam_norm_sq**0.5
                 _F3_LAST_DIAGNOSTICS["init_lam_norm"] = _init_lam_norm_sq**0.5
@@ -2046,20 +2373,23 @@ def _make_implicit_vjp_fn(
                 # Invalidate the stale warm-start cache before the
                 # eager fallback fires; the eager GMRES result then
                 # becomes the new seed for the next call.
-                _cached["prev_lam_leaves"] = None
+                run["prev_lam_leaves"] = None
                 _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = True
-                rhs = _eager_dE_denv()
+                rhs = fused_rhs
                 _GMRES_LOGGER.debug(
                     "Eager GMRES: maxiter=%d tol=%g restart=%d",
                     gmres_maxiter,
                     gmres_tol,
                     gmres_restart,
                 )
-                lam, _info = _jit_eager_gmres_solve(
+                # Seed among [rhs] and zero by measured residual (#858), solve,
+                # and measure the true residual -- one compiled program, one
+                # matvec call site (gmres_single_matvec).
+                lam, _abs, _bn = _jit_gmres_one_matvec_solve(
                     params_data_tuple,
                     env_leaves,
                     rhs,
-                    _best_adjoint_seed(_eager_apply_I_minus_Jt, rhs, [rhs]),
+                    [rhs],
                     apply_Jt=_jit_apply_Jt,
                     chi=chi_post,
                     pb=pb,
@@ -2067,12 +2397,9 @@ def _make_implicit_vjp_fn(
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
                 )
-                # ``_info`` is not a convergence flag on this solver -- see
-                # _warn_if_adjoint_unconverged.  Measure the residual instead.
-                _rel, _solved = _measure_adjoint(
-                    _eager_apply_I_minus_Jt,
-                    lam,
-                    rhs,
+                _rel, _solved = _report_adjoint(
+                    float(jax.device_get(_abs)),
+                    float(jax.device_get(_bn)),
                     tol=gmres_tol,
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
@@ -2080,7 +2407,7 @@ def _make_implicit_vjp_fn(
                 )
                 _F3_LAST_DIAGNOSTICS["adjoint_residual"] = _rel
                 lam_leaves = tuple(jax.tree.leaves(lam))
-                _cached["prev_lam_leaves"] = lam_leaves
+                run["prev_lam_leaves"] = lam_leaves
                 return (
                     _jit_chain_rule(
                         params_data_tuple,
@@ -2102,7 +2429,7 @@ def _make_implicit_vjp_fn(
             # *is* a residual criterion -- what it lacked was reporting, not a
             # guard.  Pinned by
             # test_the_fused_happy_path_is_residual_gated_by_construction.
-            _cached["prev_lam_leaves"] = tuple(jax.tree.leaves(lam_final))
+            run["prev_lam_leaves"] = tuple(jax.tree.leaves(lam_final))
             # The same compiled chain rule as the fallback above: the fused
             # program returns lam only, so the D=3-sized params-VJP compiles
             # once per (chi, pb) whichever solver produced lam.
@@ -2113,27 +2440,23 @@ def _make_implicit_vjp_fn(
         else:
             # adjoint_method == "gmres": eager Krylov via JAX's built-in
             # solver.  Retained as an opt-out for divergent edge cases.
-            # Warm-start from the cached ``prev_lam_leaves`` when shape-
-            # compatible (issue #501); fall back to ``rhs`` as the cold
-            # x0 otherwise.  The shape check matches the fixed-point
-            # branch above.
+            # Warm-start from the cached ``prev_lam_leaves`` when shape- and
+            # dtype-compatible (issues #501, #1113); fall back to ``rhs`` as
+            # the cold x0 otherwise.  Same check as the fixed-point branch.
             rhs = _eager_dE_denv()
-            prev_lam = _cached.get("prev_lam_leaves")
-            if prev_lam is not None and (
-                len(prev_lam) != len(env_leaves)
-                or any(a.shape != b.shape for a, b in zip(prev_lam, env_leaves))
-            ):
-                _cached["prev_lam_leaves"] = None
+            prev_lam = run.get("prev_lam_leaves")
+            if prev_lam is not None and not _seed_matches(prev_lam, env_leaves):
+                run["prev_lam_leaves"] = None
                 prev_lam = None
-            # Warm start first, then the Neumann term, then zero -- but chosen
-            # by measured residual, not by preference order (#858).  Both
-            # non-zero seeds are good only where they beat zero, and where
-            # they do not GMRES cannot undo them.
-            warm = None
+            # Warm start first, then the Neumann term, then zero -- chosen by
+            # measured residual inside the solve (#858).  A missing warm start
+            # is passed as zeros, not None: zero ties the incumbent and loses,
+            # and the candidates' pytree structure stays fixed so the compiled
+            # solve is reused between cold and warm backwards (#1087).
             if prev_lam is not None:
-                # Unflatten back into the same pytree structure as rhs.
                 warm = jax.tree.unflatten(jax.tree.structure(rhs), prev_lam)
-            x0 = _best_adjoint_seed(_eager_apply_I_minus_Jt, rhs, [warm, rhs])
+            else:
+                warm = jax.tree.map(jnp.zeros_like, rhs)
             _GMRES_LOGGER.debug(
                 "Eager GMRES: maxiter=%d tol=%g restart=%d warm=%s",
                 gmres_maxiter,
@@ -2141,11 +2464,11 @@ def _make_implicit_vjp_fn(
                 gmres_restart,
                 prev_lam is not None,
             )
-            lam, _info = _jit_eager_gmres_solve(
+            lam, _abs, _bn = _jit_gmres_one_matvec_solve(
                 params_data_tuple,
                 env_leaves,
                 rhs,
-                x0,
+                [warm, rhs],
                 apply_Jt=_jit_apply_Jt,
                 chi=chi_post,
                 pb=pb,
@@ -2153,12 +2476,9 @@ def _make_implicit_vjp_fn(
                 maxiter=gmres_maxiter,
                 restart=gmres_restart,
             )
-            # ``_info`` is not a convergence flag on this solver -- see
-            # _warn_if_adjoint_unconverged.  Measure the residual instead.
-            _rel, _solved = _measure_adjoint(
-                _eager_apply_I_minus_Jt,
-                lam,
-                rhs,
+            _rel, _solved = _report_adjoint(
+                float(jax.device_get(_abs)),
+                float(jax.device_get(_bn)),
                 tol=gmres_tol,
                 maxiter=gmres_maxiter,
                 restart=gmres_restart,
@@ -2166,13 +2486,126 @@ def _make_implicit_vjp_fn(
             )
             _F3_LAST_DIAGNOSTICS["adjoint_residual"] = _rel
             lam_leaves = tuple(jax.tree.leaves(lam))
-            _cached["prev_lam_leaves"] = lam_leaves
+            run["prev_lam_leaves"] = lam_leaves
             return (
                 _jit_chain_rule(
                     params_data_tuple, env_leaves, lam_leaves, g, chi=chi_post, pb=pb
                 ),
                 _solved,
             )
+
+    def _flow_slope_check(residuals, g, grads, run):
+        """#1111: ``None`` to keep the flowing gradient, else why to discard it.
+
+        Runs only on a non-stationary forward.  One extra forward energy
+        evaluation along the gradient's own descent direction must change the
+        energy by what the gradient predicts: r = dE_measured / dE_predicted
+        in [_FLOW_SLOPE_RATIO_MIN, _FLOW_SLOPE_RATIO_MAX].  An inconclusive
+        check (the probe raised, a non-finite value, a chi bump) discards flow
+        too -- frozen is biased (#1028) but bounded.  The probe evaluates with
+        this forward's own per-call inputs (``env_init``, ``chi_ramp``, gate,
+        energy callback) and run, even when the pullback is called after
+        another forward on the same cache entry; if those inputs were evicted
+        from the per-entry LRU (``_PROBE_INPUTS_PER_ENTRY``) the check is
+        inconclusive.  The probe leaves the diagnostics, the warnings, the
+        current per-call state and the once-per-run latches (of this forward's
+        run and of the run current when the backward started) as it found them.
+        """
+        (
+            params_data_tuple,
+            _env_leaves,
+            chi_post,
+            token,
+            energy0,
+            nonstationary,
+            serial,
+        ) = residuals
+        if not nonstationary:
+            return None
+        inputs = lru_get(_probe_inputs, int(serial))
+        if inputs is None:
+            return (
+                "the slope check could not evaluate (its forward inputs were evicted)"
+            )
+        inputs = dict(inputs)
+        forward_at_top_level = bool(inputs.pop(_PROBE_MESH_KEY, False))
+        g_arr = jnp.asarray(g)
+        if float(jax.device_get(jnp.abs(g_arr))) == 0.0:
+            return None
+
+        def _norm(tree):
+            return float(
+                jax.device_get(
+                    jnp.sqrt(
+                        sum(
+                            jnp.sum(jnp.abs(leaf) ** 2)
+                            for leaf in jax.tree.leaves(tree)
+                        )
+                    )
+                )
+            )
+
+        G = jax.tree.map(lambda leaf: leaf / g_arr, grads[0])
+        g_norm = _norm(G)
+        if not g_norm > 0.0:
+            return "the slope check could not evaluate (the energy gradient is zero)"
+        h = _FLOW_SLOPE_STEP * _norm(params_data_tuple)
+        # JAX convention: grad of a real function of complex z is the conjugate
+        # of the steepest-ascent direction (grad |z|^2 at 1+1j is 2-2j), so the
+        # descent step is along conj(G).  jnp.conj is a no-op for real leaves;
+        # |G|^2 = sum |G_a|^2 is unchanged, so the predicted dE stays -h|G|.
+        x_h = jax.tree.map(
+            lambda a, b: a - (h / g_norm) * jnp.conj(b), params_data_tuple, G
+        )
+
+        diag_snapshot = dict(_F3_LAST_DIAGNOSTICS)
+        # ``run`` is this forward's; the probe's _run_forward is pointed at it
+        # below, but the run current at backward start may be a different one
+        # (another forward ran in between), so both runs' latches are kept.
+        current_run = _run_state(mutables, mutables["run_token"])
+        latch_snapshots = [
+            (state, {k: v for k, v in state.items() if k.endswith("_warned")})
+            for state in (run, current_run)
+        ]
+        state_snapshot = {k: mutables[k] for k in (*_PROBE_INPUT_KEYS, "run_token")}
+        try:
+            mutables.update(inputs)
+            mutables["run_token"] = int(token)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with _top_level_mesh_context(forward_at_top_level):  # #1116
+                    e_h, chi_h = _slope_probe_energy(
+                        _run_forward, _compute_energy, dict(zip(coords, x_h))
+                    )
+        except Exception as exc:  # noqa: BLE001 -- any failure is inconclusive
+            return (
+                "the slope check could not evaluate (its forward raised "
+                f"{type(exc).__name__}: {exc})"
+            )
+        finally:
+            _F3_LAST_DIAGNOSTICS.clear()
+            _F3_LAST_DIAGNOSTICS.update(diag_snapshot)
+            mutables.update(state_snapshot)
+            for state, snapshot in latch_snapshots:
+                state.update(snapshot)
+
+        if chi_h != int(chi_post):
+            return (
+                "the slope check could not evaluate (its forward changed chi "
+                f"{int(chi_post)} -> {chi_h})"
+            )
+        e0 = float(jax.device_get(jnp.real(energy0)))
+        r = (e_h - e0) / (-h * g_norm)
+        if not math.isfinite(r):
+            return f"the slope check could not evaluate (non-finite ratio {r})"
+        _F3_LAST_DIAGNOSTICS["flow_slope_ratio"] = r
+        if _FLOW_SLOPE_RATIO_MIN <= r <= _FLOW_SLOPE_RATIO_MAX:
+            return None
+        return (
+            f"its gradient failed the slope check (measured/predicted dE = "
+            f"{r:.3g}, accepted range [{_FLOW_SLOPE_RATIO_MIN:g}, "
+            f"{_FLOW_SLOPE_RATIO_MAX:g}])"
+        )
 
     def f_bwd(residuals, g):
         """Backward with the #1028 frozen-projector fallback.
@@ -2202,9 +2635,22 @@ def _make_implicit_vjp_fn(
         1.6e-4.  A stationarity gate would trade flow for frozen exactly
         where frozen is no better.  The fallback targets the failure that is
         specific to flowing: an adjoint that cannot be solved at all.
+
+        A *solved* flowing adjoint is still not enough on a non-stationary
+        forward (#1111): the single-matvec GMRES solves adjoints JAX's GMRES
+        stalled on, and on the #1028 fixture the solved flowing gradient was
+        1497x off finite differences (86x at D=3 chi=12, already on main).
+        Neither stationarity nor the adjoint amplification separates those
+        from good flowing gradients; one extra forward evaluation along the
+        gradient's own descent direction does.  ``_flow_slope_check`` keeps
+        flow only if measured/predicted dE lies in [0.5, 2] (garbage
+        <= 0.002, good 0.97-1.24, frozen 1.00-1.54), and only spends that
+        forward when the forward was not stationary.
         """
         _F3_LAST_DIAGNOSTICS.pop("flow_adjoint_residual", None)
         _F3_LAST_DIAGNOSTICS.pop("flow_fallback_reason", None)
+        _F3_LAST_DIAGNOSTICS.pop("flow_slope_ratio", None)
+        run = _run_state(mutables, int(residuals[3]))
         deferred = _policy_defers_backward_warnings()
         if projector_backward != _PROJECTOR_BACKWARD_FLOW:
             grads, _ = _bwd_core(residuals, g, projector_backward, warn=not deferred)
@@ -2233,21 +2679,23 @@ def _make_implicit_vjp_fn(
         ):
             reason = "its gradient was non-finite"
         if reason is None:
+            reason = _flow_slope_check(residuals, g, grads, run)
+        if reason is None:
             _F3_LAST_DIAGNOSTICS["projector_backward_used"] = _PROJECTOR_BACKWARD_FLOW
             return grads
         # The cached lambda solves the flowing system (or is garbage); the
         # frozen solve must not be seeded from it.
-        _cached["prev_lam_leaves"] = None
+        run["prev_lam_leaves"] = None
         # Deferred to the caller's policy, the latch stays unspent.
-        if not deferred and not _cached["flow_fallback_warned"]:
-            _cached["flow_fallback_warned"] = True
+        if not deferred and not run["flow_fallback_warned"]:
+            run["flow_fallback_warned"] = True
             warnings.warn(
                 "Implicit-AD CTM: the flowing-projector backward "
                 '(projector_backward="flow", the default under '
                 'forward_gauge="bond_phase") was discarded because '
                 f"{reason}; this gradient uses frozen projectors instead, "
                 "which are biased (#1028) but bounded.  Warned once per "
-                "cached energy function; the diagnostics report "
+                "run; the diagnostics report "
                 "'projector_backward_used' on every call.",
                 RuntimeWarning,
                 stacklevel=3,
@@ -2257,7 +2705,7 @@ def _make_implicit_vjp_fn(
         )
         # That solve cached the FROZEN system's lambda; the next call tries
         # flowing again, a different linear system, so it must start cold.
-        _cached["prev_lam_leaves"] = None
+        run["prev_lam_leaves"] = None
         _F3_LAST_DIAGNOSTICS["projector_backward_used"] = "frozen_fallback"
         _F3_LAST_DIAGNOSTICS["flow_adjoint_residual"] = flow_residual
         _F3_LAST_DIAGNOSTICS["flow_fallback_reason"] = reason

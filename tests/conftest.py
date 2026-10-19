@@ -16,6 +16,14 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor
 _FILE_MARKERS = {
     "test_eps_t_blindness_727.py": "core",
     "test_gs_recipe_explicit_rejection_755.py": "core",
+    # #1059 finding 27: metric preconditioning dropped for fermions; spies.
+    "test_metric_precond_fermions_1059.py": "core",
+    # #1059 finding 1: optimize_fpeps_ad dispatch; spies on the branch
+    # targets, so no tensor work (the one end-to-end test is marked slow).
+    "test_fpeps_ad_dispatch_1059.py": "core",
+    # #1059 findings 2 and 3 + fermionic gate on non-fermionic sites: the
+    # refusals fire before any tensor work, and the branch targets are spies.
+    "test_fermionic_refusals_1059.py": "core",
     "test_tensor.py": "core",
     # PR #986 Phase 1: the swap-gate primitive.  Pure block-metadata sign
     # tests, no CTM, ~1s; the graded-transpose cross-check is the mutation
@@ -158,6 +166,8 @@ _FILE_MARKERS = {
     # on the default path -- so it belongs in the required gate for the same
     # reason.  Shares one D=2 chi=8 module fixture across every case (~9s).
     "test_ctm_tensor_return_info.py": "core",
+    # #926: AST scan of src/tenax for duplicate class/def names (~1 s).
+    "test_no_duplicate_definitions.py": "core",
     # #1035 hold test: mechanism tests on maps of known stability (~3 s) plus
     # one real dense D=2 CTM (~25 s).  Core because the hold is on by default
     # in ctm_tensor_2site / ctm_multisite: a regression that certifies a
@@ -261,6 +271,14 @@ _FILE_MARKERS = {
     "test_adjoint_seed_858.py": "core",
     # #1087: a second eager-GMRES backward must compile nothing (~14s).
     "test_gmres_adjoint_no_recompile_1087.py": "core",
+    "test_gmres_single_matvec.py": "core",
+    "test_gmres_single_matvec_wiring.py": "core",
+    # #1049: the implicit-AD compile cache is keyed by value and bounded (~45s).
+    "test_vjp_cache_key_1049.py": "algorithm",
+    "test_blocks_cache_tracer_1103.py": "core",
+    "test_block_sparse_jit.py": "core",
+    "test_fuse_indices_concat.py": "core",
+    "test_block_sparse_jit_numerics.py": "algorithm",
     # The implicit-AD forward jits its energy and replays the RDM checks (~60s).
     "test_jit_forward_energy.py": "algorithm",
     "test_metric_precond_no_recompile.py": "core",
@@ -531,6 +549,7 @@ _FILE_MARKERS = {
     "test_chi_auto_bump.py": "core",
     "test_ctm_env_pad.py": "core",
     "test_ipeps_chi_bump_integration.py": "algorithm",
+    "test_ipeps_best_energy_remeasure_1095.py": "algorithm",
     "test_ctm_convergence_random_iPEPS.py": "algorithm",
     "test_ipeps_grad_spike_guard.py": "slow",
     # #973 cross-run warm-start leak: wiring tests are ms-scale (planted
@@ -538,6 +557,7 @@ _FILE_MARKERS = {
     # short implicit-AD optimizations and sits with the other multi-run
     # optimizer integrations in slow.
     "test_warm_start_entry_invalidation_973.py": "core",
+    "test_warm_start_dtype_1113.py": "core",
     "test_optimizer_run_independence_973.py": "slow",
     # Block-sparse stacked-contraction backend seam (#200 / #566): fast,
     # mechanism-level (small even-D fermionic tensors, no CTM convergence).
@@ -731,6 +751,8 @@ _FILE_MARKERS = {
     "test_ipeps_ad_conv_criterion.py": "algorithm",  # 27.3s / 15
     "test_ipeps_ad_f3_fused_bwd.py": "algorithm",  # 18.5s / 3
     "test_ipeps_ad_history.py": "algorithm",
+    "test_ipeps_history_lengths_1082.py": "algorithm",
+    "test_ctm_warning_dedupe_1083.py": "algorithm",
     "test_ipeps_checkpoint_resume.py": "algorithm",  # 134s / 6
     "test_ipeps_u1sz.py": "algorithm",  # has a slow-marked case
     "test_metric_precond.py": "algorithm",  # 59s / 9
@@ -770,6 +792,10 @@ _FILE_MARKERS = {
     # D=2 chi=4, 31.5s CPU for all eight tests (fused and split).
     "test_ctm_2x2_projector_backward_983.py": "core",
     "test_projector_backward_default_1028.py": "core",
+    "test_flow_slope_check_1111.py": "core",
+    # #1116 item 2: the slope-check probe must not recompile the warm
+    # forward inside the backward (abstract-mesh cache key).  ~20 s CPU.
+    "test_probe_mesh_context_1116.py": "core",
     # #1024: the split-CTM chi-seam layout invariant.  ``core``: a charge
     # layout that disagrees across a chi bond kills the 2x2 projector with a
     # shape error on any state whose horizontal and vertical bonds differ --

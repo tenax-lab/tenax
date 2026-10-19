@@ -4,6 +4,155 @@
 
 ### Behavior Changes
 
+- **Flowing-projector gradients are slope-checked on non-stationary forwards
+  (#1111).** A solved flowing adjoint can still give a gradient orders of
+  magnitude off on a forward that is not a fixed point (measured 1497x on the
+  #1028 fixture, 86x at D=3 chi=12). When the forward is not stationary, the
+  backward now evaluates the energy once more along the gradient's descent
+  direction and keeps the flowing gradient only if the measured change is
+  0.5-2x the predicted one; otherwise it falls back to frozen projectors with
+  the reason in `flow_fallback_reason` and the ratio in `flow_slope_ratio`.
+  Measured: garbage flowing gradients 0.000-0.002, good ones 0.97-1.24. Cost:
+  one extra forward CTM evaluation per non-stationary flowing step (often every
+  step at D>=3, #841), measured ~27% of the gradient's wall time at D=3 dense
+  chi=12 on CPU (2.39 s of 8.81 s), plus a one-time recompile of the forward's
+  programs inside the backward (per shape/chi; ~2.3 s at D=2 chi=4, 7.7 s cold
+  vs 2.4 s warm at D=3 chi=12). Stationary forwards are unchanged. The check
+  catches grossly wrong flow gradients; it does not certify that flow beats
+  frozen (on a raw-`SymmetricTensor` version of the #1028 fixture flow is kept
+  at r=0.746 with FD errors 35%/37% where frozen is 13%/4%). For complex
+  parameters the check steps along `conj(G)`, JAX's descent convention.
+
+- **The eager-GMRES adjoint compiles the J^T matvec once.** The implicit-AD
+  backward's GMRES (`adjoint_method="gmres"`, and the fallback when the fused
+  Neumann loop does not converge) used JAX's GMRES, which applies the matvec
+  at three call sites (initial residual, Arnoldi step, restart residual), and
+  also compiled a fourth, standalone copy (`_jit_apply_Jt`) to choose the seed
+  and measure the residual (pre-optimization HLO: 4 matvec call sites, 3 of
+  them from JAX's GMRES; after XLA inlining, 2.42M HLO instructions, 2.8x the
+  standalone matvec's 852k). A new single-matvec GMRES does the seed choice, the solve
+  and the residual measurement in one program with one call site, and
+  `adjoint_method="fixed_point"` no longer compiles a separate `dE/denv` (the
+  `gmres` path still does).
+  Gradients agree with the previous solver to the solve tolerance, not bit
+  for bit. Measured on CPU, D=2 chi=8 U(1), first gradient with
+  `adjoint_method="gmres"`: 3,729 s -> 1,188 s.
+  The new solver also solves some flowing-projector adjoints that JAX's GMRES
+  stalled on, so `projector_backward="flow"` (the default under `bond_phase`)
+  is now accepted in cases where it used to fall back to frozen projectors.
+  On a non-stationary forward that flow gradient can be badly wrong (measured:
+  the D=2 #1028 fixture), and main already accepted such a gradient at D=3
+  chi=12; this is tracked in #1111.
+
+- **Block-sparse CTM-AD backward programs compile without XLA's CPU fusion
+  pass from D=3** (`_block_sparse_jit.py`; #566).  A `SymmetricTensor`
+  contraction traces one small op per pair of charge blocks.  The
+  implicit-AD backward of a symmetric state is therefore mostly reshapes,
+  transposes, scatters and small dots, which XLA's CPU instruction fusion
+  handles badly.  On CPU, at top level:
+
+  - `dE/denv`, the chain rule and the fused fixed-point backward compile
+    with `xla_disable_hlo_passes=fusion` when a site tensor has a virtual
+    bond of dimension 3 or more, or 20 or more charge blocks.
+  - The `J^T` product and the two GMRES solves, which contain only the
+    sweep VJP, go unfused only on the 20-block test (many-sector U(1)).
+    For graded states they compile about 2x faster fused.
+
+  Blocks are counted per site tensor, so D=2 states stay fused for any unit
+  cell.  The forward sweep and forward energy keep the default pipeline at
+  every size.  The chain rule, fermionic, compiled 89 / 1062 s fused /
+  unfused at D=2, 9363 / 2793 s at D=3, and more than 8000 / 3018 s at D=4.
+
+  From D=3 up, `dE/denv` runs faster unfused for every symmetry measured.
+  Warm run, fused against unfused:
+
+  | D, chi | U(1) | Z2 | fermionic |
+  |---|---|---|---|
+  | 2, 4-16 | 4.4 / 3.1 ms (chi=16) | 1.35 / 1.49 ms | 1.68 / 2.32 ms |
+  | 3, 6-9 | 14.7 / 10.5 ms (chi=6) | 8.65 / 7.41 ms | 26.3 / 10.9 ms |
+  | 4, 16 | - | 170 / 127 ms | 446 / 287 ms |
+  | 6, 36 | - | 11.5 / 10.0 s | 33.0 / 16.2 s |
+
+  The U(1) D=3 chi=9 `dE/denv` also compiled in 905 s unfused against
+  8569 s fused.  At D=2 every program favours fusion: the backward programs
+  of a D=2 U(1) `optimize_gs_ad` step compiled 1.8-3.5x slower unfused.  At
+  D>=3 the forward sweep, and the sweep VJP of graded states, compile
+  1.5-3.6x faster fused, and their run time differs by less than 15%.
+
+  Dense programs, other backends, calls inside an enclosing trace, and every
+  call on JAX older than 0.4.36 (no `compiler_options` on `jax.jit`) keep the
+  default pipeline.  Results are unchanged (D=2 U(1) `dE/denv`: maximum
+  difference 1.4e-17).
+
+- **Block-sparse `fuse_indices` and `split_index` emit no scatter**
+  (`_tensor_utils.py`; #566).  `fuse_indices` on a `SymmetricTensor` built
+  each fused block with one `.at[].set` scatter per input block.  It now
+  joins the sub-blocks of a fused block with one `concatenate`.  Legs whose
+  charges are not grouped by sector also get one fixed permutation (a
+  `take`; its backward is the only scatter left, one per reordered block).
+  `split_index` takes static slices where
+  the layout is contiguous.  Blocks are bit-identical to the old
+  implementation.  U(1) D=3 chi=9 `dE/denv`, before / after, measured side
+  by side:
+
+  | | before | after |
+  |---|---|---|
+  | jaxpr equations | 496,986 | 320,738 |
+  | `scatter` | 31,392 | 0 |
+  | compile, unfused | 1165 s | 967 s |
+  | warm run | 80.3 ms | 67.6 ms |
+
+  The remaining equations are the per-block-pair reshapes, transposes and
+  dots of the contractions themselves.
+
+- **Metric preconditioning is turned off for fermionic input** (#1059
+  finding 27).  `gs_metric_precond` (on by default) builds its norm matrix
+  with the sign-free contractor and `.todense()`, so on fermionic tensors it
+  was the hard-core-boson metric.  The descent guard kept it from changing
+  the fixed point or the reported energy, but L-BFGS and CG could lose
+  efficiency or fall back to steepest descent.  `optimize_gs_ad` (and so
+  `optimize_fpeps_ad`) now sets `gs_metric_precond=False` for a fermionic
+  gate, site or `gs_resume` checkpoint under L-BFGS or CG, with a `UserWarning`, as the split and
+  `cg_gates` map_fn paths already do.  Fermionic L-BFGS trajectories change.
+
+- **Fermionic input is refused where its signs would be dropped**
+  (#1059 findings 2 and 3).  Grading lives in the tensor type, so a
+  fermionic tensor made dense, or contracted without signs, silently
+  becomes a hard-core boson: the run optimised the boson model and
+  reported its energy as the fermionic one.  `NotImplementedError` now
+  fires, before any tensor work, for:
+  - `gs_c4v=True` with a fermionic gate or site (1-site and 2-site): the
+    C4v branches rebuild the site from a dense C4v basis;
+  - any root-implicit `ctm_ad_mode` with a fermionic gate or site:
+    `"root_implicit_symmetric"` contracts its graded double layer without
+    signs, and the dense engines make the gate dense.  The check sits in
+    `optimize_gs_ad_root_implicit`, so direct callers get it too;
+  - a fermionic gate with sites that are not all fermionic, including
+    `A_init=None`, which built a random dense site.  Pass `FermionParity`
+    `SymmetricTensor`s, or use `optimize_fpeps_ad` with an `FPEPSConfig`.
+
+  `optimize_fpeps_ad` runs the same checks.
+
+- **`optimize_fpeps_ad` now goes through `optimize_gs_ad`** (#1059
+  finding 1).  It called the private 1-site loop directly, so
+  `unit_cell="2site"` or a `Lattice` silently ran a uniform 1-site ansatz
+  (which cannot hold a CDW), `CTMConfig.ctm_ad_mode` was ignored, and none
+  of `optimize_gs_ad`'s config checks ran.  Now:
+  - every unit cell and AD engine `optimize_gs_ad` has is reachable, and
+    the return value has `optimize_gs_ad`'s shape for that unit cell
+    (`((A, B), (env_A, env_B), E)` for `"2site"`);
+  - `A_init=None` builds an `(A, B)` pair from `fpeps_config` for
+    `"2site"`, and is refused for a `Lattice`;
+  - a new keyword `envs_init` is passed through (the frozen-layout seed,
+    #1051);
+  - the default `unit_cell="1x1"` still runs the same 1-site loop with
+    the same gradients (its `projector_backward` was already resolved
+    inside that loop).  What it gains is the config validation: an
+    implicit-AD combination `optimize_gs_ad` refuses (e.g.
+    `projector_method="eigh"`, `forward_gauge="sigma"`, or a
+    `ctm_conv_method` other than `"elementwise"`) is now refused here too,
+    instead of running unchecked.
+
 - **The 1-site metric L-BFGS now has a memory.**  On the 1-site
   `optimize_gs_ad` path the metric L-BFGS built its curvature pair from
   the initial tensor, not the current iterate, so `s = 0` at every step and
@@ -514,6 +663,102 @@
   - **Not covered:** chi slots added by the in-loop chi bump
     (`ctmrg_heuristic_increase_chi`) keep a frozen layout.
 
+- **The #1111 slope check's probe no longer recompiles the forward inside
+  the backward (#1116).**  A custom_vjp backward runs under JAX's recorded
+  equation context, which keys the jit and eager-dispatch caches on an empty
+  abstract mesh where top-level calls use the unset default, so the probe's
+  extra forward recompiled every program the forward had already compiled
+  (`_step`, `_bond_phase_fix_envs`, `_jit_forward_energy`, and the eager
+  primitives), once per process per signature.  Measured on CPU with the
+  forward pre-warmed: on the D=2 chi=4 1-site limit cycle the probe went
+  from 115 compiles / 3.69 s to 0 / 0.08 s and the whole gradient from
+  9.68 s to 5.90 s; on the D=2 chi=4 2-site pair the probe went from 99
+  compiles / 4.4 s to 0 / 0.15 s (cold gradient 21.7 s -> 17.1 s).  The probe now runs under the
+  top-level key; values, the slope ratio and the verdict are unchanged.  This
+  uses a private JAX API and is a no-op on a JAX that lacks it, or when the
+  caller set any abstract mesh (with axes, with an abstract device, or an
+  explicit empty one).
+
+- **`on_unconverged="warn"` no longer floods the log with one warning per
+  forward** (`_ctm_convergence_policy.py`, `ipeps_optimize.py`; #1083).  A
+  3-step run emitted ~19 near-identical warnings from five call sites, which
+  Python's once-per-location filter cannot merge.  `optimize_gs_ad` now emits
+  the first warning per (site, step) (best point and last iterate are kept
+  separate), the next warning says "(N similar suppressed)", and the total is
+  returned as `history["ctm_warnings_suppressed"]`.  Direct helper calls outside
+  a run still warn every time.
+
+- **The 1-site `return_history` lists no longer drift after a gradient-spike
+  rollback** (`ipeps_optimize.py`; #1082).  The 1-site loop appended each
+  step's CTM-forward entries but skipped the energy and timing of a rolled-back
+  step, so `energies` ended one short of `ctm_converged` / `ctm_sv_diff` per
+  rollback (3 vs 4 on a 4-step run).  The rolled-back step is now recorded, as
+  the 2-site loop already did.
+
+- **An unconverged best point no longer aborts the final evaluation when the
+  last iterate converges (#1081).** `optimize_gs_ad` re-evaluates the best
+  and the last parameters with a fresh CTM.  The best point was never allowed
+  to be dropped, so if its cold CTM missed the tolerance and no certified warm
+  environment existed, the run raised `CTMNotConvergedError` before the
+  converging last iterate was ever evaluated.  The best point is now skipped
+  in that case; the run still raises if both candidates are unconverged.
+
+- **The AD optimizer's best energy now follows a re-measurement of the best
+  state (#1095).** `best_energy` could only go down, so one in-loop energy
+  that read too low (for example from an under-converged CTM environment)
+  stayed the best for the rest of the run. After a rollback re-solved the
+  best tensors and measured them honestly higher, the honest value was
+  rejected and every later step was ranked against a value the state does
+  not have. When the energy is measured at the best tensors themselves and
+  that CTM forward is certified (converged, or not known to be
+  unconverged), it now replaces the stored best even if it is higher (still
+  subject to the finiteness and `gs_energy_floor` checks), on the 1-site,
+  2-site and multisite paths, and the 1-site and 2-site best checkpoint is
+  rewritten to match. An unconverged re-measure under
+  `on_unconverged="warn"` can still lower the best but never raise it. This
+  happens after every rollback to the best tensors, including the chi-bump
+  and stage-advance rollbacks, so the logged `E_best` is re-based at the new
+  chi and can jump up at stage boundaries.
+- **The implicit-AD warm start no longer reuses an adjoint of another dtype
+  (#1113).** The cached adjoint vector was reused when its leaf shapes matched,
+  regardless of dtype. A `jax.grad` over `ctm_energy_implicit` that switched
+  between complex and real site tensors while reusing the same gate and
+  neighbours objects raised a dtype `ValueError`. The seed check now also
+  compares dtypes, so such a backward starts cold. `optimize_gs_ad` was not
+  affected: it clears the warm start at the start of every run (#973).
+
+- **The JAX floor is now `jax>=0.4.35`, the oldest version tenax imports
+  on** (#1105).  `pyproject.toml` declared `jax>=0.4.30`, but
+  `src/tenax/linalg.py` imports `jax.lax.linalg.SvdAlgorithm` (#691), which
+  exists only from 0.4.35, so `import tenax` failed on 0.4.30-0.4.34.  The
+  floor of `dependencies` and of every accelerator extra is raised.  The
+  `cuda13` and `cuda13-local` extras get `jax>=0.7.0`, the first JAX that
+  defines those extras; an older JAX skips them with only a warning and
+  installs no CUDA 13 plugin.  On
+  0.4.35 the tensor, contraction, linalg, SVD, DMRG and block-sparse-jit
+  tests pass (306 passed, 20 skipped).
+
+- **The block-sparse no-fusion dispatch no longer raises on JAX
+  0.4.36-0.5.3** (#1102 follow-up).  `jax.jit` accepts `compiler_options` from
+  0.4.36, but XLA rejects `xla_disable_hlo_passes` as a string until 0.6.0
+  (`RuntimeError: ... Field is repeated`).  On those versions every D>=3
+  symmetric implicit-AD backward raised instead of compiling.  The dispatch
+  now compiles one scalar program with the option on the first call that
+  would go unfused, and if that fails every call keeps the default pipeline
+  (`no_fusion_compiles`).  Checked with real JAX 0.4.35, 0.4.36, 0.5.3, 0.6.0
+  and 0.10.2.
+
+- **`SymmetricTensor.blocks` no longer caches tracers on a concrete tensor**
+  (#1103).  The block dict is cached on the tensor the first time it is
+  read.  When that first read happened inside a `jax.jit` that closes over a
+  concrete tensor, the cached slices were tracers, and the next eager use of
+  the tensor raised `UnexpectedTracerError`.  It hit `ctm_energy_implicit`
+  with a `SymmetricTensor` gate, which the compiled energy programs close
+  over: `jax.grad` failed in the backward.  Slices are now cached only when
+  they are concrete or belong to the same trace as the tensor's data, so an
+  inner `jax.jit` over a tensor of an outer trace leaves no tracer either.
+  Eager reads, and repeated reads inside one trace, still use the cache.
+
 - **Hager-Zhang `phi` probes warm-start CTM from the step's env**
   (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
   start from the previous probe's env (the #502 write-back), so the env a
@@ -557,6 +802,37 @@
   call, so the same warnings -- or, under warnings-as-errors, the same
   `RuntimeWarning` -- reach the caller.  The line search's and final
   evaluation's own energy calls outside the dispatch are unchanged.
+
+- **A second `optimize_gs_ad` call no longer recompiles the implicit-AD
+  backward** (#1049, `_ctm_energy_ad.py`, `_ctm_honeycomb_ad.py`).  The
+  compile cache keyed the backward on `id(gate)`, `id(energy_fn)` and
+  `id(neighbors)`, and the optimizer builds its energy callback as a fresh
+  closure per call, so every call missed, re-traced and re-compiled the
+  backward (measured ~82-92 s per extra call at D=2 chi=8; a D=3 backward
+  compile takes hours on CPU) and left the old entry behind for good.  The
+  key now uses values where the value is the whole story
+  (`_cache_fingerprint.py`): data -- Python scalars by exact type (floats
+  by bit pattern), strings, tuples, lists, dicts in order, frozensets
+  (in iteration order), `jax.Array`s
+  (shape, exact dtype, weak-type bit, placement -- `committed` and `sharding` --,
+  contents), and tenax-owned types walked
+  field by field, NumPy metadata inside them included (`TensorIndex.__eq__`
+  ignores `fuse_info`, so equality is never trusted)
+  -- and the optimizers' own energy callbacks, which declare exactly what
+  they capture with `declare_cache_key` (checked at declaration).  User
+  callbacks, bound methods, mutable sets, a user's NumPy arrays and scalars
+  (whose flags and strides are observable too) and foreign objects keep the
+  old identity key -- and a user callback's gate and neighbors do too, since
+  it may branch on their identity -- since their behaviour can depend on state no fingerprint sees; that
+  can only miss.  A gate with different values still gets its own compiled
+  backward.  Only the compiled code is shared: the adjoint warm-start seed and
+  the once-per-run warning latches belong to one run -- one energy callback,
+  gate and neighbors by identity, which is what the key was before -- so a
+  new gate or callback starts cold even when it hits the cache, and a
+  backward uses the run of its own forward.  Each entry keeps at most 8 runs.  The cache is now an
+  LRU of at most 8 entries.  On the 2-site D=2 chi=4 repro, the second call drops
+  from 7.7 s (backward re-traced, a second cache entry) to 1.3 s (no
+  backward trace, one entry).
 - **The implicit-AD backward compiles its chain rule once, not once per
   solver** (`_ctm_energy_ad.py`).  The chain rule -- the params-VJP of the
   CTM sweep, most of the backward's compile -- lived inside the fused
@@ -1687,6 +1963,18 @@
   `xfail`, not by a loosened threshold.
 
 ### CI / tests
+
+- **Removed two unfixable `recipe="1x1"` QR tests and added a duplicate-definition
+  guard** (#931, #926).  `test_implicit_qr_gradient_matches_fd` failed
+  intermittently on main CI (directional FD off by 0.364 against TOL 0.35,
+  locally 0.166) and `test_implicit_qr_eigh_gradient_gap_shrinks_with_chi` was
+  an `xfail(strict=False)` that passed or failed by which chi pair it sampled;
+  both ran on a diverged rank-1 forward and cannot be re-pointed at a converged
+  configuration (the QR projector is inert on `recipe="2x2"`).  End-to-end
+  QR-projector gradient correctness is therefore now untested: the QR projector
+  only acts on `recipe="1x1"`, whose forward does not converge (#795).
+  `tests/test_no_duplicate_definitions.py` now fails on any repeated
+  class/function name at module or class scope in `src/tenax`.
 
 - **`test_regularized_qr_backward_finite_at_rank_deficiency` now fails when the
   `diag(R)` floor is removed** (#927).  It previously did not: the input was

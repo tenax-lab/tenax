@@ -6,6 +6,7 @@ Extracts optimize_gs_ad and related helpers from ipeps.py.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import math
 import time as _time
@@ -15,6 +16,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._cache_fingerprint import declare_cache_key
+from tenax.algorithms._ctm_convergence_policy import (
+    ctm_warning_scope,
+    set_ctm_warning_step,
+)
 from tenax.algorithms._ctm_energy_ad import invalidate_implicit_ad_warm_start
 from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
@@ -145,7 +151,13 @@ def _cache_env_known_converged(cache: dict | None, params=None) -> bool:
 
 
 def _final_eval_use_warm(
-    info, warm_cache: dict | None, ctm_cfg, *, params=None, skippable: bool = False
+    info,
+    warm_cache: dict | None,
+    ctm_cfg,
+    *,
+    params=None,
+    skippable: bool = False,
+    label: str = "last iterate",
 ) -> str:
     """Site 4 of #1059: decide how to handle an unconverged final evaluation.
 
@@ -176,8 +188,8 @@ def _final_eval_use_warm(
         return "warm"
     if skippable and ctm_cfg.on_unconverged == "raise":
         _logger.warning(
-            "[iPEPS-AD] fresh final CTM at the last iterate did not converge "
-            "and has no converged warm env; reporting the best params instead"
+            f"[iPEPS-AD] fresh final CTM at the {label} did not converge "
+            "and has no converged warm env; reporting the other candidate instead"
         )
         return "skip"
     from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
@@ -188,6 +200,11 @@ def _final_eval_use_warm(
         policy=ctm_cfg.on_unconverged,
         conv_tol=ctm_cfg.conv_tol,
         chi=ctm_cfg.chi,
+        # The best point and the last iterate are different evaluations, so
+        # each keeps its own warning (#1083).  Keyed by the label: since
+        # #1081 both can be skippable, so ``skippable`` no longer tells them
+        # apart.
+        key=label,
     )
     return "fresh"
 
@@ -291,6 +308,10 @@ def _site1_forward_info(
     ``diagnostics`` overrides the module read: the step reused the accepted
     line-search probe's ``value_and_grad`` (#1062), whose forward diagnostics
     were snapshotted when the probe ran.
+
+    Returns the verdict (True converged / False unconverged under ``"warn"``),
+    or None when no forward wrote one.  #1095 gates a rising re-measure of
+    ``best_params`` on it.
     """
     import tenax.algorithms._ctm_energy_ad as _cea
     from tenax.algorithms._ctm_convergence_policy import check_ctm_converged
@@ -302,7 +323,7 @@ def _site1_forward_info(
     )
     info = _gradient_forward_info(d)
     if info is None:
-        return
+        return None
     ok = check_ctm_converged(
         info,
         site="gradient",
@@ -318,6 +339,24 @@ def _site1_forward_info(
         m = float(info.step_multiplier)
         mult_list.append(None if m != m else m)  # NaN -> None (spec section 3)
         stat_list.append(float(info.stationarity_residual))
+    return bool(ok)
+
+
+def _remeasure_certified(site1_ok: bool | None, env_cache: dict) -> bool:
+    """May a re-measure of ``best_params`` RAISE ``best_energy``? (#1095)
+
+    The re-measure after a reset is usually a cold CTM, the forward most
+    likely to be unconverged under ``on_unconverged="warn"``.  An uncertified
+    high value must not raise the bar: a worse state could then become best
+    and the original ``best_params`` would be lost.  Uses this step's site-1
+    verdict when one was written (implicit AD); otherwise the env refresh's
+    verdict, accepting anything not positively unconverged (split paths and
+    explicit AD record none).  A LOWER re-measure is accepted by the normal
+    rule regardless.
+    """
+    if site1_ok is not None:
+        return site1_ok
+    return _cached_env_state(env_cache) != "unconverged"
 
 
 def _site1_value_and_grad(loss_fn, params, *, enabled: bool, step_index: int, ctm_cfg):
@@ -1086,6 +1125,29 @@ def optimize_gs_ad_chi_schedule(
     return optimize_gs_ad(hamiltonian_gate, A_init, step_cfg)
 
 
+def _with_ctm_warning_scope(fn):
+    """Run ``fn`` inside a warn-dedupe scope and report the suppressed count (#1083)."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with ctm_warning_scope() as scope:
+            out = fn(*args, **kwargs)
+        if scope.pending:
+            _logger.info(
+                "[iPEPS-AD] %d unconverged-CTM warning(s) suppressed after the "
+                "last one emitted (%d in total this run)",
+                scope.pending,
+                scope.suppressed,
+            )
+        if isinstance(out, tuple) and out and isinstance(out[-1], dict):
+            if "energies" in out[-1]:
+                out[-1]["ctm_warnings_suppressed"] = scope.suppressed
+        return out
+
+    return wrapper
+
+
+@_with_ctm_warning_scope
 def optimize_gs_ad(
     hamiltonian_gate: jax.Array | Tensor,
     A_init: jax.Array | Tensor | tuple | dict | None,
@@ -1158,6 +1220,12 @@ def optimize_gs_ad(
         For 1-site:    ``(A_opt, env, E_gs)``
         For 2-site:    ``((A_opt, B_opt), (env_A, env_B), E_gs)``
         For multi-site: ``(dict[str, Tensor], dict[str, CTMTensorEnv], E_gs)``
+
+        With ``config.return_history=True`` a ``history`` dict is appended as
+        the last element.  Besides ``energies``, ``step_times`` and the
+        ``ctm_*`` per-step lists, it holds ``ctm_warnings_suppressed`` (int):
+        how many repeated unconverged-CTM warnings ``on_unconverged="warn"``
+        swallowed (one warning is kept per site and step, #1083).
     """
     if envs_init is not None:
         if config.unit_cell != "2site":
@@ -1246,6 +1314,8 @@ def optimize_gs_ad(
     # Refuse rather than thread: threading would make nine forwards
     # genuinely non-convergent, since '1x1' reaches no fixed point (#911).
     _reject_mislabelled_1x1(config)
+    _refuse_sign_free_fermionic(hamiltonian_gate, A_init, config)
+    config = _drop_metric_precond_for_fermions(hamiltonian_gate, A_init, config)
 
     # Root implicit AD (#715).  Placed ahead of the unit-cell branches because
     # the variant (dense 1x1 vs dense cell vs symmetric) is selected from the
@@ -1341,14 +1411,118 @@ def _use_reference_c4v_path(config: iPEPSConfig) -> bool:
     return use_reference_c4v_path(config)
 
 
+def _refuse_sign_free_fermionic(hamiltonian_gate, A_init, config: iPEPSConfig) -> None:
+    """Refuse fermionic input on a path that would drop its signs (#1059).
+
+    Grading lives in the tensor type: a fermionic ``SymmetricTensor`` made
+    dense, or contracted next to non-fermionic sites, falls silently to
+    hard-core-boson semantics, and the run optimises (and reports) the
+    boson model.  Two such paths:
+
+    - ``gs_c4v=True`` (#1059 finding 2): the 1-site and 2-site C4v branches
+      rebuild the site from a dense C4v basis and make the gate dense.
+    - A fermionic gate with sites that are not fermionic, including
+      ``A_init=None``, which builds a random dense site (or a simple-update
+      one from the dense gate).
+
+    Every ``ctm_ad_mode`` root-implicit engine (finding 3) is refused by its
+    own entry point, ``optimize_gs_ad_root_implicit``.  ``optimize_fpeps_ad``
+    reaches this helper through ``optimize_gs_ad``.
+    """
+    from tenax.algorithms._ctm_graded import is_fermionic, site_tensors_of
+
+    sites = site_tensors_of(A_init)
+    fermionic_sites = [is_fermionic(t) for t in sites]
+    fermionic = is_fermionic(hamiltonian_gate) or any(fermionic_sites)
+    if not fermionic:
+        return
+    if config.gs_c4v:
+        raise NotImplementedError(
+            "gs_c4v=True is not supported for fermionic tensors (#1059): the "
+            "C4v path rebuilds the site from a dense C4v basis and makes the "
+            "gate dense, which drops the fermionic signs and optimises the "
+            "hard-core-boson model. Use gs_c4v=False."
+        )
+    if is_fermionic(hamiltonian_gate) and not (sites and all(fermionic_sites)):
+        raise NotImplementedError(
+            "A fermionic gate needs fermionic site tensors (#1059): with "
+            + (
+                "A_init=None the optimizer builds a dense site"
+                if not sites
+                else "a non-fermionic site the contractions carry no signs"
+            )
+            + ", and the run optimises the hard-core-boson model. Pass "
+            "FermionParity SymmetricTensors as A_init (optimize_fpeps_ad "
+            "builds them from an FPEPSConfig)."
+        )
+
+
+def _resumed_params_are_fermionic(config: iPEPSConfig) -> bool:
+    """True if ``gs_resume`` will restore fermionic tensors.
+
+    A resume restores ``params`` from the checkpoint, not from ``A_init``,
+    so a run with a dense gate and ``A_init=None`` can still optimize
+    fermionic tensors.
+    """
+    from tenax.algorithms._checkpoint import checkpoint_exists, load_checkpoint
+    from tenax.algorithms._ctm_graded import is_fermionic
+
+    if not config.gs_resume or not checkpoint_exists(config.gs_checkpoint_path):
+        return False
+    bundle = load_checkpoint(config.gs_checkpoint_path)
+    leaves = jax.tree_util.tree_leaves(
+        (bundle.get("params"), bundle.get("best_params")),
+        is_leaf=lambda x: isinstance(x, SymmetricTensor),
+    )
+    return any(is_fermionic(t) for t in leaves)
+
+
+def _drop_metric_precond_for_fermions(
+    hamiltonian_gate, A_init, config: iPEPSConfig
+) -> iPEPSConfig:
+    """Turn off metric preconditioning for fermionic input, with a warning.
+
+    The metric's norm matrix (``_metric_precond``) is built with the
+    sign-free contractor and ``.todense()``, so on fermionic tensors it is
+    the hard-core-boson metric (#1059 finding 27).  The descent guard keeps
+    it from changing the fixed point or the reported energy, but L-BFGS and
+    CG can lose efficiency or fall back to steepest descent repeatedly.  The
+    split and ``cg_gates`` map_fn paths drop it the same way.
+    """
+    if not config.gs_metric_precond or config.gs_optimizer.lower() not in (
+        "lbfgs",
+        "cg",
+    ):
+        return config
+    from tenax.algorithms._ctm_graded import is_fermionic, site_tensors_of
+
+    if not (
+        is_fermionic(hamiltonian_gate)
+        or any(is_fermionic(t) for t in site_tensors_of(A_init))
+        or _resumed_params_are_fermionic(config)
+    ):
+        return config
+    import warnings
+    from dataclasses import replace
+
+    warnings.warn(
+        "gs_metric_precond=True is not supported for fermionic tensors "
+        "(#1059): the metric's norm matrix is built without fermionic signs. "
+        "Falling back to non-preconditioned optimization. Set "
+        "gs_metric_precond=False to silence this.",
+        stacklevel=3,
+    )
+    return replace(config, gs_metric_precond=False)
+
+
 def _reject_mislabelled_1x1(config: iPEPSConfig) -> None:
     """Refuse gs_recipe='1x1' everywhere it is not threaded end to end (#938).
 
-    Shared by every public optimizer entry point -- ``optimize_gs_ad`` and
-    ``optimize_fpeps_ad`` (which dispatches straight to
-    ``_optimize_gs_ad_tensor`` and would otherwise bypass the check, Codex
-    round 5 on #972). See the call site in ``optimize_gs_ad`` for the
-    per-path inventory of where the recipe gets dropped."""
+    Called by ``optimize_gs_ad``, which ``optimize_fpeps_ad`` also goes
+    through (#1059; before that it called ``_optimize_gs_ad_tensor`` directly
+    and ran this check itself, Codex round 5 on #972). See the call site in
+    ``optimize_gs_ad`` for the per-path inventory of where the recipe gets
+    dropped."""
     if config.gs_recipe == "1x1" and (
         config.ctm.fuse_virtual_legs
         or config.unit_cell != "1x1"
@@ -1609,7 +1783,7 @@ def _optimize_gs_ad_tensor(
     """
     # #973: drop any previous run's adjoint seed before this run's first
     # gradient -- see invalidate_implicit_ad_warm_start's docstring.
-    invalidate_implicit_ad_warm_start()
+    invalidate_implicit_ad_warm_start(run_start=True)
     config = _normalize_stall_recovery(config, unit_cell="1x1")
     _warn_implicit_ad_variational_caveat(config, path="1-site Tensor-protocol")
     import optax
@@ -1747,12 +1921,18 @@ def _optimize_gs_ad_tensor(
         return params * (1.0 / (params.norm() + 1e-10))
 
     if _use_cg:
+        # Without map_fn/init_fn, which the energy never reads, so the
+        # callback below is keyed by value (#1049).
+        _cg_energy_gates = cg_gates._energy_gates()
 
         def _cg_energy_callable(site_tensors, envs, _gate):
             """energy_fn closure for ctm_energy_explicit/implicit (CG path)."""
             A_norm = site_tensors[(0, 0)]
-            return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, _cg_d_eff)
+            return compute_energy_cg(A_norm, envs[(0, 0)], _cg_energy_gates, _cg_d_eff)
 
+        # #1049: keyed by value, so a new optimize_gs_ad call reuses the compiled
+        # backward.  Lists exactly what the closure captures.
+        declare_cache_key(_cg_energy_callable, _cg_energy_gates, _cg_d_eff)
         _energy_fn_kw = _cg_energy_callable
     else:
         _energy_fn_kw = None
@@ -2227,7 +2407,9 @@ def _optimize_gs_ad_tensor(
         if config.gs_checkpoint_path is None:
             return
         chi_changed = ctm_cfg.chi != chi_before
-        is_new_best = best_energy < e_prev and _ckpt_written_1s["best"] != step
+        # ``!=`` not ``<``: a re-measure of best_params can raise best_energy
+        # (#1095), and the on-disk best must follow it.
+        is_new_best = best_energy != e_prev and _ckpt_written_1s["best"] != step
         should_save_last = (
             force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
         ) and _ckpt_written_1s["last"] != step
@@ -2272,9 +2454,11 @@ def _optimize_gs_ad_tensor(
     _chi_at_step_start = None
     _su_guard = _su_start_guard_armed(_init_from_su, start_step)
     for step in range(start_step, config.gs_num_steps):
+        set_ctm_warning_step(step)
         # Snapshots for checkpoint "did chi change / new best" detection.
-        # ``best_energy`` only decreases, so a strict < comparison after the
-        # step body identifies a freshly-accepted best.  Both snapshots are
+        # ``best_energy`` changes only when a best is accepted (a decrease, or
+        # a re-measure of best_params that may rise, #1095), so a ``!=``
+        # comparison after the step body identifies it.  Both snapshots are
         # passed to ``_maybe_save_1s_checkpoint`` at every save call site so
         # the helper can decide what to flush.
         _best_energy_at_step_start = best_energy
@@ -2299,6 +2483,7 @@ def _optimize_gs_ad_tensor(
                 ctm_cfg = _replace(ctm_cfg, plateau_patience=new_patience)
         if config.return_history:
             _step_t0 = _time.perf_counter()
+        _site1_ok = None
         try:
             _reused = _ls_eval.take(params, ctm_cfg)
             _reused_diag = None
@@ -2320,7 +2505,7 @@ def _optimize_gs_ad_tensor(
                 )
                 grads = _euclidean_grads(grads)
             if _site1_check:
-                _site1_forward_info(
+                _site1_ok = _site1_forward_info(
                     step + 1,
                     ctm_cfg,
                     (
@@ -2446,6 +2631,19 @@ def _optimize_gs_ad_tensor(
         energy_float = float(energy_val)
         grad_norm_val = _grad_l2_norm(grads)
 
+        # Record the step BEFORE the spike guard below can ``continue`` (#1082):
+        # the CTM-forward lists were already appended for this step, so a
+        # rolled-back step must still get its energy / timing, as in the
+        # 2-site loop, or ``energies`` drifts one short per rollback.
+        if config.return_history:
+            _step_dt = _time.perf_counter() - _step_t0
+            if _first_step:
+                _jit_compile_time = float(_step_dt)
+                _first_step = False
+            else:
+                _history_step_times.append(float(_step_dt))
+            _history_energies.append(energy_float)
+
         # Gradient-spike guard (ported from the 2-site path, #524): a
         # non-variational implicit-AD step shows up as a >Nx gradient blowup
         # (e.g. |g| jumping from ~0.2 to ~5e3) whose energy can dip below the
@@ -2501,15 +2699,6 @@ def _optimize_gs_ad_tensor(
         if len(recent_gnorms) > config.gs_grad_spike_window:
             recent_gnorms.pop(0)
 
-        if config.return_history:
-            _step_dt = _time.perf_counter() - _step_t0
-            if _first_step:
-                _jit_compile_time = float(_step_dt)
-                _first_step = False
-            else:
-                _history_step_times.append(float(_step_dt))
-            _history_energies.append(energy_float)
-
         # Update env cache for warm-starting next step
         _update_env_cache(params)
 
@@ -2518,6 +2707,10 @@ def _optimize_gs_ad_tensor(
             current_best=best_energy,
             candidate=energy_float,
             floor=config.gs_energy_floor,
+            # #1095: a certified re-measure of best_params (after a rollback)
+            # replaces best_energy even when higher.
+            remeasured=params is best_params
+            and _remeasure_certified(_site1_ok, _env_cache),
         ):
             best_energy = energy_float
             best_params = params
@@ -3136,7 +3329,9 @@ def _optimize_gs_ad_tensor(
     # (non-variational at finite chi), so we compare fresh evaluations only.
     # Match in-loop CTM tolerances (#317) by reusing ctm_cfg directly.
 
-    def _eval_fresh(p, env_init=None, warm_cache=None, skippable=False):
+    def _eval_fresh(
+        p, env_init=None, warm_cache=None, skippable=False, label="last iterate"
+    ):
         """Evaluate energy with fully converged fresh CTM.
 
         Returns ``(A, env, E, source)``; ``source`` is ``"warm_fallback"`` when
@@ -3157,7 +3352,7 @@ def _optimize_gs_ad_tensor(
             **ctm_converge_kwargs(ctm_cfg, env_init=env_init),
         )
         verdict = _final_eval_use_warm(
-            info, warm_cache, ctm_cfg, params=p, skippable=skippable
+            info, warm_cache, ctm_cfg, params=p, skippable=skippable, label=label
         )
         source = "fresh"
         if verdict == "warm":
@@ -3197,12 +3392,13 @@ def _optimize_gs_ad_tensor(
     # of the certified best point rather than failing the whole run.
     if best_params is not params:
         A_best, env_best, E_best_fresh, src_best = _eval_fresh(
-            best_params, warm_cache=best_env_cache
+            best_params, warm_cache=best_env_cache, skippable=True, label="best point"
         )
     A_final, env_final, E_final, src_final = _eval_fresh(
         params,
         warm_cache=_env_cache if params is best_params else None,
-        skippable=params is not best_params,
+        # skippable only while a finite best point is available to fall back on
+        skippable=params is not best_params and math.isfinite(E_best_fresh),
     )
     if best_params is params:
         E_best_fresh = E_final
@@ -3412,7 +3608,7 @@ def _optimize_gs_ad_tensor_2site(
     """
     # #973: drop any previous run's adjoint seed before this run's first
     # gradient -- see invalidate_implicit_ad_warm_start's docstring.
-    invalidate_implicit_ad_warm_start()
+    invalidate_implicit_ad_warm_start(run_start=True)
     config = _normalize_stall_recovery(config, unit_cell="2site")
     use_c4v = config.gs_c4v
     if not use_c4v:
@@ -3671,6 +3867,10 @@ def _optimize_gs_ad_tensor_2site(
             gate_,
             d_phys,
         )
+
+    # #1049: keyed by value, so a new optimize_gs_ad call reuses the compiled
+    # backward.  Lists exactly what the closure captures.
+    declare_cache_key(_energy_fn_2site, d_phys)
 
     _ctm_energy_fn_2s = make_ctm_energy_fn(
         neighbors=CHECKERBOARD_NEIGHBORS,
@@ -4091,7 +4291,9 @@ def _optimize_gs_ad_tensor_2site(
         if config.gs_checkpoint_path is None:
             return
         chi_changed = ctm_cfg_2s.chi != chi_before
-        is_new_best = best_energy < e_prev and _ckpt_written_2s["best"] != step
+        # ``!=`` not ``<``: a re-measure of best_params can raise best_energy
+        # (#1095), and the on-disk best must follow it.
+        is_new_best = best_energy != e_prev and _ckpt_written_2s["best"] != step
         should_save_last = (
             force_last or chi_changed or (step + 1) % config.gs_checkpoint_every == 0
         ) and _ckpt_written_2s["last"] != step
@@ -4151,9 +4353,11 @@ def _optimize_gs_ad_tensor_2site(
         _chi_at_step_start = None
         _su_guard = _su_start_guard_armed(_init_from_su, start_step)
         for step in range(start_step, config.gs_num_steps):
+            set_ctm_warning_step(step)
             # Snapshots for checkpoint "did chi change / new best" detection.
-            # ``best_energy`` only decreases, so a strict < comparison after
-            # the step body identifies a freshly-accepted best.  Both
+            # ``best_energy`` changes only when a best is accepted (a
+            # decrease, or a re-measure of best_params that may rise, #1095),
+            # so a ``!=`` comparison after the step body identifies it.  Both
             # snapshots are passed to ``_maybe_save_2s_checkpoint`` at every
             # save call site so the helper can decide what to flush.
             _best_energy_at_step_start = best_energy
@@ -4181,6 +4385,7 @@ def _optimize_gs_ad_tensor_2site(
 
             if config.return_history:
                 _step_t0 = _time.perf_counter()
+            _site1_ok = None
             try:
                 _reused = _ls_eval.take(params, ctm_cfg_2s)
                 _reused_diag = None
@@ -4202,7 +4407,7 @@ def _optimize_gs_ad_tensor_2site(
                     )
                     grads = _euclidean_grads(grads)
                 if _site1_check_2s:
-                    _site1_forward_info(
+                    _site1_ok = _site1_forward_info(
                         step + 1,
                         ctm_cfg_2s,
                         (
@@ -4417,6 +4622,10 @@ def _optimize_gs_ad_tensor_2site(
                 current_best=best_energy,
                 candidate=energy_float,
                 floor=config.gs_energy_floor,
+                # #1095: a certified re-measure of best_params (after a
+                # rollback) replaces best_energy even when higher.
+                remeasured=params is best_params
+                and _remeasure_certified(_site1_ok, _env_cache_2s),
             ):
                 best_energy = energy_float
                 best_params = params
@@ -5146,7 +5355,9 @@ def _optimize_gs_ad_tensor_2site(
         # unphysical values, so we compare fresh evaluations only.
         # Match in-loop CTM tolerances (#317) by reusing ctm_cfg_2s directly.
 
-        def _eval_fresh_2site(p, env_init=None, warm_cache=None, skippable=False):
+        def _eval_fresh_2site(
+            p, env_init=None, warm_cache=None, skippable=False, label="last iterate"
+        ):
             """Evaluate energy with fully converged fresh CTM.
 
             Returns ``(A, B, envs, E, source)``; see the 1-site ``_eval_fresh``.
@@ -5168,7 +5379,12 @@ def _optimize_gs_ad_tensor_2site(
                 **ctm_converge_kwargs(ctm_cfg_2s, env_init=env_init),
             )
             verdict = _final_eval_use_warm(
-                info, warm_cache, ctm_cfg_2s, params=p, skippable=skippable
+                info,
+                warm_cache,
+                ctm_cfg_2s,
+                params=p,
+                skippable=skippable,
+                label=label,
             )
             source = "fresh"
             if verdict == "warm":
@@ -5194,14 +5410,18 @@ def _optimize_gs_ad_tensor_2site(
         # converged warm env of its own is dropped (E = +inf) in favour of it.
         if best_params is not params:
             A_best, B_best, envs_best, E_best_fresh, src_best = _eval_fresh_2site(
-                best_params, warm_cache=best_env_cache_2s
+                best_params,
+                warm_cache=best_env_cache_2s,
+                skippable=True,
+                label="best point",
             )
             env_A_best = envs_best[(0, 0)]
             env_B_best = envs_best[(1, 0)]
         A_last, B_last, envs_last, E_last, src_last = _eval_fresh_2site(
             params,
             warm_cache=_env_cache_2s if params is best_params else None,
-            skippable=params is not best_params,
+            # skippable only while a finite best point is available
+            skippable=params is not best_params and math.isfinite(E_best_fresh),
         )
         env_A_last, env_B_last = envs_last[(0, 0)], envs_last[(1, 0)]
         if best_params is params:
@@ -5255,7 +5475,7 @@ def _optimize_gs_ad_multisite(
     """
     # #973: drop any previous run's adjoint seed before this run's first
     # gradient -- see invalidate_implicit_ad_warm_start's docstring.
-    invalidate_implicit_ad_warm_start()
+    invalidate_implicit_ad_warm_start(run_start=True)
     config = _normalize_stall_recovery(config, unit_cell="multisite")
     _warn_implicit_ad_variational_caveat(config, path="Multisite Lattice")
 
@@ -5327,6 +5547,10 @@ def _optimize_gs_ad_multisite(
             gate_,
         )
 
+    # #1049: keyed by value, so a new optimize_gs_ad call reuses the compiled
+    # backward.  Lists exactly what the closure captures.
+    declare_cache_key(_energy_fn, neighbors)
+
     _ctm_energy_fn = make_ctm_energy_fn(
         neighbors=neighbors,
         gate=gate,
@@ -5358,6 +5582,9 @@ def _optimize_gs_ad_multisite(
             **ctm_converge_kwargs(ctm_cfg, env_init=_env_cache.get("envs", None)),
         )
         _env_cache["envs"] = envs
+        # #1095: record the refresh verdict so _remeasure_certified can
+        # refuse a rising re-measure from an unconverged forward.
+        _env_cache[_VERDICT_KEY] = (envs, bool(info.converged), params_)
         # See ``_update_env_cache_2s`` (#472, #474): the 2x2 plaquette
         # projector tracks ε_T directly so reactive bumps fire on the
         # multisite forward stack with the default recipe.
@@ -5491,6 +5718,7 @@ def _optimize_gs_ad_multisite(
 
     # ── Optimization loop ────────────────────────────────────────────────
     for step in range(config.gs_num_steps):
+        set_ctm_warning_step(step)
         # Update conv_tol if schedule is active
         if _conv_tol_schedule is not None:
             new_tol = _get_scheduled_conv_tol(step, config.gs_num_steps)
@@ -5608,6 +5836,10 @@ def _optimize_gs_ad_multisite(
             current_best=best_energy,
             candidate=energy_float,
             floor=config.gs_energy_floor,
+            # #1095: a certified re-measure of best_params (after a rollback)
+            # replaces best_energy even when higher.  No site-1 check here;
+            # the env refresh's verdict gates it.
+            remeasured=params is best_params and _remeasure_certified(None, _env_cache),
         ):
             best_energy = energy_float
             best_params = params
@@ -6246,39 +6478,51 @@ def _optimize_gs_ad_multisite(
 
 def optimize_fpeps_ad(
     hamiltonian_gate: Tensor,
-    A_init: Tensor | None,
+    A_init: Tensor | tuple | dict | None,
     config: iPEPSConfig,
     fpeps_config=None,
+    *,
+    envs_init: dict[Coord, CTMTensorEnv] | None = None,
 ) -> tuple:
     """AD-based ground state optimization of fermionic iPEPS.
 
     Uses automatic differentiation through the CTM fixed-point equation
     to compute exact gradients of the energy with respect to the
-    fermionic site tensor, then optimizes with optax.
+    fermionic site tensor(s), then optimizes with optax.
 
-    Accepts either ``DenseTensor`` or ``SymmetricTensor`` (e.g.
-    ``FermionParity`` symmetry) inputs — the optimizer shell is
-    polymorphic over the Tensor protocol (#297) and returns a tensor
-    of the same type as the input, preserving charges and flows.
+    This is :func:`optimize_gs_ad` with a fermionic initial state: it builds
+    ``A_init`` from *fpeps_config* when it is ``None``, then hands off to
+    :func:`optimize_gs_ad`, so every unit cell, AD engine and config check
+    that function has applies here too (#1059).
+
+    Accepts ``DenseTensor`` or ``SymmetricTensor`` (e.g.
+    ``FermionParity`` symmetry) inputs, and returns tensors of the same
+    type, preserving charges and flows (#297).
 
     Args:
         hamiltonian_gate: 2-site Hamiltonian as a ``Tensor`` (typically
             a ``SymmetricTensor`` with ``FermionParity`` symmetry),
             shape ``(d, d, d, d)``.
-        A_init:           Initial fPEPS site tensor ``(D, D, D, D, d)``
-            with labels ``(u, d, l, r, phys)``.  If ``None``, a random
-            tensor with ``FermionParity`` is created using
-            *fpeps_config*.
+        A_init:           Initial fPEPS site tensor(s), labels
+            ``(u, d, l, r, phys)``: one tensor for ``unit_cell="1x1"``, an
+            ``(A, B)`` tuple for ``"2site"``, a ``dict[str, Tensor]`` for a
+            ``Lattice``.  If ``None``, random ``FermionParity`` tensors are
+            built from *fpeps_config* (``"1x1"`` and ``"2site"`` only).
         config:           ``iPEPSConfig`` with AD optimization settings
-            (learning rate, number of steps, CTM config, etc.).
+            (unit cell, learning rate, number of steps, CTM config, etc.).
         fpeps_config:     ``FPEPSConfig`` used only when ``A_init`` is
-            ``None`` to build the initial tensor (bond dimension D,
+            ``None`` to build the initial tensor(s) (bond dimension D,
             physical dimension d=2, FermionParity charges).
+        envs_init:        Passed to :func:`optimize_gs_ad`: a converged
+            2-site environment that seeds the first forward CTM and fixes
+            its sector layout (see ``su_grow_layout``).
 
     Returns:
-        ``(A_opt, env, E_gs)`` where ``A_opt`` is the optimized site
-        tensor (same type as ``A_init``), ``env`` is a ``CTMTensorEnv``,
-        and ``E_gs`` is the ground-state energy per site.
+        As :func:`optimize_gs_ad`:
+
+        - ``"1x1"``:    ``(A_opt, env, E_gs)``
+        - ``"2site"``:  ``((A_opt, B_opt), (env_A, env_B), E_gs)``
+        - ``Lattice``:  ``(dict[str, Tensor], dict[str, CTMTensorEnv], E_gs)``
     """
     if A_init is None:
         if fpeps_config is None:
@@ -6288,10 +6532,18 @@ def optimize_fpeps_ad(
             )
         from tenax.algorithms.fermionic_ipeps import _build_initial_fpeps_tensor
 
-        A_init = _build_initial_fpeps_tensor(fpeps_config)
+        if isinstance(config.unit_cell, Lattice):
+            raise ValueError(
+                "optimize_fpeps_ad cannot build the initial tensors of a "
+                "Lattice unit cell; pass A_init as a dict[str, Tensor]."
+            )
+        if config.unit_cell == "2site":
+            k_a, k_b = jax.random.split(jax.random.PRNGKey(0))
+            A_init = (
+                _build_initial_fpeps_tensor(fpeps_config, k_a),
+                _build_initial_fpeps_tensor(fpeps_config, k_b),
+            )
+        else:
+            A_init = _build_initial_fpeps_tensor(fpeps_config)
 
-    # Dispatches straight to the private optimizer, so it must run the #938
-    # recipe guard itself -- _optimize_gs_ad_tensor threads gs_recipe into
-    # the implicit loss while its warm-start and final evaluations drop it.
-    _reject_mislabelled_1x1(config)
-    return _optimize_gs_ad_tensor(hamiltonian_gate, A_init, config)
+    return optimize_gs_ad(hamiltonian_gate, A_init, config, envs_init=envs_init)

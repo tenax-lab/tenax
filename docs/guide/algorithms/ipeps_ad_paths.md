@@ -176,6 +176,24 @@ constants (#983). `"standard"` and `"lorentzian"` freeze them. `"auto"`
   `"flow"` or `"frozen_fallback"`.
 - The eager CTM forward is bit-identical either way — only the VJP changes.
 
+On a forward that is not a fixed point, a solved flowing adjoint can still
+give a gradient that is badly wrong (#1111). The backward therefore checks a
+flowing gradient there: it evaluates the energy once more along the
+gradient's descent direction and keeps the gradient only if the measured
+change is 0.5-2x the predicted one. Otherwise it falls back to frozen
+projectors. `get_last_implicit_ad_diagnostics()` reports the ratio as
+`flow_slope_ratio` and the reason as `flow_fallback_reason`. The check costs
+one extra forward CTM evaluation per non-stationary flowing step (often every
+step at D>=3, #841): measured ~27% of the gradient's wall time at D=3 dense
+chi=12 on CPU (2.39 s of 8.81 s), plus a one-time recompile of the forward's
+programs inside the backward (per shape/chi; the backward runs under an empty
+mesh trace context, so the forward's jit caches miss). Stationary forwards pay
+nothing. The check catches grossly wrong flow gradients; it does not certify
+that flow beats frozen (on a raw-`SymmetricTensor` version of the #1028
+fixture flow is kept at r=0.746 with FD errors 35%/37% where frozen is
+13%/4%). For
+complex parameters it steps along `conj(G)`.
+
 **Why phase gauge works in backprop**: Each phase-gauge step is a
 Frobenius normalization plus a differentiable global-phase fix on each
 environment tensor. Applied inside the checkpointed unrolled graph, it
@@ -257,6 +275,162 @@ This is the YASTN approach (arXiv:2311.11894), adapted for JAX. It is what
 runs unless you set `gs_implicit_ad=False`. Reach for Path 1 when you want
 backprop through the unrolled sweeps — for a gauge other than `"phase"`, or
 to avoid the implicit backward entirely — not as a general default.
+
+#### Symmetric tensors: compile time and XLA fusion (CPU)
+
+When JAX compiles a program, XLA runs an *instruction-fusion* pass by
+default.  It merges chains of small operations into one combined kernel: a
+reshape, a multiply, an add and a transpose become a single loop over the
+data, and the intermediate arrays are never written to memory.  "Fused" below
+means compiled with this pass (the default); "unfused" means compiled with
+`xla_disable_hlo_passes=fusion`.  The numerical results are the same either
+way.
+
+Fusion helps a program made of a few large array operations, such as a dense
+CTM sweep.  It hurts a block-sparse backward.  A `SymmetricTensor`
+contraction emits one small operation per pair of charge blocks, so the
+implicit-AD backward of a symmetric state is hundreds of thousands of
+reshapes, scatters and small dots.  On a program that size the fusion pass
+scales worse than linearly.  It also copies cheap operations into every
+place that uses them, so the program grows.  On the D=3 U(1) chi=9
+`dE/denv` program (329k HLO instructions) the optimized module grew 7x, the
+compile took 8569 s fused and 905 s unfused, and the compiled program ran in
+92 ms fused and 62 ms unfused.
+
+So on CPU some implicit-AD backward programs of a large symmetric state are
+compiled unfused automatically:
+
+- `dE/denv`, the chain rule and the fused fixed-point backward go unfused
+  when a site tensor has a virtual leg (`u`, `d`, `l`, `r`) of dimension 3
+  or more, or 20 or more charge blocks.
+- The `J^T` product and the two GMRES solves contain only the sweep VJP.
+  They go unfused only when a site tensor has 20 or more charge blocks (a
+  many-sector U(1) state; a D=3 U(1) site has 35).
+
+Blocks are counted per site tensor, not per unit cell.  Everything else keeps
+the default pipeline:
+
+- the forward CTM sweep and the forward energy, at every size;
+- D=2 states, for any unit cell;
+- dense tensors;
+- GPU and TPU (not measured);
+- calls inside another `jax.jit`, `grad` or `vmap` trace;
+- JAX older than 0.4.36.
+
+The rule follows measurements on U(1), Z2 and fermionic 2-site states (CPU,
+8 cores; fused / unfused):
+
+| Program | D=2 | D>=3 |
+|---|---|---|
+| Forward sweep | fused faster | fused compiles 1.5-3.6x faster; run time within 8% |
+| Sweep VJP (`J^T` product, GMRES) | fused faster | graded: fused compiles about 2x faster, run time within 15% or faster fused; many-sector U(1): unfused faster |
+| `dE/denv` | fused faster or a tie | unfused runs 1.2-2.4x faster |
+| Chain rule | fused 12x faster to compile | unfused compiles 3.4x faster and runs 2x faster |
+
+The chain rule is the largest backward program.  Fermionic, fused / unfused
+compile: 89 / 1062 s at D=2, 9363 / 2793 s at D=3, more than 8000 / 3018 s
+at D=4.  Even unfused it is now the main compile cost of a D>=3 gradient.
+
+The `dE/denv` warm run, fused / unfused:
+
+| D, chi | U(1) | Z2 | fermionic |
+|---|---|---|---|
+| 2, 4-16 | 4.4 / 3.1 ms (chi=16) | 1.35 / 1.49 ms | 1.68 / 2.32 ms |
+| 3, 6-9 | 14.7 / 10.5 ms (chi=6) | 8.65 / 7.41 ms | 26.3 / 10.9 ms |
+| 4, 16 | - | 170 / 127 ms | 446 / 287 ms |
+| 6, 36 | - | 11.5 / 10.0 s | 33.0 / 16.2 s |
+
+Two measurements explain why the rule is not "unfused everywhere":
+
+- With every block-sparse program unfused, a D=2 U(1) `optimize_gs_ad` step
+  took 3388 s against 1396 s.
+- At D>=3 the forward sweep and, for graded states, the sweep VJP gain
+  nothing at run time unfused, and compile slower.
+
+The operation count alone does not predict the outcome: a 52k-operation D=2
+sweep favours fusion, while a 30k-operation D=2 `dE/denv` ties.  The block
+count alone misses Z2 and fermionic states, which have 16 blocks per site at
+every D.  Hence the bond-dimension rule.
+
+The dispatch lives in `tenax.algorithms._block_sparse_jit` (#566, #1102).
+Do not set `XLA_FLAGS=--xla_disable_hlo_passes=fusion` process-wide: that
+also drops fusion for the forward sweep and for every small eager operation.
+In one measurement it doubled the setup time, 582 s to 1249 s.
+
+The GMRES adjoint (`adjoint_method="gmres"`, and the fallback when the fused
+Neumann loop does not converge) compiles the sweep VJP once, like the fused
+module.  JAX's own GMRES applied it at three places in one program, and XLA
+compiled each one; the solver tenax uses instead applies it at one.  Measured
+on CPU at D=2 chi=8 (U(1)), the first gradient with `adjoint_method="gmres"`
+dropped from 3,729 s to 1,188 s.  At D=3 the fallback is common near a slowly
+converging forward; one D=3 chi=16 run spent 12,357 s compiling it before this
+change (not re-measured).
+
+#### Persistent compilation cache
+
+`import tenax` turns on JAX's persistent compilation cache.  JAX writes each
+compiled program that took 1 s or more to compile to disk, and a later
+process that compiles the same program loads it from there instead.  The
+default directory is `~/.cache/jax`; to use another one, set
+`JAX_COMPILATION_CACHE_DIR` in the environment before Python starts.
+JAX loads the cached programs and runs them without checking where they
+came from, so anyone who can write to the cache directory can run code in
+your process.  Do not point it at a directory that an untrusted user can
+write to, such as a shared scratch area.
+
+The cache can help the second and later runs only.  It does not shorten the
+first compile of a program, and nothing else does: ahead-of-time
+compilation (`jit(...).lower(...).compile()`) is the same compile at an
+earlier time.
+
+Loading a cached program is not free, and on CPU a large block-sparse
+program costs most of a compile to load.  Measured on CPU, U(1) `dE/denv`
+unfused (#1109 code, 16 cores); the load times are confirmed cache hits in
+the JAX debug log:
+
+| D, chi | first compile | load from cache |
+|---|---|---|
+| 2, 8 | 15.7 s | 6.2 s, 6.3 s |
+| 3, 9 | 1048 s | 828 s, 872 s |
+
+So do not count on the cache to remove the compile wall of a D>=3 symmetric
+gradient on CPU: a repeat run saves about a fifth of it.  The cache also
+stores the many small eager programs of the forward CTM; with it, the
+setup of the D=3 run took 531-534 s against 700 s.  GPU is not measured.
+
+The cache key is the compiled program, so a run misses the cache when any
+of these changes:
+
+- D, chi, the symmetry or the unit cell;
+- the charge layout of a CTM chi leg, which sets the block shapes;
+- the tenax code that builds the program;
+- the JAX or jaxlib version, the backend, or the compiler options.
+
+The cache has no size limit by default and nothing removes old entries.
+One development machine had 32 GB in 25,555 entries, the largest 1.7 GB.  To
+bound the directory, install `filelock` (not a tenax dependency) and set a
+limit in bytes after `import tenax` and before the first compile:
+
+```python
+import jax
+import tenax
+
+jax.config.update("jax_compilation_cache_max_size", 20 * 2**30)  # 20 GiB
+```
+
+JAX then evicts the least recently used entries.  Set the limit on an empty
+or new directory: entries written without a limit lack the access-time files
+that eviction reads, so on an existing unbounded cache the eviction fails
+with `FileNotFoundError` (JAX reports it as a warning) and the limit is not
+applied.
+
+To turn the cache off, call
+`jax.config.update("jax_enable_compilation_cache", False)` after
+`import tenax` and before the first compile.  JAX reads both settings once,
+at the first compile.
+
+For a timing measurement, use an empty directory per run, so that a cached
+program does not appear as a fast compile.
 
 ### Path 3: 2-site Shared-Tensor C4v (Checkerboard AFM)
 
@@ -894,7 +1068,16 @@ acts on every forward's `converged` flag:
   params, and `history["final_env_source"]` records which.
 
 `CTMConfig(on_unconverged="warn")` keeps the old control flow and emits
-`CTMNotConvergedWarning` instead.
+`CTMNotConvergedWarning` instead.  Inside one `optimize_gs_ad` run it emits
+at most one warning per check site (gradient, warm-start cache, line search,
+final energy) and optimizer step (#1083); a step's further unconverged
+forwards at that site are counted, not shown.  The next warning that is shown
+says how many similar ones were suppressed, a run that ends with suppressed
+warnings still pending logs the count at INFO level, and
+`history["ctm_warnings_suppressed"]` (with `return_history=True`) holds the
+run's total.  The final best-point and last-iterate evaluations are counted
+separately.  Calls outside `optimize_gs_ad`, and `on_unconverged="raise"`, are
+unchanged.
 
 **Coverage.** All of this applies to the fused-CTM implicit-AD optimizers for
 `unit_cell="1x1"` and `"2site"`. With explicit AD (`gs_implicit_ad=False`)

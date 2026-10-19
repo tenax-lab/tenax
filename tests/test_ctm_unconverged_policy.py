@@ -909,6 +909,43 @@ def test_site4_raises_without_converged_warm(monkeypatch, unit_cell):
 
 
 @pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
+def test_site4_unconverged_best_point_yields_to_converged_last_iterate(
+    monkeypatch, unit_cell
+):
+    """#1081: only the FIRST cold final evaluation (the best point) is
+    unconverged; the last iterate converges.  The run must report the last
+    iterate instead of raising on the best point.
+
+    Both verdicts are forced: the real last-iterate forward is borderline on
+    this fixture (CI Linux 3.11 measured sv_diff 4.51e-14 against conv_tol
+    1e-14, unconverged, so both evaluations failed and the run correctly
+    raised).  The test is about which point the policy reports, not about
+    whether this forward converges."""
+    real = _cpl.python_loop_ctm_converge
+    state = {"warm_seen": False, "armed": 0}
+
+    def spy(*a, **k):
+        envs, info = real(*a, **k)
+        if k.get("env_init") is not None:
+            state["warm_seen"] = True
+        elif state["warm_seen"]:
+            state["armed"] += 1
+            if state["armed"] == 1:
+                return envs, info._replace(converged=False)
+            if state["armed"] == 2:
+                return envs, info._replace(converged=True)
+        return envs, info
+
+    monkeypatch.setattr(_cpl, "python_loop_ctm_converge", spy)
+    monkeypatch.setattr(_opt, "_should_restore_best_env", lambda *a, **k: False)
+    cfg = _cfg(unit_cell, "raise", max_iter=300, steps=1)
+    out = _opt.optimize_gs_ad(_heisenberg_gate(), _init(unit_cell), cfg)
+    assert state["armed"] >= 2, "best point and last iterate were not both evaluated"
+    assert math.isfinite(out[2])
+    assert out[-1]["final_env_source"] == "fresh"
+
+
+@pytest.mark.parametrize("unit_cell", ["2site", "1x1"])
 def test_site4_warn_legacy(monkeypatch, unit_cell):
     state = _final_eval_unconverged(monkeypatch)
     monkeypatch.setattr(_opt, "_should_restore_best_env", lambda *a, **k: False)
@@ -1224,7 +1261,12 @@ def test_policy_scope_defers_flow_fallback_warning_for_unconverged_forward():
     RuntimeWarning inside the policy scope, so warnings-as-errors still sees
     the typed policy outcome.  The latch stays unspent: outside the scope
     the same call still warns.  Fixture of #1077's fallback test: the 2-site
-    U(1)-Sz start at max_iter=20 (stationarity residual 0.25)."""
+    U(1)-Sz start at max_iter=20 (stationarity residual 0.25).
+
+    The fixture starves the adjoint solve (gmres_tol=1e-12, gmres_maxiter=1,
+    gmres_restart=2): the single-matvec GMRES solves this flow adjoint
+    (relative residual 1.32e-6), which JAX's GMRES stalled on (2.75e-5), so
+    the flow attempt must be made to fail on purpose."""
     import jax
 
     from tenax.algorithms._ctm_energy_ad import _VJP_CACHE, ctm_energy_implicit
@@ -1247,6 +1289,9 @@ def test_policy_scope_defers_flow_fallback_warning_for_unconverged_forward():
             forward_gauge="bond_phase",
             conv_method="elementwise",
             projector_backward="flow",
+            gmres_tol=1e-12,
+            gmres_maxiter=1,
+            gmres_restart=2,
         )
 
     _VJP_CACHE.clear()
@@ -1416,3 +1461,52 @@ def test_site1_checks_supplied_diagnostics_over_module(monkeypatch):
     assert ei.value.site == "gradient" and ei.value.step == 3
     # Without a snapshot the (converged) module diagnostics are read: no raise.
     _opt._site1_forward_info(3, cfg, None)
+
+
+# ── #1095: a re-measure of best_params may raise best_energy, if certified ──
+
+
+def test_should_accept_best_remeasured_accepts_higher():
+    """The ``remeasured`` exception to the strict-decrease rule (#1095)."""
+    from tenax.algorithms._ipeps_optimize_shared import _should_accept_best
+
+    assert not _should_accept_best(current_best=-1.0, candidate=-0.9, floor=None)
+    assert _should_accept_best(
+        current_best=-1.0, candidate=-0.9, floor=None, remeasured=True
+    )
+    # A re-measure still refuses non-finite values and floor violations.
+    for bad in (float("nan"), float("inf")):
+        assert not _should_accept_best(
+            current_best=-1.0, candidate=bad, floor=None, remeasured=True
+        )
+    assert not _should_accept_best(
+        current_best=-0.5, candidate=-0.8, floor=-0.7, remeasured=True
+    )
+
+
+def test_remeasure_certified_site1_verdict_then_refresh_verdict():
+    """#1095: the site-1 verdict wins; else anything not positively unconverged."""
+    env, other = object(), object()
+    ok = _opt._remeasure_certified
+    # Site-1 verdict present: it decides, whatever the cache says.
+    assert ok(True, {"envs": env, _opt._VERDICT_KEY: (env, False, None)})
+    assert not ok(False, {"envs": env, _opt._VERDICT_KEY: (env, True, None)})
+    # No site-1 verdict: refuse only a positively unconverged refresh.
+    assert not ok(None, {"envs": env, _opt._VERDICT_KEY: (env, False, None)})
+    assert ok(None, {"envs": env, _opt._VERDICT_KEY: (env, True, None)})
+    assert ok(None, {"envs": env, _opt._VERDICT_KEY: (other, False, None)})  # stale
+    assert ok(None, {"envs": env})  # unknown (split path: no verdict written)
+    assert ok(None, {})  # none
+
+
+def test_site1_forward_info_returns_verdict(monkeypatch):
+    """#1095 gates on the value ``_site1_forward_info`` returns."""
+    monkeypatch.setattr(_cea, "get_last_implicit_ad_diagnostics", lambda: {})
+    warn = CTMConfig(chi=4, conv_tol=1e-10, on_unconverged="warn")
+    assert _opt._site1_forward_info(1, warn, None) is None  # no forward wrote one
+    snap = {"forward_converged": False, "forward_iterations": 7, "forward_sv_diff": 0.5}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert _opt._site1_forward_info(1, warn, None, diagnostics=snap) is False
+    snap["forward_converged"] = True
+    assert _opt._site1_forward_info(1, warn, None, diagnostics=snap) is True

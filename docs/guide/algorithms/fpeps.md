@@ -166,9 +166,18 @@ H = spinless_fermion_gate(config)  # -t(c†c+h.c.) + V n_i n_j - (mu/4)(n_i+n_j
 - ``su_grow_layout(H, cfg, key=key)`` / ``bond_layout(A, B)`` — grow and read the
   χ-sector layout for a frozen-layout AD seed, below.
 - ``FPEPSConfig`` — configuration dataclass.
-- ``optimize_fpeps_ad(hamiltonian_gate, A_init, config, fpeps_config=None)`` —
-  AD-based ground-state optimization (1-site). For a 2-site unit cell use
-  ``optimize_gs_ad(gate, (A, B), config)`` with ``config.unit_cell="2site"``.
+- ``optimize_fpeps_ad(hamiltonian_gate, A_init, config, fpeps_config=None, *,
+  envs_init=None)`` — AD-based ground-state optimization. It is
+  ``optimize_gs_ad`` with a fermionic initial state: ``A_init=None`` builds
+  ``FermionParity`` tensors from ``fpeps_config`` (one for
+  ``unit_cell="1x1"``, an ``(A, B)`` pair for ``"2site"``; a ``Lattice`` needs
+  an explicit dict). It returns ``optimize_gs_ad``'s shape for the unit cell:
+  ``(A, env, E)`` for 1x1, ``((A, B), (env_A, env_B), E)`` for 2-site.
+  ``envs_init`` is the frozen-layout seed from ``su_grow_layout`` (2-site
+  only). The default 1x1 cell is a uniform state and cannot hold a CDW; use
+  ``"2site"`` for one. ``gs_c4v=True`` and
+  ``ctm_ad_mode="root_implicit_symmetric"`` have no fermionic signs; do not
+  use them with fermions (#1059).
 
 (fpeps-invalid-rdm)=
 ## Refusing an energy built from an invalid RDM

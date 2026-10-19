@@ -169,6 +169,11 @@ def test_unsolvable_flowing_adjoint_falls_back_to_frozen():
     finite differences (|g| = 82 against 1.5 frozen).  The backward must
     detect the unsolved adjoint and return exactly the frozen gradient,
     saying so in the diagnostics.
+
+    The single-matvec GMRES solves this flow adjoint (relative residual
+    1.32e-6) that JAX's GMRES stalled on, so the solve is starved here
+    (``gmres_maxiter=1, gmres_restart=2``) to exercise the fallback
+    mechanism; see #1111.
     """
     import warnings
 
@@ -196,6 +201,9 @@ def test_unsolvable_flowing_adjoint_falls_back_to_frozen():
                 forward_gauge="bond_phase",
                 conv_method="elementwise",
                 projector_backward=projector_backward,
+                gmres_tol=1e-12,
+                gmres_maxiter=1,
+                gmres_restart=2,
             )
 
         with warnings.catch_warnings(record=True) as caught:
@@ -209,12 +217,9 @@ def test_unsolvable_flowing_adjoint_falls_back_to_frozen():
     g_flow, diag_flow, caught = grad_with("flow")
     # The fallback's frozen solve must not leave its lambda as the warm start
     # of the next (flowing, different) adjoint system.
-    (f_flow, _mutables) = next(iter(_VJP_CACHE.values()))
-    cached = next(
-        c.cell_contents
-        for c in f_flow.bwd.__closure__
-        if isinstance(c.cell_contents, dict) and "prev_lam_leaves" in c.cell_contents
-    )
+    (_f_flow, mutables) = next(iter(_VJP_CACHE.values()))
+    # The seed lives in the entry's run state (#1049); one gate is one run.
+    (cached,) = [state for _token, state, _objects in mutables["_runs"].values()]
     assert cached["prev_lam_leaves"] is None
     g_frozen, diag_frozen, _ = grad_with("auto")
 

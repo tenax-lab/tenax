@@ -307,6 +307,16 @@ at the target chi.  Example: ``chi_ramp=[(8, 10), (16, 10), (32, None)]``
 does 10 sweeps at chi=8, 10 at chi=16, then converges at chi=32.
 Benchmarks show 1.2–2.1× GPU speedup with identical energies.
 
+### Persistent compilation cache (on by default)
+
+`import tenax` makes JAX store compiled programs in `~/.cache/jax`
+(override with `JAX_COMPILATION_CACHE_DIR`), so a repeat run can load a
+program instead of compiling it.  On CPU, loading a large block-sparse
+backward costs most of a compile (D=3 U(1): 870 s against 1048 s).  The
+first compile is not shortened, and the directory has no size limit by
+default.  See "Persistent compilation cache" in
+`docs/guide/algorithms/ipeps_ad_paths.md`.
+
 ---
 
 ## See also
