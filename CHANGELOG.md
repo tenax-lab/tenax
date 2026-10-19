@@ -256,17 +256,12 @@
 
 - **Opt-in joint-VJP chain rule for the implicit-AD backward.**
   `CTMConfig(adjoint_chain_rule="joint")` gets the chain rule's indirect term
-  from the adjoint solve's own VJP over `(params, env)`, so the separate
-  params-VJP program never compiles. `benchmarks/bench_chain_rule_compile.py`,
-  D=2 chi=8 dense single-site, CPU, backward compile (excluding the forward
-  `_step`): −51% on the GMRES path (19.6→9.6 s), −50% fused (19.1→9.5 s),
-  −28% fused-then-fallback (27.9→20.0 s); warm gradient unchanged within
-  noise. A spike on a two-site D=2 chi=8 fixture measured −37%. Gradient
-  equal to the default to 1e-10 or better on the GMRES paths and within
-  `gmres_tol` on the fused path. Default unchanged (`"separate"`).
-  The joint fused program skips XLA's GPU-only `hoist-fused-bitcasts`
-  pass, which aborts on it (jaxlib 0.10.2, D=3 chi=16 U(1); new
-  `block_sparse_jit(disable_passes=...)`).
+  from the GMRES adjoint solve's own VJP over `(params, env)`, so the separate
+  params-VJP program never compiles; the fused Neumann loop is unchanged and
+  is followed by that solve, seeded with its `λ`. Gradient equal to the
+  default to round-off. U(1) D=3 chi=16 two-site, one A100, first step: XLA
+  compile 7,795→5,977 s (−23%), wall 8,231→6,388 s, peak RSS 51→39 GB, warm
+  steps unchanged. Default unchanged (`"separate"`).
 
 - **CTM hold test: a saddle is not converged** (#1035): `ctm_tensor_2site`
   and `ctm_multisite` compared successive sweeps only, and that cannot tell

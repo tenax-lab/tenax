@@ -158,3 +158,24 @@ wall (#1102).  Dense and GPU calls are unaffected.
 * Folding the direct term into `_jit_dE_denv` (the Arnoldi precheck consumes
   it).
 * `_jit_gmres_solve` (legacy JAX-GMRES program).
+
+## Revision 2026-10-19: fused path = env-only loop + joint GMRES polish
+
+The fused design above (carry `J_params^T λ` in the Neumann loop, energy VJP
+over `(params, env)` in the fused program) was measured and replaced.
+
+* GPU D=3 chi=16 U(1), step 1: the joint fused program compiled 4,211 s
+  against 2,244 s separate, cancelling the chain-rule saving (step-1 compile
+  −3.2%, inside noise).  It also tripped an XLA GPU `HoistFusedBitcasts`
+  CHECK-abort that needed a pass-disabling workaround.
+* CPU D=3 chi=8 spike: the energy VJP over `(params, env)` inside the fused
+  program cost ~+1,700 s of compile; the carry ~+46 s.  On GPU the carry
+  alone (variant "jointC": joint loop + standalone direct term) still cost
+  +1,355 s, so the CPU ratio did not transfer.
+* Adopted ("polishA"): the fused program is the separate one, unchanged; a
+  joint GMRES solve always follows, seeded with the loop's `λ` when the loop
+  solved the system, else cold; `_jit_direct` gives the direct term.  GPU
+  step 1: compile 7,795 → 5,977 s (−23%), wall 8,231 → 6,388 s, RSS
+  51.1 → 39.0 GB, warm 4.7/3.8 → 4.6/3.9 s, gradient equal to separate to
+  ≤4e-15 on cold and warm calls.  The pass workaround is no longer needed and
+  was removed.

@@ -370,14 +370,28 @@ change (not re-measured).
 takes the chain rule's indirect term `J_params^T λ` from the adjoint solve's
 own matvec — one VJP of the CTM sweep over `(params, env)` — so the separate
 params-VJP program (`_jit_chain_rule`, the largest single compile at D=3) is
-never built.  The GMRES solve returns `J_params^T` of its best iterate; the
-fused Neumann loop returns it for `λ_{K-1}`, the iterate its residual
-certifies, so its gradient can differ from `"separate"` by O(`gmres_tol`).
-Measured with `benchmarks/bench_chain_rule_compile.py` (D=2 chi=8 dense
-single-site, CPU), backward compile excluding the forward `_step`: −51% on the
-GMRES path (19.6→9.6 s), −50% fused (19.1→9.5 s), −28% fused-then-fallback
-(27.9→20.0 s); the warm gradient is unchanged within noise.  A spike on a
-two-site D=2 chi=8 fixture measured −37%.  The default stays `"separate"` until measured at D=3.
+never built.  The GMRES solve returns `J_params^T` of its best iterate.  The
+fused Neumann loop is the same env-only program as in `"separate"`; a joint
+GMRES solve always follows it, seeded with the loop's `λ` (usually accepted
+after one matvec) or, when the loop gave up, started cold as the fallback is.
+The gradient equals `"separate"` to round-off on every path.
+
+Measured on the first optimization step of a U(1) D=3 chi=16 two-site
+iPEPS on one A100 (empty compilation cache; the fused loop gave up and the
+fallback ran):
+
+| | `"separate"` | `"joint"` |
+|---|---|---|
+| XLA compile | 7,795 s | 5,977 s (−23%) |
+| first step, wall | 8,231 s | 6,388 s (−22%) |
+| warm value-and-grad | 4.7 / 3.8 s | 4.6 / 3.9 s |
+| peak host RSS | 51.1 GB | 39.0 GB |
+
+One run per mode; compile times on that host vary by about ±20%.  With
+`benchmarks/bench_chain_rule_compile.py` (D=2 chi=8 dense single-site, CPU)
+the GMRES-path backward compile drops 51%.  Carrying `J_params^T λ` through
+the fused loop instead was measured and rejected: it doubled the fused
+program's compile.  The default stays `"separate"` for now.
 
 #### Persistent compilation cache
 

@@ -183,14 +183,15 @@ def _fused_premise():
 
 
 def test_joint_fused_matches_separate():
-    """lambda_{K-1} vs lambda_K: within the solve tolerance."""
+    """The joint GMRES polish takes the fused loop's lambda as its seed, so the
+    gradient is the separate one to round-off."""
     A0 = _site(_FUSED_SEED)
     g_sep = _grad(A0, "separate")
     _fused_premise()
     g_joint = _grad(A0, "joint")
     _fused_premise()
     np.testing.assert_allclose(
-        np.asarray(g_joint), np.asarray(g_sep), rtol=1e-8, atol=1e-9
+        np.asarray(g_joint), np.asarray(g_sep), rtol=1e-10, atol=1e-12
     )
 
 
@@ -234,7 +235,7 @@ def test_joint_fused_matches_separate_two_site():
     g_joint = _grad(arrs, "joint", **kw)
     _fused_premise()
     for a, b in zip(g_joint, g_sep):
-        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-7, atol=1e-9)
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-12)
 
 
 @pytest.mark.usefixtures("fresh_vjp_cache")
@@ -258,14 +259,13 @@ def test_joint_fused_and_fallback_never_trace_the_separate_chain_rule():
     assert d.get("diverged") or not d.get("converged"), "premise: fallback ran"
     traced = set(_TRACED[mark:])
     assert "_jit_chain_rule" not in traced, sorted(traced)
-    assert "_jit_direct" not in traced, "the fallback must reuse the fused direct"
-    assert "_jit_gmres_joint_solve" in traced
+    assert {"_jit_gmres_joint_solve", "_jit_direct"} <= traced, sorted(traced)
 
 
 @pytest.mark.slow
 def test_joint_fused_matches_separate_u1():
     """Block-sparse params: the cotangent is a SymmetricTensor pytree carried
-    through the while loop.  Trivial-charge U(1) fixture of
+    through the GMRES loop.  Trivial-charge U(1) fixture of
     tests/test_block_sparse_ctm_ad.py (one block, full block-sparse path)."""
     from tests.test_block_sparse_ctm_ad import _make_u1_symmetric_ipeps
 
@@ -290,7 +290,7 @@ def test_joint_fused_matches_separate_u1():
     g_sep, g_joint = grad("separate"), grad("joint")
     assert type(g_joint) is type(g_sep)
     np.testing.assert_allclose(
-        np.asarray(g_joint._data), np.asarray(g_sep._data), rtol=1e-8, atol=1e-9
+        np.asarray(g_joint._data), np.asarray(g_sep._data), rtol=1e-10, atol=1e-12
     )
 
 
@@ -339,8 +339,8 @@ def test_joint_matches_separate_u1_multiblock(method):
     np.testing.assert_allclose(
         np.asarray(g_joint._data),
         np.asarray(g_sep._data),
-        rtol=1e-10 if method == "gmres" else 1e-8,
-        atol=1e-9,
+        rtol=1e-10,
+        atol=1e-12,
     )
 
 
