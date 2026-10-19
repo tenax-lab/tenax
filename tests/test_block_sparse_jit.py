@@ -38,6 +38,7 @@ pytestmark = pytest.mark.skipif(
 _ANY_JAX = {
     "test_a_large_symmetric_call_compiles_on_this_jax",
     "test_disable_passes_falls_back_where_xla_rejects_the_option",
+    "test_disable_passes_under_an_outer_jit_compiles",
 }
 
 
@@ -415,4 +416,15 @@ def test_a_gpu_only_pass_name_is_harmless_on_cpu():
     f = block_sparse_jit(_elementwise, disable_passes=("hoist-fused-bitcasts",))
     assert _fusions(f.dense.lower(x).compile()) == _fusions(
         jax.jit(_elementwise).lower(x).compile()
+    )
+
+
+def test_disable_passes_under_an_outer_jit_compiles():
+    """Codex review of #1123: JAX refuses ``compiler_options`` on a nested jit,
+    so a call inside another trace must take the plain program."""
+    x = jnp.linspace(0.0, 1.0, 8)
+    f = block_sparse_jit(_elementwise, disable_passes=("hoist-fused-bitcasts",))
+    np.testing.assert_allclose(
+        np.asarray(jax.jit(lambda v: f(v) + 1.0)(x)),
+        np.asarray(_elementwise(x) + 1.0),
     )

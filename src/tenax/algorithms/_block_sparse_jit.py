@@ -257,8 +257,10 @@ def block_sparse_jit(fn=None, /, *, by_bond_dim=True, disable_passes=(), **jit_k
         block_sparse = dense_with_passes = plain
 
     def dense_variant():
-        # Only where XLA accepts the option at all; otherwise the default.
-        if disable_passes and no_fusion_compiles():
+        # Only where XLA accepts the option at all, and only at top level:
+        # JAX refuses ``compiler_options`` on a nested jit (the enclosing
+        # compile decides its passes), as ``_wants_no_fusion`` checks too.
+        if disable_passes and _jax_core.trace_state_clean() and no_fusion_compiles():
             return dense_with_passes
         return plain
 

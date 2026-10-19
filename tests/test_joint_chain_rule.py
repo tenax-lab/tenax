@@ -379,3 +379,17 @@ def test_pess_loss_builders_forward_the_chain_rule_setting(builder, monkeypatch)
     with pytest.raises(_Captured):
         loss(state)
     assert seen.get("adjoint_chain_rule") == "joint", sorted(seen)
+
+
+# ------------------------------------------------------------- split CTM
+
+
+@pytest.mark.parametrize("recipe", ["1x1", "2x2"])
+def test_split_ctm_refuses_the_joint_chain_rule(recipe):
+    """Codex review of #1123: the split backward never reads the setting, so
+    "joint" there would be silently ignored."""
+    from tenax.algorithms.ipeps_ad_policy import validate_split_ctm_config
+
+    with pytest.raises(NotImplementedError, match="adjoint_chain_rule"):
+        validate_split_ctm_config(CTMConfig(adjoint_chain_rule="joint"), recipe)
+    validate_split_ctm_config(CTMConfig(), recipe)  # the default still passes
