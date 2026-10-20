@@ -315,3 +315,124 @@ def test_real_rhs_with_complex_matvec_or_candidate_raises():
         gmres_single_matvec(
             _mv(A), (b,), [(b.astype(jnp.complex128),)], tol=1e-10, maxiter=3, restart=4
         )
+
+
+# --------------------------------------------------------------------------
+# aux mode (joint-VJP chain rule): the solver carries a(x) for the returned x
+# --------------------------------------------------------------------------
+
+_P = jnp.asarray(np.random.default_rng(7).standard_normal((5, N)))
+
+
+def _mv_aux(A, P=_P):
+    def matvec(v):
+        return (A @ v[0],), P @ v[0]
+
+    return matvec
+
+
+def _solve_aux(A, b, candidates=(), *, tol=1e-12, maxiter=10, restart=30, P=_P):
+    return jax.jit(
+        lambda bb, cc: gmres_single_matvec(
+            _mv_aux(A, P),
+            (bb,),
+            [(c,) for c in cc],
+            tol=tol,
+            maxiter=maxiter,
+            restart=restart,
+            aux=True,
+        )
+    )(b, list(candidates))
+
+
+@pytest.mark.parametrize("kind", ["well", "ill", "nonnormal", "complex"])
+def test_aux_is_the_linear_map_of_the_returned_iterate(kind):
+    A, b = _system(kind)
+    P = _P.astype(A.dtype)
+    x, res, bn, a = _solve_aux(A, b, P=P)
+    np.testing.assert_allclose(np.asarray(a), np.asarray(P @ x[0]), atol=1e-12)
+    x0, res0, bn0 = _solve(A, b)
+    np.testing.assert_array_equal(np.asarray(x[0]), np.asarray(x0))
+    assert float(res) == float(res0) and float(bn) == float(bn0)
+
+
+def test_aux_follows_a_winning_seed():
+    A, b = _system("well")
+    exact = jnp.linalg.solve(A, b)
+    x, _res, _bn, a = _solve_aux(A, b, [exact], maxiter=0)
+    np.testing.assert_allclose(np.asarray(x[0]), np.asarray(exact), atol=1e-14)
+    np.testing.assert_allclose(np.asarray(a), np.asarray(_P @ exact), atol=1e-12)
+
+
+def test_aux_at_the_maxiter_cap():
+    A, b = _system("ill")
+    x, res, bn, a = _solve_aux(A, b, maxiter=1, restart=2)
+    assert float(res) > 1e-12 * float(bn)  # premise: the cap stopped it
+    np.testing.assert_allclose(np.asarray(a), np.asarray(_P @ x[0]), atol=1e-12)
+
+
+def test_aux_with_maxiter_zero_and_no_seed_is_zero():
+    A, b = _system("well")
+    x, _res, _bn, a = _solve_aux(A, b, maxiter=0)
+    assert not np.any(np.asarray(x[0]))
+    assert not np.any(np.asarray(a))
+
+
+def test_aux_stays_paired_with_x_when_the_operator_is_nan():
+    A, b = _system("well")
+    A = A.at[0, 0].set(jnp.nan)
+    x, res, _bn, a = _solve_aux(A, b)
+    assert np.isnan(float(res))
+    np.testing.assert_allclose(
+        np.asarray(a), np.asarray(_P @ x[0]), atol=1e-12, equal_nan=True
+    )
+
+
+def _while_carry_sizes(fn, *args):
+    jx = jax.make_jaxpr(fn)(*args)
+    return [
+        len(e.invars) - e.params["cond_nconsts"] - e.params["body_nconsts"]
+        for e in jx.jaxpr.eqns
+        if e.primitive.name == "while"
+    ]
+
+
+def test_aux_off_keeps_todays_loop_carry():
+    """``aux=False`` must not grow the loop state: 16 carry leaves, measured
+    on main ed5b8cf before aux existed."""
+    A, b = _system("well")
+    sizes = _while_carry_sizes(
+        lambda bb: gmres_single_matvec(
+            _mv(A), (bb,), [], tol=1e-10, maxiter=3, restart=2
+        ),
+        b,
+    )
+    assert sizes == [16]
+    sizes_aux = _while_carry_sizes(
+        lambda bb: gmres_single_matvec(
+            _mv_aux(A), (bb,), [], tol=1e-10, maxiter=3, restart=2, aux=True
+        ),
+        b,
+    )
+    assert sizes_aux == [17]  # + best_aux (one leaf here)
+
+
+def test_aux_mode_still_applies_the_matvec_at_one_site():
+    A, b = _system("well")
+    jx = jax.make_jaxpr(
+        lambda bb: gmres_single_matvec(
+            _mv_aux(A), (bb,), [], tol=1e-10, maxiter=3, restart=2, aux=True
+        )
+    )(b)
+    # Two dot_generals per matvec (A @ v and P @ v), at one call site.
+    assert (
+        str(jx).count("dot_general")
+        == str(
+            jax.make_jaxpr(
+                lambda bb: gmres_single_matvec(
+                    _mv(A), (bb,), [], tol=1e-10, maxiter=3, restart=2
+                )
+            )(b)
+        ).count("dot_general")
+        + 1
+    )

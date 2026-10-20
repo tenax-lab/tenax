@@ -92,6 +92,15 @@ def validate_split_ctm_config(
             "(fuse_virtual_legs=False), which ignores forward_gauge; use "
             "fuse_virtual_legs=True, or forward_gauge='phase'."
         )
+    if ctm_cfg.adjoint_chain_rule != "separate":
+        # The split backward builds its own env and parameter VJPs and never
+        # reads the setting, so "joint" would be silently ignored (Codex P2 on
+        # #1123).  Split CTM is frozen: refuse rather than port it.
+        raise NotImplementedError(
+            f"adjoint_chain_rule={ctm_cfg.adjoint_chain_rule!r} is not supported "
+            "on the split-CTM path (fuse_virtual_legs=False); use "
+            "fuse_virtual_legs=True, or adjoint_chain_rule='separate'."
+        )
     if ctm_cfg.ctmrg_heuristic_increase_chi:
         raise NotImplementedError(
             "in-CTM chi auto-bump (ctmrg_heuristic_increase_chi) is not "
@@ -594,6 +603,7 @@ def make_ctm_energy_fn(
             gmres_restart=ctm_cfg.gmres_restart,
             arnoldi_precheck=False,
             adjoint_method=ctm_cfg.adjoint_method,
+            adjoint_chain_rule=ctm_cfg.adjoint_chain_rule,
             energy_fn=energy_fn,
             # Flows through to the implicit-AD forward CTM.  Default 20
             # (variPEPS-style approximate AD: cheap on the plateau, the

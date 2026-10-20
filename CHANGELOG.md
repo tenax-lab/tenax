@@ -254,6 +254,15 @@
 
 ### Added
 
+- **Opt-in joint-VJP chain rule for the implicit-AD backward.**
+  `CTMConfig(adjoint_chain_rule="joint")` gets the chain rule's indirect term
+  from the GMRES adjoint solve's own VJP over `(params, env)`, so the separate
+  params-VJP program never compiles; the fused Neumann loop is unchanged and
+  is followed by that solve, seeded with its `λ`. Gradient equal to the
+  default to round-off. U(1) D=3 chi=16 two-site, one A100, first step: XLA
+  compile 7,795→5,977 s (−23%), wall 8,231→6,388 s, peak RSS 51→39 GB, warm
+  steps unchanged. Default unchanged (`"separate"`).
+
 - **CTM hold test: a saddle is not converged** (#1035): `ctm_tensor_2site`
   and `ctm_multisite` compared successive sweeps only, and that cannot tell
   an attractor from a saddle.  On the fermionic t-V D=3 chi=12 V=1 mu=2

@@ -220,6 +220,21 @@ class CTMConfig:
     # ``gmres_maxiter`` (step cap).  The fixed-point loop additionally
     # falls back to GMRES in-loop when ``diff > prev_diff`` after step 5.
     adjoint_method: Literal["fixed_point", "gmres"] = "fixed_point"
+    # How the implicit-AD backward forms the chain rule's indirect term
+    # J_params^T lambda.
+    #   "separate" (default) -- its own compiled program, ``_jit_chain_rule``:
+    #     the params-VJP of the CTM sweep, the largest single compile at D=3
+    #     (2,604 s at chi=16 on GPU).
+    #   "joint" -- the GMRES adjoint solve's matvec is one VJP over
+    #     (params, env), which yields J_params^T of the solve's own iterate;
+    #     the separate program never compiles.  The fused Neumann loop is
+    #     unchanged (env only) and is always followed by that joint GMRES
+    #     solve, seeded with its lambda.  Gradient equal to "separate" to
+    #     round-off.  U(1) D=3 chi=16 on GPU (A100), first step: compile
+    #     7,795 -> 5,977 s (-23%), wall 8,231 -> 6,388 s, peak RSS 51 -> 39 GB,
+    #     warm steps unchanged.  Opt-in until the default flip (docs/
+    #     superpowers/specs/2026-10-18-joint-vjp-chain-rule-design.md).
+    adjoint_chain_rule: Literal["separate", "joint"] = "separate"
     # "elementwise" or "sv" (corner singular-value spectrum).
     #
     # #780 -- "elementwise" is GAUGE-DEPENDENT and does not converge on a
@@ -561,6 +576,12 @@ class CTMConfig:
             raise ValueError(
                 f"adjoint_method must be one of {valid_adjoint_methods}, "
                 f"got {self.adjoint_method!r}"
+            )
+        valid_chain_rules = {"separate", "joint"}
+        if self.adjoint_chain_rule not in valid_chain_rules:
+            raise ValueError(
+                f"adjoint_chain_rule must be one of {valid_chain_rules}, "
+                f"got {self.adjoint_chain_rule!r}"
             )
         # Phase-1 deprecation (#512): both the scheduled ``chi_ramp`` and
         # the end-of-outer-step ``chi_auto_bump`` zero-pad the env between
