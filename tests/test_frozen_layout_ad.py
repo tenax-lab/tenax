@@ -25,7 +25,7 @@ from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms.ctm_layout import symmetric_layout_seed
+from tenax.algorithms.ctm_layout import _converge, normalized_pair
 from tenax.algorithms.fermionic_ipeps import (
     FPEPSConfig,
     _initialize_fpeps,
@@ -52,6 +52,8 @@ CHI = 12
 # chi=12): the latter costs ~10 min to build and its implicit-AD forward does
 # not reliably reach a #841 element-wise fixed point (Task 4 rounds 1-5).
 CHI_D2 = 8
+# The bosonic ``seeded_xxz_d2`` fixture's chi (see its docstring).
+CHI_XXZ = 4
 
 
 def _su(pin, D=3, seed=6, steps=4 * 40):
@@ -560,30 +562,32 @@ def seeded_d2():
 
 @pytest.fixture(scope="module")
 def seeded_xxz_d2():
-    """A bosonic U(1) XXZ (Delta=0.3) pair, D=2, chi=8, for the tests that need
+    """A bosonic U(1) XXZ (Delta=0.3) pair, D=2, chi=4, for the tests that need
     ``gs_metric_precond``: on fermionic input (``seeded_d2``) #1099 turns the
     metric off, so the metric L-BFGS path cannot run there.
 
-    Measured (CPU): SU + seed ~260 s; the seed is cold-converged in 18 sweeps
-    and stable over 100 forced sweeps, E = -0.4936975.  A 4-step metric run
-    calls ``lbfgs_two_loop`` with histories 0, 1, 2, 3, and all three
-    re-checks keep the layout.
+    chi=4 keeps charged sectors (measured layout ``(-2:1, 0:2, 2:1)`` on every
+    corner leg) with a clean cut: ``symmetric_layout_seed`` measured a cut gap
+    of 0.70, stable over 100 forced sweeps, E = -0.4936904.  The seed itself is
+    not called here (its chi+4 gap CTM costs ~140 s); one cold converge is.
     """
     A0, B0 = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
     su_cfg = iPEPSConfig(
-        max_bond_dim=2, num_imaginary_steps=200, dt=0.05, ctm=CTMConfig(chi=CHI_D2)
+        max_bond_dim=2, num_imaginary_steps=200, dt=0.05, ctm=CTMConfig(chi=CHI_XXZ)
     )
     _, (A, B), _ = ipeps(xxz_gate(0.3), (A0, B0), su_cfg, compute_energy=False)
-    H = xxz_gate_u1sz(0.3)
-    seed_cfg = dataclasses.replace(
-        CTMConfig(chi=CHI_D2), conv_tol=1e-10, max_iter=300, plateau_patience=None
+    A_n, B_n = normalized_pair(A, B)
+    cfg = dataclasses.replace(
+        CTMConfig(chi=CHI_XXZ), conv_tol=1e-10, max_iter=300, plateau_patience=None
     )
-    r = symmetric_layout_seed(A, B, H, seed_cfg, forced_sweeps=100)
-    assert r.cold_converged and r.stable  # regime: a converged, stable seed
-    return A, B, H, r.envs_init
+    envs, info = _converge({(0, 0): A_n, (1, 0): B_n}, cfg, None)
+    assert info.converged  # regime: a converged seed
+    # Regime: charged sectors survive the cut, so a layout can move.
+    assert len(np.unique(np.asarray(envs[(0, 0)].C1.indices[0].charges))) > 1
+    return A, B, xxz_gate_u1sz(0.3), envs
 
 
-def _ad_config(steps, gs=None, **ctm):
+def _ad_config(steps, gs=None, chi=CHI_D2, **ctm):
     return iPEPSConfig(
         max_bond_dim=2,
         unit_cell="2site",
@@ -591,7 +595,7 @@ def _ad_config(steps, gs=None, **ctm):
         gs_implicit_ad=True,
         gs_num_steps=steps,
         gs_verbose=False,
-        ctm=CTMConfig(chi=CHI_D2, **{"max_iter": 50, "conv_tol": 1e-9, **ctm}),
+        ctm=CTMConfig(chi=chi, **{"max_iter": 50, "conv_tol": 1e-9, **ctm}),
         **(gs or {}),
     )
 
@@ -1004,6 +1008,60 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
 # ------------------------------------------------------------------ #
 
 
+def _surrogate_energy(monkeypatch, A, B):
+    """Replace the energy with ``-(<A, R_A> + <B, R_B>) / 2`` on the normalized
+    pair, ``R`` a fixed 10% perturbation of the start.  No AD backward runs
+    through the CTM (minutes per call on block-sparse tensors); the real CTM
+    still runs for the env cache, the line-search probes and the re-checks,
+    and L-BFGS still builds real ``(s, y)`` pairs.  These tests check the
+    optimizer's bookkeeping, not the physics.
+
+    Both energy entries are patched with the same function, so the line
+    search's value and the gradient's slope agree: ``ctm_energy_implicit``
+    (the AD loss) and ``compute_energy_ctm_tensor_2site`` (``loss_fn_fwd``).
+    """
+    import tenax.algorithms._ctm_tensor as ct
+
+    def _ref(T, key):
+        leaves, tree = jax.tree_util.tree_flatten(T)
+        keys = jax.random.split(key, len(leaves))
+        noisy = [
+            x
+            + 0.1
+            * jnp.linalg.norm(x)
+            / jnp.sqrt(x.size)
+            * jax.random.normal(k, x.shape, x.dtype)
+            for x, k in zip(leaves, keys)
+        ]
+        R = jax.tree_util.tree_unflatten(tree, noisy)
+        return R * (1.0 / R.norm())
+
+    RA, RB = _ref(A, jax.random.PRNGKey(1)), _ref(B, jax.random.PRNGKey(2))
+
+    def _overlap(X, R):
+        return sum(
+            jnp.real(jnp.vdot(x, r))
+            for x, r in zip(jax.tree_util.tree_leaves(X), jax.tree_util.tree_leaves(R))
+        )
+
+    def _energy(An, Bn):
+        return -0.5 * (_overlap(An, RA) + _overlap(Bn, RB))
+
+    def ctm_energy_implicit(site_tensors, *a, **kw):
+        return _energy(site_tensors[(0, 0)], site_tensors[(1, 0)])
+
+    def compute_energy_ctm_tensor_2site(An, Bn, *a, **kw):
+        return _energy(An, Bn)
+
+    # ``declare_cache_key`` accepts a module-level tenax function in the
+    # optimizer's closure; the stub is installed as that module attribute.
+    compute_energy_ctm_tensor_2site.__module__ = ct.__name__
+    monkeypatch.setattr(ea, "ctm_energy_implicit", ctm_energy_implicit)
+    monkeypatch.setattr(
+        ct, "compute_energy_ctm_tensor_2site", compute_energy_ctm_tensor_2site
+    )
+
+
 def _caller():
     import sys
 
@@ -1058,6 +1116,7 @@ def test_the_recheck_runs_unfrozen_with_the_configured_tie_rtol(
     import tenax.algorithms._ctm_python_loop as cpl
 
     A, B, H, envs = seeded_xxz_d2
+    _surrogate_energy(monkeypatch, A, B)
     real = cpl.python_loop_ctm_converge
     calls = []
 
@@ -1084,6 +1143,7 @@ def test_the_recheck_runs_unfrozen_with_the_configured_tie_rtol(
             _ad_config(
                 3,
                 gs={"gs_layout_tie_rtol": 2e-8, "return_history": True},
+                chi=CHI_XXZ,
                 max_iter=400,
             ),
             envs_init=envs,
@@ -1124,8 +1184,11 @@ def test_a_layout_change_resets_the_optimizer_state(request, monkeypatch, metric
 
     if metric:
         A, B, H, envs = request.getfixturevalue("seeded_xxz_d2")
+        chi = CHI_XXZ
     else:
         A, B, H, _d, envs = request.getfixturevalue("seeded_d2")
+        chi = CHI_D2
+    _surrogate_energy(monkeypatch, A, B)
     events = []
 
     def _changed(old, new):
@@ -1182,6 +1245,7 @@ def test_a_layout_change_resets_the_optimizer_state(request, monkeypatch, metric
             _ad_config(
                 4,
                 gs={"return_history": True, "gs_metric_precond": metric},
+                chi=chi,
                 max_iter=400,
             ),
             envs_init=envs,
@@ -1215,6 +1279,7 @@ def test_an_unconverged_recheck_is_not_a_change(seeded_d2, monkeypatch):
     import tenax.algorithms._ctm_python_loop as cpl
 
     A, B, H, _d, envs = seeded_d2
+    _surrogate_energy(monkeypatch, A, B)
     real = cpl.python_loop_ctm_converge
     n_rechecks = []
 
@@ -1265,6 +1330,7 @@ def test_a_rollback_after_a_change_restores_the_new_layout(seeded_d2, monkeypatc
     from tenax.algorithms._ad_primitives import CTMRGGradientError
 
     A, B, H, _d, envs = seeded_d2
+    _surrogate_energy(monkeypatch, A, B)
     events = []
     real_drop = ipo._drop_env_cache_for_reset
 
