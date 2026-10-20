@@ -513,7 +513,7 @@ def _refuse_symmetric_split(*site_tensors: Tensor) -> None:
             "split CTM (fuse_virtual_legs=False) is dense-only: SymmetricTensor "
             "site tensors are not supported; use the fused CTM "
             "(fuse_virtual_legs=True, ctm_tensor / ctm_tensor_2site), or "
-            "densify small tensors with .todense()"
+            "densify a small tensor with DenseTensor(A.todense(), A.indices)"
         )
 
 
