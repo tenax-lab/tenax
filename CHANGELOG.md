@@ -4,6 +4,15 @@
 
 ### Behavior Changes
 
+- **The split CTM is dense-only.** `fuse_virtual_legs=False` (and the
+  `ctm_split_tensor*` / `ctm_energy_split_*` entry points) now refuse
+  `SymmetricTensor` site tensors with `NotImplementedError`.  Bosonic
+  U(1)/Z_n input used to run on the eager forward and on single-site AD.  The
+  split CTM's memory win is a large-D effect (D≳16, #825), where symmetric
+  iPEPS-AD in tenax already loses to dense, so the symmetric split path had
+  no use and had carried its own defects (#907, #1024, #1048).  Symmetric
+  iPEPS uses the fused CTM (`fuse_virtual_legs=True`, the default).
+
 - **The joint-VJP chain rule is the default.** `CTMConfig.adjoint_chain_rule`
   now defaults to `"auto"`, which runs `"joint"` on the fused implicit-AD path
   and leaves the split CTM (`fuse_virtual_legs=False`), which has its own chain

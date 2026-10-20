@@ -148,12 +148,11 @@ class CTMConfig:
                             memory) instead, for both the single-site
                             (``unit_cell="1x1"``) and 2-site checkerboard
                             (``unit_cell="2site"``) optimizers.  The split
-                            CTM is dense-bosonic and experimental: a traced
-                            (jit/AD) 2-site sweep on ``SymmetricTensor`` site
-                            tensors is refused rather than fixed (#1048) --
-                            use ``fuse_virtual_legs=True`` for symmetric
-                            multisite AD.  Fermionic input is refused
-                            (#1035), and the χ-changing knobs are rejected.
+                            CTM is dense-only and experimental:
+                            ``SymmetricTensor`` input (U(1)/Z_n or
+                            fermionic) is refused -- symmetric iPEPS uses
+                            the fused CTM -- and the χ-changing knobs are
+                            rejected.
                             The memory win over the fused path is a large-D
                             effect (D≳16, #825).
         ctm_ad_mode:        ``None`` (default), ``"c4v_reference"`` (dense
@@ -217,8 +216,8 @@ class CTMConfig:
     fuse_virtual_legs: bool = True  # True: fused double-layer (χ²·D⁶, default).
     # False: split ket/bra double layer (χ²·D⁴): single-site (unit_cell="1x1")
     # and 2-site checkerboard (unit_cell="2site"); other lattices still raise
-    # NotImplementedError.  Dense-bosonic and experimental (frozen by design):
-    # a traced 2-site SymmetricTensor sweep is refused, not fixed (#1048).
+    # NotImplementedError.  Dense-only and experimental (frozen by design):
+    # SymmetricTensor input is refused.
     ad_regularize_svd: bool = True  # use Lorentzian-regularized SVD backward in AD
     gmres_precondition: bool = (
         False  # diagonal scaling preconditioner for GMRES backward (experimental)

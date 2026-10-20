@@ -362,8 +362,8 @@ A_opt, env, E_gs = optimize_gs_ad(gate, None, config)  # env is a SplitCTMTensor
 Constraints (each raises a clear `NotImplementedError` otherwise):
 
 - **Single-site dense only** — `unit_cell="1x1"`, `DenseTensor`, on the default
-  `gs_recipe="2x2"`. SymmetricTensor/fermionic and multisite split AD are later
-  phases. (`gs_recipe="1x1"` is still *accepted* on this path but deprecated and
+  `gs_recipe="2x2"`. The split CTM is dense-only: SymmetricTensor (U(1)/Z_n or
+  fermionic) input is refused; use the fused CTM for symmetric iPEPS. (`gs_recipe="1x1"` is still *accepted* on this path but deprecated and
   non-convergent — #911.)
 - **Fixed chi** — the χ-changing knobs (`chi_ramp`, `chi_auto_bump`,
   `ctmrg_heuristic_increase_chi`) and CTM schedules are rejected; pick one
