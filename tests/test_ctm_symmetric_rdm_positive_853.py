@@ -50,6 +50,10 @@ def _rdm_min_eig_rel(rdm) -> float:
 # from 20 to 100 sweeps, and a single symmetric convergence at this size costs
 # ~44 min cold (measured 2026-09-10, a box ~2x faster than CI) -- the second
 # budget was an hour of bucket time proving the same property (#960).
+# Slow bucket (2026-10-20): 3157 s on the not-slow CPU run, the largest test
+# outside ``slow`` by 3.6x.  The cost is the eager symmetric sweep at D=3,
+# chi=12 (a fresh compile per new block shape), not the budget.
+@pytest.mark.slow
 @pytest.mark.parametrize("max_iter", [20])
 def test_the_plain_symmetric_ctm_keeps_the_rdm_positive(max_iter):
     """The control for #853: on the plain symmetric path, the RDM is a state.
