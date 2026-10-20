@@ -86,6 +86,23 @@ class CTMConfig:
                             tracked by issue #292.  Prefer
                             ``ad_backward_method="vjp"`` (the default)
                             until GMRES is stabilized.
+        adjoint_method:     Solver for the implicit-AD adjoint system.
+                            ``"fixed_point"`` (default) runs the fused
+                            Neumann loop and falls back to GMRES when it
+                            does not converge; ``"gmres"`` goes straight to
+                            the single-matvec GMRES solve.
+        adjoint_chain_rule: How the implicit-AD backward forms the chain
+                            rule's indirect term ``J_params^T λ``.
+                            ``"separate"`` (default) compiles its own
+                            params-VJP program; ``"joint"`` (opt-in, #1123)
+                            takes it from a joint GMRES solve over
+                            ``(params, env)``, so that program never
+                            compiles.  Same gradient to round-off; at U(1)
+                            D=3 chi=16 on an A100 the first step compiles
+                            23% faster (7,795 -> 5,977 s) with 12 GB less
+                            peak RSS; warm steps unchanged.  Refused on the
+                            split CTM (``fuse_virtual_legs=False``).  See
+                            ``docs/guide/algorithms/ipeps_ad_paths.md``.
         chi_ramp:           **Deprecated** (#512; emits ``DeprecationWarning``).
                             Staged ``[(chi, num_sweeps), ...]`` CTM
                             convergence.  It zero-pads the env between
