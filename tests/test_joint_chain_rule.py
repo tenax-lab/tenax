@@ -1,4 +1,4 @@
-"""Opt-in joint-VJP chain rule (``CTMConfig.adjoint_chain_rule="joint"``).
+"""Joint-VJP chain rule (``CTMConfig.adjoint_chain_rule="joint"``, the default via ``"auto"``).
 
 The implicit-AD backward's chain rule needs ``J_params^T λ``, the params-VJP
 of the CTM sweep, which ``_jit_chain_rule`` compiles as its own program -- the
@@ -100,8 +100,36 @@ def _grad(arrs, mode, **kw):
 # ----------------------------------------------------------------- config
 
 
-def test_default_is_separate():
-    assert CTMConfig().adjoint_chain_rule == "separate"
+def test_default_is_auto():
+    assert CTMConfig().adjoint_chain_rule == "auto"
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_auto_runs_joint_and_shares_its_programs():
+    """``"auto"`` resolves to ``"joint"`` before the dispatch key: one cache
+    entry for both, no ``_jit_chain_rule``, and the joint gradient."""
+    A0 = _site(_FUSED_SEED)
+    mark = len(_TRACED)
+    g_auto = _grad(A0, "auto")
+    traced = set(_TRACED[mark:])
+    assert "_jit_chain_rule" not in traced, sorted(traced)
+    assert {"_jit_gmres_joint_solve", "_jit_direct"} <= traced, sorted(traced)
+    mark = len(_TRACED)
+    g_joint = _grad(A0, "joint")
+    assert len(cea._VJP_CACHE) == 1, list(cea._VJP_CACHE)
+    assert not set(_TRACED[mark:]) & {"_jit_gmres_joint_solve", "_jit_direct"}
+    # Not bit-equal: the shared entry warm-starts the second solve from the
+    # first one's lambda (#501), so they agree to the solve tolerance.
+    np.testing.assert_allclose(
+        np.asarray(g_auto), np.asarray(g_joint), rtol=1e-10, atol=1e-12
+    )
+
+
+def test_ctm_energy_implicit_defaults_to_auto():
+    import inspect
+
+    sig = inspect.signature(ctm_energy_implicit)
+    assert sig.parameters["adjoint_chain_rule"].default == "auto"
 
 
 def test_invalid_value_raises():
@@ -404,4 +432,5 @@ def test_split_ctm_refuses_the_joint_chain_rule(recipe):
 
     with pytest.raises(NotImplementedError, match="adjoint_chain_rule"):
         validate_split_ctm_config(CTMConfig(adjoint_chain_rule="joint"), recipe)
-    validate_split_ctm_config(CTMConfig(), recipe)  # the default still passes
+    validate_split_ctm_config(CTMConfig(), recipe)  # the default "auto" passes
+    validate_split_ctm_config(CTMConfig(adjoint_chain_rule="separate"), recipe)

@@ -54,6 +54,8 @@ def _energy(A_arr, adjoint_method, gmres_tol=1e-6):
             min_iter=8,
             conv_tol=1e-10,
             adjoint_method=adjoint_method,
+            # Pins the separate chain rule, whose programs these tests count.
+            adjoint_chain_rule="separate",
             gmres_tol=gmres_tol,
         )
     )

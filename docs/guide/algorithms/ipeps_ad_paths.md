@@ -366,8 +366,8 @@ dropped from 3,729 s to 1,188 s.  At D=3 the fallback is common near a slowly
 converging forward; one D=3 chi=16 run spent 12,357 s compiling it before this
 change (not re-measured).
 
-**Joint-VJP chain rule (opt-in).** `CTMConfig(adjoint_chain_rule="joint")`
-takes the chain rule's indirect term `J_params^T λ` from the adjoint solve's
+**Joint-VJP chain rule (the default).** `CTMConfig(adjoint_chain_rule="joint")`,
+which the default `"auto"` runs on the fused CTM, takes the chain rule's indirect term `J_params^T λ` from the adjoint solve's
 own matvec — one VJP of the CTM sweep over `(params, env)` — so the separate
 params-VJP program (`_jit_chain_rule`, the largest single compile at D=3) is
 never built.  The GMRES solve returns `J_params^T` of its best iterate.  The
@@ -391,7 +391,10 @@ One run per mode; compile times on that host vary by about ±20%.  With
 `benchmarks/bench_chain_rule_compile.py` (D=2 chi=8 dense single-site, CPU)
 the GMRES-path backward compile drops 51%.  Carrying `J_params^T λ` through
 the fused loop instead was measured and rejected: it doubled the fused
-program's compile.  The default stays `"separate"` for now.
+program's compile.  `"separate"` keeps the old programs, for reproducing
+runs from before the flip.  The split CTM (`fuse_virtual_legs=False`) has
+its own chain rule: `"auto"` leaves it alone there and an explicit `"joint"`
+is refused.
 
 #### Persistent compilation cache
 

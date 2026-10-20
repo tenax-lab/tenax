@@ -689,7 +689,7 @@ def ctm_energy_implicit(
     device_mesh=None,
     ctm_chunk_size: int | None = None,
     mixing: float = 0.0,
-    adjoint_chain_rule: str = "separate",
+    adjoint_chain_rule: str = "auto",
 ) -> jnp.ndarray:
     """Compute iPEPS energy with implicit-differentiation backward (GMRES).
 
@@ -811,7 +811,8 @@ def ctm_energy_implicit(
                            see ``python_loop_ctm_converge``.  The fixed point,
                            and so the adjoint's linearization point, is the
                            same as without mixing.
-        adjoint_chain_rule: ``"separate"`` (default) or ``"joint"``; see
+        adjoint_chain_rule: ``"auto"`` (default, runs ``"joint"``),
+                           ``"joint"`` or ``"separate"``; see
                            ``CTMConfig.adjoint_chain_rule``.
 
     Returns:
@@ -884,6 +885,11 @@ def ctm_energy_implicit(
     # so JAX can differentiate through them without densifying.
     params_data = tuple(site_tensors[c] for c in coords)
 
+    # "auto" is "joint" here: every backward this dispatch builds supports
+    # it (#1123).  Resolved before the cache key so "auto" and "joint" share
+    # compiled programs.  The split CTM never reaches this function.
+    if adjoint_chain_rule == "auto":
+        adjoint_chain_rule = "joint"
     return _ctm_energy_implicit_dispatch(
         params_data,
         coords,
@@ -1410,7 +1416,7 @@ def _ctm_energy_implicit_dispatch(
     device_mesh=None,
     ctm_chunk_size=None,
     mixing=0.0,
-    adjoint_chain_rule="separate",
+    adjoint_chain_rule="joint",
 ):
     """Dispatch to custom_vjp-decorated function with caching.
 
@@ -1547,7 +1553,7 @@ def _make_implicit_vjp_fn(
     device_mesh=None,
     ctm_chunk_size: int | None = None,
     mixing: float = 0.0,
-    adjoint_chain_rule: str = "separate",
+    adjoint_chain_rule: str = "joint",
 ):
     """Build a custom_vjp-decorated function closed over static config.
 

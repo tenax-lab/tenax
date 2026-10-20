@@ -500,7 +500,7 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | AD method             | ``gs_implicit_ad``          | ``True``         | ``False`` = explicit AD              |
 | Implicit AD mode      | ``ctm_ad_mode``             | ``None``         | ``"c4v_reference"`` (Francuz et al., 1-site C4v) / ``"root_implicit"`` (dense 1x1 asymmetric root-implicit AD, arXiv:2607.15030; ``unit_cell`` other than ``"1x1"`` raises ``NotImplementedError``) |
 | Implicit adjoint      | ``adjoint_solver``          | ``"bicgstab"``   | ``"gmres"`` (reference-mode only)    |
-| Adjoint chain rule    | ``adjoint_chain_rule``      | ``"separate"``   | ``"joint"`` (opt-in, #1123): indirect term from a joint GMRES solve; same gradient, D=3 first-step compile −23%; refused on split CTM |
+| Adjoint chain rule    | ``adjoint_chain_rule``      | ``"auto"``       | ``"auto"`` = ``"joint"`` on the fused CTM (indirect term from a joint GMRES solve; same gradient, D=3 first-step compile −23%) and the split CTM's own chain rule there; ``"separate"`` = pre-flip behaviour; explicit ``"joint"`` refused on split CTM |
 | Adjoint max iters     | ``adjoint_maxiter``         | ``50``           | reference-mode only                  |
 | Adjoint tol           | ``adjoint_tol``             | ``1e-8``         | reference-mode only                  |
 | Adjoint Tikhonov      | ``adjoint_tikhonov``        | ``1e-6``         | ``0.0`` for strictly exact adjoint; raise to 1e-4…1e-3 near a well-converged GS |
