@@ -45,9 +45,13 @@ def test_seed_is_converged_and_stable(su_pair):
     assert r.stable, (r.energy_cold, r.energy_forced)
     assert r.layout == layout_of(r.envs_init)
     assert any(len(v) > 1 for v in r.layout.values())  # charged sectors present
-    # The chi=8 corner spectrum has rank 6 (exact zeros at the cut), so there
-    # is no weight at the cut and the gap is reported as inf, not NaN.
-    assert not np.isnan(r.cut_gap) and r.cut_gap > 0
+    # Regime (measured): the chi+4 corner spectrum has a 3-fold degeneracy,
+    # s/s0 = 9.36709e-3 in sectors -4, 0, +4, at sorted positions 6, 7, 8.
+    # The chi=8 cut falls inside it, so the gap is roundoff (4e-16 or exactly
+    # 0.0 between builds): a tie at the cut, which cut_gap must report, not
+    # hide as NaN or inf.  test_cut_gap_is_finite_when_the_cut_bites owns
+    # the nonzero-gap case.
+    assert np.isfinite(r.cut_gap) and 0 <= r.cut_gap < 1e-12, r.cut_gap
 
 
 def test_cut_gap_is_finite_when_the_cut_bites(su_pair):
