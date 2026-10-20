@@ -25,6 +25,7 @@ from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
+from tenax.algorithms.ctm_layout import symmetric_layout_seed
 from tenax.algorithms.fermionic_ipeps import (
     FPEPSConfig,
     _initialize_fpeps,
@@ -32,6 +33,12 @@ from tenax.algorithms.fermionic_ipeps import (
     bond_layout,
     spinless_fermion_gate,
     su_grow_layout,
+)
+from tenax.algorithms.ipeps import (
+    heisenberg_u1sz_init_pair,
+    ipeps,
+    xxz_gate,
+    xxz_gate_u1sz,
 )
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.algorithms.ipeps_optimize import optimize_gs_ad
@@ -551,6 +558,31 @@ def seeded_d2():
     return A, B, H, 2, {(0, 0): eA, (1, 0): eB}
 
 
+@pytest.fixture(scope="module")
+def seeded_xxz_d2():
+    """A bosonic U(1) XXZ (Delta=0.3) pair, D=2, chi=8, for the tests that need
+    ``gs_metric_precond``: on fermionic input (``seeded_d2``) #1099 turns the
+    metric off, so the metric L-BFGS path cannot run there.
+
+    Measured (CPU): SU + seed ~260 s; the seed is cold-converged in 18 sweeps
+    and stable over 100 forced sweeps, E = -0.4936975.  A 4-step metric run
+    calls ``lbfgs_two_loop`` with histories 0, 1, 2, 3, and all three
+    re-checks keep the layout.
+    """
+    A0, B0 = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+    su_cfg = iPEPSConfig(
+        max_bond_dim=2, num_imaginary_steps=200, dt=0.05, ctm=CTMConfig(chi=CHI_D2)
+    )
+    _, (A, B), _ = ipeps(xxz_gate(0.3), (A0, B0), su_cfg, compute_energy=False)
+    H = xxz_gate_u1sz(0.3)
+    seed_cfg = dataclasses.replace(
+        CTMConfig(chi=CHI_D2), conv_tol=1e-10, max_iter=300, plateau_patience=None
+    )
+    r = symmetric_layout_seed(A, B, H, seed_cfg, forced_sweeps=100)
+    assert r.cold_converged and r.stable  # regime: a converged, stable seed
+    return A, B, H, r.envs_init
+
+
 def _ad_config(steps, gs=None, **ctm):
     return iPEPSConfig(
         max_bond_dim=2,
@@ -983,7 +1015,7 @@ def _certify_rechecks(monkeypatch):
 
     The scripted-change tests force ``_layout_changed``; the optimizer acts
     on a change only when the re-check also certified its layout (final
-    review I1).  On this fixture the real re-checks end in an eager
+    review I1).  On ``seeded_d2`` the real re-checks end in an eager
     two-cycle (measured: RuntimeWarning "alternated" from the re-check
     call), so they must script the certificate too.
     """
@@ -1010,16 +1042,22 @@ def test_layout_changed_compares_chi_layouts(seeded_d2, light_envs):
     assert ipo._layout_changed(light_envs, envs)
 
 
-def test_the_recheck_runs_unfrozen_with_the_configured_tie_rtol(seeded_d2, monkeypatch):
+def test_the_recheck_runs_unfrozen_with_the_configured_tie_rtol(
+    seeded_xxz_d2, monkeypatch
+):
     """Steps 2..N each run one re-check: warm (env_init = the cache the
     previous step left), eager phase on (no ``eager_layout_sweeps=0``),
     the configured tie tolerance.  Refresh and line-search probes stay
     frozen.  On this fixture neither re-check moves the layout (measured:
     verdicts ``[False, False]``), so ``layout_changes`` is ``[]``; the
-    scripted tests below own the change path."""
+    scripted tests below own the change path.
+
+    Bosonic fixture: it runs the default optimizer (metric L-BFGS).  On the
+    fermionic ``seeded_d2`` #1099 drops the metric, and on that path both
+    re-checks move the layout (measured: ``[True, True]``)."""
     import tenax.algorithms._ctm_python_loop as cpl
 
-    A, B, H, _d, envs = seeded_d2
+    A, B, H, envs = seeded_xxz_d2
     real = cpl.python_loop_ctm_converge
     calls = []
 
@@ -1067,7 +1105,7 @@ def test_the_recheck_runs_unfrozen_with_the_configured_tie_rtol(seeded_d2, monke
 
 
 @pytest.mark.parametrize("metric", [True, False], ids=["metric_lbfgs", "optax_lbfgs"])
-def test_a_layout_change_resets_the_optimizer_state(seeded_d2, monkeypatch, metric):
+def test_a_layout_change_resets_the_optimizer_state(request, monkeypatch, metric):
     """Script a change at the step-3 re-check (step 2 has an empty L-BFGS
     history anyway, so a reset there proves nothing).  Then, before the
     step-4 re-check: a fresh value_and_grad runs (the HZ reuse is dropped),
@@ -1077,10 +1115,17 @@ def test_a_layout_change_resets_the_optimizer_state(seeded_d2, monkeypatch, metr
     ``lbfgs_two_loop``: the first two-loop call after the change must see an
     empty history (no stale pairs, and no new pair built from the pre-change
     params).  ``gs_metric_precond=False`` uses the optax optimizer: its
-    ``init`` must run again before its first ``update`` on the new layout."""
+    ``init`` must run again before its first ``update`` on the new layout.
+
+    The metric case runs on the bosonic ``seeded_xxz_d2``: on the fermionic
+    ``seeded_d2`` #1099 turns the metric off, so ``lbfgs_two_loop`` never
+    runs there."""
     import tenax.algorithms._metric_precond as mp
 
-    A, B, H, _d, envs = seeded_d2
+    if metric:
+        A, B, H, envs = request.getfixturevalue("seeded_xxz_d2")
+    else:
+        A, B, H, _d, envs = request.getfixturevalue("seeded_d2")
     events = []
 
     def _changed(old, new):
