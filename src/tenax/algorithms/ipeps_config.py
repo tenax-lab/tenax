@@ -93,15 +93,18 @@ class CTMConfig:
                             the single-matvec GMRES solve.
         adjoint_chain_rule: How the implicit-AD backward forms the chain
                             rule's indirect term ``J_params^T λ``.
-                            ``"separate"`` (default) compiles its own
-                            params-VJP program; ``"joint"`` (opt-in, #1123)
-                            takes it from a joint GMRES solve over
-                            ``(params, env)``, so that program never
-                            compiles.  Same gradient to round-off; at U(1)
-                            D=3 chi=16 on an A100 the first step compiles
-                            23% faster (7,795 -> 5,977 s) with 12 GB less
-                            peak RSS; warm steps unchanged.  Refused on the
-                            split CTM (``fuse_virtual_legs=False``).  See
+                            ``"joint"`` takes it from a joint GMRES solve
+                            over ``(params, env)``, so the separate
+                            params-VJP program never compiles; ``"separate"``
+                            compiles that program (the behaviour before
+                            #1123).  Same gradient to round-off; at U(1) D=3
+                            chi=16 on an A100 the first step compiles 23%
+                            faster (7,795 -> 5,977 s) with 12 GB less peak
+                            RSS; warm steps unchanged.  ``"auto"`` (default)
+                            runs ``"joint"`` on the fused CTM and leaves the
+                            split CTM (``fuse_virtual_legs=False``), which
+                            has its own chain rule, as it was; an explicit
+                            ``"joint"`` is refused there.  See
                             ``docs/guide/algorithms/ipeps_ad_paths.md``.
         chi_ramp:           **Deprecated** (#512; emits ``DeprecationWarning``).
                             Staged ``[(chi, num_sweeps), ...]`` CTM
@@ -239,7 +242,10 @@ class CTMConfig:
     adjoint_method: Literal["fixed_point", "gmres"] = "fixed_point"
     # How the implicit-AD backward forms the chain rule's indirect term
     # J_params^T lambda.
-    #   "separate" (default) -- its own compiled program, ``_jit_chain_rule``:
+    #   "auto" (default) -- "joint" on the fused implicit path, which is the
+    #     only backward that reads this; the split CTM keeps its own chain
+    #     rule.  An explicit "joint" on the split CTM is refused.
+    #   "separate" -- its own compiled program, ``_jit_chain_rule``:
     #     the params-VJP of the CTM sweep, the largest single compile at D=3
     #     (2,604 s at chi=16 on GPU).
     #   "joint" -- the GMRES adjoint solve's matvec is one VJP over
@@ -249,9 +255,10 @@ class CTMConfig:
     #     solve, seeded with its lambda.  Gradient equal to "separate" to
     #     round-off.  U(1) D=3 chi=16 on GPU (A100), first step: compile
     #     7,795 -> 5,977 s (-23%), wall 8,231 -> 6,388 s, peak RSS 51 -> 39 GB,
-    #     warm steps unchanged.  Opt-in until the default flip (docs/
-    #     superpowers/specs/2026-10-18-joint-vjp-chain-rule-design.md).
-    adjoint_chain_rule: Literal["separate", "joint"] = "separate"
+    #     warm steps unchanged.  Default via "auto" since the flip (#1123
+    #     shipped it opt-in; docs/superpowers/specs/
+    #     2026-10-18-joint-vjp-chain-rule-design.md).
+    adjoint_chain_rule: Literal["auto", "separate", "joint"] = "auto"
     # "elementwise" or "sv" (corner singular-value spectrum).
     #
     # #780 -- "elementwise" is GAUGE-DEPENDENT and does not converge on a
@@ -594,7 +601,7 @@ class CTMConfig:
                 f"adjoint_method must be one of {valid_adjoint_methods}, "
                 f"got {self.adjoint_method!r}"
             )
-        valid_chain_rules = {"separate", "joint"}
+        valid_chain_rules = {"auto", "separate", "joint"}
         if self.adjoint_chain_rule not in valid_chain_rules:
             raise ValueError(
                 f"adjoint_chain_rule must be one of {valid_chain_rules}, "
