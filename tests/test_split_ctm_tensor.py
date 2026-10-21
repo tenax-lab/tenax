@@ -194,62 +194,26 @@ class TestSplitCTMTensorInit:
         for t in env:
             assert jnp.all(jnp.isfinite(t.todense()))
 
-    def test_symmetric_init_shapes(self, small_peps_symmetric):
-        """SymmetricTensor initialization should produce correct shapes."""
-        chi, chi_I = 4, 2
-        D = 2
-        env = initialize_split_ctm_tensor_env(small_peps_symmetric, chi, chi_I)
-        assert isinstance(env, SplitCTMTensorEnv)
+    def test_symmetric_input_is_refused(self, small_peps_symmetric):
+        """The split CTM is dense-only: a bosonic U(1) site is refused at
+        every entry -- init, single-site sweep, the public converge and the
+        energy -- instead of being swept."""
+        from tenax.algorithms._split_ctm_tensor_energy import (
+            compute_energy_split_ctm_tensor,
+        )
 
-        for C in [env.C1, env.C2, env.C3, env.C4]:
-            assert isinstance(C, SymmetricTensor)
-            assert C.todense().shape == (chi, chi)
-
-        for T_ket in [env.T1_ket, env.T2_ket, env.T3_ket, env.T4_ket]:
-            assert isinstance(T_ket, SymmetricTensor)
-            assert T_ket.todense().shape == (chi, D, chi_I)
-
-        for T_bra in [env.T1_bra, env.T2_bra, env.T3_bra, env.T4_bra]:
-            assert isinstance(T_bra, SymmetricTensor)
-            assert T_bra.todense().shape == (chi_I, D, chi)
-
-    @pytest.mark.parametrize("D, chi", [(2, 4), (2, 6), (2, 8), (3, 8), (3, 12)])
-    def test_fermionic_interlayer_bonds_match(self, D, chi):
-        """Issue #391: ket/bra interlayer (`*_I`) bonds are the SAME SVD bond
-        and must carry identical raw charges.
-
-        Pre-fix the ket derived ``qI = qc + qd`` while the bra derived
-        ``qI = qd − qc``; for non-trivial charges these gave different raw
-        sequences AND different per-parity dimensions, so the relabel-and-
-        contract step in ``_split_ctm_move_left`` either silently broadcast
-        size-1 dims or crashed.
-        """
-        A = make_random_fermionic_site(D, d=2, seed=70)
-        env = initialize_split_ctm_tensor_env(A, chi=chi, chi_I=chi)
-        for ket, bra in [
-            (env.T1_ket, env.T1_bra),
-            (env.T2_ket, env.T2_bra),
-            (env.T3_ket, env.T3_bra),
-            (env.T4_ket, env.T4_bra),
-        ]:
-            ket_I = ket.indices[
-                ket.labels().index(
-                    next(lbl for lbl in ket.labels() if lbl.endswith("_I"))
-                )
-            ]
-            bra_I = bra.indices[
-                bra.labels().index(
-                    next(lbl for lbl in bra.labels() if lbl.endswith("_I"))
-                )
-            ]
-            assert np.array_equal(
-                np.asarray(ket_I.charges), np.asarray(bra_I.charges)
-            ), (
-                f"ket I-charges {list(ket_I.charges)} != bra I-charges {list(bra_I.charges)}"
-            )
-            # Flows on the I-bond must be opposite (one IN, one OUT) so the
-            # interlayer contraction is flow-compatible.
-            assert int(ket_I.flow) == -int(bra_I.flow)
+        A = small_peps_symmetric
+        dense_env = initialize_split_ctm_tensor_env(
+            DenseTensor(A.todense(), A.indices), 4, 2
+        )
+        with pytest.raises(NotImplementedError, match="dense-only"):
+            initialize_split_ctm_tensor_env(A, 4, 2)
+        with pytest.raises(NotImplementedError, match="dense-only"):
+            _split_ctm_tensor_sweep(dense_env, A, 4, 2, True)
+        with pytest.raises(NotImplementedError, match="dense-only"):
+            ctm_split_tensor(A, chi=4, max_iter=2, chi_I=2)
+        with pytest.raises(NotImplementedError, match="dense-only"):
+            compute_energy_split_ctm_tensor(A, dense_env, np.eye(4), d=2)
 
     def test_fermionic_ctm_is_refused(self):
         """#1035 step 4: the split CTM's split <-> fused conversions are
@@ -495,195 +459,6 @@ class TestSplitCTMTensorEnergy:
 # ------------------------------------------------------------------ #
 # SymmetricTensor tests                                                #
 # ------------------------------------------------------------------ #
-
-
-class TestSplitCTMSymmetric:
-    """Tests for SymmetricTensor iPEPS with trivial and nontrivial charges."""
-
-    def test_symmetric_one_sweep_finite(self, small_peps_symmetric):
-        """One CTM sweep with trivial-charge SymmetricTensor A produces finite tensors."""
-        chi, chi_I = 4, 2
-        env = initialize_split_ctm_tensor_env(small_peps_symmetric, chi, chi_I)
-        env = _split_ctm_tensor_sweep(env, small_peps_symmetric, chi, chi_I, True)
-        for t in env:
-            assert jnp.all(jnp.isfinite(t.todense())), (
-                "SymmetricTensor sweep produced non-finite tensors"
-            )
-
-    def test_fermionic_u1_one_sweep_finite(self):
-        """One CTM sweep with FermionicU1 charges produces finite tensors.
-
-        This is the key regression test: with dagger(), the physical trace
-        loses blocks because charge 1 is dualled to -1 and mismatches.
-        With bar(), charges stay identical so all blocks are preserved.
-        """
-        from tenax.core.symmetry import FermionicU1
-
-        key = jax.random.PRNGKey(77)
-        sym = FermionicU1()
-        virt_charges = np.array([0, 1], dtype=np.int32)
-        phys_charges = np.array([0, 1], dtype=np.int32)
-        indices = (
-            TensorIndex.from_charges(
-                sym, virt_charges.copy(), FlowDirection.OUT, label="u"
-            ),
-            TensorIndex.from_charges(
-                sym, virt_charges.copy(), FlowDirection.IN, label="d"
-            ),
-            TensorIndex.from_charges(
-                sym, virt_charges.copy(), FlowDirection.OUT, label="l"
-            ),
-            TensorIndex.from_charges(
-                sym, virt_charges.copy(), FlowDirection.IN, label="r"
-            ),
-            TensorIndex.from_charges(
-                sym, phys_charges.copy(), FlowDirection.IN, label="phys"
-            ),
-        )
-        A = SymmetricTensor.random_normal(indices, key)
-        chi, chi_I = 4, 2
-        env = initialize_split_ctm_tensor_env(A, chi, chi_I)
-        env = _split_ctm_tensor_sweep(env, A, chi, chi_I, True)
-        for t in env:
-            assert jnp.all(jnp.isfinite(t.todense())), (
-                "FermionicU1 sweep produced non-finite tensors"
-            )
-
-    def test_symmetric_multi_sweep_converges(self, small_peps_symmetric):
-        """Multiple CTM sweeps with SymmetricTensor A don't crash (regression for type mixing)."""
-        env = ctm_split_tensor(small_peps_symmetric, chi=4, max_iter=5, chi_I=2)
-        for t in env:
-            assert jnp.all(jnp.isfinite(t.todense())), (
-                "Multi-sweep symmetric CTM produced non-finite tensors"
-            )
-
-    def test_symmetric_energy_matches_dense(self, small_peps_dense, heisenberg_gate):
-        """SymmetricTensor split-CTM energy should match DenseTensor result.
-
-        Uses the same tensor data wrapped as both DenseTensor and SymmetricTensor
-        (with trivial U(1) charges) to verify the symmetric path is correct.
-
-        ``chi_I = chi`` (the production default) rather than the ``chi_I=4,
-        chi=8`` this used to run.  On a *random* site tensor an interlayer bond
-        that far below chi leaves the retained interlayer subspace genuinely
-        ambiguous, and the dense and block-sparse SVDs tie-break it
-        differently: measured dense ``0.2925`` vs symmetric ``-14.32`` at
-        chi_I=4, while at chi_I=chi they agree to 1.7e-16 and the corner
-        spectra are identical.  Neither number is meaningful there — dense at
-        chi_I=4 is itself 0.11 away from its own chi_I>=8 value, and chi_I=2
-        gives -1.05 — so the old setting could not discriminate correctness in
-        the first place.  It only passed because the ``1x1`` rank-1 collapse
-        (#726/#746) made chi_I inert: that path returns a bit-identical energy
-        at chi_I=4 and chi_I=8.
-
-        A physical (simple-update) state is clean at every chi_I from 2 to 16
-        (dense vs symmetric agree to <=1e-10), so this is a random-tensor
-        artifact of an under-resolved interlayer bond, not a symmetric-path
-        defect.  Tracked in #766.
-        """
-        # Build SymmetricTensor with same data as small_peps_dense
-        A_sym = SymmetricTensor.from_dense(
-            small_peps_dense.todense(), small_peps_dense.indices
-        )
-
-        chi, chi_I = 8, 8
-        d = 2
-
-        env_d = ctm_split_tensor(small_peps_dense, chi=chi, max_iter=50, chi_I=chi_I)
-        E_dense = compute_energy_split_ctm_tensor(
-            small_peps_dense, env_d, heisenberg_gate, d
-        )
-
-        env_s = ctm_split_tensor(A_sym, chi=chi, max_iter=50, chi_I=chi_I)
-        E_sym = compute_energy_split_ctm_tensor(A_sym, env_s, heisenberg_gate, d)
-
-        assert jnp.isfinite(E_sym), f"Symmetric energy is not finite: {float(E_sym)}"
-        assert jnp.abs(E_dense - E_sym) < 1e-6, (
-            f"Energy mismatch: dense={float(E_dense)}, sym={float(E_sym)}"
-        )
-
-    def test_fermionic_u1_charges_preserved_across_sweeps(self):
-        """Nontrivial charge sectors survive multiple CTM sweeps (regression for charge collapse)."""
-        from tenax.core.symmetry import FermionicU1
-
-        key = jax.random.PRNGKey(77)
-        sym = FermionicU1()
-        virt_charges = np.array([0, 1], dtype=np.int32)
-        phys_charges = np.array([0, 1], dtype=np.int32)
-        indices = (
-            TensorIndex.from_charges(
-                sym, virt_charges.copy(), FlowDirection.OUT, label="u"
-            ),
-            TensorIndex.from_charges(
-                sym, virt_charges.copy(), FlowDirection.IN, label="d"
-            ),
-            TensorIndex.from_charges(
-                sym, virt_charges.copy(), FlowDirection.OUT, label="l"
-            ),
-            TensorIndex.from_charges(
-                sym, virt_charges.copy(), FlowDirection.IN, label="r"
-            ),
-            TensorIndex.from_charges(
-                sym, phys_charges.copy(), FlowDirection.IN, label="phys"
-            ),
-        )
-        A = SymmetricTensor.random_normal(indices, key)
-        chi, chi_I = 4, 2
-        env = initialize_split_ctm_tensor_env(A, chi, chi_I)
-        # Run 3 sweeps
-        for _ in range(3):
-            env = _split_ctm_tensor_sweep(env, A, chi, chi_I, True)
-        # All tensors must remain SymmetricTensors with at least 1 block.
-        # Block count may decrease from initial because the block-sparse
-        # projector keeps the dominant charge sectors (unlike the old
-        # dense code which forced charge distribution via _derive_charges).
-        for t in env:
-            assert isinstance(t, SymmetricTensor), (
-                f"Expected SymmetricTensor, got {type(t)}"
-            )
-            assert t.n_blocks >= 1, (
-                "All blocks collapsed to 0 — environment degenerated"
-            )
-
-    def test_symmetric_sweep_no_todense(self, small_peps_symmetric):
-        """CTM sweeps on SymmetricTensor must not call todense() or from_dense().
-
-        This guards against regressions that silently densify during the
-        symmetric path.  The energy measurement is excluded because it
-        currently bridges to dense (known limitation).
-        """
-        from unittest.mock import patch
-
-        chi, chi_I = 4, 2
-        env = initialize_split_ctm_tensor_env(small_peps_symmetric, chi, chi_I)
-
-        todense_calls = []
-        from_dense_calls = []
-
-        orig_todense = SymmetricTensor.todense
-        orig_from_dense = SymmetricTensor.from_dense
-
-        def tracking_todense(self):
-            todense_calls.append(True)
-            return orig_todense(self)
-
-        @classmethod
-        def tracking_from_dense(cls, *args, **kwargs):
-            from_dense_calls.append(True)
-            return orig_from_dense(*args, **kwargs)
-
-        with (
-            patch.object(SymmetricTensor, "todense", tracking_todense),
-            patch.object(SymmetricTensor, "from_dense", tracking_from_dense),
-        ):
-            _split_ctm_tensor_sweep(env, small_peps_symmetric, chi, chi_I, True)
-
-        assert len(todense_calls) == 0, (
-            f"todense() called {len(todense_calls)} times during symmetric sweep"
-        )
-        assert len(from_dense_calls) == 0, (
-            f"from_dense() called {len(from_dense_calls)} times during symmetric sweep"
-        )
 
 
 class TestSplitEdgeHelper:
@@ -1001,6 +776,8 @@ class TestSplitRDMsFermionic:
         )
 
         A = make_random_fermionic_site(2, d=2, seed=70)
-        env = initialize_split_ctm_tensor_env(A, 6, 6)
+        # The split init itself refuses fermionic input, so build the env
+        # from a dense copy to reach the energy's own refusal.
+        env = initialize_split_ctm_tensor_env(DenseTensor(A.todense(), A.indices), 6, 6)
         with pytest.raises(NotImplementedError, match="split-CTM energy: fermionic"):
             compute_energy_split_ctm_tensor(A, env, heisenberg_gate, d=2)
