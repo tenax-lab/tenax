@@ -15,7 +15,7 @@ Tenax is a JAX-based tensor-network library: DMRG/iDMRG on MPS, TRG/HOTRG, and i
 ## Gotchas
 
 - **Avoid `todense()` on the symmetric-tensor path** unless the result is guaranteed small (a local operator, or a bond matrix after decomposition). Use the block-sparse operations (`SymmetricTensor` methods, `tenax.linalg.svd`/`qr`/`eigh`) instead — densifying a large `SymmetricTensor` defeats the point of symmetric tensors.
-- New public API must be exported in `src/tenax/__init__.py` (`__all__`) and reflected in `README.md`; keep README examples consistent with actual signatures and test usage.
+- New public API must be exported in `src/tenax/__init__.py` (`__all__`) and documented in its docstring (rendered by the Sphinx API pages in `docs/api/`) and in the matching `docs/guide/` page — options, caveats, issue references and measured numbers belong there. `README.md` gets at most a one-line feature entry linking to that guide page, and only when a new user-visible capability is added — never option-level detail. Keep README and guide examples consistent with actual signatures and test usage.
 
 ## Skills
 

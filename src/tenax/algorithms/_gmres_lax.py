@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 
 
@@ -335,3 +336,283 @@ def gmres_pytree_jax(
 
     x_flat, info = jax_gmres(flat_matvec, b_flat, x0_flat, **kwargs)
     return unflatten(x_flat), info
+
+
+# Phases of :func:`gmres_single_matvec`.  The loop body applies the matvec
+# once and the phase decides what the product means.
+_SEED, _RESID, _ARNOLDI = 0, 1, 2
+
+
+def gmres_single_matvec(
+    matvec, b_tree, candidates, *, tol, maxiter, restart, aux=False
+):
+    """Restarted GMRES whose compiled program applies ``matvec`` at ONE site.
+
+    JAX's GMRES calls the matvec at three places (initial residual, Arnoldi
+    step, residual after each restart), and XLA inlines every call.  When the
+    matvec is a CTM-sweep VJP that is three compiled copies of the most
+    expensive program in the backward -- measured at D=2 chi=8 on CPU:
+    2,458 s for the GMRES program against 611 s for the fused Neumann module
+    with one copy.  Here a single ``lax.while_loop`` body computes
+    ``y = matvec(v_in)`` once and a ``lax.switch`` on ``phase`` consumes it:
+
+    * ``_SEED``    -- ``y = A c_k`` for candidate ``k``; keep ``c_k`` if its
+      residual is *strictly* below the incumbent's.  The incumbent starts as
+      zero at ``||b||``, so zero wins ties and an earlier candidate beats a
+      later equal one -- the :func:`_best_adjoint_seed` rules (#858).
+    * ``_RESID``   -- ``y = A x``: the true residual.  Stop when
+      ``||r|| <= max(tol*||b||, tol)``, when ``maxiter`` cycles are spent, or
+      when ``||r||`` is not finite; otherwise start a Krylov cycle.
+    * ``_ARNOLDI`` -- ``y = A V[j]``: CGS2 orthogonalisation, Givens update,
+      and at the end of a cycle (``restart`` steps, estimated convergence, or
+      breakdown) the triangular solve and the update of ``x``.
+
+    Every exit passes through ``_RESID``, so the returned ``abs_resid`` is the
+    measured ``||b - A x||`` of the returned ``x``, never an estimate.  The one
+    exception: if a ``_RESID`` residual is non-finite before any finite
+    residual of the operator has been measured (the operator produced NaN/inf),
+    the best iterate is returned but ``abs_resid`` is NaN, so the solve fails
+    closed (``best_res`` would then be the assumed ``||b||`` of ``x = 0``,
+    which was never measured).  A later non-finite cycle (e.g. a singular
+    system) keeps the best *measured* pair.  A non-finite *seed* candidate
+    residual does not set this: a bad warm start must not poison a good solve.
+
+    Args:
+        matvec: pytree -> pytree, the operator ``A``.
+        b_tree: right-hand side pytree.
+        candidates: list of seed pytrees shaped like ``b_tree``; ``None``
+            entries are skipped.  Zero is always in the running.
+        tol: absolute and relative tolerance, as ``_adjoint_converged``.
+        maxiter: maximum restart cycles.  ``0`` returns the best seed.
+        restart: Arnoldi steps per cycle.
+        aux: when True, ``matvec`` returns ``(A v, a(v))`` with ``a`` linear,
+            and the solver also returns ``a(x)`` for the returned ``x``.  Free:
+            ``best_x`` changes only in ``_SEED`` and ``_RESID``, where the
+            matvec input is exactly the vector adopted, so ``a(best_x)`` comes
+            from the same call and is kept under the same strict-``<`` rule.
+            The Krylov basis needs no copy.  Used by the joint-VJP chain rule,
+            where ``a(v) = J_params^T v``.
+
+    Returns:
+        ``(x_tree, abs_resid, b_norm)``, plus ``a(x_tree)`` last when ``aux``.
+    """
+    b_leaves, treedef = jax.tree.flatten(b_tree)
+    shapes = [leaf.shape for leaf in b_leaves]
+    offsets = [int(o) for o in np.cumsum([leaf.size for leaf in b_leaves])[:-1]]
+
+    def flatten(tree):
+        return jnp.concatenate([jnp.ravel(leaf) for leaf in jax.tree.leaves(tree)])
+
+    def unflatten(vec):
+        parts = jnp.split(vec, offsets)
+        return jax.tree.unflatten(
+            treedef, [p.reshape(s) for p, s in zip(parts, shapes)]
+        )
+
+    b = flatten(b_tree)
+    dtype = b.dtype
+    rdtype = jnp.zeros((), dtype).real.dtype
+    n = b.shape[0]
+    m = int(restart)
+    if m < 1:
+        raise ValueError(f"restart must be >= 1, got {restart}")
+
+    # Fail closed on a real problem with complex data: ``.astype`` would drop
+    # the imaginary part and certify a residual that is not the true one.
+    if not jnp.issubdtype(dtype, jnp.complexfloating):
+        out_shapes = jax.eval_shape(matvec, b_tree)
+        if aux:
+            out_shapes = out_shapes[0]
+        if any(
+            jnp.issubdtype(leaf.dtype, jnp.complexfloating)
+            for leaf in jax.tree.leaves(out_shapes)
+        ):
+            raise TypeError("gmres_single_matvec: b is real but matvec returns complex")
+        for c in candidates:
+            if c is not None and any(
+                jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.complexfloating)
+                for leaf in jax.tree.leaves(c)
+            ):
+                raise TypeError(
+                    "gmres_single_matvec: b is real but a candidate is complex"
+                )
+
+    def apply(v):
+        out = matvec(unflatten(v))
+        if aux:
+            y, a = out
+            return flatten(y).astype(dtype), a
+        return flatten(out).astype(dtype), None
+
+    cands = [flatten(c).astype(dtype) for c in candidates if c is not None]
+    n_cand = len(cands)
+    C = jnp.stack(cands) if cands else jnp.zeros((1, n), dtype)
+
+    def norm(v):
+        return jnp.sqrt(jnp.sum(jnp.abs(v) ** 2)).astype(rdtype)
+
+    b_norm = norm(b)
+    tol_r = jnp.asarray(tol, rdtype)
+    thresh = jnp.maximum(tol_r * b_norm, tol_r)
+    eps = jnp.finfo(rdtype).eps
+    zeros_n = jnp.zeros((n,), dtype)
+    basis_idx = jnp.arange(m + 1)
+    coef_idx = jnp.arange(m)
+
+    if aux:
+        aux_shape = jax.eval_shape(lambda t: matvec(t)[1], b_tree)
+        aux0 = jax.tree.map(lambda s: jnp.zeros(s.shape, s.dtype), aux_shape)
+
+    def keep_aux(s, better, a):
+        if not aux:
+            return {}
+        return {
+            "best_aux": jax.tree.map(
+                lambda new, old: jnp.where(better, new, old), a, s["best_aux"]
+            )
+        }
+
+    state0 = {
+        "phase": jnp.int32(_SEED if n_cand else _RESID),
+        "k": jnp.int32(0),
+        "v_in": C[0] if n_cand else zeros_n,
+        "x": zeros_n,
+        "best_x": zeros_n,
+        "best_res": b_norm,
+        "V": jnp.zeros((m + 1, n), dtype),
+        "H": jnp.zeros((m + 1, m), dtype),
+        "cs": jnp.zeros((m,), rdtype),
+        "sn": jnp.zeros((m,), dtype),
+        "g": jnp.zeros((m + 1,), dtype),
+        "j": jnp.int32(0),
+        "cycles": jnp.int32(0),
+        "done": jnp.array(False),
+        "nonfinite": jnp.array(False),
+        # True once any finite residual of the operator has been measured, so
+        # ``best_res`` is a measured value and not the assumed ``||b||``.
+        "measured": jnp.array(False),
+    }
+    if aux:
+        state0["best_aux"] = aux0
+
+    def seed(s, y, a):
+        res = norm(b - y)
+        better = res < s["best_res"]  # NaN compares False: never chosen
+        best_x = jnp.where(better, C[s["k"]], s["best_x"])
+        best_res = jnp.where(better, res, s["best_res"])
+        k1 = s["k"] + 1
+        last = k1 >= n_cand
+        nxt = C[jnp.minimum(k1, max(n_cand - 1, 0))]
+        return {
+            **s,
+            "k": k1,
+            "best_x": best_x,
+            "best_res": best_res,
+            **keep_aux(s, better, a),
+            "measured": s["measured"] | jnp.isfinite(res),
+            "x": jnp.where(last, best_x, s["x"]),
+            "v_in": jnp.where(last, best_x, nxt),
+            "phase": jnp.where(last, _RESID, _SEED).astype(jnp.int32),
+        }
+
+    def resid(s, y, a):
+        r = b - y
+        rn = norm(r)
+        bad = ~jnp.isfinite(rn)
+        done = (rn <= thresh) | (s["cycles"] >= maxiter) | bad
+        v0 = r / jnp.where(rn > 0, rn, 1).astype(dtype)
+        # Best *measured* iterate (strict <; NaN never wins): a bad cycle
+        # must not replace a better x, and (x, abs_resid) stays a measured pair.
+        better = rn < s["best_res"]
+        return {
+            **s,
+            "best_x": jnp.where(better, s["x"], s["best_x"]),
+            "best_res": jnp.where(better, rn, s["best_res"]),
+            **keep_aux(s, better, a),
+            "nonfinite": s["nonfinite"] | (bad & ~s["measured"]),
+            "measured": s["measured"] | ~bad,
+            "done": done,
+            "V": jnp.zeros_like(s["V"]).at[0].set(v0),
+            "H": jnp.zeros_like(s["H"]),
+            "cs": jnp.zeros_like(s["cs"]),
+            "sn": jnp.zeros_like(s["sn"]),
+            "g": jnp.zeros_like(s["g"]).at[0].set(rn.astype(dtype)),
+            "j": jnp.int32(0),
+            "v_in": v0,
+            "phase": jnp.int32(_ARNOLDI),
+        }
+
+    def arnoldi(s, y, a):
+        j = s["j"]
+        V = s["V"]
+        mask = (basis_idx <= j).astype(dtype)
+        # Classical Gram-Schmidt applied twice (CGS2): vectorised over the
+        # basis, as stable as modified Gram-Schmidt in practice.
+        h1 = mask * (jnp.conj(V) @ y)
+        w = y - h1 @ V
+        h2 = mask * (jnp.conj(V) @ w)
+        w = w - h2 @ V
+        hnext = norm(w)
+        col = (h1 + h2).at[j + 1].set(hnext.astype(dtype))
+
+        def rotate(i, c):
+            a, bb = c[i], c[i + 1]
+            ci, si = s["cs"][i], s["sn"][i]
+            return (
+                c.at[i].set(ci * a + si * bb).at[i + 1].set(-jnp.conj(si) * a + ci * bb)
+            )
+
+        col = lax.fori_loop(0, j, rotate, col)
+        a, bb = col[j], col[j + 1]
+        denom = jnp.sqrt(jnp.abs(a) ** 2 + jnp.abs(bb) ** 2)
+        safe_denom = jnp.where(denom > 0, denom, 1)
+        abs_a = jnp.abs(a)
+        phase_a = jnp.where(abs_a > 0, a / jnp.where(abs_a > 0, abs_a, 1), 1)
+        c_new = jnp.where(denom > 0, abs_a / safe_denom, 1).astype(rdtype)
+        s_new = jnp.where(denom > 0, phase_a * jnp.conj(bb) / safe_denom, 0).astype(
+            dtype
+        )
+        col = col.at[j].set(c_new * a + s_new * bb).at[j + 1].set(0)
+        gj = s["g"][j]
+        g = s["g"].at[j].set(c_new * gj).at[j + 1].set(-jnp.conj(s_new) * gj)
+        H = s["H"].at[:, j].set(col)
+        cs = s["cs"].at[j].set(c_new)
+        sn = s["sn"].at[j].set(s_new)
+
+        est = jnp.abs(g[j + 1])
+        breakdown = hnext <= 10 * eps * norm(y)
+        end = (j + 1 >= m) | (est <= thresh) | breakdown
+
+        # End of cycle: solve the leading (j+1)x(j+1) upper-triangular system.
+        active = coef_idx <= j
+        Hs = jnp.where(
+            active[:, None] & active[None, :], H[:m, :m], jnp.eye(m, dtype=dtype)
+        )
+        coef = jax.scipy.linalg.solve_triangular(
+            Hs, jnp.where(active, g[:m], 0), lower=False
+        )
+        x_new = s["x"] + coef @ V[:m]
+        V_next = V.at[j + 1].set(w / jnp.where(hnext > 0, hnext, 1).astype(dtype))
+        return {
+            **s,
+            "H": H,
+            "cs": cs,
+            "sn": sn,
+            "g": g,
+            "V": jnp.where(end, V, V_next),
+            "x": jnp.where(end, x_new, s["x"]),
+            "v_in": jnp.where(end, x_new, V_next[j + 1]),
+            "j": jnp.where(end, j, j + 1).astype(jnp.int32),
+            "cycles": s["cycles"] + end.astype(jnp.int32),
+            "phase": jnp.where(end, _RESID, _ARNOLDI).astype(jnp.int32),
+        }
+
+    def body(s):
+        y, a = apply(s["v_in"])  # the one and only matvec call site
+        return lax.switch(s["phase"], (seed, resid, arnoldi), s, y, a)
+
+    out = lax.while_loop(lambda s: ~s["done"], body, state0)
+    abs_resid = jnp.where(out["nonfinite"], jnp.nan, out["best_res"])
+    if aux:
+        return unflatten(out["best_x"]), abs_resid, b_norm, out["best_aux"]
+    return unflatten(out["best_x"]), abs_resid, b_norm

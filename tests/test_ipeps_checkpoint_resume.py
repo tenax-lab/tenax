@@ -333,7 +333,12 @@ def test_resume_1site_continues_from_saved_step(tmp_path):
         return iPEPSConfig(
             unit_cell="1x1",
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4),
+            # needs an unconverged forward: since the bond_phase default (#1069)
+            # the final-energy forward of this trajectory stalls at sv_diff
+            # 1.59e-7 vs conv_tol 1e-8, identical at max_iter=100 and 300, so
+            # more budget does not help; the test checks the resume step
+            # counter, not convergence; see #1059.
+            ctm=CTMConfig(chi=4, on_unconverged="warn"),
             gs_num_steps=nsteps,
             gs_checkpoint_path=str(tmp_path),
             gs_checkpoint_every=1,
@@ -451,7 +456,9 @@ def test_resume_rejects_plain_to_cg(tmp_path):
     plain_cfg = iPEPSConfig(
         unit_cell="1x1",
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=20, min_iter=5),
+        # 20 sweeps left the gradient forward unconverged (residual 1.2e-7 vs
+        # 1e-8); 100 converge, so phase A completes and checkpoints (#1059).
+        ctm=CTMConfig(chi=4, max_iter=100, min_iter=5),
         gs_num_steps=2,
         gs_checkpoint_path=str(tmp_path),
         gs_checkpoint_every=1,
@@ -490,7 +497,9 @@ def _ferro_gate():
 def _converged_1site_cfg(ckpt_path, **overrides):
     kwargs = dict(
         max_bond_dim=1,
-        ctm=CTMConfig(chi=1, max_iter=5),
+        # max_iter=5 < min_iter=10 never measured the CTM, which the default
+        # on_unconverged="raise" refuses; 20 sweeps certify it (#1059).
+        ctm=CTMConfig(chi=1, max_iter=20),
         gs_num_steps=3,
         gs_implicit_ad=False,
         gs_explicit_ad_steps=2,

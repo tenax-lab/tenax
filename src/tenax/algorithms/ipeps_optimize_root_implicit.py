@@ -430,6 +430,24 @@ def optimize_gs_ad_root_implicit(
     # Resolved before anything else touches its arguments: on the symmetric
     # variant the caller *must* supply the state, so that is a precondition on
     # the call rather than something to discover after converting a gate.
+    # #1059: no root-implicit engine has fermionic signs.  The symmetric one
+    # builds a graded double layer, then contracts its quadrants with the
+    # sign-free contractor (finding 3); the dense ones make the gate dense.
+    # Either way the optimiser would descend the hard-core-boson energy.
+    # Checked here, not only in optimize_gs_ad, so direct callers are covered.
+    from tenax.algorithms._ctm_graded import is_fermionic, site_tensors_of
+
+    if is_fermionic(hamiltonian_gate) or any(
+        is_fermionic(t) for t in site_tensors_of(A_init)
+    ):
+        raise NotImplementedError(
+            f"ctm_ad_mode={config.ctm.ctm_ad_mode!r} is not supported for "
+            "fermionic tensors (#1059): no root-implicit engine carries "
+            "fermionic signs, so the optimiser would descend the "
+            "hard-core-boson energy. Use the default (fixed-point implicit) "
+            "AD path."
+        )
+
     A_start = _initial_symmetric_tensor(A_init) if symmetric else None
 
     gate = (
@@ -647,6 +665,12 @@ def optimize_gs_ad_root_implicit(
     steps_run = 0
 
     converged_flag = False
+    # A simple-update start is never accepted on its first evaluation (#1075);
+    # this engine builds its own SU state, so the provenance is decided here.
+    # No stall recovery on this path: skip-and-continue.
+    from tenax.algorithms._ipeps_optimize_shared import _su_start_guard_armed
+
+    _su_guard = _su_start_guard_armed(A_init is None and config.su_init, 0)
     for step in range(config.gs_num_steps):
         steps_run = step + 1
         _step_t0 = _time.perf_counter()
@@ -735,6 +759,7 @@ def optimize_gs_ad_root_implicit(
             if config.gs_conv_criterion in ("grad_norm", "both")
             else None
         )
+        _skip_conv, _su_guard = _su_guard, False
         if n_nonfinite:
             # #812.  Masking a non-finite gradient to zero is what keeps the
             # run alive, and it is also what makes the run look converged --
@@ -754,7 +779,7 @@ def optimize_gs_ad_root_implicit(
             # grad-spike rollback, for the same "re-evaluates the same state
             # and sees dE == 0" reason.
             prev_energy = float("inf")
-        elif _converged_outer(config, delta_energy, grad_norm_val):
+        elif not _skip_conv and _converged_outer(config, delta_energy, grad_norm_val):
             if config.gs_verbose:
                 _log_ad_converged(
                     "root_implicit",

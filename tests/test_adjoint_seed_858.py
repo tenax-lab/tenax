@@ -34,7 +34,11 @@ from tenax.algorithms._ctm_energy_ad import (
     get_last_implicit_ad_diagnostics,
 )
 from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
-from tenax.algorithms._gmres_lax import gmres_pytree, gmres_pytree_jax
+from tenax.algorithms._gmres_lax import (
+    gmres_pytree,
+    gmres_pytree_jax,
+    gmres_single_matvec,
+)
 from tenax.algorithms.ipeps import _wrap_as_dense_tensor, heisenberg_gate
 
 
@@ -220,6 +224,10 @@ def _implicit_energy(
             min_iter=8,
             conv_tol=1e-12,
             adjoint_method=adjoint_method,
+            # The spies below watch ``_jit_gmres_one_matvec_solve``, the
+            # separate chain rule's solve; the default joint one is
+            # ``_jit_gmres_joint_solve``.
+            adjoint_chain_rule="separate",
         )
     )
 
@@ -276,13 +284,21 @@ def test_the_real_adjoint_seeds_the_solver_no_worse_than_zero(monkeypatch):
     import tenax.algorithms._ctm_energy_ad as ad
 
     seen = []
-    real = ad.gmres_pytree_jax
+    # The solve is compiled (#1087), so ``gmres_pytree_jax`` only ever sees
+    # tracers.  Spy one level up, on the call the backward makes with concrete
+    # values, and rebuild the same ``(I - J^T)`` matvec the solve uses.
+    real = ad._jit_gmres_one_matvec_solve
 
-    def spy(matvec, b_tree, x0_tree=None, **kw):
-        seen.append((matvec, b_tree, x0_tree))
-        return real(matvec, b_tree, x0_tree, **kw)
+    def spy(params, env, b_tree, candidates, *, apply_Jt, chi, pb, **kw):
+        def matvec(v):
+            return apply_Jt(params, env, v, chi=chi, pb=pb)
 
-    monkeypatch.setattr(ad, "gmres_pytree_jax", spy)
+        seen.append((matvec, b_tree, list(candidates), kw["restart"]))
+        return real(
+            params, env, b_tree, candidates, apply_Jt=apply_Jt, chi=chi, pb=pb, **kw
+        )
+
+    monkeypatch.setattr(ad, "_jit_gmres_one_matvec_solve", spy)
 
     A0 = _random_D2_site()
     jax.grad(lambda a: _implicit_energy(a, chi=_HARMFUL_SEED_CHI, max_iter=80))(A0)
@@ -290,12 +306,10 @@ def test_the_real_adjoint_seeds_the_solver_no_worse_than_zero(monkeypatch):
     assert seen, (
         "no eager GMRES solve ran, so this test observed nothing. The "
         "backward took the fused fixed-point branch instead; re-point the "
-        "fixture at the branch that calls gmres_pytree_jax."
+        "fixture at the branch that calls _jit_gmres_one_matvec_solve."
     )
-    for i, (matvec, b_tree, x0_tree) in enumerate(seen):
+    for i, (matvec, b_tree, candidates, restart) in enumerate(seen):
         b_norm = _l2(b_tree)
-        # The premise, per solve: without it a passing assertion below would
-        # only mean the fixture is benign at this chi.
         neumann = _residual(matvec, b_tree, b_tree)
         assert neumann > b_norm, (
             f"solve {i}: the Neumann seed starts at {neumann:.4e} against "
@@ -303,7 +317,18 @@ def test_the_real_adjoint_seeds_the_solver_no_worse_than_zero(monkeypatch):
             f"test cannot tell a measured seed from an unconditional one. "
             f"Re-scan chi (measured 5.14x at chi={_HARMFUL_SEED_CHI})."
         )
-        seed_resid = _residual(matvec, x0_tree, b_tree)
+        assert any(
+            all(
+                np.array_equal(np.asarray(x), np.asarray(y))
+                for x, y in zip(jax.tree.leaves(c), jax.tree.leaves(b_tree))
+            )
+            for c in candidates
+        ), f"solve {i}: rhs is not among the candidates handed to the solver"
+        # The seed the solver itself picks (maxiter=0: seed phase only).
+        seed, _, _ = gmres_single_matvec(
+            matvec, b_tree, candidates, tol=1e-30, maxiter=0, restart=restart
+        )
+        seed_resid = _residual(matvec, seed, b_tree)
         assert seed_resid <= b_norm * (1 + 1e-9), (
             f"adjoint solve {i} was seeded at residual {seed_resid:.4e} "
             f"against ||b|| = {b_norm:.4e}. GMRES's residual bound is against "
@@ -311,6 +336,65 @@ def test_the_real_adjoint_seeds_the_solver_no_worse_than_zero(monkeypatch):
             f"lambda worse than lambda = 0 -- and it cannot recover if it "
             f"stagnates. See #858."
         )
+
+
+# A module-level operator for the wrapper test below: ``_jit_gmres_one_matvec_solve``
+# takes ``apply_Jt`` as a static (hashed) argument, so it must be a stable
+# function with the library's ``(params, env, v, *, chi, pb)`` signature.
+_WRAP_N = 24
+_WRAP_J = jnp.asarray(
+    3.0
+    * np.random.default_rng(1).standard_normal((_WRAP_N, _WRAP_N))
+    / np.sqrt(_WRAP_N)
+)
+
+
+def _wrap_apply_I_minus_Jt(params, env, v, *, chi, pb):
+    del params, env, chi, pb
+    return (v[0] - _WRAP_J.T @ v[0],)
+
+
+def test_the_compiled_solve_hands_its_seed_to_gmres():
+    """``_jit_gmres_one_matvec_solve`` must use the caller's candidates.
+
+    A wrapper that dropped them (or substituted ``rhs``) would bring #858
+    back with the spy test above still green (Codex review of #1088).  So run
+    it with a budget too small to converge, where the answer depends on the
+    start: it must equal ``gmres_single_matvec`` from the same good seed and
+    differ from the answer started at zero.
+    """
+    import tenax.algorithms._ctm_energy_ad as ad
+
+    rng = np.random.default_rng(2)
+    b = (jnp.asarray(rng.standard_normal(_WRAP_N)),)
+    kw = {"tol": 1e-14, "maxiter": 1, "restart": 2}
+
+    def matvec(v):
+        return _wrap_apply_I_minus_Jt(None, None, v, chi=0, pb="auto")
+
+    A = np.eye(_WRAP_N) - np.asarray(_WRAP_J).T
+    exact = np.linalg.solve(A, np.asarray(b[0]))
+    good = (jnp.asarray(exact + 1e-3 * rng.standard_normal(_WRAP_N)),)
+    assert _residual(matvec, good, b) < _l2(b), "premise: the seed beats zero"
+
+    got, _, _ = ad._jit_gmres_one_matvec_solve(
+        (), (), b, [good], apply_Jt=_wrap_apply_I_minus_Jt, chi=0, pb="auto", **kw
+    )
+    want, _, _ = gmres_single_matvec(matvec, b, [good], **kw)
+    from_zero, _, _ = gmres_single_matvec(matvec, b, [], **kw)
+
+    gap = float(np.linalg.norm(np.asarray(want[0]) - np.asarray(from_zero[0])))
+    assert gap > 1e-6, (
+        f"premise: with this budget the start changes the answer by only "
+        f"{gap:.2e}, so this test could not tell them apart"
+    )
+    np.testing.assert_allclose(
+        np.asarray(got[0]),
+        np.asarray(want[0]),
+        rtol=1e-10,
+        atol=1e-12,
+        err_msg="the compiled solve did not start from the candidate it was given",
+    )
 
 
 def test_the_real_adjoint_never_reports_a_relative_residual_above_one():

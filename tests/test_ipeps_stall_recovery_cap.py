@@ -147,7 +147,7 @@ def test_reset_loop_exits_within_retry_cap_c4v(monkeypatch):
         max_bond_dim=2,
         ctm=CTMConfig(chi=4),
         gs_num_steps=gs_num_steps,
-        gs_stall_recovery="reset",  # explicit; default for 1x1 is ``"noise"``
+        gs_stall_recovery="reset",  # explicit, though it is now the default
         gs_stall_recovery_retries=gs_stall_recovery_retries,
         su_init=False,
         gs_c4v=True,

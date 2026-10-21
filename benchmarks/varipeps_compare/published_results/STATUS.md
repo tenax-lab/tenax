@@ -1,7 +1,9 @@
 # Tenax ↔ variPEPS Square Heisenberg Benchmark — Status
 
 **Last update:** 2026-05-10 (F3 fused-backward landed; chi=16 budget still blocked, see profile attribution below)
-**Protocol:** TOL=1e-6, MAX_STEPS=100, complex128, single_site path with sublattice-rotated gate, D=2, χ=16. Tenax `gs_implicit_ad=True`, variPEPS native.
+**Protocol (since 2026-10-03, #1075):** both libraries stop on ‖∇E‖₂ < TOL = 1e-5 (Tenax `gs_conv_criterion="grad_norm"`, variPEPS `optimizer_convergence_eps`). The variPEPS run below used variPEPS's default eps = 1e-5, so it matches; the Tenax entry predates the change.
+
+**Protocol (as run, 2026-05):** TOL=1e-6 passed as Tenax `gs_conv_tol` (dE criterion), MAX_STEPS=100, complex128, single_site path with sublattice-rotated gate, D=2, χ=16. Tenax `gs_implicit_ad=True`, variPEPS native.
 
 ## What's in this directory
 

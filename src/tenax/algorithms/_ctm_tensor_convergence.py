@@ -22,6 +22,7 @@ __all__ = [
     "make_neighbors",
     "ctm_tensor",
     "ctm_tensor_2site",
+    "ctm_hold_test",
     "CTMConvergenceInfo",
 ]
 
@@ -30,7 +31,17 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
+from tenax.algorithms._ctm_hold import (
+    DEFAULT_HOLD_DIRECTIONS,
+    DEFAULT_HOLD_EXTENSION,
+    DEFAULT_HOLD_NOISE_FLOOR,
+    DEFAULT_HOLD_PERTURBATION,
+    DEFAULT_HOLD_SWEEPS,
+    HoldResult,
+    hold_test,
+)
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     _build_double_layer_tensor,
@@ -89,6 +100,19 @@ def _renormalize_tensor_env(env: CTMTensorEnv) -> CTMTensorEnv:
     )
 
 
+def _refuse_fermionic_1x1(a: Tensor, where: str) -> None:
+    """The ``"1x1"`` recipe and the paired moves fuse chi and D² legs
+    sign-free and are not on the graded path (#1035, design §5 step 4); a
+    fermionic double layer would get hard-core-boson signs there."""
+    from tenax.algorithms._ctm_graded import is_fermionic
+
+    if is_fermionic(a):
+        raise NotImplementedError(
+            f"{where}: fermionic tensors need recipe='2x2' (the graded Tensor "
+            "CTM); the 1x1 recipe and the paired moves are sign-free"
+        )
+
+
 def _ctm_tensor_sweep(
     env: CTMTensorEnv,
     a: Tensor,
@@ -110,6 +134,7 @@ def _ctm_tensor_sweep(
         ``(env, max_eps)`` where ``max_eps`` is the maximum per-move truncation
         error across the four directional moves in this sweep.
     """
+    _refuse_fermionic_1x1(a, "_ctm_tensor_sweep")
     base_charges = _get_base_charges(a)
     env, eps_left = _ctm_tensor_move_left(
         env,
@@ -173,6 +198,7 @@ def _ctm_tensor_sweep_paired(
         ``(env, max_eps)`` where ``max_eps`` is the maximum per-move truncation
         error across the two paired moves in this sweep.
     """
+    _refuse_fermionic_1x1(a, "_ctm_tensor_sweep_paired")
     env, eps_horiz = _ctm_tensor_move_horizontal(
         env, env, a, chi, projector_method, projector_backward=projector_backward
     )
@@ -252,6 +278,48 @@ def _get_base_charges(a: Tensor):
     if _np.all(charges == 0):
         return None
     return charges
+
+
+def _seam_chi_charges(
+    envs: dict[Coord, CTMTensorEnv],
+    neighbors: dict[Coord, dict[str, Coord]],
+    anchor: Coord,
+    direction: str,
+    chi: int,
+) -> np.ndarray | None:
+    """Charges of the env leg that the projector anchored at ``anchor`` rewrites.
+
+    The 2x2 sweep writes each projector's ``chi_new`` into the env of the cell
+    on the far side of the absorbed column/row (phase 2 of
+    :func:`_ctm_tensor_sweep_multisite` and the ``_ctm_tensor_absorb_*_2plaq``
+    helpers): its ``"curr"`` use lands on
+
+    * left:   ``T4[anchor.right].t4_u``
+    * right:  ``T2[anchor].t2_d``
+    * top:    ``T1[anchor.bottom].t1_r``
+    * bottom: ``T3[anchor].t3_l``
+
+    The traced SVD inherits its per-sector counts from this leg (#929).  The
+    enlarged corners only carry the *absorbed* cell's leg, which on a
+    checkerboard is the other sublattice's bond (#1035 Task 3).  Returns
+    ``None`` for a dense env or a leg that is not ``chi`` wide.
+    """
+    cell, field, label = {
+        "left": (neighbors[anchor]["right"], "T4", "t4_u"),
+        "right": (anchor, "T2", "t2_d"),
+        "top": (neighbors[anchor]["bottom"], "T1", "t1_r"),
+        "bottom": (anchor, "T3", "t3_l"),
+    }[direction]
+    t = getattr(envs[cell], field)
+    if not isinstance(t, SymmetricTensor):
+        return None
+    labels = t.labels()
+    if label not in labels:
+        return None
+    idx = t.indices[labels.index(label)]
+    if idx.dim != chi:
+        return None
+    return np.asarray(idx.charges, dtype=np.int32)
 
 
 def _sort_coords_for_direction(coords: list[Coord], direction: str) -> list[Coord]:
@@ -357,6 +425,8 @@ def _ctm_tensor_sweep_multisite(
             return a
 
     if recipe == "1x1":
+        for a in double_layers.values():
+            _refuse_fermionic_1x1(a, "_ctm_tensor_sweep_multisite(recipe='1x1')")
         for direction, move_fn in _DIRECTION_MOVES:
             for coord in _sort_coords_for_direction(all_coords, direction):
                 nb = neighbors[coord][direction]
@@ -436,6 +506,9 @@ def _ctm_tensor_sweep_multisite(
                         direction,
                         base_charges=base_charges,
                         projector_backward=projector_backward,
+                        incoming_chi_charges=_seam_chi_charges(
+                            envs_old, neighbors, s_anchor, direction, chi
+                        ),
                     )
                 )
                 projectors[s_anchor] = (P_top, P_bot)
@@ -1077,14 +1150,14 @@ def ctm_tensor(
         reading this to decide whether to grow ``chi`` -- the variPEPS
         §2.8.2 auto-bump -- is dead on the blind rows:
 
-        =============  ==================  ==========================
+        =============  ====================  ==========================
         ``recipe``     ``projector_method``  ε_T
-        =============  ==================  ==========================
-        ``"2x2"``      *(ignored)*         genuine
-        ``"1x1"``      ``"svd"``           **structurally 0**
-        ``"1x1"``      ``"eigh"``          genuine
-        ``"1x1"``      ``"qr"``            **0, never computed**
-        =============  ==================  ==========================
+        =============  ====================  ==========================
+        ``"2x2"``      *(ignored)*           genuine
+        ``"1x1"``      ``"svd"``             **structurally 0**
+        ``"1x1"``      ``"eigh"``            genuine
+        ``"1x1"``      ``"qr"``              **0, never computed**
+        =============  ====================  ==========================
 
         The ``"1x1"``/``"svd"`` zero is a *shape* artifact, not a
         measurement: ``_ctm_projector.py`` forms ``M = C1g^H C4g``, which is
@@ -1144,10 +1217,15 @@ def ctm_tensor(
     # from independent projectors in standard 4-move CTM).  When virtual
     # charges are asymmetric (e.g. after simple update truncation),
     # fall back to DenseTensor since the D^2 leg charges change per
-    # direction.
+    # direction -- for bosons only.  A fermionic site must stay symmetric:
+    # densified, it takes the sign-free double layer and the CTM silently
+    # returns hard-core-boson observables (Codex P1 on #1044).  The 2x2
+    # recipe needs no uniform layout, and the 1x1 recipe refuses fermions.
     use_paired = False
     if isinstance(A, SymmetricTensor):
         import numpy as _np
+
+        from tenax.algorithms._ctm_graded import is_fermionic
 
         virtual_indices = [A.indices[i] for i in range(4)]
         has_nontrivial = any(
@@ -1162,7 +1240,7 @@ def ctm_tensor(
         )
         if has_nontrivial and all_same:
             use_paired = True
-        elif has_nontrivial and not all_same:
+        elif has_nontrivial and not all_same and not is_fermionic(A):
             # Asymmetric virtual charges: densify for compatibility
             A = DenseTensor(A.todense(), A.indices)
 
@@ -1304,6 +1382,11 @@ def _ctm_tensor_multisite(
     projector_backward: str = "auto",
     recipe: str = "2x2",
     _deprecation_stacklevel: int = 3,
+    hold_sweeps: int = 0,
+    hold_perturbation: float = DEFAULT_HOLD_PERTURBATION,
+    *,
+    _return_status: bool = False,
+    _warn_unconverged: bool = True,
 ) -> dict[Coord, CTMTensorEnv]:
     """Run multisite CTM to convergence using the Tensor protocol.
 
@@ -1323,6 +1406,16 @@ def _ctm_tensor_multisite(
                       truncates each bond with two inequivalent projectors on
                       alternating sweeps, so no environment is stationary under
                       both and there is no fixed point to converge to.
+        hold_sweeps:  See :func:`ctm_tensor_2site`.  Default ``0`` (off).
+        hold_perturbation: See :func:`ctm_tensor_2site`.
+        _return_status: Private.  When true, return ``(envs, info, detail)``
+                      with ``info`` a :class:`CTMConvergeInfo` (``iterations``
+                      is the sweeps actually run when not converged, ``-1``
+                      otherwise) and ``detail`` the not-converged diagnostic
+                      text (``None`` when converged), so a wrapper can act on
+                      the verdict (#1059 site 5).
+        _warn_unconverged: Private.  ``False`` suppresses the not-converged
+                      warning, for a wrapper that raises instead (#1059).
 
     Returns:
         Dict mapping coordinates to converged CTMTensorEnv.
@@ -1416,9 +1509,15 @@ def _ctm_tensor_multisite(
     # Reachable two ways: ``max_iter=1``, and any QR warm-up that leaves exactly
     # one measured sweep (``max_iter=7, qr_warmup_steps=6``).
     ever_measured = False
-    for _ in range(max_iter):
-        envs, _, _ = _ctm_tensor_sweep_multisite(
-            envs,
+    if hold_sweeps and hold_sweeps < 4:
+        raise ValueError(
+            f"hold_sweeps must be 0 (off) or >= 4, got {hold_sweeps}: the hold "
+            f"fits a growth rate over the second half of its sweeps"
+        )
+
+    def _step(e):
+        out, _, _ = _ctm_tensor_sweep_multisite(
+            e,
             double_layers,
             neighbors,
             chi,
@@ -1427,6 +1526,19 @@ def _ctm_tensor_multisite(
             projector_backward=projector_backward,
             recipe=recipe,
         )
+        return out
+
+    # The hold (#1035): the criterion below compares SUCCESSIVE sweeps, which
+    # cannot tell an attractor from a saddle.  Once it passes, ``hold_test``
+    # perturbs the claimed point and asks whether the step pulls it back.
+    # ``hold_log`` records every hold for the warning; ``hold_key`` advances so
+    # a second hold at a revisited point does not replay the same perturbation.
+    hold_log: list = []
+    hold_key = jax.random.PRNGKey(0)
+    used = 0
+    while used < max_iter:
+        envs = _step(envs)
+        used += 1
         converged = True
         sweep_diff = 0.0
         # Rebuilt each sweep rather than accumulated, and keyed on the whole
@@ -1483,17 +1595,105 @@ def _ctm_tensor_multisite(
         # the zero-measured-sweep case already reports.
         if ever_measured:
             final_diff = sweep_diff
+        if converged and hold_sweeps:
+            per = 1 + DEFAULT_HOLD_DIRECTIONS  # CTM steps per hold sweep
+            if used + per * hold_sweeps > max_iter:
+                # Not enough budget left to certify: fail closed, and stop
+                # here (Codex P2 on #1058, ruling): a hold cut below
+                # ``hold_sweeps`` has no measured window to fit -- K=40 is the
+                # smallest that separated the #1035 saddle from its attractor
+                # -- and plain sweeps past the criterion cannot certify
+                # anything either.  The warning below reports the sweeps that
+                # actually ran and says the point is unverified.
+                hold_log.append(("budget", used, max_iter - used, per * hold_sweeps))
+                converged = False
+                break
+            hold_key, sub = jax.random.split(hold_key)
+            # A still-growing fit is re-tested up to 3 * hold_sweeps (a
+            # transient can outlast the first window), but never past the
+            # caller's budget.
+            cap = min(DEFAULT_HOLD_EXTENSION * hold_sweeps, (max_iter - used) // per)
+            held = hold_test(
+                _step,
+                envs,
+                sweeps=hold_sweeps,
+                perturbation=hold_perturbation,
+                key=sub,
+                max_sweeps=cap,
+            )
+            used += held.sweeps
+            capped = cap < DEFAULT_HOLD_EXTENSION * hold_sweeps
+            # Codex P2 on #1058: a contracting verdict vetoed by the
+            # reference's own drift (a stable moving orbit) is not a saddle.
+            if held.passed:
+                status, stat = "pass", held.rate
+            elif held.rate < 1.0 and math.isfinite(held.drift):
+                status, stat = "drift", held.drift
+            elif not math.isfinite(held.rate):
+                status, stat = "nonfinite", held.rate
+            else:
+                status, stat = "fail", held.rate
+            hold_log.append((status, used, stat, capped, held.floor))
+            if status == "nonfinite":
+                # Codex P2 on #1058: the perturbed copy blew up; resuming from
+                # it would feed NaN/inf into the next projector SVD.  Keep the
+                # finite claimed point and stop, reported UNVERIFIED below.
+                converged = False
+                break
+            if not held.passed:
+                # A saddle.  Continue from the perturbed trajectory: it has
+                # already been pushed off the saddle along the unstable
+                # direction, so the loop walks on to the attractor instead of
+                # re-certifying the saddle from its 1e-10 residual.
+                envs = held.envs
+                prev_svs = {}
+                converged = False
+                continue
         if converged:
             break
 
+    # #1059 (Codex P2 on #1070): the verdict is built first and emitted at
+    # the end, so ``ctm_tensor_2site(strict=True)`` can raise its typed
+    # error *instead of* warning -- under ``-W error`` the warning would
+    # otherwise abort the call before the documented exception.
+    unconv = None
     if blind_coords:
         # Not silent, and not fatal.  The sweeps still ran, so the environment
         # returned here is the best this budget reached.  What the caller must
         # not do is read it as converged.
-        warnings.warn(
+        unconv = (
             _blind_corner_message(blind_coords, collapsed_coords),
             RuntimeWarning,
-            stacklevel=2,
+        )
+    elif hold_log and hold_log[-1][0] == "nonfinite":
+        unconv = (
+            f"CTM not verified in ctm_tensor_multisite(): the successive-sweep "
+            f"criterion reached conv_tol={conv_tol:g} at chi={chi}, but a "
+            f"hold-test perturbation diverged to non-finite values, so the "
+            f"point could not be told apart from a saddle.  The returned "
+            f"environment is the finite claimed point, UNVERIFIED (#1035).  "
+            f"Try a smaller hold_perturbation, or hold_sweeps=0.",
+            UserWarning,
+        )
+    elif hold_log and hold_log[-1][0] == "budget":
+        # Codex P2 on #1058: this exit is early, so "ran the full max_iter"
+        # would be false.  Report the sweeps that ran, and why they stopped.
+        _, at, left, need = hold_log[-1]
+        swept = budget - max_iter + at  # + any QR warm-up
+        unconv = (
+            f"CTM not verified in ctm_tensor_multisite(): stopped after "
+            f"{swept} of max_iter={budget} sweeps at chi={chi}.  The "
+            f"successive-sweep criterion reached conv_tol={conv_tol:g} at "
+            f"sweep {swept}, but the hold test that tells an attractor from a "
+            f"saddle needs at least {need} more CTM steps (hold_sweeps="
+            f"{hold_sweeps} x {1 + DEFAULT_HOLD_DIRECTIONS} trajectories) and "
+            f"only {left} were left, so it did not run.  The returned "
+            f"environment is UNVERIFIED -- it may be a saddle that more "
+            f"sweeps would leave (#1035)"
+            f"{_hold_failure_note(hold_log[:-1])}.  Raise max_iter by at "
+            f"least {need - left}, or pass hold_sweeps=0 to accept "
+            f"successive-sweep agreement alone.",
+            UserWarning,
         )
     elif not converged:
         # #901.  The blind branch above covers a criterion that could not
@@ -1505,6 +1705,7 @@ def _ctm_tensor_multisite(
         # ``ipeps()`` already warns in exactly this situation, and the wording
         # deliberately mirrors it -- same category, so a caller filtering one
         # filters both.
+        hold_note = _hold_failure_note(hold_log)
         criterion = (
             f"final criterion {final_diff:.3g}"
             if ever_measured
@@ -1513,20 +1714,88 @@ def _ctm_tensor_multisite(
                 "spectra were compared, so no measurement of it exists"
             )
         )
-        warnings.warn(
+        # Codex P2 on #1058: after a hold rejection the criterion may sit
+        # below conv_tol; saying "without reaching conv_tol" then points the
+        # caller at the wrong setting.
+        met = ever_measured and final_diff <= conv_tol
+        if hold_note and met:
+            outcome = (
+                f"reaching conv_tol={conv_tol:g} ({criterion}) only at points "
+                f"the hold test rejected"
+            )
+        elif hold_note:
+            outcome = (
+                f"ending away from conv_tol={conv_tol:g} ({criterion}) after "
+                f"the hold rejected the point where it was met"
+            )
+        else:
+            outcome = f"without reaching conv_tol={conv_tol:g} ({criterion})"
+        unconv = (
             f"CTM did not converge in ctm_tensor_multisite(): ran the full "
-            f"max_iter={budget} sweeps at chi={chi} without reaching "
-            f"conv_tol={conv_tol:g} ({criterion}). The "
+            f"max_iter={budget} sweeps at chi={chi} {outcome}{hold_note}. The "
             f"returned environment is not a fixed point and any observable "
             f"read from it can move with max_iter -- on a limit cycle it will "
             f"move without ever settling, so raising max_iter is not always a "
             f"fix. Raise max_iter, or switch recipe: the 1x1 recipe does not "
             f"converge on a non-C4v multisite cell (#425/#426/#901).",
             UserWarning,
-            stacklevel=2,
         )
 
+    if unconv is not None and (_warn_unconverged or converged):
+        warnings.warn(unconv[0], unconv[1], stacklevel=2)
+
+    if _return_status:
+        from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
+
+        # Codex P2 on #1070: count the sweeps that ran, not the budget -- the
+        # hold's budget and non-finite exits stop early.  ``budget - max_iter``
+        # is the QR warm-up.
+        info = CTMConvergeInfo(
+            converged=bool(converged),
+            iterations=(budget - max_iter + used) if not converged else -1,
+            sv_diff=float(final_diff),
+        )
+        return envs, info, (unconv[0] if unconv is not None else None)
     return envs
+
+
+def _hold_failure_note(hold_log: list) -> str:
+    """The hold's part of the not-converged warning (empty if no hold ran)."""
+    if not hold_log:
+        return ""
+    fails = [h for h in hold_log if h[0] == "fail"]
+    parts = []
+    if fails:
+        rates = ", ".join(f"{h[2]:.4f}" for h in fails[-3:])
+        cut = " (the last hold was cut short by max_iter)" if fails[-1][3] else ""
+        # #1063: a displacement that sinks into the reference's own jitter
+        # counts as contracted, so a rejection was fitted above that floor.
+        floors = [h[4] for h in fails[-3:] if len(h) > 4 and math.isfinite(h[4])]
+        floor = (
+            f", fitted above the reference's own noise floor "
+            f"{', '.join(f'{f:.2g}' for f in floors)} (a displacement that sinks "
+            f"to {DEFAULT_HOLD_NOISE_FLOOR:g}x that floor counts as contracted)"
+            if floors
+            else ""
+        )
+        parts.append(
+            f"; the successive-sweep criterion passed {len(fails)} time(s) at a "
+            f"point the hold test rejected as a saddle, not an attractor -- a "
+            f"perturbation did not contract (fitted growth rate/sweep {rates} "
+            f">= 1{floor}){cut}; the loop walked on from the perturbed point, "
+            f"and the budget ran out before it reached an attractor"
+        )
+    drifts = [h for h in hold_log if h[0] == "drift"]
+    if drifts:
+        ds = ", ".join(f"{h[2]:.3g}" for h in drifts[-3:])
+        parts.append(
+            f"; the successive-sweep criterion passed {len(drifts)} time(s) at "
+            f"a point that is not fixed -- every perturbation contracted, but "
+            f"the unperturbed reference itself moved away from it during the "
+            f"hold (invariant drift {ds}), as on a stable limit cycle whose "
+            f"corner spectra do not change"
+        )
+    return "".join(parts)
 
 
 def ctm_tensor_2site(
@@ -1540,6 +1809,9 @@ def ctm_tensor_2site(
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
     recipe: str = "2x2",
+    hold_sweeps: int = 0,
+    hold_perturbation: float = DEFAULT_HOLD_PERTURBATION,
+    strict: bool = False,
 ) -> tuple[CTMTensorEnv, CTMTensorEnv]:
     """Run 2-site checkerboard CTM to convergence using the Tensor protocol.
 
@@ -1555,11 +1827,55 @@ def ctm_tensor_2site(
         qr_warmup_steps:  Number of eigh warm-up sweeps before QR kicks in.
         recipe:       ``"2x2"`` (default) or ``"1x1"`` projector recipe;
                       see :func:`_ctm_tensor_sweep_multisite`.
+        hold_sweeps:  Hold test (#1035), opt-in: default ``0`` (off); pass
+                      e.g. ``DEFAULT_HOLD_SWEEPS`` (40) to turn it on.
+                      ``conv_tol`` compares SUCCESSIVE sweeps, which cannot
+                      tell an attractor from a saddle: at a saddle successive
+                      sweeps agree to 1e-10 while a displacement grows every
+                      sweep.  Once the criterion passes, two copies perturbed
+                      by ``hold_perturbation`` (independent deterministic
+                      directions) and the point itself are stepped side by
+                      side; each displacement is measured in a gauge-invariant
+                      metric (per-leg, per-sector singular values of every
+                      environment tensor; blind to chi-bond order and signs)
+                      and renormalised whenever it shrinks 1e-3 (a power
+                      iteration, so a weakly excited unstable direction still
+                      surfaces).  The point is accepted only if every
+                      direction's fitted growth rate over the last
+                      ``hold_sweeps // 2`` sweeps is < 1 -- never on early
+                      contraction alone.  A fit that still grows is re-tested
+                      every ``hold_sweeps // 2`` sweeps up to ``3 *
+                      hold_sweeps`` before the point is rejected.  On a
+                      saddle the loop continues from the perturbed point and
+                      walks on to the attractor; if ``max_iter`` runs out
+                      first (hold steps count toward it, three per hold
+                      sweep) it warns NOT converged, and if the criterion
+                      passes with fewer than ``3 * hold_sweeps`` steps left it
+                      stops and warns that the point is UNVERIFIED -- the
+                      saddle is never returned as converged.  Cost: ``3 *
+                      hold_sweeps`` steps to accept, up to ``9 *
+                      hold_sweeps`` to reject; see
+                      :func:`tenax.algorithms._ctm_hold.hold_test`.
+        hold_perturbation: Relative size of the hold's perturbation (default
+                      1e-6).  Keep it well above the point's residual
+                      (``~conv_tol``) or the displacement sits on the
+                      residual floor.
+        strict:       If true, raise
+                      :class:`~tenax.CTMNotConvergedError` (``site=
+                      "ctm_tensor_2site"``) when the CTM does not converge
+                      within ``max_iter`` -- including a criterion that was
+                      blind, or a point the hold test could not verify --
+                      instead of warning and returning the unconverged
+                      environment.  Default ``False`` keeps the legacy
+                      warn-and-return behaviour (#1059).
 
     Returns:
         ``(env_A, env_B)`` — converged CTMTensorEnv for each sublattice.
+
+    Raises:
+        CTMNotConvergedError: if ``strict`` and the CTM did not converge.
     """
-    envs = _ctm_tensor_multisite(
+    envs, info, detail = _ctm_tensor_multisite(
         {(0, 0): A, (1, 0): B},
         CHECKERBOARD_NEIGHBORS,
         chi,
@@ -1573,8 +1889,94 @@ def ctm_tensor_2site(
         # One extra frame: this wrapper sits between the helper and the
         # user, so the default 3 would name this line, not the caller's.
         _deprecation_stacklevel=4,
+        hold_sweeps=hold_sweeps,
+        hold_perturbation=hold_perturbation,
+        _return_status=True,
+        _warn_unconverged=not strict,
     )
+    if strict and not info.converged:
+        from tenax.algorithms._ctm_convergence_policy import CTMNotConvergedError
+
+        raise CTMNotConvergedError(
+            info, "ctm_tensor_2site", conv_tol=conv_tol, chi=chi, detail=detail
+        )
     return envs[(0, 0)], envs[(1, 0)]
+
+
+def ctm_hold_test(
+    site_tensors: dict[Coord, Tensor],
+    envs: dict[Coord, CTMTensorEnv],
+    chi: int,
+    *,
+    neighbors: dict[Coord, dict[str, Coord]] | None = None,
+    sweeps: int = DEFAULT_HOLD_SWEEPS,
+    perturbation: float = DEFAULT_HOLD_PERTURBATION,
+    key: jax.Array | None = None,
+    renormalize: bool = True,
+    projector_method: str = "svd",
+    projector_backward: str = "auto",
+    recipe: str = "2x2",
+) -> HoldResult:
+    """Diagnostic: is a converged CTM environment an attractor or a saddle?
+
+    Runs the hold test that :func:`ctm_tensor_2site` applies when
+    ``hold_sweeps > 0`` on an environment from anywhere -- a seed you are about
+    to pass as ``optimize_gs_ad(envs_init=...)``, or the environment the
+    implicit-AD forward returned.  The environment is perturbed by
+    ``perturbation`` (relative), stepped ``sweeps`` times with the eager
+    multisite sweep, and accepted only if the gauge-invariant motion
+    contracts; see :func:`tenax.algorithms._ctm_hold.hold_test`.
+
+    Args:
+        site_tensors: ``{coord: site tensor}``, e.g. ``{(0, 0): A, (1, 0): B}``.
+        envs:         ``{coord: CTMTensorEnv}`` to test.
+        chi:          Environment bond dimension.
+        neighbors:    Neighbour map.  Default: ``SINGLE_SITE_NEIGHBORS`` for
+                      ``{(0, 0)}``, ``CHECKERBOARD_NEIGHBORS`` for
+                      ``{(0, 0), (1, 0)}``; any other cell must pass it.
+        sweeps:       Hold budget (default 40).
+        perturbation: Relative perturbation (default 1e-6).
+        key:          PRNG key for the perturbation (default ``PRNGKey(0)``).
+        renormalize, projector_method, projector_backward, recipe: as for
+                      :func:`ctm_tensor_2site`; use the values the
+                      environment was converged with.
+
+    Returns:
+        :class:`~tenax.algorithms._ctm_hold.HoldResult` -- ``passed``,
+        ``rate`` (fitted per-sweep growth of the perturbed motion), the
+        per-sweep statistics and the sweeps spent.
+    """
+    if recipe == "1x1":
+        _warn_recipe_1x1_deprecated("ctm_hold_test")
+    if neighbors is not None:
+        nbrs = neighbors
+    elif set(envs) == {(0, 0)}:
+        nbrs = SINGLE_SITE_NEIGHBORS
+    elif set(envs) == {(0, 0), (1, 0)}:
+        nbrs = CHECKERBOARD_NEIGHBORS
+    else:
+        # Codex P2 on #1058: guessing a topology for any other cell sends
+        # neighbour lookups to coordinates the envs do not have.
+        raise ValueError(
+            f"ctm_hold_test: cannot infer neighbors for coordinates "
+            f"{sorted(envs)}; pass neighbors= explicitly"
+        )
+    double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
+
+    def _step(e):
+        out, _, _ = _ctm_tensor_sweep_multisite(
+            e,
+            double_layers,
+            nbrs,
+            chi,
+            renormalize,
+            projector_method,
+            projector_backward=projector_backward,
+            recipe=recipe,
+        )
+        return out
+
+    return hold_test(_step, envs, sweeps=sweeps, perturbation=perturbation, key=key)
 
 
 def ctm_multisite(
@@ -1588,6 +1990,8 @@ def ctm_multisite(
     qr_warmup_steps: int = 3,
     projector_backward: str = "auto",
     recipe: str = "2x2",
+    hold_sweeps: int = 0,
+    hold_perturbation: float = DEFAULT_HOLD_PERTURBATION,
 ) -> dict[str, CTMTensorEnv]:
     """Run multisite CTM to convergence for an arbitrary lattice.
 
@@ -1613,6 +2017,8 @@ def ctm_multisite(
         recipe:            ``"2x2"`` (default) — variPEPS-style 2x2 plaquette
                            projector; ``"1x1"`` — legacy single-site projector
                            pair (for backward-compat / regression bisection).
+        hold_sweeps:       Hold test; see :func:`ctm_tensor_2site`.
+        hold_perturbation: See :func:`ctm_tensor_2site`.
 
     Returns:
         ``{site_name: CTMTensorEnv}`` — converged environments.
@@ -1695,6 +2101,8 @@ def ctm_multisite(
         # One extra frame: this wrapper sits between the helper and the
         # user, so the default 3 would name this line, not the caller's.
         _deprecation_stacklevel=4,
+        hold_sweeps=hold_sweeps,
+        hold_perturbation=hold_perturbation,
     )
 
     # Map results back to site names

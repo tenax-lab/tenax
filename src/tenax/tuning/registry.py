@@ -296,13 +296,20 @@ _register(
         hint=TuningHint(
             scale=Scale.CATEGORICAL,
             sensitivity=Sensitivity.HIGH,
-            values=("qr", "phase", "sigma", "none"),
+            values=("auto", "phase", "bond_phase", "qr", "sigma", "none"),
             cost=CostModel(runtime="neutral", memory="none"),
         ),
         when_to_tune=(
-            "'phase' is the default for explicit-AD (auto-promoted from "
-            "'qr'); 'sigma' is required for implicit-diff stability at "
-            "D>=2. 'none' is diagnostic only."
+            "The default 'auto' resolves per path: 'bond_phase' (phase plus "
+            "a per-chi-index bond gauge, #841) on the fused implicit-AD "
+            "path without chi_ramp or ctm_ad_mode, 'phase' everywhere else. "
+            "Set 'phase' explicitly to opt out of the bond gauge on the "
+            "implicit path. Explicit values are never promoted; implicit AD "
+            "accepts only 'phase'/'bond_phase'. Under optimize_gs_ad the "
+            "explicit-AD and split energies apply no forward gauge, so "
+            "'phase'/'sigma'/'qr'/'none' have no effect there (#1074); "
+            "'sigma' (1-site) is applied only by the legacy ad_utils paths. "
+            "'none' is diagnostic only."
         ),
         references=("arXiv:2311.11894",),  # Francuz et al.
     )
@@ -579,10 +586,11 @@ _register(
         type_str="str | None",
         category=TuningCategory.OPTIMIZER,
         description=(
-            "Strategy when the line search stalls: 'noise' injects a "
-            "Frobenius perturbation (legacy 1-site C4v); 'reset' clears "
-            "L-BFGS (s,y) history and rolls back to best_params "
-            "(variPEPS). None = auto-per-dispatcher."
+            "Strategy when the line search stalls: 'reset' clears L-BFGS "
+            "(s,y) history and rolls back to best_params (variPEPS); "
+            "'noise' (legacy) kicks the current params by a Frobenius "
+            "perturbation with no rollback. None = 'reset'. Ignored by the "
+            "ctm_ad_mode engines, which have no stall recovery."
         ),
         hint=TuningHint(
             scale=Scale.CATEGORICAL,
@@ -590,8 +598,8 @@ _register(
             values=(None, "noise", "reset"),
         ),
         when_to_tune=(
-            "Set to 'reset' for 2-site runs that get stuck; 'noise' is "
-            "required for 1-site C4v to break out of SU-init plateaus."
+            "Leave at the default; 'noise' only to escape a genuinely "
+            "stationary start, since a kick near convergence is not undone."
         ),
     )
 )
@@ -640,7 +648,11 @@ _register(
         dependencies=(
             Dependency(
                 name="CTMConfig.forward_gauge",
-                relation="auto-promotes qr -> phase when implicit_ad=False",
+                relation=(
+                    "default 'auto' resolves to 'bond_phase' when "
+                    "implicit_ad=True (fused, no chi_ramp/ctm_ad_mode), "
+                    "else 'phase'"
+                ),
             ),
             Dependency(
                 name="CTMConfig.ctm_ad_mode",
@@ -824,9 +836,8 @@ _register(
             "legacy regularized_eigh backward; 'lorentzian' forces the "
             "Francuz-Schmoll truncated-eigh Lorentzian backward. 'flow' "
             "(2x2 recipe, #983) additionally lets the plaquette projectors' "
-            "dP/dA reach the gradient; use it only on paths with no "
-            "fixed-point adjoint solve -- it is unsafe under implicit AD "
-            "(#1028)."
+            "dP/dA reach the gradient; 'auto' resolves to it on implicit AD "
+            "with the bond_phase gauge (#1028) and freezes elsewhere."
         ),
         hint=TuningHint(
             scale=Scale.CATEGORICAL,
@@ -1059,7 +1070,9 @@ _register(
         category=TuningCategory.ACCURACY,
         description=(
             "Energy-change convergence tolerance for the outer L-BFGS/CG "
-            "ground-state optimizer. Loop exits early when "
+            "ground-state optimizer. Read only when gs_conv_criterion is "
+            "'dE' or 'both' (the default since v0.8.4 is 'grad_norm', which "
+            "uses gs_grad_norm_tol); 'dE' exits when "
             "|E_k - E_{k-1}| < gs_conv_tol."
         ),
         hint=TuningHint(

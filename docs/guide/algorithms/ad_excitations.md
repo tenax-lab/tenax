@@ -95,12 +95,13 @@ ill-defined.
 Tenax provides two gauge-fixing strategies, selected via
 ``CTMConfig.forward_gauge``:
 
-#### Phase gauge (``forward_gauge="phase"``, default)
+#### Phase gauge (``forward_gauge="phase"``; what the ``"auto"`` default resolves to off the implicit-AD path)
 
 Applies **Frobenius normalization + global phase fix** (variPEPS-style)
-to each corner and edge after every CTM step.  Cheapest gauge fix that
-still stabilizes unrolled AD; works for both implicit and explicit AD,
-1-site and 2-site.  See ``docs/guide/algorithms/ctm.md`` for details.
+to each corner and edge after every CTM step.  Cheapest gauge fix; applied
+on the implicit-AD path and the legacy ``ad_utils`` paths, 1-site and
+2-site.  ``optimize_gs_ad``'s explicit-AD energy applies no forward gauge,
+so the setting has no effect there (#1074).  See ``docs/guide/algorithms/ctm.md`` for details.
 
 #### QR gauge (``forward_gauge="qr"``)
 

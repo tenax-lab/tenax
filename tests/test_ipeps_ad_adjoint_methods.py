@@ -197,6 +197,11 @@ def test_fixed_point_matches_gmres_gradient():
                 chi=8,
                 max_iter=100,
                 conv_tol=1e-10,
+                # As in the premise gate above: the default plateau_patience=20
+                # bails at sweep 43 of this fixture's 69-sweep approach, and
+                # #1059's default on_unconverged="raise" then rejects the
+                # final-energy forward.
+                plateau_patience=None,
                 adjoint_method=method,
             ),
             gs_num_steps=1,

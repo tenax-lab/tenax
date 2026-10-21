@@ -18,7 +18,12 @@ GRID = tuple(
     for chi in CHI_VALUES
 )  # 8 points
 
-TOL = 1e-6
+# Outer-loop stop for BOTH libraries: ||grad E||_2 < TOL.  Tenax runs
+# gs_conv_criterion="grad_norm" with gs_grad_norm_tol=TOL; variPEPS sets
+# optimizer_convergence_eps=TOL (it compares the L2 norm of the raw
+# gradient, the same quantity).  1e-5 is variPEPS's own default, so the
+# published variPEPS reference (run at that default) stays comparable.
+TOL = 1e-5
 MAX_STEPS = 100
 SEED = 0
 DTYPE = "complex128"

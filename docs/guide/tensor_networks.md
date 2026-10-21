@@ -141,3 +141,34 @@ graph LR
 
 Paste the output into any Mermaid renderer (GitHub markdown, Mermaid Live
 Editor, or VS Code preview) to get an interactive diagram.
+
+(network-blueprint)=
+## Network Blueprint (`.net` files)
+
+`NetworkBlueprint` is the Cytnx-style declarative alternative to building a
+`TensorNetwork` node by node: each line names a tensor and its leg labels, and
+the `TOUT:` line lists the open legs of the result in order. Parse the topology
+once, load tensors, and contract repeatedly — the template pattern used inside
+sweeps.
+
+```python
+from tenax import NetworkBlueprint
+
+# Define network topology as a string (or read from a .net file)
+bp = NetworkBlueprint("""
+L: a, b, c
+M: a, p, q, d
+A: b, p, s, e
+M2: e, q, t, f
+R: d, f, g
+TOUT: c, s, t, g
+""")
+
+# Load tensors (can be DenseTensor or SymmetricTensor)
+bp.put_tensors({"L": L, "M": M, "A": A, "M2": M2, "R": R})
+result = bp.launch()  # contracts the full network
+
+# Reuse with different tensors (e.g. in a DMRG sweep)
+bp.put_tensor("A", new_A)
+result2 = bp.launch()
+```

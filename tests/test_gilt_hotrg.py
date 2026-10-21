@@ -112,7 +112,9 @@ class TestGiltHOTRGFreeEnergy:
         assert abs(float(gilt_hotrg(T, cfg)) - lz_exact) < 3e-3
 
     def test_filter_perturbation_shrinks_with_eps(self):
-        beta, chi, ns = BETA_C, 16, 16
+        # chi=8 / 12 steps keeps err(1e-3) - err(1e-4) at 5.9e-4 (chi=16 / 16
+        # steps: 7.5e-4); at 8 steps the margin goes negative, so keep ns >= 12.
+        beta, chi, ns = BETA_C, 8, 12
         lz_exact = float(-ising_free_energy_exact(beta) * beta)
 
         def err(eps):

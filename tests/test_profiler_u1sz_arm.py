@@ -13,7 +13,8 @@ from tenax.algorithms.ipeps import heisenberg_gate_u1sz, heisenberg_u1sz_init_pa
 def test_u1sz_ctm_forward_runs(D, chi):
     """#605/#608: D>=3 U(1)-Sz CTM must not raise (the unfused-projector fix)."""
     A, _B = heisenberg_u1sz_init_pair(D=D, key=jax.random.PRNGKey(0))
-    env, _trunc = ctm_tensor(A, chi=chi, max_iter=4, conv_tol=1e-4)
+    # #605/#608 raised at the first projector, so one sweep reaches it.
+    env, _trunc = ctm_tensor(A, chi=chi, max_iter=1, conv_tol=1e-4)
     for name in env._fields:
         t = getattr(env, name)
         assert np.all(np.isfinite(np.asarray(t._data))), f"{name} non-finite"
@@ -41,6 +42,9 @@ def _u1sz_energy(D, chi, stack: str):
             os.environ["TENAX_STACK_BLOCKSPARSE"] = prev
 
 
+# Slow bucket (2026-10-20): ~320 s on CPU, two cold compiles (clear_caches)
+# to measure a drift; a measurement, not a regression guard.
+@pytest.mark.slow
 def test_stack_flag_energy_drift_is_bounded():
     """Quantify the flagged ~4.6e-4 stacked-core drift on the U(1)-Sz path."""
     e_off = _u1sz_energy(D=2, chi=8, stack="0")

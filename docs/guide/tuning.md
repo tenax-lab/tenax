@@ -84,19 +84,29 @@ which AD path pairs with which gauge.
 
 ### `CTMConfig.forward_gauge`
 
-Values: `"phase"` (default), `"qr"`, `"sigma"`, `"none"`
+Values: `"auto"` (default), `"phase"`, `"bond_phase"`, `"qr"`, `"sigma"`,
+`"none"`
 
-- `"phase"`: AD-correct default. variPEPS-style Frobenius normalization
-  + phase fix per absorption.  Stable for both implicit and explicit
-  AD (1-site and 2-site).
+- `"auto"`: resolves per path — `"bond_phase"` on the fused implicit-AD
+  path (no `chi_ramp`, `ctm_ad_mode=None`), `"phase"` everywhere else.
+- `"phase"`: variPEPS-style Frobenius normalization + phase fix per
+  absorption, applied on the implicit-AD path (1-site and 2-site) and by
+  the legacy `ad_utils` paths; set it explicitly to opt the implicit path
+  out of the bond gauge.  Under `optimize_gs_ad` the explicit-AD and split
+  energies apply no forward gauge, so it has no effect there (#1074).
+- `"bond_phase"`: `"phase"` plus a per-chi-index sign/phase aligned to
+  the previous environment (#841).  Implicit AD only.
 - `"qr"`: legacy QR gauge.  Forward-only CTM, notebooks, diagnostics.
   Explicit user choice is preserved — no silent promotion.
 - `"sigma"`: transfer-matrix eigenvector alignment, required for
-  element-wise CTM convergence at large chi.  1-site path only.
+  element-wise CTM convergence at large chi.  1-site path only.  Under
+  `optimize_gs_ad` it is refused on implicit AD and has no effect on
+  explicit AD (#1074).
 - `"none"`: diagnostic only.  Expect instabilities.
 
-**No silent gauge promotion** in AD paths: if you pass `"qr"` you get
-`"qr"`.  Set `forward_gauge` explicitly to override the default.
+**No silent gauge promotion** in AD paths: only `"auto"` is resolved; if
+you pass `"qr"` you get `"qr"`.  Set `forward_gauge` explicitly to
+override the default.
 
 ### `CTMConfig.ad_regularize_svd` (default `True`)
 
@@ -169,6 +179,17 @@ Values: `"cg"` (default), `"lbfgs"`, `"adam"`
 | Benchmark | 100–500 |
 | Publication (variPEPS-style) | 2000+ |
 
+### `iPEPSConfig.gs_conv_criterion` (default `"grad_norm"`)
+
+Exit test for the outer loop.  `"grad_norm"` (default since v0.8.4) stops at
+`‖∇E‖₂ < gs_grad_norm_tol` (default `1e-5`, variPEPS's
+`optimizer_convergence_eps`).  The pre-v0.8.4 default `"dE"`
+(`|ΔE| < gs_conv_tol`) is deprecated: it declared convergence with
+`‖∇E‖` between `1e-2` and `0.69` in all four D=2/3 square-Heisenberg
+validation runs.  `"both"` needs both.  `gs_conv_tol` is read only by `"dE"`
+and `"both"`.  Runs that never reach the tolerance stop at `gs_num_steps`
+and report `converged=False`.
+
 ### `iPEPSConfig.gs_metric_precond` (default `True`)
 
 Metric preconditioning (natural gradient) via the local tangent-space
@@ -191,14 +212,17 @@ Reference: Hager & Zhang, SIAM J. Optim. 16(1):170–192 (2005).
 
 Values: `None` (auto), `"noise"`, `"reset"`
 
-- **`"noise"`** — inject a `gs_noise_amplitude` Frobenius perturbation
-  when the line search stalls. Required for 1-site C4v to break out of
-  SU-init plateaus.
 - **`"reset"`** — clear L-BFGS `(s, y)` history, roll back to
   `best_params`, force steepest descent on the next step. This is what
-  variPEPS does; best for 2-site runs.
-- **`None`** (default) — auto-select: `"noise"` for 1-site, `"reset"`
-  for 2-site.
+  variPEPS does.
+- **`"noise"`** (legacy) — inject a `gs_noise_amplitude` Frobenius
+  perturbation when the line search stalls, with no rollback. A kick
+  near a settled energy is not undone: on D=3 Heisenberg it took a 1x1
+  run from E=-0.66819 to -0.033.
+- **`None`** (default) — `"reset"` on every unit cell (1-site was
+  `"noise"` before v0.8.4). The `ctm_ad_mode` engines (`"c4v_reference"`, `"root_implicit"`,
+  `"root_implicit_symmetric"`) have no stall recovery and ignore this
+  setting.
 
 ---
 
@@ -282,6 +306,28 @@ fixed number of sweeps at a small chi before the final stage converges
 at the target chi.  Example: ``chi_ramp=[(8, 10), (16, 10), (32, None)]``
 does 10 sweeps at chi=8, 10 at chi=16, then converges at chi=32.
 Benchmarks show 1.2–2.1× GPU speedup with identical energies.
+
+### `CTMConfig.adjoint_chain_rule` (default `"auto"`)
+
+`"joint"` gets the chain rule's indirect term out of a GMRES adjoint solve
+over `(params, env)` instead of compiling a separate params-VJP program, the
+largest single backward compile at D≥3.  The default `"auto"` runs `"joint"`
+on the fused CTM; the split CTM (`fuse_virtual_legs=False`) keeps its own
+chain rule and refuses an explicit `"joint"`.  The gradient is the same as
+`"separate"` to round-off and warm steps cost the same.  Measured at U(1) D=3
+chi=16 on one A100, step 1: compile 7,795 → 5,977 s (−23%), peak RSS
+51 → 39 GB.  Set `"separate"` only to reproduce runs from before the flip.  Details under "Symmetric tensors: compile time
+and XLA fusion" in `docs/guide/algorithms/ipeps_ad_paths.md`.
+
+### Persistent compilation cache (on by default)
+
+`import tenax` makes JAX store compiled programs in `~/.cache/jax`
+(override with `JAX_COMPILATION_CACHE_DIR`), so a repeat run can load a
+program instead of compiling it.  On CPU, loading a large block-sparse
+backward costs most of a compile (D=3 U(1): 870 s against 1048 s).  The
+first compile is not shortened, and the directory has no size limit by
+default.  See "Persistent compilation cache" in
+`docs/guide/algorithms/ipeps_ad_paths.md`.
 
 ---
 

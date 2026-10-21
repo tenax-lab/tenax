@@ -27,7 +27,9 @@ config = iPEPSConfig(
         max_iter=80,
         conv_tol=1e-8,
         projector_method="qr",  # fastest, best energy, scales to chi=64+
-        # forward_gauge defaults to "phase" (AD-correct for 1-site and 2-site)
+        # forward_gauge defaults to "auto": "bond_phase" on implicit AD
+        # (#841); on explicit AD it resolves to "phase", which the explicit
+        # energy does not apply (#1074)
     ),
     # Path 2, implicit AD -- the default, so this line only makes it explicit.
     # Swap to False for Path 1 (explicit AD through the unrolled sweeps) and
@@ -71,14 +73,17 @@ scales well to chi=64 (2.5x slower than chi=8), and never NaNs.
 | Literature (chi=8) | -0.6625 | — | — |
 | Exact (QMC, chi→∞) | -0.6694 | — | — |
 
-Phase gauge is **6-9x faster** than sigma gauge for explicit AD with equal
-or better energy.
+Historical: phase gauge measured **6-9x faster** than sigma gauge for
+explicit AD with equal or better energy.  These measurements predate the
+current routing, under which `optimize_gs_ad`'s explicit-AD energy applies
+no forward gauge at all (#1074).
 
 The `eigh + sigma (GMRES implicit)` row is a historical measurement and its
 configuration **no longer runs**: `validate_ctm_for_implicit_ad` accepts
-`forward_gauge="phase"` and nothing else, and rejects `projector_method="eigh"`
+`forward_gauge="phase"` or `"bond_phase"` (the `"auto"` default resolves to the latter) and nothing else, and rejects `projector_method="eigh"`
 outright. The number is kept because it was measured; do not copy the config.
-Sigma gauge remains a first-class **explicit**-AD mode (#808).
+Sigma gauge is applied only by the legacy ``ad_utils`` explicit-AD paths
+and by ``ctm_energy_implicit`` called directly; under ``optimize_gs_ad`` it is refused on implicit AD and ignored by the explicit-AD energy (#1074).
 
 ## Working AD Paths
 
@@ -105,17 +110,21 @@ Forward:  A → warmup sweeps (stop_gradient) → N CTM sweeps (phase gauge, che
 Backward: dE/dA via backprop through all N sweeps
 ```
 
-**Strengths**: Best reported energy at chi=16 (-0.6628 with qr+phase),
-scales cleanly to chi=64+, never NaNs, and is 6–9× faster than sigma
-gauge for equal or better energy.
+**Strengths** (historical, measured before #1074's routing, under which
+this path applies no forward gauge): best reported energy at chi=16
+(-0.6628 with qr+phase — below the converged D=2 χ=16 optimum −0.66251, so
+not a converged variational value), scales cleanly to chi=64+, never NaNs,
+and was 6–9× faster than sigma gauge.
 
 **Configuration**:
 - `gs_implicit_ad=False` — backprop through unrolled steps (explicit AD; opt-in, the default is `True` / implicit diff).
 - `gs_projector_method="qr"` — QR projectors (recommended for explicit AD).
-- `forward_gauge="phase"` (config default, AD-correct).  Users can
-  override with `forward_gauge="sigma"` (historical path), `"qr"`
-  (legacy), or `"none"` (diagnostic); see the mode table below.  No
-  silent promotion — explicit user choice is preserved.
+- `forward_gauge="auto"` (config default) resolves to `"phase"` on this
+  path, but under `optimize_gs_ad` the explicit energy
+  (`ctm_energy_explicit`, and its split variants) applies **no** forward
+  gauge, so `"phase"`, `"sigma"`, `"qr"` and `"none"` all run the same
+  ungauged sweep here.  Only the legacy `ad_utils` entry points apply the
+  setting.  `"bond_phase"` is refused here rather than silently ignored.
 - `projector_backward="auto"` (config default) — when `projector_method="eigh"`
   and `gs_implicit_ad=False`, `optimize_gs_ad` auto-promotes to `"lorentzian"`,
   routing the projector VJP through the Francuz–Schuch–Vanhecke
@@ -124,14 +133,66 @@ gauge for equal or better energy.
   tracked in issue #299 (E_best improves from ≈ −0.558 to ≈ −0.6602 at
   D=2, χ=8). On the 2x2 recipe there is also `"flow"`, which additionally
   lets the plaquette projectors' `dP/dA` reach the gradient instead of
-  returning them as `stop_gradient` constants (#983) — use it on explicit
-  AD, which has no fixed-point adjoint solve; it is **not** safe under
-  implicit AD (#1028). Set to `"standard"` to force the legacy backward, or
+  returning them as `stop_gradient` constants (#983). On implicit AD with
+  the `"bond_phase"` gauge, `"auto"` already resolves to `"flow"` (#1028).
+  Set to `"standard"` to force the legacy backward, or
   `"lorentzian"` to opt in even when using `projector_method="qr"/"svd"`
   (the flag is a no-op on non-eigh projectors). Currently dense-only;
   U(1) `SymmetricTensor` support is deferred to Approach B of the plan.
 - `gs_explicit_ad_steps=30` — number of backprop CTM sweeps.
 - `gs_explicit_ad_warmup=10` — warmup sweeps (stop_gradient).
+
+#### Projector response in the gradient (`projector_backward="flow"`)
+
+`CTMConfig(projector_backward="flow")` lets the 2x2 plaquette projectors'
+`dP/dA` reach the gradient instead of returning them as `stop_gradient`
+constants (#983). `"standard"` and `"lorentzian"` freeze them. `"auto"`
+(the default) resolves per path:
+
+- **Implicit AD with the `"bond_phase"` gauge** (the default fused implicit
+  path of `optimize_gs_ad`): `"auto"` is `"flow"` (#1028). By default the PESS
+  implicit losses and direct `ctm_energy_implicit` calls still freeze (of
+  the PESS builders only `build_pess_loss_3site_multisite` honours an
+  explicit `"flow"`). Freezing the projectors there biased
+  the gradient — relative AD-vs-FD error at D=3, χ=16/32 was 6.8–74% frozen
+  against 1–5e-6 flowing, with the adjoint residual at ~3e-11. The adjoint is
+  solvable because `"bond_phase"` gives the forward an element-wise fixed
+  point (#841).
+- **Every other path** (explicit AD, split CTM, `"phase"` gauge,
+  `ctm_ad_mode` engines): `"auto"` stays frozen. Pass `"flow"` explicitly on
+  explicit AD (`gs_implicit_ad=False`, fused or split). Measured AD-vs-finite-difference on `ctm_energy_explicit` goes from
+  0.229–0.928 frozen to 0.944–0.994 flowing, and on a single CTM sweep from
+  ratios spanning −7.98…+14.95 (wrong by up to 15×, sometimes wrong in sign)
+  to 1.000000.
+- Implicit AD needs a forward that actually converges element-wise: the
+  adjoint `(I − Jᵀ)λ = dE/denv` linearizes around the fixed point, so an
+  unconverged forward (too small `max_iter`) leaves the gradient unreliable
+  whether the projectors flow or not. Flowing is the more fragile of the two
+  there — on a 2-site U(1) start whose CTM never converges it was 121× off
+  finite differences, then NaN, where frozen was 3–34% off — so when the
+  flowing adjoint is not solved to `gmres_tol` (or the gradient is
+  non-finite) the backward is redone with frozen projectors.
+  `get_last_implicit_ad_diagnostics()["projector_backward_used"]` reports
+  `"flow"` or `"frozen_fallback"`.
+- The eager CTM forward is bit-identical either way — only the VJP changes.
+
+On a forward that is not a fixed point, a solved flowing adjoint can still
+give a gradient that is badly wrong (#1111). The backward therefore checks a
+flowing gradient there: it evaluates the energy once more along the
+gradient's descent direction and keeps the gradient only if the measured
+change is 0.5-2x the predicted one. Otherwise it falls back to frozen
+projectors. `get_last_implicit_ad_diagnostics()` reports the ratio as
+`flow_slope_ratio` and the reason as `flow_fallback_reason`. The check costs
+one extra forward CTM evaluation per non-stationary flowing step (often every
+step at D>=3, #841): measured ~27% of the gradient's wall time at D=3 dense
+chi=12 on CPU (2.39 s of 8.81 s), plus a one-time recompile of the forward's
+programs inside the backward (per shape/chi; the backward runs under an empty
+mesh trace context, so the forward's jit caches miss). Stationary forwards pay
+nothing. The check catches grossly wrong flow gradients; it does not certify
+that flow beats frozen (on a raw-`SymmetricTensor` version of the #1028
+fixture flow is kept at r=0.746 with FD errors 35%/37% where frozen is
+13%/4%). For
+complex parameters it steps along `conj(G)`.
 
 **Why phase gauge works in backprop**: Each phase-gauge step is a
 Frobenius normalization plus a differentiable global-phase fix on each
@@ -140,12 +201,15 @@ removes the gauge ambiguity that causes element-wise CTM convergence to
 drift without introducing the power-iteration cost of sigma gauge. The
 Frobenius + phase fix is what variPEPS uses in `_post_process_CTM_tensors`.
 
-**Sigma gauge as a fallback**: ``forward_gauge="sigma"`` is still a
-first-class mode **on this path**. It is slower (~40% per sweep from power
-iteration) but remains available when you want the exact transfer-matrix
-alignment. It is *not* available on the implicit path below, which refuses
-every value but ``"phase"`` — this paragraph used to say the opposite (#808).
-There is no silent promotion either way: ``optimize_gs_ad`` passes
+**Sigma gauge**: under ``optimize_gs_ad``, ``forward_gauge="sigma"`` has
+**no effect on this path** — the explicit-AD energy applies no forward gauge,
+so it runs the same ungauged sweep as ``"phase"`` / ``"qr"`` / ``"none"``
+(#1074).  Sigma alignment (~40% slower per sweep from power iteration) is
+applied only by the legacy ``ad_utils`` explicit-AD paths and by
+``ctm_energy_implicit`` called directly.  It is *not* available on the
+implicit path below either, which refuses every value but ``"phase"`` /
+``"bond_phase"`` (#808).  There is no silent promotion either way: only the
+``"auto"`` default is resolved; ``optimize_gs_ad`` passes an explicit
 ``ctm.forward_gauge`` through unchanged.
 
 ### Path 2: Implicit AD (Recommended — the default)
@@ -155,7 +219,7 @@ implicit-differentiation linear system at the fixed point → gradients flow
 back to the tensor without unrolling.
 
 ```
-Forward:  A → CTM sweeps (phase gauge) → converged env → energy
+Forward:  A → CTM sweeps (bond_phase gauge by default) → converged env → energy
 Backward: dE/dA via (I - J^T) λ = g  (VJP iteration or GMRES)
 ```
 
@@ -172,10 +236,17 @@ graph in memory).
   a tighter CTM fixed point. Tracked by issue #292.
 
 **Configuration (for the VJP path only)**:
-- `forward_gauge="phase"` — the only value this path accepts, and the
-  `CTMConfig` default. `validate_ctm_for_implicit_ad`
-  (`ipeps_ad_policy.py:30`) raises `ValueError` for anything else, `"sigma"`
-  included; there is no `sigma` branch in the check at all.
+- `forward_gauge="auto"` — the `CTMConfig` default, which on this path
+  (fused virtual legs, no `chi_ramp`, `ctm_ad_mode=None`) runs
+  `"bond_phase"` (#841, below) in the loss and in every warm-start /
+  line-search / final-evaluation forward; with `chi_ramp` it silently runs
+  `"phase"` instead, and with split CTM (`fuse_virtual_legs=False`) or a
+  `ctm_ad_mode` engine it resolves to `"phase"` (the split energies apply no
+  forward gauge, #1074).  Set `forward_gauge="phase"` explicitly to opt out of
+  the bond gauge.  These two are the only concrete values this path
+  accepts; `validate_ctm_for_implicit_ad` (`ipeps_ad_policy.py`) raises
+  `ValueError` for anything else, `"sigma"` included; there is no `sigma`
+  branch in the check at all.
 - `ad_backward_method="vjp"` — the supported implicit backward.
 - `gs_implicit_ad=True` — use implicit differentiation. This is the
   `iPEPSConfig` default, so Path 2 is what you get without asking.
@@ -183,8 +254,9 @@ graph in memory).
 > This block used to read `forward_gauge="sigma"` — "required for stable
 > element-wise convergence". That was stale rather than a second supported
 > mode: transcribed verbatim it raises `ValueError` before the first CTM
-> sweep (#808). Sigma gauge remains reachable on the **explicit** AD path
-> (Path 1).
+> sweep (#808). Under ``optimize_gs_ad`` the explicit AD path (Path 1)
+> accepts it but applies no forward gauge (#1074); only the legacy
+> ``ad_utils`` paths apply sigma alignment.
 
 **Arnoldi spectral-radius precheck** (enabled by default):
 
@@ -203,6 +275,192 @@ This is the YASTN approach (arXiv:2311.11894), adapted for JAX. It is what
 runs unless you set `gs_implicit_ad=False`. Reach for Path 1 when you want
 backprop through the unrolled sweeps — for a gauge other than `"phase"`, or
 to avoid the implicit backward entirely — not as a general default.
+
+#### Symmetric tensors: compile time and XLA fusion (CPU)
+
+When JAX compiles a program, XLA runs an *instruction-fusion* pass by
+default.  It merges chains of small operations into one combined kernel: a
+reshape, a multiply, an add and a transpose become a single loop over the
+data, and the intermediate arrays are never written to memory.  "Fused" below
+means compiled with this pass (the default); "unfused" means compiled with
+`xla_disable_hlo_passes=fusion`.  The numerical results are the same either
+way.
+
+Fusion helps a program made of a few large array operations, such as a dense
+CTM sweep.  It hurts a block-sparse backward.  A `SymmetricTensor`
+contraction emits one small operation per pair of charge blocks, so the
+implicit-AD backward of a symmetric state is hundreds of thousands of
+reshapes, scatters and small dots.  On a program that size the fusion pass
+scales worse than linearly.  It also copies cheap operations into every
+place that uses them, so the program grows.  On the D=3 U(1) chi=9
+`dE/denv` program (329k HLO instructions) the optimized module grew 7x, the
+compile took 8569 s fused and 905 s unfused, and the compiled program ran in
+92 ms fused and 62 ms unfused.
+
+So on CPU some implicit-AD backward programs of a large symmetric state are
+compiled unfused automatically:
+
+- `dE/denv`, the chain rule and the fused fixed-point backward go unfused
+  when a site tensor has a virtual leg (`u`, `d`, `l`, `r`) of dimension 3
+  or more, or 20 or more charge blocks.
+- The `J^T` product and the two GMRES solves contain only the sweep VJP.
+  They go unfused only when a site tensor has 20 or more charge blocks (a
+  many-sector U(1) state; a D=3 U(1) site has 35).
+
+Blocks are counted per site tensor, not per unit cell.  Everything else keeps
+the default pipeline:
+
+- the forward CTM sweep and the forward energy, at every size;
+- D=2 states, for any unit cell;
+- dense tensors;
+- GPU and TPU (not measured);
+- calls inside another `jax.jit`, `grad` or `vmap` trace;
+- JAX older than 0.4.36.
+
+The rule follows measurements on U(1), Z2 and fermionic 2-site states (CPU,
+8 cores; fused / unfused):
+
+| Program | D=2 | D>=3 |
+|---|---|---|
+| Forward sweep | fused faster | fused compiles 1.5-3.6x faster; run time within 8% |
+| Sweep VJP (`J^T` product, GMRES) | fused faster | graded: fused compiles about 2x faster, run time within 15% or faster fused; many-sector U(1): unfused faster |
+| `dE/denv` | fused faster or a tie | unfused runs 1.2-2.4x faster |
+| Chain rule | fused 12x faster to compile | unfused compiles 3.4x faster and runs 2x faster |
+
+The chain rule is the largest backward program.  Fermionic, fused / unfused
+compile: 89 / 1062 s at D=2, 9363 / 2793 s at D=3, more than 8000 / 3018 s
+at D=4.  Even unfused it is now the main compile cost of a D>=3 gradient.
+
+The `dE/denv` warm run, fused / unfused:
+
+| D, chi | U(1) | Z2 | fermionic |
+|---|---|---|---|
+| 2, 4-16 | 4.4 / 3.1 ms (chi=16) | 1.35 / 1.49 ms | 1.68 / 2.32 ms |
+| 3, 6-9 | 14.7 / 10.5 ms (chi=6) | 8.65 / 7.41 ms | 26.3 / 10.9 ms |
+| 4, 16 | - | 170 / 127 ms | 446 / 287 ms |
+| 6, 36 | - | 11.5 / 10.0 s | 33.0 / 16.2 s |
+
+Two measurements explain why the rule is not "unfused everywhere":
+
+- With every block-sparse program unfused, a D=2 U(1) `optimize_gs_ad` step
+  took 3388 s against 1396 s.
+- At D>=3 the forward sweep and, for graded states, the sweep VJP gain
+  nothing at run time unfused, and compile slower.
+
+The operation count alone does not predict the outcome: a 52k-operation D=2
+sweep favours fusion, while a 30k-operation D=2 `dE/denv` ties.  The block
+count alone misses Z2 and fermionic states, which have 16 blocks per site at
+every D.  Hence the bond-dimension rule.
+
+The dispatch lives in `tenax.algorithms._block_sparse_jit` (#566, #1102).
+Do not set `XLA_FLAGS=--xla_disable_hlo_passes=fusion` process-wide: that
+also drops fusion for the forward sweep and for every small eager operation.
+In one measurement it doubled the setup time, 582 s to 1249 s.
+
+The GMRES adjoint (`adjoint_method="gmres"`, and the fallback when the fused
+Neumann loop does not converge) compiles the sweep VJP once, like the fused
+module.  JAX's own GMRES applied it at three places in one program, and XLA
+compiled each one; the solver tenax uses instead applies it at one.  Measured
+on CPU at D=2 chi=8 (U(1)), the first gradient with `adjoint_method="gmres"`
+dropped from 3,729 s to 1,188 s.  At D=3 the fallback is common near a slowly
+converging forward; one D=3 chi=16 run spent 12,357 s compiling it before this
+change (not re-measured).
+
+**Joint-VJP chain rule (the default).** `CTMConfig(adjoint_chain_rule="joint")`,
+which the default `"auto"` runs on the fused CTM, takes the chain rule's indirect term `J_params^T λ` from the adjoint solve's
+own matvec — one VJP of the CTM sweep over `(params, env)` — so the separate
+params-VJP program (`_jit_chain_rule`, the largest single compile at D=3) is
+never built.  The GMRES solve returns `J_params^T` of its best iterate.  The
+fused Neumann loop is the same env-only program as in `"separate"`; a joint
+GMRES solve always follows it, seeded with the loop's `λ` (usually accepted
+after one matvec) or, when the loop gave up, started cold as the fallback is.
+The gradient equals `"separate"` to round-off on every path.
+
+Measured on the first optimization step of a U(1) D=3 chi=16 two-site
+iPEPS on one A100 (empty compilation cache; the fused loop gave up and the
+fallback ran):
+
+| | `"separate"` | `"joint"` |
+|---|---|---|
+| XLA compile | 7,795 s | 5,977 s (−23%) |
+| first step, wall | 8,231 s | 6,388 s (−22%) |
+| warm value-and-grad | 4.7 / 3.8 s | 4.6 / 3.9 s |
+| peak host RSS | 51.1 GB | 39.0 GB |
+
+One run per mode; compile times on that host vary by about ±20%.  With
+`benchmarks/bench_chain_rule_compile.py` (D=2 chi=8 dense single-site, CPU)
+the GMRES-path backward compile drops 51%.  Carrying `J_params^T λ` through
+the fused loop instead was measured and rejected: it doubled the fused
+program's compile.  `"separate"` keeps the old programs, for reproducing
+runs from before the flip.  The split CTM (`fuse_virtual_legs=False`) has
+its own chain rule: `"auto"` leaves it alone there and an explicit `"joint"`
+is refused.
+
+#### Persistent compilation cache
+
+`import tenax` turns on JAX's persistent compilation cache.  JAX writes each
+compiled program that took 1 s or more to compile to disk, and a later
+process that compiles the same program loads it from there instead.  The
+default directory is `~/.cache/jax`; to use another one, set
+`JAX_COMPILATION_CACHE_DIR` in the environment before Python starts.
+JAX loads the cached programs and runs them without checking where they
+came from, so anyone who can write to the cache directory can run code in
+your process.  Do not point it at a directory that an untrusted user can
+write to, such as a shared scratch area.
+
+The cache can help the second and later runs only.  It does not shorten the
+first compile of a program, and nothing else does: ahead-of-time
+compilation (`jit(...).lower(...).compile()`) is the same compile at an
+earlier time.
+
+Loading a cached program is not free, and on CPU a large block-sparse
+program costs most of a compile to load.  Measured on CPU, U(1) `dE/denv`
+unfused (#1109 code, 16 cores); the load times are confirmed cache hits in
+the JAX debug log:
+
+| D, chi | first compile | load from cache |
+|---|---|---|
+| 2, 8 | 15.7 s | 6.2 s, 6.3 s |
+| 3, 9 | 1048 s | 828 s, 872 s |
+
+So do not count on the cache to remove the compile wall of a D>=3 symmetric
+gradient on CPU: a repeat run saves about a fifth of it.  The cache also
+stores the many small eager programs of the forward CTM; with it, the
+setup of the D=3 run took 531-534 s against 700 s.  GPU is not measured.
+
+The cache key is the compiled program, so a run misses the cache when any
+of these changes:
+
+- D, chi, the symmetry or the unit cell;
+- the charge layout of a CTM chi leg, which sets the block shapes;
+- the tenax code that builds the program;
+- the JAX or jaxlib version, the backend, or the compiler options.
+
+The cache has no size limit by default and nothing removes old entries.
+One development machine had 32 GB in 25,555 entries, the largest 1.7 GB.  To
+bound the directory, install `filelock` (not a tenax dependency) and set a
+limit in bytes after `import tenax` and before the first compile:
+
+```python
+import jax
+import tenax
+
+jax.config.update("jax_compilation_cache_max_size", 20 * 2**30)  # 20 GiB
+```
+
+JAX then evicts the least recently used entries.  Set the limit on an empty
+or new directory: entries written without a limit lack the access-time files
+that eviction reads, so on an existing unbounded cache the eviction fails
+with `FileNotFoundError` (JAX reports it as a warning) and the limit is not
+applied.
+
+To turn the cache off, call
+`jax.config.update("jax_enable_compilation_cache", False)` after
+`import tenax` and before the first compile.  JAX reads both settings once,
+at the first compile.
+
+For a timing measurement, use an empty directory per run, so that a cached
+program does not appear as a fast compile.
 
 ### Path 3: 2-site Shared-Tensor C4v (Checkerboard AFM)
 
@@ -290,7 +548,8 @@ config = iPEPSConfig(
   `ctm.ctm_ad_mode="c4v_reference"`,
 - supports `gs_num_steps>0` optimization with implicit gradients.
 
-### Path 5: Root Implicit AD (Opt-In, dense 1×1)
+(root-implicit-ad)=
+### Path 5: Root Implicit AD (Opt-In; dense 1×1 and 2-site checkerboard)
 
 Root implicit differentiation of the CTMRG fixed point, following
 Burgelman et al., [arXiv:2607.15030](https://arxiv.org/abs/2607.15030).
@@ -331,7 +590,7 @@ config = iPEPSConfig(
 )
 ```
 
-**Current scope: 1×1 unit cells, dense or block-sparse.**
+**Current scope: dense 1×1 and dense 2-site checkerboard cells; block-sparse 1×1.**
 
 - `ctm_ad_mode="root_implicit"` — the dense asymmetric engine. Takes a
   `DenseTensor`; a `SymmetricTensor` is refused and points at the mode
@@ -353,11 +612,17 @@ config = iPEPSConfig(
   the loop descended — measured 4.7e-04 apart at D=2, χ=4. Both are
   legitimate variational energies of the same `A_opt`.
 
-- **`unit_cell` other than `"1x1"` raises `NotImplementedError`,** and not
-  because the wiring is pending. The multisite engine differentiates a
-  *one-site observable* `tr(ρ₁ₛᵢₜₑ · op)`, not an energy, and a two-site
-  Hamiltonian gate cannot be passed as that `op`. A physical multisite
-  energy needs a two-site ring spanning adjacent cells — tracked as #894.
+- **`unit_cell="2site"` is supported on the dense engine** (#894): with
+  `ctm_ad_mode="root_implicit"`, `optimize_gs_ad(..., unit_cell="2site")`
+  runs the multisite (cell) engine on the 2x2 checkerboard tie
+  `a=(0,0)=(1,1)`, `b=(0,1)=(1,0)` — the bipartite square lattice. It
+  differentiates the *physical* two-site energy, whose RDMs span adjacent
+  cells so the inter-cell bond gauge cancels. (Before #894 this raised
+  `NotImplementedError`: the multisite engine then differentiated only a
+  one-site observable `tr(ρ₁ₛᵢₜₑ · op)`, and a two-site Hamiltonian gate
+  could not be passed as that `op`.) A general `Lattice` (kagome, honeycomb,
+  ...) is not a rectangular periodic grid and is refused rather than silently
+  optimising the wrong model. `root_implicit_symmetric` stays 1×1 only.
 
 - **Rejected rather than silently ignored:** `chi_auto_bump`, `chi_ramp`,
   `ctmrg_heuristic_increase_chi`, `fuse_virtual_legs=False`,
@@ -368,6 +633,64 @@ config = iPEPSConfig(
 - **Warns and falls back:** `gs_metric_precond` and `gs_line_search`. Both
   are effectively default-on, so refusing them would reject this path's own
   default configuration.
+
+#### Configuration with the rank clamp spelled out
+
+```python
+config_root = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(
+        chi=6,
+        max_iter=100,
+        conv_tol=1e-10,
+        ctm_ad_mode="root_implicit",
+        # Relative clamp on the retained CTM spectrum. None (the default) uses
+        # the derived eps**(1/3): the covariant equations depend on S cubically,
+        # so a retained direction below that cannot be resolved in working
+        # precision and would produce NaN gradients. Raise it only to diagnose
+        # a state whose environment is rank-deficient -- clamping past the
+        # genuinely-weighted directions breaks the equations rather than
+        # regularising them, which the root-residual gate then rejects.
+        rel_floor=None,
+    ),
+    unit_cell="1x1",          # or "2site" for the checkerboard cell (#894)
+    gs_num_steps=20,
+    gs_optimizer="adam",
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_root)
+```
+
+(measure-gradient-error)=
+#### Measuring the gradient error
+
+Root-implicit gradient accuracy is state-dependent and **not** predicted by any
+diagnostic the engine reports (#785) — the root residual is anti-correlated
+with it, and `usable_rank`, the retained-spectrum ratios and the site tensor's
+own conditioning all fail too. Measured across seeds at one conditioning,
+gradient error spans 3.4e-06 to 7.7e-03. So measure it once on a
+representative state with `measure_gradient_error` before a long run; it costs
+a few CTM convergences.
+
+```python
+from tenax import measure_gradient_error
+from tenax.algorithms._ctm_root_implicit_asym import (
+    asym_root_implicit_energy_and_grad,
+)
+
+report = measure_gradient_error(
+    lambda t: asym_root_implicit_energy_and_grad(t, gate, chi=6)[:2], A_opt
+)
+print(report.summary())
+```
+
+`relative_error` is a measurement only when `is_resolved`. When it is not,
+check `fd_divergence`: only a SMALL value means the gradient is accurate to
+about `unresolved_bound` (the larger of the two thresholds it is tested
+against, so `is_resolved` is exactly `relative_error > unresolved_bound`) —
+the good case. A large one means the differences are still moving — the bound
+then carries that, so it is honest but wide. NaN means no two steps probed
+commensurable directions: the scan is indeterminate, and `unresolved_bound` is
+NaN too, because nothing established a floor to report.
 
 #### The rank clamp, and what the residual gate does and does not mean
 
@@ -462,29 +785,165 @@ gradient at all — at `D=3, chi=4` it returns NaN for every entry while this
 path is finite and finite-difference-correct — or to avoid the block-sparse
 SVD/eigh VJP compile wall (#566, #687).
 
+## Configuration recipes
+
+The configurations below, one per path, in one script. Each runs on the
+square-lattice Heisenberg gate; `examples/heisenberg_ipeps_ad.py` compares
+random vs simple-update initialization, and
+`examples/heisenberg_ipeps_excitations.py` computes the full excitation
+spectrum along Gamma-X-M-Gamma. The root-implicit configuration is under
+{ref}`root-implicit-ad`.
+
+```python
+import jax.numpy as jnp
+from tenax import (
+    iPEPSConfig,
+    CTMConfig,
+    optimize_gs_ad,
+    optimize_gs_ad_chi_schedule,
+    ExcitationConfig,
+    compute_excitations,
+    make_momentum_path,
+)
+
+# Build a 2-site Heisenberg gate
+Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
+Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
+gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
+    jnp.einsum("ij,kl->ikjl", Sp, Sm) + jnp.einsum("ij,kl->ikjl", Sm, Sp)
+)
+
+# Explicit-AD configuration: L-BFGS + explicit AD + QR projectors.
+# forward_gauge defaults to "auto"; on this explicit route it resolves to
+# "phase" but has no effect -- ctm_energy_explicit applies no forward gauge,
+# so the sweeps are ungauged (#1074).  (On implicit AD "auto" runs
+# "bond_phase", #841.)  Reaches E=-0.6628 at D=2, chi=16; the converged
+# D=2, chi=16 optimum is -0.66251 (Tenax implicit AD and variPEPS agree to
+# 4e-7, 2026-10-03).
+config = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(
+        chi=16,
+        max_iter=80,
+        projector_method="qr",  # recommended projector for explicit AD
+        # Explicit AD's "auto" freezes the 2x2 projectors; let them flow.
+        # (On implicit AD "auto" already resolves to "flow", #1028.)
+        projector_backward="flow",
+    ),
+    gs_implicit_ad=False,  # opt into explicit AD (the default is implicit)
+    gs_projector_method="qr",
+    gs_optimizer="lbfgs",  # L-BFGS with Hager-Zhang line search
+    gs_line_search_method="hager_zhang",
+    gs_metric_precond=True,  # metric preconditioning (Rader et al.)
+    gs_c4v=True,  # C4v basis parameterization
+    su_init=True,
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
+print(f"Ground-state energy: {E_gs:.6f}")
+
+# Chi-ramping schedule: progressively increase chi for faster convergence.
+# Each entry is (chi, num_steps) — run `num_steps` AD steps at logical χ=chi.
+# Internally the schedule runs as a single `optimize_gs_ad` call with envs
+# padded to max(chi) from step 1, so the JIT-compiled CTM / energy / backward
+# kernels never see a shape change (issue #453).
+chi_schedule = [(4, 30), (8, 30), (16, 20)]
+A_opt, env, E_gs = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
+
+# 2-site shared-tensor C4v AD for antiferromagnets (Neel order)
+# A single C4v-parameterized tensor is optimized; B is derived from A via
+# sublattice rotation B = e^{i pi sigma^y/2} on the physical leg.  This
+# ties the two sublattices together and avoids the A/B drift that makes
+# the unconstrained 2-site AD path unstable.  Spin-1/2 (d=2) only.
+config_2site = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(chi=16, max_iter=100, min_iter=50),
+    gs_optimizer="lbfgs",
+    gs_explicit_ad_steps=10,
+    gs_explicit_ad_warmup=2,
+    gs_num_steps=50,
+    gs_line_search=True,
+    unit_cell="2site",
+    gs_c4v=True,
+    su_init=True,
+    num_imaginary_steps=100,
+    dt=0.05,
+)
+(A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(gate, None, config_2site)
+
+# SVD (Fishman) projectors — alternative to eigh and QR
+config_svd = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(chi=16, max_iter=50, projector_method="svd"),
+    gs_num_steps=200,
+    gs_optimizer="lbfgs",
+    gs_line_search_method="hager_zhang",
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_svd)
+
+# Opt-in reference-mode dense C4v mode (Francuz et al., App. C-F)
+config_reference = iPEPSConfig(
+    max_bond_dim=2,
+    ctm=CTMConfig(
+        chi=16,
+        max_iter=80,
+        projector_method="eigh",
+        ctm_ad_mode="c4v_reference",
+        adjoint_solver="bicgstab",
+        adjoint_maxiter=50,
+        adjoint_tol=1e-8,
+    ),
+    gs_implicit_ad=True,
+    gs_c4v=True,
+    unit_cell="1x1",
+    gs_num_steps=100,
+    gs_optimizer="adam",
+)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_reference)
+
+# Quasiparticle excitations (Ponsioen et al. 2022)
+momenta = make_momentum_path("brillouin", num_points=20)
+exc_config = ExcitationConfig(num_excitations=3)
+result = compute_excitations(A_opt, env, gate, E_gs, momenta, exc_config)
+print(result.energies.shape)  # (20, 3)
+```
+
+The explicit-AD configuration reaches E=-0.6628 at D=2, chi=16 (literature:
+-0.6548 at D=2). The chi-ramping schedule runs internally as a single
+`optimize_gs_ad` call with envs padded to `max(chi)` from step 1, so the
+JIT-compiled CTM / energy / backward kernels never see a shape change
+(issue #453). For excitations see {doc}`ad_excitations`.
+
 ## Forward Gauge Mode Matrix
 
-Tenax supports four ``forward_gauge`` modes. Their intended use is
-summarized below:
+Tenax supports five concrete ``forward_gauge`` modes plus the ``"auto"``
+default, which resolves per path (``ipeps_config.resolve_forward_gauge``).
+Their intended use is summarized below:
 
 | Mode | Explicit AD (Path 1) | Implicit AD (Path 2, VJP) | Notes |
 |------|----------------------|----------------------------|-------|
-| ``"phase"`` (default) | **Recommended** | **The only accepted value** | Cheapest gauge fix; Frobenius + differentiable phase fix. Works for 1-site and 2-site. |
+| ``"auto"`` (default) | Resolves to ``"phase"``; under ``optimize_gs_ad`` the explicit energy applies no forward gauge, so it has no effect there | Runs ``"bond_phase"``; resolves to ``"phase"`` with ``chi_ramp``, split CTM, or ``ctm_ad_mode`` (the split energies apply no forward gauge, #1074) | Resolved silently at the path entry; never reaches a CTM. The legacy ``ad_utils`` paths run ``"phase"``. |
+| ``"phase"`` | What ``"auto"`` resolves to; no effect under ``optimize_gs_ad`` (#1074) | Accepted (explicit opt-out of the bond gauge) | Cheapest gauge fix; Frobenius + differentiable phase fix. Works for 1-site and 2-site. |
+| ``"bond_phase"`` | Not supported | **Accepted (what ``"auto"`` runs)**, #841 | ``"phase"`` plus one sign/phase per chi index of every bond family, aligned to the previous env. Exact gauge transform. Removes the per-bond-index Z2 sign cycle that keeps ``"phase"`` from an element-wise fixed point (D=3 fermionic t-V, chi=12: stationarity residual 0.805 → ~5e-9). Not with ``chi_ramp``, split CTM, or ``ctm_ad_mode`` set (those engines own their CTM); explicit AD refuses it too. Charge sectors are grouped by block structure, not values: a bond whose stored blocks are numerically disconnected (exact zeros from rank deficiency) is only partly aligned, and the #841 stationarity guard then warns. |
 | ``"qr"`` | Legacy QR gauge | Refused (`ValueError`) | Forward-only CTM, notebooks, diagnostics. |
 | ``"sigma"`` | Historical — still correct but ~6–9× slower than phase | Refused (`ValueError`) | Power iteration (30 steps) per sweep. |
 | ``"none"`` | Benchmark / diagnostic only | Refused (`ValueError`) | Isolates gauge-fix cost from projector cost. |
 
 The Path 2 column is a hard gate, not a preference: `validate_ctm_for_implicit_ad`
-accepts `forward_gauge="phase"` and nothing else, and it narrows by neither
+accepts `forward_gauge="phase"` or `"bond_phase"` and nothing else, and it narrows by neither
 `chi` nor unit cell — so the older "at large chi (1-site only)" qualifier on
 the `sigma` row described a configuration that never ran (#808).
 
-**No silent gauge promotion**: ``optimize_gs_ad`` passes
-``ctm.forward_gauge`` through unchanged.  An explicit user choice
-(``"qr"``, ``"sigma"``, ``"phase"``, or ``"none"``) is always
-respected.  This was previously achieved through an auto-promotion of
-``"qr"`` → ``"phase"``; the promotion was removed in PR #343 in favor
-of a sensible static default.
+**No silent gauge promotion**: only the ``"auto"`` default is resolved;
+``optimize_gs_ad`` passes an explicit ``ctm.forward_gauge`` through
+unchanged.  An explicit user choice (``"qr"``, ``"sigma"``, ``"phase"``,
+``"bond_phase"``, or ``"none"``) is always passed through as-is (the
+explicit-AD and split energies then apply none of them, #1074), and an explicit
+``"bond_phase"`` on a path that cannot honour it raises.  This was
+previously achieved through an auto-promotion of ``"qr"`` → ``"phase"``;
+the promotion was removed in PR #343 in favor of a static ``"phase"``
+default, which ``"auto"`` replaced once ``"bond_phase"`` (#841) became the
+implicit path's best gauge while other paths cannot take it.
 
 The GMRES backward (``ad_backward_method="gmres"``) is tracked as an open
 gap — see issue #292 and the ``xfail``-marked regression test in
@@ -492,7 +951,7 @@ gap — see issue #292 and the ``xfail``-marked regression test in
 
 ## Critical Components
 
-### 1. Phase Gauge Fixing (default for explicit AD)
+### 1. Phase Gauge Fixing (implicit AD and the legacy ``ad_utils`` paths; not applied by ``optimize_gs_ad``'s explicit-AD energy, #1074)
 
 The phase gauge fix is two differentiable steps applied to every
 corner and edge after each CTM sweep:
@@ -505,18 +964,20 @@ corner and edge after each CTM sweep:
    real-positive (variPEPS ``_post_process_CTM_tensors`` convention).
 
 Together they remove the dominant gauge ambiguity at negligible cost —
-no power iteration, no eigensolve, fully differentiable — and are the
-reason the qr+phase path scales to chi=64 without NaNs.
+no power iteration, no eigensolve, fully differentiable.  (The historical
+note that they let the explicit qr+phase path scale to chi=64 without NaNs
+predates the routing in #1074, where that path applies no gauge.)
 
-### 2. Sigma Gauge Fixing (explicit-AD path only)
+### 2. Sigma Gauge Fixing (legacy ``ad_utils`` explicit-AD paths only; not applied by ``optimize_gs_ad``, #1074)
 
 Sigma gauge aligns each iteration's environment to the previous one using
 transfer matrix eigenvectors, making element-wise convergence monotonic.
 
 **It is not available on the implicit-diff path.** This section used to say the
 opposite — "required for the implicit-diff backward" — and that was stale:
-`validate_ctm_for_implicit_ad` accepts `forward_gauge="phase"` and raises
-`ValueError` for every other value, `"sigma"` included (#808). What the implicit
+`validate_ctm_for_implicit_ad` accepts `forward_gauge="phase"` /
+`"bond_phase"` (and the `"auto"` default that resolves to one of them) and
+raises `ValueError` for every other value, `"sigma"` included (#808). What the implicit
 backward actually needs from the forward pass is element-wise convergence to a
 well-conditioned fixed point, and phase gauge delivers that at a fraction of the
 cost — no power iteration, no eigensolve.
@@ -611,31 +1072,79 @@ optimization stability and speed.
    it reports says whether `y*` solves the characteristic equations, and
    that is measurably *not* the same as whether the gradient is accurate —
    it mispredicts in both directions (see Path 5). `usable_rank` does not
-   separate the cases either. Gradient accuracy on this path currently has
-   to be established by finite differences offline, not by anything the
-   library reports at run time. Tracked by issue #785.
+   separate the cases either. Gradient accuracy on this path has to be
+   established by finite differences — `measure_gradient_error` runs that
+   scan (see {ref}`measure-gradient-error`) — not by anything the engine
+   reports at run time. Tracked by issue #785.
+
+## Unconverged CTM forwards (`on_unconverged`)
+
+The implicit gradient is only valid at a CTM fixed point, and an energy from
+an unconverged environment can even fall below the variational bound (#1059,
+#1060). So by default (`CTMConfig(on_unconverged="raise")`) `optimize_gs_ad`
+acts on every forward's `converged` flag:
+
+- **Gradient forward:** raises `CTMNotConvergedError`. The optimizer resets to
+  the best params and restores the best environment if it is certified
+  converged there, or writes `ckpt.last.pkl` and re-raises when it cannot
+  recover.
+- **Warm-start cache:** an unconverged environment is never cached, except on
+  a cold start when nothing is cached yet.
+- **Line search:** an unconverged φ trial returns `+inf` and is rejected; an
+  unconverged dφ (Hager–Zhang) trial ends that line search, keeping the best
+  converged φ point found so far.
+- **Final energy:** a fresh evaluation first; if it does not converge, the
+  energy comes from a warm environment certified converged at exactly those
+  params, and `history["final_env_source"]` records which.
+
+`CTMConfig(on_unconverged="warn")` keeps the old control flow and emits
+`CTMNotConvergedWarning` instead.  Inside one `optimize_gs_ad` run it emits
+at most one warning per check site (gradient, warm-start cache, line search,
+final energy) and optimizer step (#1083); a step's further unconverged
+forwards at that site are counted, not shown.  The next warning that is shown
+says how many similar ones were suppressed, a run that ends with suppressed
+warnings still pending logs the count at INFO level, and
+`history["ctm_warnings_suppressed"]` (with `return_history=True`) holds the
+run's total.  The final best-point and last-iterate evaluations are counted
+separately.  Calls outside `optimize_gs_ad`, and `on_unconverged="raise"`, are
+unchanged.
+
+**Coverage.** All of this applies to the fused-CTM implicit-AD optimizers for
+`unit_cell="1x1"` and `"2site"`. With explicit AD (`gs_implicit_ad=False`)
+the gradient forward is not checked, though the line search and the final
+energy still are. Split CTM (`fuse_virtual_legs=False`),
+`ctm_ad_mode="root_implicit"` and multisite unit cells do not check
+convergence yet, and continue on an unconverged forward without raising or
+warning.
 
 ## Stall recovery (`gs_stall_recovery`)
 
 When the L-BFGS / CG line search fails to make progress, the optimizer
-runs a stall-recovery routine. Two modes are supported:
+runs a stall-recovery routine. Two modes are supported on the standard
+1-site, 2-site and multisite dispatchers. The ``ctm_ad_mode`` engines
+(``"c4v_reference"``, ``"root_implicit"``, ``"root_implicit_symmetric"``)
+have no stall recovery: they skip a failed step and continue, and ignore
+``gs_stall_recovery`` whether it is set or not.
 
-- ``"noise"`` — inject a ``gs_noise_amplitude`` (default 10 %) Frobenius
-  perturbation on the current params and reset the L-BFGS history.
-  **Required for the 1-site C4v production path**, which sits on an
-  SU-init plateau with gradient norms around ``1e-10`` that would
-  otherwise trip ``gs_conv_tol`` before the first real step.
-- ``"reset"`` — clear the L-BFGS ``(s, y)`` history and the CG beta
-  state so the next iteration is a plain (preconditioned) steepest
-  descent step from the current iterate. No rollback, no randomness.
-  **Default for the 2-site path** because the 10 % noise kick in the
-  ~32-dimensional D=2 parameter space lands in non-variational CTM
-  regions and drives the optimizer into unphysical "best" energies
-  (see issue #298).
+- ``"reset"`` (default on every unit cell) — roll back to
+  ``best_params``, clear the L-BFGS ``(s, y)`` history and the CG beta
+  state, so the next iteration is a plain (preconditioned) steepest
+  descent step from the best iterate; after ``gs_stall_recovery_retries``
+  consecutive resets the optimizer returns the best state. This is what
+  variPEPS does.
+- ``"noise"`` (legacy) — inject a ``gs_noise_amplitude`` (default 10 %)
+  Frobenius perturbation on the *current* params and reset the L-BFGS
+  history, with no rollback. It was the 1-site default until v0.8.4, to
+  break the C4v run off an SU-init plateau with gradient norms ~1e-10;
+  that plateau no longer reproduces (the SU start has |g| = 0.30 at D=2
+  and 0.54 at D=3). Near a settled energy the kick is destructive: on
+  D=3 χ=16 Heisenberg it took a 1x1 run from E=-0.66819 to -0.033, after
+  which the CTM adjoint diverged, and a 1x1 C4v run from -0.6668 to
+  -0.50. On 2-site it was retired earlier for the same reason (#298,
+  #520).
 
-Leaving ``gs_stall_recovery=None`` (the default) auto-selects the
-right mode for the unit cell at dispatch time. An explicit user
-setting is never overridden.
+Leaving ``gs_stall_recovery=None`` (the default) selects ``"reset"``. An
+explicit user setting is never overridden.
 
 For extra safety on 2-site runs, set ``gs_energy_floor`` to a value a
 bit below the expected variational minimum (e.g. ``2 * E_literature``).

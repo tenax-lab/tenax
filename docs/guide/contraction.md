@@ -126,7 +126,10 @@ V, eigenvalues = eigh(
 ```
 
 Like SVD and QR, `eigh` dispatches to a block-sparse path for
-`SymmetricTensor`.
+`SymmetricTensor`. On that path the default output order is a cross-sector ranking
+read on the host, which raises under `jax.jit`; `bond_order="sector"` (on both
+`eigh` and `svd`) emits a charge-grouped bond instead — see
+{ref}`eigh-bond-order` and {ref}`svd-bond-order`.
 
 ## Lower-level API
 

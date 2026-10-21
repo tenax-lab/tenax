@@ -204,8 +204,23 @@ class TestSVDProjectorSymmetric:
         np.testing.assert_allclose(sv_sym, sv_ref, atol=1e-10)
 
     def test_svd_projector_fpeps_returns_symmetric(self, fpeps_tensor):
-        """SVD projector works with FermionParity (nontrivial charges)."""
-        A = fpeps_tensor
+        """SVD projector works with nontrivial Z2 charges.
+
+        On bosonic Z2, not ``FermionParity``: this is the 1x1 projector, which
+        fermions no longer reach -- the 1x1 recipe refuses them and they run
+        on the graded 2x2 CTM (#1035 step 4), whose converged corners here
+        come out rank-deficient at chi=4.  The block layout is the same.
+        """
+        from tenax.core.symmetry import ZnSymmetry
+
+        z2 = ZnSymmetry(2)
+        A = SymmetricTensor.from_dense(
+            fpeps_tensor.todense(),
+            tuple(
+                TensorIndex.from_charges(z2, ix.charges, ix.flow, label=ix.label)
+                for ix in fpeps_tensor.indices
+            ),
+        )
         chi = 4
         # Lift the rank-1 cold init (PR #422/#424) into a full-rank env before
         # testing biorthogonality — the projector formula correctly produces

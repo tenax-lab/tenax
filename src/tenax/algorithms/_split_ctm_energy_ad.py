@@ -8,6 +8,10 @@ both fully supported here: forward-only converge, explicit-AD (unrolled)
 converge, and implicit-AD (fixed-point ``custom_vjp`` with Neumann backward)
 energy entries for each — ``ctm_energy_split_{explicit,implicit}`` (1×1) and
 ``ctm_energy_split_{explicit,implicit}_2site`` (2-site checkerboard).
+
+The split CTM is dense-only and experimental (frozen by design):
+``SymmetricTensor`` input, bosonic or fermionic, is refused; symmetric iPEPS
+uses the fused CTM (``fuse_virtual_legs=True``).
 """
 
 from __future__ import annotations

@@ -460,6 +460,21 @@ def _energy_loss_implicit_ad(A: DenseTensor, config: CTMConfig, gate) -> jax.Arr
     return compute_energy_ctm_tensor(A_norm, env, gate)
 
 
+# #841: both parametrizations of the explicit-AD FD test below run the SAME
+# 2x2 Fishman path (``projector_method`` is consulted only on the 1x1 recipe)
+# through the deprecated ``ctm_tensor_converge_explicit``, which unflattens
+# each sweep's leaves with the INITIAL env's treedef -- and a sweep returns
+# all four corners with their legs in the opposite order, so the corners are
+# silently transposed and the loss itself depends on the chi-leg SVD gauge
+# (E = 0.451640 under the pre-#841 sign rule, 0.451768 after it; the eager
+# sweep gives the same energy under every sign rule).  The #841 gauge change
+# moved AD/FD on this test's direction from rel 0.121 to 0.048, just under
+# the 5e-2 bar, while other directions still miss (0.227 on PRNGKey(2)).
+# That is not the xfail's defect being fixed, so the markers are non-strict
+# rather than removed.
+_EXPLICIT_FD_XFAIL_STRICT = False
+
+
 class TestCTMFixedPointGradientFiniteDifference:
     """Directional finite-difference agreement: the gold-standard AD check.
 
@@ -520,7 +535,7 @@ class TestCTMFixedPointGradientFiniteDifference:
                         "needs Lorentzian-broadened backward inside "
                         "_gauge_fixed_svd, similar to truncated_svd_ad."
                     ),
-                    strict=True,
+                    strict=_EXPLICIT_FD_XFAIL_STRICT,
                 ),
             ),
             pytest.param(
@@ -540,7 +555,7 @@ class TestCTMFixedPointGradientFiniteDifference:
                         "post-truncation gauge fix on the k-dim subspace, or "
                         "a custom VJP for the whole projector function."
                     ),
-                    strict=True,
+                    strict=_EXPLICIT_FD_XFAIL_STRICT,
                 ),
             ),
         ],
