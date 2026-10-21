@@ -12,6 +12,11 @@
   iPEPS-AD in tenax already loses to dense, so the symmetric split path had
   no use and had carried its own defects (#907, #1024, #1048).  Symmetric
   iPEPS uses the fused CTM (`fuse_virtual_legs=True`, the default).
+  The now-unreachable symmetric code in the split modules is gone (~1,000
+  lines): the symmetric env init, per-sector interlayer truncation, the
+  fermionic merge→fused→resplit route, and the `chi_ref_charges` / `chi_seed`
+  keywords of `initialize_split_ctm_tensor_env` (unreleased, so no
+  deprecation period).
 
 - **The joint-VJP chain rule is the default.** `CTMConfig.adjoint_chain_rule`
   now defaults to `"auto"`, which runs `"joint"` on the fused implicit-AD path
