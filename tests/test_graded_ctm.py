@@ -232,10 +232,14 @@ def test_ctm_tensor_keeps_an_asymmetric_fermionic_site_on_the_graded_path():
     A = _asymmetric_fermionic_site(3)
     H = spinless_fermion_gate(FPEPSConfig(D=3, t=1.0, V=1.0))
     chi = 8
+    # A same-budget parity, not a convergence claim.  Measured (2026-10-20):
+    # E1 == E2 exactly at max_iter 4, 6, 10 and 20 (E = 0.638, 0.792, 0.796,
+    # 0.796), and the wall is ~200 s at each: the block-sparse compile, not the
+    # sweeps.  6 sweeps keeps E far from the 1e-3 regime floor.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        env, _eps = ctm_tensor(A, chi, max_iter=60, conv_tol=1e-10)
-        eA, eB = ctm_tensor_2site(A, A, chi, max_iter=60, conv_tol=1e-10)
+        env, _eps = ctm_tensor(A, chi, max_iter=6, conv_tol=1e-10)
+        eA, eB = ctm_tensor_2site(A, A, chi, max_iter=6, conv_tol=1e-10)
     assert isinstance(env.C1, SymmetricTensor)
     assert env.C1.indices[0].symmetry.is_fermionic
     E1 = float(compute_energy_ctm_tensor(A, env, H, 2))

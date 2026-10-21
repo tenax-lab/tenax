@@ -343,7 +343,9 @@ def gmres_pytree_jax(
 _SEED, _RESID, _ARNOLDI = 0, 1, 2
 
 
-def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
+def gmres_single_matvec(
+    matvec, b_tree, candidates, *, tol, maxiter, restart, aux=False
+):
     """Restarted GMRES whose compiled program applies ``matvec`` at ONE site.
 
     JAX's GMRES calls the matvec at three places (initial residual, Arnoldi
@@ -383,9 +385,16 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
         tol: absolute and relative tolerance, as ``_adjoint_converged``.
         maxiter: maximum restart cycles.  ``0`` returns the best seed.
         restart: Arnoldi steps per cycle.
+        aux: when True, ``matvec`` returns ``(A v, a(v))`` with ``a`` linear,
+            and the solver also returns ``a(x)`` for the returned ``x``.  Free:
+            ``best_x`` changes only in ``_SEED`` and ``_RESID``, where the
+            matvec input is exactly the vector adopted, so ``a(best_x)`` comes
+            from the same call and is kept under the same strict-``<`` rule.
+            The Krylov basis needs no copy.  Used by the joint-VJP chain rule,
+            where ``a(v) = J_params^T v``.
 
     Returns:
-        ``(x_tree, abs_resid, b_norm)``.
+        ``(x_tree, abs_resid, b_norm)``, plus ``a(x_tree)`` last when ``aux``.
     """
     b_leaves, treedef = jax.tree.flatten(b_tree)
     shapes = [leaf.shape for leaf in b_leaves]
@@ -412,6 +421,8 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
     # the imaginary part and certify a residual that is not the true one.
     if not jnp.issubdtype(dtype, jnp.complexfloating):
         out_shapes = jax.eval_shape(matvec, b_tree)
+        if aux:
+            out_shapes = out_shapes[0]
         if any(
             jnp.issubdtype(leaf.dtype, jnp.complexfloating)
             for leaf in jax.tree.leaves(out_shapes)
@@ -427,7 +438,11 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
                 )
 
     def apply(v):
-        return flatten(matvec(unflatten(v))).astype(dtype)
+        out = matvec(unflatten(v))
+        if aux:
+            y, a = out
+            return flatten(y).astype(dtype), a
+        return flatten(out).astype(dtype), None
 
     cands = [flatten(c).astype(dtype) for c in candidates if c is not None]
     n_cand = len(cands)
@@ -443,6 +458,19 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
     zeros_n = jnp.zeros((n,), dtype)
     basis_idx = jnp.arange(m + 1)
     coef_idx = jnp.arange(m)
+
+    if aux:
+        aux_shape = jax.eval_shape(lambda t: matvec(t)[1], b_tree)
+        aux0 = jax.tree.map(lambda s: jnp.zeros(s.shape, s.dtype), aux_shape)
+
+    def keep_aux(s, better, a):
+        if not aux:
+            return {}
+        return {
+            "best_aux": jax.tree.map(
+                lambda new, old: jnp.where(better, new, old), a, s["best_aux"]
+            )
+        }
 
     state0 = {
         "phase": jnp.int32(_SEED if n_cand else _RESID),
@@ -464,8 +492,10 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
         # ``best_res`` is a measured value and not the assumed ``||b||``.
         "measured": jnp.array(False),
     }
+    if aux:
+        state0["best_aux"] = aux0
 
-    def seed(s, y):
+    def seed(s, y, a):
         res = norm(b - y)
         better = res < s["best_res"]  # NaN compares False: never chosen
         best_x = jnp.where(better, C[s["k"]], s["best_x"])
@@ -478,13 +508,14 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
             "k": k1,
             "best_x": best_x,
             "best_res": best_res,
+            **keep_aux(s, better, a),
             "measured": s["measured"] | jnp.isfinite(res),
             "x": jnp.where(last, best_x, s["x"]),
             "v_in": jnp.where(last, best_x, nxt),
             "phase": jnp.where(last, _RESID, _SEED).astype(jnp.int32),
         }
 
-    def resid(s, y):
+    def resid(s, y, a):
         r = b - y
         rn = norm(r)
         bad = ~jnp.isfinite(rn)
@@ -497,6 +528,7 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
             **s,
             "best_x": jnp.where(better, s["x"], s["best_x"]),
             "best_res": jnp.where(better, rn, s["best_res"]),
+            **keep_aux(s, better, a),
             "nonfinite": s["nonfinite"] | (bad & ~s["measured"]),
             "measured": s["measured"] | ~bad,
             "done": done,
@@ -510,7 +542,7 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
             "phase": jnp.int32(_ARNOLDI),
         }
 
-    def arnoldi(s, y):
+    def arnoldi(s, y, a):
         j = s["j"]
         V = s["V"]
         mask = (basis_idx <= j).astype(dtype)
@@ -576,9 +608,11 @@ def gmres_single_matvec(matvec, b_tree, candidates, *, tol, maxiter, restart):
         }
 
     def body(s):
-        y = apply(s["v_in"])  # the one and only matvec call site
-        return lax.switch(s["phase"], (seed, resid, arnoldi), s, y)
+        y, a = apply(s["v_in"])  # the one and only matvec call site
+        return lax.switch(s["phase"], (seed, resid, arnoldi), s, y, a)
 
     out = lax.while_loop(lambda s: ~s["done"], body, state0)
     abs_resid = jnp.where(out["nonfinite"], jnp.nan, out["best_res"])
+    if aux:
+        return unflatten(out["best_x"]), abs_resid, b_norm, out["best_aux"]
     return unflatten(out["best_x"]), abs_resid, b_norm

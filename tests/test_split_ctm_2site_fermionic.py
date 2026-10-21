@@ -56,13 +56,12 @@ def _make_fp_site(D=2, seed=0):
     )
 
 
-def test_the_fermionic_split_sweep_is_refused():
+def test_the_fermionic_split_multisite_init_is_refused():
+    """The split CTM is dense-only: the multisite init refuses fermionic
+    sites before any sweep can run."""
     A = _make_fp_site(seed=11)
-    site_tensors = {(0, 0): A, (1, 0): A}
-    envs = _initialize_split_multisite_env(site_tensors, 6, 6)
-    bars = {c: T.bar() for c, T in site_tensors.items()}
-    with pytest.raises(NotImplementedError, match="split CTM: fermionic"):
-        _split_ctm_sweep_multisite_2x2(envs, site_tensors, bars, NB, 6, 6)
+    with pytest.raises(NotImplementedError, match="dense-only"):
+        _initialize_split_multisite_env({(0, 0): A, (1, 0): A}, 6, 6)
 
 
 def test_the_fermionic_split_2site_public_path_is_refused():
