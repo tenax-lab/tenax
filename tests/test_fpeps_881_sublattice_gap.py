@@ -626,8 +626,10 @@ def test_fpeps_restarts_from_its_own_returned_pair():
         # chi=4 / 12 sweeps leaves two bond RDMs grossly non-PSD (smallest
         # eigenvalue -0.61), which fpeps()'s #879 gate refuses as NaN.  At
         # chi=8 every bond RDM is PSD and E is stable (0.1539; chi=16: 0.1521).
+        # 20 sweeps suffice: E1 = 0.137768 (60 sweeps: 0.137776) and the 0-step
+        # restart reproduces E1 to 3e-17 at 12, 20, 30 and 60 sweeps.
         ctm_chi=8,
-        ctm_max_iter=60,
+        ctm_max_iter=20,
         ctm_conv_tol=1e-9,
     )
     H = spinless_fermion_gate(cfg)

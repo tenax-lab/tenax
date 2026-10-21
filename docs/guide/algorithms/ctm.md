@@ -334,12 +334,13 @@ fused χ²·D⁶ double layer.
   gradient to machine precision in the non-degenerate regime (~1e-15; the
   SU(2)-symmetric Heisenberg point carries a degenerate-SV SVD-backward floor
   on the explicit reference).
-- **Scope.** The split CTM is dense-bosonic and experimental (frozen by
-  design): `DenseTensor` and bosonic `SymmetricTensor` (U(1)/Z_n) both run on
-  the eager forward and on single-site (`unit_cell="1x1"`) AD, but a *traced*
-  2-site `SymmetricTensor` multisite sweep is refused rather than fixed — use
-  `fuse_virtual_legs=True` for symmetric multisite AD (#1048). Fermionic input
-  is refused outright (#1035).
+- **Scope.** The split CTM is dense-only and experimental (frozen by design):
+  `SymmetricTensor` input, U(1)/Z_n or fermionic, is refused with
+  `NotImplementedError`; symmetric iPEPS uses the fused CTM
+  (`fuse_virtual_legs=True`).  Its memory win is a large-D effect, where
+  symmetric iPEPS-AD in tenax already loses to dense, so the symmetric split
+  path was dropped rather than kept frozen (it had carried #907, #1024 and
+  #1048).
 - **Fixed χ.** The χ-changing knobs are rejected on this path.
 - **Memory.** The win over fused is a large-D effect (D≳16). Measured at
   `recipe="2x2"` on one A100-80GB it reaches χ=96/48/32 at D=8/10/12 against

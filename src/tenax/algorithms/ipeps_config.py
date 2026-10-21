@@ -87,6 +87,26 @@ class CTMConfig:
                             tracked by issue #292.  Prefer
                             ``ad_backward_method="vjp"`` (the default)
                             until GMRES is stabilized.
+        adjoint_method:     Solver for the implicit-AD adjoint system.
+                            ``"fixed_point"`` (default) runs the fused
+                            Neumann loop and falls back to GMRES when it
+                            does not converge; ``"gmres"`` goes straight to
+                            the single-matvec GMRES solve.
+        adjoint_chain_rule: How the implicit-AD backward forms the chain
+                            rule's indirect term ``J_params^T λ``.
+                            ``"joint"`` takes it from a joint GMRES solve
+                            over ``(params, env)``, so the separate
+                            params-VJP program never compiles; ``"separate"``
+                            compiles that program (the behaviour before
+                            #1123).  Same gradient to round-off; at U(1) D=3
+                            chi=16 on an A100 the first step compiles 23%
+                            faster (7,795 -> 5,977 s) with 12 GB less peak
+                            RSS; warm steps unchanged.  ``"auto"`` (default)
+                            runs ``"joint"`` on the fused CTM and leaves the
+                            split CTM (``fuse_virtual_legs=False``), which
+                            has its own chain rule, as it was; an explicit
+                            ``"joint"`` is refused there.  See
+                            ``docs/guide/algorithms/ipeps_ad_paths.md``.
         chi_ramp:           **Deprecated** (#512; emits ``DeprecationWarning``).
                             Staged ``[(chi, num_sweeps), ...]`` CTM
                             convergence.  It zero-pads the env between
@@ -129,12 +149,11 @@ class CTMConfig:
                             memory) instead, for both the single-site
                             (``unit_cell="1x1"``) and 2-site checkerboard
                             (``unit_cell="2site"``) optimizers.  The split
-                            CTM is dense-bosonic and experimental: a traced
-                            (jit/AD) 2-site sweep on ``SymmetricTensor`` site
-                            tensors is refused rather than fixed (#1048) --
-                            use ``fuse_virtual_legs=True`` for symmetric
-                            multisite AD.  Fermionic input is refused
-                            (#1035), and the χ-changing knobs are rejected.
+                            CTM is dense-only and experimental:
+                            ``SymmetricTensor`` input (U(1)/Z_n or
+                            fermionic) is refused -- symmetric iPEPS uses
+                            the fused CTM -- and the χ-changing knobs are
+                            rejected.
                             The memory win over the fused path is a large-D
                             effect (D≳16, #825).
         ctm_ad_mode:        ``None`` (default), ``"c4v_reference"`` (dense
@@ -198,8 +217,8 @@ class CTMConfig:
     fuse_virtual_legs: bool = True  # True: fused double-layer (χ²·D⁶, default).
     # False: split ket/bra double layer (χ²·D⁴): single-site (unit_cell="1x1")
     # and 2-site checkerboard (unit_cell="2site"); other lattices still raise
-    # NotImplementedError.  Dense-bosonic and experimental (frozen by design):
-    # a traced 2-site SymmetricTensor sweep is refused, not fixed (#1048).
+    # NotImplementedError.  Dense-only and experimental (frozen by design):
+    # SymmetricTensor input is refused.
     ad_regularize_svd: bool = True  # use Lorentzian-regularized SVD backward in AD
     gmres_precondition: bool = (
         False  # diagonal scaling preconditioner for GMRES backward (experimental)
@@ -221,6 +240,25 @@ class CTMConfig:
     # ``gmres_maxiter`` (step cap).  The fixed-point loop additionally
     # falls back to GMRES in-loop when ``diff > prev_diff`` after step 5.
     adjoint_method: Literal["fixed_point", "gmres"] = "fixed_point"
+    # How the implicit-AD backward forms the chain rule's indirect term
+    # J_params^T lambda.
+    #   "auto" (default) -- "joint" on the fused implicit path, which is the
+    #     only backward that reads this; the split CTM keeps its own chain
+    #     rule.  An explicit "joint" on the split CTM is refused.
+    #   "separate" -- its own compiled program, ``_jit_chain_rule``:
+    #     the params-VJP of the CTM sweep, the largest single compile at D=3
+    #     (2,604 s at chi=16 on GPU).
+    #   "joint" -- the GMRES adjoint solve's matvec is one VJP over
+    #     (params, env), which yields J_params^T of the solve's own iterate;
+    #     the separate program never compiles.  The fused Neumann loop is
+    #     unchanged (env only) and is always followed by that joint GMRES
+    #     solve, seeded with its lambda.  Gradient equal to "separate" to
+    #     round-off.  U(1) D=3 chi=16 on GPU (A100), first step: compile
+    #     7,795 -> 5,977 s (-23%), wall 8,231 -> 6,388 s, peak RSS 51 -> 39 GB,
+    #     warm steps unchanged.  Default via "auto" since the flip (#1123
+    #     shipped it opt-in; docs/superpowers/specs/
+    #     2026-10-18-joint-vjp-chain-rule-design.md).
+    adjoint_chain_rule: Literal["auto", "separate", "joint"] = "auto"
     # "elementwise" or "sv" (corner singular-value spectrum).
     #
     # #780 -- "elementwise" is GAUGE-DEPENDENT and does not converge on a
@@ -562,6 +600,12 @@ class CTMConfig:
             raise ValueError(
                 f"adjoint_method must be one of {valid_adjoint_methods}, "
                 f"got {self.adjoint_method!r}"
+            )
+        valid_chain_rules = {"auto", "separate", "joint"}
+        if self.adjoint_chain_rule not in valid_chain_rules:
+            raise ValueError(
+                f"adjoint_chain_rule must be one of {valid_chain_rules}, "
+                f"got {self.adjoint_chain_rule!r}"
             )
         # Phase-1 deprecation (#512): both the scheduled ``chi_ramp`` and
         # the end-of-outer-step ``chi_auto_bump`` zero-pad the env between
