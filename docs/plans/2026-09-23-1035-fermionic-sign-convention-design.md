@@ -2,6 +2,23 @@
 
 Date: 2026-09-23 · Status: **proposed, for review — revision 2** · Tracks: #1035, #1037, #995, #1023, #1034
 
+> **Status as of 2026-10-21: design D0 (B, the graded contractor) was adopted
+> and mostly built.** This document is kept as the design record; its file:line
+> references are to `ad9c213` and have drifted since. What landed, by §5 step:
+>
+> - Step 0, the Fock oracle: #1038.
+> - Steps 1–2, reference `graded_contract` and graded linalg, with the go/no-go
+>   in §8: #1039.
+> - Step 3, fusion and the graded double layer (§9): #1040.
+> - Steps 4 and 6, the graded fused CTM and graded simple update, which make
+>   `fpeps()` fermionic: #1044. Follow-ups: #1051, #1053, #1054, #1056, #1058.
+> - Not built: step 5 (the strict mode that makes `permute_legs` raise on
+>   fermionic tensors) and step 7 (odd insertions in the CTM, then excitations).
+>
+> §7 Q4 was overtaken: #1034's `twist` merged as `dcf6c8e` before this was
+> settled, and #1042 later collapsed `Tensor.twist` and `twist_legs` into one
+> sign. #1035 and #1037 remain open.
+
 Every file:line below is on `main` at `ad9c213`. Every numerical claim comes
 from a probe run against that commit. The probe is described next to its result.
 
