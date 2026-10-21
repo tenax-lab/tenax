@@ -4,6 +4,29 @@
 
 ### Behavior Changes
 
+- **The split CTM is dense-only.** `fuse_virtual_legs=False` (and the
+  `ctm_split_tensor*` / `ctm_energy_split_*` entry points) now refuse
+  `SymmetricTensor` site tensors with `NotImplementedError`.  Bosonic
+  U(1)/Z_n input used to run on the eager forward and on single-site AD.  The
+  split CTM's memory win is a large-D effect (D≳16, #825), where symmetric
+  iPEPS-AD in tenax already loses to dense, so the symmetric split path had
+  no use and had carried its own defects (#907, #1024, #1048).  Symmetric
+  iPEPS uses the fused CTM (`fuse_virtual_legs=True`, the default).
+  The now-unreachable symmetric code in the split modules is gone (~1,000
+  lines): the symmetric env init, per-sector interlayer truncation, the
+  fermionic merge→fused→resplit route, and the `chi_ref_charges` / `chi_seed`
+  keywords of `initialize_split_ctm_tensor_env` (unreleased, so no
+  deprecation period).
+
+- **The joint-VJP chain rule is the default.** `CTMConfig.adjoint_chain_rule`
+  now defaults to `"auto"`, which runs `"joint"` on the fused implicit-AD path
+  and leaves the split CTM (`fuse_virtual_legs=False`), which has its own chain
+  rule, as it was.  The separate params-VJP program (`_jit_chain_rule`) no
+  longer compiles.  Gradients equal the old default to round-off; U(1) D=3
+  chi=16 on one A100, first step: XLA compile 7,795→5,977 s (−23%), peak RSS
+  51→39 GB, warm steps unchanged.  `adjoint_chain_rule="separate"` restores the
+  old behaviour; an explicit `"joint"` is still refused on the split CTM.
+
 - **Flowing-projector gradients are slope-checked on non-stationary forwards
   (#1111).** A solved flowing adjoint can still give a gradient orders of
   magnitude off on a forward that is not a fixed point (measured 1497x on the
@@ -253,6 +276,15 @@
     so this costs nothing in the common case.
 
 ### Added
+
+- **Opt-in joint-VJP chain rule for the implicit-AD backward.**
+  `CTMConfig(adjoint_chain_rule="joint")` gets the chain rule's indirect term
+  from the GMRES adjoint solve's own VJP over `(params, env)`, so the separate
+  params-VJP program never compiles; the fused Neumann loop is unchanged and
+  is followed by that solve, seeded with its `λ`. Gradient equal to the
+  default to round-off. U(1) D=3 chi=16 two-site, one A100, first step: XLA
+  compile 7,795→5,977 s (−23%), wall 8,231→6,388 s, peak RSS 51→39 GB, warm
+  steps unchanged. (Now the default; see Behavior Changes.)
 
 - **CTM hold test: a saddle is not converged** (#1035): `ctm_tensor_2site`
   and `ctm_multisite` compared successive sweeps only, and that cannot tell

@@ -302,6 +302,14 @@ prefer `ctmrg_heuristic_increase_chi`.
   raises `CTMRGGradientError` so the optimizer can recover via stall recovery
   instead of silently diverging.
 
+- **First gradient takes hours at D≥3 (symmetric tensors)**: that is XLA
+  compiling the implicit-AD backward, not the solve; later steps take
+  seconds.  The default `adjoint_chain_rule="auto"` already runs the
+  joint-VJP chain rule (first-step compile −23% and 12 GB less peak memory
+  at U(1) D=3 chi=16 on an A100, same gradient); check the config does not
+  set `"separate"`.  Keep the persistent compilation cache on so a rerun
+  reuses the programs.
+
 ### 2-site C4v shared-tensor configuration
 
 For Heisenberg-like AFMs, the shared-tensor C4v path is recommended:
@@ -354,8 +362,8 @@ A_opt, env, E_gs = optimize_gs_ad(gate, None, config)  # env is a SplitCTMTensor
 Constraints (each raises a clear `NotImplementedError` otherwise):
 
 - **Single-site dense only** — `unit_cell="1x1"`, `DenseTensor`, on the default
-  `gs_recipe="2x2"`. SymmetricTensor/fermionic and multisite split AD are later
-  phases. (`gs_recipe="1x1"` is still *accepted* on this path but deprecated and
+  `gs_recipe="2x2"`. The split CTM is dense-only: SymmetricTensor (U(1)/Z_n or
+  fermionic) input is refused; use the fused CTM for symmetric iPEPS. (`gs_recipe="1x1"` is still *accepted* on this path but deprecated and
   non-convergent — #911.)
 - **Fixed chi** — the χ-changing knobs (`chi_ramp`, `chi_auto_bump`,
   `ctmrg_heuristic_increase_chi`) and CTM schedules are rejected; pick one
@@ -576,6 +584,7 @@ print(f"Final energy: {result.energy:.8f}")
 | Implicit VJP backward diverges | ρ(J^T) ≫ 1 at CTM fixed point | Increase χ, or switch to explicit AD (`gs_implicit_ad=False`) |
 | `CTMRGGradientError` raised | Arnoldi precheck detected ρ ≥ threshold | Increase χ, or switch to explicit AD path |
 | NaN at large chi (chi>16) | eigh backward without regularization | Use QR projectors, or ensure `projector_backward="lorentzian"` |
+| First AD step takes hours, later steps seconds | Backward compile (symmetric D≥3) | Keep the default `adjoint_chain_rule="auto"` (not `"separate"`); keep the compilation cache on |
 | CTM not converging | χ too small or max_iter too low | Increase both; try `chi_ramp` for faster convergence |
 | Wrong symmetry breaking | Wrong unit cell | Try "2site" for AFM order |
 | NaN in gradients | SVD degeneracy | Reduce learning rate, check gate is Hermitian |

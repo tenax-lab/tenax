@@ -142,6 +142,7 @@ def build_pess_loss(
             gmres_restart=config.gmres_restart,
             arnoldi_precheck=False,
             adjoint_method=config.adjoint_method,
+            adjoint_chain_rule=config.adjoint_chain_rule,
             plateau_patience=config.plateau_patience,
             # In-CTM χ-bump (variPEPS §2.8.2; Issue #492 / #411).  Defaults
             # in CTMConfig keep the bump off, so existing PESS callers see
@@ -232,6 +233,7 @@ def build_pess_loss_exact(
             gmres_restart=config.gmres_restart,
             arnoldi_precheck=False,
             adjoint_method=config.adjoint_method,
+            adjoint_chain_rule=config.adjoint_chain_rule,
             plateau_patience=config.plateau_patience,
             ctmrg_heuristic_increase_chi=config.ctmrg_heuristic_increase_chi,
             ctmrg_heuristic_increase_chi_threshold=(
@@ -768,6 +770,7 @@ def build_pess_loss_3site_multisite(
             gmres_restart=config.gmres_restart,
             arnoldi_precheck=False,
             adjoint_method=config.adjoint_method,
+            adjoint_chain_rule=config.adjoint_chain_rule,
             plateau_patience=config.plateau_patience,
             # In-CTM χ-bump (variPEPS §2.8.2; Issue #492 / #411).  Mirror
             # the 1-site PESS call above so the AD-traced energy and the
