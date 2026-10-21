@@ -539,6 +539,9 @@ Pre-built 2-site Hamiltonian tensors:
 - `heisenberg_gate_u1sz` — U(1)-Sz block-sparse `SymmetricTensor` with charges
   `[+1, −1]` for spin-↑/↓.
 - `xxz_gate` — XXZ anisotropy.
+- `xxz_gate_u1sz` — U(1)-Sz block-sparse `SymmetricTensor` for XXZ with charges `[+1, −1]`.
+- `xxz_gate_z2` — Z2 block-sparse `SymmetricTensor` for XXZ with charges `[0, 1]` (spin-down parity).
+- `xxz_z2_init_pair` — Random Z2-symmetric 2-site iPEPS pair `(A, B)` with alternating virtual charges.
 - `spinless_fermion_gate` — fPEPS hopping + interaction + chemical potential
   (`FPEPSConfig.mu`), with `FermionParity` symmetry; see {doc}`fpeps`.
 

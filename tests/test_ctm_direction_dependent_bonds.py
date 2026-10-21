@@ -64,7 +64,7 @@ def test_su_output_is_direction_dependent_but_cell_consistent():
     assert _charges(A, "l") == _charges(B, "r"), "A.l must match B.r (cell-consistent)"
 
 
-_SWEEPS = 2
+_SWEEPS = 1
 
 
 def test_symmetric_2site_ctm_matches_dense_on_direction_dependent_bonds():
@@ -82,8 +82,12 @@ def test_symmetric_2site_ctm_matches_dense_on_direction_dependent_bonds():
     XLA compile per new block shape), which timed the CI fast-other shard out
     at the 240 min cap on every run.  Measured 2026-09-27: dense and symmetric
     agree to 4.7e-14 after 1 sweep and 1.1e-16 after 2 (E=-0.418147440020).
-    Mutant: the symmetric projector's ``S**-1/2`` replaced by ``S**-1`` (the
-    dense projector is a separate function) -- this test fails.
+    Mutant: ``S**-1/2`` replaced by ``S**-1`` in
+    ``_ctm_tensor_projector_2x2._compute_2x2_projector_symmetric`` (the dense
+    path is ``_compute_2x2_projector``) -- this test fails (2026-10-21: E_sym
+    -2.6e6 at 2 sweeps, -1.7e9 at 1).  The same edit in
+    ``_ctm_projector._svd_projector_symmetric`` survives: this recipe never
+    calls it.
     """
     A, B = _su_direction_dependent_pair()
     Hd = heisenberg_gate()
