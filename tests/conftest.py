@@ -118,7 +118,6 @@ _FILE_MARKERS = {
     # traced multisite SymmetricTensor split sweep outright, so that gradient
     # comparison is moot and its replacement (asserting the refusal) is cheap
     # -- no @pytest.mark.slow is carried in this file anymore.
-    "test_split_ctm_2site_symmetric.py": "algorithm",
     # 2-site split-CTM fermionic (#463 Phase 4): block-sparse forward parity vs
     # the fused sweep; algorithm bucket like its symmetric/split siblings.
     "test_split_ctm_2site_fermionic.py": "algorithm",
@@ -143,7 +142,6 @@ _FILE_MARKERS = {
     # raise/no-op, ~2s); the end-to-end confined-state repro carries its own
     # ``@pytest.mark.slow`` (SU evolution + two CTM builds, ~20s), which the
     # rule below honours by withholding ``core`` from it.
-    "test_split_ctm_symmetric_empty_projector_907.py": "core",
     # #890: ``ipeps()`` accepted an ``initial_peps`` whose bond dim disagreed
     # with ``config.max_bond_dim`` and failed several frames into the SU sweep
     # with an opaque reshape ``TypeError``.  Warm-starting a larger-D run from a
@@ -287,6 +285,7 @@ _FILE_MARKERS = {
     # The fused backward and its GMRES fallback share one compiled chain rule
     # (~75s: a fused and a gmres backward at D=2 chi=4).
     "test_shared_chain_rule_bwd.py": "algorithm",
+    "test_joint_chain_rule.py": "algorithm",
     # MPS/MPO physical-basis agreement (#816).  A mismatched charge ORDER
     # still converges and reports the correct energy while returning a
     # permuted state, so the energy check that normally catches everything
@@ -808,7 +807,6 @@ _FILE_MARKERS = {
     # ``slow`` marker and so stay out of the gate: measured 784.7s for those
     # 3 against 11.7s for the 25 the gate does run, and they confirm the same
     # defect the init-time invariant already catches.
-    "test_split_ctm_asymmetric_layout_1024.py": "core",
     # The twist primitive (#555's deferred non-planar operation).  ``core``:
     # it is pure block algebra with no CTM in it -- 1.1s for all six tests --
     # and it is the operation a non-planar fermionic reference needs to be

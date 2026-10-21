@@ -210,6 +210,8 @@ _BACKWARD_FNS = {
     "_jit_chain_rule",
     "_jit_apply_Jt",
     "_jit_gmres_one_matvec_solve",
+    "_jit_gmres_joint_solve",  # the default chain rule ("auto" -> "joint")
+    "_jit_direct",
 }
 _TRACED: list[str] = []
 jm.register_event_duration_secs_listener(

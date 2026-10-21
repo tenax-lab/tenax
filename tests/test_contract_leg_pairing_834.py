@@ -545,7 +545,10 @@ def test_a_trace_within_one_tensor_is_not_treated_as_a_pairing(monkeypatch):
 
 
 # ------------------------------------------- what the default mode must not do
-def _charged_u1_sweep(max_iter: int = 3):
+def _charged_u1_sweep(max_iter: int = 1):
+    # One sweep reaches every refusal site: with the #905 flow flip put back
+    # in ``_apply_proj_unfused``, strict mode raises in sweep 1 (measured
+    # 2026-10-20; 3 sweeps cost 155 s, 1 sweep 50 s).
     from tenax.algorithms._ctm_tensor import ctm_tensor_2site
     from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
 

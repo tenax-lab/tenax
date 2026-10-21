@@ -224,6 +224,10 @@ def _implicit_energy(
             min_iter=8,
             conv_tol=1e-12,
             adjoint_method=adjoint_method,
+            # The spies below watch ``_jit_gmres_one_matvec_solve``, the
+            # separate chain rule's solve; the default joint one is
+            # ``_jit_gmres_joint_solve``.
+            adjoint_chain_rule="separate",
         )
     )
 

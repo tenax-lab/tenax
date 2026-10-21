@@ -7,19 +7,13 @@ __all__ = [
     "_apply_projector",
     "_build_split_enlarged_corner",
     "_compute_split_plaquette_projector_pair",
-    "_ensure_corner_flows",
-    "_ensure_edge_flows",
-    "_ensure_tensor_flows",
     "_doublelayer_grown_corner",
     "_factorize_projector",
-    "_fused_charge_permutation",
     "_grow_and_project_bounded_lr",
     "_grow_and_project_edge_lr",
     "_grow_edge_halves",
     "_grow_edge_no_double_layer",
     "_project_grown_edge_tensor_lr",
-    "_reembed_target_for_projector",
-    "_select_bond_entries",
     "_split_ctm_absorb_bottom_2plaq",
     "_split_ctm_absorb_left_2plaq",
     "_split_ctm_absorb_right_2plaq",
@@ -29,26 +23,19 @@ __all__ = [
     "_split_ctm_move_right",
     "_split_ctm_move_top",
     "_svd_split_edge_tensor",
-    "_truncate_svd_per_sector",
 ]
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms._ctm_projector import _compute_projector_tensor, _reembed_fused
+from tenax.algorithms._ctm_projector import _compute_projector_tensor
 from tenax.algorithms._ctm_tensor_moves import (
     _apply_proj_unfused,
     _half_to_chi_new_bot,
     _half_to_chi_new_top,
 )
 from tenax.algorithms._ctm_tensor_projector_2x2 import _compute_2x2_projector
-from tenax.algorithms._ctm_utils import _CORNER_SPECS, _derive_charges
-from tenax.algorithms._split_ctm_tensor_init import (
-    _EDGE_BRA_SPECS,
-    _EDGE_KET_SPECS,
-    SplitCTMTensorEnv,
-)
+from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
 from tenax.algorithms._tensor_utils import (
     absorb_sqrt_singular_values,
     fuse_indices,
@@ -56,7 +43,7 @@ from tenax.algorithms._tensor_utils import (
 )
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+from tenax.core.tensor import DenseTensor, Tensor
 from tenax.linalg import svd as tensor_svd
 
 # When True, the four split moves grow the FULL closed chi^2*D^6 double-layer
@@ -264,7 +251,6 @@ def _compute_split_plaquette_projector_pair(
     Abar_BR: Tensor,
     chi: int,
     direction: str,
-    base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
 ) -> tuple[Tensor, Tensor, jax.Array, jax.Array]:
     """Split twin of :func:`_compute_plaquette_projector_pair`.
@@ -326,7 +312,6 @@ def _compute_split_plaquette_projector_pair(
         Q_BR,
         chi,
         direction=direction,
-        base_charges=base_charges,
         projector_backward=projector_backward,
     )
     return (
@@ -432,7 +417,6 @@ def _split_ctm_absorb_bottom_2plaq(
     convention, #670/#674): projector halves applied via ``_apply_proj_unfused``,
     ket/bra edge halves grown then SVD-split over ``chi_I``.
     """
-    base_charges = _split_base_charges(A)
     C4g = _grow_split_corner_2x2(
         env_src.C4,
         "c4_r",
@@ -492,11 +476,7 @@ def _split_ctm_absorb_bottom_2plaq(
         chi_I=chi_I,
         ket_relabels={"chi_new": "t3k_r", "u": "d_ket", "_svd_bond": "t3k_I"},
         bra_relabels={"_svd_bond": "t3b_I", "u_bra": "d_bra", "chi_new_r": "t3b_l"},
-        base_charges=base_charges,
     )
-    C4_new = _ensure_corner_flows(C4_new, "C4")
-    C3_new = _ensure_corner_flows(C3_new, "C3")
-    T3_ket_new, T3_bra_new = _ensure_edge_flows(T3_ket_new, T3_bra_new, "T3")
     return C4_new, T3_ket_new, T3_bra_new, C3_new
 
 
@@ -504,7 +484,6 @@ def _split_ctm_absorb_left_2plaq(
     env_src, A, A_bar, P_top_above, P_bot_above, P_top_curr, P_bot_curr, chi_I
 ):
     """Split LEFT absorption -> (C1_new, T4_ket_new, T4_bra_new, C4_new)."""
-    base_charges = _split_base_charges(A)
     C1g = _grow_split_corner_2x2(
         env_src.C1,
         "c1_r",
@@ -564,11 +543,7 @@ def _split_ctm_absorb_left_2plaq(
         chi_I=chi_I,
         ket_relabels={"chi_new": "t4k_d", "r": "l_ket", "_svd_bond": "t4k_I"},
         bra_relabels={"_svd_bond": "t4b_I", "r_bra": "l_bra", "chi_new_r": "t4b_u"},
-        base_charges=base_charges,
     )
-    C1_new = _ensure_corner_flows(C1_new, "C1")
-    C4_new = _ensure_corner_flows(C4_new, "C4")
-    T4_ket_new, T4_bra_new = _ensure_edge_flows(T4_ket_new, T4_bra_new, "T4")
     return C1_new, T4_ket_new, T4_bra_new, C4_new
 
 
@@ -576,7 +551,6 @@ def _split_ctm_absorb_right_2plaq(
     env_src, A, A_bar, P_top_above, P_bot_above, P_top_curr, P_bot_curr, chi_I
 ):
     """Split RIGHT absorption -> (C2_new, T2_ket_new, T2_bra_new, C3_new)."""
-    base_charges = _split_base_charges(A)
     C2g = _grow_split_corner_2x2(
         env_src.C2,
         "c2_l",
@@ -636,11 +610,7 @@ def _split_ctm_absorb_right_2plaq(
         chi_I=chi_I,
         ket_relabels={"chi_new": "t2k_u", "l": "r_ket", "_svd_bond": "t2k_I"},
         bra_relabels={"_svd_bond": "t2b_I", "l_bra": "r_bra", "chi_new_r": "t2b_d"},
-        base_charges=base_charges,
     )
-    C2_new = _ensure_corner_flows(C2_new, "C2")
-    C3_new = _ensure_corner_flows(C3_new, "C3")
-    T2_ket_new, T2_bra_new = _ensure_edge_flows(T2_ket_new, T2_bra_new, "T2")
     return C2_new, T2_ket_new, T2_bra_new, C3_new
 
 
@@ -648,7 +618,6 @@ def _split_ctm_absorb_top_2plaq(
     env_src, A, A_bar, P_top_left, P_bot_left, P_top_curr, P_bot_curr, chi_I
 ):
     """Split TOP absorption -> (C1_new, T1_ket_new, T1_bra_new, C2_new)."""
-    base_charges = _split_base_charges(A)
     C1g = _grow_split_corner_2x2(
         env_src.C1,
         "c1_d",
@@ -708,11 +677,7 @@ def _split_ctm_absorb_top_2plaq(
         chi_I=chi_I,
         ket_relabels={"chi_new": "t1k_l", "d": "u_ket", "_svd_bond": "t1k_I"},
         bra_relabels={"_svd_bond": "t1b_I", "d_bra": "u_bra", "chi_new_r": "t1b_r"},
-        base_charges=base_charges,
     )
-    C1_new = _ensure_corner_flows(C1_new, "C1")
-    C2_new = _ensure_corner_flows(C2_new, "C2")
-    T1_ket_new, T1_bra_new = _ensure_edge_flows(T1_ket_new, T1_bra_new, "T1")
     return C1_new, T1_ket_new, T1_bra_new, C2_new
 
 
@@ -875,10 +840,9 @@ def _grow_edge_no_double_layer(
     Returns an 8-leg Tensor with labels matching *output_labels*.
 
     NOTE: this joins the two half-edges into a single ``chi^2 * D^6`` tensor.
-    The bounded path (:func:`_grow_and_project_edge`) avoids forming it; this
-    closed form is retained for the SymmetricTensor (fermionic) projection
-    path, whose order-dependent Koszul signs the bounded reorder does not yet
-    reproduce (issue #641 / #463 Phase 2-4).
+    The bounded path (:func:`_grow_and_project_bounded_lr`) avoids forming it;
+    this closed form is reached only through :data:`_FORCE_CLOSED_EDGE`, as the
+    reference the bounded path is tested against.
     """
     ket_half, bra_half = _grow_edge_halves(
         T_ket, T_bra, A, A_bar, contracted_leg, ket_I_label, bra_I_label
@@ -891,18 +855,6 @@ def _grow_edge_no_double_layer(
 # ------------------------------------------------------------------ #
 
 
-def _split_base_charges(A: Tensor) -> np.ndarray | None:
-    """Charges of a site tensor's first leg, for per-sector interlayer-SVD
-    truncation on the symmetric split path.
-
-    Returns ``None`` for a DenseTensor (global truncation). Derived locally at
-    the point of use — a clean extraction of the single-site split-move inline
-    derivation (``A.indices[0].charges``); deliberately NOT a plumbed cross-call
-    parameter (``base_charges`` is being un-plumbed — see ``_apply_projector``).
-    """
-    return A.indices[0].charges if isinstance(A, SymmetricTensor) else None
-
-
 def _svd_split_edge_tensor(
     T: Tensor,
     left_labels: list[str],
@@ -910,256 +862,37 @@ def _svd_split_edge_tensor(
     chi_I: int,
     ket_relabels: dict[str, str],
     bra_relabels: dict[str, str],
-    base_charges: np.ndarray | None = None,
 ) -> tuple[Tensor, Tensor]:
     """SVD-split a 4-leg projected edge into ket/bra halves.
 
-    Transposes *T* so left labels come first and right labels last
-    (required for correct block-sparse SVD), then splits via SVD,
-    absorbs sqrt(s) into both factors, relabels and normalizes.
-
-    When *base_charges* is provided and the input is a SymmetricTensor,
-    uses per-sector truncation (via ``_derive_charges``) instead of
-    global truncation to prevent charge-sector loss.
+    Transposes *T* so left labels come first and right labels last, then
+    splits via a truncated SVD, absorbs sqrt(s) into both factors, relabels
+    and normalizes.
     """
-    # Ensure axes are in (left..., right...) order for block-sparse SVD
     labels = T.labels()
     perm = tuple(labels.index(lbl) for lbl in left_labels + right_labels)
     if perm != tuple(range(len(labels))):
         T = T.transpose(perm)
 
-    if isinstance(T, SymmetricTensor) and base_charges is not None:
-        # Per-sector SVD truncation: full SVD then sector-aware selection
-        U_t, s, Vh_t, _s_full = tensor_svd(
-            T,
-            left_labels=left_labels,
-            right_labels=right_labels,
-            new_bond_label="_svd_bond",
-            max_singular_values=None,  # get all singular values
-        )
-        U_t, s, Vh_t = _truncate_svd_per_sector(
-            U_t, s, Vh_t, "_svd_bond", chi_I, base_charges
-        )
-    elif isinstance(T, DenseTensor):
-        # Bare jnp.linalg.svd's adjoint NaN's on rank-deficient inputs
-        # (split-CTM at small D after PR #399 flipped the projector default
-        # to "svd"). Route through truncated_svd_symmetric_ad, whose backward
-        # is the Lorentzian-regularized + rank-aware kernel from _ad_primitives.
-        # TODO(#687): add SymmetricTensor block-sparse regularized SVD so the
-        # SymmetricTensor branch above gets the same regularized adjoint. Its
-        # absence floors symmetric CTM AD (implicit==explicit) at ~1e-2 vs the
-        # dense path's 1e-6 — even on a non-degenerate spectrum, so it is more
-        # than missing regularization; see issue #687.
-        from tenax.algorithms._ad_primitives import truncated_svd_symmetric_ad
+    # Bare jnp.linalg.svd's adjoint NaN's on rank-deficient inputs
+    # (split-CTM at small D after PR #399 flipped the projector default
+    # to "svd"). Route through truncated_svd_symmetric_ad, whose backward
+    # is the Lorentzian-regularized + rank-aware kernel from _ad_primitives.
+    from tenax.algorithms._ad_primitives import truncated_svd_symmetric_ad
 
-        U_t, s, Vh_t = truncated_svd_symmetric_ad(
-            T,
-            left_labels=left_labels,
-            right_labels=right_labels,
-            chi=chi_I,
-            new_bond_label="_svd_bond",
-        )
-    else:
-        U_t, s, Vh_t, _s_full = tensor_svd(
-            T,
-            left_labels=left_labels,
-            right_labels=right_labels,
-            new_bond_label="_svd_bond",
-            max_singular_values=chi_I,
-        )
+    U_t, s, Vh_t = truncated_svd_symmetric_ad(
+        T,
+        left_labels=left_labels,
+        right_labels=right_labels,
+        chi=chi_I,
+        new_bond_label="_svd_bond",
+    )
     T_ket, T_bra = absorb_sqrt_singular_values(U_t, s, Vh_t, "_svd_bond")
     T_ket = T_ket.relabels(ket_relabels)
     T_bra = T_bra.relabels(bra_relabels)
     T_ket, _ = max_abs_normalize(T_ket)
     T_bra, _ = max_abs_normalize(T_bra)
     return T_ket, T_bra
-
-
-def _truncate_svd_per_sector(
-    U_t: SymmetricTensor,
-    s: jax.Array,
-    Vh_t: SymmetricTensor,
-    bond_label: str,
-    chi_I: int,
-    base_charges: np.ndarray,
-) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor]:
-    """Per-sector SVD truncation matching ``_derive_charges`` allocation.
-
-    Selects singular values so that each charge sector from *base_charges*
-    gets its fair share of the ``chi_I`` budget, preventing cascading
-    charge-sector loss across CTM sweeps.
-    """
-    target = _derive_charges(base_charges, chi_I)
-    target_count: dict[int, int] = {}
-    for q in target:
-        target_count[int(q)] = target_count.get(int(q), 0) + 1
-
-    bond_pos_U = U_t.labels().index(bond_label)
-    current_charges = np.asarray(U_t.indices[bond_pos_U].charges)
-
-    # Walk through globally-sorted singular values, allocating per sector.
-    # s is in descending order; current_charges[i] is the sector for s[i].
-    keep_mask = np.zeros(len(s), dtype=bool)
-    sector_allocated: dict[int, int] = {}
-    for i, q in enumerate(current_charges):
-        q_int = int(q)
-        allocated = sector_allocated.get(q_int, 0)
-        if allocated < target_count.get(q_int, 0):
-            keep_mask[i] = True
-            sector_allocated[q_int] = allocated + 1
-
-    # If some target sectors had no data, fill budget from remaining
-    total_kept = int(np.sum(keep_mask))
-    if total_kept < chi_I:
-        for i in range(len(s)):
-            if total_kept >= chi_I:
-                break
-            if not keep_mask[i]:
-                keep_mask[i] = True
-                total_kept += 1
-
-    keep_indices = np.where(keep_mask)[0]
-    s_new = s[keep_indices]
-    new_charges = current_charges[keep_mask]
-
-    # Build per-sector entry mapping: which entries within each sector to keep
-    sector_entry_map: dict[int, list[int]] = {}
-    cur_sector_idx: dict[int, int] = {}
-    for i, q in enumerate(current_charges):
-        q_int = int(q)
-        idx_in_sector = cur_sector_idx.get(q_int, 0)
-        cur_sector_idx[q_int] = idx_in_sector + 1
-        if keep_mask[i]:
-            sector_entry_map.setdefault(q_int, []).append(idx_in_sector)
-
-    sym = U_t.indices[bond_pos_U].symmetry
-    new_bond_out = TensorIndex.from_charges(
-        sym,
-        np.asarray(new_charges, dtype=np.int32),
-        FlowDirection.OUT,
-        label=bond_label,
-    )
-    new_bond_in = TensorIndex.from_charges(
-        sym,
-        np.asarray(new_charges, dtype=np.int32),
-        FlowDirection.IN,
-        label=bond_label,
-    )
-
-    # Rebuild U (bond is last axis)
-    U_new = _select_bond_entries(U_t, bond_pos_U, sector_entry_map, new_bond_out)
-    # Rebuild Vh (bond is first axis)
-    bond_pos_Vh = Vh_t.labels().index(bond_label)
-    Vh_new = _select_bond_entries(Vh_t, bond_pos_Vh, sector_entry_map, new_bond_in)
-
-    return U_new, s_new, Vh_new
-
-
-def _select_bond_entries(
-    T: SymmetricTensor,
-    bond_pos: int,
-    sector_entry_map: dict[int, list[int]],
-    new_bond_idx: TensorIndex,
-) -> SymmetricTensor:
-    """Select specific entries from a bond axis of a SymmetricTensor."""
-    new_blocks: dict[tuple[int, ...], jax.Array] = {}
-    for key, block in T.blocks.items():
-        q_bond = int(key[bond_pos])
-        if q_bond not in sector_entry_map:
-            continue
-        kept = sector_entry_map[q_bond]
-        idx = [slice(None)] * T.ndim
-        idx[bond_pos] = jnp.array(kept)
-        new_blocks[key] = block[tuple(idx)]
-
-    new_indices = list(T.indices)
-    new_indices[bond_pos] = new_bond_idx
-    obj = object.__new__(SymmetricTensor)
-    obj._indices = tuple(new_indices)
-    obj._init_flat_buffer(new_blocks)
-    return obj
-
-
-def _fused_charge_permutation(
-    source_charges: np.ndarray, target_charges: np.ndarray
-) -> list[int] | None:
-    """Compute a permutation mapping *source_charges* order to *target_charges*.
-
-    Returns a list ``perm`` such that ``source_charges[perm[i]] == target_charges[i]``
-    for every *i*, or ``None`` if no such mapping exists (different charge sets).
-
-    This is needed when the projector P and the tensor being projected have
-    different fused charge orderings (due to different leg flow conventions),
-    so we must reorder the tensor's fused axis before dense matrix multiply.
-    """
-    if len(source_charges) != len(target_charges):
-        return None
-
-    # Build a map: charge -> list of indices in source
-    source_map: dict[int, list[int]] = {}
-    for i, q in enumerate(source_charges):
-        source_map.setdefault(int(q), []).append(i)
-
-    perm: list[int] = []
-    used: dict[int, int] = {}  # charge -> next index to use from source_map
-    for q in target_charges:
-        q_int = int(q)
-        if q_int not in source_map:
-            return None
-        pos = used.get(q_int, 0)
-        if pos >= len(source_map[q_int]):
-            return None
-        perm.append(source_map[q_int][pos])
-        used[q_int] = pos + 1
-
-    return perm
-
-
-def _ensure_tensor_flows(
-    T: Tensor, expected_flows: tuple[FlowDirection, ...]
-) -> Tensor:
-    """No-op: let tensors keep whatever flows the SVD / projection gave them.
-
-    Previously this rebuilt the tensor via from_dense with corrected flows,
-    but that destroys charge sectors.  Since all contractions are
-    label-based, the flows propagate naturally.
-    """
-    return T
-
-
-def _ensure_corner_flows(corner: Tensor, corner_name: str) -> Tensor:
-    """Rebuild a SymmetricTensor corner so its flows match _CORNER_SPECS."""
-    _, _, expected_flow_a, expected_flow_b, _ = _CORNER_SPECS[corner_name]
-    return _ensure_tensor_flows(corner, (expected_flow_a, expected_flow_b))
-
-
-def _ensure_edge_flows(
-    T_ket: Tensor, T_bra: Tensor, edge_name: str
-) -> tuple[Tensor, Tensor]:
-    """Rebuild SymmetricTensor edge halves so flows match _EDGE_*_SPECS."""
-    _, _, _, fk1, fk2, fk3, _, _ = _EDGE_KET_SPECS[edge_name]
-    _, _, _, fb1, fb2, fb3, _, _ = _EDGE_BRA_SPECS[edge_name]
-    T_ket = _ensure_tensor_flows(T_ket, (fk1, fk2, fk3))
-    T_bra = _ensure_tensor_flows(T_bra, (fb1, fb2, fb3))
-    return T_ket, T_bra
-
-
-def _reembed_target_for_projector(P: Tensor, Tg: Tensor) -> Tensor:
-    """Re-embed Tg's 'fused' index to match P's if they differ.
-
-    The projector has a unified fused index (covering both corners'
-    charge sectors).  Re-embedding the target tensor UP to match P
-    zero-pads any missing charge sectors, preserving all information.
-    """
-    if not isinstance(P, SymmetricTensor) or not isinstance(Tg, SymmetricTensor):
-        return Tg
-    p_fused_pos = P.labels().index("fused")
-    tg_fused_pos = Tg.labels().index("fused")
-    if not np.array_equal(
-        P.indices[p_fused_pos].charges, Tg.indices[tg_fused_pos].charges
-    ):
-        return _reembed_fused(Tg, P.indices[p_fused_pos])
-    return Tg
 
 
 def _project_grown_edge_tensor_lr(
@@ -1178,7 +911,7 @@ def _project_grown_edge_tensor_lr(
 
     Each side's three legs ``(env_chi, ket_D, bra_D)`` are hard-fused (two
     IN fuses, same order as :func:`_doublelayer_grown_corner`) into a single
-    ``fused`` leg, re-embedded to the projector's unified fused index, then:
+    ``fused`` leg, then:
 
     - the **left** side (C1g side) is contracted with ``P_1.bar()`` (i.e.
       ``P_1^†``) — the new ``chi_new`` becomes ``left_chi``;
@@ -1205,7 +938,6 @@ def _project_grown_edge_tensor_lr(
     Tg = fuse_indices(
         Tg, labels.index("fused"), labels.index(lc), "fused", FlowDirection.IN
     )
-    Tg = _reembed_target_for_projector(P_1, Tg)
     Tg = contract(P_1.bar(), Tg)  # "fused" contracted → "chi_new"
     Tg = Tg.relabel("chi_new", "left_chi")
 
@@ -1220,7 +952,6 @@ def _project_grown_edge_tensor_lr(
     Tg = fuse_indices(
         Tg, labels.index("fused"), labels.index(rc), "fused", FlowDirection.OUT
     )
-    Tg = _reembed_target_for_projector(P_2, Tg)
     P2_relabeled = P_2.relabel("chi_new", "right_chi")
     Tg = contract(P2_relabeled, Tg)  # "fused" contracted → "right_chi"
 
@@ -1230,26 +961,16 @@ def _project_grown_edge_tensor_lr(
 def _apply_projector(
     P: Tensor,
     Cg_fused: Tensor,
-    base_charges: np.ndarray | None = None,  # noqa: ARG001 — kept for API compat
 ) -> Tensor:
     """Apply projector P to a fused corner/edge tensor via Tensor protocol.
 
     Computes ``P^dagger @ Cg`` by contracting over the shared ``fused`` leg.
-    Uses ``.bar()`` (conjugate + flip flows) so the contraction engine
-    handles both DenseTensor and SymmetricTensor without todense.
-
-    When P's fused index (from the unified projector) differs from Cg's
-    fused index, re-embeds Cg to match P before contracting.
+    Uses ``.bar()`` (conjugate + flip flows) on the projector.
 
     Args:
         P:            Projector tensor with labels ``(fused, chi_new)``.
         Cg_fused:     Fused corner/edge with ``fused`` as one of its legs.
-        base_charges: Unused (kept for call-site compatibility during transition).
     """
-    # Re-embed Cg to match P's fused index if they differ.
-    # This zero-pads charge sectors absent from Cg, ensuring the
-    # contraction engine sees matching indices on the contracted leg.
-    Cg_fused = _reembed_target_for_projector(P, Cg_fused)
     # Projector .bar() (no Koszul) — see _ctm_tensor_moves note.
     result = contract(P.bar(), Cg_fused)  # contracts over "fused" → (chi_new, ...)
     return result
@@ -1287,9 +1008,6 @@ def _projector_edge_operator(
               ``"right"`` → bare ``P_u`` (mirrors un-daggered ``P_2``).
 
     Returns a 4-leg operator ``(env_label, ketD_label, braD_label, out_chi)``.
-
-    DenseTensor only; ``bar`` over the SymmetricTensor projector does not
-    preserve the order-dependent Koszul signs (#641 / #463 Ph 2-4).
     """
     op = P_u.bar() if side == "left" else P_u
     return op.relabels(
@@ -1379,11 +1097,10 @@ def _grow_and_project_edge_lr(
     how the fused path uses a single
     :func:`tenax.algorithms._ctm_tensor_moves._apply_projector_with_reembed`:
 
-    - For SymmetricTensor inputs (or when :data:`_FORCE_CLOSED_EDGE` is set),
-      builds the closed ``chi^2 * D^6`` double-layer edge and projects it with
-      :func:`_project_grown_edge_tensor_lr`, preserving the fermionic
-      Koszul-sign convention.
-    - For DenseTensor inputs, unfuses each projector and routes through the
+    - When :data:`_FORCE_CLOSED_EDGE` is set (tests only), builds the closed
+      ``chi^2 * D^6`` double-layer edge and projects it with
+      :func:`_project_grown_edge_tensor_lr`.
+    - Otherwise, unfuses each projector and routes through the
       memory-bounded :func:`_grow_and_project_bounded_lr` (``chi^2 * D^4``-
       bounded, issue #641), which reproduces the closed result to machine
       precision without forming the ``chi^2 * D^6`` edge.
@@ -1391,7 +1108,7 @@ def _grow_and_project_edge_lr(
     Returns the 4-leg projected edge ``(left_chi, mid_ket, mid_bra,
     right_chi)``.
     """
-    if _FORCE_CLOSED_EDGE or not isinstance(A, DenseTensor):
+    if _FORCE_CLOSED_EDGE:
         Tg = _grow_edge_no_double_layer(
             T_ket,
             T_bra,
@@ -1441,8 +1158,6 @@ def _split_ctm_move_left(
     chi_I: int,
 ) -> SplitCTMTensorEnv:
     """Left move: double-layer corner-pair projector (closed edge)."""
-    base_charges = A.indices[0].charges if isinstance(A, SymmetricTensor) else None
-
     # --- Phase A: Double-layer grown corners + biorthogonal projector pair ---
 
     # Double-layer grown corners (C1 with T1_ket+T1_bra; C4 with T3_ket+T3_bra)
@@ -1466,19 +1181,11 @@ def _split_ctm_move_left(
     )  # fused=(c4_u,d_ket,d_bra); remaining=t3b_l
 
     # Fishman biorthogonal pair (P_1 for C1 side, P_2 for C4 side)
-    P_1, P_2, _eps_t = _compute_projector_tensor(
-        C1g, C4g, chi, base_charges=base_charges
-    )
+    P_1, P_2, _eps_t = _compute_projector_tensor(C1g, C4g, chi)
 
     # New corners: P_1 -> C1g, P_2 -> C4g
-    C1_new = _apply_projector(P_1, C1g, base_charges).relabels(
-        {"chi_new": "c1_d", c1_rem: "c1_r"}
-    )
-    C4_new = _apply_projector(P_2, C4g, base_charges).relabels(
-        {"chi_new": "c4_r", c4_rem: "c4_u"}
-    )
-    C1_new = _ensure_corner_flows(C1_new, "C1")
-    C4_new = _ensure_corner_flows(C4_new, "C4")
+    C1_new = _apply_projector(P_1, C1g).relabels({"chi_new": "c1_d", c1_rem: "c1_r"})
+    C4_new = _apply_projector(P_2, C4g).relabels({"chi_new": "c4_r", c4_rem: "c4_u"})
     C1_new, _ = max_abs_normalize(C1_new)
     C4_new, _ = max_abs_normalize(C4_new)
 
@@ -1509,9 +1216,7 @@ def _split_ctm_move_left(
         chi_I=chi_I,
         ket_relabels={"left_chi": "t4k_d", "r": "l_ket", "_svd_bond": "t4k_I"},
         bra_relabels={"_svd_bond": "t4b_I", "R": "l_bra", "right_chi": "t4b_u"},
-        base_charges=base_charges,
     )
-    T4_ket_new, T4_bra_new = _ensure_edge_flows(T4_ket_new, T4_bra_new, "T4")
 
     return env._replace(
         C1=C1_new,
@@ -1529,8 +1234,6 @@ def _split_ctm_move_right(
     chi_I: int,
 ) -> SplitCTMTensorEnv:
     """Right move: double-layer corner-pair projector (closed edge)."""
-    base_charges = A.indices[0].charges if isinstance(A, SymmetricTensor) else None
-
     # --- Phase A: Double-layer grown corners + biorthogonal projector pair ---
 
     # C2 connects to the top edge via its bra-right chi (t1b_r); grow bra first
@@ -1555,18 +1258,10 @@ def _split_ctm_move_right(
     )  # fused=(c3_u,d_ket,d_bra); remaining=t3k_r
 
     # Fishman biorthogonal pair (P_1 for C2 side, P_2 for C3 side)
-    P_1, P_2, _eps_t = _compute_projector_tensor(
-        C2g, C3g, chi, base_charges=base_charges
-    )
+    P_1, P_2, _eps_t = _compute_projector_tensor(C2g, C3g, chi)
 
-    C2_new = _apply_projector(P_1, C2g, base_charges).relabels(
-        {"chi_new": "c2_l", c2_rem: "c2_d"}
-    )
-    C3_new = _apply_projector(P_2, C3g, base_charges).relabels(
-        {"chi_new": "c3_u", c3_rem: "c3_l"}
-    )
-    C2_new = _ensure_corner_flows(C2_new, "C2")
-    C3_new = _ensure_corner_flows(C3_new, "C3")
+    C2_new = _apply_projector(P_1, C2g).relabels({"chi_new": "c2_l", c2_rem: "c2_d"})
+    C3_new = _apply_projector(P_2, C3g).relabels({"chi_new": "c3_u", c3_rem: "c3_l"})
     C2_new, _ = max_abs_normalize(C2_new)
     C3_new, _ = max_abs_normalize(C3_new)
 
@@ -1597,9 +1292,7 @@ def _split_ctm_move_right(
         chi_I=chi_I,
         ket_relabels={"left_chi": "t2k_u", "l": "r_ket", "_svd_bond": "t2k_I"},
         bra_relabels={"_svd_bond": "t2b_I", "L": "r_bra", "right_chi": "t2b_d"},
-        base_charges=base_charges,
     )
-    T2_ket_new, T2_bra_new = _ensure_edge_flows(T2_ket_new, T2_bra_new, "T2")
 
     return env._replace(
         C2=C2_new,
@@ -1617,8 +1310,6 @@ def _split_ctm_move_top(
     chi_I: int,
 ) -> SplitCTMTensorEnv:
     """Top move: double-layer corner-pair projector (closed edge)."""
-    base_charges = A.indices[0].charges if isinstance(A, SymmetricTensor) else None
-
     # --- Phase A: Double-layer grown corners + biorthogonal projector pair ---
 
     # C1 connects to the left edge via its ket end (t4k_d); C2 to the right
@@ -1643,18 +1334,10 @@ def _split_ctm_move_top(
     )  # fused=(c2_l,r_ket,r_bra); remaining=t2b_d
 
     # Fishman biorthogonal pair (P_1 for C1 side, P_2 for C2 side)
-    P_1, P_2, _eps_t = _compute_projector_tensor(
-        C1g, C2g, chi, base_charges=base_charges
-    )
+    P_1, P_2, _eps_t = _compute_projector_tensor(C1g, C2g, chi)
 
-    C1_new = _apply_projector(P_1, C1g, base_charges).relabels(
-        {"chi_new": "c1_d", c1_rem: "c1_r"}
-    )
-    C2_new = _apply_projector(P_2, C2g, base_charges).relabels(
-        {"chi_new": "c2_l", c2_rem: "c2_d"}
-    )
-    C1_new = _ensure_corner_flows(C1_new, "C1")
-    C2_new = _ensure_corner_flows(C2_new, "C2")
+    C1_new = _apply_projector(P_1, C1g).relabels({"chi_new": "c1_d", c1_rem: "c1_r"})
+    C2_new = _apply_projector(P_2, C2g).relabels({"chi_new": "c2_l", c2_rem: "c2_d"})
     C1_new, _ = max_abs_normalize(C1_new)
     C2_new, _ = max_abs_normalize(C2_new)
 
@@ -1685,9 +1368,7 @@ def _split_ctm_move_top(
         chi_I=chi_I,
         ket_relabels={"left_chi": "t1k_l", "d": "u_ket", "_svd_bond": "t1k_I"},
         bra_relabels={"_svd_bond": "t1b_I", "D": "u_bra", "right_chi": "t1b_r"},
-        base_charges=base_charges,
     )
-    T1_ket_new, T1_bra_new = _ensure_edge_flows(T1_ket_new, T1_bra_new, "T1")
 
     return env._replace(
         C1=C1_new,
@@ -1705,8 +1386,6 @@ def _split_ctm_move_bottom(
     chi_I: int,
 ) -> SplitCTMTensorEnv:
     """Bottom move: double-layer corner-pair projector (closed edge)."""
-    base_charges = A.indices[0].charges if isinstance(A, SymmetricTensor) else None
-
     # --- Phase A: Double-layer grown corners + biorthogonal projector pair ---
 
     # C4 connects to the left edge via its bra end (t4b_u); C3 to the right
@@ -1731,18 +1410,10 @@ def _split_ctm_move_bottom(
     )  # fused=(c3_u,r_ket,r_bra); remaining=t2k_u
 
     # Fishman biorthogonal pair (P_1 for C4 side, P_2 for C3 side)
-    P_1, P_2, _eps_t = _compute_projector_tensor(
-        C4g, C3g, chi, base_charges=base_charges
-    )
+    P_1, P_2, _eps_t = _compute_projector_tensor(C4g, C3g, chi)
 
-    C4_new = _apply_projector(P_1, C4g, base_charges).relabels(
-        {"chi_new": "c4_r", c4_rem: "c4_u"}
-    )
-    C3_new = _apply_projector(P_2, C3g, base_charges).relabels(
-        {"chi_new": "c3_u", c3_rem: "c3_l"}
-    )
-    C4_new = _ensure_corner_flows(C4_new, "C4")
-    C3_new = _ensure_corner_flows(C3_new, "C3")
+    C4_new = _apply_projector(P_1, C4g).relabels({"chi_new": "c4_r", c4_rem: "c4_u"})
+    C3_new = _apply_projector(P_2, C3g).relabels({"chi_new": "c3_u", c3_rem: "c3_l"})
     C4_new, _ = max_abs_normalize(C4_new)
     C3_new, _ = max_abs_normalize(C3_new)
 
@@ -1773,9 +1444,7 @@ def _split_ctm_move_bottom(
         chi_I=chi_I,
         ket_relabels={"left_chi": "t3k_r", "u": "d_ket", "_svd_bond": "t3k_I"},
         bra_relabels={"_svd_bond": "t3b_I", "U": "d_bra", "right_chi": "t3b_l"},
-        base_charges=base_charges,
     )
-    T3_ket_new, T3_bra_new = _ensure_edge_flows(T3_ket_new, T3_bra_new, "T3")
 
     return env._replace(
         C3=C3_new,
