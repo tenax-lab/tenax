@@ -500,6 +500,23 @@ _EDGE_BRA_SPECS = {
 }
 
 
+def _refuse_symmetric_split(*site_tensors: Tensor) -> None:
+    """The split CTM is dense-only: refuse ``SymmetricTensor`` input.
+
+    Its memory win (chi^2 D^4 instead of chi^2 D^6) is a large-D effect
+    (D >~ 16, #825), where symmetric iPEPS-AD in tenax already loses to dense;
+    the symmetric split path had no user and carried its own defects (#907,
+    #1024, #1048).  Symmetric and fermionic iPEPS use the fused CTM.
+    """
+    if any(isinstance(t, SymmetricTensor) for t in site_tensors):
+        raise NotImplementedError(
+            "split CTM (fuse_virtual_legs=False) is dense-only: SymmetricTensor "
+            "site tensors are not supported; use the fused CTM "
+            "(fuse_virtual_legs=True, ctm_tensor / ctm_tensor_2site), or "
+            "densify a small tensor with DenseTensor(A.todense(), A.indices)"
+        )
+
+
 def initialize_split_ctm_tensor_env(
     A: Tensor,
     chi: int,
@@ -524,6 +541,7 @@ def initialize_split_ctm_tensor_env(
     Returns:
         Initialized SplitCTMTensorEnv.
     """
+    _refuse_symmetric_split(A)
     if chi_seed is not None:
         if chi_ref_charges is not None:
             raise TypeError(

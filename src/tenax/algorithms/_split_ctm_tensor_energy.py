@@ -139,6 +139,9 @@ def _refuse_fermionic_split(*site_tensors: Tensor) -> None:
             "contraction, #1035); use the fused Tensor CTM's energy "
             "(compute_energy_ctm_tensor / _2site / _multisite)"
         )
+    from tenax.algorithms._split_ctm_tensor_init import _refuse_symmetric_split
+
+    _refuse_symmetric_split(*site_tensors)
 
 
 def _rdm_1site_split_tensor(A: Tensor, env: SplitCTMTensorEnv) -> jax.Array:

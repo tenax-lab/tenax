@@ -307,16 +307,16 @@ at the target chi.  Example: ``chi_ramp=[(8, 10), (16, 10), (32, None)]``
 does 10 sweeps at chi=8, 10 at chi=16, then converges at chi=32.
 Benchmarks show 1.2–2.1× GPU speedup with identical energies.
 
-### `CTMConfig.adjoint_chain_rule` (default `"separate"`)
+### `CTMConfig.adjoint_chain_rule` (default `"auto"`)
 
-`"joint"` (opt-in, #1123) gets the chain rule's indirect term out of a GMRES
-adjoint solve over `(params, env)` instead of compiling a separate
-params-VJP program, the largest single backward compile at D≥3.  The
-gradient is the same to round-off and warm steps cost the same, so it is
-worth turning on when first-step compile time dominates (symmetric D≥3).
-Measured at U(1) D=3 chi=16 on one A100, step 1: compile 7,795 → 5,977 s
-(−23%), peak RSS 51 → 39 GB.  Not available on the split CTM
-(`fuse_virtual_legs=False`).  Details under "Symmetric tensors: compile time
+`"joint"` gets the chain rule's indirect term out of a GMRES adjoint solve
+over `(params, env)` instead of compiling a separate params-VJP program, the
+largest single backward compile at D≥3.  The default `"auto"` runs `"joint"`
+on the fused CTM; the split CTM (`fuse_virtual_legs=False`) keeps its own
+chain rule and refuses an explicit `"joint"`.  The gradient is the same as
+`"separate"` to round-off and warm steps cost the same.  Measured at U(1) D=3
+chi=16 on one A100, step 1: compile 7,795 → 5,977 s (−23%), peak RSS
+51 → 39 GB.  Set `"separate"` only to reproduce runs from before the flip.  Details under "Symmetric tensors: compile time
 and XLA fusion" in `docs/guide/algorithms/ipeps_ad_paths.md`.
 
 ### Persistent compilation cache (on by default)
