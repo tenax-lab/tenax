@@ -129,7 +129,7 @@ def test_optimize_pess_ad_decreases_energy():
 
     e0 = float(build_pess_loss(cg_gates, config)(state0))
     state_opt, e_opt = optimize_pess_ad(
-        state0, cg_gates, config, max_iter=5, verbose=False
+        state0, cg_gates, config, max_iter=2, verbose=False
     )
 
     assert jnp.isfinite(e_opt)

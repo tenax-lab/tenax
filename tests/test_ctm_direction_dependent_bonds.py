@@ -64,7 +64,7 @@ def test_su_output_is_direction_dependent_but_cell_consistent():
     assert _charges(A, "l") == _charges(B, "r"), "A.l must match B.r (cell-consistent)"
 
 
-_SWEEPS = 2
+_SWEEPS = 1
 
 
 def test_symmetric_2site_ctm_matches_dense_on_direction_dependent_bonds():

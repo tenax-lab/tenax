@@ -95,6 +95,10 @@ class TestHeisenbergU1SzInit:
 
 
 class TestU1SzSymmetricMatchesDense:
+    # Slow bucket (2026-10-20): 877 s on the not-slow CPU run (one implicit-AD
+    # step through the block-sparse CTM).  The fast bucket keeps charged-sector
+    # survival on the eager path (test_ctm_charged_sectors_905.py).
+    @pytest.mark.slow
     def test_one_step_symmetric_charged_ctm_no_collapse(self):
         """U(1)-Sz charged CTM does not collapse (#602).
 
