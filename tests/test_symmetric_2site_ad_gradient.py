@@ -60,12 +60,18 @@ def _clear_diagnostics():
 
 def _regime(A, B, seed):
     """Refuse a fixture that would make the test vacuous."""
-    if not any(len(v) > 1 for v in seed.layout.values()):
+    # Corner legs only: every corner leg is a chi leg.  The layout also holds
+    # the T tensors' double-layer legs, whose sectors are fixed by the sites
+    # and can be charged when every chi leg is not (Codex on #1134).
+    chi_legs = [v for k, v in seed.layout.items() if k[1].startswith("C")]
+    if not any(len(v) > 1 for v in chi_legs):
         raise AssertionError("out of regime: no charged environment sector")
     if not (isinstance(A, SymmetricTensor) and len(A.blocks) > 1):
         raise AssertionError("out of regime: site tensor not blocked")
     if not seed.cold_converged or not seed.stable:
         raise AssertionError("out of regime: forward not converged/stable")
+    if not seed.gap_converged:
+        raise AssertionError("out of regime: the cut-gap solve did not converge")
     if not seed.cut_gap > 1e-2:
         raise AssertionError(f"out of regime: cut gap {seed.cut_gap:.2e} <= 1e-2")
 
@@ -90,7 +96,8 @@ def test_gradient_matches_a_converged_fd(point):
     chi, A, B, gate, seed = point
     # The symmetric energy is the CTM energy, not a restricted-layout one
     # (#1098): the dense eager CTM reaches it (measured <= 6e-15).
-    e_dense, _ = converged_energy(*densify_pair(A, B), gate, _ctm(chi), None)
+    e_dense, dense_ok = converged_energy(*densify_pair(A, B), gate, _ctm(chi), None)
+    assert dense_ok, "the dense reference CTM did not converge"
     assert abs(seed.energy_cold - e_dense) < 1e-10, (seed.energy_cold, e_dense)
     loss, _ = make_2site_loss(gate, _ctm(chi), seed.envs_init)
     _clear_diagnostics()
@@ -124,6 +131,23 @@ def test_fixture_rejects_trivial_charges():
     class _T:
         blocks = {0: None}
 
-    seed = SeedResult({}, {("x",): ((0, 4),)}, 0.0, 0.0, True, 1.0, True, 10)
+    # Every chi leg has one sector; a double-layer leg of T1 has two.
+    layout = {
+        ((0, 0), "C1", "chi_a"): ((0, 4),),
+        ((0, 0), "C1", "chi_b"): ((0, 4),),
+        ((0, 0), "T1", "u2"): ((-1, 1), (1, 1)),
+    }
+    seed = SeedResult({}, layout, 0.0, 0.0, True, 1.0, True, 10, True)
     with pytest.raises(AssertionError, match="no charged environment sector"):
         _regime(_T(), _T(), seed)
+
+
+def test_fixture_rejects_an_unconverged_cut_gap():
+    from tenax.algorithms.ctm_layout import SeedResult
+
+    A, B = heisenberg_u1sz_init_pair(D, jax.random.PRNGKey(0))
+    assert len(A.blocks) > 1  # regime: the site check passes
+    layout = {((0, 0), "C1", "chi_a"): ((-1, 2), (1, 2))}
+    seed = SeedResult({}, layout, 0.0, 0.0, True, 1.0, True, 10, False)
+    with pytest.raises(AssertionError, match="cut-gap solve did not converge"):
+        _regime(A, B, seed)
