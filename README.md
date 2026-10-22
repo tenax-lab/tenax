@@ -35,6 +35,7 @@ Each entry links to its guide page; the full documentation is at [tenax.readthed
 - **Fermionic iPEPS (fPEPS)** — graded tensors for spinless fermions / the t-V model ([fPEPS](docs/guide/algorithms/fpeps.md))
 - **Honeycomb and kagome** — native honeycomb CTM and kagome iPESS with AD ([guide](docs/guide/algorithms/honeycomb_kagome.md))
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary momenta ([AD excitations](docs/guide/algorithms/ad_excitations.md))
+- **Symmetric model gates** — U(1)-Sz and Z2 XXZ gates and a Z2 initial pair for 2-site iPEPS ([guide](docs/guide/algorithms/ipeps.md))
 
 **Classical statistical mechanics**
 
