@@ -140,12 +140,18 @@ lorentzian projector backward, environment converged in 27 sweeps at χ=9 and χ
 `main` at `366ac11`, JAX 0.10.1, torch 2.14.1, EPYC 7742, torch on 8 threads.
 
 **Correctness.** Every program matches JAX to ≤1.4e-13 except the full J^T v
-(14–44% off). That is not a replay bug: a 1e-15 relative input perturbation moves the
-torch J^T v by 15% (the sweep and dE/denv move by 3e-15), and JAX's own J^T v also
-disagrees with a central finite difference that is stable to 7 digits. The program is
-ill-conditioned on this random state (frozen-projector backward with singular values
-near 1e-6·s0). This is a finding about tenax's adjoint, independent of backend, and is
-not yet checked on an optimised state.
+(14–44% off). That is not a replay bug, and it is not ill-conditioning. It is a
+kink in tenax's own forward. The CTM moves rescale each environment tensor by its
+largest `|entry|` with the gradient flowing through that `max`. The double-layer
+environment ties that entry exactly (ket<->bra swap), so a 1e-15 input change, or
+JAX and torch rounding differently, flips which tied entry receives the radial
+part of the cotangent. #1138 keeps the value but takes the gradient of a smooth,
+equally homogeneous norm. With that change J^T v is stable to 2e-15 and torch
+matches JAX. The earlier mismatch against
+central finite differences was the frozen-projector bias of the
+`projector_backward="lorentzian"` setting this spike used. With the production
+default `"flow"` (#1028), AD matches finite differences to 1.000000 ± 2e-6 on a
+tangent cotangent.
 
 **Timings** (CPU, warm; χ=9 and χ=16 are nearly identical, so torch is
 dispatch-bound at ~9 µs/op):
