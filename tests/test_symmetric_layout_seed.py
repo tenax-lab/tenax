@@ -42,6 +42,7 @@ def _cfg(**kw):
 def test_seed_is_converged_and_stable(su_pair):
     r = symmetric_layout_seed(*su_pair, xxz_gate_u1sz(0.3), _cfg(), forced_sweeps=100)
     assert r.cold_converged
+    assert r.gap_converged
     assert r.stable, (r.energy_cold, r.energy_forced)
     assert r.layout == layout_of(r.envs_init)
     assert any(len(v) > 1 for v in r.layout.values())  # charged sectors present
@@ -84,6 +85,15 @@ def test_planted_early_stop_is_not_stable(su_pair):
     early = dataclasses.replace(early, max_iter=3, min_iter=1)
     r = symmetric_layout_seed(*su_pair, xxz_gate_u1sz(0.3), early, forced_sweeps=100)
     assert not r.stable
+
+
+def test_an_unconverged_gap_solve_is_reported(su_pair):
+    """The chi+4 solve that ``cut_gap`` reads can stop unconverged; the seed
+    must say so, not return the gap as if it were valid (Codex on #1133)."""
+    early = dataclasses.replace(_cfg(on_unconverged="warn"), max_iter=3, min_iter=1)
+    r = symmetric_layout_seed(*su_pair, xxz_gate_u1sz(0.3), early, forced_sweeps=0)
+    assert not r.cold_converged  # regime: 3 sweeps cannot converge this point
+    assert not r.gap_converged
 
 
 def test_seed_accepts_dense_pair(su_pair):

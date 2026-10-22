@@ -104,6 +104,7 @@ class SeedResult(NamedTuple):
     cut_gap: float
     cold_converged: bool
     cold_iterations: int
+    gap_converged: bool
 
 
 def symmetric_layout_seed(
@@ -122,6 +123,19 @@ def symmetric_layout_seed(
     ``stable`` is False when ``forced_sweeps`` more sweeps move the energy by
     ``energy_tol`` or more, or change the layout: a cold CTM can certify
     convergence on a point it later leaves (#1096).
+
+    Returns a :class:`SeedResult`:
+
+    - ``envs_init``, ``layout``: the cold environment and its chi layout.
+    - ``energy_cold``, ``energy_forced``: energy before and after the forced
+      sweeps; ``stable`` compares them and the two layouts.
+    - ``cold_converged``, ``cold_iterations``: the cold solve's status.
+    - ``cut_gap``: smallest relative gap ``(s[chi-1] - s[chi]) / s[chi-1]``
+      over all corners, from a cold solve at ``chi + gap_extra_chi``.  Near
+      0 means the cut at ``chi`` splits a (near-)degenerate set, so the layout
+      is not unique.  ``inf`` if no corner has weight at the cut.
+    - ``gap_converged``: whether that larger-chi solve converged.  If it did
+      not, ``cut_gap`` is read from an unconverged spectrum; do not trust it.
     """
     A_n, B_n = normalized_pair(A, B)
     st = {(0, 0): A_n, (1, 0): B_n}
@@ -142,7 +156,7 @@ def symmetric_layout_seed(
     big_cfg = dataclasses.replace(
         ctm_cfg, chi=ctm_cfg.chi + gap_extra_chi, on_unconverged="warn"
     )
-    big, _ = _converge(st, big_cfg, None)
+    big, big_info = _converge(st, big_cfg, None)
     return SeedResult(
         envs_init=cold,
         layout=lay,
@@ -152,4 +166,5 @@ def symmetric_layout_seed(
         cut_gap=_cut_gap(big, ctm_cfg.chi),
         cold_converged=bool(info.converged),
         cold_iterations=int(info.iterations),
+        gap_converged=bool(big_info.converged),
     )
