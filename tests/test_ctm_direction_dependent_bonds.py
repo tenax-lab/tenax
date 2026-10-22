@@ -109,7 +109,11 @@ def test_symmetric_2site_ctm_matches_dense_on_direction_dependent_bonds():
 
     assert c1 > 1e-8, f"symmetric CTM corner collapsed (C1 norm={c1})"
     assert abs(E_sym - E_dense) < 1e-10, f"sym {E_sym} != dense {E_dense}"
-    assert E_sym < -0.3, f"energy {E_sym} unphysical (expected AFM, ~ -0.5 to -0.7)"
+    # A sanity floor, not a physics check.  Without base_charges the SU does not
+    # approach the ground state (-0.6694): the 40-step pair converges, by a
+    # dense chi=12 CTM, to -0.4333, above the Neel product state (-0.5).  At 12
+    # and 20 SU steps the pair gives exactly -0.5000000 at 1 to 200 sweeps.
+    assert E_sym < -0.3, f"energy {E_sym} unphysical (40-step fixture: ~ -0.41)"
 
 
 def test_2x2_enlarged_corners_build_on_direction_dependent_init():
