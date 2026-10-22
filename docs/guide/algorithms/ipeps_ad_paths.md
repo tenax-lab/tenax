@@ -785,6 +785,42 @@ gradient at all — at `D=3, chi=4` it returns NaN for every entry while this
 path is finite and finite-difference-correct — or to avoid the block-sparse
 SVD/eigh VJP compile wall (#566, #687).
 
+## Seeded symmetric 2-site runs: the layout re-check
+
+A 2-site run seeded with `envs_init` (for example from
+`symmetric_layout_seed`, see {doc}`ctm`) keeps the seed's chi sector layout
+inside each optimizer step: the traced projector cannot change it, and the line
+search needs one fixed function of the step length.  Between steps the layout
+is re-checked:
+
+- `gs_layout_recheck` (default `True`) — at the start of every optimizer step
+  after the first, run one warm, layout-adapting CTM call at the current
+  tensors.  After a resume (`gs_resume=True`) the first resumed step is
+  re-checked too, because its tensors were updated after the checkpointed
+  evaluation.  A change is acted on only when that call converged *and*
+  certified its layout as a global top-chi cut.  On a change, the step is
+  evaluated on the new layout, and the optimizer state is cleared: the
+  metric L-BFGS / CG history, a fresh `init` for any optax optimizer (L-BFGS
+  or Adam), best-energy tracking, and the line-search reuse.  `False` keeps
+  the seed's layout for the whole run.
+- `gs_layout_tie_rtol` (default `1e-8`) — the re-check's hysteresis margin,
+  relative to the largest singular value at the cut: a dropped value at most
+  this much above a kept one is a tie, and the layout is kept.  Measured on the
+  D=2 U(1) XXZ point: partner noise up to 1.5e-15, closest real gap 5.6e-5.
+  Must be finite and `>= 0`.
+
+The re-check is skipped for a dense seed (no chi layout) and on the split-CTM
+path.  With `return_history=True`, `history["layout_changes"]` lists the steps
+where the layout changed, and `history["layout_recheck_uncertified"]` the
+steps where a re-check found a different layout but did not certify it (not
+acted on).  A layout that recurs during a run raises a `RuntimeWarning`: the
+re-check is flip-flopping between layouts.
+
+Known limit: the re-check fixes a stale layout, not a too-small chi.  On the
+D=2 U(1) XXZ Δ=0.3 point at chi=8, the optimizer still follows the chi=8
+truncation bias below the variational bound; the converged chi=12 energy is
+higher by 7.6e-4 at step 17 and by 1.0e-2 at step 27.
+
 ## Configuration recipes
 
 The configurations below, one per path, in one script. Each runs on the
