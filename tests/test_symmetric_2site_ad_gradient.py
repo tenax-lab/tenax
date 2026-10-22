@@ -169,6 +169,15 @@ def test_gradient_matches_a_converged_fd(point):
         assert abs(gd - r["fd"]) < tol, (k, gd, r["fd"], r["fd_unc"], r["scan"])
 
 
+@pytest.mark.slow
+def test_the_dense_reference_refuses_a_moving_environment(point):
+    """Two sweeps from a cold start are far from the fixed point, so one more
+    sweep moves the spectra; the stationarity check must say so."""
+    chi, A, B, gate, _ = point
+    with pytest.raises(AssertionError, match="dense (energy|spectra) move"):
+        _dense_reference(A, B, gate, chi, sweeps=2)
+
+
 def test_fixture_rejects_trivial_charges():
     from tenax.algorithms.ctm_layout import SeedResult
 
