@@ -53,6 +53,19 @@ EXEMPT: dict[str, str] = {
         "builds a single jitted sweep; the recipe is closed over, and the "
         "callers (python_loop_ctm_converge, _python_loop_chi_ramp) warn"
     ),
+    "algorithms/_ctm_python_loop.py::_ctm_sweep": (
+        "the body of one sweep, shared by _make_jit_ctm_step's jitted step and "
+        "the #1098 eager layout phase; its only caller outside that jitted "
+        "step is python_loop_ctm_converge, which warns"
+    ),
+    "algorithms/_ctm_python_loop.py::_end_of_call_layout_check": (
+        "one #1098 check sweep at the end of python_loop_ctm_converge, its "
+        "only caller, which warns"
+    ),
+    "algorithms/_ctm_python_loop.py::_probe_can_certify": (
+        "a predicate, no sweep: returns False for recipe='1x1'; called only "
+        "by python_loop_ctm_converge (which warns) and _end_of_call_layout_check"
+    ),
     # --- private, reachable only through a public function that warns ---
     "algorithms/_ctm_energy_ad.py::_sigma_gauged_ctm_converge": (
         "inner convergence for ctm_energy_implicit, which warns at entry; "
