@@ -35,15 +35,7 @@ Each entry links to its guide page; the full documentation is at [tenax.readthed
 - **Fermionic iPEPS (fPEPS)** — graded tensors for spinless fermions / the t-V model ([fPEPS](docs/guide/algorithms/fpeps.md))
 - **Honeycomb and kagome** — native honeycomb CTM and kagome iPESS with AD ([guide](docs/guide/algorithms/honeycomb_kagome.md))
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary momenta ([AD excitations](docs/guide/algorithms/ad_excitations.md))
-
-**Model gates**
-
-- `heisenberg_gate` — dense Heisenberg Hamiltonian.
-- `heisenberg_gate_u1sz` — U(1)-Sz block-sparse Heisenberg with charges `[+1, −1]`.
-- `xxz_gate` — dense XXZ Hamiltonian with anisotropy parameter.
-- `xxz_gate_u1sz` — U(1)-Sz block-sparse XXZ with charges `[+1, −1]`.
-- `xxz_gate_z2` — Z2 block-sparse XXZ with charges `[0, 1]` (spin-down parity).
-- `xxz_z2_init_pair` — Random Z2-symmetric 2-site iPEPS pair.
+- **Symmetric model gates** — U(1)-Sz and Z2 XXZ gates and a Z2 initial pair for 2-site iPEPS ([guide](docs/guide/algorithms/ipeps.md))
 
 **Classical statistical mechanics**
 
