@@ -3,6 +3,13 @@
 **Status:** draft for review · **Author:** Claude Code (for @yingjerkao) · **Date:** 2026-09-17
 **Scope decisions (locked by YJ):** (a) **v1 focus is block-sparse autodiff** — the eager backend exists to break the `SymmetricTensor` AD wall (see §2), *not* to be a general second backend; (b) **AD must work through the torch backend** in v1; (c) block-sparse/PEPS **AD** families are the parity targets, MPS defaults to the CPython path (D7), and *full* single-device feature parity is the eventual **direction**, not a v1 gate.
 
+> **Spike result (2026-10-22) — read §2.1 before acting on §11.** The premise of §2
+> was measured with a throwaway torch-eager replay of the exact D=3 U(1) CTM-AD
+> programs. Eager removes the compile wall, but the warm step is ~15–30× slower than
+> compiled JAX, so torch only wins runs shorter than ~100 optimizer steps (or ones that
+> recompile constantly). On that evidence the 20–31 person-week plan below does not pay
+> for itself on compute; the cheaper lead is a JAX-side change (§2.1, last paragraph).
+
 > Provenance of the many specific requirements below (which review round surfaced each) is collected in **Appendix A** rather than inline, so the body reads as a design. Every code citation was independently verified against the tree at head `756f9e0`.
 
 ---
@@ -119,6 +126,60 @@ not the driver):
   check on the symmetry/AD math itself (§10).
 - **Ecosystem** — torch optimizers, `torch.compile` later, the PEPS-torch/YASTN
   interop surface.
+
+### 2.1 Spike result: does eager actually beat the wall? (2026-10-22)
+
+**Method.** The programs `_make_implicit_vjp_fn` jits — one CTM sweep, the energy,
+dE/denv, dE/dparams, the full J^T v, and the backward-only J^T v / J_p^T λ that reuse
+saved residuals — were traced to jaxprs, flattened (nested `jit`/`custom_vjp` bodies
+inlined), and replayed op-by-op with torch eager. Replaying JAX's own backward programs
+means `stop_gradient` and every custom VJP are already applied, so this measures the
+eager execution cost of exactly tenax's math, with no torch autograd and no port.
+State: `heisenberg_u1sz_init_pair(D=3)` random, 32 blocks/site, `bond_phase` gauge,
+lorentzian projector backward, environment converged in 27 sweeps at χ=9 and χ=16.
+`main` at `366ac11`, JAX 0.10.1, torch 2.14.1, EPYC 7742, torch on 8 threads.
+
+**Correctness.** Every program matches JAX to ≤1.4e-13 except the full J^T v
+(14–44% off). That is not a replay bug: a 1e-15 relative input perturbation moves the
+torch J^T v by 15% (the sweep and dE/denv move by 3e-15), and JAX's own J^T v also
+disagrees with a central finite difference that is stable to 7 digits. The program is
+ill-conditioned on this random state (frozen-projector backward with singular values
+near 1e-6·s0). This is a finding about tenax's adjoint, independent of backend, and is
+not yet checked on an optimised state.
+
+**Timings** (CPU, warm; χ=9 and χ=16 are nearly identical, so torch is
+dispatch-bound at ~9 µs/op):
+
+| program | ops | torch eager | JAX eager (warm) | JAX jit (warm, χ=9) | JAX cold compile (χ=9, same host, unfused) |
+|---|---|---|---|---|---|
+| sweep | 180,808 | 1.6 s | 7.1 s | 23 ms | 435 s |
+| dE/denv | 282,915 | 2.0–2.2 s | 10.6 s | 63 ms | 663 s |
+| J^T v, backward only | 39,348 | 0.45–0.53 s | 1.8 s | 35 ms | 62 s |
+| J_p^T λ, backward only | 58,950 | 0.58–0.66 s | 2.6 s | 39 ms | 140 s |
+| full J^T v (re-linearises) | 220,244 | 2.1–2.2 s | 9.5 s | — | — |
+| dE/dparams | 482,869 | 3.6–3.7 s | 280–295 s | — | — |
+
+Torch on an A100 (shared with other users' jobs) was 5–25× *slower* than torch on CPU:
+the blocks are too small, so it is kernel-launch-bound.
+
+**Per optimizer step (χ=16, estimate).** Torch: ~30–110 s (10–30 forward sweeps,
+10–100 GMRES matvecs at ~0.5 s, ~10 s fixed), and it never compiles. JAX: ~2–5 s
+warm, but the first step compiles for ~6,400 s (GPU), and compiles again whenever χ,
+the chi layout or the fallback path changes. Break-even is ~100 steps. A native torch
+port with coarser ops than the jaxpr might gain 2–3×, which still leaves it ~5–10×
+behind warm JAX.
+
+**What this means for §11.** The eager backend breaks the compile wall exactly as §2
+predicts, but trades it for a ~20× per-step cost. It pays off only for short or
+exploratory runs and for workloads that recompile often. It does not justify the
+20–31 person-weeks on compute grounds; debuggability and a second oracle (§2, bullets)
+remain real but secondary.
+
+**Cheaper lead (JAX side, unmeasured in tenax).** The J^T v that reuses saved residuals
+is 39k ops and compiles in 62 s, whereas the full re-linearising program is 220k ops
+(tenax's joint GMRES program compiled in 2,856 s on GPU at χ=16). Linearising once
+per optimizer step and jitting only the transpose for the GMRES matvec could cut the
+GMRES-path compile without a second backend.
 
 ---
 
