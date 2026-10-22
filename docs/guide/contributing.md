@@ -75,8 +75,9 @@ CI required checks run `pytest -m core` on Python 3.11, 3.12 (Linux) and
    ```
 
 **Branch protection:** `main` requires three passing checks — `Tests (Python 3.11)`,
-`Tests (Python 3.12)`, and `Tests (macOS, Python 3.12)`. The PR branch must be
-up-to-date with `main`.
+`Tests (Python 3.12)`, and `Tests (macOS, Python 3.12)`. The PR branch does not
+have to be up-to-date with `main`: the merge queue tests each PR against the
+latest `main`.
 
 ## Writing tests
 
