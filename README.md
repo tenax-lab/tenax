@@ -32,6 +32,7 @@ Each entry links to its guide page; the full documentation is at [tenax.readthed
 - **iPEPS simple update** — 1-site and 2-site unit cells, with a belief-propagation gauge for the bond weights ([iPEPS](docs/guide/algorithms/ipeps.md))
 - **AD ground-state optimization** — implicit, explicit, C4v and root-implicit AD through CTM; on the fused-CTM implicit-AD 1x1 and 2-site paths an unconverged CTM forward raises `CTMNotConvergedError` (or warns with `CTMNotConvergedWarning`) ([AD paths](docs/guide/algorithms/ipeps_ad_paths.md))
 - **CTM environments** — SVD/eigh/QR projectors, in-CTM χ growth, convergence and saddle checks, optional mixing for two-state cycles, split-CTMRG ([CTM](docs/guide/algorithms/ctm.md))
+- **Chi-layout seed for symmetric AD** — converge and check the chi sector layout before a frozen-layout 2-site AD run ([CTM](docs/guide/algorithms/ctm.md#chi-sector-layout-and-the-layout-seed))
 - **Fermionic iPEPS (fPEPS)** — graded tensors for spinless fermions / the t-V model ([fPEPS](docs/guide/algorithms/fpeps.md))
 - **Honeycomb and kagome** — native honeycomb CTM and kagome iPESS with AD ([guide](docs/guide/algorithms/honeycomb_kagome.md))
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary momenta ([AD excitations](docs/guide/algorithms/ad_excitations.md))
@@ -44,12 +45,6 @@ Each entry links to its guide page; the full documentation is at [tenax.readthed
 - `xxz_gate_u1sz` — U(1)-Sz block-sparse XXZ with charges `[+1, −1]`.
 - `xxz_gate_z2` — Z2 block-sparse XXZ with charges `[0, 1]` (spin-down parity).
 - `xxz_z2_init_pair` — Random Z2-symmetric 2-site iPEPS pair.
-
-**CTM chi layout**
-
-- `symmetric_layout_seed(A, B, gate, ctm_cfg)` — converge an eager 2-site CTM, check it with forced sweeps, and return it as `envs_init` (with its layout and a `stable` flag) for AD with a frozen chi sector layout.
-- `layout_of(envs)` — per-sector size of every environment leg.
-- `same_layout(a, b)` — True if two layouts have the same (charge, size) pairs on every leg.
 
 **Classical statistical mechanics**
 

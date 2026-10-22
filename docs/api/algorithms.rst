@@ -149,6 +149,14 @@ CTM (Tensor protocol)
 
 .. autofunction:: tenax.algorithms._ctm_tensor_energy.compute_energy_ctm_tensor_2site
 
+.. autofunction:: tenax.algorithms.ctm_layout.symmetric_layout_seed
+
+.. autoclass:: tenax.algorithms.ctm_layout.SeedResult
+
+.. autofunction:: tenax.algorithms.ctm_layout.layout_of
+
+.. autofunction:: tenax.algorithms.ctm_layout.same_layout
+
 Split-CTMRG
 -----------
 
