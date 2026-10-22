@@ -4294,6 +4294,7 @@ def _optimize_gs_ad_tensor_2site(
     # All other branches keep the fresh-init values set above.
     _gate_fp = gate_fingerprint(gate) if config.gs_checkpoint_path is not None else None
     start_step = 0
+    _resumed_2s = False
     if config.gs_resume:
         # Fail fast on a typo'd / deleted / never-written checkpoint
         # path rather than silently falling through to fresh init —
@@ -4394,6 +4395,9 @@ def _optimize_gs_ad_tensor_2site(
             ctm_cfg_2s = _replace(ctm_cfg_2s, plateau_patience=_current_patience_2s)
 
         start_step = int(bundle["step"]) + 1
+        # The checkpoint's tensors were updated after its last evaluation, so
+        # the first resumed step re-checks the layout (Codex on #1135).
+        _resumed_2s = True
         if config.gs_verbose:
             print(
                 f"[iPEPS-AD:2site-tensor] resumed from step {start_step} "
@@ -4518,7 +4522,7 @@ def _optimize_gs_ad_tensor_2site(
             try:
                 _recheck = (
                     _recheck_layout_2s(params)
-                    if _recheck_on and step > start_step
+                    if _recheck_on and (step > start_step or _resumed_2s)
                     else "off"
                 )
                 if _recheck == "refused":
@@ -4562,7 +4566,9 @@ def _optimize_gs_ad_tensor_2site(
                         cg_direction = None
                         prev_grad = None
                         prev_precond_grad = None
-                    if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    # Every optax optimizer: Adam moments from the old layout
+                    # would steer the first update on the new one (Codex on #1135).
+                    if optimizer is not None:
                         opt_state = optimizer.init(params)
                     # Energies on different layouts are not comparable: the
                     # old best may sit on the branch the old layout made.

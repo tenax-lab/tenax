@@ -1164,8 +1164,8 @@ def test_the_recheck_runs_unfrozen_with_the_configured_tie_rtol(
     assert hist["layout_changes"] == []
 
 
-@pytest.mark.parametrize("metric", [True, False], ids=["metric_lbfgs", "optax_lbfgs"])
-def test_a_layout_change_resets_the_optimizer_state(request, monkeypatch, metric):
+@pytest.mark.parametrize("kind", ["metric_lbfgs", "optax_lbfgs", "adam"])
+def test_a_layout_change_resets_the_optimizer_state(request, monkeypatch, kind):
     """Script a change at the step-3 re-check (step 2 has an empty L-BFGS
     history anyway, so a reset there proves nothing).  Then, before the
     step-4 re-check: a fresh value_and_grad runs (the HZ reuse is dropped),
@@ -1179,10 +1179,15 @@ def test_a_layout_change_resets_the_optimizer_state(request, monkeypatch, metric
 
     The metric case runs on the bosonic ``seeded_xxz_d2``: on the fermionic
     ``seeded_d2`` #1099 turns the metric off, so ``lbfgs_two_loop`` never
-    runs there."""
+    runs there.  Adam is an optax optimizer too: its moments from the old
+    layout must not reach the first update on the new one (Codex on #1135)."""
     import tenax.algorithms._metric_precond as mp
 
-    if metric:
+    metric = kind == "metric_lbfgs"
+    gs = {"return_history": True, "gs_metric_precond": metric}
+    if kind == "adam":
+        gs.update(gs_optimizer="adam", gs_line_search=False)
+    if kind != "optax_lbfgs":
         A, B, H, envs = request.getfixturevalue("seeded_xxz_d2")
         chi = CHI_XXZ
     else:
@@ -1244,7 +1249,7 @@ def test_a_layout_change_resets_the_optimizer_state(request, monkeypatch, metric
             (A, B),
             _ad_config(
                 4,
-                gs={"return_history": True, "gs_metric_precond": metric},
+                gs=gs,
                 chi=chi,
                 max_iter=400,
             ),
@@ -1271,6 +1276,36 @@ def test_a_layout_change_resets_the_optimizer_state(request, monkeypatch, metric
         assert ("update",) in window, window
         first_update = window.index(("update",))
         assert ("init",) in window[:first_update], events
+
+
+def test_a_resumed_run_rechecks_its_first_step(seeded_xxz_d2, monkeypatch, tmp_path):
+    """A fresh run skips the re-check at its first step: ``envs_init`` was
+    converged at those tensors.  A resumed run must not: the checkpoint's
+    tensors were updated after its last evaluation (Codex on #1135).  Each
+    re-check calls ``_layout_changed`` once."""
+    A, B, H, envs = seeded_xxz_d2
+    _surrogate_energy(monkeypatch, A, B)
+    calls = []
+    real = ipo._layout_changed
+
+    def _spy(old, new):
+        calls.append(1)
+        return real(old, new)
+
+    monkeypatch.setattr(ipo, "_layout_changed", _spy)
+    ckpt = {"gs_checkpoint_path": str(tmp_path), "gs_checkpoint_every": 1}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        optimize_gs_ad(H, (A, B), _ad_config(2, gs=ckpt, chi=CHI_XXZ), envs_init=envs)
+        n_fresh = len(calls)
+        optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(3, gs={**ckpt, "gs_resume": True}, chi=CHI_XXZ),
+            envs_init=envs,
+        )
+    assert n_fresh == 1, calls  # regime: steps 1-2, the re-check at step 2 only
+    assert len(calls) - n_fresh == 1, calls  # the resumed step 3 re-checks
 
 
 def test_an_unconverged_recheck_is_not_a_change(seeded_d2, monkeypatch):
