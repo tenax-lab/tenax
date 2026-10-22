@@ -108,6 +108,12 @@ iPEPS
 
 .. autofunction:: tenax.algorithms.ipeps.xxz_gate
 
+.. autofunction:: tenax.algorithms.ipeps.xxz_gate_u1sz
+
+.. autofunction:: tenax.algorithms.ipeps.xxz_gate_z2
+
+.. autofunction:: tenax.algorithms.ipeps.xxz_z2_init_pair
+
 .. autofunction:: tenax.algorithms.ipeps.ipeps
 
 .. autofunction:: tenax.algorithms.ipeps_ctm.ctm
