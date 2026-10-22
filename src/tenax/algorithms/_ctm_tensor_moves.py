@@ -20,6 +20,7 @@ __all__ = [
 ]
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms import _ctm_graded as G
@@ -50,9 +51,42 @@ from tenax.core import EPS
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
+def _max_abs_scale(T: Tensor) -> jax.Array:
+    """``T.max_abs()`` in value, with the gradient of a smooth norm.
+
+    The value is exactly ``max |T|`` (``f - stop_gradient(f)`` is exactly 0),
+    so the forward is unchanged.  The gradient is that of ``c * ||T||_F`` with
+    the constant ``c = max|T| / ||T||_F``.
+
+    Why not differentiate ``max`` itself: it has a kink wherever the largest
+    ``|entry|`` is tied, and the double-layer environment ties it exactly
+    (entries related by the ket<->bra swap).  There the backward depended on
+    which tied entry rounding picked: a 1e-15 relative change to a D=3 U(1)
+    chi=9 environment moved the implicit-AD ``J^T v`` by 15%, and JAX and a
+    torch replay of the same program disagreed by as much.
+
+    Why not ``stop_gradient`` the scale: the derivative of ``T / N(T)`` is what
+    projects the scale direction out of the CTM Jacobian (``N`` homogeneous of
+    degree 1 gives ``J T = 0``).  Without it the unnormalised map's radial
+    eigenvalue ~1 stays in ``J`` and the adjoint ``(I - J^T) lambda = b``
+    stops converging (GMRES residual 1e-6 -> 7e-4 on
+    ``tests/test_adjoint_convergence_gate.py``).  ``c * ||T||_F`` is also
+    homogeneous of degree 1, so it keeps that projection, and the result is
+    the exact Jacobian of a Frobenius-normalised map with the same fixed point
+    up to a per-tensor scale, which the energy does not see.
+    """
+    data = T._data
+    m = jax.lax.stop_gradient(T.max_abs())
+    sq = jnp.sum(jnp.abs(data) ** 2)
+    nonzero = sq > 0
+    f = jnp.sqrt(jnp.where(nonzero, sq, 1.0))
+    ratio = jax.lax.stop_gradient(jnp.where(nonzero, m / f, 0.0))
+    return m + (f - jax.lax.stop_gradient(f)) * ratio
+
+
 def _normalize_tensor(T: Tensor) -> Tensor:
-    """Normalize tensor by max abs value (inf-norm)."""
-    norm = T.max_abs()
+    """Normalize tensor by max abs value (inf-norm); see :func:`_max_abs_scale`."""
+    norm = _max_abs_scale(T)
     return T * (1.0 / (norm + EPS))
 
 

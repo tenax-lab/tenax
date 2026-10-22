@@ -61,6 +61,7 @@ from tenax.algorithms._ctm_tensor_moves import (
     _ctm_tensor_move_right_2x2,
     _ctm_tensor_move_top,
     _ctm_tensor_move_top_2x2,
+    _max_abs_scale,
 )
 from tenax.algorithms._ctm_tensor_paired_moves import (
     _ctm_tensor_move_horizontal,
@@ -80,9 +81,11 @@ def _normalize_tensor(T: Tensor) -> Tensor:
     """Normalize tensor by max abs value, matching dense CTM convention.
 
     Uses polymorphic ``max_abs()`` and scalar division so that
-    SymmetricTensor stays block-sparse without a dense round-trip.
+    SymmetricTensor stays block-sparse without a dense round-trip.  The
+    gradient is that of a smooth norm, not of ``max``; see
+    :func:`tenax.algorithms._ctm_tensor_moves._max_abs_scale`.
     """
-    norm = T.max_abs()
+    norm = _max_abs_scale(T)
     return T * (1.0 / (norm + EPS))
 
 
