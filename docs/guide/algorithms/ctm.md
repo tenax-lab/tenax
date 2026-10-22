@@ -349,6 +349,49 @@ fused χ²·D⁶ double layer.
 
 References: Naumann et al., arXiv:2502.10298.
 
+## Chi sector layout and the layout seed
+
+With `SymmetricTensor` input, each chi leg of the environment splits into
+charge sectors.  The *layout* is the size of each sector on every leg.  Under
+AD the traced projector keeps the layout it is handed (#929), so a 2-site AD
+run seeded with `envs_init` optimizes on that layout.  `symmetric_layout_seed`
+builds that seed:
+
+```python
+from tenax import layout_of, same_layout, symmetric_layout_seed
+
+seed = symmetric_layout_seed(A, B, gate, ctm_cfg, forced_sweeps=300)
+envs_init = seed.envs_init
+```
+
+It converges an eager 2-site CTM from a cold start, so the layout can change
+between sweeps (#1098).  Then it runs `forced_sweeps` more sweeps with no
+convergence stop.  `stable` is False when those sweeps move the energy by
+`energy_tol` (default `1e-10`) or more, or change the layout: a cold CTM can
+certify convergence on a point it later leaves (#1096).
+
+The result fields:
+
+- `envs_init`, `layout` — the cold environment and its layout
+  (`layout_of(envs_init)`).
+- `energy_cold`, `energy_forced`, `stable` — the forced-sweep check.
+- `cold_converged`, `cold_iterations` — the cold solve's status.
+- `cut_gap` — the smallest relative gap `(s[chi-1] - s[chi]) / s[chi-1]` over
+  all corners, read from a second cold solve at `chi + gap_extra_chi`
+  (default 4).  A value near 0 means the cut at `chi` falls inside a
+  (near-)degenerate set, so the layout is not unique.  Example: for the D=2
+  U(1) XXZ Δ=0.3 state at chi=8, the cut splits a 3-fold degenerate triplet
+  (s/s0 = 9.36709e-3 in sectors -4, 0, +4) and `cut_gap` is roundoff.
+- `gap_converged` — whether that larger-chi solve converged.  If it is False,
+  do not trust `cut_gap`.
+
+`layout_of(envs)` returns the layout as a dict keyed by
+`(coord, field, leg label)`.  It includes the double-layer legs, whose sectors
+are fixed by the site tensors; filter on the chi legs if you need only those.
+`same_layout(a, b)` compares two layouts.
+
+Dense input is accepted; its chi legs carry one sector each.
+
 ## API
 
 **1-site:**
