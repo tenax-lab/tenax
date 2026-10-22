@@ -388,6 +388,23 @@ def test_running_out_of_max_iter_inside_the_eager_phase_warns(case):
     assert info.iterations == 1, (name, info)
 
 
+def test_a_qr_warm_up_that_uses_the_whole_budget_warns(case, monkeypatch):
+    """With ``projector_method="qr"`` the jitted eigh warm-up runs first.  If it
+    uses all of ``max_iter``, no eager sweep is left, so the layout is not
+    adapted and the end-of-call check does not run; that must not be silent
+    (Codex on #1132)."""
+    name, A, B = case.name, case.A, case.B
+    eager = _count_eager(monkeypatch)
+    with pytest.warns(UserWarning, match=r"QR warm-up.*max_iter=3.*#1098"):
+        kw = {
+            **_kwargs(case.chi, max_iter=3, min_iter=0, conv_tol=0.0),
+            "projector_method": "qr",
+            "qr_warmup_steps": 3,
+        }
+        python_loop_ctm_converge({(0, 0): A, (1, 0): B}, CHECKERBOARD_NEIGHBORS, **kw)
+    assert eager == [], (name, eager)
+
+
 def test_a_1x1_warm_start_runs_no_probe_sweep(case, monkeypatch):
     """The probe records only the traced 2x2 cut, so under ``recipe="1x1"``
     it could never certify a layout; it must be skipped, not run in front of

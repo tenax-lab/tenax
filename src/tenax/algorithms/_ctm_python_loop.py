@@ -901,6 +901,21 @@ def python_loop_ctm_converge(
     pre = warmup
     eager_budget = min(eager_layout_sweeps, max_iter - warmup)
     layout_phase = eager_budget > 0 and _needs_eager_layout_phase(site_tensors, envs)
+    if (
+        warmup > 0
+        and eager_budget <= 0
+        and _needs_eager_layout_phase(site_tensors, envs)
+    ):
+        # The jitted warm-up keeps the layout it is handed, so with no sweep
+        # left there is no layout phase and no end-of-call check either.
+        warnings.warn(
+            "python_loop_ctm_converge: the QR warm-up "
+            f"(qr_warmup_steps={qr_warmup_steps}) used the whole iteration "
+            f"budget (max_iter={max_iter}), so the symmetric chi-leg layout "
+            "was not adapted (#1098).  The result may be the energy of the "
+            "cold-init layout; raise max_iter.",
+            stacklevel=2,
+        )
     outcome = "stable"
     if layout_phase:
         compare_input = env_init is not None and _chi_layout(envs) != _cold_init_layout(
