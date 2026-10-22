@@ -203,55 +203,70 @@ def _collapsing_pair():
     return _su_direction_dependent_pair()
 
 
-@pytest.mark.slow
-def test_a_collapsed_corner_is_not_certified_and_the_budget_is_respected():
-    """The behavioural claim: the answer must depend on `max_iter` again.
+#: The two budgets straddle the blind loop's exit.  Measured on this fixture
+#: with both guards disabled (``_spectrum_can_show_change`` -> True and
+#: ``_spectrum_is_uninformative`` -> False, i.e. the pre-#898 criterion): the
+#: loop certifies on sweep 3, so the energy at ``max_iter=4`` is bit-identical
+#: to ``max_iter=3`` (-0.424537656216 both); the guarded loop moves on to
+#: -0.428340678043.  Budgets used to be (4, 12, 30) -- 46 sweeps at ~2 min each
+#: and growing (every new block shape is a fresh XLA compile), 2h37m locally,
+#: which timed the slow shard out at the 240 min cap on every CI run.
+_BUDGETS = (3, 4)
 
-    Before the fix the returned environment was bit-identical at every budget,
-    which is the observable signature of a criterion that exits on a quantity
-    it cannot read. After it, more sweeps must do more work — that is the whole
-    contract of `max_iter`.
-    """
+
+@pytest.fixture(scope="module")
+def collapsed_runs():
+    """One CTM run per budget on the collapsing fixture, shared by the two
+    tests below: the energy each returned and the RuntimeWarnings it raised."""
     import tenax
     from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
     from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
 
     A, B = _collapsing_pair()
     gate = tenax.heisenberg_gate()
-
-    energies = {}
-    for max_iter in (4, 12, 30):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
+    runs = {}
+    for max_iter in _BUDGETS:
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
             eA, eB = ctm_tensor_2site(
                 A, B, chi=12, max_iter=max_iter, conv_tol=1e-9, recipe="2x2"
             )
-        energies[max_iter] = float(
-            compute_energy_ctm_tensor_2site(A, B, eA, eB, gate, 2)
-        )
-
-    print(f"#898 budget response: {energies}")
-    # Strictly monotone in the budget: each extra sweep is still buying
-    # something, which is exactly what the early exit was throwing away.
-    assert energies[4] != energies[12], energies
-    assert energies[12] != energies[30], energies
-    # And it is descending toward the true fixed point, not wandering.
-    assert energies[30] < energies[12] < energies[4], energies
+        energy = float(compute_energy_ctm_tensor_2site(A, B, eA, eB, gate, 2))
+        runtime = [w.message for w in rec if issubclass(w.category, RuntimeWarning)]
+        runs[max_iter] = (energy, runtime)
+    return runs
 
 
 @pytest.mark.slow
-def test_a_collapsed_corner_says_so_out_loud():
+def test_a_collapsed_corner_is_not_certified_and_the_budget_is_respected(
+    collapsed_runs,
+):
+    """The behavioural claim: the answer must depend on `max_iter` again.
+
+    Before the fix the returned environment was bit-identical at every budget
+    past the sweep where the blind comparison certified, which is the
+    observable signature of a criterion that exits on a quantity it cannot
+    read.  After it, one more sweep must do more work -- that is the whole
+    contract of `max_iter`.
+    """
+    energies = {k: e for k, (e, _) in collapsed_runs.items()}
+    print(f"#898 budget response: {energies}")
+    lo, hi = _BUDGETS
+    assert energies[lo] != energies[hi], energies
+    # And it is descending toward the true fixed point, not wandering.
+    assert energies[hi] < energies[lo], energies
+
+
+@pytest.mark.slow
+def test_a_collapsed_corner_says_so_out_loud(collapsed_runs):
     """Silence was the actual damage: the caller had no way to know.
 
     The environment is still returned — the sweeps ran and, on this fixture,
     kept improving — but it must not be mistaken for a fixed point.
     """
-    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
-
-    A, B = _collapsing_pair()
-
-    with pytest.warns(RuntimeWarning, match="could not be certified") as rec:
-        ctm_tensor_2site(A, B, chi=12, max_iter=6, conv_tol=1e-9, recipe="2x2")
+    _, runtime = collapsed_runs[_BUDGETS[-1]]
+    certified = [m for m in runtime if "could not be certified" in str(m)]
+    assert certified, [str(m) for m in runtime]
 
     # The strong diagnosis, and it must be reserved for this case: the corner
     # is *still* rank-1, so "mean-field, will not respond to chi" is a claim
@@ -261,7 +276,7 @@ def test_a_collapsed_corner_says_so_out_loud():
     # the same phrase is absent when the corner recovered -- together they pin
     # that the message says only what that run established (#903 review, P2
     # round 3).
-    text = str(rec[0].message)
+    text = str(certified[0])
     assert "mean-field" in text, text
 
 
@@ -774,63 +789,6 @@ def test_the_exemption_needs_every_virtual_leg_to_be_trivial(dims, expected, why
 
 @pytest.mark.core
 @pytest.mark.parametrize(
-    "cell",
-    [
-        {"trivial": (1, 1, 1, 1, 2), "rich": (4, 4, 4, 4, 2)},
-        {"rich": (4, 4, 4, 4, 2), "trivial": (1, 1, 1, 1, 2)},
-        {"trivial": (1, 1, 1, 1, 2), "rich": (1, 1, 4, 4, 2)},
-    ],
-)
-def test_each_coordinate_of_a_mixed_cell_is_judged_on_its_own_site(cell):
-    """The bound is per coordinate, never per cell (#903 review).
-
-    A cell-wide aggregate is wrong in **both** directions, and this PR shipped
-    each in turn:
-
-    * ``min`` lets one trivial site exempt every corner, so a rank-one
-      spectrum at the *rich* coordinate is read as informative and the loop
-      exits on the collapsed environment -- **fails open**.
-    * ``max`` gives the rich site's bound to every corner, so the *trivial*
-      coordinate is blind on every sweep, the loop can never certify it, and
-      it exhausts ``max_iter`` while emitting the strong collapsed-environment
-      warning -- fails closed, but wrongly.
-
-    ``ctm_multisite`` does not require uniform bond dimensions, so both are
-    reachable on supported input.  Reachable rank is a property of the site
-    sitting at a coordinate, so both halves are asserted **in the same cell**:
-    the earlier aggregate-only test could not have caught either failure,
-    because it never looked at an individual coordinate.
-
-    Cell order is varied because a bound that reads one position passes any
-    fixture that happens to order the cell favourably.
-    """
-    from tenax.algorithms._ctm_tensor_convergence import (
-        _forced_corner_rank,
-        _max_virtual_bond_dim,
-    )
-
-    sites = {k: _FakeTensor(d, ("u", "d", "l", "r", "phys")) for k, d in cell.items()}
-    bounds = {
-        c: _forced_corner_rank(_max_virtual_bond_dim(A) ** 2) for c, A in sites.items()
-    }
-    sv = jnp.asarray([1.0, 0.0, 0.0, 0.0])
-
-    exempt = {
-        c: bool(jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=b)))
-        for c, b in bounds.items()
-    }
-    assert exempt["trivial"] is True, (
-        f"the D=1 coordinate is an exact fixed point and must certify; "
-        f"bounds={bounds} -- a cell-wide max would make it blind forever"
-    )
-    assert exempt["rich"] is False, (
-        f"the nontrivial coordinate must stay fail-closed; bounds={bounds} -- "
-        f"a cell-wide min would let the trivial site exempt it"
-    )
-
-
-@pytest.mark.core
-@pytest.mark.parametrize(
     "sv,uninformative,why",
     [
         ([1.0, 0.5, float("nan")], True, "NaN in the tail, healthy leading value"),
@@ -884,3 +842,127 @@ def test_two_empty_spectra_fail_closed_instead_of_raising():
     assert jnp.isinf(diff), f"expected inf, got {diff}"
     # And the mixed case still fails closed rather than comparing lengths.
     assert jnp.isinf(_ctm_sv_diff(empty, jnp.asarray([1.0, 0.5])))
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "cell,exempt,why",
+    [
+        ({"a": (1, 1, 1, 1, 2), "b": (1, 1, 1, 1, 2)}, True, "uniformly trivial"),
+        ({"a": (1, 1, 1, 1, 2), "b": (4, 4, 4, 4, 2)}, False, "one rich site"),
+        ({"a": (4, 4, 4, 4, 2), "b": (1, 1, 1, 1, 2)}, False, "same, order swapped"),
+        ({"a": (1, 1, 1, 1, 2), "b": (1, 1, 4, 4, 2)}, False, "one anisotropic site"),
+    ],
+)
+def test_one_global_bound_per_cell_can_never_under_cover(cell, exempt, why):
+    """The bound is the max over EVERY site, and nothing finer (#898, #916).
+
+    Six successive per-corner derivations were each a correct fix to the last
+    and each still under-covered: ``indices[0]``; ``min`` across sites; ``max``
+    across sites; per coordinate; ``{c} | neighbours(c)`` -- which still misses
+    the *diagonal* sites of the four-site plaquettes the ``2x2`` projectors are
+    built from.  Every miss failed **open**: too small a bound certifies a
+    collapsed corner, and no downstream signal distinguishes that from a real
+    fixed point.
+
+    A global max cannot under-cover, in any recipe, by construction.  The price
+    is that a legitimate ``D=1`` coordinate inside a heterogeneous cell is no
+    longer exempt and spends its budget instead -- the safe direction, and the
+    exemption only ever mattered for *uniformly* trivial states, where the
+    global max is still 1.  That is the first row below; the rest are the cases
+    where being conservative is the whole point.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import (
+        _forced_corner_rank,
+        _max_virtual_bond_dim,
+    )
+
+    sites = {k: _FakeTensor(d, ("u", "d", "l", "r", "phys")) for k, d in cell.items()}
+    bound = _forced_corner_rank(
+        max(_max_virtual_bond_dim(A) ** 2 for A in sites.values())
+    )
+    sv = jnp.asarray([1.0, 0.0, 0.0, 0.0])
+    got = bool(jnp.isfinite(_ctm_sv_diff(sv, sv, max_rank=bound)))
+    assert got is exempt, f"{why}: exemption should be {exempt}, bound={bound}"
+
+
+def _aniso_site(du, dd, dl, dr, d=2, seed=0):
+    """An iPEPS site tensor with independently chosen virtual bond dims."""
+    from tenax.core.index import FlowDirection, TensorIndex
+    from tenax.core.symmetry import U1Symmetry
+    from tenax.core.tensor import DenseTensor
+
+    sym = U1Symmetry()
+    zeros = lambda n: np.zeros(n, dtype=np.int32)  # noqa: E731
+    data = jax.random.normal(jax.random.PRNGKey(seed), (du, dd, dl, dr, d))
+    data = data / (jnp.linalg.norm(data) + 1e-10)
+    return DenseTensor(
+        data,
+        (
+            TensorIndex.from_charges(sym, zeros(du), FlowDirection.OUT, label="u"),
+            TensorIndex.from_charges(sym, zeros(dd), FlowDirection.IN, label="d"),
+            TensorIndex.from_charges(sym, zeros(dl), FlowDirection.OUT, label="l"),
+            TensorIndex.from_charges(sym, zeros(dr), FlowDirection.IN, label="r"),
+            TensorIndex.from_charges(sym, zeros(d), FlowDirection.OUT, label="phys"),
+        ),
+    )
+
+
+def test_a_coordinate_fed_by_a_richer_neighbour_is_still_covered():
+    """The bound must not be keyed to the coordinate a corner is STORED under.
+
+    #903's review P1, and the defect #916 fixes.  In the ``2x2`` recipe
+    ``_ctm_tensor_sweep_multisite`` builds a destination's C1 from a
+    *neighbour's* double layer, so ``envs[c].C1`` is not necessarily produced
+    by the site at ``c``.  An all-``D=1`` coordinate fed by a richer neighbour
+    can therefore reach a corner rank above what its own tensor implies, and a
+    per-coordinate bound hands it ``max_rank=1`` -- which exempts its collapsed
+    corner from the criterion and certifies it.  Every miss in that family
+    failed **open**.
+
+    This is the black-box discriminator, and it is the part the sibling
+    ``test_one_global_bound_per_cell_can_never_under_cover`` cannot supply:
+    that test computes the bound in its own body, so it asserts its own
+    arithmetic and passes whatever the production keying does.  Here the
+    collapse warning has to *name* the under-covered coordinate.  Measured:
+    keyed per coordinate the warning names only ``(0,1), (1,0), (1,1)`` and
+    silently omits ``(0,0)``; with one global bound it names all four.
+
+    The cell is anisotropic so that ``(0,0)`` is all-``D=1`` while its
+    neighbours carry bonds of 2 -- row 0 horizontal and column 0 vertical are
+    1, row 1 and column 1 are 2, which keeps every shared bond consistent
+    under the 2x2 wrap.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import _ctm_tensor_multisite
+
+    cell = {
+        (0, 0): _aniso_site(1, 1, 1, 1, seed=1),  # the under-covered coordinate
+        (0, 1): _aniso_site(2, 2, 1, 1, seed=2),
+        (1, 0): _aniso_site(1, 1, 2, 2, seed=3),
+        (1, 1): _aniso_site(2, 2, 2, 2, seed=4),
+    }
+    neighbors = {
+        (r, c): {
+            "top": ((r - 1) % 2, c),
+            "bottom": ((r + 1) % 2, c),
+            "left": (r, (c - 1) % 2),
+            "right": (r, (c + 1) % 2),
+        }
+        for (r, c) in cell
+    }
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _ctm_tensor_multisite(
+            cell, neighbors, chi=4, max_iter=3, conv_tol=1e-12, recipe="2x2"
+        )
+
+    collapse = [str(w.message) for w in caught if "is STILL rank" in str(w.message)]
+    assert collapse, "no collapse diagnosis was emitted at all"
+    named = collapse[0]
+    assert "(0, 0)" in named, (
+        "the all-D=1 coordinate (0, 0) was exempted from the criterion: its "
+        "corner is built from a richer neighbour, so a bound keyed to (0, 0) "
+        "itself under-covers and certifies a collapsed corner. Warning was: "
+        f"{named}"
+    )

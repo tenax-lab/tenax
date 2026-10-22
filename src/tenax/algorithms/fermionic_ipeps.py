@@ -5,7 +5,7 @@ The state is represented as a PEPS with fermionic tensor structure, where
 Koszul signs are automatically handled by SymmetricTensor operations.
 
 Currently supports:
-- Spinless fermion Hamiltonian: H = -t(c†c + h.c.) + V(n_i n_j)
+- Spinless fermion Hamiltonian: H = -t(c†c + h.c.) + V(n_i n_j) - mu*sum_i n_i
 - Trotter decomposition for imaginary time evolution
 - fPEPS site tensor initialization with FermionParity
 - Simple update (horizontal and vertical bonds)
@@ -18,14 +18,16 @@ Reference:
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 # Imported at module level rather than under ``TYPE_CHECKING``, and that is not
-# a style choice: ``SplitCTMTensorEnv`` appears in the public signatures of
+# a style choice: ``CTMTensorEnv`` appears in the public signatures of
 # :func:`fpeps` and :func:`sublattice_gap`.  ``from __future__ import
 # annotations`` keeps annotations as strings, so a ``TYPE_CHECKING``-only import
 # survives import and ordinary attribute access -- but anything that *evaluates*
@@ -33,7 +35,7 @@ import numpy as np
 # purpose::
 #
 #     >>> typing.get_type_hints(fpeps)
-#     NameError: name 'SplitCTMTensorEnv' is not defined
+#     NameError: name 'CTMTensorEnv' is not defined
 #
 # That breaks every consumer that introspects a signature: runtime validators
 # (pydantic, typeguard, beartype), ``inspect.signature(..., eval_str=True)``,
@@ -48,11 +50,14 @@ import numpy as np
 # Fix this because the public annotations should resolve, not because the docs
 # are on fire.
 #
-# There is no cycle to avoid here: ``_split_ctm_tensor_init`` imports only
-# ``_ctm_utils`` and ``tenax.core``, and importing it does not pull this module
-# in.  If that ever changes, the fix is a qualified annotation that resolves at
-# runtime, not a retreat to ``TYPE_CHECKING``.
-from tenax.algorithms._split_ctm_tensor_init import SplitCTMTensorEnv
+# There is no cycle to avoid here: ``_ctm_tensor_init`` does not import this
+# module.  If that ever changes, the fix is a qualified annotation that resolves
+# at runtime, not a retreat to ``TYPE_CHECKING``.
+#
+# The environments are the fused graded Tensor CTM's (#1035 step 4); the split
+# CTM refuses fermionic input, because its split <-> fused conversions are
+# sign-free.
+from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.algorithms.ipeps_simple_update import (
     BondWeights,
     _simple_update_checkerboard_sweep,
@@ -62,6 +67,15 @@ from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
+
+#: PSD-arm tolerance for fpeps()'s #879 RDM-validity gate (negativity relative to
+#: the RDM's spectral radius).  Deliberately looser than the strict #854 gate
+#: (``RDM_PSD_TOL = 1e-8``): a low-chi CTM leaves a small negativity that is
+#: convergence noise, not a collapse -- measured ~1e-3 at chi=8, V=1/V=2 -- so
+#: fpeps() still returns a number there and only refuses *gross* non-PSD (the #854
+#: case sits at ~0.8).  The non-finite and trace-collapse arms are unaffected (they
+#: use their own tolerances), so a collapsed environment is refused regardless.
+_FPEPS_RDM_PSD_TOL = 1e-2
 
 
 @dataclass
@@ -77,6 +91,15 @@ class FPEPSConfig:
         ctm_chi:              Bond dimension for CTM environment.
         ctm_max_iter:         Maximum CTM iterations.
         ctm_conv_tol:         CTM convergence tolerance.
+        mu:                   Chemical potential.  ``H`` gains a ``-mu * sum_i
+                              n_i`` term, distributed over the bonds as
+                              ``-(mu / z) * (n_i + n_j)`` per bond with
+                              ``z = 4`` (the square lattice's coordination
+                              number), so the four bonds touching a site sum to
+                              exactly ``-mu * n_i`` there.  ``mu = 2 * V`` is
+                              the particle-hole-symmetric half-filling point of
+                              the t-V model.  Default ``0.0`` reproduces the
+                              original gate exactly.
     """
 
     D: int = 2
@@ -87,17 +110,30 @@ class FPEPSConfig:
     ctm_chi: int = 8
     ctm_max_iter: int = 50
     ctm_conv_tol: float = 1e-6
+    mu: float = 0.0
 
 
 def spinless_fermion_gate(config: FPEPSConfig) -> SymmetricTensor:
-    """Build the 2-site Hamiltonian H = -t(c†c + h.c.) + V(n_i n_j).
+    """Build the 2-site Hamiltonian H = -t(c†c + h.c.) + V(n_i n_j) - mu*(n_i+n_j)/z.
 
     The Hamiltonian acts on two spinless fermion sites with local
     Hilbert space ``{|0>, |1>}`` (empty, occupied). The fermionic
     anti-commutation relations are encoded via FermionParity symmetry.
 
+    The chemical-potential term is distributed over the bonds as
+    ``-(config.mu / z) * (n_i + n_j)`` with ``z = 4``, the coordination
+    number of the square lattice this gate is built for. :func:`fpeps` and
+    :func:`su_grow_layout` apply it on the 2-site checkerboard square
+    lattice; :func:`optimize_fpeps_ad` applies it on the square lattice of
+    whatever ``iPEPSConfig.unit_cell`` selects (the default ``"1x1"`` is a
+    uniform state, which cannot hold a CDW -- use ``"2site"`` for one).
+    Every site touches exactly 4 bonds either way.
+    Summed over the 4 bonds of a site, that gives exactly ``-mu * n_i`` per
+    site. ``config.mu = 0.0`` (the default) leaves the gate unchanged.
+
     Args:
-        config: FPEPSConfig with hopping t and interaction V.
+        config: FPEPSConfig with hopping t, interaction V, and chemical
+            potential mu.
 
     Returns:
         SymmetricTensor with 4 legs (si, sj, si_out, sj_out),
@@ -105,6 +141,7 @@ def spinless_fermion_gate(config: FPEPSConfig) -> SymmetricTensor:
     """
     t = config.t
     V = config.V
+    mu = config.mu
 
     # Build the dense 4x4 Hamiltonian matrix in the basis
     # |00>, |01>, |10>, |11> (site i tensor site j)
@@ -122,6 +159,13 @@ def spinless_fermion_gate(config: FPEPSConfig) -> SymmetricTensor:
 
     # Interaction: V * n_i * n_j
     H[3, 3] = V  # <11|H|11>
+
+    # Chemical potential: -(mu/z) * (n_i + n_j), z=4 bonds per square-lattice
+    # site. n_i + n_j is 0, 1, 1, 2 on |00>, |01>, |10>, |11>. Guarded on
+    # mu != 0.0 so the mu=0 default adds nothing (bit-identical to the
+    # pre-mu gate), rather than relying on 0.0 * mu rounding to 0.0.
+    if mu != 0.0:
+        H += np.diag(-(mu / 4.0) * np.array([0.0, 1.0, 1.0, 2.0]))
 
     # Reshape to (2, 2, 2, 2): (si, sj, si_out, sj_out)
     H_4leg = H.reshape(2, 2, 2, 2)
@@ -305,19 +349,174 @@ def _fpeps_simple_update(
         tensors a CTM should contract.
     """
     gate = _trotter_gate(hamiltonian_gate, dt)
+    B = A if B is None else B
     # Four phases per step, so each of the four checkerboard bonds is evolved
     # once per step -- the same imaginary time per bond as the old two-phase
     # loop delivered for its two.
-    return _simple_update_checkerboard_sweep(
-        A, A if B is None else B, gate, max_D, 4 * steps
-    )
+    return _simple_update_checkerboard_sweep(A, B, gate, max_D, 4 * steps)
+
+
+def bond_layout(A: SymmetricTensor, B: SymmetricTensor) -> tuple[tuple[int, int], ...]:
+    """``(n_even, n_odd)`` per bond leg of ``A`` then ``B``, legs ``u, d, l, r``.
+
+    The quantity the simple update grows and AD must hold fixed.  ``B``'s legs
+    are included because on the checkerboard they are the far ends of ``A``'s
+    bonds, and a mismatch between them is a broken state, not a layout.
+    """
+    out = []
+    for T in (A, B):
+        for leg in ("u", "d", "l", "r"):
+            ix = T.indices[T.labels().index(leg)]
+            par = np.asarray(ix.symmetry.parity(np.asarray(ix.charges)))
+            out.append((int((par == 0).sum()), int((par == 1).sum())))
+    return tuple(out)
+
+
+class FrozenSU(NamedTuple):
+    """The output of :func:`su_grow_layout` (fields in the plan).
+
+    Attributes:
+        A:      Physical (lambda-absorbed) site tensor for sublattice A,
+                ready for CTM/AD.
+        B:      Physical (lambda-absorbed) site tensor for sublattice B.
+        layout: :func:`bond_layout` at the end of the run -- the sector
+                split AD is meant to hold fixed.
+        stages: :func:`bond_layout` at the end of each growth stage,
+                ``D_start`` through ``config.D`` inclusive, in that order.
+        frozen: Whether the layout stayed put after the final stage's first
+                cycle.  ``False`` means the sector split kept moving through
+                the rest of that stage, and ``layout``/``stages[-1]`` should
+                not be trusted as a fixed point.
+    """
+
+    A: SymmetricTensor
+    B: SymmetricTensor
+    layout: tuple[tuple[int, int], ...]
+    stages: tuple[tuple[tuple[int, int], ...], ...]
+    frozen: bool
+
+
+def su_grow_layout(
+    gate: SymmetricTensor,
+    config: FPEPSConfig,
+    *,
+    D_start: int = 2,
+    cycles_per_stage: int = 25,
+    final_cycles: int = 50,
+    key: jax.Array | None = None,
+) -> FrozenSU:
+    """Build the bond-sector layout one slot at a time with an eager, unpinned
+    simple update, then stop.
+
+    A global top-D truncation locks the sector sizes at the first truncation
+    and never moves them again (measured in tenax and in YASTN), so the only
+    step that reads the physics into the layout is the one that adds a slot:
+    the new slot goes to the sector with the largest discarded weight.  This
+    relaxes at ``D_start``, raises ``max_D`` by one, relaxes again, up to
+    ``config.D``.  The last stage runs ``final_cycles`` cycles; ``frozen`` is
+    whether the layout stayed put after that stage's first cycle.
+
+    ``D_start`` must be at least 2: a D=1 bond is one even sector, which
+    forces a parity-even site into the vacuum, on which hopping does nothing.
+    A bond with an empty parity sector is refused rather than frozen -- AD
+    could never refill it (#878).
+
+    Each of the four bonds keeps its own spectrum (``independent_bonds=True``),
+    unlike :func:`_fpeps_simple_update`.  With the truncation unpinned, a
+    bond's SVD emits its own sector split *and* its own charge order, so the
+    shared-spectrum mirror would scale the partner leg with singular values
+    aligned to a different layout -- permuted between sectors at fixed ``D``,
+    and one element too long on a leg not yet grown.  The pinned path keeps
+    both partners on one layout, which is why sharing is safe there.
+
+    Args:
+        gate:             2-site Hamiltonian as SymmetricTensor (the bare
+                          Hamiltonian, not yet Trotterized -- this builds
+                          ``exp(-config.dt * gate)`` itself, once).
+        config:           FPEPSConfig.  ``config.D`` is the final bond
+                          dimension the layout is grown to.
+        D_start:          Bond dimension to start relaxing at.  Must be at
+                          least 2 (see above) and at most ``config.D``.
+        cycles_per_stage: Checkerboard cycles (4 phases each) to relax for
+                          at every stage before ``max_D`` is raised, except
+                          the last.  Must be at least 1.
+        final_cycles:     Checkerboard cycles to relax for at ``config.D``,
+                          the stage whose freeze is checked.  Must be at
+                          least 2 -- ``frozen`` compares cycle 0's layout
+                          against every later cycle, so one cycle would make
+                          ``frozen`` trivially True.
+        key:              JAX random key for the initial random fPEPS
+                          tensor.  Defaults to ``PRNGKey(0)``.
+
+    Returns:
+        :class:`FrozenSU`.
+    """
+    if D_start < 2:
+        raise ValueError("su_grow_layout: D_start must be >= 2 (D=1 is the vacuum)")
+    if D_start > config.D:
+        raise ValueError(
+            f"su_grow_layout: D_start ({D_start}) must be <= config.D ({config.D})"
+        )
+    if cycles_per_stage < 1:
+        raise ValueError(
+            f"su_grow_layout: cycles_per_stage must be >= 1, got {cycles_per_stage} "
+            "-- a stage with zero cycles leaves `lay` unbound (the D_start "
+            "collapse check reads it) or, for a non-first stage, silently "
+            "reuses the previous stage's layout."
+        )
+    if final_cycles < 2:
+        raise ValueError(
+            f"su_grow_layout: final_cycles must be >= 2, got {final_cycles} -- "
+            "`frozen` is checked by comparing cycle 0's layout against every "
+            "later cycle in the final stage, so final_cycles=1 makes `frozen` "
+            "trivially True (there is nothing to compare cycle 0 against)."
+        )
+    key = jax.random.PRNGKey(0) if key is None else key
+    A = B = _initialize_fpeps(dataclasses.replace(config, D=D_start), key)
+    trotter = _trotter_gate(gate, config.dt)
+    lam = None
+    stages = []
+    frozen = True
+    for D in range(D_start, config.D + 1):
+        n_cycles = final_cycles if D == config.D else cycles_per_stage
+        first = None
+        for cycle in range(n_cycles):
+            # independent_bonds=True: unpinned, each bond's SVD emits its own
+            # sector layout and charge order, so mirroring one bond's spectrum
+            # onto its partner (the shared-spectrum default) scales the
+            # partner's leg with values from a different layout -- and during
+            # growth, a length-D spectrum onto a leg still at D-1 (PR #1051).
+            A, B, lam = _simple_update_checkerboard_sweep(
+                A,
+                B,
+                trotter,
+                D,
+                4,
+                lambdas=lam,
+                independent_bonds=True,
+                pin_sectors=False,
+            )
+            lay = bond_layout(A, B)
+            if D == config.D:
+                if cycle == 0:
+                    first = lay
+                elif lay != first:
+                    frozen = False
+        stages.append(lay)
+    if any(0 in pair for pair in lay):
+        raise ValueError(
+            f"su_grow_layout: a bond sector collapsed to zero {lay}; AD cannot "
+            "refill it. Try another key (see #878)."
+        )
+    A_phys, B_phys = _to_physical_pair(A, B, lam)
+    return FrozenSU(A_phys, B_phys, lay, tuple(stages), frozen)
 
 
 def sublattice_gap(
     A: SymmetricTensor,
     B: SymmetricTensor,
-    env_A: SplitCTMTensorEnv,
-    env_B: SplitCTMTensorEnv,
+    env_A: CTMTensorEnv,
+    env_B: CTMTensorEnv,
 ) -> float:
     """Is there **charge order** between the two checkerboard sublattices?
 
@@ -367,7 +566,7 @@ def sublattice_gap(
         A, B:           The two checkerboard site tensors, in **physical**
                         (CTM-contractable) form -- the pair :func:`fpeps`
                         returns, not the bare Vidal ``Gamma``.
-        env_A, env_B:   Their converged ``SplitCTMTensorEnv`` environments, the
+        env_A, env_B:   Their converged ``CTMTensorEnv`` environments, the
                         pair :func:`fpeps` returns alongside the state.
 
     Returns:
@@ -380,10 +579,10 @@ def sublattice_gap(
         signal that the environment is too small or too few sweeps, and
         clipping would hide it inside a plausible-looking 1.0.
     """
-    from tenax.algorithms._split_ctm_tensor_energy import _rdm2x1_split_tensor_2site
+    from tenax.algorithms._ctm_tensor_energy import _rdm2x1_tensor_2site
 
     # (s1_A_ket, s2_B_ket, s1_A_bra, s2_B_bra), already trace-normalised.
-    rho = np.asarray(_rdm2x1_split_tensor_2site(A, B, env_A, env_B))
+    rho = np.asarray(_rdm2x1_tensor_2site(A, B, env_A, env_B))
     rho_A = np.einsum("abcb->ac", rho)
     rho_B = np.einsum("abad->bd", rho)
     # The two-site RDM is trace-normalised, so both traces are 1 already; divide
@@ -506,7 +705,7 @@ def fpeps(
 ) -> tuple[
     float,
     tuple[SymmetricTensor, SymmetricTensor],
-    tuple[SplitCTMTensorEnv, SplitCTMTensorEnv],
+    tuple[CTMTensorEnv, CTMTensorEnv],
 ]:
     """Run fPEPS: simple update optimization + CTM energy evaluation.
 
@@ -518,13 +717,28 @@ def fpeps(
 
     .. warning::
         The **absolute energy is not certified** (#392), and this fix does not
-        change that.  ``H`` carries no chemical potential, so both the empty
-        state and the fully polarised checkerboard are exact ``E = 0``
+        change that.  ``H`` carries a chemical potential only if the caller
+        sets ``config.mu`` (default ``0.0``, see :class:`FPEPSConfig` and
+        :func:`spinless_fermion_gate`); at the default both the empty state
+        and the fully polarised checkerboard are exact ``E = 0``
         eigenstates -- fixed points of imaginary time that are not the ground
         state -- and the sweep is observed to settle on them: at 200 steps,
         D=2, ``V=0``, it reports ``E = -6e-05`` where the half-filled answer is
-        about ``-1.6 t``.  :func:`sublattice_gap` tells you *which* state you
-        landed on; it does not tell you it is the ground state.
+        ``-8t/pi**2 = -0.8106``.  :func:`sublattice_gap` tells you *which* state
+        you landed on; it does not tell you it is the ground state.  Setting
+        ``mu = 2 * V`` restores particle-hole symmetry at half filling and
+        lifts that degeneracy -- the point where the CDW energy anchor
+        ``E = -V`` per site holds -- but it does not by itself certify
+        convergence to the ground state.
+
+        That reference is the **spinless** one, which is what this model is:
+        the local space is ``{|0>, |1>}`` (``d = 2``).  At ``V = 0`` the
+        Hamiltonian is free fermions with ``eps(k) = -2t(cos kx + cos ky)``,
+        and filling every ``eps < 0`` state -- which is half filling at
+        ``mu = 0`` -- gives ``E/site = -8t/pi**2 = -0.810569``.  This line
+        previously read ``-1.6 t``, which is ``-16t/pi**2``, the value for
+        *spinful* fermions (two species); an acceptance target that is wrong by
+        a factor of two certifies the wrong answer in both directions.
 
     Args:
         hamiltonian_gate: 2-site Hamiltonian as SymmetricTensor.
@@ -570,10 +784,8 @@ def fpeps(
         bond-ordered state has identical on-site densities on both sublattices.
         See :func:`sublattice_gap` for the full statement.
     """
-    from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
-    from tenax.algorithms._split_ctm_tensor_energy import (
-        compute_energy_split_ctm_tensor_2site,
-    )
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
 
     if isinstance(initial_tensor, tuple):
         A, B = initial_tensor
@@ -608,7 +820,9 @@ def fpeps(
     # freed, or when #882 removes stored lambdas altogether.
     A_phys, B_phys = _to_physical_pair(A_opt, B_opt, lambdas)
 
-    env_A, env_B = ctm_split_tensor_2site(
+    # The fused graded Tensor CTM (#1035 step 4).  The split CTM's split <->
+    # fused conversions are sign-free and refuse fermionic input.
+    env_A, env_B = ctm_tensor_2site(
         A_phys,
         B_phys,
         config.ctm_chi,
@@ -616,8 +830,24 @@ def fpeps(
         conv_tol=config.ctm_conv_tol,
     )
     d = A_phys.indices[A_phys.labels().index("phys")].dim
-    energy = compute_energy_split_ctm_tensor_2site(
-        A_phys, B_phys, env_A, env_B, hamiltonian_gate, d=d
+    # #879: refuse (NaN) an energy built from a non-density-matrix RDM rather than
+    # return a finite but unphysical number.  fpeps() evaluates concretely (it
+    # returns ``float(energy)``), so this rides the already-concrete path and adds
+    # no jit/grad cost -- the gate inspects only non-tracer RDMs.  The PSD arm is
+    # loosened (``_FPEPS_RDM_PSD_TOL``): a low-chi CTM leaves a small negativity
+    # (~1e-3 of the spectral radius at chi=8, seen at V=1/V=2) that is convergence
+    # noise, not a collapse, so those runs still return a number; only gross
+    # non-PSD -- and, at their own tolerances, any non-finite or trace-collapse --
+    # are refused.
+    energy = compute_energy_ctm_tensor_2site(
+        A_phys,
+        B_phys,
+        env_A,
+        env_B,
+        hamiltonian_gate,
+        d=d,
+        nan_on_invalid_rdm=True,
+        psd_tol=_FPEPS_RDM_PSD_TOL,
     )
 
     return float(energy), (A_phys, B_phys), (env_A, env_B)

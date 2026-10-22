@@ -53,7 +53,9 @@ def _normalise_lambda(sigma: jax.Array) -> jax.Array:
     return sigma / jnp.where(smax > 0, smax, 1.0)
 
 
-def _truncation_base_charges(A: Tensor, leg: str) -> np.ndarray | None:
+def _truncation_base_charges(
+    A: Tensor, leg: str, pin_sectors: bool = True
+) -> np.ndarray | None:
     """The canonical bond charge layout to impose on the SVD, or ``None``.
 
     ``base_charges`` pins the new bond's per-sector *keep counts* to the old
@@ -71,9 +73,15 @@ def _truncation_base_charges(A: Tensor, leg: str) -> np.ndarray | None:
     87.0%.  Repeated, that drives ``lambda`` to zero and the state with it
     (#865).
 
+    ``pin_sectors=False`` restores the global top-D truncation on a fermionic
+    2-site bond, which lets the SU move weight between sectors; the pin is
+    required only on the 1-site path, where ``A.l``/``A.r`` are one bond.
+
     Returning ``None`` restores the global truncation, which is what minimises
     the 2-norm truncation error and what the dense path has always done.
     """
+    if not pin_sectors:
+        return None
     if not A.indices[A.labels().index(leg)].symmetry.is_fermionic:
         return None
     return np.asarray(A.indices[A.labels().index(leg)].charges)
@@ -245,6 +253,7 @@ def _simple_update_checkerboard_sweep(
     independent_bonds: bool = False,
     *,
     phase0: int = 0,
+    pin_sectors: bool = True,
 ) -> tuple[Tensor, Tensor, BondWeights]:
     """Run ``steps`` phases of the four-bond checkerboard simple-update sweep.
 
@@ -283,6 +292,11 @@ def _simple_update_checkerboard_sweep(
         phase0: Phase to start the cycle on.  A caller resuming a sweep must
                 pass the phase it stopped on, or the first bond is evolved
                 twice and the second never.
+        pin_sectors: Forwarded to every bond update's
+                :func:`_truncation_base_charges`.  ``True`` (default) pins the
+                fermionic bond's per-sector keep counts to its current layout;
+                ``False`` lets the SVD take the globally largest singular
+                values and move weight between sectors.
     """
     if lambdas is None:
         labels = A.labels()
@@ -302,6 +316,7 @@ def _simple_update_checkerboard_sweep(
                 max_D,
                 lam_h_far=lambdas.h_BA,
                 lam_v_other=lambdas.v_BA,
+                pin_sectors=pin_sectors,
             )
             lambdas = _store(lambdas, "h_AB", h_AB, independent_bonds)
         elif phase == 1:
@@ -314,6 +329,7 @@ def _simple_update_checkerboard_sweep(
                 max_D,
                 lam_v_far=lambdas.v_BA,
                 lam_h_other=lambdas.h_BA,
+                pin_sectors=pin_sectors,
             )
             lambdas = _store(lambdas, "v_AB", v_AB, independent_bonds)
         elif phase == 2:
@@ -326,6 +342,7 @@ def _simple_update_checkerboard_sweep(
                 max_D,
                 lam_h_far=lambdas.h_AB,
                 lam_v_other=lambdas.v_AB,
+                pin_sectors=pin_sectors,
             )
             lambdas = _store(lambdas, "h_BA", h_BA, independent_bonds)
         else:
@@ -338,10 +355,118 @@ def _simple_update_checkerboard_sweep(
                 max_D,
                 lam_v_far=lambdas.v_AB,
                 lam_h_other=lambdas.h_AB,
+                pin_sectors=pin_sectors,
             )
             lambdas = _store(lambdas, "v_BA", v_BA, independent_bonds)
 
     return A, B, lambdas
+
+
+def _graded_bond_update(
+    A_abs: SymmetricTensor,
+    B_abs: SymmetricTensor,
+    gate: Tensor,
+    leg_A: str,
+    leg_B: str,
+    max_D: int,
+    base_charges: np.ndarray | None,
+) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array]:
+    """Steps 3-8 of a bond update on fermionic tensors, graded (#1035 §5 step 6).
+
+    The recipe Phase 1 certified against the Fock oracle (the truncated
+    two-site update in ``tests/test_graded_contract_oracle.py``):
+
+    * ``theta = graded_contract(A, B)`` over the shared bond;
+    * the gate as a graded operator -- ``g[P_s, P_t, p_s, p_t]`` from the
+      dense gate (``_H2``'s convention, the one the RDM readout is certified
+      in), stored with the annihilation half reversed ``(P_s, P_t, p_t, p_s)``
+      and applied as the *left* operand;
+    * ``graded_svd`` (a Koszul reorder into ``left + right``, then ``svd``);
+    * ``graded_reorder`` back to ``(u, d, l, r, phys)`` -- not ``permute_legs``,
+      which is the sign-free move that made the old update hard-core-boson.
+
+    ``svd`` leaves the new bond OUT on ``U`` and IN on ``Vh``; the site
+    convention is the opposite (``A.r``/``A.d`` IN, ``B.l``/``B.u`` OUT).  Both
+    ends are dualised, and the ``(-1)**p`` that reversing a contracted pair's
+    orientation costs under rule 2 is put back as a twist on ``U``'s end, so
+    ``A_new . B_new`` is still ``gate . theta``.  Flows in == flows out.
+
+    Returns ``(A_new, B_new, sigma)``: bare Gamma tensors in site order, and
+    the singular values of the new bond.
+    """
+    from tenax.algorithms._ctm_tensor_moves import _flip_leg_flow
+    from tenax.core._graded import (
+        graded_contract,
+        graded_reorder,
+        graded_svd,
+        twist_legs,
+    )
+
+    site = list(A_abs.labels())  # (u, d, l, r, phys)
+    a_free = [lab for lab in site if lab not in (leg_A, "phys")]
+    b_free = [lab for lab in site if lab not in (leg_B, "phys")]
+    A_ = A_abs.relabels(
+        {leg_A: "_shared", "phys": "_p_A"} | {x: f"{x}_A" for x in a_free}
+    )
+    B_ = B_abs.relabels(
+        {leg_B: "_shared", "phys": "_p_B"} | {x: f"{x}_B" for x in b_free}
+    )
+    theta = graded_contract(A_, B_)
+
+    phys_A = A_abs.indices[site.index("phys")]
+    phys_B = B_abs.indices[site.index("phys")]
+    d = phys_A.dim
+    g = np.asarray(gate.todense() if isinstance(gate, Tensor) else gate)
+    g = np.einsum("ABab->ABba", g.reshape(d, d, d, d))
+    G = SymmetricTensor.from_dense(
+        jnp.asarray(g, dtype=theta.dtype),
+        (
+            phys_A.relabel("_P_A"),  # new ket legs keep the site flow
+            phys_B.relabel("_P_B"),
+            phys_B.flip_flow().relabel("_p_B"),  # pairs with theta's ket leg
+            phys_A.flip_flow().relabel("_p_A"),
+        ),
+    )
+    M = graded_contract(G, theta)
+
+    left = [f"{x}_A" for x in a_free] + ["_P_A"]
+    right = [f"{x}_B" for x in b_free] + ["_P_B"]
+    U, sigma, Vh, _ = graded_svd(
+        M,
+        left,
+        right,
+        "_bond",
+        max_singular_values=max_D,
+        base_charges=base_charges,
+    )
+    U = twist_legs(_flip_leg_flow(U, "_bond"), ["_bond"])
+    Vh = _flip_leg_flow(Vh, "_bond")
+
+    A_new = U.relabels({"_bond": leg_A, "_P_A": "phys"} | {f"{x}_A": x for x in a_free})
+    B_new = Vh.relabels(
+        {"_bond": leg_B, "_P_B": "phys"} | {f"{x}_B": x for x in b_free}
+    )
+    return graded_reorder(A_new, site), graded_reorder(B_new, site), sigma
+
+
+def _is_fermionic_tensor(t: Tensor) -> bool:
+    return isinstance(t, SymmetricTensor) and t.indices[0].symmetry.is_fermionic
+
+
+def _finish_bond_update(A_new, B_new, lam_new, *, A_inv: dict, B_inv: dict):
+    """Steps 9-10 of a bond update: remove the outer lambdas that steps 1-2
+    absorbed, then normalise each tensor."""
+    for leg, lam in A_inv.items():
+        A_new = scale_bond_axis(A_new, leg, _inv_lambda(lam))
+    for leg, lam in B_inv.items():
+        B_new = scale_bond_axis(B_new, leg, _inv_lambda(lam))
+    norm_A = float(A_new.norm())
+    if norm_A > EPS:
+        A_new = A_new * (1.0 / norm_A)
+    norm_B = float(B_new.norm())
+    if norm_B > EPS:
+        B_new = B_new * (1.0 / norm_B)
+    return A_new, B_new, lam_new
 
 
 def _simple_update_2site_horizontal_tensor(
@@ -354,6 +479,7 @@ def _simple_update_2site_horizontal_tensor(
     *,
     lam_h_far: jax.Array | None = None,
     lam_v_other: jax.Array | None = None,
+    pin_sectors: bool = True,
 ) -> tuple[Tensor, Tensor, jax.Array]:
     """2-site simple update on the horizontal bond (A.r <-> B.l).
 
@@ -381,6 +507,7 @@ def _simple_update_2site_horizontal_tensor(
                      Defaults to ``lam_h``.
         lam_v_other: Spectrum of the *other* vertical bond, ``B.d <-> A.u``.
                      Defaults to ``lam_v``.
+        pin_sectors: Forwarded to :func:`_truncation_base_charges`.
 
     Returns:
         (A_new, B_new, lam_h_new).
@@ -411,6 +538,26 @@ def _simple_update_2site_horizontal_tensor(
     B_abs = scale_bond_axis(B_abs, "d", lam_v_other)
     B_abs = scale_bond_axis(B_abs, "r", lam_h_far)
 
+    if _is_fermionic_tensor(A_abs):
+        # Steps 3-8, graded (#1035 §5 step 6).
+        A_new, B_new, sigma = _graded_bond_update(
+            A_abs,
+            B_abs,
+            gate,
+            "r",
+            "l",
+            max_D,
+            _truncation_base_charges(A, "r", pin_sectors),
+        )
+        lam_h_new = _normalise_lambda(sigma)
+        return _finish_bond_update(
+            A_new,
+            B_new,
+            lam_h_new,
+            A_inv={"u": lam_v_other, "d": lam_v, "l": lam_h_far},
+            B_inv={"u": lam_v, "d": lam_v_other, "r": lam_h_far},
+        )
+
     # 3. Contract A.r with B.l
     A_left = A_abs.relabel("r", "shared")
     B_right = B_abs.relabels(
@@ -437,7 +584,7 @@ def _simple_update_2site_horizontal_tensor(
     #    physical bond and the next step crashes if the layout drifts.  Here
     #    they are different bonds, and imposing it discarded the *largest*
     #    singular value of theta -- see :func:`_truncation_base_charges`.
-    base_charges = _truncation_base_charges(A, "r")
+    base_charges = _truncation_base_charges(A, "r", pin_sectors)
     U, sigma, Vh, s_full = truncated_svd(
         theta,
         left_labels=["u", "d", "l", "si_out"],
@@ -502,6 +649,7 @@ def _simple_update_2site_vertical_tensor(
     *,
     lam_v_far: jax.Array | None = None,
     lam_h_other: jax.Array | None = None,
+    pin_sectors: bool = True,
 ) -> tuple[Tensor, Tensor, jax.Array]:
     """2-site simple update on the vertical bond (A.d <-> B.u).
 
@@ -520,6 +668,7 @@ def _simple_update_2site_vertical_tensor(
                      Defaults to ``lam_v``.
         lam_h_other: Spectrum of the *other* horizontal bond, ``B.r <-> A.l``.
                      Defaults to ``lam_h``.
+        pin_sectors: Forwarded to :func:`_truncation_base_charges`.
 
     Returns:
         (A_new, B_new, lam_v_new).
@@ -541,6 +690,26 @@ def _simple_update_2site_vertical_tensor(
     B_abs = scale_bond_axis(B_abs, "l", lam_h)
     B_abs = scale_bond_axis(B_abs, "r", lam_h_other)
 
+    if _is_fermionic_tensor(A_abs):
+        # Steps 3-8, graded (#1035 §5 step 6).
+        A_new, B_new, sigma = _graded_bond_update(
+            A_abs,
+            B_abs,
+            gate,
+            "d",
+            "u",
+            max_D,
+            _truncation_base_charges(A, "d", pin_sectors),
+        )
+        lam_v_new = _normalise_lambda(sigma)
+        return _finish_bond_update(
+            A_new,
+            B_new,
+            lam_v_new,
+            A_inv={"u": lam_v_far, "l": lam_h_other, "r": lam_h},
+            B_inv={"d": lam_v_far, "l": lam_h, "r": lam_h_other},
+        )
+
     # 3. Contract A.d with B.u
     A_top = A_abs.relabel("d", "shared")
     B_bottom = B_abs.relabels(
@@ -561,7 +730,7 @@ def _simple_update_2site_vertical_tensor(
 
     # 5. Truncated SVD.  See the horizontal counterpart for why the canonical
     #    charge layout is imposed only on the fermionic path (#563, #865).
-    base_charges = _truncation_base_charges(A, "d")
+    base_charges = _truncation_base_charges(A, "d", pin_sectors)
     U, sigma, Vh, s_full = truncated_svd(
         theta,
         left_labels=["u", "l", "r", "si_out"],

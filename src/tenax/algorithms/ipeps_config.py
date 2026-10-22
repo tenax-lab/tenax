@@ -9,6 +9,42 @@ import jax
 
 from tenax.core.lattice import Lattice
 
+# Every ``CTMConfig.forward_gauge`` spelling.  ``"auto"`` is a sentinel that
+# :func:`resolve_forward_gauge` replaces before any CTM consumer sees it.
+FORWARD_GAUGES = ("auto", "phase", "bond_phase", "qr", "sigma", "none")
+
+
+def resolve_forward_gauge(
+    forward_gauge: str,
+    *,
+    implicit_ad: bool,
+    fuse_virtual_legs: bool = True,
+    chi_ramp=None,
+    ctm_ad_mode: str | None = None,
+) -> str:
+    """Resolve the ``forward_gauge="auto"`` sentinel for one CTM path.
+
+    The single source of truth for what ``"auto"`` means.  It becomes
+    ``"bond_phase"`` (#841) exactly where that gauge is implemented: the
+    implicit-AD fixed point (``implicit_ad=True``) on the fused double layer
+    (``fuse_virtual_legs=True``), with no ``chi_ramp`` and no reference /
+    root-implicit engine (``ctm_ad_mode is None``).  Everywhere else --
+    explicit AD, split CTM, ``chi_ramp``, ``ctm_ad_mode``, the legacy
+    ``ad_utils`` paths -- it becomes ``"phase"``, the historical default, and
+    it does so silently: the default must not warn.
+
+    Every explicit value is returned unchanged ("no silent promotion"), so an
+    explicit ``"bond_phase"`` still reaches -- and is refused by -- a path
+    that cannot honour it, and an explicit ``"phase"`` stays ``"phase"`` on
+    the implicit path.
+    """
+    if forward_gauge != "auto":
+        return forward_gauge
+    bond_phase_ok = (
+        implicit_ad and fuse_virtual_legs and chi_ramp is None and ctm_ad_mode is None
+    )
+    return "bond_phase" if bond_phase_ok else "phase"
+
 
 @dataclass
 class CTMConfig:
@@ -26,9 +62,19 @@ class CTMConfig:
                             broadening to prevent NaN from degenerate singular
                             values (Francuz et al., PRR 7, 013237).
         forward_gauge:      Gauge fix applied after each CTM sweep.  One of
-                            ``"phase"`` (default), ``"qr"``, ``"sigma"``, or
-                            ``"none"``.  Explicit user choice is preserved —
-                            no silent promotion in AD paths.  See
+                            ``"auto"`` (default), ``"phase"``,
+                            ``"bond_phase"`` (implicit-AD path only:
+                            ``"phase"`` plus a per-chi-index bond gauge
+                            aligned to the previous env, #841), ``"qr"``,
+                            ``"sigma"``, or ``"none"``.  ``"auto"`` resolves
+                            per path (:func:`resolve_forward_gauge`) to
+                            ``"bond_phase"`` on the fused implicit-AD path
+                            (no ``chi_ramp``, ``ctm_ad_mode=None``) and to
+                            ``"phase"`` everywhere else, silently.  An
+                            explicit value is preserved exactly — no silent
+                            promotion in AD paths, and an explicit
+                            ``"bond_phase"`` on a path that cannot honour it
+                            still raises.  See
                             ``docs/guide/algorithms/ipeps_ad_paths.md`` for
                             the full mode matrix and benchmarks.
         ad_backward_method: Backward method for the implicit-diff path.
@@ -40,23 +86,53 @@ class CTMConfig:
                             tracked by issue #292.  Prefer
                             ``ad_backward_method="vjp"`` (the default)
                             until GMRES is stabilized.
-        chi_auto_bump:      Reactive auto-χ_E bump (variPEPS §2.8.2).  When
+        adjoint_method:     Solver for the implicit-AD adjoint system.
+                            ``"fixed_point"`` (default) runs the fused
+                            Neumann loop and falls back to GMRES when it
+                            does not converge; ``"gmres"`` goes straight to
+                            the single-matvec GMRES solve.
+        adjoint_chain_rule: How the implicit-AD backward forms the chain
+                            rule's indirect term ``J_params^T λ``.
+                            ``"joint"`` takes it from a joint GMRES solve
+                            over ``(params, env)``, so the separate
+                            params-VJP program never compiles; ``"separate"``
+                            compiles that program (the behaviour before
+                            #1123).  Same gradient to round-off; at U(1) D=3
+                            chi=16 on an A100 the first step compiles 23%
+                            faster (7,795 -> 5,977 s) with 12 GB less peak
+                            RSS; warm steps unchanged.  ``"auto"`` (default)
+                            runs ``"joint"`` on the fused CTM and leaves the
+                            split CTM (``fuse_virtual_legs=False``), which
+                            has its own chain rule, as it was; an explicit
+                            ``"joint"`` is refused there.  See
+                            ``docs/guide/algorithms/ipeps_ad_paths.md``.
+        chi_ramp:           **Deprecated** (#512; emits ``DeprecationWarning``).
+                            Staged ``[(chi, num_sweeps), ...]`` CTM
+                            convergence.  It zero-pads the env between
+                            L-BFGS steps; use ``ctmrg_heuristic_increase_chi``
+                            instead (``chi_ramp=[(9, 20), (12, 20), (16, 20)]``
+                            becomes ``chi=9, chi_max=16,
+                            ctmrg_heuristic_increase_chi=True``).
+        projector_method:   ``"svd"`` (Fishman two-projector, default),
+                            ``"eigh"``, or ``"qr"`` (reduced-corner QR-CTMRG,
+                            arXiv:2505.00494, dense single-site).  Consulted
+                            only on the deprecated ``recipe="1x1"`` path
+                            (#911): ``recipe="2x2"`` hardcodes Fishman SVD
+                            and ignores it.  For ``qr``/``eigh`` on a
+                            C4v-symmetric state use ``ctm_tensor_c4v``.
+        chi_auto_bump:      **Deprecated** (#512; emits ``DeprecationWarning``).
+                            Reactive auto-χ_E bump (variPEPS §2.8.2).  When
                             ``True``, the optimizer raises ``chi`` by
                             ``chi_auto_bump_step`` between L-BFGS steps
                             whenever the CTM truncation error exceeds
                             ``chi_auto_bump_eps``.  Mutually exclusive with
-                            ``chi_ramp`` (a deterministic schedule).
-                            Off by default.
-
-                            For new code, prefer ``chi_schedule`` +
-                            ``optimize_gs_ad_chi_schedule`` with
-                            convergence-triggered ramping (#455);
-                            ``chi_auto_bump`` is retained as an
-                            orthogonal CTM-truncation sentinel for the
-                            case where the optimizer is making progress
-                            but ε_T indicates CTM under-resolution.
-                            These two mechanisms compose (reactive fires
-                            first, scheduled second).
+                            ``chi_ramp`` (a deterministic schedule) and with
+                            ``ctmrg_heuristic_increase_chi``.  Off by default.
+                            It hands a zero-padded env to the optimizer
+                            between steps; prefer
+                            ``ctmrg_heuristic_increase_chi=True`` with
+                            ``chi_max`` set, which grows chi inside CTM
+                            convergence.
         chi_auto_bump_eps:  Truncation-error threshold that triggers an
                             auto-χ bump.  Default ``1e-5`` follows
                             variPEPS §2.8.2.
@@ -67,11 +143,62 @@ class CTMConfig:
                             mechanism.  ``None`` means unbounded.  When
                             set, must satisfy ``chi_max >= chi``.
         fuse_virtual_legs:  When ``True`` (default) the CTM uses the fused
-                            double-layer tensor.  When ``False`` the single-site
-                            (``recipe="1x1"``) AD path uses the split ket/bra
-                            double layer (χ²·D⁴ memory).  Only the single-site
-                            path is supported; other lattices raise
-                            ``NotImplementedError`` (#463 Phase 2).
+                            double-layer tensor.  When ``False`` the AD path
+                            uses the split ket/bra double layer (χ²·D⁴
+                            memory) instead, for both the single-site
+                            (``unit_cell="1x1"``) and 2-site checkerboard
+                            (``unit_cell="2site"``) optimizers.  The split
+                            CTM is dense-only and experimental:
+                            ``SymmetricTensor`` input (U(1)/Z_n or
+                            fermionic) is refused -- symmetric iPEPS uses
+                            the fused CTM -- and the χ-changing knobs are
+                            rejected.
+                            The memory win over the fused path is a large-D
+                            effect (D≳16, #825).
+        ctm_ad_mode:        ``None`` (default), ``"c4v_reference"`` (dense
+                            1-site C4v, Francuz et al. App. C-F, Krylov
+                            implicit backward), ``"root_implicit"`` (dense;
+                            ``unit_cell="1x1"`` or the ``"2site"``
+                            checkerboard, #894) or
+                            ``"root_implicit_symmetric"`` (``SymmetricTensor``,
+                            1x1 only).  The root-implicit modes drive the
+                            arXiv:2607.15030 characteristic equations, so no
+                            SVD/eigh backward appears in the gradient path;
+                            they are an accuracy/stability lever, not a speed
+                            one, and their gradient accuracy is measured with
+                            ``measure_gradient_error`` (#785).  Incompatible
+                            with ``forward_gauge="bond_phase"``.
+        projector_backward: Backward of the CTM projectors under AD.
+                            ``"auto"`` (default) promotes to ``"lorentzian"``
+                            when ``gs_implicit_ad=False`` and the effective
+                            projector is ``eigh``, else ``"standard"``.
+                            ``"flow"`` (2x2 recipe, #983) lets the plaquette
+                            projectors' ``dP/dA`` reach the gradient instead
+                            of freezing them: AD/FD on ``ctm_energy_explicit``
+                            goes from 0.229–0.928 to 0.944–0.994.  On
+                            implicit AD with the ``"bond_phase"`` gauge,
+                            ``"auto"`` resolves to ``"flow"`` (#1028;
+                            :meth:`effective_projector_backward`).
+                            The eager forward is bit-identical either way.
+        ctmrg_heuristic_increase_chi: In-CTM χ-bump (variPEPS §2.8.2, #492).
+                            Grows ``chi`` by
+                            ``ctmrg_heuristic_increase_chi_step_size`` during
+                            CTM convergence whenever the smallest kept
+                            singular value relative to the largest exceeds
+                            ``ctmrg_heuristic_increase_chi_threshold``
+                            (default ``1e-6``), so every gradient is taken
+                            at a converged env.  Requires ``chi_max``;
+                            mutually exclusive with ``chi_ramp`` and
+                            ``chi_auto_bump``.  The recommended way to grow
+                            chi.  Off by default.
+        rel_floor:          Relative clamp on the retained CTM spectrum for
+                            ``ctm_ad_mode="root_implicit"`` (dense 1x1 only).
+                            ``None`` (default) uses ``eps**(1/3)``: the
+                            characteristic equations depend on ``S``
+                            cubically, so a direction below that cannot be
+                            resolved (#772/#778).  Two-sided — raising it past
+                            genuinely-weighted directions breaks the
+                            equations.
     """
 
     chi: int = 20
@@ -87,9 +214,10 @@ class CTMConfig:
     qr_warmup_steps: int = 3  # eigh warm-up iterations before QR kicks in
     chi_I: int | None = None  # interlayer bond dim for split-CTMRG; None => chi_I = chi
     fuse_virtual_legs: bool = True  # True: fused double-layer (χ²·D⁶, default).
-    # False: single-site (recipe="1x1") split ket/bra double layer (χ²·D⁴).
-    # #463 Phase 2 — multisite/2-site/c4v/honeycomb/PESS raise NotImplementedError
-    # when False (no multisite split forward yet).
+    # False: split ket/bra double layer (χ²·D⁴): single-site (unit_cell="1x1")
+    # and 2-site checkerboard (unit_cell="2site"); other lattices still raise
+    # NotImplementedError.  Dense-only and experimental (frozen by design):
+    # SymmetricTensor input is refused.
     ad_regularize_svd: bool = True  # use Lorentzian-regularized SVD backward in AD
     gmres_precondition: bool = (
         False  # diagonal scaling preconditioner for GMRES backward (experimental)
@@ -104,12 +232,32 @@ class CTMConfig:
     #     geometrically when ρ(J^T) < 1, which the Arnoldi precheck
     #     guarantees.  Each iteration is one cached ``_jit_apply_Jt``
     #     matvec — no Krylov subspace, no per-iter compile cost.
-    #   "gmres" — eager Krylov solve via ``gmres_pytree_jax``.  Use as a
-    #     safety opt-out when the fixed-point loop diverges.
+    #   "gmres" — eager Krylov solve via ``gmres_single_matvec`` (one matvec
+    #     call site).  Use as a safety opt-out when the fixed-point loop
+    #     diverges.
     # Both paths reuse ``gmres_tol`` (residual / step tolerance) and
     # ``gmres_maxiter`` (step cap).  The fixed-point loop additionally
     # falls back to GMRES in-loop when ``diff > prev_diff`` after step 5.
     adjoint_method: Literal["fixed_point", "gmres"] = "fixed_point"
+    # How the implicit-AD backward forms the chain rule's indirect term
+    # J_params^T lambda.
+    #   "auto" (default) -- "joint" on the fused implicit path, which is the
+    #     only backward that reads this; the split CTM keeps its own chain
+    #     rule.  An explicit "joint" on the split CTM is refused.
+    #   "separate" -- its own compiled program, ``_jit_chain_rule``:
+    #     the params-VJP of the CTM sweep, the largest single compile at D=3
+    #     (2,604 s at chi=16 on GPU).
+    #   "joint" -- the GMRES adjoint solve's matvec is one VJP over
+    #     (params, env), which yields J_params^T of the solve's own iterate;
+    #     the separate program never compiles.  The fused Neumann loop is
+    #     unchanged (env only) and is always followed by that joint GMRES
+    #     solve, seeded with its lambda.  Gradient equal to "separate" to
+    #     round-off.  U(1) D=3 chi=16 on GPU (A100), first step: compile
+    #     7,795 -> 5,977 s (-23%), wall 8,231 -> 6,388 s, peak RSS 51 -> 39 GB,
+    #     warm steps unchanged.  Default via "auto" since the flip (#1123
+    #     shipped it opt-in; docs/superpowers/specs/
+    #     2026-10-18-joint-vjp-chain-rule-design.md).
+    adjoint_chain_rule: Literal["auto", "separate", "joint"] = "auto"
     # "elementwise" or "sv" (corner singular-value spectrum).
     #
     # #780 -- "elementwise" is GAUGE-DEPENDENT and does not converge on a
@@ -133,12 +281,25 @@ class CTMConfig:
     # should remain the AD default is open: the AD path has not been measured
     # under "sv".
     ctm_conv_method: str = "elementwise"
-    # forward_gauge: "phase" (default — Frobenius-norm phase fix per CTM
-    # absorption; works for both implicit and explicit AD, 1-site and
-    # 2-site).  "sigma" (transfer-matrix eigenvector alignment, 1-site
-    # only), "qr" (legacy), or "none" (diagnostic).  No silent promotion
-    # — explicit user choice is preserved.  See ipeps_ad_paths.md.
-    forward_gauge: str = "phase"
+    # forward_gauge: "auto" (default -- a sentinel, never handed to a CTM;
+    # ``resolve_forward_gauge`` turns it into "bond_phase" on the fused
+    # implicit-AD path with no ``chi_ramp`` and ``ctm_ad_mode=None``, and
+    # into "phase" on every other path: explicit AD, split CTM, chi_ramp,
+    # the reference / root-implicit engines, the legacy ad_utils paths).
+    # "phase" (Frobenius-norm phase fix per CTM absorption; applied by the
+    # implicit-AD forward and the legacy ad_utils paths, 1-site and 2-site --
+    # the explicit/split energies under optimize_gs_ad apply no forward
+    # gauge, #1074).  "bond_phase" (implicit
+    # AD only: phase + per-chi-index bond signs/phases aligned to the
+    # previous env, #841 -- removes the per-index Z2 sign 2-cycle the SVD
+    # projectors re-draw each sweep).  "sigma" (transfer-matrix eigenvector
+    # alignment, 1-site only), "qr" (legacy), or "none" (diagnostic).  No
+    # silent promotion -- an explicit user choice is preserved exactly, and
+    # an explicit "bond_phase" on a path that cannot honour it raises.  The
+    # "auto" fallback to "phase" is silent on purpose: the default must not
+    # warn.  Mirrors the ``projector_backward="auto"`` pattern below.  See
+    # ipeps_ad_paths.md.
+    forward_gauge: str = "auto"
     # Optional reference-mode implicit AD mode (App. C-F) for dense 1-site C4v.
     # None | "c4v_reference" | "root_implicit" | "root_implicit_symmetric".
     # The root-implicit modes (#715) drive arXiv:2607.15030 characteristic
@@ -180,7 +341,9 @@ class CTMConfig:
     #     two spatial dimensions", SciPost Phys. Codebases (arXiv:2308.12358).
     adjoint_tikhonov: float = 1e-6
     # Backward pass used for the eigh projector inside AD.
-    #   "auto"       -> default; ``optimize_gs_ad`` promotes to "lorentzian"
+    #   "auto"       -> default; "flow" on implicit AD with the "bond_phase"
+    #                   gauge (#1028, ``effective_projector_backward``).
+    #                   Elsewhere ``optimize_gs_ad`` promotes to "lorentzian"
     #                   when ``gs_implicit_ad=False`` and the effective
     #                   projector is "eigh"; otherwise the effective value is
     #                   "standard".  Mirrors the ``forward_gauge`` pattern.
@@ -191,9 +354,20 @@ class CTMConfig:
     #                   Honored even when ``projector_method != "eigh"``, in
     #                   which case the forward doesn't use eigh at all and
     #                   the flag is a no-op.
+    #   "flow"       -> 2x2 recipe only (#983): let the plaquette projectors'
+    #                   ``dP/dA`` reach the gradient instead of returning them
+    #                   as ``stop_gradient`` constants.  Every other value
+    #                   above freezes them, which is the historical behaviour.
+    #                   Use this on paths with NO fixed-point adjoint solve --
+    #                   explicit AD, or a bare sweep -- where it is measurably
+    #                   more correct (AD/FD 0.229..0.928 frozen against
+    #                   0.944..0.994 flowing on ``ctm_energy_explicit``).
+    #                   Under implicit AD it needs an element-wise fixed point
+    #                   (#841, fixed), so "auto" picks it only with the
+    #                   "bond_phase" gauge (#1028).
     # Kept at the end of the dataclass to preserve positional-argument
     # compatibility for callers that construct CTMConfig positionally.
-    projector_backward: Literal["auto", "standard", "lorentzian"] = "auto"
+    projector_backward: Literal["auto", "standard", "lorentzian", "flow"] = "auto"
     adjoint_arnoldi_precheck: bool = True
     adjoint_arnoldi_threshold: float = 5.0
     # variPEPS §2.8.2 reactive auto-χ_E bump.  When enabled, the optimizer
@@ -297,8 +471,61 @@ class CTMConfig:
     # well-conditioned states.  Consulted by ``ctm_ad_mode="root_implicit"``
     # only.  Appended at the end to preserve positional CTMConfig ABI.
     rel_floor: float | None = None
+    # Linear mixing of the forward CTM iterate (#1060):
+    # e <- (1 - ctm_mixing) * gauge(step(e)) + ctm_mixing * e.  0.0 (default)
+    # is the plain iteration.  Same fixed points; a two-state cycle around an
+    # unstable fixed point (CTMConvergeInfo.step_multiplier near -1) contracts
+    # under mixing, measured on spinless t-V D=3 at chi=20: plain iteration
+    # cycles at residual 3.9e-2 forever, 0.3 converges to 6e-9.  Requires
+    # forward_gauge="bond_phase" and ctm_conv_method="elementwise".  Appended
+    # at the end to preserve positional CTMConfig ABI.
+    ctm_mixing: float = 0.0
+    # What to do when a CTM forward feeding a gradient or a reported energy
+    # returns converged=False (#1059/#1060): "raise" (default) fails loudly;
+    # "warn" keeps the legacy control flow and emits CTMNotConvergedWarning.
+    # See tenax.algorithms._ctm_convergence_policy.  Appended at the end to
+    # preserve positional CTMConfig ABI.
+    on_unconverged: Literal["raise", "warn"] = "raise"
+
+    def effective_forward_gauge(self, *, implicit_ad: bool) -> str:
+        """This config's concrete gauge on an (implicit / other) AD path.
+
+        Thin wrapper over :func:`resolve_forward_gauge` reading this config's
+        ``fuse_virtual_legs``, ``chi_ramp`` and ``ctm_ad_mode``; never returns
+        ``"auto"``.
+        """
+        return resolve_forward_gauge(
+            self.forward_gauge,
+            implicit_ad=implicit_ad,
+            fuse_virtual_legs=self.fuse_virtual_legs,
+            chi_ramp=self.chi_ramp,
+            ctm_ad_mode=self.ctm_ad_mode,
+        )
+
+    def effective_projector_backward(self, *, implicit_ad: bool) -> str:
+        """This config's projector backward on an (implicit / other) AD path.
+
+        ``"auto"`` becomes ``"flow"`` where the forward gauge resolves to
+        ``"bond_phase"`` on the implicit path (#1028): there the adjoint is
+        solvable with ``dP/dA`` flowing, and freezing the projectors biases
+        the gradient (D=3 chi=16/32: 6.8-74% relative error frozen, 1e-6
+        flowing).  Every other path, and every explicit value, is returned
+        unchanged.
+        """
+        if (
+            self.projector_backward == "auto"
+            and implicit_ad
+            and self.effective_forward_gauge(implicit_ad=True) == "bond_phase"
+        ):
+            return "flow"
+        return self.projector_backward
 
     def __post_init__(self):
+        if self.on_unconverged not in ("raise", "warn"):
+            raise ValueError(
+                f"CTMConfig.on_unconverged must be 'raise' or 'warn', "
+                f"got {self.on_unconverged!r}"
+            )
         valid_modes = {
             None,
             "c4v_reference",
@@ -309,13 +536,59 @@ class CTMConfig:
             raise ValueError(
                 f"ctm_ad_mode must be one of {valid_modes}, got {self.ctm_ad_mode!r}"
             )
+        if self.forward_gauge not in FORWARD_GAUGES:
+            raise ValueError(
+                f"forward_gauge must be one of {FORWARD_GAUGES}, "
+                f"got {self.forward_gauge!r}"
+            )
+        if self.ctm_ad_mode is not None and self.forward_gauge == "bond_phase":
+            # The c4v-reference and root-implicit engines own their CTM and
+            # never read ``forward_gauge``, so ``bond_phase`` (#841) would be
+            # silently ignored there (Codex P2 on #1057).  Refuse, as on the
+            # explicit and split paths.
+            raise NotImplementedError(
+                "forward_gauge='bond_phase' is not supported with "
+                f"ctm_ad_mode={self.ctm_ad_mode!r}: that engine owns its CTM "
+                "and applies no forward gauge. Use ctm_ad_mode=None, or "
+                "forward_gauge='phase'."
+            )
+        if not 0.0 <= self.ctm_mixing < 1.0:
+            raise ValueError(f"ctm_mixing must be in [0, 1), got {self.ctm_mixing!r}")
+        # ``"auto"`` can only become bond_phase when nothing on the config
+        # already forces phase: fused legs, no chi_ramp, no ctm_ad_mode.  The
+        # remaining unknown (implicit vs explicit AD) is re-checked at the
+        # optimizer entry and in ``ctm_energy_implicit``.
+        _auto_may_be_bond = (
+            self.fuse_virtual_legs
+            and self.chi_ramp is None
+            and self.ctm_ad_mode is None
+        )
+        if self.ctm_mixing > 0.0 and (
+            not (
+                self.forward_gauge == "bond_phase"
+                or (self.forward_gauge == "auto" and _auto_may_be_bond)
+            )
+            or self.ctm_conv_method != "elementwise"
+        ):
+            # Mixing is element-wise, so it needs gauge-aligned iterates, and
+            # every fused forward (warm start, probe, final evaluation) applies
+            # a pair gauge only under bond_phase -- under any other gauge those
+            # forwards would refuse at the first call instead of here.
+            # ``"auto"`` passes here because the path is not known yet; the
+            # optimizer entry (``build_ad_ctm_config``) re-checks the
+            # resolved gauge, which is bond_phase exactly where mixing works.
+            raise ValueError(
+                "ctm_mixing > 0 requires forward_gauge='bond_phase' and "
+                f"ctm_conv_method='elementwise', got forward_gauge="
+                f"{self.forward_gauge!r}, ctm_conv_method={self.ctm_conv_method!r}"
+            )
         valid_solvers = {"bicgstab", "gmres"}
         if self.adjoint_solver not in valid_solvers:
             raise ValueError(
                 f"adjoint_solver must be one of {valid_solvers}, "
                 f"got {self.adjoint_solver!r}"
             )
-        valid_projector_backward = {"auto", "standard", "lorentzian"}
+        valid_projector_backward = {"auto", "standard", "lorentzian", "flow"}
         if self.projector_backward not in valid_projector_backward:
             raise ValueError(
                 f"projector_backward must be one of {valid_projector_backward}, "
@@ -326,6 +599,12 @@ class CTMConfig:
             raise ValueError(
                 f"adjoint_method must be one of {valid_adjoint_methods}, "
                 f"got {self.adjoint_method!r}"
+            )
+        valid_chain_rules = {"auto", "separate", "joint"}
+        if self.adjoint_chain_rule not in valid_chain_rules:
+            raise ValueError(
+                f"adjoint_chain_rule must be one of {valid_chain_rules}, "
+                f"got {self.adjoint_chain_rule!r}"
             )
         # Phase-1 deprecation (#512): both the scheduled ``chi_ramp`` and
         # the end-of-outer-step ``chi_auto_bump`` zero-pad the env between
@@ -447,6 +726,23 @@ class iPEPSConfig:
                                tensor via simple update (``ipeps()``) instead of
                                random initialization.  Ignored when ``A_init``
                                is provided explicitly.
+        gs_conv_criterion:     Outer-loop exit test for ``optimize_gs_ad``.
+                               ``"grad_norm"`` (default since v0.8.4) exits
+                               when ``||grad E||_2 < gs_grad_norm_tol`` -- a
+                               stationarity test, as in variPEPS.  ``"dE"``
+                               (the default before v0.8.4, deprecated) exits
+                               when ``|E_k - E_{k-1}| < gs_conv_tol``, which
+                               also fires when a line search barely moves or
+                               right after a rollback / noise injection, with
+                               the gradient still large.  ``"both"`` requires
+                               both.  A run that exhausts ``gs_num_steps``
+                               without meeting the criterion returns the best
+                               state with ``converged=False`` in its history.
+        gs_conv_tol:           ``|dE|`` tolerance; used only by the ``"dE"``
+                               and ``"both"`` criteria.
+        gs_grad_norm_tol:      ``||grad E||_2`` tolerance (default ``1e-5``,
+                               variPEPS ``optimizer_convergence_eps``); used
+                               by ``"grad_norm"`` and ``"both"``.
         gs_verbose:            If True, print AD optimization progress.
         gs_log_interval:       Print every N AD steps when ``gs_verbose`` is
                                enabled. The first and final steps are always
@@ -458,10 +754,14 @@ class iPEPSConfig:
                                (iterative VJP backward) is the recommended
                                AD path.  ``False`` opts into explicit AD
                                (backprop through unrolled CTM sweeps).
-                               ``ctm.forward_gauge`` defaults to ``"phase"``
-                               for both paths — there is no silent gauge
-                               promotion, and the implicit path validates
-                               ``forward_gauge="phase"``.  See
+                               ``ctm.forward_gauge`` defaults to ``"auto"``,
+                               which resolves to ``"bond_phase"`` on the
+                               fused implicit path and to ``"phase"`` on the
+                               explicit path (and on split CTM, ``chi_ramp``
+                               and ``ctm_ad_mode`` runs).  An explicit value
+                               is never promoted, and the implicit path
+                               validates ``forward_gauge`` in
+                               ``("phase", "bond_phase")``.  See
                                ``docs/guide/algorithms/ipeps_ad_paths.md``.
         gs_ctm_conv_tol_schedule:
                                Optional ramp for the CTM convergence
@@ -497,13 +797,16 @@ class iPEPSConfig:
                                ``optimize_gs_ad_chi_schedule`` internally;
                                users should not set it directly.
         gs_stall_recovery:     Stall-recovery mode for line-search failures
-                               (issue #298).  ``"noise"`` injects a Frobenius
-                               perturbation (legacy 1-site C4v path);
-                               ``"reset"`` clears L-BFGS ``(s, y)`` history
-                               and rolls back to ``best_params`` (variPEPS
-                               style).  ``None`` (default) lets
-                               ``optimize_gs_ad`` pick per dispatcher:
-                               ``"noise"`` for 1-site, ``"reset"`` for 2-site.
+                               (issue #298).  ``"reset"`` clears L-BFGS
+                               ``(s, y)`` history and rolls back to
+                               ``best_params`` (variPEPS style);
+                               ``"noise"`` (legacy) kicks the current params
+                               by a ``gs_noise_amplitude`` Frobenius
+                               perturbation with no rollback.  ``None``
+                               (default) resolves to ``"reset"`` on every
+                               unit cell (1-site was ``"noise"`` before
+                               v0.8.4).  The ``ctm_ad_mode`` engines have no
+                               stall recovery and ignore this field.
         gs_stall_recovery_retries:
                                Maximum consecutive resets allowed on the
                                ``"reset"`` recovery path before the
@@ -534,16 +837,17 @@ class iPEPSConfig:
     gs_learning_rate: float = 1e-3
     gs_num_steps: int = 200
     gs_conv_tol: float = 1e-8
-    # Outer convergence criterion for ``optimize_gs_ad``. ``"dE"`` (current
-    # legacy default, **deprecated** — see ``__post_init__``) exits when
-    # ``|E_step - E_step-1| < gs_conv_tol`` — this is variationally fragile
-    # near flat minima or right after a stall recovery, where ``|dE|`` can
-    # underflow ``gs_conv_tol`` while the gradient is still large.
-    # ``"grad_norm"`` matches variPEPS by exiting when
-    # ``||grad E||_2 < gs_grad_norm_tol`` (a true stationarity test); it
-    # will become the default in a future release. ``"both"`` requires both
-    # to hold simultaneously (most conservative). See issue #448.
-    gs_conv_criterion: Literal["dE", "grad_norm", "both"] = "dE"
+    # Outer convergence criterion for ``optimize_gs_ad``. ``"grad_norm"``
+    # (the default since v0.8.4) matches variPEPS by exiting when
+    # ``||grad E||_2 < gs_grad_norm_tol`` (a true stationarity test).
+    # ``"dE"`` (the default before v0.8.4, **deprecated** — see
+    # ``__post_init__``) exits when ``|E_step - E_step-1| < gs_conv_tol`` —
+    # variationally fragile near flat minima, after a barely-moving line
+    # search, or right after a stall recovery, where ``|dE|`` underflows
+    # ``gs_conv_tol`` while the gradient is still large (|g| = 1e-2 .. 0.69
+    # at "convergence" in the v0.8.4 validation runs).  ``"both"`` requires
+    # both to hold simultaneously (most conservative). See issue #448.
+    gs_conv_criterion: Literal["dE", "grad_norm", "both"] = "grad_norm"
     # Gradient-norm tolerance used by the ``"grad_norm"`` and ``"both"``
     # criteria. The default ``1e-5`` matches variPEPS
     # ``optimizer_convergence_eps``.
@@ -616,23 +920,27 @@ class iPEPSConfig:
     gs_stall_recovery_retries: int = 5  # max consecutive resets before giving up (#454)
     gs_noise_amplitude: float = 0.1  # relative noise amplitude for recovery
     # Stall recovery mode for L-BFGS / CG line search failures.
-    #   "noise"  -> inject gs_noise_amplitude Frobenius perturbation (legacy,
-    #               required for 1-site C4v production path to break out of the
-    #               SU-init plateau at step 0).
+    #   "noise"  -> inject gs_noise_amplitude Frobenius perturbation, no
+    #               rollback (legacy; a kick near a settled energy can land
+    #               where the CTM adjoint diverges).
     #   "reset"  -> clear L-BFGS (s, y) history, roll back params to best_params,
     #               force steepest descent on next step.  Matches variPEPS.
-    #   None     -> auto-default per dispatcher: "noise" for 1-site, "reset" for
-    #               2-site.  Set by optimize_gs_ad at entry.
+    #   None     -> "reset" on every unit cell (1-site was "noise" before
+    #               v0.8.4).  Set by optimize_gs_ad at entry.  The
+    #               ctm_ad_mode engines (c4v_reference, root_implicit*) have
+    #               no stall recovery and ignore it.
     gs_stall_recovery: Literal["noise", "reset"] | None = None
     # Optional variational sanity floor on in-loop best-state tracking.  Any
     # candidate energy strictly below this value is rejected as a non-
     # variational CTM artifact (see issue #298).  None disables the check.
     gs_energy_floor: float | None = None
     # Implicit differentiation through the CTM fixed point (iterative VJP
-    # backward).  The gauge is ``ctm.forward_gauge``, which defaults to
-    # ``"phase"`` -- and for this path "defaults to" understates it:
-    # ``validate_ctm_for_implicit_ad`` accepts no other value.  This comment
-    # said "sigma gauge" until #808; sigma is an *explicit*-AD option.
+    # backward).  The gauge is ``ctm.forward_gauge``, whose default
+    # ``"auto"`` resolves to ``"bond_phase"`` on this path (fused, no
+    # ``chi_ramp``, ``ctm_ad_mode=None``; ``"phase"`` otherwise) -- and
+    # ``validate_ctm_for_implicit_ad`` accepts only "phase" / "bond_phase".
+    # This comment said "sigma gauge" until #808; sigma is an
+    # *explicit*-AD option.
     gs_implicit_ad: bool = True
     # When True, optimize_gs_ad appends a trajectory dict
     # ``{energies, step_times, jit_compile_time, num_steps, converged}``
@@ -888,12 +1196,13 @@ class iPEPSConfig:
             raise ValueError("gs_resume=True requires gs_checkpoint_path to be set")
         if self.gs_conv_criterion == "dE":
             warnings.warn(
-                "gs_conv_criterion='dE' is deprecated and will be replaced by "
-                "'grad_norm' as the default in a future release (issue #448). "
-                "The dE criterion underflows near flat minima and after stall "
-                "recoveries, causing premature exit. "
-                "Set gs_conv_criterion='grad_norm' to opt in now, or 'both' "
-                "for the most conservative criterion.",
+                "gs_conv_criterion='dE' is deprecated; it was the default "
+                "before v0.8.4, and the default is now 'grad_norm' (issue "
+                "#448). The dE criterion underflows near flat minima, after "
+                "a barely-moving line search and after stall recoveries, "
+                "declaring convergence while ||grad E|| is still large. "
+                "Drop the argument to use 'grad_norm', or pass 'both' for "
+                "the most conservative criterion.",
                 DeprecationWarning,
                 stacklevel=2,
             )

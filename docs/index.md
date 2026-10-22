@@ -34,6 +34,7 @@ guide/installation
 guide/quickstart
 guide/capabilities
 guide/core_concepts
+guide/symmetry
 guide/contraction
 guide/tensor_networks
 guide/gotchas
@@ -55,6 +56,7 @@ guide/algorithms/ipeps
 guide/algorithms/ipeps_ad_paths
 guide/algorithms/ctm
 guide/algorithms/fpeps
+guide/algorithms/honeycomb_kagome
 guide/algorithms/ad_excitations
 guide/algorithms/auto_mpo
 ```

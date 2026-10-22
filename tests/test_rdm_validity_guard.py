@@ -56,7 +56,19 @@ from tenax.algorithms.ipeps_rdm import (
 
 D = 2
 DPHYS = 2
-CFG = CTMConfig(chi=4, chi_I=4, max_iter=5, conv_tol=1e-10)
+# ``min_iter=1`` pins the environment to the converged early-stop point.  At
+# ``chi = D**2 = 4`` the corner spectrum is exactly flat (see the module
+# docstring), so the SV-diff criterion reads "converged" immediately while the
+# corner *basis* keeps rotating sweep to sweep -- there is no unique fixed
+# point.  This fixture's "healthy environment" premise therefore holds only at
+# a pinned sweep count: with the default ``min_iter=10`` (capped to ``max_iter``
+# by #925/#976) the loop is forced to 5 sweeps and lands on a rotated basis
+# whose horizontal RDM is numerically near-invalid, so the guard fires on the
+# nominally-healthy env.  Pinning ``min_iter=1`` lets the loop stop as soon as
+# the SV criterion is met (~2 sweeps), reproducing the deterministic healthy
+# basis these tests were written against.  This is the same gauge-dependent
+# degeneracy documented in #780/#781, not a guard defect.
+CFG = CTMConfig(chi=4, chi_I=4, max_iter=5, min_iter=1, conv_tol=1e-10)
 MATCH = "not a density matrix"
 
 #: Common prefix of all three guard messages -- "reduced density matrix is not

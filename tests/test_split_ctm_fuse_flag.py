@@ -568,7 +568,10 @@ def test_optimize_gs_ad_fused_still_returns_fused_env():
     from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 
     A, gate = _split_opt_inputs()
-    _, env, E = optimize_gs_ad(gate, A, _split_opt_config(fuse=True, gs_recipe="2x2"))
+    # max_iter 40 left the fused 2x2 gradient forward unconverged at
+    # conv_tol=1e-10 (residual 1.4e-6); 200 converge (#1059).
+    cfg = _split_opt_config(fuse=True, gs_recipe="2x2", ctm={"max_iter": 200})
+    _, env, E = optimize_gs_ad(gate, A, cfg)
     assert isinstance(env, CTMTensorEnv)
     assert jnp.isfinite(E)
 
@@ -720,3 +723,52 @@ def test_optimize_gs_ad_split_rejects_cg_gates():
     dummy_gate = jnp.zeros((4, 4, 4, 4))  # d_eff placeholder for the CG supersite
     with pytest.raises(NotImplementedError, match="cg_gates"):
         optimize_gs_ad(dummy_gate, None, cfg)
+
+
+# --------------------------------------------------------------------------- #
+# Dense-only: SymmetricTensor input is refused on every split entry point      #
+# --------------------------------------------------------------------------- #
+
+
+def _make_symmetric_site(D, d, seed):
+    from tenax.core.tensor import SymmetricTensor
+
+    dense = _make_site(D, d, seed)
+    return SymmetricTensor.from_dense(dense.todense(), dense.indices)
+
+
+def test_split_ad_entries_refuse_symmetric_input():
+    """The split CTM is dense-only.  Before, a bosonic U(1) site ran the 1x1
+    split AD and the eager 2-site forward, and only a traced 2-site sweep was
+    refused (#1048); now every entry refuses before converging anything."""
+    from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
+    from tenax.algorithms._split_ctm_energy_ad import (
+        ctm_energy_split_explicit,
+        ctm_energy_split_explicit_2site,
+        ctm_energy_split_implicit,
+        ctm_energy_split_implicit_2site,
+    )
+    from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
+
+    A, B = _make_symmetric_site(2, 2, 1), _make_symmetric_site(2, 2, 2)
+    gate = _heisenberg_gate()
+    sites = {(0, 0): A, (1, 0): B}
+    calls = {
+        "explicit": lambda: ctm_energy_split_explicit(
+            {(0, 0): A}, SINGLE_SITE_NEIGHBORS, gate, chi=4
+        ),
+        "implicit": lambda: ctm_energy_split_implicit(
+            {(0, 0): A}, SINGLE_SITE_NEIGHBORS, gate, chi=4
+        ),
+        "explicit_2site": lambda: ctm_energy_split_explicit_2site(
+            sites, CHECKERBOARD_NEIGHBORS, gate, chi=4
+        ),
+        "implicit_2site": lambda: ctm_energy_split_implicit_2site(
+            sites, CHECKERBOARD_NEIGHBORS, gate, chi=4
+        ),
+        "converge_2site": lambda: ctm_split_tensor_2site(A, B, 4, max_iter=2),
+    }
+    for name, call in calls.items():
+        with pytest.raises(NotImplementedError, match="dense-only"):
+            call()
+            pytest.fail(f"{name} accepted SymmetricTensor input")

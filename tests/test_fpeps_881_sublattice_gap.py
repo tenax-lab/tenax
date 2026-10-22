@@ -31,10 +31,8 @@ import jax
 import numpy as np
 import pytest
 
-from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor_2site
-from tenax.algorithms._split_ctm_tensor_energy import (
-    compute_energy_split_ctm_tensor_2site,
-)
+from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
 from tenax.algorithms._tensor_utils import scale_bond_axis
 from tenax.algorithms.fermionic_ipeps import (
     FPEPSConfig,
@@ -76,6 +74,115 @@ def _gram_gap(A, B):
     return max(gaps)
 
 
+def _sublattice_asymmetry(A, B):
+    """``|A - B| / |A|`` on the raw (ungauged) pair.
+
+    A genuine CDW has two distinct sublattices; a symmetric state does not.  This
+    reads the *state* directly -- independent of the CTM and of ``sublattice_gap``
+    itself -- so it separates a collapsed **fixture** (skip) from a broken
+    **diagnostic** (fail) below.
+    """
+    dA, dB = np.asarray(A.todense()), np.asarray(B.todense())
+    return float(np.linalg.norm(dA - dB) / max(np.linalg.norm(dA), 1e-300))
+
+
+#: A genuine t-V CDW fixture measures ~1.9 (V=1) / ~1.4 (V=4) here; a fermionic
+#: SU that lands in the symmetric-collapse basin measures ~0.  0.5 sits far below
+#: every genuine value and far above a collapse.
+_CDW_FIXTURE_FLOOR = 0.5
+
+
+def _require_cdw_fixture(A, B, label):
+    """Skip -- do not fail -- when the SU fixture collapsed to a symmetric state.
+
+    ``sublattice_gap`` can only be exercised on a state that *has* two distinct
+    sublattices.  The fermionic simple update does not reliably produce one: the
+    seed-3 pair lands in the CDW basin on some builds but in the
+    symmetric-collapse basin on others (the #878/#964 platform-dependent
+    collapse), where the ungauged pair is ~symmetric and every gap reads ~0.
+    That is a property of the fixture, not of the diagnostic under test, so the
+    gap tests withdraw here rather than assert a CDW the fixture does not carry --
+    which is exactly what left this file platform-red on CI (#999).  A genuinely
+    broken ``sublattice_gap`` on a *good* CDW fixture (asymmetry above the floor)
+    still fails loudly, because this gate reads the state, not the gap.
+    """
+    asym = _sublattice_asymmetry(A, B)
+    if asym < _CDW_FIXTURE_FLOOR:
+        pytest.skip(
+            f"the fermionic SU collapsed the {label} fixture to a ~symmetric "
+            f"state on this platform (|A-B|/|A| = {asym:.3f} < "
+            f"{_CDW_FIXTURE_FLOOR}); sublattice_gap needs a CDW state, which the "
+            f"SU does not reliably produce here (#878/#964 seed/platform collapse "
+            f"basin). Withdrawing rather than asserting a CDW the fixture lacks — "
+            f"see #999."
+        )
+
+
+def _cdw_seed(A0):
+    """Two sublattice inits biased to opposite checkerboard occupations.
+
+    ``_fpeps_simple_update`` defaults ``B`` to ``A``, so from a symmetric start
+    the checkerboard CDW can only appear by *spontaneous* symmetry breaking --
+    and which basin the Trotterized sweep lands in is a property of the
+    floating-point path, so the same seed gives a CDW on one build and a
+    collapsed symmetric state on another (#878/#964; the platform/context
+    dependence that left this file red -- #999).  Biasing the two sublattices'
+    physical occupation *oppositely* seeds the breaking deterministically: the SU
+    then refines a CDW it already carries instead of gambling on breaking one, so
+    the fixtures are a CDW on every build.
+
+    The bias is **strong** (a 16x occupation tilt) on purpose.  A mild tilt was
+    tried and rejected: it holds in isolation but still collapses in the full
+    suite (measured: a 3% tilt gave ``|A-B|/|A|`` ~1.4 run alone yet ~0.1-0.27 --
+    below the CDW floor -- when the whole file runs, the same JAX-context
+    sensitivity that is #999 itself).  Only a strong tilt keeps the pair a CDW in
+    **every** context.  The cost is that the seeded state saturates the gap
+    (~1.0) rather than sitting mid-range; ``test_the_gap_is_invariant_under_a_
+    bond_gauge`` no longer needs a mid-range gap because its counter-gauge
+    cancellation is exact at any amplitude (§ that test), and ``test_a_mispaired_
+    gauge_is_caught`` still moves the gap by ~6e-4 >> ``BAR_GAP`` at saturation.
+    There is no seed that is both mid-range and context-robust: anything strong
+    enough to beat the collapse saturates.
+    """
+    hi, lo = 4.0, 0.25
+    a = scale_bond_axis(A0, "phys", jax.numpy.array([hi, lo]))
+    b = scale_bond_axis(A0, "phys", jax.numpy.array([lo, hi]))
+    return a, b
+
+
+class _FakeTensor:
+    """Minimal stand-in exposing ``todense()`` for the detector unit test."""
+
+    def __init__(self, arr):
+        self._arr = np.asarray(arr)
+
+    def todense(self):
+        return self._arr
+
+
+def test_sublattice_asymmetry_separates_a_collapse_from_a_cdw():
+    """The collapse detector reads the state, not the gap (mechanism, no SU/CTM).
+
+    Removing the ``max(...)`` normalizer, dropping the difference, or moving
+    ``_CDW_FIXTURE_FLOOR`` into either genuine value makes one of these fail --
+    so the skip guard on the fixtures cannot silently stop discriminating.
+    """
+    v = np.array([[1.0, 2.0], [3.0, 4.0]])
+    # A symmetric (collapsed) pair reads exactly zero, well under the floor.
+    assert _sublattice_asymmetry(_FakeTensor(v), _FakeTensor(v.copy())) == 0.0
+    assert (
+        _sublattice_asymmetry(_FakeTensor(v), _FakeTensor(v.copy()))
+        < _CDW_FIXTURE_FLOOR
+    )
+    # An anti-aligned pair reads 2.0 and a doubled one 1.0 -- both clear the
+    # floor, bracketing it below the ~1.4/1.9 the real V=4/V=1 fixtures measure.
+    assert _sublattice_asymmetry(_FakeTensor(v), _FakeTensor(-v)) == pytest.approx(2.0)
+    assert _sublattice_asymmetry(_FakeTensor(v), _FakeTensor(2.0 * v)) == pytest.approx(
+        1.0
+    )
+    assert 1.0 > _CDW_FIXTURE_FLOOR  # the doubled pair clears the floor
+
+
 #: The gauge factors, one per checkerboard bond. Diagonal in the charge basis so
 #: the FermionParity block structure survives, and deliberately **not** unitary
 #: -- a unitary gauge would leave even the Gram spectrum alone and prove nothing.
@@ -114,44 +221,55 @@ def _bond_gauge(A, B, mispair=False):
 
 @pytest.fixture(scope="module")
 def su_pair():
-    """A short D=2 t-V simple-update run at V=4, physical (CTM-contractable).
+    """A short D=2 t-V simple-update run at V=4, seeded into a CDW (``_cdw_seed``).
 
-    Strong CDW: the gap saturates at ~1.0 here, which is what makes it the right
-    end of the V response in ``test_the_gap_tracks_the_charge_density_wave`` --
-    and exactly what makes it the *wrong* fixture for the gauge test, see
-    ``midgap_pair``.
+    Strong CDW: the gap saturates at ~1.0, the right end of the V response in
+    ``test_the_gap_tracks_the_charge_density_wave``.  The gauge tests use
+    ``midgap_pair`` (V=1) instead -- not for a mid-range gap (the seed saturates
+    that at any V, #999) but for the **energy** witness: ``E`` is ~0 at ``V=4``
+    (#392), which inverts the energy assertion there; see ``midgap_pair``.
     """
     cfg = FPEPSConfig(D=2, t=1.0, V=4.0, dt=0.05)
     H = spinless_fermion_gate(cfg)
     A0 = _initialize_fpeps(cfg, jax.random.PRNGKey(3))
-    A, B, lam = _fpeps_simple_update(A0, H, max_D=cfg.D, dt=cfg.dt, steps=8)
-    return _to_physical_pair(A, B, lam)
+    A_seed, B_seed = _cdw_seed(A0)
+    A, B, lam = _fpeps_simple_update(
+        A_seed, H, max_D=cfg.D, dt=cfg.dt, steps=8, B=B_seed
+    )
+    A, B = _to_physical_pair(A, B, lam)
+    _require_cdw_fixture(A, B, "V=4 su_pair")
+    return A, B
 
 
 @pytest.fixture(scope="module")
 def midgap_pair():
-    """A pair whose gap sits **mid-range**, for the gauge tests.
+    """The V=1 pair for the gauge tests, seeded into a CDW (``_cdw_seed``).
 
-    At ``V=4`` the gap is 1.000437 ungauged, 1.000059 under the correct gauge
-    and 0.999419 under a *mispaired* one -- the observable is saturated, so it
-    barely moves for a state change that is real and large.  An invariance test
-    on a saturated observable proves close to nothing: it would pass on a
-    diagnostic that had been replaced by ``return 1.0``.
+    ``V=1``, not ``V=4``, for the **energy** witness.  With no chemical potential
+    ``E`` is ~0 at ``V=4`` (the #392 particle-hole point), so the mispaired and
+    correct gauges both move it by noise-level ~2-3e-03 with no separation in the
+    right direction -- the energy assertion would be inverted.  ``V=1`` puts
+    ``E`` at ~1.5, where a mispairing moves it 9.6e-03 against the correct
+    gauge's exact 0.0.
 
-    The energy witness is worse than weak there, it is **inverted**: on that
-    fixture the mispaired gauge moves ``E`` by 2.080e-03 while the *correct*
-    gauge moves it by 3.195e-03, so no bar separates them in the right
-    direction at all.  The cause is #392 -- with no chemical potential ``E`` is
-    ~0 at ``V=4`` (-1.9e-03 here), so the residuals are noise about nothing.
-
-    ``V=1`` puts the gap at ~0.27, in the responsive part of its range, and the
-    energy at ~1.5, which restores both witnesses.
+    The *gap* no longer needs V tuned for a mid-range value.  #999's collapse
+    forces a **strong** seed (see ``_cdw_seed``), which saturates the gap (~1.0)
+    at any V; the counter-gauge cancellation makes the gap-invariance assertion
+    exact regardless of amplitude, and ``test_a_mispaired_gauge_is_caught``
+    supplies the "it actually moves" half (2.99e-03 on a mispairing).  So V is
+    chosen for the energy witness, the seed guarantees a CDW, and
+    ``_require_cdw_fixture`` is the backstop.
     """
     cfg = FPEPSConfig(D=2, t=1.0, V=1.0, dt=0.05)
     H = spinless_fermion_gate(cfg)
     A0 = _initialize_fpeps(cfg, jax.random.PRNGKey(3))
-    A, B, lam = _fpeps_simple_update(A0, H, max_D=cfg.D, dt=cfg.dt, steps=8)
-    return (*_to_physical_pair(A, B, lam), H)
+    A_seed, B_seed = _cdw_seed(A0)
+    A, B, lam = _fpeps_simple_update(
+        A_seed, H, max_D=cfg.D, dt=cfg.dt, steps=8, B=B_seed
+    )
+    A, B = _to_physical_pair(A, B, lam)
+    _require_cdw_fixture(A, B, "V=1 midgap_pair")
+    return A, B, H
 
 
 #: CTM settings for the **one** environment pair the gauge tests share, and the
@@ -173,28 +291,33 @@ def midgap_pair():
 #: bit-stably, and the file was red on main's full suite for weeks
 #: (platform-alternating, values identical on every failure -- issue #999).
 #:
-#: What *is* a theorem is covariance of the contraction itself: the split
-#: environment carries the site tensors' ket/bra virtual legs explicitly, so a
-#: diagonal bond gauge on the pair is cancelled **exactly** by the inverse
-#: factors on the environment's edge legs (``_counter_gauged_envs``).  Gauged
+#: What *is* a theorem is covariance of the contraction itself: each
+#: environment edge's D² leg is the site's ket and bra virtual legs fused
+#: (ket-slow), so a diagonal bond gauge on the pair is cancelled **exactly** by
+#: ``kron(g, g)`` on that leg (``_counter_gauged_envs``); the graded fuse's
+#: signs are diagonal too, so they commute with it.  (Measured on the split
+#: environment before #1035 step 4 moved fermions to the fused CTM.)  Gauged
 #: pair + counter-gauged environment is the same contraction term by term:
 #: measured invariance residual 0.0 for both ``E`` and the gap, and the same
 #: 2.7e-12 input perturbation now moves them by ~8e-13 -- the response is
 #: linear again, so a different BLAS moves it in the last digits, not across a
 #: bar.  One CTM run instead of three also drops ~180 s from the file.
 GAUGE_CHI, GAUGE_SWEEPS = 4, 40
-#: Bracket: invariance measured at 0.0 (bit-exact here; allow ~1e-12-class
-#: reassociation noise on other kernels), mispaired movement measured at
-#: 9.109e-02.  1e-6 sits >5 orders from both sides.
+#: Bracket on the **seeded** fixture (``_cdw_seed``): invariance measured at
+#: 1.7e-17 -- exact counter-gauge cancellation, allow ~1e-12-class reassociation
+#: noise on other kernels -- and mispaired movement at 9.622e-03.  1e-6 sits ~4
+#: orders below the mispairing and above the invariance.  (Pre-seed the
+#: mispaired figure was 9.109e-02; the seed saturates the fixture so the
+#: witness is a little narrower, still comfortably bracketed -- #999.)
 BAR_E = 1e-6
-#: Invariance 0.0, mispaired 1.889e-01.  Same margin logic as ``BAR_E``.
+#: Invariance 0.0, mispaired 2.986e-03 (seeded).  Same margin logic as ``BAR_E``.
 BAR_GAP = 1e-6
 
 
 def _env_observables(A, B, env_A, env_B, H):
     """``(E, gap)`` for this pair contracted with the **given** environments."""
     d = A.indices[A.labels().index("phys")].dim
-    E = float(compute_energy_split_ctm_tensor_2site(A, B, env_A, env_B, H, d=d))
+    E = float(compute_energy_ctm_tensor_2site(A, B, env_A, env_B, H, d=d))
     return E, sublattice_gap(A, B, env_A, env_B)
 
 
@@ -204,32 +327,32 @@ def _counter_gauged_envs(env_A, env_B):
     ``_bond_gauge`` puts a diagonal factor on every virtual leg of ``A`` and
     ``B``.  In any contraction those legs meet either the partner site (the
     patch-internal bond, where ``G`` meets ``G^-1`` directly) or an environment
-    edge's ``*_ket``/``*_bra`` leg.  Scaling each edge leg by the inverse of the
-    factor its site leg received therefore reproduces the ungauged contraction
-    term by term -- for *every* observable, which is what makes this pair valid
-    for the energy and the gap at once.
+    edge's fused ket(x)bra D² leg.  Scaling that leg by ``kron(v, v)`` -- the
+    inverse of the factor the site leg received, on the ket and the bra half,
+    in the fuse's ket-slow order -- reproduces the ungauged contraction term by
+    term, for *every* observable, which is what makes this pair valid for the
+    energy and the gap at once.
 
     The mapping mirrors ``_bond_gauge`` leg for leg (site ``u`` meets ``T1``,
     ``r`` meets ``T2``, ``d`` meets ``T3``, ``l`` meets ``T4``); the factors are
     real, so ket and bra halves take the same vector.  Getting any one of the
-    eight wrong un-cancels that leg and the invariance test below fails at
-    O(1e-1) -- that is the guard on this helper itself.
+    four wrong, or the fused order, un-cancels that leg and the invariance test
+    below fails at O(1e-1) -- that is the guard on this helper itself.
     """
     g_hAB, g_hBA, g_vAB, g_vBA = _GAUGE
 
     def counter(env, u, r, d, left):
         reps = {}
-        for edge, site_leg, vec in (
-            ("T1", "u", u),
-            ("T2", "r", r),
-            ("T3", "d", d),
-            ("T4", "l", left),
+        for edge, leg, vec in (
+            ("T1", "u2", u),
+            ("T2", "r2", r),
+            ("T3", "d2", d),
+            ("T4", "l2", left),
         ):
-            for half in ("ket", "bra"):
-                name = f"{edge}_{half}"
-                reps[name] = scale_bond_axis(
-                    getattr(env, name), f"{site_leg}_{half}", jax.numpy.asarray(vec)
-                )
+            v = np.asarray(vec, dtype=float)
+            reps[edge] = scale_bond_axis(
+                getattr(env, edge), leg, jax.numpy.asarray(np.kron(v, v))
+            )
         return env._replace(**reps)
 
     # Inverses of the site factors: A gets r=g_hAB, l=1/g_hBA, d=g_vAB,
@@ -248,7 +371,7 @@ def midgap_baseline(midgap_pair):
     rather than re-converging -- see the note on ``GAUGE_CHI`` above.
     """
     A, B, H = midgap_pair
-    env_A, env_B = ctm_split_tensor_2site(
+    env_A, env_B = ctm_tensor_2site(
         A, B, GAUGE_CHI, max_iter=GAUGE_SWEEPS, conv_tol=1e-10
     )
     E, gap = _env_observables(A, B, env_A, env_B, H)
@@ -274,9 +397,17 @@ def test_the_gap_is_invariant_under_a_bond_gauge(midgap_baseline):
     fix and pass on the defect.  Getting any one of the eight environment legs'
     counter-factors wrong shows up here at O(1e-1).
 
-    A saturated fixture would prove nothing -- at V=4 the gap is 1.000437 and
-    barely moves for a state change that is real and large -- which is why
-    ``midgap_pair`` pins the gap into the responsive part of its range first.
+    Saturation does not weaken *this* test the way it once would have.  The
+    fixture is now a deterministically **seeded** CDW (``_cdw_seed``): #999's
+    collapse is a spontaneous-symmetry-breaking lottery that only a strong seed
+    survives in every JAX context, and a strong seed saturates the gap (~1.0) --
+    there is no seed that is both mid-range and context-robust.  That is fine
+    here, because the counter-gauge cancellation below is an *exact* algebraic
+    identity at any amplitude (residual 0.0), not a hope about CTM insensitivity.
+    The job of "the observable actually MOVES, so it is not a constant" is
+    carried by ``test_a_mispaired_gauge_is_caught``, which still shifts the gap
+    by ~6e-4 >> ``BAR_GAP`` on a mispairing even at saturation -- not by a
+    mid-range gap here.
 
     What makes the bar meaningful is not its size but that it is **bracketed**:
     ``test_a_mispaired_gauge_is_caught`` requires the same constants to fail on
@@ -287,10 +418,16 @@ def test_the_gap_is_invariant_under_a_bond_gauge(midgap_baseline):
     A_g, B_g = _bond_gauge(A, B)
     E_g, gap_g = _env_observables(A_g, B_g, *_counter_gauged_envs(env_A, env_B), H)
 
-    assert 0.05 < gap < 0.95, (
-        f"gap {gap:.4f} is at the edge of its range -- a saturated observable "
-        f"is invariant under everything, so the assertions below would be weak "
-        f"even if they passed"
+    # The seeded fixture is a strong (near-saturated) CDW by construction, so the
+    # only precondition is that it is a genuine CDW rather than a collapse -- the
+    # #999 failure mode -- which ``_require_cdw_fixture`` already enforces upstream
+    # (asymmetry above the floor).  The old ``gap < 0.95`` upper bound assumed a
+    # mid-range fixture that no context-robust seed can produce (see ``_cdw_seed``
+    # / the docstring above); saturation is now harmless because the cancellation
+    # below is exact at any amplitude.
+    assert gap > 0.05, (
+        f"gap {gap:.4f}: the fixture is not a CDW at all -- a collapse that "
+        f"should have been withdrawn by _require_cdw_fixture upstream (#999)"
     )
     assert abs(E - E_g) < BAR_E, (
         f"the 'gauge' moved the energy from {E:.8f} to {E_g:.8f} -- it is not a "
@@ -367,11 +504,13 @@ def test_a_mispaired_gauge_is_caught(midgap_baseline):
     witnesses must say so, or they are decorations.  How far it may move is
     itself pinned, by ``test_the_mispairing_stays_a_single_relocated_inverse``.
 
-    Measured on ``midgap_pair`` at chi=4, 40 sweeps against the fixed
-    counter-gauged environments: the energy moves 9.109e-02 and the gap
-    1.889e-01, against the correct gauge's 0.0 on both.  ``BAR_E`` and
-    ``BAR_GAP`` sit >5 orders from each side, so this test and the one above
-    bracket them from opposite sides.  A previous version of the guard used
+    Measured on the seeded ``midgap_pair`` at chi=4, 40 sweeps against the fixed
+    counter-gauged environments: the energy moves 9.622e-03 and the gap
+    2.986e-03, against the correct gauge's 0.0 on both (exact -- 1.7e-17).
+    ``BAR_E`` and ``BAR_GAP`` (1e-6) sit ~4 orders below the mispairing and above
+    the invariance, so this test and the one above bracket them from opposite
+    sides.  (The seed saturates the fixture -- #999 -- which narrowed the
+    mispaired movement from the pre-seed 9.109e-02 / 1.889e-01; still bracketed.)  A previous version of the guard used
     ``abs(E - E_g) < 2e-2 * max(abs(E), 1.0)`` on the V=4 fixture, where
     ``E ~ 0`` (#392) collapsed the relative bar to an absolute 2e-2 -- ten times
     the whole magnitude of ``E`` -- and this mutation passed it.
@@ -411,10 +550,10 @@ def test_the_gap_tracks_the_charge_density_wave(su_pair):
     A, B, lam = _fpeps_simple_update(A0, H, max_D=cfg.D, dt=cfg.dt, steps=8)
     A, B = _to_physical_pair(A, B, lam)
     kw = dict(max_iter=12, conv_tol=1e-10)
-    gap_free = sublattice_gap(A, B, *ctm_split_tensor_2site(A, B, CHI, **kw))
+    gap_free = sublattice_gap(A, B, *ctm_tensor_2site(A, B, CHI, **kw))
 
     A4, B4 = su_pair
-    gap_cdw = sublattice_gap(A4, B4, *ctm_split_tensor_2site(A4, B4, CHI, **kw))
+    gap_cdw = sublattice_gap(A4, B4, *ctm_tensor_2site(A4, B4, CHI, **kw))
 
     assert gap_free < 0.1, (
         f"gap {gap_free:.4f} at V=0, where free spinless fermions have no "
@@ -436,7 +575,7 @@ def test_the_gap_never_densifies_the_site_tensor(su_pair, monkeypatch):
     P1-2, and ``CLAUDE.md``'s standing rule).
     """
     A, B = su_pair
-    envs = ctm_split_tensor_2site(A, B, CHI, max_iter=12, conv_tol=1e-10)
+    envs = ctm_tensor_2site(A, B, CHI, max_iter=12, conv_tol=1e-10)
 
     original = SymmetricTensor.todense
     ranks = []
@@ -483,12 +622,19 @@ def test_fpeps_restarts_from_its_own_returned_pair():
         V=4.0,
         dt=0.05,
         num_imaginary_steps=4,
-        ctm_chi=4,
-        ctm_max_iter=12,
-        ctm_conv_tol=1e-6,
+        # A converged environment: on the fused graded CTM (#1035 step 4)
+        # chi=4 / 12 sweeps leaves two bond RDMs grossly non-PSD (smallest
+        # eigenvalue -0.61), which fpeps()'s #879 gate refuses as NaN.  At
+        # chi=8 every bond RDM is PSD and E is stable (0.1539; chi=16: 0.1521).
+        # 20 sweeps suffice: E1 = 0.137768 (60 sweeps: 0.137776) and the 0-step
+        # restart reproduces E1 to 3e-17 at 12, 20, 30 and 60 sweeps.
+        ctm_chi=8,
+        ctm_max_iter=20,
+        ctm_conv_tol=1e-9,
     )
     H = spinless_fermion_gate(cfg)
     E1, (A1, B1), _ = fpeps(H, cfg, key=jax.random.PRNGKey(5))
+    assert np.isfinite(E1), "the reference run itself was refused (#879)"
 
     # A zero-step restart must reproduce the state it was handed, which is what
     # makes the round trip meaningful: same tensors in, same energy out.

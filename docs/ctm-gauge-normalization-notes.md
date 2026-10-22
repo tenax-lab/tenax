@@ -1,5 +1,9 @@
 # Gauge Selection and Normalization for Differentiable CTMRG
 
+> **Historical (2026-04-28).** Under the current routing, `optimize_gs_ad`'s
+> explicit-AD energy applies no forward gauge (#1074); the explicit-AD
+> cross-checks below predate that.
+>
 > Note assembled 2026-04-28 from a third-party design summary, cross-checked against
 > the current Tenax CTM AD code (`src/tenax/algorithms/_ctm_*.py`,
 > `ipeps_config.py`, `ipeps_ad_policy.py`, `ad_utils.py`) and the in-house
@@ -50,8 +54,11 @@ tensor.
 
 **Tenax cross-check.**
 
-- Default in `CTMConfig.forward_gauge` is `"phase"`
-  (`src/tenax/algorithms/ipeps_config.py:68`).
+- Default in `CTMConfig.forward_gauge` is `"auto"`
+  (`src/tenax/algorithms/ipeps_config.py`), resolved by
+  `resolve_forward_gauge` to `"bond_phase"` (this phase fix plus a
+  per-chi-index bond gauge, #841) on the fused implicit-AD path and to
+  `"phase"` everywhere else.
 - `build_ad_ctm_config` does **no** silent gauge promotion
   (`src/tenax/algorithms/ipeps_ad_policy.py:67–78`); user choice is preserved.
 - The first-above-threshold convention is implemented in two places and they

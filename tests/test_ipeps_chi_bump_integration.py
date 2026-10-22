@@ -45,7 +45,7 @@ def test_optimize_gs_ad_auto_bump_raises_chi_under_pressure():
             chi_auto_bump_eps=1e-5,
             chi_auto_bump_step=2,
             chi_max=8,
-            max_iter=10,
+            max_iter=60,  # 10 left the forwards unconverged (#1059)
             min_iter=2,
             conv_tol=1e-3,
         ),
@@ -116,7 +116,7 @@ def test_optimize_gs_ad_auto_bump_fires_after_line_search():
                 chi_auto_bump_eps=1e-5,
                 chi_auto_bump_step=2,
                 chi_max=8,
-                max_iter=10,
+                max_iter=60,  # 10 left the forwards unconverged (#1059)
                 min_iter=2,
                 conv_tol=1e-3,
             ),
@@ -175,12 +175,16 @@ def test_optimize_gs_ad_auto_bump_fires_on_convergence_break():
             chi_auto_bump_eps=1e-5,
             chi_auto_bump_step=2,
             chi_max=8,
-            max_iter=10,
+            max_iter=60,  # 10 left the forwards unconverged (#1059)
             min_iter=2,
             conv_tol=1e-3,
         ),
         gs_num_steps=5,
-        gs_conv_tol=100.0,  # force iter-1 conv break
+        # Force an iter-1 conv break on dE.  Explicit since v0.8.4 made
+        # "grad_norm" the default: under it this run never breaks, the
+        # end-of-step bump alone reaches chi>=6, and the test goes vacuous.
+        gs_conv_criterion="dE",
+        gs_conv_tol=100.0,
         gs_implicit_ad=True,
         gs_verbose=False,
         su_init=False,
@@ -249,7 +253,7 @@ def test_optimize_gs_ad_auto_bump_runs_on_2site(monkeypatch):
             chi_auto_bump_eps=1e-5,
             chi_auto_bump_step=2,
             chi_max=8,
-            max_iter=10,
+            max_iter=60,  # 10 left the forwards unconverged (#1059)
             min_iter=2,
             conv_tol=1e-3,
         ),

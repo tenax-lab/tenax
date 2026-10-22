@@ -92,19 +92,35 @@ def _should_accept_best(
     current_best: float,
     candidate: float,
     floor: float | None,
+    remeasured: bool = False,
 ) -> bool:
     """Return True iff ``candidate`` should overwrite ``best_energy``.
 
     Rejects non-finite (NaN/inf) candidates, candidates not strictly
-    below ``current_best``, and candidates at or below ``floor``
-    (treated as non-variational CTM artifacts per issue #298).  A
-    ``None`` floor disables the floor check.
+    below ``current_best`` (unless ``remeasured``, below), and candidates
+    at or below ``floor`` (treated as non-variational CTM artifacts per
+    issue #298).  A ``None`` floor disables the floor check.
+
+    ``remeasured=True`` means ``candidate`` is a *certified* measurement at
+    ``best_params`` itself: the caller passes ``params is best_params and
+    _remeasure_certified(...)``.  ``params is best_params`` is what every
+    rollback produces -- spike, CTM-error and stall resets, and the chi-bump /
+    stage-advance rollbacks, so ``best_energy`` is re-based at the new chi
+    there.  A certified re-measure replaces ``best_energy`` even when it is
+    *higher* (#1095): a single in-loop forward that read low must not stay
+    the best forever and rank every later candidate against a value the
+    state does not have.  An uncertified re-measure (unconverged under
+    ``on_unconverged="warn"``) is not ``remeasured``, so it can only lower
+    the bar through the ordinary rule.  The finiteness and floor checks
+    still apply; a floor-violating re-measure keeps the previous value.
     """
     if not math.isfinite(candidate):
         return False
-    if candidate >= current_best:
-        return False
     if floor is not None and candidate <= floor:
+        return False
+    if remeasured:
+        return True
+    if candidate >= current_best:
         return False
     return True
 
@@ -221,13 +237,16 @@ def _converged_outer(
 
     Honors ``config.gs_conv_criterion``:
 
-    - ``"dE"`` (default): legacy behaviour — exit on
+    - ``"grad_norm"`` (default since v0.8.4): exit on
+      ``||grad||_2 < gs_grad_norm_tol`` (variPEPS
+      ``optimizer_convergence_eps`` analog, issue #448).
+    - ``"dE"`` (default before v0.8.4, deprecated): exit on
       ``|dE| < gs_conv_tol``.
-    - ``"grad_norm"``: exit on ``||grad||_2 < gs_grad_norm_tol``
-      (variPEPS ``optimizer_convergence_eps`` analog, issue #448).
     - ``"both"``: require both to hold simultaneously.
 
-    A ``None`` ``grad_norm`` defeats any criterion that needs it.
+    A ``None`` ``grad_norm`` defeats any criterion that needs it, and so
+    does a NaN one (``nan < tol`` is False) -- keep the comparisons in the
+    ``x < tol`` form; ``not (x >= tol)`` would let NaN through.
     """
     criterion = config.gs_conv_criterion
     de_ok = delta_energy < config.gs_conv_tol
@@ -272,3 +291,20 @@ def _grad_l2_norm(grads) -> float:
         return 0.0
     sq = sum(jnp.vdot(jnp.ravel(g), jnp.ravel(g)).real for g in leaves)
     return float(jnp.sqrt(sq))
+
+
+def _su_start_guard_armed(init_from_su: bool, start_step: int) -> bool:
+    """Whether to skip the convergence test on the first gradient evaluation.
+
+    Under ``"grad_norm"`` the very first evaluation can pass the test, which
+    ``"dE"`` never could (``prev_energy = inf``).  For a simple-update start
+    that is a stationary point (a saddle such as the product state, or the SU
+    plateau the 1-site ``"noise"`` default exists for) that would return the
+    SU state as converged before the line search could fail and trigger stall
+    recovery (Codex P1 on #1075).  So: skip the test once and take the
+    optimizer step, letting the configured recovery act; a still-stationary
+    next evaluation converges normally.  Only for an SU-derived start on a
+    fresh run -- a user-supplied ``A_init`` that is already stationary is a
+    warm start and converges at once, and so does a checkpoint resume.
+    """
+    return init_from_su and start_step == 0

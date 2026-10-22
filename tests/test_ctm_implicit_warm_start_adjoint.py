@@ -215,7 +215,7 @@ def test_adjoint_warm_start_invalidated_on_shape_mismatch():
     The ``_VJP_CACHE`` key derives from (coords, chi, gate id, neighbors
     id, ...) — it does NOT include ``site_tensor`` shape.  So a D-sweep
     that keeps coords/gate/neighbors constant hits the SAME cached VJP
-    closure (and the same ``_cached["prev_lam_leaves"]`` dict) with
+    closure (and the same run's ``prev_lam_leaves``) with
     differently-shaped env_leaves.  We simulate this by manually
     injecting a wrong-shape ``prev_lam_leaves`` into the cached closure
     and verifying the next ``jax.grad`` call invalidates it (rather than
@@ -233,12 +233,11 @@ def test_adjoint_warm_start_invalidated_on_shape_mismatch():
     params = _make_su_tensor(D=2, d=2)
     loss = _make_loss_fn()
 
-    # Step 1: warm-up call populates _cached["prev_lam_leaves"] with
+    # Step 1: warm-up call populates the run's prev_lam_leaves with
     # leaves shaped like env_leaves for the current (D, chi) probe.
     jax.grad(loss)(params)
 
-    # Step 2: locate the live _cached dict via the f.bwd closure of
-    # the cached VJP entry, then inject a deliberately-wrong-shape
+    # Step 2: locate the run state of the cached VJP entry, then inject a deliberately-wrong-shape
     # prev_lam_leaves entry.  This mimics the D-sweep scenario where
     # the previous grad call ran at a different shape but the same
     # cache_key, so the stale lam_leaves carry over.
@@ -246,17 +245,9 @@ def test_adjoint_warm_start_invalidated_on_shape_mismatch():
         f"expected exactly one VJP entry after the warm-up call; "
         f"found {len(_VJP_CACHE)}"
     )
-    f_cached, _mutables = next(iter(_VJP_CACHE.values()))
-    cached_dict = None
-    for cell in f_cached.bwd.__closure__:
-        try:
-            v = cell.cell_contents
-        except ValueError:
-            continue
-        if isinstance(v, dict) and "prev_lam_leaves" in v:
-            cached_dict = v
-            break
-    assert cached_dict is not None, "could not locate _cached dict in f.bwd closure"
+    _f_cached, mutables = next(iter(_VJP_CACHE.values()))
+    # The seed lives in the entry's run state (#1049); one loss is one run.
+    (cached_dict,) = [state for _token, state, _objects in mutables["_runs"].values()]
     assert cached_dict["prev_lam_leaves"] is not None, (
         "warm-up call did not populate prev_lam_leaves; "
         "f_bwd may have hit the divergence/fallback path"
@@ -307,20 +298,11 @@ def test_invalidate_implicit_ad_warm_start_clears_seed():
     # Populate cache and confirm the seed is cached.
     jax.grad(loss)(params)
     assert len(_VJP_CACHE) == 1
-    f_cached, mutables = next(iter(_VJP_CACHE.values()))
+    _f_cached, mutables = next(iter(_VJP_CACHE.values()))
     assert "_invalidate_warm_start" in mutables, (
         "make_implicit_vjp_fn must register the warm-start invalidator in mutables"
     )
-    cached_dict = None
-    for cell in f_cached.bwd.__closure__:
-        try:
-            v = cell.cell_contents
-        except ValueError:
-            continue
-        if isinstance(v, dict) and "prev_lam_leaves" in v:
-            cached_dict = v
-            break
-    assert cached_dict is not None
+    (cached_dict,) = [state for _token, state, _objects in mutables["_runs"].values()]
     assert cached_dict["prev_lam_leaves"] is not None, (
         "warm-up call must seed prev_lam_leaves"
     )

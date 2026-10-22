@@ -148,11 +148,37 @@ def _registered_keys() -> set[str]:
     return set(re.findall(r'"(test_[A-Za-z0-9_]+\.py)"', src[start:end]))
 
 
+# Matches the ``_UNBUCKETED_LEGACY`` assignment in any of the forms it can
+# take, capturing whether it opens a brace set (``{``) or is the drained
+# ``set()``.  The optional ``: <type>`` group is the whole point (#805 review):
+# a bare ``_UNBUCKETED_LEGACY = {`` marker would miss a *repopulation* written
+# in the annotated ``_UNBUCKETED_LEGACY: set[str] = {...}`` form -- the natural
+# form now that the drained declaration carries that annotation -- and the
+# shrink-only ratchet would then silently ignore the new entries.
+_LEGACY_DECL = re.compile(r"_UNBUCKETED_LEGACY\b\s*(?::[^=\n]+)?=\s*(set\(\)|\{)")
+
+
+def _parse_legacy(src: str) -> set[str]:
+    """Legacy filenames from conftest source, annotation-form-agnostic.
+
+    Fails **closed**: an unrecognized (or absent) declaration raises rather
+    than certifying an empty legacy set, so a refactor that this parser cannot
+    read turns the guard red instead of blind.
+    """
+    m = _LEGACY_DECL.search(src)
+    if m is None:
+        raise ValueError(
+            "could not locate the _UNBUCKETED_LEGACY declaration in conftest; "
+            "this parser must be updated to match its current form"
+        )
+    if m.group(1) == "set()":
+        return set()
+    end = src.index("\n}\n", m.end())
+    return set(re.findall(r'"(test_[A-Za-z0-9_]+\.py)"', src[m.start() : end]))
+
+
 def _legacy_keys() -> set[str]:
-    src = (TESTS_DIR / "conftest.py").read_text()
-    start = src.index("_UNBUCKETED_LEGACY = {")
-    end = src.index("\n}\n", start)
-    return set(re.findall(r'"(test_[A-Za-z0-9_]+\.py)"', src[start:end]))
+    return _parse_legacy((TESTS_DIR / "conftest.py").read_text())
 
 
 def _registered_items() -> dict[str, str]:
@@ -232,6 +258,35 @@ def test_the_legacy_list_can_only_shrink():
         + "\n  ".join(extra)
         + "\n\nBucket them in `_FILE_MARKERS` instead."
     )
+
+
+def test_the_legacy_parser_reads_a_repopulated_annotated_set():
+    """The ratchet must not go blind if the drained set is repopulated.
+
+    The declaration was drained to ``_UNBUCKETED_LEGACY: set[str] = set()``
+    (#805). A future edit that puts files back would naturally keep that type
+    annotation — ``_UNBUCKETED_LEGACY: set[str] = {...}`` — and a parser keyed
+    on the bare ``_UNBUCKETED_LEGACY = {`` marker would silently read *empty*
+    from it, so ``test_the_legacy_list_can_only_shrink`` and its siblings would
+    wave the new entries through (#805 review, P3).
+
+    ``_parse_legacy`` is exercised here on synthetic source in every form the
+    declaration can take, so a regression in it fails on its own line rather
+    than as a mysterious hole in the ratchet.
+    """
+    # The drained form reads empty.
+    assert _parse_legacy("_UNBUCKETED_LEGACY: set[str] = set()\n") == set()
+    # The bare brace form (pre-#805) still reads its entries.
+    bare = '_UNBUCKETED_LEGACY = {\n    "test_a.py",\n}\n'
+    assert _parse_legacy(bare) == {"test_a.py"}
+    # The annotated brace form — the repopulation Codex flagged — is read too.
+    annotated = (
+        '_UNBUCKETED_LEGACY: set[str] = {\n    "test_a.py",\n    "test_b.py",\n}\n'
+    )
+    assert _parse_legacy(annotated) == {"test_a.py", "test_b.py"}
+    # An unrecognized/absent declaration fails closed, never silently empty.
+    with pytest.raises(ValueError):
+        _parse_legacy("# no legacy declaration here\n")
 
 
 def test_every_registered_bucket_is_a_real_bucket():

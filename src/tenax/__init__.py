@@ -109,6 +109,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     ),
     "ctm_tensor": ("tenax.algorithms._ctm_tensor", "ctm_tensor"),
     "ctm_tensor_2site": ("tenax.algorithms._ctm_tensor", "ctm_tensor_2site"),
+    "ctm_hold_test": ("tenax.algorithms._ctm_tensor", "ctm_hold_test"),
     "ctm_tensor_c4v": ("tenax.algorithms._ctm_tensor", "ctm_tensor_c4v"),
     # _ctm_tensor_convergence
     "ctm_multisite": ("tenax.algorithms._ctm_tensor_convergence", "ctm_multisite"),
@@ -209,17 +210,24 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # fermionic_ipeps
     "FPEPSConfig": ("tenax.algorithms.fermionic_ipeps", "FPEPSConfig"),
     "fpeps": ("tenax.algorithms.fermionic_ipeps", "fpeps"),
+    "bond_layout": ("tenax.algorithms.fermionic_ipeps", "bond_layout"),
     "spinless_fermion_gate": (
         "tenax.algorithms.fermionic_ipeps",
         "spinless_fermion_gate",
     ),
     "sublattice_gap": ("tenax.algorithms.fermionic_ipeps", "sublattice_gap"),
+    "FrozenSU": ("tenax.algorithms.fermionic_ipeps", "FrozenSU"),
+    "su_grow_layout": ("tenax.algorithms.fermionic_ipeps", "su_grow_layout"),
     # gilt
     "GiltConfig": ("tenax.algorithms.gilt", "GiltConfig"),
     "GiltTNRConfig": ("tenax.algorithms.gilt", "GiltTNRConfig"),
     "gilt_plaquette": ("tenax.algorithms.gilt", "gilt_plaquette"),
     "gilt_tnr": ("tenax.algorithms.gilt", "gilt_tnr"),
     "gilt_tnr_step": ("tenax.algorithms.gilt", "gilt_tnr_step"),
+    # gilt-hotrg
+    "GiltHOTRGConfig": ("tenax.algorithms.gilt_hotrg", "GiltHOTRGConfig"),
+    "gilt_hotrg": ("tenax.algorithms.gilt_hotrg", "gilt_hotrg"),
+    "gilt_hotrg_step": ("tenax.algorithms.gilt_hotrg", "gilt_hotrg_step"),
     # hotrg
     "HOTRGConfig": ("tenax.algorithms.hotrg", "HOTRGConfig"),
     "hotrg": ("tenax.algorithms.hotrg", "hotrg"),
@@ -279,9 +287,21 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     ),
     # ipeps_config
     "CTMConfig": ("tenax.algorithms.ipeps_config", "CTMConfig"),
+    "CTMNotConvergedError": (
+        "tenax.algorithms._ctm_convergence_policy",
+        "CTMNotConvergedError",
+    ),
+    "CTMNotConvergedWarning": (
+        "tenax.algorithms._ctm_convergence_policy",
+        "CTMNotConvergedWarning",
+    ),
     "CTMEnvironment": ("tenax.algorithms.ipeps_config", "CTMEnvironment"),
     "SplitCTMEnvironment": ("tenax.algorithms.ipeps_config", "SplitCTMEnvironment"),
     "iPEPSConfig": ("tenax.algorithms.ipeps_config", "iPEPSConfig"),
+    "resolve_forward_gauge": (
+        "tenax.algorithms.ipeps_config",
+        "resolve_forward_gauge",
+    ),
     "aligned_ctm_schedules": (
         "tenax.algorithms.ipeps_config",
         "aligned_ctm_schedules",
@@ -470,6 +490,10 @@ __all__ = [
     "gilt_plaquette",
     "gilt_tnr",
     "gilt_tnr_step",
+    # Gilt-HOTRG
+    "GiltHOTRGConfig",
+    "gilt_hotrg",
+    "gilt_hotrg_step",
     # HOTRG
     "HOTRGConfig",
     "hotrg",
@@ -494,8 +518,11 @@ __all__ = [
     # iPEPS
     "iPEPSConfig",
     "CTMConfig",
+    "CTMNotConvergedError",
+    "CTMNotConvergedWarning",
     "CTMEnvironment",
     "SplitCTMEnvironment",
+    "resolve_forward_gauge",
     "aligned_ctm_schedules",
     "heisenberg_gate",
     "heisenberg_gate_u1sz",
@@ -552,6 +579,7 @@ __all__ = [
     "ctm_tensor",
     "ctm_tensor_c4v",
     "ctm_tensor_2site",
+    "ctm_hold_test",
     "ctm_multisite",
     "compute_energy_ctm_tensor",
     "compute_energy_ctm_tensor_2site",
@@ -566,8 +594,11 @@ __all__ = [
     "FPEPSConfig",
     "fpeps",
     "optimize_fpeps_ad",
+    "bond_layout",
     "spinless_fermion_gate",
     "sublattice_gap",
+    "FrozenSU",
+    "su_grow_layout",
     # iPEPS Excitations
     "ExcitationConfig",
     "ExcitationResult",

@@ -1,51 +1,42 @@
-"""Regression: U(1)-Sz single-site CTM env must not collapse to zero (#700).
+"""Regression: the U(1)-Sz single-site CTM env must not collapse (#700, #723).
 
-PR #671's sorted-tail chi-leg tiling drove the D=3 U(1)-Sz ``ctm_tensor`` env to
-exact zero (E=0) on the first absorption sweep at partial-tile chi (chi=12/14/16,
-where chi - D**2 is neither 0 nor a full multiset), while leaving chi=10 and
-chi=18 nonzero.  The collapse was silent (no error, just E=0).  The fix pads the
-chi bonds beyond D**2 with the identity (charge-0) sector, which reproduces the
-pre-regression energy and is chi-independent.
+#700: PR #671's sorted-tail chi-leg padding drove the D=3 U(1)-Sz ``ctm_tensor``
+env to exact zero on the first sweep at partial-tile chi (12/14/16).  That
+defect lives in ``_tile_fused_to_chi`` and is pinned there, directly, by
+``tests/test_ctm_tensor_tiling.py::test_tile_pads_with_vacuum_not_asymmetric_sectors``
+(0.1 s).  This end-to-end test can no longer see it: since #723 made
+``recipe="2x2"`` the default, the first sweep's projector renormalises the
+padded sectors away before the edges ever meet them.  Measured with the
+sorted-tail padding restored (2026-09-27): E and |C1| bit-identical to the fixed
+code at chi=10..18 after 1 and 2 sweeps, and still passing all of the old
+assertions after the full 30 sweeps at chi=12.
 
-Updated for #723: ``ctm_tensor`` now defaults to ``recipe="2x2"``, so the
-chi-frozen reference energy this test used to pin is gone — see the note below.
+#723: the legacy ``recipe="1x1"`` collapses the environment to a rank-1 corner
+(a chi_eff=1 mean-field boundary).  That is what this test guards.  One sweep is
+enough: the 1x1 recipe gives rank 1 at every chi in 10..18 after the first
+sweep, the 2x2 recipe rank D**2 = 9.  The old test ran 30 sweeps at five chi
+values; the block-sparse sectors grow every sweep and each new block shape is a
+fresh XLA compile (77% of the wall time), so it took ~2.5 h per chi on CI and
+timed its slow shard out at the 240 min job cap on every run.
 """
 
 import jax
 import numpy as np
-import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from tenax import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor import ctm_tensor
-from tenax.algorithms.ipeps import heisenberg_gate_u1sz, heisenberg_u1sz_init_pair
+from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
 
-# The former ``_E_REF = -0.061722`` pin is deliberately gone.  It was measured
-# on the legacy ``recipe="1x1"`` path, which collapses the environment to
-# rank-1 corners (#723/#726/#747), and it was a *chi-frozen* value: -0.061721808
-# at chi=10 and bit-identical at chi=12, because a rank-1 corner is a chi_eff=1
-# mean-field boundary that cannot respond to chi at all.  Pinning one energy
-# across chi=10..18 only type-checked because the environment was broken.
-#
-# On the corrected 2x2 recipe the corner has rank 4 and the energy genuinely
-# moves with chi (+0.112962196 at chi=10, +0.113096902 at chi=12), so a single
-# pinned value is the wrong shape for this test.  A corrected reference should
-# be re-pinned as part of the #747 re-run; until then this asserts what #700
-# actually guards — the environment must not go to *exact zero* — plus the
-# anti-collapse invariant that would have caught #723.
+CHI = 12  # partial tile (chi - D**2 = 3), the #700 regime
 
 
-@pytest.mark.parametrize("chi", [10, 12, 14, 16, 18])
-def test_u1sz_env_does_not_collapse(chi):
+def test_u1sz_env_does_not_collapse():
     A, _ = heisenberg_u1sz_init_pair(D=3, key=jax.random.PRNGKey(0))
-    env, _ = ctm_tensor(A, chi=chi, max_iter=30, conv_tol=1e-10)
+    env, _ = ctm_tensor(A, chi=CHI, max_iter=1, conv_tol=1e-10)
     c1_norm = float(np.linalg.norm(np.asarray(env.C1._data)))
-    assert c1_norm > 1e-6, f"chi={chi}: env collapsed to zero (|C1|={c1_norm})"
+    assert c1_norm > 1e-6, f"env collapsed to zero (|C1|={c1_norm})"
 
     s = np.linalg.svd(np.asarray(env.C1.todense()), compute_uv=False)
     rank = int((s / (s[0] + 1e-300) > 1e-10).sum())
-    assert rank > 1, f"chi={chi}: env collapsed to a rank-{rank} corner (#723)"
-
-    e = float(compute_energy_ctm_tensor(A, env, heisenberg_gate_u1sz()))
-    assert np.isfinite(e) and e != 0.0, f"chi={chi}: E={e}"
+    assert rank > 1, f"env collapsed to a rank-{rank} corner (#723)"

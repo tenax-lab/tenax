@@ -12,7 +12,16 @@ python -m benchmarks.run --backend cpu --algorithm trg --size small --trials 1
 
 # Full CPU baseline (all algorithms, all sizes, 3 trials)
 python -m benchmarks.run --backend cpu -o benchmarks/results/cpu_baseline.json
+
+# GPU comparison
+python -m benchmarks.run --backend cuda -o benchmarks/results/cuda.json
+
+# CSV output for analysis
+python -m benchmarks.run -b cpu -a all -s all --csv results.csv
 ```
+
+Each run prints a summary table and saves full results (timings, parameters,
+device info) to JSON.
 
 ## CLI reference
 

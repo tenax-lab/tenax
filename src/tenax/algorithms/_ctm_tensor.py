@@ -58,6 +58,9 @@ from tenax.algorithms._ctm_tensor_convergence import (
     _renormalize_tensor_env as _renormalize_tensor_env,
 )
 from tenax.algorithms._ctm_tensor_convergence import (
+    ctm_hold_test as ctm_hold_test,
+)
+from tenax.algorithms._ctm_tensor_convergence import (
     ctm_multisite as ctm_multisite,
 )
 from tenax.algorithms._ctm_tensor_convergence import (

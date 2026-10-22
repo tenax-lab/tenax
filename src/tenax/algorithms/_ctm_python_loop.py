@@ -16,13 +16,16 @@ __all__ = [
 
 from collections.abc import Callable
 from functools import partial
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import jax
 
 if TYPE_CHECKING:
     from jax.sharding import Mesh
 
+# Defined in the leaf policy module so ``_ctm_tensor_convergence`` can build
+# one without importing this module (which imports it: an import cycle).
+from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
     _validate_chi_bump_args,
@@ -38,23 +41,6 @@ from tenax.algorithms._ctm_tensor_init import (
     initialize_ctm_tensor_env,
 )
 from tenax.core.tensor import Tensor
-
-
-class CTMConvergeInfo(NamedTuple):
-    """Convergence information from python_loop_ctm_converge."""
-
-    converged: bool
-    iterations: int  # CTM sweeps actually performed (#781)
-    sv_diff: float
-    max_truncation_error: float = 0.0  # variPEPS §2.8.2 indicator (last sweep)
-    max_smallest_S: float = 0.0  # variPEPS norm_smallest_S indicator (#492)
-    final_chi: int = 0  # final chi after any in-CTM bumps (#492); 0 ⇒ unchanged
-    # Sweep index whose environment is returned.  Equals ``iterations``
-    # except on the ``plateau_patience`` bail, where the best-metric env is
-    # handed back and this trails ``iterations`` by ``plateau_patience``.
-    # ``sv_diff`` is the metric of *this* sweep, not of ``iterations``.
-    best_iteration: int = 0
-
 
 # Process-lifetime cache so repeat calls with the same neighbors dict reuse
 # the same compiled @jit'd ``_step`` function.  Without this, every callsite
@@ -176,6 +162,8 @@ def python_loop_ctm_converge(
     recipe: str = "2x2",
     device_mesh=None,
     ctm_chunk_size: int | None = None,
+    forward_gauge: str | None = None,
+    mixing: float = 0.0,
     _recipe_warning_emitted: bool = False,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM to convergence using a Python for-loop over JIT'd sweeps.
@@ -234,9 +222,46 @@ def python_loop_ctm_converge(
                            ``None`` to restore the pre-2026-05-11 "run to
                            ``max_iter``" behavior.
 
+        forward_gauge:     ``None`` (default): only ``gauge_fix_fn`` applies,
+                           as before.  ``"bond_phase"``: the paired,
+                           reference-aligned per-bond gauge of the
+                           implicit-AD loss (``ad_utils._bond_phase_fix_envs``,
+                           #841), so optimizer forwards (warm start,
+                           line-search probe, final evaluation) converge to
+                           the same element-wise fixed point the loss
+                           linearizes.  Exclusive with ``gauge_fix_fn`` and
+                           with ``chi_ramp``.
+        mixing:            Linear mixing ``beta`` in ``[0, 1)`` (#1060).
+                           ``0`` (default) is the plain iteration.  ``beta >
+                           0`` iterates ``e <- (1-beta) gauge(step(e)) + beta
+                           e``: same fixed points, but a two-state cycle around
+                           an unstable fixed point can contract.  Convergence
+                           is still tested on the undamped residual.  Needs
+                           ``conv_method="elementwise"`` and a gauge
+                           (``forward_gauge="bond_phase"`` or
+                           ``gauge_fix_fn``).  See
+                           ``CTMConvergeInfo.step_multiplier`` for when to
+                           reach for it.
+
     Returns:
         ``(envs, CTMConvergeInfo)`` — converged environments and info.
     """
+    if forward_gauge not in (None, "bond_phase"):
+        raise ValueError(
+            f"python_loop_ctm_converge: forward_gauge={forward_gauge!r}; "
+            "only None or 'bond_phase' (other gauges go through gauge_fix_fn)"
+        )
+    if forward_gauge == "bond_phase" and gauge_fix_fn is not None:
+        raise ValueError(
+            "python_loop_ctm_converge: forward_gauge='bond_phase' and "
+            "gauge_fix_fn are exclusive"
+        )
+    if forward_gauge == "bond_phase" and chi_ramp is not None:
+        raise NotImplementedError(
+            "forward_gauge='bond_phase' is not supported with chi_ramp "
+            "(the per-stage chi change has no index-by-index reference); "
+            "use ctmrg_heuristic_increase_chi, or forward_gauge='phase'."
+        )
     # #911: warned here rather than in ``_make_jit_ctm_step`` or
     # ``_python_loop_chi_ramp`` -- this is the once-per-convergence boundary,
     # those are once-per-sweep and once-per-ramp-stage.  Before the chi_ramp
@@ -285,6 +310,7 @@ def python_loop_ctm_converge(
             recipe=recipe,
             device_mesh=device_mesh,
             ctm_chunk_size=ctm_chunk_size,
+            mixing=mixing,
         )
 
     # Build the JIT'd step function (captures neighbors + device_mesh in closure)
@@ -314,7 +340,17 @@ def python_loop_ctm_converge(
     )
 
     # Build gauge_fix_fn pair adapter
-    if gauge_fix_fn is not None:
+    if forward_gauge == "bond_phase":
+        from tenax.algorithms.ad_utils import (
+            _bond_gauge_families,
+            _bond_phase_fix_envs_jit,
+        )
+
+        _bond_families = _bond_gauge_families(tuple(site_tensors), neighbors)
+
+        def _gauge_pair(envs_new, envs_old):
+            return _bond_phase_fix_envs_jit(envs_new, envs_old, _bond_families)
+    elif gauge_fix_fn is not None:
         _user_gauge = gauge_fix_fn
 
         def _gauge_pair(envs_new, envs_old):
@@ -374,6 +410,7 @@ def python_loop_ctm_converge(
         conv_tol=conv_tol,
         conv_method=conv_method,
         plateau_patience=plateau_patience,
+        mixing=mixing,
     )
 
     return result.envs, CTMConvergeInfo(
@@ -384,6 +421,7 @@ def python_loop_ctm_converge(
         max_smallest_S=result.max_smallest_S,
         final_chi=result.final_chi,
         best_iteration=warmup + result.best_iteration,
+        step_multiplier=result.step_multiplier,
     )
 
 
@@ -407,6 +445,7 @@ def _python_loop_chi_ramp(
     recipe: str = "2x2",
     device_mesh=None,
     ctm_chunk_size: int | None = None,
+    mixing: float = 0.0,
 ) -> tuple[dict[Coord, CTMTensorEnv], CTMConvergeInfo]:
     """Run CTM with chi-ramp schedule."""
     envs = env_init
@@ -465,6 +504,7 @@ def _python_loop_chi_ramp(
             _recipe_warning_emitted=True,
             device_mesh=device_mesh,
             ctm_chunk_size=ctm_chunk_size,
+            mixing=mixing,
         )
         prev_chi = stage_chi
 

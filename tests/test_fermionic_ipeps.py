@@ -97,6 +97,81 @@ class TestSpinlessFermionGate:
         np.testing.assert_allclose(dense, expected, atol=1e-14)
 
 
+class TestSpinlessFermionGateChemicalPotential:
+    """Tests for ``FPEPSConfig.mu`` and its ``-(mu/4)(n_i+n_j)`` bond term."""
+
+    def test_default_mu_is_zero(self):
+        assert FPEPSConfig().mu == 0.0
+
+    def test_mu_zero_bit_identical_to_original_gate(self):
+        """mu=0.0 (the default) must reproduce the pre-mu gate exactly, not
+        just to floating-point tolerance.
+        """
+        cfg = FPEPSConfig(t=1.3, V=0.7, mu=0.0)
+        H = spinless_fermion_gate(cfg)
+        dense = np.array(H.todense()).reshape(4, 4)
+        expected = np.zeros((4, 4), dtype=np.float64)
+        expected[2, 1] = -cfg.t
+        expected[1, 2] = -cfg.t
+        expected[3, 3] = cfg.V
+        assert np.array_equal(dense, expected), (
+            "spinless_fermion_gate(mu=0.0) is not bit-identical to the "
+            "original (pre-#1035-mu) gate"
+        )
+
+    def test_half_filling_bond_diagonal(self):
+        """At V=1, mu=2 (mu = 2V, the particle-hole-symmetric half-filling
+        point), the bond diagonal is (0, -0.5, -0.5, 0): |00> and |11>
+        become degenerate, and off-diagonal hopping is untouched.
+        """
+        cfg = FPEPSConfig(t=1.0, V=1.0, mu=2.0)
+        H = spinless_fermion_gate(cfg)
+        dense = np.array(H.todense()).reshape(4, 4)
+        np.testing.assert_allclose(np.diag(dense), [0.0, -0.5, -0.5, 0.0], atol=1e-14)
+        assert dense[2, 1] == -cfg.t and dense[1, 2] == -cfg.t, (
+            "the mu term must leave the off-diagonal hopping matrix elements "
+            "untouched -- it is purely diagonal in the occupation basis"
+        )
+
+    def test_mu_term_is_parity_even(self):
+        """The mu term must not mix the even-occupation (|00>, |11>) and
+        odd-occupation (|01>, |10>) sectors -- it is diagonal, so it cannot,
+        but a wrong index into the diagonal could smuggle weight across the
+        parity blocks that FermionParity forbids.  (Constructing the
+        SymmetricTensor at all already enforces this: ``from_dense`` raises
+        if any element outside a valid charge sector is nonzero.)
+        """
+        cfg = FPEPSConfig(t=1.0, V=1.0, mu=3.0)
+        H = spinless_fermion_gate(cfg)  # would raise ValueError if not block-sparse
+        dense = np.array(H.todense()).reshape(4, 4)
+        even, odd = (0, 3), (1, 2)
+        for i in even:
+            for j in odd:
+                assert dense[i, j] == 0.0
+                assert dense[j, i] == 0.0
+
+    def test_hermitian_with_nonzero_mu(self):
+        cfg = FPEPSConfig(t=1.0, V=1.0, mu=2.5)
+        H = spinless_fermion_gate(cfg)
+        dense = H.todense().reshape(4, 4)
+        np.testing.assert_allclose(dense, dense.T.conj(), atol=1e-14)
+
+    def test_mu_normalization_gives_minus_mu_n_per_site(self):
+        """4 bonds touch every square-lattice site; reading the per-bond
+        ``-(mu/4)*n_i`` contribution off the built gate (with ``t=V=0`` so
+        only the mu term is nonzero) and multiplying by those 4 bonds must
+        recover exactly ``-mu * n_i`` -- the physics
+        :func:`spinless_fermion_gate`'s ``z=4`` normalization is for.
+        """
+        mu = 3.7
+        cfg = FPEPSConfig(t=0.0, V=0.0, mu=mu)
+        H = np.array(spinless_fermion_gate(cfg).todense()).reshape(4, 4)
+        # |10> (index 2): site i occupied (n_i=1), site j empty (n_j=0).
+        per_bond_contribution_site_i = H[2, 2]
+        z = 4
+        assert z * per_bond_contribution_site_i == pytest.approx(-mu * 1)
+
+
 # ------------------------------------------------------------------ #
 # Task 2: _trotter_gate                                                #
 # ------------------------------------------------------------------ #
@@ -398,9 +473,17 @@ def test_fpeps_importable_from_tenax():
 
 
 def test_single_phase_full_rank_identity_matches_bosonic_control():
-    """One bond update at max_D = D*d must reconstruct gate*theta, and the
-    fermionic arm must do so exactly as well as the block-identical bosonic
-    Z2 control (#997).
+    """One bond update at max_D = D*d must be the best rank-6 approximation
+    of gate*theta -- its reconstruction fidelity must equal the Eckart-Young
+    optimum ``sqrt(sum_top6 s^2 / sum s^2)`` of that operator -- in the
+    fermionic arm and in the block-identical bosonic Z2 control alike (#997).
+
+    Since #1035 step 6 the fermionic arm is graded: ``gate*theta`` is the
+    graded contraction with the gate as a graded operator, and the
+    comparison reorders with Koszul signs.  The two arms are then different
+    operators (the sign-free one is the hard-core-boson gate), so they no
+    longer share a fidelity; each is held to its own optimum instead, which
+    keeps the test self-calibrating.
 
     Pre-fix, linalg's matricization Koszul signs (640 of 2560 fired in a
     5-step sweep) plus the factor transposes made a single production phase
@@ -415,11 +498,12 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
     state-model fragility (#878/#881, #882 SS5.3).
     """
     import tenax.algorithms.ipeps_simple_update as isu
+    from tenax.algorithms._ctm_graded import contract, is_fermionic, svd
     from tenax.algorithms.ipeps_simple_update import (
         _simple_update_2site_horizontal_tensor,
         _simple_update_2site_vertical_tensor,
     )
-    from tenax.contraction.contractor import contract
+    from tenax.core._graded import graded_reorder
     from tenax.core._tensor_utils import scale_bond_axis
     from tenax.core.symmetry import ZnSymmetry
     from tenax.core.tensor import _koszul_sign
@@ -471,36 +555,120 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
         )
 
     def fid(X, Y):
-        ylab = [
-            "si_out" if lab == "phys" else "sj_out" if lab == "phys_B" else lab
-            for lab in Y.labels()
-        ]
-        xd = np.asarray(X.todense())
-        yd = np.transpose(
-            np.asarray(Y.todense()), tuple(ylab.index(lab) for lab in X.labels())
-        )
-        x, y = xd.ravel(), yd.ravel()
+        Y = Y.relabels({"phys": "si_out", "phys_B": "sj_out"})
+        if is_fermionic(Y):  # a plain transpose is the sign-free move
+            Y = graded_reorder(Y, list(X.labels()))
+            yd = np.asarray(Y.todense())
+        else:
+            yd = np.transpose(
+                np.asarray(Y.todense()),
+                tuple(Y.labels().index(lab) for lab in X.labels()),
+            )
+        x, y = np.asarray(X.todense()).ravel(), yd.ravel()
         return abs(np.vdot(x, y)) / (np.linalg.norm(x) * np.linalg.norm(y))
+
+    def gate_op(G, theta):
+        """The gate as the SU applies it (``_graded_bond_update``): on the
+        fermionic arm a graded operator, the left operand."""
+        if not is_fermionic(theta):
+            return G
+        si = theta.indices[theta.labels().index("si")]
+        sj = theta.indices[theta.labels().index("sj")]
+        g = np.asarray(G.todense()).reshape(si.dim, sj.dim, si.dim, sj.dim)
+        return SymmetricTensor.from_dense(
+            jnp.asarray(np.einsum("ABab->ABba", g), dtype=theta.dtype),
+            (
+                si.relabel("si_out"),
+                sj.relabel("sj_out"),
+                sj.flip_flow(),
+                si.flip_flow(),
+            ),
+        )
+
+    def gated_of(theta, G):
+        theta = theta.relabel("phys", "si").relabel("phys_B", "sj")
+        op = gate_op(G, theta)
+        return contract(op, theta) if op is not G else contract(theta, G)
+
+    def optimum(gated, left, k=6):
+        """Eckart-Young: the best rank-k fidelity to ``gated``."""
+        right = [lab for lab in gated.labels() if lab not in left]
+        _, s, _, _ = svd(gated, left, right, "_b")
+        s2 = np.sort(np.asarray(s) ** 2)[::-1]
+        return float(np.sqrt(s2[:k].sum() / s2.sum()))
 
     # The base_charges pin is fermionic-only, so with it active the two
     # arms run DIFFERENT truncations (per-sector keep counts vs global
     # top-k) and their fidelities differ at the pin's expense, not the
-    # signs'.  Disable it so the arms are code-identical (SS5.1 already
-    # established the pin is a regularizer, not a structural need).
+    # signs'.  Disable it so the arms are code-identical.  That is the
+    # whole reason, and it is local to this comparison: this test drives
+    # one bond update per arm and never reaches a CTM or an AD trace, so
+    # nothing here depends on the bond layout holding still.
+    #
+    # It previously also cited "SS5.1 already established the pin is a
+    # regularizer, not a structural need".  **That claim is retracted.**
+    # Measured on the shipped ``fpeps()`` path (dt=0.05, 100 steps, 5
+    # seeds), the pin is not a weak regulariser that helps a little -- it
+    # is what drives the collapse:
+    #
+    #     V=0, pin ON    D=3 3/5 survive   D=4 3/5
+    #     V=0, pin OFF   D=3 5/5           D=4 5/5
+    #     V=2, pin ON    D=3 2/5           D=4 4/5
+    #
+    # What the pin IS still good for is narrower than "structural need",
+    # and narrower than the previous revision of this comment claimed.
+    # That revision said the global SV sort "cannot run at all" under a
+    # tracer, implying the pin is required for traceability.  It is not:
+    # ``_truncated_svd_symmetric_traced`` handles ``base_charges=None``
+    # with a proportional static allocation (the ``else`` branch at
+    # ``linalg.py:881``, "proportional to per-sector available capacity"),
+    # so an unpinned traced SVD is reachable.  That is pinned by
+    # ``test_svd_bond_order.py::
+    # test_a_capped_unpinned_svd_traces_through_the_proportional_fallback``
+    # -- a mutant raising inside the fallback fails it, and only it.  An
+    # earlier revision cited
+    # ``test_descending_order_still_cannot_be_traced_as_one_code_path``
+    # here; that test passes no cap, so it takes the full-spectrum branch
+    # and never reaches the fallback.
+    #
+    # The true statement is about AGREEMENT, not reachability: the traced
+    # base_charges branch is built to reproduce the EAGER per-sector keep
+    # counts, and the proportional fallback carries no such guarantee.  So
+    # unpinning costs traced/eager parity under AD; it does not cost the
+    # ability to trace.
+    #
+    # The eager side is the ``base_charges is not None`` branch inside
+    # ``_truncated_svd_symmetric`` (``linalg.py:525-600``), implemented
+    # inline there.  Naming the live code rather than a helper matters here:
+    # the first revision of this line cited ``_retruncate_by_base_charges``,
+    # copying the phrasing from ``linalg.py:752``/``:860``, and **no such
+    # function exists anywhere in the tree** -- it survives only in comments
+    # that reference it.  A reader sent to verify the central claim would
+    # have found nothing.  (Those two production comments still carry the
+    # dead name; out of scope for this branch, flagged separately.)
+    #
+    # There used to be a second reason here -- that unpinning breaks the
+    # 2x2 split-CTM, which could not contract a corner against an edge
+    # once the layout went direction-dependent.  **That was #1024 and it
+    # is fixed** (``ded9446`` seeds every environment chi leg from one
+    # shared axis); ``test_split_ctm_asymmetric_layout_1024.py::
+    # test_the_2x2_split_ctm_runs_on_every_layout`` now covers exactly the
+    # layouts simple update discovers once the pin is gone.  Leaving it
+    # written as a present-tense limitation would misdirect the #878 work,
+    # which is gated on this and no longer blocked by it.  See #878.
     orig_pin = isu._truncation_base_charges
-    isu._truncation_base_charges = lambda A, leg: None
+    isu._truncation_base_charges = lambda A, leg, pin_sectors=True: None
     try:
         results = {}
         for name, A, B, G in (
             ("FP", A0, B0, gate),
             ("Z2", retype_z2(A0), retype_z2(B0), retype_z2(gate)),
         ):
-            theta = theta_h(A, B)
-            gated = contract(theta.relabel("phys", "si").relabel("phys_B", "sj"), G)
+            gated = gated_of(theta_h(A, B), G)
             if name == "FP":
                 # Regime: the SVD split of THIS theta must braid odd past
                 # odd, or the decomposition applies no sign and the
-                # arm-equality asserts nothing (#997's first reproducer
+                # optimum check asserts nothing (#997's first reproducer
                 # passed that way).
                 split = ("u", "d", "l", "si_out", "u_B", "d_B", "r_B", "sj_out")
                 perm = tuple(gated.labels().index(lab) for lab in split)
@@ -515,16 +683,18 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
             An, Bn, ln = _simple_update_2site_horizontal_tensor(
                 A, B, G, lh, lv, 6, lam_h_far=lhf, lam_v_other=lvo
             )
-            results[name] = fid(gated, rebuild_h(An, Bn, ln))
+            best = optimum(gated, ["u", "d", "l", "si_out"])
+            assert best < 1 - 1e-6, "fixture out of regime: nothing truncated"
+            results[name] = (fid(gated, rebuild_h(An, Bn, ln)), best)
 
-        assert results["FP"] > 0.999, f"fermionic phase not exact: {results['FP']}"
-        np.testing.assert_allclose(
-            results["FP"],
-            results["Z2"],
-            atol=1e-9,
-            err_msg="fermionic single-phase fidelity differs from the "
-            "block-identical bosonic control (#997)",
-        )
+        for name, (got, best) in results.items():
+            np.testing.assert_allclose(
+                got,
+                best,
+                atol=1e-9,
+                err_msg=f"{name} single-phase fidelity is not the rank-6 "
+                "optimum of gate*theta (#997)",
+            )
 
         # Vertical phase, same contract: kills a factor-transpose regression
         # on the path the horizontal test does not touch (U at (0,4,1,2,3)).
@@ -557,20 +727,19 @@ def test_single_phase_full_rank_identity_matches_bosonic_control():
             ("FP", A0, B0, gate),
             ("Z2", retype_z2(A0), retype_z2(B0), retype_z2(gate)),
         ):
-            gated = contract(
-                theta_v(A, B, lv).relabel("phys", "si").relabel("phys_B", "sj"), G
-            )
+            gated = gated_of(theta_v(A, B, lv), G)
             An, Bn, lnv = _simple_update_2site_vertical_tensor(
                 A, B, G, lh, lv, 6, lam_v_far=lvo, lam_h_other=lhf
             )
-            vres[name] = fid(gated, theta_v(An, Bn, lnv))
-        assert vres["FP"] > 0.999, f"vertical phase not exact: {vres['FP']}"
-        np.testing.assert_allclose(
-            vres["FP"],
-            vres["Z2"],
-            atol=1e-9,
-            err_msg="vertical single-phase fidelity differs from the "
-            "block-identical bosonic control (#997)",
-        )
+            best = optimum(gated, ["u", "l", "r", "si_out"])
+            vres[name] = (fid(gated, theta_v(An, Bn, lnv)), best)
+        for name, (got, best) in vres.items():
+            np.testing.assert_allclose(
+                got,
+                best,
+                atol=1e-9,
+                err_msg=f"{name} vertical single-phase fidelity is not the "
+                "rank-6 optimum of gate*theta (#997)",
+            )
     finally:
         isu._truncation_base_charges = orig_pin

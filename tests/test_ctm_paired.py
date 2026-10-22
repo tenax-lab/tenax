@@ -136,22 +136,15 @@ class TestPairedSweepDense:
 
 
 class TestPairedSweepFermionic:
-    def test_paired_sweep_fermionic_stable(self, small_peps_fermionic):
-        """FermionParity SymmetricTensor runs 15 sweeps without error."""
-        chi = 4
+    def test_paired_sweep_refuses_fermions(self, small_peps_fermionic):
+        """#1035 step 4: the paired moves fuse chi and D² legs sign-free, so
+        they refuse fermionic input; fermions run on the 2x2 recipe (the
+        graded Tensor CTM).  This replaced a 15-sweep stability test."""
         A = small_peps_fermionic
         a = _build_double_layer_tensor(A)
-
-        env = initialize_ctm_tensor_env(A, chi)
-        for _ in range(15):
-            env, _ = _ctm_tensor_sweep_paired(env, a, chi, renormalize=True)
-
-        # Check all tensors are finite
-        for field in env:
-            dense = field.todense()
-            assert jnp.all(jnp.isfinite(dense)), (
-                f"Non-finite values in tensor with labels {field.labels()}"
-            )
+        env = initialize_ctm_tensor_env(A, 4)
+        with pytest.raises(NotImplementedError, match="recipe='2x2'"):
+            _ctm_tensor_sweep_paired(env, a, 4, renormalize=True)
 
     def test_paired_sweep_fermionic_energy_converged(self, heisenberg_gate):
         """Fermionic paired CTM converges to a valid RDM.

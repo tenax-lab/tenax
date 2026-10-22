@@ -173,28 +173,17 @@ class TestBlockPreservation:
             )
             assert t.n_blocks > 0, "Env tensor has zero blocks after CTM"
 
-    def test_split_ctm_tensor_symmetric_blocks_preserved(self):
-        """FermionicU1 split CTM: charge sectors survive CTM sweeps."""
+    def test_split_ctm_tensor_refuses_symmetric_input(self):
+        """The split CTM is dense-only: FermionicU1 input is refused at
+        initialization rather than swept."""
         sym = FermionicU1()
         virt_charges = np.array([0, 1], dtype=np.int32)
         phys_charges = np.array([0, 1], dtype=np.int32)
         A = _make_symmetric_peps(
             jax.random.PRNGKey(77), sym, virt_charges, phys_charges
         )
-
-        chi, chi_I = 4, 2
-        env = initialize_split_ctm_tensor_env(A, chi, chi_I)
-
-        for _ in range(5):
-            env = _split_ctm_tensor_sweep(env, A, chi, chi_I, True)
-
-        for t in env:
-            assert isinstance(t, SymmetricTensor), (
-                "Env tensor lost SymmetricTensor type after split CTM sweeps"
-            )
-            assert t.n_blocks >= 1, (
-                "All blocks collapsed to 0 — environment degenerated"
-            )
+        with pytest.raises(NotImplementedError, match="dense-only"):
+            initialize_split_ctm_tensor_env(A, 4, 2)
 
 
 # ------------------------------------------------------------------ #

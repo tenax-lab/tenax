@@ -59,7 +59,8 @@ def test_chi_schedule_bumps_between_stages():
     cfg = iPEPSConfig(
         unit_cell="2site",
         max_bond_dim=D,
-        ctm=CTMConfig(chi=2, chi_max=3, max_iter=10, conv_tol=1e-4),
+        # 10 sweeps left the gradient forward unconverged (#1059).
+        ctm=CTMConfig(chi=2, chi_max=3, max_iter=60, conv_tol=1e-4),
         gs_c4v=True,
         gs_optimizer="lbfgs",
         gs_num_steps=4,  # overridden by the shim (sum of schedule budgets)
@@ -230,7 +231,7 @@ def test_reactive_plus_scheduled_compose_2site_smoke():
             chi_auto_bump_eps=1e-30,  # any positive ε_T fires reactive (#474)
             chi_auto_bump_step=2,
             chi_max=4,
-            max_iter=10,
+            max_iter=60,  # 10 left the forwards unconverged (#1059)
             min_iter=2,
             conv_tol=1e-3,
         ),

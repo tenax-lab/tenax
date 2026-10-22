@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms import _ctm_graded as G
 from tenax.algorithms._ad_primitives import _unit_phase
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
@@ -25,15 +26,195 @@ from tenax.linalg import _dense_svd
 __all__ = ["_build_enlarged_corner", "_compute_2x2_projector"]
 
 
+# The single ``projector_backward`` value that lets ``dP/dA`` reach the
+# gradient on the 2x2 recipe.  Every other value -- including an unresolved
+# "auto", and the "none" spelling #983 proposed for the explicit freeze --
+# keeps the projectors as ``stop_gradient`` constants.
+#
+# It was opt-in until #1028.  The original reason, measured before #841 was
+# fixed: the implicit-AD backward solves ``(I - J^T) λ = dE/denv``, and
+# restoring ``dP/denv`` puts the CTM gauge mode back into ``J``.  On the D=2
+# chi=4 fixture of ``tests/test_adjoint_convergence_gate.py``, with
+# restart=200 and gmres_maxiter=600, the flowing adjoint residual went
+# 4.2e-13 / 4.5e-15 / 5.1e-01 / 8.1e-02 / 7.9e-01 at ctm_max_iter
+# 20/40/80/150/300 under forward_gauge="phase" (and 5.6e-13 / 2.0e-02 /
+# 7.2e-01 / 9.2e-01 / 4.2e-12 under "sigma"); the frozen control was 1e-16 at
+# every one of those points.  Not a Krylov-budget stall -- flat in both
+# restart and maxiter -- but a system with no solution, because the 2x2
+# forward had no element-wise fixed point (#841): the M1/M2 SVD gauge read the
+# sign of the largest-|U| entry, which the exact ket<->bra swap symmetry ties
+# between swapped D^2 rows, so the chi signs flipped at random every sweep.
+#
+# #841 is fixed (``_swap_robust_phases``).  Re-measured after the fix, phase
+# gauge, same restart/maxiter, gmres_tol=1e-12, on fixtures whose forward
+# converges: D=2 chi=6 flowing residual 6.0e-15, then 1.6e-14 at 40..300
+# (before: 2.1e-02, then 1.5e-02 flat), forward stationarity 3.3e-08 (before
+# 0.41); chi=8 1.3e-11, then 3.5e-13 (before 1.4e-02, then 4.4e-02).  At chi=6,
+# ctm_max_iter=150, conv_tol=1e-10 the flowing implicit gradient matches
+# central FD of the energy to AD/FD = 0.9999..1.0001 on three directions; the
+# frozen one is off by 1.023..1.051.  The chi=4 fixture above is a genuine
+# period-3 limit cycle of the forward (the corner spectrum itself does not
+# converge; stationarity 0.02-0.16), so its adjoint -- now 2e-15..5e-13 --
+# linearizes around a point that is not a fixed point and certifies nothing.
+#
+# So "flow" is now solvable where the forward converges, and #1028 made it the
+# implicit-path default under the "bond_phase" gauge
+# (``CTMConfig.effective_projector_backward``): at D=3 chi=16/32 the frozen
+# gradient was 6.8-74% off FD, the flowing one 1-5e-6.  Paths with no adjoint
+# solve (explicit AD, a bare sweep) had no such obstruction and should pass
+# "flow" regardless -- measured AD/FD on ctm_energy_explicit at the chi=4
+# fixture before #841: 0.229..0.928 frozen against 0.944..0.994 flowing.
+_PROJECTOR_BACKWARD_FLOW = "flow"
+
+
+@jax.custom_vjp
+def _regularized_dense_svd(M: jax.Array):
+    """``_dense_svd`` forward, Lorentzian-regularized backward.
+
+    Deliberately *not* :func:`tenax.algorithms._ad_primitives.regularized_svd`:
+    that helper applies ``_fix_svd_signs`` in its forward, and the 2x2 path
+    fixes the gauge itself in :func:`_gauge_fixed_svd`.  Wrapping the bare
+    ``_dense_svd`` instead keeps the forward bit-identical to the pre-#983
+    path -- only the VJP changes -- so eager CTM numbers cannot move.
+
+    The regularization is required, not cosmetic: the Fishman halves are
+    routinely rank deficient (``_fishman_truncate_S`` zeroes the sub-floor
+    tail), and a repeated EXACT zero makes the textbook adjoint's
+    ``F_ij = 1/(s_i^2 - s_j^2)`` evaluate ``1/(0-0)``.  Measured on a D=2
+    chi=4 random site (seed 3, 2 zeroed of 16): 32 NaN gradient entries
+    unregularized, finite and FD-consistent with the Lorentzian F.
+
+    Note the trigger is rank deficiency, *not* the near-degeneracy the old
+    comment here blamed: a seed with a 2.2e-06 adjacent gap and no exact
+    zero differentiates cleanly through the unregularized backward.
+    """
+    return _dense_svd(M, full_matrices=False)
+
+
+def _regularized_dense_svd_fwd(M):
+    U, s, Vh = _dense_svd(M, full_matrices=False)
+    return (U, s, Vh), (U, s, Vh)
+
+
+def _regularized_dense_svd_bwd(residuals, g):
+    from tenax.algorithms._ad_primitives import _svd_sector_backward
+
+    U, s, Vh = residuals
+    dU, ds, dVh = g
+    return (_svd_sector_backward(U, s, Vh, dU, ds, dVh),)
+
+
+_regularized_dense_svd.defvjp(_regularized_dense_svd_fwd, _regularized_dense_svd_bwd)
+
+
+# Golden-ratio Weyl step of the gauge reference vector (#841).
+_GAUGE_REF_STEP = (np.sqrt(5.0) - 1.0) / 2.0
+# Relative |<w, u>| below which the in-block reference phase is undefined.
+_GAUGE_REF_FLOOR = 1e-8
+
+
+def _gauge_reference_vector(n_rows: int) -> np.ndarray:
+    """Fixed, generic reference weights ``w`` for the swap-robust gauge (#841).
+
+    ``w_i = 1/2 + frac((i + 1) * g)`` with ``g = (sqrt(5) - 1) / 2``: a Weyl
+    sequence in ``(1/2, 3/2)`` whose entries are pairwise DISTINCT (``g`` is
+    irrational; in float64 the three-gap theorem keeps them ~1/n apart, far
+    above rounding).  It depends only on the static row count, so it is a
+    trace-time constant -- jit-safe, and the gauge fix stays a pure function
+    of its input with no memory of a previous iterate.
+    """
+    i = np.arange(1, n_rows + 1, dtype=np.float64)
+    return 0.5 + np.mod(i * _GAUGE_REF_STEP, 1.0)
+
+
+def _swap_robust_phases(U: jax.Array, row_group: np.ndarray | None) -> jax.Array:
+    """Per-column gauge phase of ``U``, robust to the ket<->bra swap tie (#841).
+
+    ``row_group=None`` is the variPEPS / YASTN rule this file always used: the
+    phase of the largest-``|U|`` entry of each column.
+
+    ``row_group`` (a static int array, one group id per row) switches on the
+    #841 rule for matrices whose rows are ``(chi, D^2)``, grouped by ``chi``:
+    take the group holding the largest-``|U|`` entry, as before, but read the
+    phase off the overlap ``<w_g, u_g>`` of the column with the fixed weights
+    :func:`_gauge_reference_vector` over the rows of THAT GROUP only.
+
+    Why the argmax entry alone is ill-posed there: the double corners
+    ``M1``/``M2`` carry an EXACT ket<->bra swap symmetry ``S M T = M``, ``S`` =
+    (+-1 per chi index) x (ket<->bra permutation ``P`` of the ``D^2`` leg)
+    (double-layer Hermiticity, measured to 3e-16).  Each singular vector obeys
+    ``S u = e u`` (``e = +-1``), so ``|u_i| = |u_{P i}|`` EXACTLY on every
+    swapped pair -- with opposite signs on half of them.  The argmax between
+    two exactly tied rows is decided by rounding, so the column sign was a coin
+    flip per sweep: the forward had no element-wise fixed point, the
+    stationarity guard fired, and the flowing implicit adjoint had no solution.
+
+    Why the in-group overlap breaks that tie for BOTH parities: ``S`` maps a
+    chi group to itself (its chi action is diagonal), so on the chosen group
+    ``u_g`` obeys ``tau_g P u_g = e u_g`` and ``<w_g, u_g> = <Pi w_g, u_g>``
+    with ``Pi = (1 + e tau_g P) / 2``.  That vanishes for every such ``u_g``
+    only if ``P w_g = -e tau_g w_g``, i.e. ``|w_i| = |w_{P i}|`` on a swapped
+    pair ``i != P i`` -- impossible, the entries of ``w`` are distinct.  What
+    remains is the generic codimension-1 set ``<w_g, u_g> = 0``, which no
+    symmetry selects.  The swapped partners of the argmax row sit in the same
+    chi group, so the CHOICE of group is tie-free too.
+
+    Why only within the group, not ``<w, u>`` over the whole column: the input
+    environment's chi legs carry a +-1 gauge ``sigma_a`` per chi index, which
+    multiplies group ``a`` of ``u``.  With the group choice the output sign
+    copies exactly one ``sigma_a`` -- the covariance of the old argmax rule,
+    under which the chi basis can align with itself at the fixed point.  A
+    whole-column overlap makes the output sign ``sign(sum_a sigma_a x_a)``, a
+    threshold function of the input gauge, and was measured to lock the dense
+    D=2 chi=6 forward into an exact period-2 chi-sign cycle (env residual
+    0.60 at every sweep, env(t) = env(t-2) to 1e-14).
+
+    Fallback: where ``|<w_g, u_g>| <= _GAUGE_REF_FLOOR |w_g| |u_g|`` the
+    overlap phase is rounding noise; the argmax entry's phase is used instead.
+    That keeps the result a deterministic function of ``U`` and is reached
+    only on a 1e-8-thin slab around a generic hyperplane (a zero column falls
+    through to phase 1).  Both branches go through :func:`_unit_phase`, so
+    neither poisons the VJP (#789).
+
+    Returns ``p`` with ``|p| = 1`` (real +-1 for real ``U``); the caller puts
+    ``conj(p)`` on the column of ``U`` and ``p`` on the row of ``Vh``, which
+    preserves ``U diag(s) Vh``.
+    """
+    cols = jnp.arange(U.shape[1])
+    max_idx = jnp.argmax(jnp.abs(U), axis=0)  # (k,)
+    at_max = U[max_idx, cols]
+    if row_group is None:
+        return _unit_phase(at_max)
+    row_group = np.asarray(row_group)
+    if row_group.shape != (U.shape[0],):
+        raise ValueError(
+            f"row_group has shape {row_group.shape}, expected ({U.shape[0]},)"
+        )
+    groups = jnp.asarray(row_group)
+    in_group = groups[:, None] == groups[max_idx][None, :]  # (R, k)
+    w = jnp.asarray(_gauge_reference_vector(U.shape[0]), dtype=jnp.real(U).dtype)
+    w_g = jnp.where(in_group, w[:, None], 0.0)
+    overlap = jnp.sum(w_g * U, axis=0)  # (k,)
+    w_norm = jnp.sqrt(jnp.sum(w_g**2, axis=0))
+    u_norm = jnp.sqrt(jnp.sum(jnp.where(in_group, jnp.abs(U) ** 2, 0.0), axis=0))
+    defined = jnp.abs(overlap) > _GAUGE_REF_FLOOR * w_norm * u_norm
+    return jnp.where(defined, _unit_phase(overlap), _unit_phase(at_max))
+
+
 def _gauge_fixed_svd(
     M: jax.Array,
+    *,
+    regularized: bool = False,
+    swap_block: int | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Reconstruction-preserving gauge-fixed SVD for the 2x2 projector.
 
     Returns ``(U, s, Vh)`` with each column of ``U`` and matching row of
-    ``Vh`` rephased so the row of largest ``|U|`` is real-positive. Uses the
-    variPEPS / YASTN convention of putting ``conj(phase)`` on ``U`` and the
-    *bare* ``phase`` on ``Vh``, which preserves the SVD reconstruction
+    ``Vh`` rephased so the row of largest ``|U|`` is real-positive -- or, with
+    ``swap_block``, so the overlap of the column with fixed generic weights
+    over that row's chi group is (#841, see :func:`_swap_robust_phases`).
+    Uses the variPEPS / YASTN convention of putting ``conj(phase)`` on ``U``
+    and the *bare* ``phase`` on ``Vh``, which preserves the SVD reconstruction
     ``U @ diag(s) @ Vh == M`` even for complex inputs.
 
     The shared :func:`tenax.algorithms._ad_primitives._fix_svd_signs` used to
@@ -47,18 +228,43 @@ def _gauge_fixed_svd(
     now equivalent; the workaround was masking a defect that also corrupted
     the complex SVD *backward* (#750/#751).  This copy is kept only to avoid
     churn in a correctness fix -- deduplicating it is safe follow-up work.
+
+    Args:
+        M: Matrix to decompose.
+        regularized: Route the *backward* through
+            :func:`_regularized_dense_svd`.  The forward is bit-identical
+            either way; set this whenever the projectors are actually
+            differentiated (#983), since the Fishman halves are routinely
+            rank deficient.
+        swap_block: Rows of ``M`` are ``(chi, D^2)`` row-major with
+            ``swap_block = D^2``: the ket<->bra swap permutes rows within each
+            consecutive block of this many rows.  Pass it for the double
+            corners ``M1``/``M2`` (#841).  ``None`` (default) keeps the plain
+            largest-``|U|`` rule, right for ``M_prime``, whose rows are Fishman
+            bonds on which the swap acts diagonally.
     """
-    U, s, Vh = _dense_svd(M, full_matrices=False)
-    max_idx = jnp.argmax(jnp.abs(U), axis=0)  # (k,)
-    diag = U[max_idx, jnp.arange(U.shape[1])]
-    phases = _unit_phase(diag)
+    if regularized:
+        U, s, Vh = _regularized_dense_svd(M)
+    else:
+        U, s, Vh = _dense_svd(M, full_matrices=False)
+    row_group = None
+    if swap_block is not None:
+        if swap_block < 1 or U.shape[0] % swap_block:
+            raise ValueError(
+                f"swap_block={swap_block} does not divide the {U.shape[0]} rows"
+            )
+        row_group = np.arange(U.shape[0]) // swap_block
+    phases = _swap_robust_phases(U, row_group)  # (k,)
     U = U * jnp.conj(phases)[None, :]
     Vh = Vh * phases[:, None]
     return U, s, Vh
 
 
 def _gauge_fix_symmetric_svd(
-    U_T: SymmetricTensor, Vh_T: SymmetricTensor
+    U_T: SymmetricTensor,
+    Vh_T: SymmetricTensor,
+    *,
+    swap_outer_legs: int | None = None,
 ) -> tuple[SymmetricTensor, SymmetricTensor]:
     """Per-sector gauge fix for SymmetricTensor SVD outputs.
 
@@ -69,6 +275,17 @@ def _gauge_fix_symmetric_svd(
     ``U @ diag(s) @ Vh == M`` is preserved.  Critical for the 2x2 closure
     ``P_bot · P_top = I`` (no intervening matrix to absorb a ``conj(phase)**2``
     factor — see the docstring of :func:`_gauge_fixed_svd`).
+
+    With ``swap_outer_legs`` the phase is instead read off the overlap with
+    fixed generic weights over the chi group of that entry (#841, see
+    :func:`_swap_robust_phases`): the leading ``swap_outer_legs`` legs of ``U``
+    are the chi legs, the remaining row legs (all but the last, the bond) the
+    ``D^2`` rows the ket<->bra swap permutes.  Pass ``1`` for the double
+    corners ``M1``/``M2``; ``None`` (default) keeps the plain largest-``|U|``
+    rule, right for ``M_prime``.  A chi element's rows may span several
+    U-blocks of the sector (when the swapped legs carry separate charges); the
+    groups are keyed by chi charge and in-sector position, so they do.  The
+    stacking order is static, so groups and weights are trace-time constants.
 
     Vectorized over bond-charge sectors (#566): instead of looping over every
     bond column, we process each (static) bond charge once — stacking that
@@ -96,8 +313,12 @@ def _gauge_fix_symmetric_svd(
     new_vh_blocks: dict[tuple[int, ...], jax.Array] = dict(Vh_T.blocks)
 
     # Detect dtype statically so we don't promote real blocks to complex.
-    sample_block = next(iter(U_T.blocks.values()))
-    is_complex = jnp.issubdtype(sample_block.dtype, jnp.complexfloating)
+    # Read it off the tensor rather than a sample block: an empty ``U_T``
+    # (no charge sectors -- a confined environment, #905/#907) has no block to
+    # sample, and the per-sector loop below is already a no-op on it, so the
+    # gauge fix must pass an empty tensor through unchanged rather than raise a
+    # ``StopIteration`` four frames down.
+    is_complex = jnp.issubdtype(U_T.dtype, jnp.complexfloating)
 
     for q in np.unique(bond_charges):
         q_int = int(q)
@@ -113,14 +334,27 @@ def _gauge_fix_symmetric_svd(
         M_q = jnp.concatenate(
             [jnp.reshape(new_u_blocks[key], (-1, n_q)) for key in u_keys], axis=0
         )
-        idx = jnp.argmax(jnp.abs(M_q), axis=0)  # (n_q,)
-        best = M_q[idx, jnp.arange(n_q)]  # (n_q,)
-        abs_best = jnp.abs(best)
-        phase = jnp.where(
-            abs_best > 0,
-            best / jnp.maximum(abs_best, jnp.asarray(1e-30, dtype=abs_best.dtype)),
-            jnp.ones_like(best),
-        )
+        row_group = None
+        if swap_outer_legs is not None:
+            # Row-major reshape of a (*chi, *D2, n_q) block: each chi element
+            # owns a contiguous run of prod(D2) rows.  A chi element is named
+            # by its chi charges (the key's leading entries) and its position
+            # inside that charge sector, which is the same in every block, so
+            # the id below is shared by all blocks the element's rows span.
+            group_id: dict[tuple, int] = {}
+            parts = []
+            for key in u_keys:
+                shape = new_u_blocks[key].shape[:-1]
+                n_outer = int(np.prod(shape[:swap_outer_legs], dtype=np.int64))
+                n_inner = int(np.prod(shape[swap_outer_legs:], dtype=np.int64))
+                outer_q = tuple(int(c) for c in key[:swap_outer_legs])
+                ids = [
+                    group_id.setdefault((outer_q, a), len(group_id))
+                    for a in range(n_outer)
+                ]
+                parts.append(np.repeat(np.asarray(ids, dtype=np.int64), n_inner))
+            row_group = np.concatenate(parts)
+        phase = _swap_robust_phases(M_q, row_group)  # (n_q,)
         if is_complex:
             conj_phase = jnp.conj(phase)
             bare_phase = phase
@@ -139,6 +373,58 @@ def _gauge_fix_symmetric_svd(
     U_out = SymmetricTensor._from_blocks_unchecked(new_u_blocks, U_T.indices)
     Vh_out = SymmetricTensor._from_blocks_unchecked(new_vh_blocks, Vh_T.indices)
     return U_out, Vh_out
+
+
+def _require_svd_connected(
+    M_T: SymmetricTensor,
+    U_T: SymmetricTensor,
+    *,
+    left_labels: tuple[str, ...],
+    right_labels: tuple[str, ...],
+    direction: str,
+    matrix_name: str,
+) -> None:
+    """Raise a diagnosis if a projector SVD produced an empty (rank-0) bond.
+
+    ``M_T`` is a double-layer corner contraction; the SVD splits its left and
+    right label groups over a shared bond.  When ``M_T`` carries no charge
+    blocks -- the corners it was contracted from share no sector on their
+    internal bond -- the SVD bond has dimension zero: ``U_T`` has no blocks and
+    the singular-value vector is length zero.  Left unguarded this surfaces far
+    from its cause -- a ``StopIteration`` in :func:`_gauge_fix_symmetric_svd`
+    (``next(iter(U_T.blocks))`` on an empty tensor) or a zero-size reduction
+    in :func:`_fishman_truncate_S` (``max`` of a size-0 array).
+
+    On the symmetric CTM path this is the confined-environment limitation of
+    #905 -- the corners occupy a charge sector that cannot connect the two
+    halves of the double-layer plaquette, so no 2x2 projector exists.  The dense
+    path densifies and never sees an absent sector, which is why it runs on the
+    same state.  Raise a named diagnosis rather than let an empty projector flow
+    into the sweep and certify a wrong environment (#907).
+    """
+    if U_T.blocks:
+        return
+
+    def _sectors(labels: tuple[str, ...]) -> dict[str, list[int]]:
+        out: dict[str, list[int]] = {}
+        m_labels = M_T.labels()
+        for lbl in labels:
+            charges = M_T.indices[m_labels.index(lbl)].charges
+            out[lbl] = sorted({int(c) for c in charges})
+        return out
+
+    raise ValueError(
+        f"symmetric 2x2 projector: {matrix_name} (direction={direction!r}) has "
+        f"a rank-0 SVD bond -- the contracted double-corner tensor has "
+        f"{len(M_T.blocks)} charge blocks, so the SVD produces an empty bond and "
+        f"no projector can be built. This is the confined symmetric CTM "
+        f"environment of #905: the corners occupy a charge sector that does not "
+        f"connect the plaquette halves (their leg sectors are left="
+        f"{_sectors(left_labels)}, right={_sectors(right_labels)}, but no fused "
+        f"block survives the contraction). The dense path densifies and does "
+        f"not hit this -- pass DenseTensor inputs, or use ctm_tensor_c4v for a "
+        f"C4v-symmetric state. See #907."
+    )
 
 
 def _scale_bond_by_diag(
@@ -219,24 +505,24 @@ def _build_enlarged_corner(
     if position == "top_left":
         # C1.c1_r <-> T1.t1_l
         C_r = C.relabel("c1_r", "t1_l")
-        CT_h = contract(C_r, T_h)  # -> (c1_d, u2, t1_r)
+        CT_h = G.contract(C_r, T_h)  # -> (c1_d, u2, t1_r)
         # C1.c1_d <-> T4.t4_d
         T_v_r = T_v.relabel("t4_d", "c1_d")
-        CTT = contract(CT_h, T_v_r)  # -> (u2, t1_r, l2, t4_u)
+        CTT = G.contract(CT_h, T_v_r)  # -> (u2, t1_r, l2, t4_u)
         # T1.u2 <-> a.u2 ; T4.l2 <-> a.l2
-        Q = contract(CTT, a)  # -> (t1_r, t4_u, d2, r2) free legs
+        Q = G.contract(CTT, a)  # -> (t1_r, t4_u, d2, r2) free legs
         # Relabel seams to chi_R, chi_B; r2 / d2 keep original labels.
         return Q.relabels({"t1_r": "chi_R", "t4_u": "chi_B"})
 
     if position == "top_right":
         # C2.c2_l <-> T1.t1_r
         C_r = C.relabel("c2_l", "t1_r")
-        CT_h = contract(C_r, T_h)  # -> (c2_d, t1_l, u2)
+        CT_h = G.contract(C_r, T_h)  # -> (c2_d, t1_l, u2)
         # C2.c2_d <-> T2.t2_u
         T_v_r = T_v.relabel("t2_u", "c2_d")
-        CTT = contract(CT_h, T_v_r)  # -> (t1_l, u2, r2, t2_d)
+        CTT = G.contract(CT_h, T_v_r)  # -> (t1_l, u2, r2, t2_d)
         # T1.u2 <-> a.u2 ; T2.r2 <-> a.r2
-        Q = contract(CTT, a)  # -> (t1_l, t2_d, l2, d2) free legs
+        Q = G.contract(CTT, a)  # -> (t1_l, t2_d, l2, d2) free legs
         return Q.relabels({"t1_l": "chi_L", "t2_d": "chi_B"})
 
     if position == "bottom_left":
@@ -244,23 +530,23 @@ def _build_enlarged_corner(
         # historically swapped vs geometry; #670/#702.  Valid because the
         # sweep keeps corner labels in the init convention at every point.)
         C_r = C.relabel("c4_r", "t4_u")
-        CT_v = contract(C_r, T_v)  # -> (c4_u, t4_d, l2)
+        CT_v = G.contract(C_r, T_v)  # -> (c4_u, t4_d, l2)
         # C4.c4_u <-> T3.t3_r
         T_h_r = T_h.relabel("t3_r", "c4_u")
-        CTT = contract(CT_v, T_h_r)  # -> (t4_d, l2, d2, t3_l)
+        CTT = G.contract(CT_v, T_h_r)  # -> (t4_d, l2, d2, t3_l)
         # T3.d2 <-> a.d2 ; T4.l2 <-> a.l2
-        Q = contract(CTT, a)  # -> (t4_d, t3_l, u2, r2) free legs
+        Q = G.contract(CTT, a)  # -> (t4_d, t3_l, u2, r2) free legs
         return Q.relabels({"t4_d": "chi_T", "t3_l": "chi_R"})
 
     if position == "bottom_right":
         # C3.c3_l <-> T3.t3_l
         C_r = C.relabel("c3_l", "t3_l")
-        CT_h = contract(C_r, T_h)  # -> (c3_u, t3_r, d2)
+        CT_h = G.contract(C_r, T_h)  # -> (c3_u, t3_r, d2)
         # C3.c3_u <-> T2.t2_d
         T_v_r = T_v.relabel("t2_d", "c3_u")
-        CTT = contract(CT_h, T_v_r)  # -> (t3_r, d2, t2_u, r2)
+        CTT = G.contract(CT_h, T_v_r)  # -> (t3_r, d2, t2_u, r2)
         # T3.d2 <-> a.d2 ; T2.r2 <-> a.r2
-        Q = contract(CTT, a)  # -> (t3_r, t2_u, l2, u2) free legs
+        Q = G.contract(CTT, a)  # -> (t3_r, t2_u, l2, u2) free legs
         return Q.relabels({"t3_r": "chi_L", "t2_u": "chi_T"})
 
     raise ValueError(f"unsupported position={position!r}")
@@ -276,8 +562,16 @@ def _fishman_truncate_S(S: jnp.ndarray, eps: float = 1e-12) -> jnp.ndarray:
 
     Mirrors the Fishman SVD truncation used in the 1x1 projector path
     (`_ctm_projector.py`).
+
+    The reference is the GLOBAL maximum, not ``S[0]``.  A dense SVD returns
+    ``S`` sorted descending, so the two agree there, but the symmetric path
+    passes the block-sparse SVD's singular values concatenated sector by
+    sector, where ``S[0]`` is the largest value of the lowest-charge sector
+    only.  With ``S[0]`` a spectrum whose leading sector is weak kept values
+    far below ``eps`` times the true maximum (and, if the leading sector's max
+    were tiny, kept everything).
     """
-    s_max = S[0]
+    s_max = jnp.max(S)
     return jnp.where(S / (s_max + 1e-30) >= eps, S, 0.0)
 
 
@@ -317,6 +611,8 @@ def _compute_2x2_projector(
     *,
     direction: str = "left",
     base_charges: np.ndarray | None = None,
+    projector_backward: str = "auto",
+    incoming_chi_charges: np.ndarray | None = None,
 ) -> tuple[Tensor, Tensor, jax.Array]:
     r"""Fishman 2x2 plaquette cross-projector for the multisite CTM move.
 
@@ -349,6 +645,21 @@ def _compute_2x2_projector(
             symmetric branch each named charge is floored at one ``chi_new``
             slot; the rest of the budget follows the singular values (#922).
             Ignored on the dense path (no charge sectors).
+        projector_backward: ``"flow"`` lets the projector response reach
+            the gradient, with the Fishman SVDs' backward
+            Lorentzian-regularized.  Every other value -- including the
+            ``"auto"`` default -- returns the projectors as
+            ``stop_gradient`` constants, so ``dP/dA`` is dropped.  Use
+            ``"flow"`` on paths with no fixed-point adjoint solve (explicit
+            AD, a bare sweep); see ``_PROJECTOR_BACKWARD_FLOW`` for why it
+            is not yet the default under implicit AD (#983, blocked on
+            #841).
+        incoming_chi_charges: Charges of the environment leg that ``chi_new``
+            replaces, supplied by a multisite sweep that knows which cell the
+            new bond is written to.  Consulted only by the traced symmetric
+            path; see :func:`_incoming_chi_charges` for why the enlarged
+            corners cannot name that leg themselves on a multi-cell unit
+            cell.
 
     Returns:
         Triple ``(P_top, P_bot, eps_T)`` of rank-3 :class:`DenseTensor`
@@ -412,6 +723,8 @@ def _compute_2x2_projector(
             chi,
             direction=direction,
             base_charges=base_charges,
+            projector_backward=projector_backward,
+            incoming_chi_charges=incoming_chi_charges,
         )
 
     # ---- Step 1: form the two halves (M1, M2) for the chosen direction. ----
@@ -501,14 +814,19 @@ def _compute_2x2_projector(
     # ---- Step 2: Fishman SVD on both halves. ----
     # Gauge-fix each SVD via _gauge_fixed_svd: rotates U/Vh columns so the
     # row of largest |U| is real-positive (variPEPS convention, preserves
-    # reconstruction even for complex inputs).  This is critical for AD —
+    # reconstruction even for complex inputs) -- on M1/M2 read through the
+    # swap-robust in-group overlap (#841: their rows are (chi, D^2) and the
+    # exact ket<->bra swap symmetry ties |U| between swapped D^2 rows).  This is critical for AD —
     # raw jnp.linalg.svd's gauge has tiny sign flips across iterations
     # which produce non-smooth gradients (mirrors the 1x1 path in
     # _ctm_projector.py, which uses _fix_svd_signs there).
     eps = 1e-12
-    M1_U, M1_S, M1_Vh = _gauge_fixed_svd(M1)
+    # #983: when the projectors are differentiated, the halves' SVD backward
+    # must be regularized -- these matrices are routinely rank deficient.
+    _reg = projector_backward == _PROJECTOR_BACKWARD_FLOW
+    M1_U, M1_S, M1_Vh = _gauge_fixed_svd(M1, regularized=_reg, swap_block=D2_M1_row)
     M1_S = _fishman_truncate_S(M1_S, eps)
-    M2_U, M2_S, M2_Vh = _gauge_fixed_svd(M2)
+    M2_U, M2_S, M2_Vh = _gauge_fixed_svd(M2, regularized=_reg, swap_block=D2_M2_row)
     M2_S = _fishman_truncate_S(M2_S, eps)
 
     # ---- Step 3: pick which side of each Fishman SVD becomes the half. ----
@@ -570,7 +888,7 @@ def _compute_2x2_projector(
         # P_second ~ second @ V_M S^-1/2 (row side -> chi_new)
         M_prime = first_half @ second_half
 
-    U_M, S_M, V_M_h = _gauge_fixed_svd(M_prime)
+    U_M, S_M, V_M_h = _gauge_fixed_svd(M_prime, regularized=_reg)
     k = min(chi, S_M.shape[0])
     # ε_T from the FULL spectrum (before truncation) — variPEPS §2.8.2
     # indicator that drives ``chi_auto_bump``.  Issue #474.
@@ -700,17 +1018,33 @@ def _compute_2x2_projector(
     else:
         P_top = DenseTensor(P_top_arr, P_top_idx)
         P_bot = DenseTensor(P_bot_arr, P_bot_idx)
-    # Project as a stop_gradient constant on the backward path: variPEPS
-    # treats CTM projectors as fixed-point constants so the implicit-AD
-    # adjoint solve recovers the env dependence on A without flowing
-    # through jnp.linalg.svd, whose F_ij = 1/(s_i² - s_j²) backward NaN-s
-    # on near-degenerate singular values of M_prime (typical at small D).
-    # ``eps_T`` and ``smallest_S`` are also stop_gradient'd — both are
+    # #983: the projectors carry a real ``dP/dA``, and freezing them here
+    # silently dropped it from every gradient taken through ``recipe="2x2"``
+    # -- which is the default recipe.  Measured on ONE sweep (no fixed-point
+    # premise, so uncontaminated by #841), AD/FD on a gauge-invariant
+    # functional at D=2 chi=4 and D=3 chi=9: frozen gave ratios spanning
+    # -7.98 to +14.95 -- wrong by up to 15x and sometimes wrong in SIGN --
+    # against 1.000000 (7 digits) once the response flows.
+    #
+    # The older reasoning here was that the SVD backward NaN-s on
+    # "near-degenerate singular values of M_prime (typical at small D)".
+    # The NaN is real but the trigger was misdiagnosed: it is EXACT rank
+    # deficiency (``_fishman_truncate_S`` zeroes the sub-floor tail, and a
+    # repeated zero makes ``F_ij = 1/(s_i^2 - s_j^2)`` evaluate ``1/(0-0)``).
+    # A point with a 2.2e-06 adjacent gap and no exact zero differentiates
+    # cleanly unregularized; the points that NaN are exactly the rank-
+    # deficient ones.  ``_regularized_dense_svd`` above handles that, so the
+    # freeze is no longer load-bearing for finiteness.
+    #
+    # ``eps_T`` and ``smallest_S`` stay frozen unconditionally -- both are
     # consumed only by the CTM convergence loop's chi-bump logic (#474 /
     # #492), which is non-AD.
+    if projector_backward != _PROJECTOR_BACKWARD_FLOW:
+        P_top = jax.tree.map(jax.lax.stop_gradient, P_top)
+        P_bot = jax.tree.map(jax.lax.stop_gradient, P_bot)
     return (
-        jax.tree.map(jax.lax.stop_gradient, P_top),
-        jax.tree.map(jax.lax.stop_gradient, P_bot),
+        P_top,
+        P_bot,
         jax.lax.stop_gradient(eps_T),
         jax.lax.stop_gradient(smallest_S),
     )
@@ -827,6 +1161,17 @@ def _incoming_chi_charges(
     Returns ``None`` when the leg is missing or is not ``chi`` wide -- during a
     chi ramp the environment is still at the old width, and a stale inventory
     is worse than the tiled guess.
+
+    **Only right on a one-cell unit cell.**  The leg read here belongs to the
+    cell whose column/row is being *absorbed*, but ``chi_new`` is written into
+    the env of the neighbouring cell -- e.g. the bottom projector anchored at
+    ``X`` becomes ``T3[X].t3_l``, while this reads ``T3[X.bottom].t3_l``.  On a
+    2-site checkerboard that is the other sublattice's bond, so every traced
+    sweep swapped the A->B and B->A inventories and a seeded fixed point
+    oscillated between two layouts (#1035 Task 3).  Multisite sweeps therefore
+    pass the destination leg explicitly (``incoming_chi_charges``, built by
+    ``_ctm_tensor_convergence._seam_chi_charges``); this reader is the fallback
+    for callers without a unit-cell map.
     """
     corner, label = {
         "left": (Q_TL, "chi_B"),
@@ -854,6 +1199,8 @@ def _compute_2x2_projector_symmetric(
     *,
     direction: str,
     base_charges: np.ndarray | None = None,
+    projector_backward: str = "auto",
+    incoming_chi_charges: np.ndarray | None = None,
 ) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array]:
     """Block-sparse 2x2 Fishman projector for SymmetricTensor inputs.
 
@@ -880,8 +1227,7 @@ def _compute_2x2_projector_symmetric(
         singular values aren't required explicitly — the block-sparse
         SVD already truncates to ``chi`` (Issue #474).
     """
-    from tenax.contraction.contractor import contract
-    from tenax.linalg import svd as tensor_svd
+    from tenax.algorithms import _ctm_graded as G
 
     if direction not in ("left", "right", "top", "bottom"):
         raise ValueError(f"unsupported direction={direction!r}")
@@ -892,7 +1238,7 @@ def _compute_2x2_projector_symmetric(
         Q_TR_relab = Q_TR.relabels(
             {"chi_L": "chi_R", "l2": "r2", "chi_B": "chi_B_TR", "d2": "d2_TR"}
         )
-        M1_T = contract(Q_TL_relab, Q_TR_relab)
+        M1_T = G.contract(Q_TL_relab, Q_TR_relab)
         m1_left_labels = ("chi_B_TL", "d2_TL")
         m1_right_labels = ("chi_B_TR", "d2_TR")
 
@@ -900,7 +1246,7 @@ def _compute_2x2_projector_symmetric(
             {"chi_L": "chi_R", "l2": "r2", "chi_T": "chi_T_BR", "u2": "u2_BR"}
         )
         Q_BL_relab = Q_BL.relabels({"chi_T": "chi_T_BL", "u2": "u2_BL"})
-        M2_T = contract(Q_BR_relab, Q_BL_relab)
+        M2_T = G.contract(Q_BR_relab, Q_BL_relab)
         m2_left_labels = ("chi_T_BR", "u2_BR")
         m2_right_labels = ("chi_T_BL", "u2_BL")
     else:  # "top", "bottom"
@@ -908,7 +1254,7 @@ def _compute_2x2_projector_symmetric(
             {"chi_T": "chi_B", "u2": "d2", "chi_R": "chi_R_BL", "r2": "r2_BL"}
         )
         Q_TL_relab = Q_TL.relabels({"chi_R": "chi_R_TL", "r2": "r2_TL"})
-        M1_T = contract(Q_BL_relab, Q_TL_relab)
+        M1_T = G.contract(Q_BL_relab, Q_TL_relab)
         m1_left_labels = ("chi_R_BL", "r2_BL")
         m1_right_labels = ("chi_R_TL", "r2_TL")
 
@@ -916,29 +1262,45 @@ def _compute_2x2_projector_symmetric(
             {"chi_B": "chi_T", "d2": "u2", "chi_L": "chi_L_TR", "l2": "l2_TR"}
         )
         Q_BR_relab = Q_BR.relabels({"chi_L": "chi_L_BR", "l2": "l2_BR"})
-        M2_T = contract(Q_TR_relab, Q_BR_relab)
+        M2_T = G.contract(Q_TR_relab, Q_BR_relab)
         m2_left_labels = ("chi_L_TR", "l2_TR")
         m2_right_labels = ("chi_L_BR", "l2_BR")
 
     # ---- Stage 2: SVDs of M1, M2 with per-sector gauge fix. ----
-    U_M1_T, M1_S, Vh_M1_T, _ = tensor_svd(
+    U_M1_T, M1_S, Vh_M1_T, _ = G.svd(
         M1_T,
         left_labels=m1_left_labels,
         right_labels=m1_right_labels,
         new_bond_label="m1_bond",
         max_singular_values=None,
     )
-    U_M1_T, Vh_M1_T = _gauge_fix_symmetric_svd(U_M1_T, Vh_M1_T)
+    _require_svd_connected(
+        M1_T,
+        U_M1_T,
+        left_labels=m1_left_labels,
+        right_labels=m1_right_labels,
+        direction=direction,
+        matrix_name="M1 (upper double-corner)",
+    )
+    U_M1_T, Vh_M1_T = _gauge_fix_symmetric_svd(U_M1_T, Vh_M1_T, swap_outer_legs=1)
     M1_S = _fishman_truncate_S(M1_S, eps=1e-12)
 
-    U_M2_T, M2_S, Vh_M2_T, _ = tensor_svd(
+    U_M2_T, M2_S, Vh_M2_T, _ = G.svd(
         M2_T,
         left_labels=m2_left_labels,
         right_labels=m2_right_labels,
         new_bond_label="m2_bond",
         max_singular_values=None,
     )
-    U_M2_T, Vh_M2_T = _gauge_fix_symmetric_svd(U_M2_T, Vh_M2_T)
+    _require_svd_connected(
+        M2_T,
+        U_M2_T,
+        left_labels=m2_left_labels,
+        right_labels=m2_right_labels,
+        direction=direction,
+        matrix_name="M2 (lower double-corner)",
+    )
+    U_M2_T, Vh_M2_T = _gauge_fix_symmetric_svd(U_M2_T, Vh_M2_T, swap_outer_legs=1)
     M2_S = _fishman_truncate_S(M2_S, eps=1e-12)
 
     M1_sqrtS = jnp.sqrt(M1_S)
@@ -971,13 +1333,13 @@ def _compute_2x2_projector_symmetric(
     if prime_order == "second_first":
         cut_relabel = dict(zip(m1_left_labels, m2_right_labels))
         first_half_for_mp = first_half.relabels(cut_relabel)
-        M_prime_T = contract(second_half, first_half_for_mp)
+        M_prime_T = G.contract(second_half, first_half_for_mp)
         mp_left_labels = ("m2_bond",)
         mp_right_labels = ("m1_bond",)
     else:
         cut_relabel = dict(zip(m1_right_labels, m2_left_labels))
         first_half_for_mp = first_half.relabels(cut_relabel)
-        M_prime_T = contract(first_half_for_mp, second_half)
+        M_prime_T = G.contract(first_half_for_mp, second_half)
         mp_left_labels = ("m1_bond",)
         mp_right_labels = ("m2_bond",)
 
@@ -985,7 +1347,7 @@ def _compute_2x2_projector_symmetric(
     # traced path if blocks carry tracers, or the eager+retruncate path
     # otherwise.
     if base_charges is None:
-        U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+        U_Mp_T, S_Mp, Vh_Mp_T, _ = G.svd(
             M_prime_T,
             left_labels=mp_left_labels,
             right_labels=mp_right_labels,
@@ -1008,10 +1370,14 @@ def _compute_2x2_projector_symmetric(
             # values.  Give it the environment's own chi inventory rather than
             # the double-layer charges tiled to chi -- see
             # :func:`_incoming_chi_charges` (#929).
-            traced_base = _incoming_chi_charges(Q_TL, Q_TR, Q_BL, Q_BR, direction, chi)
+            traced_base = incoming_chi_charges
+            if traced_base is None or len(traced_base) != chi:
+                traced_base = _incoming_chi_charges(
+                    Q_TL, Q_TR, Q_BL, Q_BR, direction, chi
+                )
             if traced_base is None:
                 traced_base = base_charges
-            U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+            U_Mp_T, S_Mp, Vh_Mp_T, _ = G.svd(
                 M_prime_T,
                 left_labels=mp_left_labels,
                 right_labels=mp_right_labels,
@@ -1020,7 +1386,7 @@ def _compute_2x2_projector_symmetric(
                 base_charges=traced_base,
             )
         else:
-            U_Mp_T, S_Mp, Vh_Mp_T, _ = tensor_svd(
+            U_Mp_T, S_Mp, Vh_Mp_T, _ = G.svd(
                 M_prime_T,
                 left_labels=mp_left_labels,
                 right_labels=mp_right_labels,
@@ -1030,6 +1396,14 @@ def _compute_2x2_projector_symmetric(
             U_Mp_T, S_Mp, Vh_Mp_T = _retruncate_chi_bond(
                 U_Mp_T, S_Mp, Vh_Mp_T, base_charges=base_charges, chi=chi
             )
+    _require_svd_connected(
+        M_prime_T,
+        U_Mp_T,
+        left_labels=mp_left_labels,
+        right_labels=mp_right_labels,
+        direction=direction,
+        matrix_name="M_prime (combined projector)",
+    )
     U_Mp_T, Vh_Mp_T = _gauge_fix_symmetric_svd(U_Mp_T, Vh_Mp_T)
 
     # ε_T via the Frobenius identity (Issue #474).  Block-sparse SVD
@@ -1063,13 +1437,13 @@ def _compute_2x2_projector_symmetric(
     S_inv_sqrt = jnp.where(mask, 1.0 / jnp.sqrt(S_safe), 0.0)
 
     if prime_order == "second_first":
-        # P_first  = first_half · V_Mp · S^{-1/2}   = contract(first_half, Vh_Mp.bar())
-        # P_second = S^{-1/2} · U_Mp^† · second_half = contract(U_Mp.bar(), second_half)
-        P_first_unscaled = contract(first_half, Vh_Mp_T.bar())
-        P_second_unscaled = contract(U_Mp_T.bar(), second_half)
+        # P_first  = first_half · V_Mp · S^{-1/2}   = G.contract(first_half, Vh_Mp.bar())
+        # P_second = S^{-1/2} · U_Mp^† · second_half = G.contract(U_Mp.bar(), second_half)
+        P_first_unscaled = G.contract(first_half, G.bar(Vh_Mp_T))
+        P_second_unscaled = G.contract(G.bar(U_Mp_T), second_half)
     else:  # "first_second"
-        P_first_unscaled = contract(U_Mp_T.bar(), first_half)
-        P_second_unscaled = contract(second_half, Vh_Mp_T.bar())
+        P_first_unscaled = G.contract(G.bar(U_Mp_T), first_half)
+        P_second_unscaled = G.contract(second_half, G.bar(Vh_Mp_T))
 
     P_first = _scale_bond_by_diag(P_first_unscaled, S_inv_sqrt, bond_label="chi_new")
     P_second = _scale_bond_by_diag(P_second_unscaled, S_inv_sqrt, bond_label="chi_new")
@@ -1112,11 +1486,17 @@ def _compute_2x2_projector_symmetric(
             for lbl in ("chi_new_bot", "chi_outer", "fused_D2")
         )
     )
-    # Same stop_gradient treatment as the dense path — see the comment
-    # at the end of _compute_2x2_projector.  (#474 / #492)
+    # Same treatment as the dense path — see the comment at the end of
+    # _compute_2x2_projector.  (#474 / #492 / #983.)  This branch needs no
+    # regularization switch of its own: under tracing ``tenax.linalg.svd``
+    # already routes each charge sector through ``truncated_svd_ad``, whose
+    # backward carries the same Lorentzian F-matrix.
+    if projector_backward != _PROJECTOR_BACKWARD_FLOW:
+        P_top = jax.tree.map(jax.lax.stop_gradient, P_top)
+        P_bot = jax.tree.map(jax.lax.stop_gradient, P_bot)
     return (
-        jax.tree.map(jax.lax.stop_gradient, P_top),
-        jax.tree.map(jax.lax.stop_gradient, P_bot),
+        P_top,
+        P_bot,
         jax.lax.stop_gradient(eps_T),
         jax.lax.stop_gradient(smallest_S),
     )

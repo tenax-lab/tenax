@@ -5,3 +5,10 @@ Tensor Network
    :members:
    :undoc-members:
    :show-inheritance:
+
+Network Blueprint
+-----------------
+
+.. autoclass:: tenax.network.netfile.NetworkBlueprint
+   :members:
+   :no-index:

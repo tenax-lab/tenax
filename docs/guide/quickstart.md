@@ -21,15 +21,15 @@ charges = np.zeros(3, dtype=np.int32)
 A = DenseTensor(
     jax.random.normal(jax.random.PRNGKey(0), (3, 4)),
     indices=(
-        TensorIndex(sym, charges, FlowDirection.IN, label="i"),
-        TensorIndex(sym, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="bond"),
+        TensorIndex.from_charges(sym, charges, FlowDirection.IN, label="i"),
+        TensorIndex.from_charges(sym, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="bond"),
     ),
 )
 B = DenseTensor(
     jax.random.normal(jax.random.PRNGKey(1), (4, 5)),
     indices=(
-        TensorIndex(sym, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="bond"),
-        TensorIndex(sym, np.zeros(5, dtype=np.int32), FlowDirection.OUT, label="j"),
+        TensorIndex.from_charges(sym, np.zeros(4, dtype=np.int32), FlowDirection.IN, label="bond"),
+        TensorIndex.from_charges(sym, np.zeros(5, dtype=np.int32), FlowDirection.OUT, label="j"),
     ),
 )
 
@@ -43,11 +43,11 @@ print(C.todense().shape)  # (3, 5)
 
 ```python
 import jax
-from tenax import DMRGConfig, dmrg, build_mpo_heisenberg, FiniteMPS
+from tenax import DMRGConfig, dmrg, build_mpo_heisenberg, build_random_symmetric_mps
 
 L = 10  # 10-site chain
-mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
-mps = FiniteMPS.random(L=L, d=2, chi=4, key=jax.random.PRNGKey(0))
+mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)  # U(1) block-sparse MPO
+mps = build_random_symmetric_mps(L, bond_dim=4)  # matching block-sparse MPS
 
 config = DMRGConfig(
     max_bond_dim=32,

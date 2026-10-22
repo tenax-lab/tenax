@@ -17,6 +17,7 @@ import jax.numpy as jnp
 
 from tenax.algorithms._ctm_honeycomb_env import HoneycombCTMEnv
 from tenax.algorithms._ctm_honeycomb_topology import Coord
+from tenax.algorithms._ctm_tensor_convergence import _nan_safe_max
 from tenax.linalg import _dense_svd
 
 __all__ = ["check_honeycomb_convergence"]
@@ -35,8 +36,9 @@ def _max_env_leaf_diff(
             a = getattr(env_old, field).todense()
             b = getattr(env_new, field).todense()
             diff = float(jnp.max(jnp.abs(b - a)))
-            if diff > max_diff:
-                max_diff = diff
+            # ``if diff > max_diff`` is False for NaN, so the corrupt leaf
+            # vanished and a fully NaN env certified (#974).
+            max_diff = _nan_safe_max(max_diff, diff)
     return max_diff
 
 
@@ -62,8 +64,9 @@ def _corner_sv_diff(
             sv_old = sv_old / (jnp.sum(sv_old) + 1e-15)
             sv_new = sv_new / (jnp.sum(sv_new) + 1e-15)
             diff = float(jnp.max(jnp.abs(sv_new - sv_old)))
-            if diff > worst:
-                worst = diff
+            # Same NaN hole as the elementwise reducer above (#974); an SVD of
+            # a NaN corner yields NaN singular values, not an exception.
+            worst = _nan_safe_max(worst, diff)
     return worst
 
 

@@ -70,3 +70,50 @@ the environment tensor).
   steps. This preserves the square-lattice symmetry at each step.
 - `"horizontal_first"`: perform both horizontal and vertical coarse-graining
   within each step. May converge faster for anisotropic systems.
+
+(hotrg-multigpu)=
+## Multi-GPU sharding
+
+For large-χ dense HOTRG, set `HOTRGConfig(device_mesh=mesh)` (a 1-D
+`jax.sharding.Mesh`) to shard the dominant χ⁶ intermediate across multiple GPUs —
+~1/N per-device peak memory and a higher reachable χ, at the same free energy.
+Since HOTRG is forward-only there is no autodiff-through-SVD barrier, so GSPMD
+sharding is effective here (unlike the CTM-AD path). See
+`examples/probe_hotrg_multigpu.py`.
+
+(gilt-hotrg)=
+## Gilt-HOTRG
+
+`gilt_hotrg` applies the GILT filter of {ref}`gilt-tnr` before every **HOTRG** move (a
+drop-in counterpart of `hotrg`; `gilt_eps=0.0` recovers plain HOTRG exactly).
+Because HOTRG's HOSVD already suppresses most corner-double-line entanglement,
+GILT does not improve the smooth *free energy* here — its payoff shows in the
+*critical data*: the estimated `beta_c` lands closer to Onsager than plain
+HOTRG at the same bond dimension. It reuses the χ⁶ sharding above via
+`GiltHOTRGConfig(device_mesh=mesh)`. See `examples/gilt_hotrg_ising.py`.
+
+```python
+from tenax import GiltConfig, GiltHOTRGConfig, gilt_hotrg, compute_ising_tensor
+
+T = compute_ising_tensor(0.44068679350977147, symmetric=True)
+config = GiltHOTRGConfig(max_bond_dim=16, num_steps=18, gilt=GiltConfig(gilt_eps=1e-3))
+log_z_per_n = gilt_hotrg(T, config)
+```
+
+(potts)=
+## q-state Potts model
+
+The same coarse-graining works for the **q-state Potts model**
+(`compute_potts_tensor` produces any `q >= 2`; `q = 2` reduces to Ising):
+
+```python
+from tenax import HOTRGConfig, hotrg, compute_potts_tensor, potts_critical_beta
+
+q = 3
+beta_c = potts_critical_beta(q)  # ln(1 + sqrt(q)), the self-dual critical point
+T = compute_potts_tensor(beta_c, q=q)
+
+config = HOTRGConfig(max_bond_dim=16, num_steps=20)
+log_z_per_n = hotrg(T, config)
+print(f"Potts q={q} at beta_c={beta_c:.5f}:  ln(Z)/N = {float(log_z_per_n):.6f}")
+```

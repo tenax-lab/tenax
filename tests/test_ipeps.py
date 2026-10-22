@@ -630,7 +630,7 @@ class TestOptimizeGsAd2Site:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=3,
             gs_learning_rate=1e-3,
             unit_cell="2site",
@@ -648,7 +648,10 @@ class TestOptimizeGsAd2Site:
             max_bond_dim=2,
             num_imaginary_steps=10,
             dt=0.3,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            # on_unconverged="warn" (#1059): max_iter=10 is a smoke-test budget
+            # that leaves the final-energy forward unconverged (sv_diff ~1e-7);
+            # this test checks the code path runs, not convergence.
+            ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
             gs_num_steps=3,
             gs_learning_rate=1e-3,
             unit_cell="2site",
@@ -662,7 +665,7 @@ class TestOptimizeGsAd2Site:
         """gs_num_steps=0 should return initial energy without crashing."""
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=0,
             unit_cell="2site",
         )
@@ -698,7 +701,7 @@ class TestOptimizeGsAd2Site:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=1,
             unit_cell="2site",
         )
@@ -723,7 +726,10 @@ class TestOptimizeGsAd2Site:
         """2-site AD with C4v parameterization should run and give finite energy."""
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            # on_unconverged="warn" (#1059): max_iter=10 is a smoke-test budget
+            # that leaves the final-energy forward unconverged (sv_diff ~1e-7);
+            # this test checks the code path runs, not convergence.
+            ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
             gs_num_steps=3,
             gs_learning_rate=1e-3,
             unit_cell="2site",
@@ -739,7 +745,10 @@ class TestOptimizeGsAd2Site:
         """With gs_c4v=True, B should be the sublattice rotation of A."""
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            # on_unconverged="warn" (#1059): max_iter=10 is a smoke-test budget
+            # that leaves the final-energy forward unconverged (sv_diff ~1e-7);
+            # this test checks the code path runs, not convergence.
+            ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
             gs_num_steps=3,
             gs_learning_rate=1e-3,
             unit_cell="2site",
@@ -786,7 +795,7 @@ class TestOptimizeGsAd2Site:
         """
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=5,
             gs_learning_rate=1e-2,
             unit_cell="2site",
@@ -812,7 +821,7 @@ class TestOptimizeGsAd2Site:
         """
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=5,
             gs_learning_rate=1e-2,
             unit_cell="2site",
@@ -888,7 +897,7 @@ class TestOptimizeGsAdLogging:
     def test_verbose_prints_progress(self, heisenberg_gate, capsys):
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=5),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=2,
             gs_learning_rate=1e-3,
             gs_verbose=True,
@@ -935,7 +944,7 @@ class TestOptimizeGsAdDenseOnly:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=5),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=1,
             unit_cell="2site",
         )
@@ -970,7 +979,7 @@ class TestOptimizeGsAdOptimizers:
         """
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=2, max_iter=3),
+            ctm=CTMConfig(chi=2, max_iter=100),
             gs_optimizer="lbfgs",
             gs_num_steps=1,
             gs_line_search=True,
@@ -988,7 +997,7 @@ class TestOptimizeGsAdOptimizers:
         """
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=2, max_iter=3),
+            ctm=CTMConfig(chi=2, max_iter=100),
             gs_optimizer="cg",
             gs_num_steps=1,
         )
@@ -1077,7 +1086,12 @@ class TestADSymmetric:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            # needs an unconverged forward: this init's 1-site CTM is still
+            # unconverged at max_iter=1000 with plateau_patience=None (step 1
+            # stationarity residual 0.24, step 2 1.5e-4; dense and symmetric
+            # alike), and the test checks the type round-trip, not
+            # convergence; see #1059.
+            ctm=CTMConfig(chi=4, max_iter=10, on_unconverged="warn"),
             gs_num_steps=2,
             gs_learning_rate=0.01,
         )
@@ -1108,7 +1122,11 @@ class TestADSymmetric:
 
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=5),
+            # needs an unconverged forward: same init as
+            # test_optimize_gs_ad_symmetric_runs, whose 1-site CTM is still
+            # unconverged at max_iter=1000 with plateau_patience=None; the test
+            # checks the type round-trip, not convergence; see #1059.
+            ctm=CTMConfig(chi=4, max_iter=5, on_unconverged="warn"),
             gs_num_steps=1,
             gs_learning_rate=0.01,
         )
@@ -1176,7 +1194,7 @@ class TestADSymmetric:
         gate = self._heisenberg_gate()
         config = iPEPSConfig(
             max_bond_dim=2,
-            ctm=CTMConfig(chi=4, max_iter=10),
+            ctm=CTMConfig(chi=4, max_iter=100),
             gs_num_steps=0,
             gs_learning_rate=0.01,
         )
@@ -1532,9 +1550,10 @@ class TestPostPR291ADBaseline:
     """Regression tests locking down the post-PR-#341 iPEPS AD baseline.
 
     ``CTMConfig.forward_gauge`` accepts four modes (``qr``, ``sigma``,
-    ``phase``, ``none``) and defaults to ``"phase"`` — the value that is
-    correct for both implicit and explicit AD (1-site and 2-site).  No
-    silent promotion: explicit user choice is preserved by the AD config
+    ``phase``, ``none``) plus ``bond_phase`` (#841), and defaults to the
+    ``"auto"`` sentinel: ``"bond_phase"`` on the fused implicit-AD path,
+    ``"phase"`` everywhere else (see ``tests/test_forward_gauge_auto.py``).
+    No silent promotion: explicit user choice is preserved by the AD config
     builder (see ``tests/test_ipeps_ad_policy.py``).  ``iPEPSConfig``
     exposes a ``gs_ctm_conv_tol_schedule`` knob.  These tests pin that
     behavior so future refactors cannot silently drift off the documented
@@ -1556,14 +1575,16 @@ class TestPostPR291ADBaseline:
             cfg = CTMConfig(forward_gauge=mode)
             assert cfg.forward_gauge == mode
 
-    def test_forward_gauge_default_is_phase(self):
-        """Config default is ``phase`` — the AD-correct choice.
+    def test_forward_gauge_default_is_auto(self):
+        """Config default is the ``"auto"`` sentinel.
 
-        ``"phase"`` is the correct default for both implicit and explicit
-        AD (1-site and 2-site).  No silent promotion: direct ``CTMConfig()``
-        users get the same behavior the AD optimizer uses.
+        It resolves to ``"bond_phase"`` (#841) on the implicit-AD path and
+        to ``"phase"`` -- the historical default -- on explicit AD.
         """
-        assert CTMConfig().forward_gauge == "phase"
+        cfg = CTMConfig()
+        assert cfg.forward_gauge == "auto"
+        assert cfg.effective_forward_gauge(implicit_ad=True) == "bond_phase"
+        assert cfg.effective_forward_gauge(implicit_ad=False) == "phase"
 
     def test_gs_ctm_conv_tol_schedule_is_configurable(self):
         """New iPEPSConfig knob from PR #291 is exposed and round-trips."""
@@ -1669,7 +1690,11 @@ class TestPostPR291ADBaseline:
             # before the optimizer declares convergence.
             gs_ctm_conv_tol_schedule=[(0.0, 1e-3), (0.1, 1e-6)],
             # Disable outer-loop convergence so the schedule has room to
-            # advance even when the surrogate energy is flat.
+            # advance even when the surrogate energy is flat.  The surrogate
+            # is |A_norm|^2 == 1, so its gradient is ~0 and the default
+            # "grad_norm" criterion would stop on step 0; "both" with a
+            # negative dE tolerance can never be met.
+            gs_conv_criterion="both",
             gs_conv_tol=-1.0,
             unit_cell="1x1",
             su_init=False,
@@ -1695,15 +1720,32 @@ class TestPostPR291ADBaseline:
 
 
 def test_stall_recovery_auto_defaults():
-    """1-site -> 'noise', 2-site -> 'reset' when user leaves gs_stall_recovery=None.
+    """Every unit cell -> 'reset' when user leaves gs_stall_recovery=None.
 
-    See issue #298.
+    1-site was 'noise' before v0.8.4; a noise kick near a settled energy is
+    not rolled back (issue #298, and the D=3 1x1 collapse in the v0.8.4
+    validation).
     """
     from tenax.algorithms.ipeps_config import iPEPSConfig
     from tenax.algorithms.ipeps_optimize import _normalize_stall_recovery
 
     cfg_1s = _normalize_stall_recovery(iPEPSConfig(unit_cell="1x1"), unit_cell="1x1")
-    assert cfg_1s.gs_stall_recovery == "noise"
+    assert cfg_1s.gs_stall_recovery == "reset"
+
+    cfg_1s_c4v = _normalize_stall_recovery(
+        iPEPSConfig(unit_cell="1x1", gs_c4v=True), unit_cell="1x1"
+    )
+    assert cfg_1s_c4v.gs_stall_recovery == "reset"
+
+    cfg_ms = _normalize_stall_recovery(
+        iPEPSConfig(unit_cell="1x1"), unit_cell="multisite"
+    )
+    assert cfg_ms.gs_stall_recovery == "reset"
+
+    cfg_user_1s = _normalize_stall_recovery(
+        iPEPSConfig(unit_cell="1x1", gs_stall_recovery="noise"), unit_cell="1x1"
+    )
+    assert cfg_user_1s.gs_stall_recovery == "noise", "explicit 1-site setting wins"
 
     cfg_2s = _normalize_stall_recovery(
         iPEPSConfig(unit_cell="2site"), unit_cell="2site"
@@ -1780,7 +1822,10 @@ def test_noise_floor_does_not_gate_healthy_optimization():
 
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=10),
+        # on_unconverged="warn" (#1059): the step-4 gradient forward of this
+        # su_init trajectory plateau-bails at 34 sweeps (CI, d5a6b326); the
+        # test checks the #510 noise floor, not CTM convergence.
+        ctm=CTMConfig(chi=4, max_iter=100, on_unconverged="warn"),
         gs_num_steps=5,
         gs_learning_rate=1e-2,
         unit_cell="1x1",
@@ -1856,7 +1901,7 @@ def test_loss_fn_fwd_updates_env_cache_for_hz_dphi_reuse():
 
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=10),
+        ctm=CTMConfig(chi=4, max_iter=100),
         gs_num_steps=1,
         gs_optimizer="lbfgs",
         gs_line_search_method="hager_zhang",
@@ -1928,7 +1973,7 @@ def test_loss_fn_fwd_probe_envs_dont_leak_past_line_search():
     # 2 steps so we observe step-2 reading the cache restored at step-1 end.
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=10),
+        ctm=CTMConfig(chi=4, max_iter=100),
         gs_num_steps=2,
         gs_optimizer="lbfgs",
         gs_line_search_method="hager_zhang",
@@ -2000,7 +2045,7 @@ def test_2site_implicit_ad_ctmrg_heuristic_increase_chi_grows_env():
         max_bond_dim=2,
         ctm=CTMConfig(
             chi=4,
-            max_iter=8,
+            max_iter=100,
             ctmrg_heuristic_increase_chi=True,
             ctmrg_heuristic_increase_chi_threshold=1e-12,  # force bump every call
             ctmrg_heuristic_increase_chi_step_size=2,
@@ -2057,7 +2102,9 @@ def test_gs_ctm_max_iter_schedule_caps_late_step_ctm():
 
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=75),
+        # needs an unconverged forward: the schedule deliberately caps late
+        # steps at 5 sweeps; see #1059.
+        ctm=CTMConfig(chi=4, max_iter=75, on_unconverged="warn"),
         gs_num_steps=5,
         gs_optimizer="lbfgs",
         gs_line_search_method="hager_zhang",
@@ -2114,7 +2161,7 @@ def test_gs_ctm_max_iter_schedule_default_none_unchanged():
 
     config = iPEPSConfig(
         max_bond_dim=2,
-        ctm=CTMConfig(chi=4, max_iter=12),
+        ctm=CTMConfig(chi=4, max_iter=100),
         gs_num_steps=3,
         unit_cell="1x1",
         su_init=True,
@@ -2124,8 +2171,8 @@ def test_gs_ctm_max_iter_schedule_default_none_unchanged():
     with patch.object(ctm_mod, "python_loop_ctm_converge", side_effect=_spy):
         optimize_gs_ad(gate, None, config)
 
-    assert set(seen_max_iter) == {12}, (
-        f"unscheduled run must always pass max_iter=12; got {set(seen_max_iter)}"
+    assert set(seen_max_iter) == {100}, (
+        f"unscheduled run must always pass max_iter=100; got {set(seen_max_iter)}"
     )
 
 
@@ -2309,7 +2356,9 @@ def test_stall_reset_reinits_optax_lbfgs_state(monkeypatch):
         gs_verbose=False,
         unit_cell="1x1",
         su_init=False,
-        ctm=CTMConfig(chi=3, max_iter=5, min_iter=2, conv_tol=1e-3),
+        # 5 sweeps left the step-1 forward unconverged, which now raises before
+        # any stall can happen; 50 converge (#1059).
+        ctm=CTMConfig(chi=3, max_iter=50, min_iter=2, conv_tol=1e-3),
     )
 
     with contextlib.suppress(Exception):

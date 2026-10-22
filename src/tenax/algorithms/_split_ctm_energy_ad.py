@@ -8,6 +8,10 @@ both fully supported here: forward-only converge, explicit-AD (unrolled)
 converge, and implicit-AD (fixed-point ``custom_vjp`` with Neumann backward)
 energy entries for each — ``ctm_energy_split_{explicit,implicit}`` (1×1) and
 ``ctm_energy_split_{explicit,implicit}_2site`` (2-site checkerboard).
+
+The split CTM is dense-only and experimental (frozen by design):
+``SymmetricTensor`` input, bosonic or fermionic, is refused; symmetric iPEPS
+uses the fused CTM (``fuse_virtual_legs=True``).
 """
 
 from __future__ import annotations
@@ -55,9 +59,16 @@ def ctm_energy_split_explicit(
     renormalize: bool = True,
     energy_fn=None,
     recipe: str = "2x2",
+    projector_backward: str = "auto",
     **_ignored,
 ):
-    """Single-site iPEPS energy with explicit (unrolled) split-CTM AD."""
+    """Single-site iPEPS energy with explicit (unrolled) split-CTM AD.
+
+    ``projector_backward="flow"`` lets the 2x2 plaquette projectors' ``dP/dA``
+    reach the gradient (#983).  Explicit AD has no fixed-point adjoint solve,
+    so it is the path where flowing is both safe and measurably better; the
+    implicit twins below deliberately do NOT accept it (see #1028).
+    """
     # #911: the once-per-call boundary for this path.  Not in
     # ``_converge_split_gauge_fixed`` / ``_split_step``, which run per
     # convergence-restart and per sweep respectively.
@@ -90,6 +101,7 @@ def ctm_energy_split_explicit(
         num_steps=backprop_steps,
         warmup_steps=warmup_steps,
         recipe=recipe,
+        projector_backward=projector_backward,
         # This function already warned, with a stacklevel that
         # names the user's call site (#921 review r4).
         _recipe_warning_emitted=True,
@@ -477,6 +489,7 @@ def _explicit_split_multisite_converge(
     renormalize=True,
     warmup_steps=0,
     backprop_steps=20,
+    projector_backward="auto",
 ):
     """Explicit (unrolled) multisite split-CTM converge for warm-start AD.
 
@@ -496,13 +509,29 @@ def _explicit_split_multisite_converge(
     envs = _initialize_split_multisite_env(site_tensors, chi, chi_I)
     for _ in range(warmup_steps):
         envs = _split_ctm_sweep_multisite(
-            envs, site_tensors, bars, neighbors, chi, chi_I, renormalize, "2x2"
+            envs,
+            site_tensors,
+            bars,
+            neighbors,
+            chi,
+            chi_I,
+            renormalize,
+            "2x2",
+            projector_backward=projector_backward,
         )
     if warmup_steps > 0:
         envs = jax.tree.map(jax.lax.stop_gradient, envs)
     for _ in range(backprop_steps):
         envs = _split_ctm_sweep_multisite(
-            envs, site_tensors, bars, neighbors, chi, chi_I, renormalize, "2x2"
+            envs,
+            site_tensors,
+            bars,
+            neighbors,
+            chi,
+            chi_I,
+            renormalize,
+            "2x2",
+            projector_backward=projector_backward,
         )
     return envs
 
@@ -592,9 +621,13 @@ def ctm_energy_split_explicit_2site(
     chi_I=None,
     renormalize=True,
     energy_fn=None,
+    projector_backward: str = "auto",
     **_ignored,
 ):
-    """2-site checkerboard iPEPS energy with explicit (unrolled) split-CTM AD."""
+    """2-site checkerboard iPEPS energy with explicit (unrolled) split-CTM AD.
+
+    See :func:`ctm_energy_split_explicit` for ``projector_backward="flow"``.
+    """
     if energy_fn is not None:
         raise NotImplementedError(
             "custom energy_fn is not supported on the split path; "
@@ -615,6 +648,7 @@ def ctm_energy_split_explicit_2site(
         renormalize=renormalize,
         warmup_steps=warmup_steps,
         backprop_steps=backprop_steps,
+        projector_backward=projector_backward,
     )
     return compute_energy_split_ctm_tensor_multisite(
         site_tensors, envs, neighbors, gate

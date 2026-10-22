@@ -626,7 +626,10 @@ class TestCGOptimizerGuards:
 
         config = iPEPSConfig(
             max_bond_dim=D,
-            ctm=CTMConfig(chi=8, max_iter=20, min_iter=5),
+            # 20 sweeps left the final CTM unconverged (sv_diff 3.7e-5), so
+            # the two energies compared below were unconverged numbers;
+            # 100 converges (#1059).
+            ctm=CTMConfig(chi=8, max_iter=100, min_iter=5),
             gs_num_steps=0,  # evaluate-only
             gs_optimizer="lbfgs",
             gs_metric_precond=False,
