@@ -25,6 +25,7 @@ from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
+from tenax.algorithms.ctm_layout import _converge, normalized_pair
 from tenax.algorithms.fermionic_ipeps import (
     FPEPSConfig,
     _initialize_fpeps,
@@ -32,6 +33,12 @@ from tenax.algorithms.fermionic_ipeps import (
     bond_layout,
     spinless_fermion_gate,
     su_grow_layout,
+)
+from tenax.algorithms.ipeps import (
+    heisenberg_u1sz_init_pair,
+    ipeps,
+    xxz_gate,
+    xxz_gate_u1sz,
 )
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.algorithms.ipeps_optimize import optimize_gs_ad
@@ -45,6 +52,8 @@ CHI = 12
 # chi=12): the latter costs ~10 min to build and its implicit-AD forward does
 # not reliably reach a #841 element-wise fixed point (Task 4 rounds 1-5).
 CHI_D2 = 8
+# The bosonic ``seeded_xxz_d2`` fixture's chi (see its docstring).
+CHI_XXZ = 4
 
 
 def _su(pin, D=3, seed=6, steps=4 * 40):
@@ -551,7 +560,34 @@ def seeded_d2():
     return A, B, H, 2, {(0, 0): eA, (1, 0): eB}
 
 
-def _ad_config(steps, **ctm):
+@pytest.fixture(scope="module")
+def seeded_xxz_d2():
+    """A bosonic U(1) XXZ (Delta=0.3) pair, D=2, chi=4, for the tests that need
+    ``gs_metric_precond``: on fermionic input (``seeded_d2``) #1099 turns the
+    metric off, so the metric L-BFGS path cannot run there.
+
+    chi=4 keeps charged sectors (measured layout ``(-2:1, 0:2, 2:1)`` on every
+    corner leg) with a clean cut: ``symmetric_layout_seed`` measured a cut gap
+    of 0.70, stable over 100 forced sweeps, E = -0.4936904.  The seed itself is
+    not called here (its chi+4 gap CTM costs ~140 s); one cold converge is.
+    """
+    A0, B0 = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+    su_cfg = iPEPSConfig(
+        max_bond_dim=2, num_imaginary_steps=200, dt=0.05, ctm=CTMConfig(chi=CHI_XXZ)
+    )
+    _, (A, B), _ = ipeps(xxz_gate(0.3), (A0, B0), su_cfg, compute_energy=False)
+    A_n, B_n = normalized_pair(A, B)
+    cfg = dataclasses.replace(
+        CTMConfig(chi=CHI_XXZ), conv_tol=1e-10, max_iter=300, plateau_patience=None
+    )
+    envs, info = _converge({(0, 0): A_n, (1, 0): B_n}, cfg, None)
+    assert info.converged  # regime: a converged seed
+    # Regime: charged sectors survive the cut, so a layout can move.
+    assert len(np.unique(np.asarray(envs[(0, 0)].C1.indices[0].charges))) > 1
+    return A, B, xxz_gate_u1sz(0.3), envs
+
+
+def _ad_config(steps, gs=None, chi=CHI_D2, **ctm):
     return iPEPSConfig(
         max_bond_dim=2,
         unit_cell="2site",
@@ -559,7 +595,8 @@ def _ad_config(steps, **ctm):
         gs_implicit_ad=True,
         gs_num_steps=steps,
         gs_verbose=False,
-        ctm=CTMConfig(chi=CHI_D2, **{"max_iter": 50, "conv_tol": 1e-9, **ctm}),
+        ctm=CTMConfig(chi=chi, **{"max_iter": 50, "conv_tol": 1e-9, **ctm}),
+        **(gs or {}),
     )
 
 
@@ -931,6 +968,9 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
     confirmed to still exercise the L-BFGS stall path on this fixture (see
     the report's Fix round 1 section for whether it fired and how many
     calls were recorded).
+
+    Runs with ``gs_layout_recheck=False``: the step-boundary re-check may
+    move the layout by design; this test pins the frozen path.
     """
     A, B, H, d, envs = seeded_d2
     E0 = _E(A, B, envs, H, d)
@@ -950,7 +990,10 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
         # the #1059 reset fired and E1 (-0.53714) ended above E0 (-0.53767);
         # 150 still ended above E0 (-0.537567 vs -0.537672); 400 passes.
         (A1, B1), (_env_A1, _env_B1), E1 = optimize_gs_ad(
-            H, (A, B), _ad_config(5, max_iter=400), envs_init=envs
+            H,
+            (A, B),
+            _ad_config(5, gs={"gs_layout_recheck": False}, max_iter=400),
+            envs_init=envs,
         )
     seed_layout = _layout(envs)
     assert seen_layouts and all(lay == seed_layout for lay in seen_layouts)
@@ -958,6 +1001,429 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
     assert tree((A1, B1)) == tree((A, B))  # site layout frozen
     assert E1 <= E0 + 1e-6, (E0, E1)
     assert E1 >= -8 / np.pi**2 - 1e-3  # V=0 free-fermion bound, one-sided only
+
+
+# ------------------------------------------------------------------ #
+# Step-boundary layout re-check (layout-recheck plan, Task 2)         #
+# ------------------------------------------------------------------ #
+
+
+def _surrogate_energy(monkeypatch, A, B):
+    """Replace the energy with ``-(<A, R_A> + <B, R_B>) / 2`` on the normalized
+    pair, ``R`` a fixed 10% perturbation of the start.  No AD backward runs
+    through the CTM (minutes per call on block-sparse tensors); the real CTM
+    still runs for the env cache, the line-search probes and the re-checks,
+    and L-BFGS still builds real ``(s, y)`` pairs.  These tests check the
+    optimizer's bookkeeping, not the physics.
+
+    Both energy entries are patched with the same function, so the line
+    search's value and the gradient's slope agree: ``ctm_energy_implicit``
+    (the AD loss) and ``compute_energy_ctm_tensor_2site`` (``loss_fn_fwd``).
+    """
+    import tenax.algorithms._ctm_tensor as ct
+
+    def _ref(T, key):
+        leaves, tree = jax.tree_util.tree_flatten(T)
+        keys = jax.random.split(key, len(leaves))
+        noisy = [
+            x
+            + 0.1
+            * jnp.linalg.norm(x)
+            / jnp.sqrt(x.size)
+            * jax.random.normal(k, x.shape, x.dtype)
+            for x, k in zip(leaves, keys)
+        ]
+        R = jax.tree_util.tree_unflatten(tree, noisy)
+        return R * (1.0 / R.norm())
+
+    RA, RB = _ref(A, jax.random.PRNGKey(1)), _ref(B, jax.random.PRNGKey(2))
+
+    def _overlap(X, R):
+        return sum(
+            jnp.real(jnp.vdot(x, r))
+            for x, r in zip(jax.tree_util.tree_leaves(X), jax.tree_util.tree_leaves(R))
+        )
+
+    def _energy(An, Bn):
+        return -0.5 * (_overlap(An, RA) + _overlap(Bn, RB))
+
+    def ctm_energy_implicit(site_tensors, *a, **kw):
+        return _energy(site_tensors[(0, 0)], site_tensors[(1, 0)])
+
+    def compute_energy_ctm_tensor_2site(An, Bn, *a, **kw):
+        return _energy(An, Bn)
+
+    # ``declare_cache_key`` accepts a module-level tenax function in the
+    # optimizer's closure; the stub is installed as that module attribute.
+    compute_energy_ctm_tensor_2site.__module__ = ct.__name__
+    monkeypatch.setattr(ea, "ctm_energy_implicit", ctm_energy_implicit)
+    monkeypatch.setattr(
+        ct, "compute_energy_ctm_tensor_2site", compute_energy_ctm_tensor_2site
+    )
+
+
+def _caller():
+    import sys
+
+    return sys._getframe(2).f_code.co_name
+
+
+def _certify_rechecks(monkeypatch):
+    """Report every step-boundary re-check as layout-certified.
+
+    The scripted-change tests force ``_layout_changed``; the optimizer acts
+    on a change only when the re-check also certified its layout (final
+    review I1).  On ``seeded_d2`` the real re-checks end in an eager
+    two-cycle (measured: RuntimeWarning "alternated" from the re-check
+    call), so they must script the certificate too.
+    """
+    import tenax.algorithms._ctm_python_loop as cpl
+
+    real = cpl.python_loop_ctm_converge
+
+    def _spy(*a, **kw):
+        out_envs, info = real(*a, **kw)
+        if _caller() == "_recheck_layout_2s":
+            info = info._replace(layout_certified=True)
+        return out_envs, info
+
+    monkeypatch.setattr(cpl, "python_loop_ctm_converge", _spy)
+
+
+def test_layout_changed_compares_chi_layouts(seeded_d2, light_envs):
+    import tenax.algorithms._ctm_python_loop as cpl
+
+    *_, envs = seeded_d2
+    assert cpl._chi_layout(envs) != cpl._chi_layout(light_envs)  # regime
+    assert not ipo._layout_changed(None, envs)
+    assert not ipo._layout_changed(envs, envs)
+    assert ipo._layout_changed(light_envs, envs)
+
+
+def test_the_recheck_runs_unfrozen_with_the_configured_tie_rtol(
+    seeded_xxz_d2, monkeypatch
+):
+    """Steps 2..N each run one re-check: warm (env_init = the cache the
+    previous step left), eager phase on (no ``eager_layout_sweeps=0``),
+    the configured tie tolerance.  Refresh and line-search probes stay
+    frozen.  On this fixture neither re-check moves the layout (measured:
+    verdicts ``[False, False]``), so ``layout_changes`` is ``[]``; the
+    scripted tests below own the change path.
+
+    Bosonic fixture: it runs the default optimizer (metric L-BFGS).  On the
+    fermionic ``seeded_d2`` #1099 drops the metric, and on that path both
+    re-checks move the layout (measured: ``[True, True]``)."""
+    import tenax.algorithms._ctm_python_loop as cpl
+
+    A, B, H, envs = seeded_xxz_d2
+    _surrogate_energy(monkeypatch, A, B)
+    real = cpl.python_loop_ctm_converge
+    calls = []
+
+    def _spy(*a, **kw):
+        out = real(*a, **kw)
+        calls.append((_caller(), kw, out))
+        return out
+
+    real_changed = ipo._layout_changed
+    verdicts = []
+
+    def _changed_spy(old, new):
+        v = real_changed(old, new)
+        verdicts.append(v)
+        return v
+
+    monkeypatch.setattr(cpl, "python_loop_ctm_converge", _spy)
+    monkeypatch.setattr(ipo, "_layout_changed", _changed_spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        *_, hist = optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(
+                3,
+                gs={"gs_layout_tie_rtol": 2e-8, "return_history": True},
+                chi=CHI_XXZ,
+                max_iter=400,
+            ),
+            envs_init=envs,
+        )
+    rechecks = [kw for who, kw, _ in calls if who == "_recheck_layout_2s"]
+    assert len(rechecks) == 2, [who for who, *_ in calls]  # steps 2 and 3
+    for kw in rechecks:
+        assert kw["layout_tie_rtol"] == 2e-8
+        assert "eager_layout_sweeps" not in kw
+        assert kw["env_init"] is not None
+    frozen = [
+        kw for who, kw, _ in calls if who in ("_update_env_cache_2s", "loss_fn_fwd")
+    ]
+    assert frozen and all(kw.get("eager_layout_sweeps") == 0 for kw in frozen)
+    # Regime (measured): on this fixture both re-checks keep the layout, so
+    # ``layout_changes`` is empty here; the scripted tests own the change path.
+    assert verdicts == [False, False], verdicts
+    assert hist["layout_changes"] == []
+
+
+@pytest.mark.parametrize("kind", ["metric_lbfgs", "optax_lbfgs", "adam"])
+def test_a_layout_change_resets_the_optimizer_state(request, monkeypatch, kind):
+    """Script a change at the step-3 re-check (step 2 has an empty L-BFGS
+    history anyway, so a reset there proves nothing).  Then, before the
+    step-4 re-check: a fresh value_and_grad runs (the HZ reuse is dropped),
+    the L-BFGS state restarts, and best tracking restarts at +inf.
+
+    ``gs_metric_precond`` (default True) uses ``lbfgs_history`` and
+    ``lbfgs_two_loop``: the first two-loop call after the change must see an
+    empty history (no stale pairs, and no new pair built from the pre-change
+    params).  ``gs_metric_precond=False`` uses the optax optimizer: its
+    ``init`` must run again before its first ``update`` on the new layout.
+
+    The metric case runs on the bosonic ``seeded_xxz_d2``: on the fermionic
+    ``seeded_d2`` #1099 turns the metric off, so ``lbfgs_two_loop`` never
+    runs there.  Adam is an optax optimizer too: its moments from the old
+    layout must not reach the first update on the new one (Codex on #1135)."""
+    import tenax.algorithms._metric_precond as mp
+
+    metric = kind == "metric_lbfgs"
+    gs = {"return_history": True, "gs_metric_precond": metric}
+    if kind == "adam":
+        gs.update(gs_optimizer="adam", gs_line_search=False)
+    if kind != "optax_lbfgs":
+        A, B, H, envs = request.getfixturevalue("seeded_xxz_d2")
+        chi = CHI_XXZ
+    else:
+        A, B, H, _d, envs = request.getfixturevalue("seeded_d2")
+        chi = CHI_D2
+    _surrogate_energy(monkeypatch, A, B)
+    events = []
+
+    def _changed(old, new):
+        v = len([e for e in events if e[0] == "check"]) == 1  # 2nd check = step 3
+        events.append(("check", v))
+        return v
+
+    real_vg = ipo._site1_value_and_grad
+
+    def _vg(*a, **kw):
+        events.append(("vg",))
+        return real_vg(*a, **kw)
+
+    real_build = ipo._build_optimizer
+
+    def _build(cfg):
+        opt = real_build(cfg)
+        if opt is None:
+            return None
+
+        def init(p):
+            events.append(("init",))
+            return opt.init(p)
+
+        def update(*a, **kw):
+            events.append(("update",))
+            return opt.update(*a, **kw)
+
+        return SimpleNamespace(init=init, update=update)
+
+    real_two_loop = mp.lbfgs_two_loop
+
+    def _two_loop(g, history, h0):
+        events.append(("two_loop", len(history)))
+        return real_two_loop(g, history, h0)
+
+    real_accept = ipo._should_accept_best
+
+    def _accept(**kw):
+        events.append(("accept", kw["current_best"]))
+        return real_accept(**kw)
+
+    _certify_rechecks(monkeypatch)
+    monkeypatch.setattr(ipo, "_layout_changed", _changed)
+    monkeypatch.setattr(ipo, "_site1_value_and_grad", _vg)
+    monkeypatch.setattr(ipo, "_build_optimizer", _build)
+    monkeypatch.setattr(mp, "lbfgs_two_loop", _two_loop)
+    monkeypatch.setattr(ipo, "_should_accept_best", _accept)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        *_, hist = optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(
+                4,
+                gs=gs,
+                chi=chi,
+                max_iter=400,
+            ),
+            envs_init=envs,
+        )
+    assert hist["layout_changes"] == [3]
+    i = events.index(("check", True))
+    nxt = events.index(("check", False), i)
+    window = events[i + 1 : nxt]
+    assert ("vg",) in window, events
+    accepts = [e for e in window if e[0] == "accept"]
+    assert accepts and accepts[0][1] == float("inf"), events
+    if metric:
+        # Regime: before the change the history was not empty, so an empty
+        # one after it is the reset, not the start of the run.
+        before = [e[1] for e in events[:i] if e[0] == "two_loop"]
+        assert before and before[-1] >= 1, events
+        loops = [e for e in window if e[0] == "two_loop"]
+        assert loops and loops[0][1] == 0, events
+    else:
+        # The restart must come before the optimizer's first use on the new
+        # layout: a later init (a line-search stall reset in the same step)
+        # does not show the change reset it.
+        assert ("update",) in window, window
+        first_update = window.index(("update",))
+        assert ("init",) in window[:first_update], events
+
+
+def test_a_resumed_run_rechecks_its_first_step(seeded_xxz_d2, monkeypatch, tmp_path):
+    """A fresh run skips the re-check at its first step: ``envs_init`` was
+    converged at those tensors.  A resumed run must not: the checkpoint's
+    tensors were updated after its last evaluation (Codex on #1135).  Each
+    re-check calls ``_layout_changed`` once."""
+    A, B, H, envs = seeded_xxz_d2
+    _surrogate_energy(monkeypatch, A, B)
+    calls = []
+    real = ipo._layout_changed
+
+    def _spy(old, new):
+        calls.append(1)
+        return real(old, new)
+
+    monkeypatch.setattr(ipo, "_layout_changed", _spy)
+    ckpt = {"gs_checkpoint_path": str(tmp_path), "gs_checkpoint_every": 1}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        optimize_gs_ad(H, (A, B), _ad_config(2, gs=ckpt, chi=CHI_XXZ), envs_init=envs)
+        n_fresh = len(calls)
+        optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(3, gs={**ckpt, "gs_resume": True}, chi=CHI_XXZ),
+            envs_init=envs,
+        )
+    assert n_fresh == 1, calls  # regime: steps 1-2, the re-check at step 2 only
+    assert len(calls) - n_fresh == 1, calls  # the resumed step 3 re-checks
+
+
+def test_an_unconverged_recheck_is_not_a_change(seeded_d2, monkeypatch):
+    """A re-check that does not converge is never acted on, even if its
+    layout differs."""
+    import tenax.algorithms._ctm_python_loop as cpl
+
+    A, B, H, _d, envs = seeded_d2
+    _surrogate_energy(monkeypatch, A, B)
+    real = cpl.python_loop_ctm_converge
+    n_rechecks = []
+
+    def _spy(*a, **kw):
+        out_envs, info = real(*a, **kw)
+        if _caller() == "_recheck_layout_2s":
+            n_rechecks.append(1)
+            info = info._replace(converged=False)
+        return out_envs, info
+
+    monkeypatch.setattr(cpl, "python_loop_ctm_converge", _spy)
+    monkeypatch.setattr(ipo, "_layout_changed", lambda old, new: True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        *_, hist = optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(3, gs={"return_history": True}, max_iter=400),
+            envs_init=envs,
+        )
+    # Regime: the re-check ran (steps 2 and 3), so [] is its verdict, not
+    # the absence of one.
+    assert len(n_rechecks) == 2, n_rechecks
+    assert hist["layout_changes"] == []
+
+
+def test_a_rollback_after_a_change_restores_the_new_layout(seeded_d2, monkeypatch):
+    """After an acted-on change, a rollback restores the re-checked env,
+    never the seed: ``_reset_env_cache_2s`` falls back to ``envs_init``
+    only when no best snapshot exists, and the change clears best tracking,
+    so the change itself must leave a snapshot.
+
+    The rollback is forced on the first gradient after the change (step 2),
+    before any best is accepted on the new layout -- the only point where
+    the change's own snapshot is what a rollback restores.  (The brief's
+    grad-spike version could not do this: the config refuses
+    ``gs_grad_spike_ratio <= 1``, and a step-3 rollback restores step 2's
+    accepted snapshot, whatever the change left.)
+
+    The step-3 re-check is warm from whatever the rollback restored, so it
+    tells whether the rollback fell back to the seed: its ``old`` env must
+    not be ``envs_init``.  The gradient forward gets ``env_cache["envs"]``
+    itself as ``env_init`` (``ipeps_ad_policy._ctm_energy_fn``), so no
+    forward after the change may be seeded with the seed object either.
+    ``make_ctm_energy_fn`` imports ``ctm_energy_implicit`` from
+    ``_ctm_energy_ad`` (``ea``) when the optimizer builds its loss, so
+    patching ``ea`` before the call is seen."""
+    from tenax.algorithms._ad_primitives import CTMRGGradientError
+
+    A, B, H, _d, envs = seeded_d2
+    _surrogate_energy(monkeypatch, A, B)
+    events = []
+    real_drop = ipo._drop_env_cache_for_reset
+
+    def _drop(cache):
+        events.append(("drop",))
+        real_drop(cache)
+
+    def _changed(old, new):
+        v = not any(e[0] == "check" for e in events)  # first check = step 2
+        events.append(("check", v, old is envs))
+        return v
+
+    real_vg = ipo._site1_value_and_grad
+
+    def _vg(*a, **kw):
+        changed = any(e[:2] == ("check", True) for e in events)
+        if changed and not any(e[0] == "raised" for e in events):
+            events.append(("raised",))
+            raise CTMRGGradientError(1.5)
+        return real_vg(*a, **kw)
+
+    real_accept = ipo._should_accept_best
+
+    def _accept(**kw):
+        events.append(("accept",))
+        return real_accept(**kw)
+
+    real_fwd = ea.ctm_energy_implicit
+
+    def _fwd(*a, **kw):
+        events.append(("fwd", kw.get("env_init") is envs))
+        return real_fwd(*a, **kw)
+
+    _certify_rechecks(monkeypatch)
+    monkeypatch.setattr(ipo, "_layout_changed", _changed)
+    monkeypatch.setattr(ipo, "_drop_env_cache_for_reset", _drop)
+    monkeypatch.setattr(ipo, "_site1_value_and_grad", _vg)
+    monkeypatch.setattr(ipo, "_should_accept_best", _accept)
+    monkeypatch.setattr(ea, "ctm_energy_implicit", _fwd)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optimize_gs_ad(
+            H,
+            (A, B),
+            _ad_config(3, gs={"gs_stall_recovery": "reset"}, max_iter=400),
+            envs_init=envs,
+        )
+    i = next(k for k, e in enumerate(events) if e[:2] == ("check", True))
+    after = events[i + 1 :]
+    # Regime: the forced error fired, and a rollback drop followed it before
+    # any best was accepted on the new layout.
+    r = after.index(("raised",))
+    assert ("drop",) in after[r:], events
+    assert ("accept",) not in after[: after.index(("drop",), r)], events
+    checks = [e for e in after if e[0] == "check"]
+    assert checks and not any(e[2] for e in checks), events  # step 3's re-check
+    fwds = [e[1] for e in after if e[0] == "fwd"]
+    assert fwds and not any(fwds), events
 
 
 @pytest.mark.slow
