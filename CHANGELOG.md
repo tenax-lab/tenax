@@ -625,6 +625,15 @@
 
 ### Fixed
 
+- **The joint chain rule's eager fallback logs again.**  When the fused
+  fixed-point loop does not solve the adjoint, the `"joint"` branch (the
+  default since `adjoint_chain_rule="auto"`, #1125) falls back to an eager GMRES
+  solve but no longer emitted the `tenax.ctm.gmres` debug line
+  `Eager GMRES: maxiter=... tol=... restart=...` that the `"separate"` branch
+  emits (#499).  The fallback itself always ran; only the log was missing.  This
+  had failed `test_gmres_logger_emits_at_eager_fallback` in every slow-bucket run
+  on `main` since #1125 (20 of 20 failed slow jobs, Oct 20-23).
+
 - **A symmetric `python_loop_ctm_converge` now chooses its chi-leg charge
   layout** (#1098, `_ctm_python_loop.py`).  Every sweep ran under
   `jax.jit`, and for `SymmetricTensor` input the jitted 2x2 projector keeps
