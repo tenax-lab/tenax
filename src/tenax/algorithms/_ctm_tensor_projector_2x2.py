@@ -1428,11 +1428,15 @@ def _symmetric_projector_cut(
         # base_charges (mirrors _retruncate_chi_bond).  Under tracing,
         # the dispatcher in _truncated_svd_symmetric routes to the traced
         # variant which consumes base_charges directly.
+        # Probe the flat buffer, not ``q.blocks``: on a concrete tensor that
+        # slices every block eagerly and caches a full copy.  A block is a
+        # tracer when ``_data`` is one and there is a block.  (A concrete tensor
+        # read inside an enclosing trace would slice to tracers; the Q tensors
+        # here are either jit outputs or values of that trace.)
         is_traced_inputs = any(
-            isinstance(b, jax.core.Tracer)
+            q.n_blocks > 0 and isinstance(q._data, jax.core.Tracer)
             for q in (Q_TL, Q_TR, Q_BL, Q_BR)
             if isinstance(q, SymmetricTensor)
-            for b in q.blocks.values()
         )
         if is_traced_inputs:
             # The traced allocation is static, so it cannot read the singular

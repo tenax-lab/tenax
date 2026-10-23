@@ -161,3 +161,24 @@ def test_dense_input_calls_the_function_directly(monkeypatch):
 
     ej.call(body, {"env": _sym()})  # a symmetric leaf container does jit
     assert len(hits) == 1
+
+
+# ------------------------------- tracer probe reads _data, not blocks (R14 F3)
+def test_the_eager_svd_probe_does_not_slice_concrete_blocks():
+    """Probing ``q.blocks`` slices every block of a concrete tensor and caches it."""
+    from tenax.algorithms._ctm_tensor_moves import _is_eager_symmetric_svd_case
+
+    qs = [_sym(i) for i in range(4)]
+    assert not any(hasattr(q, "_blocks_cache") for q in qs), "fixture pre-cached"
+    kw = dict(direction="left", base_charges=np.zeros(1, np.int32))
+    assert _is_eager_symmetric_svd_case(*qs, **kw) is True
+    assert not any(hasattr(q, "_blocks_cache") for q in qs)
+
+    seen = []
+
+    def probe(*traced):
+        seen.append(_is_eager_symmetric_svd_case(*traced, **kw))
+        return traced[0]
+
+    jax.jit(probe)(*qs)
+    assert seen == [False]

@@ -408,11 +408,15 @@ def _is_eager_symmetric_svd_case(
         return False
     if base_charges is None:
         return False
+    # Probe the flat buffer, not ``q.blocks``: on a concrete tensor that
+    # slices every block eagerly and caches a full copy.  A block is a
+    # tracer when ``_data`` is one and there is a block.  (A concrete tensor
+    # read inside an enclosing trace would slice to tracers; the Q tensors
+    # here are either jit outputs or values of that trace.)
     is_traced_inputs = any(
-        isinstance(b, jax.core.Tracer)
+        q.n_blocks > 0 and isinstance(q._data, jax.core.Tracer)
         for q in (Q_TL, Q_TR, Q_BL, Q_BR)
         if isinstance(q, SymmetricTensor)
-        for b in q.blocks.values()
     )
     return not is_traced_inputs
 
