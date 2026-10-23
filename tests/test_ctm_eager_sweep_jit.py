@@ -1,4 +1,10 @@
-"""Eager #1098 layout sweeps jit their static-shape pieces; the result is unchanged."""
+"""Eager #1098 layout sweeps jit their static-shape pieces.
+
+The result is unchanged away from degenerate cuts.  At a tie the result can
+differ: this is a property of the code, not something measured here.  The
+jitted prime stage routes the M1/M2 SVDs to ``_truncated_svd_symmetric_traced``,
+so the chosen sectors can differ.  No test in this file exercises a tie.
+"""
 
 from __future__ import annotations
 
@@ -217,9 +223,13 @@ def _confined_pair():
     return {(0, 0): A, (1, 0): B}
 
 
-def test_degenerate_cut_gives_the_same_energy(monkeypatch):
-    """Review Focus 1: U(1) D=2 chi=8 cuts a three-fold degenerate set (#1098
-    test).  The jitted M' can keep another tied slot, so compare energies."""
+def test_chi8_energy_matches_with_jit_on_and_off(monkeypatch):
+    """Energy equivalence at U(1) D=2 chi=8: a converged CTM with the eager
+    helper on and off gives the same energy.
+
+    The M' cut here is not degenerate: at the converged environment it sits in
+    a 2.2 % gap (8.764e-5 kept, 8.576e-5 discarded), and both runs keep the
+    same chi layout."""
     A0, B0 = heisenberg_u1sz_init_pair(D, jax.random.PRNGKey(0))
     su = iPEPSConfig(
         max_bond_dim=D, num_imaginary_steps=200, dt=0.05, ctm=CTMConfig(chi=8)

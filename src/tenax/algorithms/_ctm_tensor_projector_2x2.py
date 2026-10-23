@@ -1613,7 +1613,7 @@ def _compute_2x2_projector_symmetric(
     base_charges: np.ndarray | None = None,
     projector_backward: str = "auto",
     incoming_chi_charges: np.ndarray | None = None,
-) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array]:
+) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array, jax.Array]:
     """Block-sparse 2x2 Fishman projector for SymmetricTensor inputs.
 
     Mirrors the dense pipeline in :func:`_compute_2x2_projector` stage-for-stage
