@@ -45,6 +45,11 @@ _FILE_MARKERS = {
     "test_graded_ctm.py": "core",
     "test_graded_simple_update.py": "core",
     "test_dmrg.py": "algorithm",
+    "test_layout_helpers.py": "core",  # ~6 s
+    "test_symmetric_layout_seed.py": "algorithm",  # ~105 s
+    "test_symmetric_ad_validation_guards.py": "core",  # 2 tests ~28 s CPU
+    # FD tests are @slow (~16 min GPU, both cases); the regime guard is fast.
+    "test_symmetric_2site_ad_gradient.py": "algorithm",
     "test_idmrg.py": "algorithm",
     "test_itebd.py": "algorithm",
     "test_trg.py": "algorithm",
@@ -504,6 +509,11 @@ _FILE_MARKERS = {
     "test_ctm_truncation_error.py": "core",
     "test_ctm_paired.py": "algorithm",
     "test_ctm_python_loop.py": "algorithm",
+    # #1098: symmetric python_loop_ctm_converge adapts the chi layout.  Two
+    # 200-step SU fixtures plus eager + jitted CTM runs: well over 20 s on CPU.
+    "test_ctm_symmetric_layout_adapts_1098.py": "algorithm",
+    # #1098: hand-built envs for the eager phase's _chi_layout criterion, ~1 s.
+    "test_ctm_chi_layout_1098.py": "core",
     "test_rsvd.py": "core",
     "test_cbe.py": "algorithm",
     "test_lattice.py": "algorithm",
@@ -662,6 +672,7 @@ _FILE_MARKERS = {
     "test_projector_backward_dispatch.py": "core",
     "test_svd_adjoint_fd_750.py": "core",
     "test_symmetric_custom_vjp.py": "core",
+    "test_symmetric_spin_models.py": "core",  # 7 tests ~6.15s
     "test_truncated_lowrank_svd.py": "core",
     #
     # Tier B, part 2 -- CTM structural invariants (7 files, +47 gate tests,

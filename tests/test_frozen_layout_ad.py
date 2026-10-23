@@ -397,7 +397,9 @@ def test_the_seeded_traced_ctm_keeps_the_layout_and_the_energy(
     assert abs(_E(A, B, envs, H, d) - _E(A, B, eager_envs, H, d)) <= 1e-8
     # The property the jit cache needs is traced->traced stability: one more
     # traced sweep must reproduce the FULL tree_structure (basis order
-    # included), or every AD step would retrace.
+    # included), or every AD step would retrace.  ``eager_layout_sweeps=0``
+    # (#1098): with the default, ``max_iter=1`` would spend its one sweep in
+    # the eager layout phase, whose basis order differs from the traced one.
     again, _ = python_loop_ctm_converge(
         site,
         CHECKERBOARD_NEIGHBORS,
@@ -405,6 +407,7 @@ def test_the_seeded_traced_ctm_keeps_the_layout_and_the_energy(
         max_iter=1,
         conv_tol=1e-10,
         env_init=envs,
+        eager_layout_sweeps=0,
     )
     tree = jax.tree_util.tree_structure
     assert tree(again) == tree(envs)
@@ -416,7 +419,11 @@ def test_the_cold_traced_ctm_is_why_the_seed_exists(frozen_state, eager_envs):
     environment the traced CTM lands on a different sector layout (sizes, not
     basis order -- see ``_layout``).  If this ever fails, the seed is a no-op
     for this fixture and Task 3's first test certifies nothing -- pick a
-    fixture where it matters."""
+    fixture where it matters.
+
+    ``eager_layout_sweeps=0`` (#1098): ``python_loop_ctm_converge`` now runs
+    eager sweeps first and so adapts the layout itself; the traced-only CTM
+    this guard measures is its opt-out."""
     A, B, _, _ = frozen_state
     envs, _ = python_loop_ctm_converge(
         {(0, 0): A, (1, 0): B},
@@ -424,6 +431,7 @@ def test_the_cold_traced_ctm_is_why_the_seed_exists(frozen_state, eager_envs):
         chi=CHI,
         max_iter=50,
         conv_tol=1e-10,
+        eager_layout_sweeps=0,
     )
     assert _layout(envs) != _layout(eager_envs)
 

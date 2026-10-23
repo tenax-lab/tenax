@@ -717,69 +717,19 @@ def _truncated_svd_symmetric(
 # ---------- Tracer-safe block-sparse SVD ----------
 
 
-def _truncated_svd_symmetric_traced(
+def _assemble_sector_matrices(
     tensor: SymmetricTensor,
-    left_labels: Sequence[Label],
-    right_labels: Sequence[Label],
-    max_singular_values: int | None,
-    new_bond_label: Label,
-    normalize: bool,
-    base_charges: np.ndarray | None = None,
-) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor, jax.Array]:
-    """Tracer-safe block-diagonal SVD for SymmetricTensor.
+    left_axes: list[int],
+    right_axes: list[int],
+) -> dict[int, tuple]:
+    """Per bond-charge sector, the dense matrix a block-diagonal SVD factors.
 
-    Used under JAX tracing (e.g. AD backward through implicit-FP GMRES).  Each
-    charge sector is SVD'd independently via :func:`truncated_svd_ad`, which
-    applies Francuz et al. Lorentzian regularization per block.
-
-    ``bond_order="sector"`` requests never reach this function: that mode's
-    layout reads no values, so the eager body itself is tracer-safe and the
-    dispatch keeps sector-mode tracers there -- deliberately, because
-    :func:`truncated_svd_ad`'s subrank floor (exact zeros below
-    ``1e-12 * (s_max + 1e-30)``) is a truncation-semantics guard, not a
-    property of the decomposition, and sector mode promises the eager
-    numbers.
-
-    Allocation rule (static, no global SV sort):
-      * If both ``base_charges`` and ``max_singular_values`` are provided:
-        ``k_q = min(target_count[q], available_q)`` where
-        ``target_count[q]`` is the count of ``q`` in
-        ``_derive_charges(base_charges, max_singular_values)``.  When
-        ``target_count`` over-allocates a sector (target exceeds
-        available), the unused budget is greedily redistributed to
-        sectors with remaining capacity, ordered by largest unused
-        capacity first, ties broken by smallest q for determinism.  This
-        matches the eager-path :func:`_retruncate_by_base_charges` so
-        traced bond dimension agrees with the forward (eager) path under
-        AD (codex P2 review on PR #440).
-      * If ``max_singular_values`` is None: ``k_q = min(rows_q, cols_q)``
-        (full spectrum per sector).
-      * Else (defensive fallback, base_charges=None and truncating):
-        ``k_q = max(1, round(max_singular_values * available_q / total_available))``,
-        adjusted so totals do not exceed ``max_singular_values``.
-
-    The bond axis emerges in sector-block order, NOT global SV-descending
-    order.  This differs from the eager path's output ordering; tensor
-    contractions match by charge identity per block, so the permutation is
-    safe.  Positional reads of S (e.g. ``S[0]``) should use ``jnp.max(S)``
-    instead — see ``_compute_2x2_projector_symmetric`` line 960.
-
-    Returns ``(U, s_truncated, Vh, s_full)``; under tracing ``s_full = s_truncated``
-    (no pre-truncation spectrum tracked separately).
+    Returns ``q -> (matrix, left_subkeys, right_subkeys, left_row_sizes,
+    right_col_sizes, available_q)``.  Traceable: shapes depend only on the
+    block structure.  Shared by :func:`_truncated_svd_symmetric_traced` and
+    :func:`sector_singular_values` (the #1098 layout probe).
     """
-    from tenax.algorithms._ad_primitives import truncated_svd_ad
-    from tenax.algorithms._ctm_utils import _derive_charges
-
-    all_labels = tensor.labels()
-    label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}
-    left_axes = [label_to_axis[lbl] for lbl in left_labels]
-    right_axes = [label_to_axis[lbl] for lbl in right_labels]
-    left_indices = tuple(tensor.indices[i] for i in left_axes)
-    right_indices = tuple(tensor.indices[i] for i in right_axes)
-
     grouped = _group_blocks_by_bond_charge(tensor, left_axes, right_axes)
-
-    sym = tensor.indices[0].symmetry
     decomp_perm = tuple(left_axes + right_axes)
 
     # Per-sector results: q -> (matrix, left_subkeys, right_subkeys,
@@ -843,6 +793,91 @@ def _truncated_svd_symmetric_traced(
             right_col_sizes,
             available_q,
         )
+
+    return sector_results
+
+
+def sector_singular_values(
+    tensor: SymmetricTensor,
+    left_labels: Sequence[Label],
+    right_labels: Sequence[Label],
+) -> dict[int, jax.Array]:
+    """Full singular-value spectrum of each bond-charge sector, descending.
+
+    Values only (no U/Vh), traceable, one entry per sector with a non-empty
+    matrix -- including sectors a truncated SVD would allocate nothing to.
+    """
+    labels = tensor.labels()
+    left_axes = [labels.index(lbl) for lbl in left_labels]
+    right_axes = [labels.index(lbl) for lbl in right_labels]
+    return {
+        q: jnp.linalg.svd(r[0], compute_uv=False)
+        for q, r in _assemble_sector_matrices(tensor, left_axes, right_axes).items()
+    }
+
+
+def _truncated_svd_symmetric_traced(
+    tensor: SymmetricTensor,
+    left_labels: Sequence[Label],
+    right_labels: Sequence[Label],
+    max_singular_values: int | None,
+    new_bond_label: Label,
+    normalize: bool,
+    base_charges: np.ndarray | None = None,
+) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor, jax.Array]:
+    """Tracer-safe block-diagonal SVD for SymmetricTensor.
+
+    Used under JAX tracing (e.g. AD backward through implicit-FP GMRES).  Each
+    charge sector is SVD'd independently via :func:`truncated_svd_ad`, which
+    applies Francuz et al. Lorentzian regularization per block.
+
+    ``bond_order="sector"`` requests never reach this function: that mode's
+    layout reads no values, so the eager body itself is tracer-safe and the
+    dispatch keeps sector-mode tracers there -- deliberately, because
+    :func:`truncated_svd_ad`'s subrank floor (exact zeros below
+    ``1e-12 * (s_max + 1e-30)``) is a truncation-semantics guard, not a
+    property of the decomposition, and sector mode promises the eager
+    numbers.
+
+    Allocation rule (static, no global SV sort):
+      * If both ``base_charges`` and ``max_singular_values`` are provided:
+        ``k_q = min(target_count[q], available_q)`` where
+        ``target_count[q]`` is the count of ``q`` in
+        ``_derive_charges(base_charges, max_singular_values)``.  When
+        ``target_count`` over-allocates a sector (target exceeds
+        available), the unused budget is greedily redistributed to
+        sectors with remaining capacity, ordered by largest unused
+        capacity first, ties broken by smallest q for determinism.  This
+        matches the eager-path :func:`_retruncate_by_base_charges` so
+        traced bond dimension agrees with the forward (eager) path under
+        AD (codex P2 review on PR #440).
+      * If ``max_singular_values`` is None: ``k_q = min(rows_q, cols_q)``
+        (full spectrum per sector).
+      * Else (defensive fallback, base_charges=None and truncating):
+        ``k_q = max(1, round(max_singular_values * available_q / total_available))``,
+        adjusted so totals do not exceed ``max_singular_values``.
+
+    The bond axis emerges in sector-block order, NOT global SV-descending
+    order.  This differs from the eager path's output ordering; tensor
+    contractions match by charge identity per block, so the permutation is
+    safe.  Positional reads of S (e.g. ``S[0]``) should use ``jnp.max(S)``
+    instead — see ``_compute_2x2_projector_symmetric`` line 960.
+
+    Returns ``(U, s_truncated, Vh, s_full)``; under tracing ``s_full = s_truncated``
+    (no pre-truncation spectrum tracked separately).
+    """
+    from tenax.algorithms._ad_primitives import truncated_svd_ad
+    from tenax.algorithms._ctm_utils import _derive_charges
+
+    all_labels = tensor.labels()
+    label_to_axis = {lbl: i for i, lbl in enumerate(all_labels)}
+    left_axes = [label_to_axis[lbl] for lbl in left_labels]
+    right_axes = [label_to_axis[lbl] for lbl in right_labels]
+    left_indices = tuple(tensor.indices[i] for i in left_axes)
+    right_indices = tuple(tensor.indices[i] for i in right_axes)
+
+    sym = tensor.indices[0].symmetry
+    sector_results = _assemble_sector_matrices(tensor, left_axes, right_axes)
 
     # --- Static per-sector keep allocation ---
     if max_singular_values is None:

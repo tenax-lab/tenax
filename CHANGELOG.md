@@ -640,6 +640,76 @@
   adjoint solve needs (freezing the scale outright left GMRES at a 7e-4
   residual on a solve that converges).
 
+- **A symmetric `python_loop_ctm_converge` now chooses its chi-leg charge
+  layout** (#1098, `_ctm_python_loop.py`).  Every sweep ran under
+  `jax.jit`, and for `SymmetricTensor` input the jitted 2x2 projector keeps
+  each charge sector's size from the leg it overwrites (#929).  So a cold
+  start never left the initial tiling (the D² fused charges padded with
+  q=0), and the converged energy was the energy of that restricted layout.
+  Now the layout is chosen before the jitted sweeps.  A warm start already
+  off the initial tiling runs one jitted *probe* sweep that also returns
+  each cut's per-sector singular values; if every cut kept a global top-chi
+  (ties within 1e-10 of the largest value accepted), that sweep is kept and
+  nothing else changes.  Otherwise -- and always for a cold start or an env
+  with the initial tiling -- eager (un-jitted) sweeps choose the layout
+  (a cold start stops when two consecutive eager sweeps agree), and the
+  jitted sweeps then keep it.  Eager outputs are put in ascending-charge
+  order along each chi leg so the jitted step does not recompile per call;
+  the probe compiles once per layout.  New keyword `eager_layout_sweeps`
+  (default 20, `0` = old behaviour) caps the eager phase; it warns if the
+  layout is still changing when the cap or `max_iter` ends the phase.  Probe
+  and eager sweeps count toward `max_iter` and the returned iteration
+  counts.  Dense input is unchanged.  This reaches the optimizer's symmetric
+  warm starts, line-search probes and final evaluations, which all call this
+  function.  Measured (D=2 XXZ Delta=0.3, 2-site SU, cold start), symmetric
+  minus dense energy: U(1)-Sz chi=6 6.6e-6 -> 1e-16, chi=8 6.9e-6 -> 5.8e-11
+  (a three-fold degenerate cut: the residual is which two of the three are
+  kept); Z2 chi=8 8.3e-5 -> 0.0.
+  - **Cost.**  A cold start runs eager sweeps op by op and compiles each
+    primitive per new block shape on first use (U(1) chi=8: ~100 s in a
+    fresh process, was ~10 s).  In a 10-step symmetric 2-site
+    `optimize_gs_ad` (U(1), D=2, chi=8, CPU) the warm calls ran no eager
+    sweep (0.03-0.11 s each, was 0.03-0.07 s), and the steady-state steps
+    took 1.6-3.1 s against 1.2-4.7 s before.  Step 2 took 385 s against
+    14 s: the first AD step still runs on the cold, frozen layout (the
+    implicit-AD forward is not seeded from this function), and step 2 is
+    the first on the adapted layout.  Final energy -0.5024173361 against
+    -0.5023729185.
+  - **End-of-call check.**  The layout is chosen once, before the jitted
+    sweeps, and the spectrum can move after that.  So at the end of every
+    symmetric call the returned env's layout is checked again: one jitted
+    probe sweep where the probe can certify, else (`recipe="1x1"`, an
+    uncharged double layer) one eager sweep whose layout must equal the
+    env's.  The check sweep's output is discarded; it counts toward
+    `max_iter` (the jitted loop leaves one sweep for it) and toward
+    `iterations`, and `best_iteration` still points at the returned env.  If
+    the check fails, the eager phase and the jitted loop run again from the
+    returned env, at most twice and within `max_iter`; if it still fails, a
+    warning names #1098 and the env is returned with `converged` as the loop
+    reported it.  The check is skipped when the layout phase already ended
+    unstable or in a two-cycle (it has warned), and on non-final `chi_ramp`
+    stages.  An eager phase whose cut alternates between two layouts now
+    stops at the first repeat, keeps the earlier layout (the other one
+    if the earlier is the cold-init tiling) and warns, instead
+    of running to the cap.  On a cold start the first eager output does not
+    take part in that test: it can echo the cold-init tiling, so a cold
+    two-cycle needs `o_n == o_{n-2} != o_{n-1}` with `n - 2 >= 2`.  Measured
+    (U(1) XXZ Delta=0.3, D=3, chi=9, every sweep eager): the layouts went
+    T, X, T, T, ... (T = the tiling) and the energy settled on T at
+    -0.5529793; the earlier rule called sweep 3 a two-cycle, kept X and
+    converged to -0.552384.  Now sweep 4 is stable on T.  Every probe (accepted or rejected), eager and
+    check sweep is counted in `iterations`, which never exceeds `max_iter`, and `best_iteration` trails
+    `iterations` only after a plateau bail.  A run seeded with
+    `optimize_gs_ad(envs_init=...)` keeps its seed's layout: its warm-start
+    refresh and line-search probes pass `eager_layout_sweeps=0`.  The final
+    evaluation is cold (#899), does not start from the seed, and adapts its
+    layout as an unseeded call does.  Cost: one extra sweep per symmetric call.  Measured (CPU, D=2, the
+    fixtures above, same process): the first check pays the probe compile
+    (U(1) chi=6 4.7 s, Z2 chi=8 3.3 s); after that a check takes 3-4 ms, on
+    cold calls (3.7 s / 2.4 s total) and settled warm calls (~0.04 s total).
+  - **Not covered:** chi slots added by the in-loop chi bump
+    (`ctmrg_heuristic_increase_chi`) keep a frozen layout.
+
 - **The #1111 slope check's probe no longer recompiles the forward inside
   the backward (#1116).**  A custom_vjp backward runs under JAX's recorded
   equation context, which keys the jit and eager-dispatch caches on an empty
