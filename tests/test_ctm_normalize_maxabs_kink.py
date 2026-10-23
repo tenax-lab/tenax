@@ -21,6 +21,7 @@ import pytest
 from tenax.algorithms._ctm_tensor_convergence import (
     _normalize_tensor as _normalize_convergence,
 )
+from tenax.algorithms._ctm_tensor_moves import _max_abs_scale
 from tenax.algorithms._ctm_tensor_moves import _normalize_tensor as _normalize_moves
 from tenax.core import EPS
 from tenax.core.index import FlowDirection, TensorIndex
@@ -65,8 +66,10 @@ def _tied_dense():
 
 @pytest.mark.parametrize("normalize", [_normalize_moves, _normalize_convergence])
 @pytest.mark.parametrize("make", [_tied_symmetric, _tied_dense])
-def test_normalize_is_smooth_and_scale_invariant_at_a_max_tie(normalize, make):
+@pytest.mark.parametrize("scale", [1.0, 1e200])
+def test_normalize_is_smooth_and_scale_invariant_at_a_max_tie(normalize, make, scale):
     data, treedef = make()
+    data = data * scale  # 1e200: squaring the raw entries would overflow
 
     def f(x):
         (out,) = jax.tree_util.tree_leaves(
@@ -95,3 +98,23 @@ def test_normalize_is_smooth_and_scale_invariant_at_a_max_tie(normalize, make):
     # adjoint solve depends on it.
     _, tangent = jax.jvp(f, (data,), (data,))
     assert float(jnp.max(jnp.abs(tangent))) <= 1e-12 * float(jnp.max(jnp.abs(f(data))))
+
+
+@pytest.mark.parametrize("make", [_tied_symmetric, _tied_dense])
+@pytest.mark.parametrize("scale", [1e-200, 1.0, 1e200])
+def test_max_abs_scale_is_finite_with_a_frobenius_gradient(make, scale):
+    data, treedef = make()
+    data = data * scale
+
+    def s_of(x):
+        return _max_abs_scale(jax.tree_util.tree_unflatten(treedef, [x]))
+
+    value, grad = jax.value_and_grad(s_of)(data)
+    m = jnp.max(jnp.abs(data))
+    assert float(value) == float(m)  # exactly max|T| in value
+    assert bool(jnp.all(jnp.isfinite(grad)))
+    # d/dT of (m / ||T||) * ||T|| with the ratio held: m T / ||T||^2, formed
+    # from max-scaled entries so the reference itself cannot overflow.
+    y = data / m
+    expected = y / jnp.sum(y**2)
+    np.testing.assert_allclose(grad, expected, rtol=1e-12, atol=0)
