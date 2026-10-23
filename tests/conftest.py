@@ -26,6 +26,7 @@ _FILE_MARKERS = {
     "test_fermionic_refusals_1059.py": "core",
     # Eager-CTM jit helper: pure mechanism (jit only for concrete inputs), no CTM.
     "test_ctm_eager_jit.py": "core",
+    "test_ctm_eager_sweep_jit.py": "algorithm",
     "test_tensor.py": "core",
     # PR #986 Phase 1: the swap-gate primitive.  Pure block-metadata sign
     # tests, no CTM, ~1s; the graded-transpose cross-check is the mutation
