@@ -66,6 +66,11 @@ def _block_in_decomp_order(block, decomp_perm: tuple[int, ...]):
     return block.transpose(decomp_perm)
 
 
+# Smallest min(m, n) at which the GPU SVD uses the polar algorithm; see
+# _dense_svd.  Measured crossover on an A100 is ~100.
+_GPU_POLAR_MIN_DIM = 128
+
+
 def _dense_svd(
     matrix: jax.Array,
     full_matrices: bool = False,
@@ -90,13 +95,30 @@ def _dense_svd(
     Ref: cuSOLVER 12.2.2.18 (jaxlib 0.10.1) -> 12.2.6.9 (jaxlib 0.10.2) regressed
     ``gesvdj`` convergence on ill-conditioned inputs; JAX then NaN-fills the
     result on ``info != 0`` (jax-ml/jax gesvdj non-convergence issue).
+
+    From ``min(m, n) >= _GPU_POLAR_MIN_DIM`` the GPU path uses the polar
+    algorithm (``gesvdp``) instead.  ``gesvd`` bidiagonalises column by
+    column and launches ~250 tiny kernels per call, so a CTM sweep is
+    launch-bound: on an A100 the spinless t-V 2x2 sweep (48 SVDs) ran
+    127k kernels at D=4 chi=32 (256x256 sectors) and 370k at D=5 chi=50
+    (~625x625).  Polar cut that to 22k / 61k and the sweep from 0.667 s to
+    0.472 s (1.41x) and 2.08 s to 1.57 s (1.33x).  Below ~100 polar is about
+    2x *slower* than ``gesvd`` (U(1) sectors, small D), hence the threshold.
+    Validated on cuSOLVER 12.3.5.3: no NaN on 84 stress matrices (spectra to
+    1e-30, rank-deficient, degenerate, zero) or 1,056 harvested CTM matrices,
+    singular values as accurate as ``gesvd``, and the flow CTM-AD gradient
+    equal to the QR one to ~12 digits.  Jacobi (``gesvdj``) stays excluded:
+    besides the NaN history it was 2-3.4x slower than ``gesvd`` on these
+    sweeps.  Re-check after a cuSOLVER or jaxlib upgrade.
     """
     if jax.default_backend() == "gpu":
+        polar = getattr(_SvdAlgorithm, "POLAR", None)  # absent on old JAX
+        use_polar = polar is not None and min(matrix.shape[-2:]) >= _GPU_POLAR_MIN_DIM
         result = _lax_svd(
             matrix,
             full_matrices=full_matrices,
             compute_uv=compute_uv,
-            algorithm=_SvdAlgorithm.QR,
+            algorithm=polar if use_polar else _SvdAlgorithm.QR,
         )
     else:
         result = jnp.linalg.svd(

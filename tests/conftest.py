@@ -25,6 +25,7 @@ _FILE_MARKERS = {
     # refusals fire before any tensor work, and the branch targets are spies.
     "test_fermionic_refusals_1059.py": "core",
     "test_tensor.py": "core",
+    "test_dense_svd_gpu_algorithm.py": "core",
     # PR #986 Phase 1: the swap-gate primitive.  Pure block-metadata sign
     # tests, no CTM, ~1s; the graded-transpose cross-check is the mutation
     # anchor for the fermionic CTM-AD reform's build-time statistics.
