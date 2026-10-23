@@ -1225,47 +1225,71 @@ def _incoming_chi_charges(
     return np.asarray(idx.charges, dtype=np.int32)
 
 
-def _compute_2x2_projector_symmetric(
+def _prime_meta(direction: str) -> dict:
+    """The static labels of the symmetric 2x2 projector for ``direction``.
+
+    Pure function of ``direction``; the three projector stages
+    (:func:`_symmetric_projector_prime`, :func:`_symmetric_projector_cut`,
+    :func:`_symmetric_projector_finish`) read their label tuples from here.
+    """
+    if direction in ("left", "right"):
+        m1_left_labels = ("chi_B_TL", "d2_TL")
+        m1_right_labels = ("chi_B_TR", "d2_TR")
+        m2_left_labels = ("chi_T_BR", "u2_BR")
+        m2_right_labels = ("chi_T_BL", "u2_BL")
+    else:  # "top", "bottom"
+        m1_left_labels = ("chi_R_BL", "r2_BL")
+        m1_right_labels = ("chi_R_TL", "r2_TL")
+        m2_left_labels = ("chi_L_TR", "l2_TR")
+        m2_right_labels = ("chi_L_BR", "l2_BR")
+    if direction in ("left", "bottom"):
+        prime_order = "second_first"
+        first_outer_labels = m1_left_labels
+        second_outer_labels = m2_right_labels
+    else:  # "right", "top"
+        prime_order = "first_second"
+        first_outer_labels = m1_right_labels
+        second_outer_labels = m2_left_labels
+    if prime_order == "second_first":
+        mp_left_labels = ("m2_bond",)
+        mp_right_labels = ("m1_bond",)
+    else:
+        mp_left_labels = ("m1_bond",)
+        mp_right_labels = ("m2_bond",)
+    return {
+        "m1_left_labels": m1_left_labels,
+        "m1_right_labels": m1_right_labels,
+        "m2_left_labels": m2_left_labels,
+        "m2_right_labels": m2_right_labels,
+        "prime_order": prime_order,
+        "first_outer_labels": first_outer_labels,
+        "second_outer_labels": second_outer_labels,
+        "mp_left_labels": mp_left_labels,
+        "mp_right_labels": mp_right_labels,
+    }
+
+
+def _symmetric_projector_prime(
     Q_TL: SymmetricTensor,
     Q_TR: SymmetricTensor,
     Q_BL: SymmetricTensor,
     Q_BR: SymmetricTensor,
-    chi: int,
     *,
     direction: str,
-    base_charges: np.ndarray | None = None,
-    projector_backward: str = "auto",
-    incoming_chi_charges: np.ndarray | None = None,
-) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array]:
-    """Block-sparse 2x2 Fishman projector for SymmetricTensor inputs.
+) -> tuple[SymmetricTensor, SymmetricTensor, SymmetricTensor]:
+    """Stages 1-4 of :func:`_compute_2x2_projector_symmetric` up to ``M_prime``.
 
-    Mirrors the dense pipeline in :func:`_compute_2x2_projector` stage-for-stage
-    via :func:`tenax.linalg.svd` and the per-sector gauge-fix helper
-    :func:`_gauge_fix_symmetric_svd`.
-
-    See ``docs/superpowers/specs/2026-05-11-2x2-projector-symmetric-design.md``
-    for the cut-seam relabel rationale and flow conventions.
-
-    Args:
-        Q_TL, Q_TR, Q_BL, Q_BR: 4-leg enlarged corners.  Must all be SymmetricTensor.
-        chi: Target bond dimension of the new chi_new leg.
-        direction: One of ``"left"``, ``"right"``, ``"top"``, ``"bottom"``.
-        base_charges: Optional 1-D ``np.ndarray`` of charges. When supplied,
-            each named charge keeps at least one ``chi_new`` slot; the rest
-            of the budget is the global top-chi (#922).
-
-    Returns:
-        ``(P_top, P_bot, eps_T)`` SymmetricTensor projectors with the same
-        label / flow conventions as the dense path's output, plus the
-        variPEPS §2.8.2 truncation-error scalar.  ``eps_T`` uses the
-        Frobenius identity ``‖S_full‖² = ‖M_prime‖_F²`` so the discarded
-        singular values aren't required explicitly — the block-sparse
-        SVD already truncates to ``chi`` (Issue #474).
+    Returns ``(M_prime_T, first_half, second_half)``.  Needs no concrete
+    values, so an eager sweep runs it under ``jax.jit`` (#1098).
     """
     from tenax.algorithms import _ctm_graded as G
 
-    if direction not in ("left", "right", "top", "bottom"):
-        raise ValueError(f"unsupported direction={direction!r}")
+    meta = _prime_meta(direction)
+    m1_left_labels = meta["m1_left_labels"]
+    m1_right_labels = meta["m1_right_labels"]
+    m2_left_labels = meta["m2_left_labels"]
+    m2_right_labels = meta["m2_right_labels"]
+    prime_order = meta["prime_order"]
 
     # ---- Stage 1: form M1, M2 as 4-leg SymmetricTensors. ----
     if direction in ("left", "right"):
@@ -1274,32 +1298,24 @@ def _compute_2x2_projector_symmetric(
             {"chi_L": "chi_R", "l2": "r2", "chi_B": "chi_B_TR", "d2": "d2_TR"}
         )
         M1_T = G.contract(Q_TL_relab, Q_TR_relab)
-        m1_left_labels = ("chi_B_TL", "d2_TL")
-        m1_right_labels = ("chi_B_TR", "d2_TR")
 
         Q_BR_relab = Q_BR.relabels(
             {"chi_L": "chi_R", "l2": "r2", "chi_T": "chi_T_BR", "u2": "u2_BR"}
         )
         Q_BL_relab = Q_BL.relabels({"chi_T": "chi_T_BL", "u2": "u2_BL"})
         M2_T = G.contract(Q_BR_relab, Q_BL_relab)
-        m2_left_labels = ("chi_T_BR", "u2_BR")
-        m2_right_labels = ("chi_T_BL", "u2_BL")
     else:  # "top", "bottom"
         Q_BL_relab = Q_BL.relabels(
             {"chi_T": "chi_B", "u2": "d2", "chi_R": "chi_R_BL", "r2": "r2_BL"}
         )
         Q_TL_relab = Q_TL.relabels({"chi_R": "chi_R_TL", "r2": "r2_TL"})
         M1_T = G.contract(Q_BL_relab, Q_TL_relab)
-        m1_left_labels = ("chi_R_BL", "r2_BL")
-        m1_right_labels = ("chi_R_TL", "r2_TL")
 
         Q_TR_relab = Q_TR.relabels(
             {"chi_B": "chi_T", "d2": "u2", "chi_L": "chi_L_TR", "l2": "l2_TR"}
         )
         Q_BR_relab = Q_BR.relabels({"chi_L": "chi_L_BR", "l2": "l2_BR"})
         M2_T = G.contract(Q_TR_relab, Q_BR_relab)
-        m2_left_labels = ("chi_L_TR", "l2_TR")
-        m2_right_labels = ("chi_L_BR", "l2_BR")
 
     # ---- Stage 2: SVDs of M1, M2 with per-sector gauge fix. ----
     U_M1_T, M1_S, Vh_M1_T, _ = G.svd(
@@ -1345,15 +1361,9 @@ def _compute_2x2_projector_symmetric(
     if direction in ("left", "bottom"):
         first_half = _scale_bond_by_diag(U_M1_T, M1_sqrtS, bond_label="m1_bond")
         second_half = _scale_bond_by_diag(Vh_M2_T, M2_sqrtS, bond_label="m2_bond")
-        prime_order = "second_first"
-        first_outer_labels = m1_left_labels
-        second_outer_labels = m2_right_labels
     else:  # "right", "top"
         first_half = _scale_bond_by_diag(Vh_M1_T, M1_sqrtS, bond_label="m1_bond")
         second_half = _scale_bond_by_diag(U_M2_T, M2_sqrtS, bond_label="m2_bond")
-        prime_order = "first_second"
-        first_outer_labels = m1_right_labels
-        second_outer_labels = m2_left_labels
 
     first_norm = jnp.sqrt(jnp.sum(M1_S) + 1e-30)
     second_norm = jnp.sqrt(jnp.sum(M2_S) + 1e-30)
@@ -1364,19 +1374,43 @@ def _compute_2x2_projector_symmetric(
         second_half, jnp.ones_like(M2_S) / second_norm, bond_label="m2_bond"
     )
 
-    # ---- Stage 4: form M_prime by renaming cut seam + contract; SVD M_prime. ----
+    # ---- Stage 4: form M_prime by renaming cut seam + contract. ----
     if prime_order == "second_first":
         cut_relabel = dict(zip(m1_left_labels, m2_right_labels))
         first_half_for_mp = first_half.relabels(cut_relabel)
         M_prime_T = G.contract(second_half, first_half_for_mp)
-        mp_left_labels = ("m2_bond",)
-        mp_right_labels = ("m1_bond",)
     else:
         cut_relabel = dict(zip(m1_right_labels, m2_left_labels))
         first_half_for_mp = first_half.relabels(cut_relabel)
         M_prime_T = G.contract(first_half_for_mp, second_half)
-        mp_left_labels = ("m1_bond",)
-        mp_right_labels = ("m2_bond",)
+
+    return M_prime_T, first_half, second_half
+
+
+def _symmetric_projector_cut(
+    M_prime_T: SymmetricTensor,
+    *,
+    direction: str,
+    chi: int,
+    base_charges: np.ndarray | None,
+    incoming_chi_charges: np.ndarray | None,
+    Q_TL: SymmetricTensor,
+    Q_TR: SymmetricTensor,
+    Q_BL: SymmetricTensor,
+    Q_BR: SymmetricTensor,
+) -> tuple[SymmetricTensor, jax.Array, SymmetricTensor]:
+    """Stage 4 SVD of ``M_prime``: ``(U_Mp_T, S_Mp, Vh_Mp_T)`` before the gauge fix.
+
+    On eager input with ``base_charges`` this reads the singular values
+    (:func:`_retruncate_chi_bond`), so it is the one stage an eager sweep
+    does not jit.  The Q tensors decide traced vs eager, as before the split,
+    and name the incoming chi leg on the traced branch.
+    """
+    from tenax.algorithms import _ctm_graded as G
+
+    meta = _prime_meta(direction)
+    mp_left_labels = meta["mp_left_labels"]
+    mp_right_labels = meta["mp_right_labels"]
 
     # Pass base_charges through; the linalg.svd dispatcher will route to the
     # traced path if blocks carry tracers, or the eager+retruncate path
@@ -1445,6 +1479,31 @@ def _compute_2x2_projector_symmetric(
         direction=direction,
         matrix_name="M_prime (combined projector)",
     )
+    return U_Mp_T, S_Mp, Vh_Mp_T
+
+
+def _symmetric_projector_finish(
+    M_prime_T: SymmetricTensor,
+    first_half: SymmetricTensor,
+    second_half: SymmetricTensor,
+    U_Mp_T: SymmetricTensor,
+    S_Mp: jax.Array,
+    Vh_Mp_T: SymmetricTensor,
+    *,
+    direction: str,
+    projector_backward: str,
+) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array, jax.Array]:
+    """Gauge fix, ``eps_T``/``smallest_S`` and stages 5-6 after the ``M_prime`` cut.
+
+    Needs no concrete values, so an eager sweep runs it under ``jax.jit``.
+    """
+    from tenax.algorithms import _ctm_graded as G
+
+    meta = _prime_meta(direction)
+    prime_order = meta["prime_order"]
+    first_outer_labels = meta["first_outer_labels"]
+    second_outer_labels = meta["second_outer_labels"]
+
     U_Mp_T, Vh_Mp_T = _gauge_fix_symmetric_svd(U_Mp_T, Vh_Mp_T)
 
     # ε_T via the Frobenius identity (Issue #474).  Block-sparse SVD
@@ -1540,4 +1599,70 @@ def _compute_2x2_projector_symmetric(
         P_bot,
         jax.lax.stop_gradient(eps_T),
         jax.lax.stop_gradient(smallest_S),
+    )
+
+
+def _compute_2x2_projector_symmetric(
+    Q_TL: SymmetricTensor,
+    Q_TR: SymmetricTensor,
+    Q_BL: SymmetricTensor,
+    Q_BR: SymmetricTensor,
+    chi: int,
+    *,
+    direction: str,
+    base_charges: np.ndarray | None = None,
+    projector_backward: str = "auto",
+    incoming_chi_charges: np.ndarray | None = None,
+) -> tuple[SymmetricTensor, SymmetricTensor, jax.Array]:
+    """Block-sparse 2x2 Fishman projector for SymmetricTensor inputs.
+
+    Mirrors the dense pipeline in :func:`_compute_2x2_projector` stage-for-stage
+    via :func:`tenax.linalg.svd` and the per-sector gauge-fix helper
+    :func:`_gauge_fix_symmetric_svd`.
+
+    See ``docs/superpowers/specs/2026-05-11-2x2-projector-symmetric-design.md``
+    for the cut-seam relabel rationale and flow conventions.
+
+    Args:
+        Q_TL, Q_TR, Q_BL, Q_BR: 4-leg enlarged corners.  Must all be SymmetricTensor.
+        chi: Target bond dimension of the new chi_new leg.
+        direction: One of ``"left"``, ``"right"``, ``"top"``, ``"bottom"``.
+        base_charges: Optional 1-D ``np.ndarray`` of charges. When supplied,
+            each named charge keeps at least one ``chi_new`` slot; the rest
+            of the budget is the global top-chi (#922).
+
+    Returns:
+        ``(P_top, P_bot, eps_T)`` SymmetricTensor projectors with the same
+        label / flow conventions as the dense path's output, plus the
+        variPEPS §2.8.2 truncation-error scalar.  ``eps_T`` uses the
+        Frobenius identity ``‖S_full‖² = ‖M_prime‖_F²`` so the discarded
+        singular values aren't required explicitly — the block-sparse
+        SVD already truncates to ``chi`` (Issue #474).
+    """
+    if direction not in ("left", "right", "top", "bottom"):
+        raise ValueError(f"unsupported direction={direction!r}")
+
+    M_prime_T, first_half, second_half = _symmetric_projector_prime(
+        Q_TL, Q_TR, Q_BL, Q_BR, direction=direction
+    )
+    U_Mp_T, S_Mp, Vh_Mp_T = _symmetric_projector_cut(
+        M_prime_T,
+        direction=direction,
+        chi=chi,
+        base_charges=base_charges,
+        incoming_chi_charges=incoming_chi_charges,
+        Q_TL=Q_TL,
+        Q_TR=Q_TR,
+        Q_BL=Q_BL,
+        Q_BR=Q_BR,
+    )
+    return _symmetric_projector_finish(
+        M_prime_T,
+        first_half,
+        second_half,
+        U_Mp_T,
+        S_Mp,
+        Vh_Mp_T,
+        direction=direction,
+        projector_backward=projector_backward,
     )
