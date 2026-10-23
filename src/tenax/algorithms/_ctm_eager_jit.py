@@ -8,7 +8,9 @@ truncation needs concrete values; :func:`call` runs every other piece under
 one ``jax.jit`` per function and input structure.
 
 Under an enclosing trace (the jitted ``_step``, AD) :func:`call` calls the
-function directly, so the traced program is the one it was before.
+function directly, so the traced program is the one it was before.  It also
+calls the function directly when no input is a :class:`SymmetricTensor`, so
+the dense eager path does not change.
 
 The contraction path reads some ``TENAX_*`` environment flags per call (see
 :data:`_CONTRACTION_ENV_FLAGS`).  Inside a jitted piece such a flag is read
@@ -27,6 +29,7 @@ from collections.abc import Callable
 import jax
 
 from tenax.contraction import contractor as _contractor
+from tenax.core.tensor import SymmetricTensor
 
 # Module switch: ``False`` runs every piece eagerly, as before this module.
 _ENABLED = True
@@ -69,9 +72,20 @@ def _has_tracer(tree) -> bool:
     return any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(tree))
 
 
+def _is_symmetric(x) -> bool:
+    return isinstance(x, SymmetricTensor)
+
+
+def _has_symmetric(tree) -> bool:
+    return any(_is_symmetric(x) for x in jax.tree.leaves(tree, is_leaf=_is_symmetric))
+
+
 def call(fn: Callable, *args, static_argnames: tuple[str, ...] = (), **kwargs):
-    """``fn(*args, **kwargs)``, under a cached ``jax.jit`` when the inputs are concrete."""
+    """``fn(*args, **kwargs)``, under a cached ``jax.jit`` for concrete symmetric inputs."""
     if not _ENABLED or _has_tracer((args, kwargs)):
+        return fn(*args, **kwargs)
+    if not _has_symmetric((args, kwargs)):
+        # The dense eager path stays as it was (plan Global Constraint).
         return fn(*args, **kwargs)
     if _contractor._strict_contract():
         # A cached executable would skip the per-call #834 checks.

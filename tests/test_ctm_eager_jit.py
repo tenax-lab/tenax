@@ -1,11 +1,29 @@
-"""``_ctm_eager_jit.call``: jit when the inputs are concrete, pass through when traced."""
+"""``_ctm_eager_jit.call``: jit concrete symmetric inputs, pass everything else through."""
 
 from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 import tenax.algorithms._ctm_eager_jit as ej
+from tenax.core.index import FlowDirection, TensorIndex
+from tenax.core.symmetry import U1Symmetry
+from tenax.core.tensor import DenseTensor, SymmetricTensor
+
+
+def _sym(seed=0):
+    U1 = U1Symmetry()
+    q = np.array([-1, 0, 0, 1], np.int32)
+    idx = (
+        TensorIndex.from_charges(U1, q, FlowDirection.IN, "a"),
+        TensorIndex.from_charges(U1, q, FlowDirection.OUT, "b"),
+    )
+    return SymmetricTensor.random_normal(idx, jax.random.PRNGKey(seed))
+
+
+def _close(out, ref, factor):
+    return jnp.allclose(out.todense(), factor * ref.todense())
 
 
 def _double(x):
@@ -18,33 +36,34 @@ def _scale(x, *, k):
 
 def test_concrete_call_runs_through_one_cached_jit():
     ej._jitted.cache_clear()
-    out = ej.call(_double, jnp.ones(3))
-    assert jnp.allclose(out, 2.0)
+    t = _sym()
+    assert _close(ej.call(_double, t), t, 2.0)
     jitted = ej._jitted(_double, (), ej._env_flags())
     assert jitted._cache_size() == 1
-    ej.call(_double, jnp.zeros(3))  # same shape: no new trace
+    ej.call(_double, _sym(1))  # same structure: no new trace
     assert jitted._cache_size() == 1
 
 
 def test_traced_call_bypasses_the_jit():
     ej._jitted.cache_clear()
-    jax.jit(lambda x: ej.call(_double, x))(jnp.ones(3))
+    jax.jit(lambda x: ej.call(_double, x))(_sym())
     assert ej._jitted.cache_info().currsize == 0
 
 
 def test_disabled_calls_the_raw_function(monkeypatch):
     ej._jitted.cache_clear()
     monkeypatch.setattr(ej, "_ENABLED", False)
-    out = ej.call(_double, jnp.ones(3))
-    assert jnp.allclose(out, 2.0)
+    t = _sym()
+    assert _close(ej.call(_double, t), t, 2.0)
     assert ej._jitted.cache_info().currsize == 0
 
 
 def test_static_argnames_are_static():
     ej._jitted.cache_clear()
-    a = ej.call(_scale, jnp.ones(2), k=3.0, static_argnames=("k",))
-    b = ej.call(_scale, jnp.ones(2), k=5.0, static_argnames=("k",))
-    assert jnp.allclose(a, 3.0) and jnp.allclose(b, 5.0)
+    t = _sym()
+    a = ej.call(_scale, t, k=3.0, static_argnames=("k",))
+    b = ej.call(_scale, t, k=5.0, static_argnames=("k",))
+    assert _close(a, t, 3.0) and _close(b, t, 5.0)
     assert ej._jitted(_scale, ("k",), ej._env_flags())._cache_size() == 2
 
 
@@ -56,10 +75,11 @@ def test_a_patched_function_gets_its_own_jit():
         return x * 2.0
 
     def f2(x):
-        return x + 10.0
+        return x * 10.0
 
-    assert jnp.allclose(ej.call(f1, jnp.ones(2)), 2.0)
-    assert jnp.allclose(ej.call(f2, jnp.ones(2)), 11.0)
+    t = _sym()
+    assert _close(ej.call(f1, t), t, 2.0)
+    assert _close(ej.call(f2, t), t, 10.0)
     assert ej._jitted.cache_info().currsize == 2
 
 
@@ -84,13 +104,15 @@ def test_armed_strict_mode_runs_every_call_eagerly(monkeypatch):
         runs.append(None)
         return x * (2.0 if contractor._strict_contract() else 1.0)
 
+    t = _sym()
     monkeypatch.setenv(_STRICT, "0")
-    assert jnp.allclose(ej.call(body, jnp.ones(3)), 1.0)  # warm the jit
-    assert len(runs) == 1
+    assert _close(ej.call(body, t), t, 1.0)  # warm the jit
+    ej.call(body, t)
+    assert len(runs) == 1, "the jit did not warm"
 
     monkeypatch.setenv(_STRICT, "1")
-    assert jnp.allclose(ej.call(body, jnp.ones(3)), 2.0)
-    assert jnp.allclose(ej.call(body, jnp.ones(3)), 2.0)
+    assert _close(ej.call(body, t), t, 2.0)
+    assert _close(ej.call(body, t), t, 2.0)
     assert len(runs) == 3, "the strict check ran at trace time only"
 
 
@@ -105,8 +127,37 @@ def test_a_new_contraction_flag_value_gets_a_new_executable(monkeypatch):
     def body(x):
         return x * (2.0 if os.environ.get(flag) == "1" else 1.0)
 
+    t = _sym()
     monkeypatch.setenv(flag, "0")
-    assert jnp.allclose(ej.call(body, jnp.ones(3)), 1.0)
+    assert _close(ej.call(body, t), t, 1.0)
     monkeypatch.setenv(flag, "1")
-    assert jnp.allclose(ej.call(body, jnp.ones(3)), 2.0)
+    assert _close(ej.call(body, t), t, 2.0)
     assert ej._jitted.cache_info().currsize == 2
+
+
+# ------------------------------------------- dense input is not jitted (R14 F2)
+def test_dense_input_calls_the_function_directly(monkeypatch):
+    """The dense eager path must not change: no jit without a SymmetricTensor."""
+    hits = []
+    real = ej._jitted
+
+    def spy(*a):
+        hits.append(a)
+        return real(*a)
+
+    monkeypatch.setattr(ej, "_jitted", spy)
+    runs = []
+
+    def body(*xs):
+        runs.append(None)
+        return xs[0]
+
+    d = DenseTensor(jnp.ones((4, 4)), _sym().indices)
+    for args in ((d,), (jnp.ones(3),), ({"env": d}, jnp.ones(2))):
+        ej.call(body, *args)
+        ej.call(body, *args)
+    assert hits == []
+    assert len(runs) == 6
+
+    ej.call(body, {"env": _sym()})  # a symmetric leaf container does jit
+    assert len(hits) == 1
