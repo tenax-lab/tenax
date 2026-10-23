@@ -2,7 +2,10 @@
 
 Fixture: U(1) XXZ Delta=0.3 2-site iPEPS from a short simple update, then a
 cold ``python_loop_ctm_converge``.  Each eager sweep is timed and the XLA
-backend compiles inside it are counted (``jax.monitoring``).
+backend compiles inside it are counted (``jax.monitoring``).  After each
+eager sweep the chi-leg layout ((charge, multiplicity) per chi leg) is printed;
+at the end, the energy per site of the converged envs and, where the device
+reports it, the device peak memory.
 
 Run on one GPU (``CUDA_VISIBLE_DEVICES=1``) or with ``JAX_PLATFORMS=cpu``.
 """
@@ -11,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import time
 
 import jax
@@ -20,6 +24,9 @@ jax.config.update("jax_enable_x64", True)
 import tenax.algorithms._ctm_python_loop as cpl  # noqa: E402
 from tenax import CTMConfig, ipeps, iPEPSConfig  # noqa: E402
 from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS  # noqa: E402
+from tenax.algorithms._ctm_tensor_energy import (  # noqa: E402
+    compute_energy_ctm_tensor_2site,
+)
 from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair, xxz_gate  # noqa: E402
 from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs  # noqa: E402
 
@@ -63,6 +70,9 @@ def main() -> None:
             f"compiles {_COMPILES[0] - c0}, compile_s {_COMPILES[1] - s0:.1f}",
             flush=True,
         )
+        layout = repr(cpl._chi_layout(out[0]))
+        digest = hashlib.sha256(layout.encode()).hexdigest()[:16]
+        print(f"eager sweep {n_sweeps[0]} layout {digest}: {layout}", flush=True)
         return out
 
     cpl._eager_ctm_sweep = timed
@@ -75,7 +85,7 @@ def main() -> None:
         on_unconverged="warn",
     )
     c0, t0 = _COMPILES[0], time.time()
-    cpl.python_loop_ctm_converge(
+    envs, _ = cpl.python_loop_ctm_converge(
         {(0, 0): A, (1, 0): B}, CHECKERBOARD_NEIGHBORS, **ctm_converge_kwargs(cfg)
     )
     print(
@@ -83,6 +93,14 @@ def main() -> None:
         f"eager_sweeps {n_sweeps[0]}",
         flush=True,
     )
+    g = xxz_gate(0.3).todense()
+    e = compute_energy_ctm_tensor_2site(A, B, envs[(0, 0)], envs[(1, 0)], g, 2)
+    print(f"energy per site {float(e):.15f}", flush=True)
+    stats = jax.devices()[0].memory_stats()
+    if stats and "peak_bytes_in_use" in stats:
+        print(f"device peak_bytes_in_use {stats['peak_bytes_in_use']}", flush=True)
+    else:
+        print("device peak_bytes_in_use n/a", flush=True)
 
 
 if __name__ == "__main__":
