@@ -1,9 +1,13 @@
 """Eager #1098 layout sweeps jit their static-shape pieces.
 
-The result is unchanged away from degenerate cuts.  At a tie the result can
-differ: this is a property of the code, not something measured here.  The
-jitted prime stage routes the M1/M2 SVDs to ``_truncated_svd_symmetric_traced``,
-so the chosen sectors can differ.  No test in this file exercises a tie.
+The jitted pieces compute the same values as the eager ones to roundoff.
+The M1/M2 SVDs of the prime stage run with ``max_singular_values=None``, so
+the traced SVD variant they reach under the jit selects no sectors.  The
+effect is downstream: the eager M' cut (``_select_chi_slots``, a global
+top-chi) receives inputs that differ at roundoff level.  At an exact
+cross-sector degeneracy (common for +q/-q pairs in U(1)-Sz) the cut can then
+keep the other slot.  The plain eager sweep was equally sensitive to
+roundoff there.  No test in this file exercises a tie.
 """
 
 from __future__ import annotations
