@@ -86,9 +86,9 @@ def test_eager_sweep_runs_the_absorb_moves_under_jit(sites, monkeypatch):
     seen = []
     raw_jitted = ej._jitted
 
-    def spy(fn, static_argnames):
+    def spy(fn, static_argnames, flags):
         seen.append(fn.__name__)
-        return raw_jitted(fn, static_argnames)
+        return raw_jitted(fn, static_argnames, flags)
 
     monkeypatch.setattr(ej, "_jitted", spy)
     _sweeps(sites, CHI, 1, True, monkeypatch)
@@ -101,9 +101,9 @@ def test_eager_sweep_runs_the_projector_stages_under_jit(sites, monkeypatch):
     seen = []
     raw_jitted = ej._jitted
 
-    def spy(fn, static_argnames):
+    def spy(fn, static_argnames, flags):
         seen.append(fn.__name__)
-        return raw_jitted(fn, static_argnames)
+        return raw_jitted(fn, static_argnames, flags)
 
     monkeypatch.setattr(ej, "_jitted", spy)
     _sweeps(sites, CHI, 1, True, monkeypatch)
