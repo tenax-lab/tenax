@@ -69,10 +69,13 @@ CI required checks run `pytest -m core` on Python 3.11, 3.12 (Linux) and
    gh pr create
    ```
 
-4. CI must pass before merge. PRs are squash-merged:
+4. CI must pass before merge. PRs are squash-merged through the merge queue:
    ```bash
-   gh pr merge <number> --squash --delete-branch --auto
+   gh pr merge <number> --squash --auto
    ```
+   Do not pass `--delete-branch`. The merge queue deletes the head branch
+   when the PR merges. With the flag, `gh` deletes the branch when the PR
+   enters the queue, and that closes the PR and removes it from the queue.
 
 **Branch protection:** `main` requires three passing checks — `Tests (Python 3.11)`,
 `Tests (Python 3.12)`, and `Tests (macOS, Python 3.12)`. The PR branch does not
