@@ -20,9 +20,12 @@ __all__ = [
 ]
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms import _ctm_eager_jit as _ej
 from tenax.algorithms import _ctm_graded as G
+from tenax.algorithms import _ctm_tensor_projector_2x2 as _p2x2
 from tenax.algorithms._ctm_chunked_absorb import (
     _chunked_T_new_bottom,
     _chunked_T_new_left,
@@ -50,10 +53,63 @@ from tenax.core import EPS
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
+def _max_abs_scale(T: Tensor) -> jax.Array:
+    """``T.max_abs()`` in value, with the gradient of a smooth norm.
+
+    The value is exactly ``max |T|`` (``f - stop_gradient(f)`` is exactly 0),
+    so the forward is unchanged.  The gradient is that of ``c * ||T||_F`` with
+    the constant ``c = max|T| / ||T||_F``.
+
+    Why not differentiate ``max`` itself: it has a kink wherever the largest
+    ``|entry|`` is tied, and the double-layer environment ties it exactly
+    (entries related by the ket<->bra swap).  There the backward depended on
+    which tied entry rounding picked: a 1e-15 relative change to a D=3 U(1)
+    chi=9 environment moved the implicit-AD ``J^T v`` by 15%, and JAX and a
+    torch replay of the same program disagreed by as much.
+
+    Why not ``stop_gradient`` the scale: the derivative of ``T / N(T)`` is what
+    projects the scale direction out of the CTM Jacobian (``N`` homogeneous of
+    degree 1 gives ``J T = 0``).  Without it the unnormalised map's radial
+    eigenvalue ~1 stays in ``J`` and the adjoint ``(I - J^T) lambda = b``
+    stops converging (GMRES residual 1e-6 -> 7e-4 on
+    ``tests/test_adjoint_convergence_gate.py``).  ``c * ||T||_F`` is also
+    homogeneous of degree 1, so it keeps that projection, and the result is
+    the exact Jacobian of a Frobenius-normalised map with the same fixed point
+    up to a per-tensor scale, which the energy does not see.
+    """
+    # ``||T||_F = m * n`` with ``n = ||T / m||_F`` in ``[1, sqrt(size)]``: the
+    # norm is formed from max-scaled entries, so it neither overflows (entries
+    # above ~1e154 in float64 would square to inf, and inf - inf is NaN) nor
+    # underflows (tiny tensors would lose the projection).  ``||T||_F`` itself
+    # is never formed: ``c * (f - sg(f))`` with ``c = m / f`` is
+    # ``(n - sg(n)) * sg(m / n)``.
+    data = T._data
+    m = jax.lax.stop_gradient(T.max_abs())
+    nonzero = m > 0
+    y = data / jnp.where(nonzero, m, 1.0)
+    n = jnp.sqrt(jnp.where(nonzero, jnp.sum(jnp.abs(y) ** 2), 1.0))
+    weight = jax.lax.stop_gradient(jnp.where(nonzero, m / n, 0.0))
+    return m + (n - jax.lax.stop_gradient(n)) * weight
+
+
+def _normalize_by_max_abs(T: Tensor) -> Tensor:
+    """``T / (max|T| + EPS)`` in value, differentiated through :func:`_max_abs_scale`.
+
+    The value is computed exactly as ``T * (1 / (max|T| + EPS))``.  The scale's
+    derivative rides on ``1 - (q - sg(q))``, which is exactly 1 in value:
+    differentiating ``T * (1 / (s + EPS))`` directly forms ``1 / (s + EPS)**2``,
+    which underflows to 0 once ``s`` is ~1e154 and silently drops the scale
+    projection.  With ``q = s / sg(s + EPS)`` every factor stays O(1).
+    """
+    s = _max_abs_scale(T)
+    denom = jax.lax.stop_gradient(s) + EPS
+    q = s / denom
+    return T * ((1.0 - (q - jax.lax.stop_gradient(q))) / denom)
+
+
 def _normalize_tensor(T: Tensor) -> Tensor:
-    """Normalize tensor by max abs value (inf-norm)."""
-    norm = T.max_abs()
-    return T * (1.0 / (norm + EPS))
+    """Normalize tensor by max abs value (inf-norm); see :func:`_max_abs_scale`."""
+    return _normalize_by_max_abs(T)
 
 
 def _flow_flip_no_conj(t):
@@ -384,6 +440,41 @@ def _half_to_chi_new_bot(P_bot: Tensor) -> Tensor:
     return P.relabel("chi_new_bot", "chi_new")
 
 
+def _is_eager_symmetric_svd_case(
+    Q_TL: Tensor,
+    Q_TR: Tensor,
+    Q_BL: Tensor,
+    Q_BR: Tensor,
+    *,
+    direction: str,
+    base_charges: np.ndarray | None,
+) -> bool:
+    """True where :func:`_compute_2x2_projector_symmetric` takes its eager branch.
+
+    The dispatch of :func:`_compute_2x2_projector` (a valid ``direction``, any
+    ``SymmetricTensor`` corner) and of the stage-4 SVD (``base_charges`` given,
+    no tracer in any symmetric corner's blocks), copied so the jitted eager
+    branch of :func:`_compute_plaquette_projector_pair` runs exactly there.
+    """
+    if direction not in ("left", "right", "top", "bottom"):
+        return False
+    if not any(isinstance(q, SymmetricTensor) for q in (Q_TL, Q_TR, Q_BL, Q_BR)):
+        return False
+    if base_charges is None:
+        return False
+    # Probe the flat buffer, not ``q.blocks``: on a concrete tensor that
+    # slices every block eagerly and caches a full copy.  A block is a
+    # tracer when ``_data`` is one and there is a block.  (A concrete tensor
+    # read inside an enclosing trace would slice to tracers; the Q tensors
+    # here are either jit outputs or values of that trace.)
+    is_traced_inputs = any(
+        q.n_blocks > 0 and isinstance(q._data, jax.core.Tracer)
+        for q in (Q_TL, Q_TR, Q_BL, Q_BR)
+        if isinstance(q, SymmetricTensor)
+    )
+    return not is_traced_inputs
+
+
 def _compute_plaquette_projector_pair(
     env_TL: CTMTensorEnv,
     env_TR: CTMTensorEnv,
@@ -432,32 +523,96 @@ def _compute_plaquette_projector_pair(
     ``incoming_chi_charges`` names the env leg the new bond replaces, for the
     traced symmetric path (see ``_ctm_tensor_convergence._seam_chi_charges``).
     """
-    Q_TL = _build_enlarged_corner(
-        env_TL.C1, env_TL.T1, env_TL.T4, a_TL, position="top_left"
+    # ``_ej.call`` jits each piece on concrete input (an eager #1098 layout
+    # sweep) and calls it directly under an enclosing trace.
+    Q_TL = _ej.call(
+        _build_enlarged_corner,
+        env_TL.C1,
+        env_TL.T1,
+        env_TL.T4,
+        a_TL,
+        position="top_left",
+        static_argnames=("position",),
     )
-    Q_TR = _build_enlarged_corner(
-        env_TR.C2, env_TR.T1, env_TR.T2, a_TR, position="top_right"
+    Q_TR = _ej.call(
+        _build_enlarged_corner,
+        env_TR.C2,
+        env_TR.T1,
+        env_TR.T2,
+        a_TR,
+        position="top_right",
+        static_argnames=("position",),
     )
-    Q_BL = _build_enlarged_corner(
-        env_BL.C4, env_BL.T3, env_BL.T4, a_BL, position="bottom_left"
+    Q_BL = _ej.call(
+        _build_enlarged_corner,
+        env_BL.C4,
+        env_BL.T3,
+        env_BL.T4,
+        a_BL,
+        position="bottom_left",
+        static_argnames=("position",),
     )
-    Q_BR = _build_enlarged_corner(
-        env_BR.C3, env_BR.T3, env_BR.T2, a_BR, position="bottom_right"
+    Q_BR = _ej.call(
+        _build_enlarged_corner,
+        env_BR.C3,
+        env_BR.T3,
+        env_BR.T2,
+        a_BR,
+        position="bottom_right",
+        static_argnames=("position",),
     )
-    P_top_raw, P_bot_raw, eps_T, smallest_S = _compute_2x2_projector(
-        Q_TL,
-        Q_TR,
-        Q_BL,
-        Q_BR,
-        chi,
-        direction=direction,
-        base_charges=base_charges,
-        projector_backward=projector_backward,
-        incoming_chi_charges=incoming_chi_charges,
-    )
+    if _is_eager_symmetric_svd_case(
+        Q_TL, Q_TR, Q_BL, Q_BR, direction=direction, base_charges=base_charges
+    ):
+        # Eager symmetric: only the M' cut reads concrete singular values, so
+        # the stages on either side of it run jitted (#1098 compile cost).
+        M_prime_T, first_half, second_half = _ej.call(
+            _p2x2._symmetric_projector_prime,
+            Q_TL,
+            Q_TR,
+            Q_BL,
+            Q_BR,
+            direction=direction,
+            static_argnames=("direction",),
+        )
+        U_Mp_T, S_Mp, Vh_Mp_T = _p2x2._symmetric_projector_cut(  # eager: reads S
+            M_prime_T,
+            direction=direction,
+            chi=chi,
+            base_charges=base_charges,
+            incoming_chi_charges=incoming_chi_charges,
+            Q_TL=Q_TL,
+            Q_TR=Q_TR,
+            Q_BL=Q_BL,
+            Q_BR=Q_BR,
+        )
+        P_top_raw, P_bot_raw, eps_T, smallest_S = _ej.call(
+            _p2x2._symmetric_projector_finish,
+            M_prime_T,
+            first_half,
+            second_half,
+            U_Mp_T,
+            S_Mp,
+            Vh_Mp_T,
+            direction=direction,
+            projector_backward=projector_backward,
+            static_argnames=("direction", "projector_backward"),
+        )
+    else:
+        P_top_raw, P_bot_raw, eps_T, smallest_S = _compute_2x2_projector(
+            Q_TL,
+            Q_TR,
+            Q_BL,
+            Q_BR,
+            chi,
+            direction=direction,
+            base_charges=base_charges,
+            projector_backward=projector_backward,
+            incoming_chi_charges=incoming_chi_charges,
+        )
     return (
-        _half_to_chi_new_top(P_top_raw),
-        _half_to_chi_new_bot(P_bot_raw),
+        _ej.call(_half_to_chi_new_top, P_top_raw),
+        _ej.call(_half_to_chi_new_bot, P_bot_raw),
         eps_T,
         smallest_S,
     )
