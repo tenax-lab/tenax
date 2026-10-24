@@ -2480,6 +2480,15 @@ def _make_implicit_vjp_fn(
                 # D=3 chi=16) and certified only lambda_{K-1}.
                 if not fused_solved:
                     _F3_LAST_DIAGNOSTICS["warm_start_invalidated"] = True
+                    # The joint solve below is the eager fallback here; log it
+                    # as the "separate" branch does (#499).  Lost when "auto"
+                    # made this branch the default (#1125).
+                    _GMRES_LOGGER.debug(
+                        "Eager GMRES: maxiter=%d tol=%g restart=%d",
+                        gmres_maxiter,
+                        gmres_tol,
+                        gmres_restart,
+                    )
                 seed = (
                     tuple(lam_final)
                     if fused_solved
