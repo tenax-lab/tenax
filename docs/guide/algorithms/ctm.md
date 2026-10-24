@@ -392,6 +392,9 @@ are fixed by the site tensors; filter on the chi legs if you need only those.
 
 Dense input is accepted; its chi legs carry one sector each.
 
+During the run, the optimizer re-checks the layout at every step boundary
+(`gs_layout_recheck`); see {doc}`ipeps_ad_paths`.
+
 ## API
 
 **1-site:**
