@@ -27,7 +27,8 @@ _FILE_MARKERS = {
     # Eager-CTM jit helper: pure mechanism (jit only for concrete inputs), no CTM.
     "test_ctm_eager_jit.py": "core",
     "test_ctm_eager_sweep_jit.py": "algorithm",
-    "test_ctm_corner_leg_order.py": "core",
+    "test_ctm_corner_leg_order.py": "algorithm",
+    "test_ctm_eager_cut_charge_order.py": "algorithm",
     "test_tensor.py": "core",
     "test_ctm_normalize_maxabs_kink.py": "core",
     # PR #986 Phase 1: the swap-gate primitive.  Pure block-metadata sign
