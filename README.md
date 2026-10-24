@@ -33,6 +33,7 @@ Each entry links to its guide page; the full documentation is at [tenax.readthed
 - **AD ground-state optimization** — implicit, explicit, C4v and root-implicit AD through CTM; on the fused-CTM implicit-AD 1x1 and 2-site paths an unconverged CTM forward raises `CTMNotConvergedError` (or warns with `CTMNotConvergedWarning`) ([AD paths](docs/guide/algorithms/ipeps_ad_paths.md))
 - **CTM environments** — SVD/eigh/QR projectors, in-CTM χ growth, convergence and saddle checks, optional mixing for two-state cycles, split-CTMRG ([CTM](docs/guide/algorithms/ctm.md))
 - **Chi-layout seed for symmetric AD** — converge and check the chi sector layout before a frozen-layout 2-site AD run ([CTM](docs/guide/algorithms/ctm.md#chi-sector-layout-and-the-layout-seed))
+- **Layout re-check during symmetric AD** — re-check the seeded chi layout at every optimizer step and restart the optimizer state when it changes ([AD paths](docs/guide/algorithms/ipeps_ad_paths.md#seeded-symmetric-2-site-runs-the-layout-re-check))
 - **Fermionic iPEPS (fPEPS)** — graded tensors for spinless fermions / the t-V model ([fPEPS](docs/guide/algorithms/fpeps.md))
 - **Honeycomb and kagome** — native honeycomb CTM and kagome iPESS with AD ([guide](docs/guide/algorithms/honeycomb_kagome.md))
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary momenta ([AD excitations](docs/guide/algorithms/ad_excitations.md))

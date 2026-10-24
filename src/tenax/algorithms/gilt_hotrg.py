@@ -42,7 +42,12 @@ from tenax.algorithms.gilt import (
     _gilt_cascade,
     _index_of,
 )
-from tenax.algorithms.hotrg import _hotrg_step_horizontal, _hotrg_step_vertical
+from tenax.algorithms.hotrg import (
+    _ISOMETRIES,
+    _SIDES,
+    _hotrg_step_horizontal,
+    _hotrg_step_vertical,
+)
 from tenax.contraction.contractor import contract, truncated_svd
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
@@ -76,6 +81,10 @@ class GiltHOTRGConfig:
                          same free energy as single-device. Dense path only
                          (a no-op on ``SymmetricTensor``, whose block-sparse
                          HOTRG is already small).
+        isometry:        How each HOTRG move finds its coarse-bond projector, as in
+                         :class:`~tenax.algorithms.hotrg.HOTRGConfig`: ``"svd"`` (default) or
+                         ``"eigh"`` (HOSVD on the fused-pair density matrix).
+        side:            ``isometry="eigh"`` only: ``"first"``, ``"second"`` or ``"auto"``.
     """
 
     max_bond_dim: int = 16
@@ -84,6 +93,8 @@ class GiltHOTRGConfig:
     svd_trunc_err: float | None = None
     gilt: GiltConfig = field(default_factory=GiltConfig)
     device_mesh: Mesh | None = None
+    isometry: str = "svd"
+    side: str = "auto"
 
 
 def _filter_bond(T: Tensor, bond: str, config: GiltConfig) -> Tensor:
@@ -163,6 +174,8 @@ def gilt_hotrg_step(
         config.max_bond_dim,
         config.svd_trunc_err,
         device_mesh=config.device_mesh,
+        isometry=config.isometry,
+        side=config.side,
     )
     info = {
         "filtered_bond_dims": {lbl: _index_of(Tf, lbl).dim for lbl in Tf.labels()},
@@ -192,6 +205,12 @@ def gilt_hotrg(tensor: Tensor, config: GiltHOTRGConfig) -> jax.Array:
         )
     if not isinstance(tensor, Tensor):
         raise TypeError(f"gilt_hotrg() requires a Tensor, got {type(tensor).__name__}")
+    if config.isometry not in _ISOMETRIES:
+        raise ValueError(
+            f"Invalid isometry {config.isometry!r}. Must be one of {_ISOMETRIES}."
+        )
+    if config.side not in _SIDES:
+        raise ValueError(f"Invalid side {config.side!r}. Must be one of {_SIDES}.")
 
     T = tensor
     log_norm_total = jnp.zeros((), dtype=T.dtype)

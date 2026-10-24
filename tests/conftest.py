@@ -514,6 +514,8 @@ _FILE_MARKERS = {
     "test_ctm_symmetric_layout_adapts_1098.py": "algorithm",
     # #1098: hand-built envs for the eager phase's _chi_layout criterion, ~1 s.
     "test_ctm_chi_layout_1098.py": "core",
+    # Layout re-check between optimizer steps: probe tie margin, config, gates.
+    "test_layout_recheck_core.py": "core",
     "test_rsvd.py": "core",
     "test_cbe.py": "algorithm",
     "test_lattice.py": "algorithm",
