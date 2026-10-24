@@ -20,6 +20,7 @@ __all__ = [
 ]
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms import _ctm_graded as G
@@ -50,10 +51,63 @@ from tenax.core import EPS
 from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 
 
+def _max_abs_scale(T: Tensor) -> jax.Array:
+    """``T.max_abs()`` in value, with the gradient of a smooth norm.
+
+    The value is exactly ``max |T|`` (``f - stop_gradient(f)`` is exactly 0),
+    so the forward is unchanged.  The gradient is that of ``c * ||T||_F`` with
+    the constant ``c = max|T| / ||T||_F``.
+
+    Why not differentiate ``max`` itself: it has a kink wherever the largest
+    ``|entry|`` is tied, and the double-layer environment ties it exactly
+    (entries related by the ket<->bra swap).  There the backward depended on
+    which tied entry rounding picked: a 1e-15 relative change to a D=3 U(1)
+    chi=9 environment moved the implicit-AD ``J^T v`` by 15%, and JAX and a
+    torch replay of the same program disagreed by as much.
+
+    Why not ``stop_gradient`` the scale: the derivative of ``T / N(T)`` is what
+    projects the scale direction out of the CTM Jacobian (``N`` homogeneous of
+    degree 1 gives ``J T = 0``).  Without it the unnormalised map's radial
+    eigenvalue ~1 stays in ``J`` and the adjoint ``(I - J^T) lambda = b``
+    stops converging (GMRES residual 1e-6 -> 7e-4 on
+    ``tests/test_adjoint_convergence_gate.py``).  ``c * ||T||_F`` is also
+    homogeneous of degree 1, so it keeps that projection, and the result is
+    the exact Jacobian of a Frobenius-normalised map with the same fixed point
+    up to a per-tensor scale, which the energy does not see.
+    """
+    # ``||T||_F = m * n`` with ``n = ||T / m||_F`` in ``[1, sqrt(size)]``: the
+    # norm is formed from max-scaled entries, so it neither overflows (entries
+    # above ~1e154 in float64 would square to inf, and inf - inf is NaN) nor
+    # underflows (tiny tensors would lose the projection).  ``||T||_F`` itself
+    # is never formed: ``c * (f - sg(f))`` with ``c = m / f`` is
+    # ``(n - sg(n)) * sg(m / n)``.
+    data = T._data
+    m = jax.lax.stop_gradient(T.max_abs())
+    nonzero = m > 0
+    y = data / jnp.where(nonzero, m, 1.0)
+    n = jnp.sqrt(jnp.where(nonzero, jnp.sum(jnp.abs(y) ** 2), 1.0))
+    weight = jax.lax.stop_gradient(jnp.where(nonzero, m / n, 0.0))
+    return m + (n - jax.lax.stop_gradient(n)) * weight
+
+
+def _normalize_by_max_abs(T: Tensor) -> Tensor:
+    """``T / (max|T| + EPS)`` in value, differentiated through :func:`_max_abs_scale`.
+
+    The value is computed exactly as ``T * (1 / (max|T| + EPS))``.  The scale's
+    derivative rides on ``1 - (q - sg(q))``, which is exactly 1 in value:
+    differentiating ``T * (1 / (s + EPS))`` directly forms ``1 / (s + EPS)**2``,
+    which underflows to 0 once ``s`` is ~1e154 and silently drops the scale
+    projection.  With ``q = s / sg(s + EPS)`` every factor stays O(1).
+    """
+    s = _max_abs_scale(T)
+    denom = jax.lax.stop_gradient(s) + EPS
+    q = s / denom
+    return T * ((1.0 - (q - jax.lax.stop_gradient(q))) / denom)
+
+
 def _normalize_tensor(T: Tensor) -> Tensor:
-    """Normalize tensor by max abs value (inf-norm)."""
-    norm = T.max_abs()
-    return T * (1.0 / (norm + EPS))
+    """Normalize tensor by max abs value (inf-norm); see :func:`_max_abs_scale`."""
+    return _normalize_by_max_abs(T)
 
 
 def _flow_flip_no_conj(t):
