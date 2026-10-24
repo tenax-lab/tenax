@@ -85,6 +85,14 @@ def _sweeps(sites, n):
     return envs
 
 
+def test_charge_ordered_slots_sorts_by_charge_and_keeps_sector_order():
+    charges = np.array([0, 2, -2, 0, 2, -2, 4], dtype=np.int32)
+    keep = [0, 1, 2, 3, 5, 6]
+    out = p2x2._charge_ordered_slots(keep, charges)
+    assert sorted(out) == keep
+    assert out == [2, 5, 0, 3, 1, 6]
+
+
 def _chi_legs(envs):
     for c, env in envs.items():
         for f, t in zip(env._fields, env):
@@ -150,7 +158,12 @@ def test_sorted_cut_converges_to_the_same_energy_and_layout(monkeypatch):
 
 
 def test_a_settled_eager_sweep_retraces_no_jitted_piece():
-    """With the layout settled, the next eager sweep traces nothing new.
+    """With the layout settled, the next eager sweep traces no jitted piece.
+
+    A guard against value-dependent metadata in any piece's input.  It does
+    not by itself pin the charge sort: in this settled D=2 state the
+    singular-value order is stable from sweep to sweep, so the unsorted cut
+    passes too (measured).  The sort's own property is tested directly above.
 
     Asserts the regime first: sweeps until one whole sweep leaves the chi
     layout unchanged, then measures the next sweep, whose layout must not move
