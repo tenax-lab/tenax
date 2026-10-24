@@ -646,6 +646,21 @@
 
 ### Fixed
 
+- **The CTM renormalisation no longer differentiates through `max`.**  The
+  CTM moves rescale every environment tensor by its largest `|entry|`, and the
+  gradient used to flow through that `max`.  The double-layer environment ties
+  the largest entry exactly (entries related by the ket<->bra swap), so the
+  sweep sat on a kink and the implicit-AD `J^T v` depended on which tied entry
+  rounding picked: on a D=3 U(1) chi=9 environment a 1e-15 relative change to
+  the input moved `J^T v` by 15% (34% with flowing projectors), and two
+  evaluations of the same program that round differently (JAX vs a torch
+  replay) disagreed by as much.  The scale is still `max |T|` in value, so the
+  forward is bit-identical, but its gradient is now that of
+  `(max|T| / ||T||_F) * ||T||_F` with the ratio held constant.  That is smooth,
+  and it still projects the scale direction out of the CTM Jacobian, which the
+  adjoint solve needs (freezing the scale outright left GMRES at a 7e-4
+  residual on a solve that converges).
+
 - **A symmetric `python_loop_ctm_converge` now chooses its chi-leg charge
   layout** (#1098, `_ctm_python_loop.py`).  Every sweep ran under
   `jax.jit`, and for `SymmetricTensor` input the jitted 2x2 projector keeps
