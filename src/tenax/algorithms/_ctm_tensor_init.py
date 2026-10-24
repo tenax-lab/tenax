@@ -220,6 +220,29 @@ _STD_CORNER_SPECS = {
     "C4": ("c4_r", "c4_u", OUT, IN, 0),  # ref_axis=u(0)
 }
 
+# Leg order of each corner, as ``initialize_ctm_tensor_env`` builds it (from
+# ``_STD_CORNER_SPECS``) and as every CTM sweep must return it.  ``jax.jit``
+# keys its cache on the pytree treedef, which includes the leg order, so a
+# sweep that returned a corner with its legs swapped made every cold start
+# compile the jitted step twice.
+CORNER_LEG_ORDER: dict[str, tuple[str, str]] = {
+    name: (la, lb) for name, (la, lb, *_rest) in _STD_CORNER_SPECS.items()
+}
+
+
+def _to_corner_order(t: Tensor, field: str) -> Tensor:
+    """``t`` with its legs in ``CORNER_LEG_ORDER[field]``; ``t`` itself if already so.
+
+    The check runs on static labels, so under ``jax.jit`` it adds no op when the
+    order is right.  ``transpose`` carries the Koszul sign for fermionic
+    symmetries, so the result is the same tensor in the canonical leg order.
+    """
+    labels = tuple(t.labels())
+    want = CORNER_LEG_ORDER[field]
+    if labels == want:
+        return t
+    return t.transpose(tuple(labels.index(lab) for lab in want))
+
 
 # Backward-compatible accessor for tests/external code that destructures
 # the 9-element tuple format.
