@@ -33,6 +33,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms import _ctm_eager_jit as _ej
 from tenax.algorithms._ctm_hold import (
     DEFAULT_HOLD_DIRECTIONS,
     DEFAULT_HOLD_EXTENSION,
@@ -532,7 +533,8 @@ def _ctm_tensor_sweep_multisite(
                     s_above_anchor = neighbors[s_src]["top"]
                     P_top_above, P_bot_above = projectors[s_above_anchor]
                     P_top_curr, P_bot_curr = projectors[s_src]
-                    C1_new, T4_new, C4_new = _ctm_tensor_absorb_left_2plaq(
+                    C1_new, T4_new, C4_new = _ej.call(
+                        _ctm_tensor_absorb_left_2plaq,
                         envs_old[s_src],
                         _shard_a(double_layers[s_src], "left"),
                         P_top_above,
@@ -562,7 +564,8 @@ def _ctm_tensor_sweep_multisite(
                     s_above_anchor = neighbors[s_dst]["top"]
                     P_top_above, P_bot_above = projectors[s_above_anchor]
                     P_top_curr, P_bot_curr = projectors[s_dst]
-                    C2_new, T2_new, C3_new = _ctm_tensor_absorb_right_2plaq(
+                    C2_new, T2_new, C3_new = _ej.call(
+                        _ctm_tensor_absorb_right_2plaq,
                         envs_old[s_src],
                         _shard_a(double_layers[s_src], "right"),
                         P_top_above,
@@ -578,7 +581,8 @@ def _ctm_tensor_sweep_multisite(
                     s_left_anchor = neighbors[s_src]["left"]
                     P_top_left, P_bot_left = projectors[s_left_anchor]
                     P_top_curr, P_bot_curr = projectors[s_src]
-                    C1_new, T1_new, C2_new = _ctm_tensor_absorb_top_2plaq(
+                    C1_new, T1_new, C2_new = _ej.call(
+                        _ctm_tensor_absorb_top_2plaq,
                         envs_old[s_src],
                         _shard_a(double_layers[s_src], "top"),
                         P_top_left,
@@ -602,7 +606,8 @@ def _ctm_tensor_sweep_multisite(
                     s_left_anchor = neighbors[s_dst]["left"]
                     P_top_left, P_bot_left = projectors[s_left_anchor]
                     P_top_curr, P_bot_curr = projectors[s_dst]
-                    C4_new, T3_new, C3_new = _ctm_tensor_absorb_bottom_2plaq(
+                    C4_new, T3_new, C3_new = _ej.call(
+                        _ctm_tensor_absorb_bottom_2plaq,
                         envs_old[s_src],
                         _shard_a(double_layers[s_src], "bottom"),
                         P_top_left,

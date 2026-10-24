@@ -24,6 +24,9 @@ _FILE_MARKERS = {
     # #1059 findings 2 and 3 + fermionic gate on non-fermionic sites: the
     # refusals fire before any tensor work, and the branch targets are spies.
     "test_fermionic_refusals_1059.py": "core",
+    # Eager-CTM jit helper: pure mechanism (jit only for concrete inputs), no CTM.
+    "test_ctm_eager_jit.py": "core",
+    "test_ctm_eager_sweep_jit.py": "algorithm",
     "test_tensor.py": "core",
     "test_ctm_normalize_maxabs_kink.py": "core",
     # PR #986 Phase 1: the swap-gate primitive.  Pure block-metadata sign

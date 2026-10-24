@@ -28,6 +28,7 @@ import jax
 import numpy as np
 import pytest
 
+from tenax.algorithms import _ctm_eager_jit
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
@@ -91,6 +92,8 @@ def _record_call_site_gaps(monkeypatch) -> list[tuple[str, float]]:
         return out
 
     monkeypatch.setattr(moves, "_build_enlarged_corner", scored)
+    # The probe needs concrete arrays (np.asarray), so do not jit the corner.
+    monkeypatch.setattr(_ctm_eager_jit, "_ENABLED", False)
     return gaps
 
 

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 # Defined in the leaf policy module so ``_ctm_tensor_convergence`` can build
 # one without importing this module (which imports it: an import cycle).
+from tenax.algorithms import _ctm_eager_jit as _ej
 from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
@@ -174,7 +175,9 @@ def _ctm_sweep(
 
     Called directly (not jitted) by the #1098 eager layout phase.
     """
-    double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
+    double_layers = {
+        c: _ej.call(_build_double_layer_tensor, A) for c, A in site_tensors.items()
+    }
     return _ctm_tensor_sweep_multisite(
         envs,
         double_layers,

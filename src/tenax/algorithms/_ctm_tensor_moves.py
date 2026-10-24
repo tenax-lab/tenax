@@ -23,7 +23,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms import _ctm_eager_jit as _ej
 from tenax.algorithms import _ctm_graded as G
+from tenax.algorithms import _ctm_tensor_projector_2x2 as _p2x2
 from tenax.algorithms._ctm_chunked_absorb import (
     _chunked_T_new_bottom,
     _chunked_T_new_left,
@@ -438,6 +440,41 @@ def _half_to_chi_new_bot(P_bot: Tensor) -> Tensor:
     return P.relabel("chi_new_bot", "chi_new")
 
 
+def _is_eager_symmetric_svd_case(
+    Q_TL: Tensor,
+    Q_TR: Tensor,
+    Q_BL: Tensor,
+    Q_BR: Tensor,
+    *,
+    direction: str,
+    base_charges: np.ndarray | None,
+) -> bool:
+    """True where :func:`_compute_2x2_projector_symmetric` takes its eager branch.
+
+    The dispatch of :func:`_compute_2x2_projector` (a valid ``direction``, any
+    ``SymmetricTensor`` corner) and of the stage-4 SVD (``base_charges`` given,
+    no tracer in any symmetric corner's blocks), copied so the jitted eager
+    branch of :func:`_compute_plaquette_projector_pair` runs exactly there.
+    """
+    if direction not in ("left", "right", "top", "bottom"):
+        return False
+    if not any(isinstance(q, SymmetricTensor) for q in (Q_TL, Q_TR, Q_BL, Q_BR)):
+        return False
+    if base_charges is None:
+        return False
+    # Probe the flat buffer, not ``q.blocks``: on a concrete tensor that
+    # slices every block eagerly and caches a full copy.  A block is a
+    # tracer when ``_data`` is one and there is a block.  (A concrete tensor
+    # read inside an enclosing trace would slice to tracers; the Q tensors
+    # here are either jit outputs or values of that trace.)
+    is_traced_inputs = any(
+        q.n_blocks > 0 and isinstance(q._data, jax.core.Tracer)
+        for q in (Q_TL, Q_TR, Q_BL, Q_BR)
+        if isinstance(q, SymmetricTensor)
+    )
+    return not is_traced_inputs
+
+
 def _compute_plaquette_projector_pair(
     env_TL: CTMTensorEnv,
     env_TR: CTMTensorEnv,
@@ -486,32 +523,96 @@ def _compute_plaquette_projector_pair(
     ``incoming_chi_charges`` names the env leg the new bond replaces, for the
     traced symmetric path (see ``_ctm_tensor_convergence._seam_chi_charges``).
     """
-    Q_TL = _build_enlarged_corner(
-        env_TL.C1, env_TL.T1, env_TL.T4, a_TL, position="top_left"
+    # ``_ej.call`` jits each piece on concrete input (an eager #1098 layout
+    # sweep) and calls it directly under an enclosing trace.
+    Q_TL = _ej.call(
+        _build_enlarged_corner,
+        env_TL.C1,
+        env_TL.T1,
+        env_TL.T4,
+        a_TL,
+        position="top_left",
+        static_argnames=("position",),
     )
-    Q_TR = _build_enlarged_corner(
-        env_TR.C2, env_TR.T1, env_TR.T2, a_TR, position="top_right"
+    Q_TR = _ej.call(
+        _build_enlarged_corner,
+        env_TR.C2,
+        env_TR.T1,
+        env_TR.T2,
+        a_TR,
+        position="top_right",
+        static_argnames=("position",),
     )
-    Q_BL = _build_enlarged_corner(
-        env_BL.C4, env_BL.T3, env_BL.T4, a_BL, position="bottom_left"
+    Q_BL = _ej.call(
+        _build_enlarged_corner,
+        env_BL.C4,
+        env_BL.T3,
+        env_BL.T4,
+        a_BL,
+        position="bottom_left",
+        static_argnames=("position",),
     )
-    Q_BR = _build_enlarged_corner(
-        env_BR.C3, env_BR.T3, env_BR.T2, a_BR, position="bottom_right"
+    Q_BR = _ej.call(
+        _build_enlarged_corner,
+        env_BR.C3,
+        env_BR.T3,
+        env_BR.T2,
+        a_BR,
+        position="bottom_right",
+        static_argnames=("position",),
     )
-    P_top_raw, P_bot_raw, eps_T, smallest_S = _compute_2x2_projector(
-        Q_TL,
-        Q_TR,
-        Q_BL,
-        Q_BR,
-        chi,
-        direction=direction,
-        base_charges=base_charges,
-        projector_backward=projector_backward,
-        incoming_chi_charges=incoming_chi_charges,
-    )
+    if _is_eager_symmetric_svd_case(
+        Q_TL, Q_TR, Q_BL, Q_BR, direction=direction, base_charges=base_charges
+    ):
+        # Eager symmetric: only the M' cut reads concrete singular values, so
+        # the stages on either side of it run jitted (#1098 compile cost).
+        M_prime_T, first_half, second_half = _ej.call(
+            _p2x2._symmetric_projector_prime,
+            Q_TL,
+            Q_TR,
+            Q_BL,
+            Q_BR,
+            direction=direction,
+            static_argnames=("direction",),
+        )
+        U_Mp_T, S_Mp, Vh_Mp_T = _p2x2._symmetric_projector_cut(  # eager: reads S
+            M_prime_T,
+            direction=direction,
+            chi=chi,
+            base_charges=base_charges,
+            incoming_chi_charges=incoming_chi_charges,
+            Q_TL=Q_TL,
+            Q_TR=Q_TR,
+            Q_BL=Q_BL,
+            Q_BR=Q_BR,
+        )
+        P_top_raw, P_bot_raw, eps_T, smallest_S = _ej.call(
+            _p2x2._symmetric_projector_finish,
+            M_prime_T,
+            first_half,
+            second_half,
+            U_Mp_T,
+            S_Mp,
+            Vh_Mp_T,
+            direction=direction,
+            projector_backward=projector_backward,
+            static_argnames=("direction", "projector_backward"),
+        )
+    else:
+        P_top_raw, P_bot_raw, eps_T, smallest_S = _compute_2x2_projector(
+            Q_TL,
+            Q_TR,
+            Q_BL,
+            Q_BR,
+            chi,
+            direction=direction,
+            base_charges=base_charges,
+            projector_backward=projector_backward,
+            incoming_chi_charges=incoming_chi_charges,
+        )
     return (
-        _half_to_chi_new_top(P_top_raw),
-        _half_to_chi_new_bot(P_bot_raw),
+        _ej.call(_half_to_chi_new_top, P_top_raw),
+        _ej.call(_half_to_chi_new_bot, P_bot_raw),
         eps_T,
         smallest_S,
     )
