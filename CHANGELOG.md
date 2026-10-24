@@ -4,6 +4,27 @@
 
 ### Behavior Changes
 
+- **GPU SVDs of matrices with `min(m, n) >= 128` use the polar algorithm.**
+  `tenax.linalg._dense_svd`, which every tenax SVD goes through, used the
+  QR-based `gesvd` on GPU for all sizes (#691).  `gesvd` bidiagonalises column
+  by column, about 250 tiny kernel launches per call, so the A100 CTM sweep was
+  launch-bound: the spinless t-V 2x2 sweep launched 127k kernels at D=4 chi=32
+  and 370k at D=5 chi=50.  From `min(m, n) >= 128` it now uses polar
+  (`gesvdp`): 22k / 61k kernels, sweep 0.667 -> 0.472 s (1.41x) at D=4 and
+  2.08 -> 1.57 s (1.33x) at D=5; the implicit-AD `J^T v` matvec gains the
+  same (0.699 -> 0.503 s, 2.157 -> 1.656 s).  Below ~100 polar is about 2x slower, so
+  smaller matrices (U(1) sectors, small D) keep `gesvd`.  On cuSOLVER 12.3.5.3
+  polar produced no NaN on 84 stress matrices (spectra to 1e-30,
+  rank-deficient, degenerate, zero) or 1,056 matrices harvested from CTM
+  sweeps, matched `gesvd`'s singular values and subspaces, and gave the same
+  flow CTM-AD gradient to ~12 digits (AD/FD 0.9999986 / 1.0000007 /
+  1.0000023 on a U(1) D=3 state).  Jacobi (`gesvdj`) stays excluded: besides
+  the NaN history it was 2-3.4x slower than `gesvd` here.  CPU is unchanged.
+  On a JAX without `SvdAlgorithm.POLAR` the GPU path stays on `gesvd`.  The
+  algorithm is chosen per lowering platform, not per process: an operand on
+  the CPU of a GPU process (`jax.default_device(cpu)`, a committed CPU array)
+  takes the CPU path, since polar has no CPU lowering.
+
 - **The split CTM is dense-only.** `fuse_virtual_legs=False` (and the
   `ctm_split_tensor*` / `ctm_energy_split_*` entry points) now refuse
   `SymmetricTensor` site tensors with `NotImplementedError`.  Bosonic
