@@ -71,6 +71,55 @@ def _block_in_decomp_order(block, decomp_perm: tuple[int, ...]):
 _GPU_POLAR_MIN_DIM = 128
 
 
+def _gpu_svd_algorithm(shape: tuple[int, ...]) -> _SvdAlgorithm:
+    """CUDA SVD algorithm for a matrix of this shape: polar from 128, else QR."""
+    polar = getattr(_SvdAlgorithm, "POLAR", None)  # absent on old JAX
+    if polar is not None and min(shape[-2:]) >= _GPU_POLAR_MIN_DIM:
+        return polar
+    return _SvdAlgorithm.QR
+
+
+def _cpu_svd(m: jax.Array, full_matrices: bool, compute_uv: bool):
+    r = jnp.linalg.svd(m, full_matrices=full_matrices, compute_uv=compute_uv)
+    return tuple(r) if compute_uv else r
+
+
+def _lax_svd_with(algorithm: _SvdAlgorithm, full_matrices: bool, compute_uv: bool):
+    def svd(m: jax.Array):
+        r = _lax_svd(
+            m, full_matrices=full_matrices, compute_uv=compute_uv, algorithm=algorithm
+        )
+        return tuple(r) if compute_uv else r
+
+    return svd
+
+
+def _gpu_process_svd_impl(m: jax.Array, full_matrices: bool, compute_uv: bool):
+    """SVD for a process whose default backend is GPU, chosen per lowering platform.
+
+    ``jax.default_backend()`` names the process, not the operand: an array on
+    the CPU of a GPU process (``jax.default_device(cpu)``, a committed CPU
+    array) lowers for CPU, which has no polar (or Jacobi) lowering.  So the
+    algorithm is picked by :func:`jax.lax.platform_dependent` at lowering
+    time -- CUDA polar/QR by size, ROCm QR, anything else the CPU path.  The
+    ``jax.jit`` around it matters for eager calls: ``platform_dependent``'s
+    platform index has no operands, so an eager call would dispatch it to the
+    default device and pick the CUDA branch for CPU data; under ``jit`` the
+    whole call lowers for the operand's platform.
+    """
+    return jax.lax.platform_dependent(
+        m,
+        cuda=_lax_svd_with(_gpu_svd_algorithm(m.shape), full_matrices, compute_uv),
+        rocm=_lax_svd_with(_SvdAlgorithm.QR, full_matrices, compute_uv),
+        default=lambda x: _cpu_svd(x, full_matrices, compute_uv),
+    )
+
+
+_gpu_process_svd = jax.jit(
+    _gpu_process_svd_impl, static_argnames=("full_matrices", "compute_uv")
+)
+
+
 def _dense_svd(
     matrix: jax.Array,
     full_matrices: bool = False,
@@ -112,18 +161,11 @@ def _dense_svd(
     sweeps.  Re-check after a cuSOLVER or jaxlib upgrade.
     """
     if jax.default_backend() == "gpu":
-        polar = getattr(_SvdAlgorithm, "POLAR", None)  # absent on old JAX
-        use_polar = polar is not None and min(matrix.shape[-2:]) >= _GPU_POLAR_MIN_DIM
-        result = _lax_svd(
-            matrix,
-            full_matrices=full_matrices,
-            compute_uv=compute_uv,
-            algorithm=polar if use_polar else _SvdAlgorithm.QR,
-        )
-    else:
-        result = jnp.linalg.svd(
+        result = _gpu_process_svd(
             matrix, full_matrices=full_matrices, compute_uv=compute_uv
         )
+    else:
+        result = _cpu_svd(matrix, full_matrices, compute_uv)
     if compute_uv:
         u, s, vh = result  # SVDResult (CPU) or tuple (GPU) -> bare tuple
         return u, s, vh

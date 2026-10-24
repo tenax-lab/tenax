@@ -20,7 +20,10 @@
   flow CTM-AD gradient to ~12 digits (AD/FD 0.9999986 / 1.0000007 /
   1.0000023 on a U(1) D=3 state).  Jacobi (`gesvdj`) stays excluded: besides
   the NaN history it was 2-3.4x slower than `gesvd` here.  CPU is unchanged.
-  On a JAX without `SvdAlgorithm.POLAR` the GPU path stays on `gesvd`.
+  On a JAX without `SvdAlgorithm.POLAR` the GPU path stays on `gesvd`.  The
+  algorithm is chosen per lowering platform, not per process: an operand on
+  the CPU of a GPU process (`jax.default_device(cpu)`, a committed CPU array)
+  takes the CPU path, since polar has no CPU lowering.
 
 - **The split CTM is dense-only.** `fuse_virtual_legs=False` (and the
   `ctm_split_tensor*` / `ctm_energy_split_*` entry points) now refuse

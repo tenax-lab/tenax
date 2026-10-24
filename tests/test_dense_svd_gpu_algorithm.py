@@ -1,4 +1,5 @@
-"""On GPU, ``_dense_svd`` picks the SVD algorithm by size: polar from 128, QR below.
+"""On GPU, ``_dense_svd`` picks the SVD algorithm by size: polar from 128, QR below,
+per lowering platform (a CPU operand in a GPU process takes the CPU path).
 
 ``gesvd`` launches ~250 tiny kernels per call, which made the A100 CTM sweep
 launch-bound; polar (``gesvdp``) was 1.3-1.4x faster on the t-V sweep at
@@ -25,23 +26,12 @@ jax.config.update("jax_enable_x64", True)
         ((3, 200, 200), "POLAR"),
     ],
 )
-def test_gpu_branch_selects_polar_from_128(monkeypatch, shape, expected):
+def test_gpu_algorithm_is_polar_from_128(shape, expected):
     if not hasattr(jax.lax.linalg.SvdAlgorithm, "POLAR"):
         pytest.skip("this JAX has no SvdAlgorithm.POLAR; the GPU path stays on QR")
-    seen = []
-
-    def record(matrix, *, full_matrices, compute_uv, algorithm):
-        seen.append(algorithm)
-        return jnp.linalg.svd(
-            matrix, full_matrices=full_matrices, compute_uv=compute_uv
-        )
-
-    monkeypatch.setattr(tl.jax, "default_backend", lambda: "gpu")
-    monkeypatch.setattr(tl, "_lax_svd", record)
-    m = jnp.asarray(np.random.default_rng(0).standard_normal(shape))
-    u, s, vh = tl._dense_svd(m)
-    assert seen == [getattr(jax.lax.linalg.SvdAlgorithm, expected)]
-    np.testing.assert_allclose((u * s[..., None, :]) @ vh, m, atol=1e-10)
+    assert tl._gpu_svd_algorithm(shape) == getattr(
+        jax.lax.linalg.SvdAlgorithm, expected
+    )
 
 
 def test_cpu_branch_is_unchanged(monkeypatch):
@@ -66,3 +56,26 @@ def test_gpu_compiles_to_gesvdp_from_128():
 
     assert targets(200) == ["cusolver_gesvdp_ffi"]
     assert targets(50) == ["cusolver_gesvd_ffi"]
+
+
+@pytest.mark.skipif(jax.default_backend() != "gpu", reason="needs a CUDA device")
+@pytest.mark.parametrize("mode", ["eager", "jit", "grad", "default_device"])
+def test_cpu_operand_in_a_gpu_process_takes_the_cpu_path(mode):
+    # The algorithm follows the operand's lowering platform, not the process
+    # default: polar has no CPU lowering (NotImplementedError before the fix).
+    cpu = jax.devices("cpu")[0]
+    x = np.random.default_rng(0).standard_normal((200, 200))
+    svals = lambda m: tl._dense_svd(m)[1]  # noqa: E731
+    if mode == "eager":
+        s = svals(jax.device_put(x, cpu))
+    elif mode == "jit":
+        s = jax.jit(svals)(jax.device_put(x, cpu))
+    elif mode == "grad":
+        s = jax.grad(lambda m: jnp.sum(svals(m)))(jax.device_put(x, cpu))
+        assert next(iter(s.devices())).platform == "cpu"
+        return
+    else:
+        with jax.default_device(cpu):
+            s = svals(jnp.asarray(x))
+    assert next(iter(s.devices())).platform == "cpu"
+    np.testing.assert_allclose(s, np.linalg.svd(x, compute_uv=False), rtol=1e-12)
