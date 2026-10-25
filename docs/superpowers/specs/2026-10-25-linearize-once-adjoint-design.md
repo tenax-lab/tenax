@@ -178,3 +178,56 @@ branch, one concern. PR only on the user's approval; never armed unasked.
 - A joint energy VJP that merges `_jit_dE_denv` and `_jit_direct`.
 - The forward CTM, the split CTM, the C4v path.
 - The dense masked-D=4 CTM non-convergence (separate investigation).
+
+## 9. Results (2026-10-25): A1 NO-GO
+
+GPU 1 (RTX 4070 Ti SUPER), U(1) 2-site XXZ Delta=0.3, D=3 chi=16, SU state,
+`benchmarks/bench_linearize_once.py --steps 4`, compile cache off. Base
+`b71f5a5` (main), head `a97d5f8`.
+
+Step-1 backward compile (s):
+
+| Program | Base | Head |
+|---|---|---|
+| `_jit_fused_fixed_point_bwd` | 790.2 | — |
+| `_jit_linearize_joint` | — | 164.5 |
+| `_jit_dE_denv` | — | 106.3 |
+| `_jit_neumann_bwd` | — | 578.2 |
+| `_jit_gmres_joint_solve` | 1116.4 | 960.5 |
+| `_jit_direct` | 496.9 | 462.4 |
+| **Total** | **2403.5** | **2271.9** |
+
+- **A1 = 0.945** (0.949 without `_jit_direct`). The bar is 0.7, and above 0.9
+  is a no-go.
+- Step 2 recompiles the backward on both arms (a new chi layout): 5127.2 s
+  (base) and 4497.0 s (head), ratio 0.877.
+- E and |g| are equal to 10 digits at steps 1-4 on both arms.
+- The head arm was killed during its post-optimize SU gradient, by the
+  controller's host-memory guard (MemAvailable 11 GB; a CPU job ran beside it).
+  So A2, A4 and the full-precision A3 were not graded. Base: optimize wall
+  16,102.9 s, max RSS 108.6 GB, device peak 1.56 GB.
+
+Why: op counts per step-1 program (CPU, D=2 chi=8; lowered StableHLO ops /
+optimised HLO instructions):
+
+| Program | Base | Head |
+|---|---|---|
+| `_jit_fused_fixed_point_bwd` | 160,289 / 435,955 | — |
+| `_jit_linearize_joint` | — | 62,571 / 128,771 |
+| `_jit_dE_denv` | — | 23,349 / 73,723 |
+| `_jit_neumann_bwd` | — | 79,451 / 264,005 |
+| `_jit_gmres_joint_solve` | 143,315 / 394,498 | 79,696 / 306,806 |
+| **Solver total** | **303,604 / 830,453** | **245,067 / 773,305** |
+
+- The design did what it said: the head solvers hold 0 SVDs after
+  optimisation (base: 104 each).
+- But the transpose J^T v alone (~79.5k lowered ops) is larger than the
+  forward linearisation (62.6k), and XLA grows it 3.3-3.9x (the forward
+  2.1x). The head still compiles J^T v twice, once in Neumann and once in
+  GMRES. So the optimised total falls only to 0.931 of base, which matches
+  the compile-time ratio.
+- The params half of the transpose is small: the env-only Neumann program and
+  the joint GMRES program differ by ~250 lowered ops.
+
+Next: compile J^T v once — spec
+`2026-10-25-single-transpose-adjoint-design.md`.
