@@ -376,14 +376,18 @@ converging forward; one D=3 chi=16 run spent 12,357 s compiling it before this
 change (not re-measured).
 
 **Joint-VJP chain rule (the default).** `CTMConfig(adjoint_chain_rule="joint")`,
-which the default `"auto"` runs on the fused CTM, takes the chain rule's indirect term `J_params^T λ` from the adjoint solve's
-own matvec — one VJP of the CTM sweep over `(params, env)` — so the separate
-params-VJP program (`_jit_chain_rule`, the largest single compile at D=3) is
-never built.  The GMRES solve returns `J_params^T` of its best iterate.  The
-fused Neumann loop is the same env-only program as in `"separate"`; a joint
-GMRES solve always follows it, seeded with the loop's `λ` (usually accepted
-after one matvec) or, when the loop gave up, started cold as the fallback is.
-The gradient equals `"separate"` to round-off on every path.
+which the default `"auto"` runs on the fused CTM, takes the chain rule's
+indirect term `J_params^T λ` from the adjoint solve.  `_jit_linearize_joint`
+linearises the gauge-fixed sweep over `(params, env)` once per backward and
+keeps the pullback.  The Neumann loop (`_jit_neumann_bwd`) runs on the env
+half of that pullback and compiles only the transpose.  It is not the
+env-only program of `"separate"`.  A joint GMRES solve
+(`_jit_gmres_joint_solve`) takes the same pullback and returns `J_params^T`
+of its best iterate.  It always follows the loop, seeded with the loop's `λ`
+(usually accepted after one matvec) or, when the loop gave up, started cold
+as the fallback is.  So the separate params-VJP program (`_jit_chain_rule`,
+the largest single compile at D=3) is never built.  The gradient equals
+`"separate"` to round-off on every path.
 
 Measured on the first optimization step of a U(1) D=3 chi=16 two-site
 iPEPS on one A100 (empty compilation cache; the fused loop gave up and the
