@@ -5,7 +5,8 @@ shape.  An eager symmetric CTM sweep runs thousands of block-level
 primitives, so at chi=16 the #1098 layout phase spends hours compiling
 (measured 2026-10-23: 3249 compiles in one D=3 chi=8 sweep).  Only the M'
 truncation needs concrete values; :func:`call` runs every other piece under
-one ``jax.jit`` per function and input structure.
+one ``jax.jit`` per function and input structure.  It is off by default
+(see :data:`_ENABLED`) until its memory is bounded.
 
 Under an enclosing trace (the jitted ``_step``, AD) :func:`call` calls the
 function directly, so the traced program is the one it was before.  It also
@@ -32,7 +33,12 @@ from tenax.contraction import contractor as _contractor
 from tenax.core.tensor import SymmetricTensor
 
 # Module switch: ``False`` runs every piece eagerly, as before this module.
-_ENABLED = True
+# Off by default: a jitted eager sweep keeps a peak RSS of 14.7 GB in
+# ``test_ctm_symmetric_rdm_positive_853[20]`` (5.3 GB eager), which exhausts
+# a 16 GB CI runner, so every later compile in that process fails with
+# ``LLVM compilation error: Cannot allocate memory``.  Turn it back on once
+# that memory is bounded.
+_ENABLED = False
 
 
 # The env flags that the contraction path reads per call, so a trace bakes
