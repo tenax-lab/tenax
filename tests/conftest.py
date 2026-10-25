@@ -30,6 +30,7 @@ _FILE_MARKERS = {
     "test_ctm_corner_leg_order.py": "algorithm",
     "test_ctm_eager_cut_charge_order.py": "algorithm",
     "test_tensor.py": "core",
+    "test_dense_svd_gpu_algorithm.py": "core",
     "test_ctm_normalize_maxabs_kink.py": "core",
     # PR #986 Phase 1: the swap-gate primitive.  Pure block-metadata sign
     # tests, no CTM, ~1s; the graded-transpose cross-check is the mutation
