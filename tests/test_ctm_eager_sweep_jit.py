@@ -36,13 +36,6 @@ D = 2
 CHI = 6  # U(1) chi=6 cuts the eager C1 spectrum in a clean gap (#1098 test)
 
 
-@pytest.fixture(autouse=True)
-def _jit_on(monkeypatch):
-    # The helper is off by default (memory, see ``_ENABLED``); these tests
-    # are about what it does when it is on.
-    monkeypatch.setattr(ej, "_ENABLED", True)
-
-
 def _sweep_kwargs(chi):
     return dict(
         neighbors=CHECKERBOARD_NEIGHBORS,
@@ -95,13 +88,13 @@ def test_jitted_eager_sweeps_match_plain_eager_sweeps(sites, monkeypatch):
 
 def test_eager_sweep_runs_the_absorb_moves_under_jit(sites, monkeypatch):
     seen = []
-    raw_jitted = ej._jitted
+    raw_compiled = ej._compiled
 
-    def spy(fn, static_argnames, flags):
+    def spy(fn, static_argnames, args, kwargs):
         seen.append(fn.__name__)
-        return raw_jitted(fn, static_argnames, flags)
+        return raw_compiled(fn, static_argnames, args, kwargs)
 
-    monkeypatch.setattr(ej, "_jitted", spy)
+    monkeypatch.setattr(ej, "_compiled", spy)
     _sweeps(sites, CHI, 1, True, monkeypatch)
     for d in ("left", "right", "top", "bottom"):
         assert f"_ctm_tensor_absorb_{d}_2plaq" in seen
@@ -110,13 +103,13 @@ def test_eager_sweep_runs_the_absorb_moves_under_jit(sites, monkeypatch):
 
 def test_eager_sweep_runs_the_projector_stages_under_jit(sites, monkeypatch):
     seen = []
-    raw_jitted = ej._jitted
+    raw_compiled = ej._compiled
 
-    def spy(fn, static_argnames, flags):
+    def spy(fn, static_argnames, args, kwargs):
         seen.append(fn.__name__)
-        return raw_jitted(fn, static_argnames, flags)
+        return raw_compiled(fn, static_argnames, args, kwargs)
 
-    monkeypatch.setattr(ej, "_jitted", spy)
+    monkeypatch.setattr(ej, "_compiled", spy)
     _sweeps(sites, CHI, 1, True, monkeypatch)
     for name in (
         "_build_enlarged_corner",
@@ -151,7 +144,7 @@ def test_jitted_eager_sweep_compiles_far_less(sites, monkeypatch):
     jax.monitoring.register_event_duration_secs_listener(listener)
     try:
         jax.clear_caches()
-        ej._jitted.cache_clear()
+        ej._clear()
         _sweeps(sites, CHI, 1, True, monkeypatch)
         on = n[0]
         jax.clear_caches()
