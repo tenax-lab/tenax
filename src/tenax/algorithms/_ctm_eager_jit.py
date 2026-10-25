@@ -77,7 +77,10 @@ def _key(fn, static_argnames, args, kwargs):
     dynamic = {k: v for k, v in kwargs.items() if k not in static_argnames}
     leaves, treedef = jax.tree.flatten((args, dynamic))
     avals = tuple(jax.typeof(x) for x in leaves)
-    return (fn, static, _env_flags(), treedef, avals), dynamic
+    # An ahead-of-time executable is bound to its input shardings, so the
+    # same layout on another device needs its own entry.
+    shardings = tuple(getattr(x, "sharding", None) for x in leaves)
+    return (fn, static, _env_flags(), treedef, avals, shardings), dynamic
 
 
 def _compiled(fn: Callable, static_argnames: tuple[str, ...], args, kwargs):

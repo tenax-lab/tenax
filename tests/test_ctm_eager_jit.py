@@ -5,6 +5,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import tenax.algorithms._ctm_eager_jit as ej
 from tenax.core.index import FlowDirection, TensorIndex
@@ -95,6 +96,21 @@ def test_the_cache_keeps_only_the_most_recent_executables(monkeypatch):
     ej.call(_scale, t, k=4.0, static_argnames=("k",))  # evicts k=3.0
     assert [key[1] for key in ej._executables] == [(("k", 2.0),), (("k", 4.0),)]
     assert _close(ej.call(_scale, t, k=2.0, static_argnames=("k",)), t, 2.0)
+
+
+def test_the_same_layout_on_another_device_gets_its_own_executable():
+    """An AOT executable cannot dispatch to another device (Codex P2 on #1145)."""
+    devices = jax.devices()
+    if len(devices) < 2:
+        pytest.skip("needs two devices")
+    ej._clear()
+    t = _sym()
+    for d in devices[:2]:
+        on_d = jax.device_put(t, d)
+        out = ej.call(_double, on_d)
+        assert _close(out, on_d, 2.0)
+        assert out._data.devices() == {d}
+    assert len(ej._executables) == 2
 
 
 # --------------------------------------- per-call contraction env flags (R14 F1)
