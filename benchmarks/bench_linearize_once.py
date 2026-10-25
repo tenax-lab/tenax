@@ -23,6 +23,8 @@ import sys
 import time
 
 import jax
+import jax.numpy as jnp
+import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
@@ -34,7 +36,14 @@ _COMPILE_RE = re.compile(
 )
 
 
-def parse_compiles(text: str) -> dict[str, float]:
+def parse_compiles(text: str, *, upto_optimize_done: bool = True) -> dict[str, float]:
+    """Sum compile seconds per program; by default stop at ``MARK optimize_done``.
+
+    The SU-state gradient taken after the run compiles more programs; they
+    stay out of the A1 totals unless ``upto_optimize_done`` is False.
+    """
+    if upto_optimize_done:
+        text = text.split("MARK optimize_done", 1)[0]
     out: dict[str, float] = {}
     for name, secs in _COMPILE_RE.findall(text):
         out[name] = out.get(name, 0.0) + float(secs)
@@ -46,12 +55,19 @@ def main() -> None:
     ap.add_argument("--D", type=int, default=3)
     ap.add_argument("--chi", type=int, default=16)
     ap.add_argument("--su-steps", type=int, default=200)
-    ap.add_argument("--steps", type=int, default=3)
+    ap.add_argument("--steps", type=int, default=4)
     ap.add_argument("--out", required=True)
     ap.add_argument("--parse", help="print the compile table of a log and exit")
+    ap.add_argument(
+        "--parse-all",
+        action="store_true",
+        help="with --parse: count the whole log, not only before optimize_done",
+    )
     a = ap.parse_args()
     if a.parse:
-        table = parse_compiles(open(a.parse).read())
+        table = parse_compiles(
+            open(a.parse).read(), upto_optimize_done=not a.parse_all
+        )
         for name, secs in sorted(table.items(), key=lambda kv: -kv[1])[:12]:
             print(f"{secs:10.1f}  {name}")
         print(f"{sum(table.values()):10.1f}  TOTAL")
@@ -92,6 +108,32 @@ def main() -> None:
     wall = time.time() - t1
     print(f"MARK optimize_done {wall:.1f} s E={float(E):.12f}", flush=True)
     stats = jax.devices()[0].memory_stats() or {}
+    # Full-precision gradient at the SU input state, default backward: the
+    # log prints |g| to 4 digits only, too coarse for the A3 gate.
+    from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
+    from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
+
+    g = jax.grad(
+        lambda p: jnp.real(
+            ctm_energy_implicit(
+                {(0, 0): p[0], (1, 0): p[1]},
+                CHECKERBOARD_NEIGHBORS,
+                xxz_gate(0.3),
+                chi=a.chi,
+                max_iter=1000,
+                conv_tol=1e-10,
+            )
+        )
+    )((A, B))
+    gvec = np.concatenate(
+        [np.asarray(x).ravel().astype(np.complex128) for x in jax.tree.leaves(g)]
+    )
+    if np.allclose(gvec.imag, 0.0):
+        gvec = gvec.real.astype(np.float64)
+    grad_path = (a.out[:-5] if a.out.endswith(".json") else a.out) + ".grad.npy"
+    np.save(grad_path, gvec)
+    grad_norm = float(np.linalg.norm(gvec))
+    print(f"MARK grad_done |g|={grad_norm!r}", flush=True)
     out = {
         "D": a.D,
         "chi": a.chi,
@@ -104,6 +146,8 @@ def main() -> None:
         "step_times": [float(s) for s in hist.get("step_times", [])],
         "optimize_wall_s": wall,
         "device_peak_bytes": stats.get("peak_bytes_in_use"),
+        "grad_norm_su": grad_norm,
+        "grad_path": grad_path,
     }
     with open(a.out, "w") as f:
         json.dump(out, f, indent=1)
