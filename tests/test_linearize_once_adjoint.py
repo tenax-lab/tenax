@@ -227,7 +227,7 @@ def test_the_adjoint_solvers_hold_no_forward_sweep(spy):
     forward = _svd_count(by_name["_jit_linearize_joint"])
     assert forward > 0  # regime: the forward sweep has SVDs to leak
     for name in _SOLVERS:
-        assert _svd_count(by_name[name]) < forward, name
+        assert _svd_count(by_name[name]) == 0, name
 
 
 @pytest.mark.usefixtures("fresh_vjp_cache")
