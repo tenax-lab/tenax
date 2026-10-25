@@ -276,6 +276,73 @@ def _jit_gmres_joint_solve(
     )
 
 
+def _neumann_loop(apply_Jt, dE_denv, init_lam, use_init, *, tol, maxiter):
+    """The adjoint fixed point ``λ_{k+1} = b + Jᵀλ_k``, ``b = dE_denv``, as one
+    ``lax.while_loop``.
+
+    Shared by ``_jit_fused_fixed_point_bwd`` (``"separate"``) and
+    ``_jit_neumann_bwd`` (``"joint"``), so both chain rules run the same loop.
+    ``apply_Jt`` returns ``Jᵀ v`` (not ``(I - Jᵀ) v``).  Cold start
+    (``use_init`` false) seeds from ``dE_denv``; ``use_init`` is traced, so warm
+    and cold calls share one compiled program.  Returns
+    ``(diverged, converged, n_iter, lam_final, abs_resid, b_norm)``; see
+    ``_jit_fused_fixed_point_bwd`` for what each one means.
+    """
+    # --- 3. Adjoint fixed-point inside lax.while_loop ---
+    # ``init_lam`` is the caller-supplied warm-start seed (cold-start
+    # uses ``dE_denv``; warm-start uses the previous ``lam_final``).
+    # The RHS ``b = dE_denv`` of the Neumann step ``λ_{k+1} = b + J^T λ_k``
+    # is unchanged — only the initial guess is seeded from cache.
+    real_dtype = jnp.real(dE_denv[0]).dtype if dE_denv else jnp.float64
+    # Cold start seeds from this program's own dE_denv: passing it in
+    # from the standalone _jit_dE_denv compiled a second copy of the
+    # energy VJP just to make the seed.  ``use_init`` is traced, so warm
+    # and cold calls share this compiled program.
+    init_lam_local = tuple(jnp.where(use_init, w, d) for w, d in zip(init_lam, dE_denv))
+    init_diff = jnp.array(jnp.inf, dtype=real_dtype)
+    init_k = jnp.array(0, dtype=jnp.int32)
+    init_diverged = jnp.array(False)
+    # Fails closed: if the body never runs (gmres_maxiter=0) this stays inf
+    # and ``_adjoint_converged`` reports not-converged rather than nothing.
+    init_resid = jnp.array(jnp.inf, dtype=real_dtype)
+
+    tol_arr = jnp.array(tol, dtype=real_dtype)
+    maxiter_arr = jnp.array(maxiter, dtype=jnp.int32)
+
+    def cond_fn(carry):
+        _lam, prev_diff, k, diverged, _resid = carry
+        return (k < maxiter_arr) & (~diverged) & (prev_diff > tol_arr)
+
+    def body_fn(carry):
+        lam, prev_diff, k, _diverged, _resid = carry
+        jt_lam = apply_Jt(lam)
+        new_lam = tuple(b + j for b, j in zip(dE_denv, jt_lam))
+        delta = tuple(n - p for n, p in zip(new_lam, lam))
+        diff = sum(jnp.linalg.norm(d) for d in delta).astype(real_dtype)
+        # ‖(I - Jᵀ)λ_k - b‖ for free: the Neumann step *is* the residual,
+        #   λ_{k+1} - λ_k = b + Jᵀλ_k - λ_k = b - (I - Jᵀ)λ_k
+        # so this is one L2 over an array already formed, not a second Jᵀ
+        # application.  Kept separate from ``diff``, which is an ℓ1-of-ℓ2
+        # sum over leaves and drives the stopping criterion — the two are
+        # different norms and only this one is what the GMRES branch gates
+        # and reports (#824).
+        resid = jnp.sqrt(sum(jnp.sum(jnp.abs(d) ** 2) for d in delta)).astype(
+            real_dtype
+        )
+        # Divergence guard: same trigger as F2 Python loop.
+        new_diverged = (diff > prev_diff) & (k > jnp.array(5, jnp.int32))
+        return (new_lam, diff, k + jnp.array(1, jnp.int32), new_diverged, resid)
+
+    lam_final, final_diff, n_iter, diverged, abs_resid = jax.lax.while_loop(
+        cond_fn,
+        body_fn,
+        (init_lam_local, init_diff, init_k, init_diverged, init_resid),
+    )
+    converged = final_diff <= tol_arr
+    b_norm = jnp.sqrt(sum(jnp.sum(jnp.abs(b) ** 2) for b in dE_denv)).astype(real_dtype)
+    return diverged, converged, n_iter, lam_final, abs_resid, b_norm
+
+
 # #1028: the flowing projector backward, and the frozen value its backward
 # falls back to when the flowing adjoint is not solvable (see ``f_bwd``).
 # "auto" is the frozen default every non-flow caller already runs.
@@ -2187,60 +2254,8 @@ def _make_implicit_vjp_fn(
             return vjp_env_fn(v)[0]
 
         # --- 3. Adjoint fixed-point inside lax.while_loop ---
-        # ``init_lam`` is the caller-supplied warm-start seed (cold-start
-        # uses ``dE_denv``; warm-start uses the previous ``lam_final``).
-        # The RHS ``b = dE_denv`` of the Neumann step ``λ_{k+1} = b + J^T λ_k``
-        # is unchanged — only the initial guess is seeded from cache.
-        real_dtype = jnp.real(dE_denv[0]).dtype if dE_denv else jnp.float64
-        # Cold start seeds from this program's own dE_denv: passing it in
-        # from the standalone _jit_dE_denv compiled a second copy of the
-        # energy VJP just to make the seed.  ``use_init`` is traced, so warm
-        # and cold calls share this compiled program.
-        init_lam_local = tuple(
-            jnp.where(use_init, w, d) for w, d in zip(init_lam, dE_denv)
-        )
-        init_diff = jnp.array(jnp.inf, dtype=real_dtype)
-        init_k = jnp.array(0, dtype=jnp.int32)
-        init_diverged = jnp.array(False)
-        # Fails closed: if the body never runs (gmres_maxiter=0) this stays inf
-        # and ``_adjoint_converged`` reports not-converged rather than nothing.
-        init_resid = jnp.array(jnp.inf, dtype=real_dtype)
-
-        tol_arr = jnp.array(gmres_tol, dtype=real_dtype)
-        maxiter_arr = jnp.array(gmres_maxiter, dtype=jnp.int32)
-
-        def cond_fn(carry):
-            _lam, prev_diff, k, diverged, _resid = carry
-            return (k < maxiter_arr) & (~diverged) & (prev_diff > tol_arr)
-
-        def body_fn(carry):
-            lam, prev_diff, k, _diverged, _resid = carry
-            jt_lam = apply_Jt(lam)
-            new_lam = tuple(b + j for b, j in zip(dE_denv, jt_lam))
-            delta = tuple(n - p for n, p in zip(new_lam, lam))
-            diff = sum(jnp.linalg.norm(d) for d in delta).astype(real_dtype)
-            # ‖(I - Jᵀ)λ_k - b‖ for free: the Neumann step *is* the residual,
-            #   λ_{k+1} - λ_k = b + Jᵀλ_k - λ_k = b - (I - Jᵀ)λ_k
-            # so this is one L2 over an array already formed, not a second Jᵀ
-            # application.  Kept separate from ``diff``, which is an ℓ1-of-ℓ2
-            # sum over leaves and drives the stopping criterion — the two are
-            # different norms and only this one is what the GMRES branch gates
-            # and reports (#824).
-            resid = jnp.sqrt(sum(jnp.sum(jnp.abs(d) ** 2) for d in delta)).astype(
-                real_dtype
-            )
-            # Divergence guard: same trigger as F2 Python loop.
-            new_diverged = (diff > prev_diff) & (k > jnp.array(5, jnp.int32))
-            return (new_lam, diff, k + jnp.array(1, jnp.int32), new_diverged, resid)
-
-        lam_final, final_diff, n_iter, diverged, abs_resid = jax.lax.while_loop(
-            cond_fn,
-            body_fn,
-            (init_lam_local, init_diff, init_k, init_diverged, init_resid),
-        )
-        converged = final_diff <= tol_arr
-        b_norm = jnp.sqrt(sum(jnp.sum(jnp.abs(b) ** 2) for b in dE_denv)).astype(
-            real_dtype
+        diverged, converged, n_iter, lam_final, abs_resid, b_norm = _neumann_loop(
+            apply_Jt, dE_denv, init_lam, use_init, tol=gmres_tol, maxiter=gmres_maxiter
         )
 
         return diverged, converged, n_iter, lam_final, abs_resid, b_norm, dE_denv
