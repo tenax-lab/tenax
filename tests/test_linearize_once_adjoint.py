@@ -126,3 +126,273 @@ def test_dense_sites_pick_the_default_variant(any_size):
         prog, (_wrap_as_dense_tensor(jnp.ones((2, 2, 2, 2, 2))),), by_bond_dim=True
     )
     assert got is prog.dense
+
+
+# ------------------------------------------------------- the default backward
+
+#: One gate object: the gate fingerprint is part of the dispatch cache key.
+_GATE = heisenberg_gate()
+
+#: tests/test_joint_chain_rule.py's fixture: at chi=4 the fused loop solves
+#: seed 0.
+_FUSED_SEED = 0
+
+_SOLVERS = ("_jit_neumann_bwd", "_jit_gmres_joint_solve")
+_NEW_PROGRAMS = ("_jit_linearize_joint", *_SOLVERS)
+
+
+@pytest.fixture
+def fresh_vjp_cache():
+    saved = collections.OrderedDict(cea._VJP_CACHE)
+    cea._VJP_CACHE.clear()
+    yield
+    cea._VJP_CACHE.clear()
+    cea._VJP_CACHE.update(saved)
+
+
+@pytest.fixture
+def spy(monkeypatch):
+    """Record every program the backward calls through ``_fusion_variant``:
+    ``(name, "block_sparse" | "dense", variant, args, kwargs)``."""
+    calls = []
+    real = cea._fusion_variant
+
+    def spying(prog, params_data_tuple, *, by_bond_dim):
+        variant = real(prog, params_data_tuple, by_bond_dim=by_bond_dim)
+        kind = "block_sparse" if variant is prog.block_sparse else "dense"
+
+        def call(*args, **kwargs):
+            calls.append((prog.__name__, kind, variant, args, kwargs))
+            return variant(*args, **kwargs)
+
+        return call
+
+    monkeypatch.setattr(cea, "_fusion_variant", spying)
+    return calls
+
+
+def _site(seed=0, dtype=jnp.float64):
+    rng = np.random.default_rng(seed)
+    A0 = rng.standard_normal((2, 2, 2, 2, 2))
+    if jnp.issubdtype(dtype, jnp.complexfloating):
+        A0 = A0 + 0.1j * rng.standard_normal((2, 2, 2, 2, 2))
+    A0 = jnp.asarray(A0, dtype=dtype)
+    return A0 / jnp.linalg.norm(A0)
+
+
+def _energy(arrs, mode, *, method="fixed_point", tol=1e-11, neighbors=None, **kw):
+    if not isinstance(arrs, (tuple, list)):
+        arrs = (arrs,)
+    neighbors = neighbors or SINGLE_SITE_NEIGHBORS
+    coords = sorted(neighbors)
+    return jnp.real(
+        ctm_energy_implicit(
+            {c: _wrap_as_dense_tensor(a) for c, a in zip(coords, arrs)},
+            neighbors,
+            _GATE,
+            recipe="2x2",
+            chi=4,
+            max_iter=60,
+            min_iter=8,
+            conv_tol=1e-10,
+            adjoint_method=method,
+            gmres_tol=tol,
+            adjoint_chain_rule=mode,
+            **kw,
+        )
+    )
+
+
+def _grad(arrs, mode, **kw):
+    return jax.grad(lambda a: _energy(a, mode, **kw))(arrs)
+
+
+_SVD = re.compile(r"\bsvd\[")
+
+
+def _svd_count(call):
+    _name, _kind, variant, args, kwargs = call
+    jaxpr = jax.make_jaxpr(lambda *a: variant(*a, **kwargs))(*args)
+    return len(_SVD.findall(str(jaxpr)))
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_the_adjoint_solvers_hold_no_forward_sweep(spy):
+    """The forward projector SVDs live in the linearise program only.  A
+    solver that re-linearised the sweep (main's GMRES matvec did) would carry
+    every one of them again."""
+    _grad(_site(_FUSED_SEED), "joint")
+    by_name = {c[0]: c for c in spy}
+    assert set(_NEW_PROGRAMS) <= set(by_name), sorted(by_name)
+    forward = _svd_count(by_name["_jit_linearize_joint"])
+    assert forward > 0  # regime: the forward sweep has SVDs to leak
+    for name in _SOLVERS:
+        assert _svd_count(by_name[name]) < forward, name
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_one_backward_linearises_once(spy):
+    _grad(_site(_FUSED_SEED), "joint")
+    names = [c[0] for c in spy]
+    assert names.count("_jit_linearize_joint") == 1, names
+    solver_args = [c[3][0] for c in spy if c[0] in _SOLVERS]
+    assert len(solver_args) == 2 and solver_args[0] is solver_args[1], names
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_later_backwards_on_one_layout_trace_nothing_new():
+    A0 = _site(_FUSED_SEED)
+    mark0 = len(_TRACED)
+    _grad(A0, "joint")
+    assert set(_NEW_PROGRAMS) <= set(_TRACED[mark0:]), sorted(set(_TRACED[mark0:]))
+    mark = len(_TRACED)
+    for k in (1, 2):
+        _grad(A0 * (1.0 + 1e-3 * k), "joint")
+    retraced = set(_TRACED[mark:]) & set(_NEW_PROGRAMS)
+    assert not retraced, sorted(retraced)
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_a_second_backward_with_new_values_matches_separate():
+    """A pullback reused from the first backward would give the first
+    state's gradient."""
+    A0 = _site(_FUSED_SEED)
+    _grad(A0, "joint")
+    A1 = 0.9 * A0 + 0.1 * _site(5)
+    A1 = A1 / jnp.linalg.norm(A1)
+    g_joint = _grad(A1, "joint")
+    g_sep = _grad(A1, "separate")
+    np.testing.assert_allclose(
+        np.asarray(g_joint), np.asarray(g_sep), rtol=1e-8, atol=1e-10
+    )
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        dict(dtype=jnp.complex128),
+        dict(projector_backward="flow", forward_gauge="bond_phase"),
+    ],
+    ids=["complex", "flow"],
+)
+def test_the_fixed_point_path_matches_separate(kw):
+    """Review Focus 1 and 3 on the default (fixed-point) method; the gmres
+    method's cases live in tests/test_joint_chain_rule.py."""
+    kw = dict(kw)
+    dtype = kw.pop("dtype", jnp.float64)
+    A0 = _site(_FUSED_SEED, dtype=dtype)
+    g_sep = _grad(A0, "separate", **kw)
+    g_joint = _grad(A0, "joint", **kw)
+    if "projector_backward" in kw:  # regime: the flowing backward really ran
+        used = cea.get_last_implicit_ad_diagnostics().get("projector_backward_used")
+        assert used == "flow", used
+    np.testing.assert_allclose(
+        np.asarray(g_joint), np.asarray(g_sep), rtol=1e-10, atol=1e-12
+    )
+
+
+@needs_no_fusion
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_the_solvers_take_the_variant_the_site_tensors_call_for(spy, any_size):
+    from tests.test_block_sparse_ctm_ad import _make_u1_symmetric_ipeps
+
+    A_sym = _make_u1_symmetric_ipeps()
+    jax.grad(
+        lambda A: jnp.real(
+            ctm_energy_implicit(
+                {(0, 0): A},
+                SINGLE_SITE_NEIGHBORS,
+                _GATE,
+                chi=4,
+                max_iter=30,
+                conv_tol=1e-8,
+                gmres_tol=1e-11,
+                adjoint_chain_rule="joint",
+            )
+        )
+    )(A_sym)
+    kinds = {c[0]: c[1] for c in spy}
+    assert kinds == dict.fromkeys(_NEW_PROGRAMS, "block_sparse"), kinds
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_dense_sites_keep_the_default_variant(spy):
+    _grad(_site(_FUSED_SEED), "joint")
+    kinds = {c[0]: c[1] for c in spy}
+    assert kinds == dict.fromkeys(_NEW_PROGRAMS, "dense"), kinds
+
+
+# ------------------------------------------------------------ SU states (slow)
+
+
+def _assert_tree_close(a, b, rtol=1e-10, atol=1e-12):
+    la, lb = jax.tree.leaves(a), jax.tree.leaves(b)
+    assert len(la) == len(lb) and la
+    for x, y in zip(la, lb):
+        np.testing.assert_allclose(np.asarray(x), np.asarray(y), rtol=rtol, atol=atol)
+
+
+@pytest.mark.slow
+def test_a_u1_su_state_matches_separate():
+    from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair, ipeps, xxz_gate
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
+
+    gate = xxz_gate(0.3)
+    A0, B0 = heisenberg_u1sz_init_pair(2, jax.random.PRNGKey(0))
+    cfg = iPEPSConfig(
+        max_bond_dim=2, num_imaginary_steps=100, dt=0.05, ctm=CTMConfig(chi=8)
+    )
+    _, (A, B), _ = ipeps(gate, (A0, B0), cfg, compute_energy=False)
+    A, B = A * (1.0 / A.norm()), B * (1.0 / B.norm())
+
+    def grad(mode):
+        return jax.grad(
+            lambda p: jnp.real(
+                ctm_energy_implicit(
+                    {(0, 0): p[0], (1, 0): p[1]},
+                    CHECKERBOARD_NEIGHBORS,
+                    gate,
+                    chi=8,
+                    max_iter=200,
+                    conv_tol=1e-10,
+                    gmres_tol=1e-11,
+                    adjoint_chain_rule=mode,
+                )
+            )
+        )((A, B))
+
+    _assert_tree_close(grad("joint"), grad("separate"))
+
+
+@pytest.mark.slow
+def test_a_fermionic_su_state_matches_separate():
+    from tenax.algorithms.fermionic_ipeps import (
+        FPEPSConfig,
+        _fpeps_simple_update,
+        _initialize_fpeps,
+        spinless_fermion_gate,
+    )
+
+    cfg = FPEPSConfig(D=2, t=1.0, V=1.0, mu=2.0, dt=0.05)
+    H = spinless_fermion_gate(cfg)
+    A = _initialize_fpeps(cfg, jax.random.PRNGKey(0))
+    B = _initialize_fpeps(cfg, jax.random.PRNGKey(1))
+    A, B, _ = _fpeps_simple_update(A, H, max_D=2, dt=0.05, steps=100, B=B)
+
+    def grad(mode):
+        return jax.grad(
+            lambda p: jnp.real(
+                ctm_energy_implicit(
+                    {(0, 0): p[0], (1, 0): p[1]},
+                    CHECKERBOARD_NEIGHBORS,
+                    H,
+                    chi=8,
+                    max_iter=200,
+                    conv_tol=1e-10,
+                    gmres_tol=1e-11,
+                    adjoint_chain_rule=mode,
+                )
+            )
+        )((A, B))
+
+    _assert_tree_close(grad("joint"), grad("separate"))

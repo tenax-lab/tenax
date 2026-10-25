@@ -235,35 +235,28 @@ def _jit_gmres_one_matvec_solve(
     )
 
 
-@partial(
-    block_sparse_jit,
-    static_argnames=("apply_joint", "chi", "pb", "tol", "maxiter", "restart"),
-)
-def _jit_gmres_joint_solve(
-    params_data_tuple,
-    env_leaves,
-    rhs,
-    candidates,
-    *,
-    apply_joint,
-    chi,
-    pb,
-    tol,
-    maxiter,
-    restart,
-):
-    """:func:`_jit_gmres_one_matvec_solve` with the joint-VJP matvec.
+@partial(block_sparse_jit, static_argnames=("tol", "maxiter", "restart"))
+def _jit_gmres_joint_solve(vjp_joint, rhs, candidates, *, tol, maxiter, restart):
+    """:func:`gmres_single_matvec` on the saved joint linearisation.
 
-    ``apply_joint`` returns ``((I - J_env^T) v, J_params^T v)`` from one VJP,
-    and :func:`gmres_single_matvec` (``aux=True``) carries ``J_params^T`` of
-    its best iterate, so the chain rule's indirect term comes out of the
-    solve and ``_jit_chain_rule`` never compiles.  Gated with the default
-    ``by_bond_dim=True`` (the chain rule's rule): this program contains the
-    params-VJP too.  Returns ``(lam, abs_resid, b_norm, indirect)``.
+    ``vjp_joint`` is the gauge-fixed sweep's pullback over ``(params, env)``
+    from ``_jit_linearize_joint``: ``vjp_joint(v) == (J_params^T v,
+    J_env^T v)``.  The matvec is ``((I - J_env^T) v, J_params^T v)``, and
+    :func:`gmres_single_matvec` (``aux=True``) carries ``J_params^T`` of its
+    best iterate, so the chain rule's indirect term comes out of the solve
+    and ``_jit_chain_rule`` never compiles (#1123).  This program holds only
+    the transpose: the forward sweep compiled once, in the linearise program
+    (spec 2026-10-25-linearize-once-adjoint-design.md).  Call it through
+    :func:`_fusion_variant` with ``by_bond_dim=True`` (the chain rule's
+    rule; this program contains the params-VJP): its arguments carry no
+    ``SymmetricTensor``.  ``candidates`` must keep the same pytree structure
+    from call to call or it recompiles (#1087).  Returns
+    ``(lam, abs_resid, b_norm, indirect)``.
     """
 
     def matvec(v):
-        return apply_joint(params_data_tuple, env_leaves, v, chi=chi, pb=pb)
+        params_ct, env_ct = vjp_joint(tuple(v))
+        return tuple(vi - ji for vi, ji in zip(v, env_ct)), params_ct
 
     return gmres_single_matvec(
         matvec,
@@ -356,6 +349,25 @@ def _fusion_variant(prog, params_data_tuple, *, by_bond_dim):
     if _wants_no_fusion((params_data_tuple,), {}, None, by_bond_dim):
         return prog.block_sparse
     return prog.dense
+
+
+@partial(block_sparse_jit, by_bond_dim=False, static_argnames=("tol", "maxiter"))
+def _jit_neumann_bwd(vjp_joint, dE_denv, init_lam, use_init, *, tol, maxiter):
+    """The Neumann adjoint loop on the saved joint linearisation.
+
+    ``J_env^T v = vjp_joint(v)[1]``; XLA drops the unused params half.  The
+    program holds only the transpose.  Call it through
+    :func:`_fusion_variant` with ``by_bond_dim=False`` (it is the sweep VJP
+    only).  Returns :func:`_neumann_loop`'s tuple.
+    """
+    return _neumann_loop(
+        lambda v: vjp_joint(tuple(v))[1],
+        dE_denv,
+        init_lam,
+        use_init,
+        tol=tol,
+        maxiter=maxiter,
+    )
 
 
 # #1028: the flowing projector backward, and the frozen value its backward
@@ -2119,16 +2131,24 @@ def _make_implicit_vjp_fn(
         )
         return tuple(jax.tree.leaves(_apply_gauge_fix(e_out, e_ref)))
 
-    @partial(block_sparse_jit, static_argnames=("chi", "pb"))
-    def _jit_apply_joint(params_data_tuple, env_leaves, v, *, chi, pb):
-        """``((I - J_env^T) v, J_params^T v)`` from ONE VJP of the sweep."""
+    @partial(block_sparse_jit, by_bond_dim=False, static_argnames=("chi", "pb"))
+    def _jit_linearize_joint(params_data_tuple, env_leaves, *, chi, pb):
+        """The gauge-fixed sweep's pullback over ``(params, env)``, once per
+        backward.
+
+        Returns :func:`jax.vjp`'s pullback, a ``jax.tree_util.Partial`` whose
+        leaves are the residuals.  ``_jit_neumann_bwd`` and
+        ``_jit_gmres_joint_solve`` take it as an argument and compile only the
+        transpose.  A cached call returns the same pullback function object,
+        so they hit their caches too; a new ``chi``/``pb``/layout recompiles
+        all three, as it recompiled their predecessors.
+        """
         _, vjp_fn = jax.vjp(
             partial(_gauge_fixed_sweep_joint, chi=chi, pb=pb),
             params_data_tuple,
             env_leaves,
         )
-        pc, jt_v = vjp_fn(v)
-        return tuple(vi - ji for vi, ji in zip(v, jt_v)), pc
+        return vjp_fn
 
     @block_sparse_jit
     def _jit_direct(params_data_tuple, env_leaves):
@@ -2332,6 +2352,10 @@ def _make_implicit_vjp_fn(
         params_data_tuple, env_leaves, chi_post, run_token = residuals[:4]
         run = _run_state(mutables, int(run_token))
 
+        def pick_variant(prog, by_bond_dim):
+            # Looked up at call time, so tests can spy on _fusion_variant.
+            return _fusion_variant(prog, params_data_tuple, by_bond_dim=by_bond_dim)
+
         # Drop the previous backward's residual before any branch can return.
         # ``_F3_LAST_DIAGNOSTICS`` is module-global, so a path that fails to
         # publish one would otherwise hand the caller a stale value from an
@@ -2428,17 +2452,46 @@ def _make_implicit_vjp_fn(
                 init_lam = prev_lam
                 use_init = jnp.array(True)
 
-            (
-                diverged,
-                _converged,
-                _n_iter,
-                lam_final,
-                _abs_resid,
-                _b_norm,
-                fused_rhs,
-            ) = _jit_fused_fixed_point_bwd(
-                params_data_tuple, env_leaves, init_lam, use_init, chi=chi_post, pb=pb
-            )
+            if adjoint_chain_rule == "joint":
+                # Linearise once (spec 2026-10-25): the Neumann loop and the
+                # joint GMRES solve below share this pullback and compile only
+                # the transpose.
+                vjp_joint = pick_variant(_jit_linearize_joint, False)(
+                    params_data_tuple, env_leaves, chi=chi_post, pb=pb
+                )
+                fused_rhs = _eager_dE_denv()
+                (
+                    diverged,
+                    _converged,
+                    _n_iter,
+                    lam_final,
+                    _abs_resid,
+                    _b_norm,
+                ) = pick_variant(_jit_neumann_bwd, False)(
+                    vjp_joint,
+                    fused_rhs,
+                    init_lam,
+                    use_init,
+                    tol=gmres_tol,
+                    maxiter=gmres_maxiter,
+                )
+            else:
+                (
+                    diverged,
+                    _converged,
+                    _n_iter,
+                    lam_final,
+                    _abs_resid,
+                    _b_norm,
+                    fused_rhs,
+                ) = _jit_fused_fixed_point_bwd(
+                    params_data_tuple,
+                    env_leaves,
+                    init_lam,
+                    use_init,
+                    chi=chi_post,
+                    pb=pb,
+                )
             _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
             _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
@@ -2524,14 +2577,10 @@ def _make_implicit_vjp_fn(
                     if fused_solved
                     else tuple(jnp.zeros_like(r) for r in fused_rhs)
                 )
-                lam, _abs, _bn, indirect = _jit_gmres_joint_solve(
-                    params_data_tuple,
-                    env_leaves,
+                lam, _abs, _bn, indirect = pick_variant(_jit_gmres_joint_solve, True)(
+                    vjp_joint,
                     fused_rhs,
                     [seed, fused_rhs],
-                    apply_joint=_jit_apply_joint,
-                    chi=chi_post,
-                    pb=pb,
                     tol=gmres_tol,
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
@@ -2657,14 +2706,13 @@ def _make_implicit_vjp_fn(
                 prev_lam is not None,
             )
             if adjoint_chain_rule == "joint":
-                lam, _abs, _bn, indirect = _jit_gmres_joint_solve(
-                    params_data_tuple,
-                    env_leaves,
+                vjp_joint = pick_variant(_jit_linearize_joint, False)(
+                    params_data_tuple, env_leaves, chi=chi_post, pb=pb
+                )
+                lam, _abs, _bn, indirect = pick_variant(_jit_gmres_joint_solve, True)(
+                    vjp_joint,
                     rhs,
                     [warm, rhs],
-                    apply_joint=_jit_apply_joint,
-                    chi=chi_post,
-                    pb=pb,
                     tol=gmres_tol,
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
