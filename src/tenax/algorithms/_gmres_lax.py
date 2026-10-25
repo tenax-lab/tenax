@@ -341,6 +341,9 @@ def gmres_pytree_jax(
 # Phases of :func:`gmres_single_matvec`.  The loop body applies the matvec
 # once and the phase decides what the product means.
 _SEED, _RESID, _ARNOLDI = 0, 1, 2
+# The first phase of :func:`neumann_then_gmres`, numbered last so the three
+# GMRES phases keep their numbers and ``gmres_single_matvec`` its program.
+_NEUMANN = 3
 
 
 def gmres_single_matvec(
@@ -396,6 +399,27 @@ def gmres_single_matvec(
     Returns:
         ``(x_tree, abs_resid, b_norm)``, plus ``a(x_tree)`` last when ``aux``.
     """
+    return _gmres_machine(
+        matvec,
+        b_tree,
+        candidates,
+        tol=tol,
+        maxiter=maxiter,
+        restart=restart,
+        aux=aux,
+        neumann=None,
+    )
+
+
+def _gmres_machine(matvec, b_tree, candidates, *, tol, maxiter, restart, aux, neumann):
+    """The loop behind :func:`gmres_single_matvec` and :func:`neumann_then_gmres`.
+
+    ``neumann`` is ``None`` for plain GMRES: ``matvec`` is the operator ``A``.
+    Otherwise it is ``{"init": init_lam, "use_init": use_init, "maxiter": int}``,
+    ``matvec`` is ``v -> (J^T v, a(v))`` (``aux`` must be True), the GMRES
+    phases see ``A v = v - J^T v``, and ``candidates`` serve only the dtype
+    check: the seeds come from the Neumann phase's handoff.
+    """
     b_leaves, treedef = jax.tree.flatten(b_tree)
     shapes = [leaf.shape for leaf in b_leaves]
     offsets = [int(o) for o in np.cumsum([leaf.size for leaf in b_leaves])[:-1]]
@@ -447,6 +471,10 @@ def gmres_single_matvec(
     cands = [flatten(c).astype(dtype) for c in candidates if c is not None]
     n_cand = len(cands)
     C = jnp.stack(cands) if cands else jnp.zeros((1, n), dtype)
+    if neumann is not None:
+        # Seeds [lam_neumann if solved else 0, b], written at the handoff.
+        n_cand = 2
+        C = jnp.zeros((2, n), dtype)
 
     def norm(v):
         return jnp.sqrt(jnp.sum(jnp.abs(v) ** 2)).astype(rdtype)
@@ -494,15 +522,34 @@ def gmres_single_matvec(
     }
     if aux:
         state0["best_aux"] = aux0
+    if neumann is not None:
+        n_maxiter = int(neumann["maxiter"])
+        n_maxiter_arr = jnp.array(n_maxiter, dtype=jnp.int32)
+        # _neumann_loop: cold start from b, warm start from init_lam.
+        lam0 = jnp.where(neumann["use_init"], flatten(neumann["init"]).astype(dtype), b)
+        state0.update(
+            {
+                "C": C,
+                "phase": jnp.int32(_NEUMANN),
+                "v_in": lam0,
+                "n_lam": lam0,
+                "n_diff": jnp.array(jnp.inf, dtype=rdtype),
+                "n_k": jnp.int32(0),
+                "n_div": jnp.array(False),
+                # Fails closed: with zero steps this stays inf.
+                "n_resid": jnp.array(jnp.inf, dtype=rdtype),
+            }
+        )
 
     def seed(s, y, a):
         res = norm(b - y)
         better = res < s["best_res"]  # NaN compares False: never chosen
-        best_x = jnp.where(better, C[s["k"]], s["best_x"])
+        Cs = C if neumann is None else s["C"]
+        best_x = jnp.where(better, Cs[s["k"]], s["best_x"])
         best_res = jnp.where(better, res, s["best_res"])
         k1 = s["k"] + 1
         last = k1 >= n_cand
-        nxt = C[jnp.minimum(k1, max(n_cand - 1, 0))]
+        nxt = Cs[jnp.minimum(k1, max(n_cand - 1, 0))]
         return {
             **s,
             "k": k1,
@@ -607,12 +654,139 @@ def gmres_single_matvec(
             "phase": jnp.where(end, _RESID, _ARNOLDI).astype(jnp.int32),
         }
 
+    def handoff(s):
+        """End of the Neumann phase: GMRES from [lam if solved else 0, b]."""
+        solved = (s["n_diff"] <= tol_r) & ~s["n_div"]
+        seed0 = jnp.where(solved, s["n_lam"], zeros_n)
+        return {
+            **s,
+            "C": jnp.stack([seed0, b]),
+            "k": jnp.int32(0),
+            "v_in": seed0,
+            "phase": jnp.int32(_SEED),
+        }
+
+    def neumann_step(s, y, a, jt):
+        """``_neumann_loop``'s body: lam <- b + J^T lam, on ``jt = J^T v_in``."""
+        del y, a
+        new = b + jt
+        delta = new - s["n_lam"]
+        d_leaves = jax.tree.leaves(unflatten(delta))
+        diff = sum(jnp.linalg.norm(d) for d in d_leaves).astype(rdtype)
+        resid = jnp.sqrt(sum(jnp.sum(jnp.abs(d) ** 2) for d in d_leaves)).astype(rdtype)
+        diverged = (diff > s["n_diff"]) & (s["n_k"] > jnp.array(5, jnp.int32))
+        s = {
+            **s,
+            "n_lam": new,
+            "n_diff": diff,
+            "n_k": s["n_k"] + jnp.array(1, jnp.int32),
+            "n_div": diverged,
+            "n_resid": resid,
+            "v_in": new,
+        }
+        # _neumann_loop's cond_fn; a NaN diff fails ``diff > tol`` and hands over.
+        go_on = (s["n_k"] < n_maxiter_arr) & ~diverged & (diff > tol_r)
+        return lax.cond(go_on, lambda t: t, handoff, s)
+
     def body(s):
         y, a = apply(s["v_in"])  # the one and only matvec call site
-        return lax.switch(s["phase"], (seed, resid, arnoldi), s, y, a)
+        if neumann is None:
+            return lax.switch(s["phase"], (seed, resid, arnoldi), s, y, a)
+        jt = y
+        y = s["v_in"] - jt  # A v = v - J^T v for the GMRES phases
+        return lax.switch(
+            s["phase"],
+            (
+                lambda t, y_, a_, _j: seed(t, y_, a_),
+                lambda t, y_, a_, _j: resid(t, y_, a_),
+                lambda t, y_, a_, _j: arnoldi(t, y_, a_),
+                neumann_step,
+            ),
+            s,
+            y,
+            a,
+            jt,
+        )
+
+    if neumann is not None and n_maxiter == 0:
+        state0 = handoff(state0)  # zero Neumann steps: straight to the seeds
 
     out = lax.while_loop(lambda s: ~s["done"], body, state0)
     abs_resid = jnp.where(out["nonfinite"], jnp.nan, out["best_res"])
+    if neumann is not None:
+        return (
+            out["n_div"],
+            out["n_diff"] <= tol_r,
+            out["n_k"],
+            unflatten(out["n_lam"]),
+            out["n_resid"],
+            unflatten(out["best_x"]),
+            abs_resid,
+            b_norm,
+            out["best_aux"],
+        )
     if aux:
         return unflatten(out["best_x"]), abs_resid, b_norm, out["best_aux"]
     return unflatten(out["best_x"]), abs_resid, b_norm
+
+
+def neumann_then_gmres(
+    jt_aux, b_tree, init_lam, use_init, *, tol, maxiter, restart, neumann=True
+):
+    """The joint adjoint solve: the Neumann loop, then GMRES, at ONE matvec site.
+
+    Solves ``(I - J^T) lam = b``.  ``jt_aux(v)`` returns ``(J^T v, a(v))`` with
+    ``a`` linear (``J_params^T`` in the joint-VJP chain rule).
+
+    With ``neumann`` (the default fixed-point method) a ``_NEUMANN`` phase runs
+    first, with the arithmetic of ``_ctm_energy_ad._neumann_loop``:
+    ``lam_0 = init_lam if use_init else b``, ``lam_{k+1} = b + J^T lam_k``, the
+    divergence guard, at most ``maxiter`` steps.  It hands over to the GMRES
+    phases with the seeds ``[lam if solved else 0, b]``: the list the host
+    built between two compiled programs before, each with its own copy of
+    ``J^T`` (spec 2026-10-25-single-transpose-adjoint-design.md).  Without
+    ``neumann`` (``adjoint_method="gmres"``) this is :func:`gmres_single_matvec`
+    on ``A v = v - J^T v`` from the seeds ``[init_lam, b]``; ``use_init`` is
+    ignored.
+
+    Returns ``(diverged, converged, n_iter, lam_neumann, abs_resid_neumann,
+    lam, abs_resid, b_norm, a(lam))``.  Without ``neumann`` the first five are
+    ``(False, False, 0, init_lam, inf)``.
+    """
+    if neumann:
+        return _gmres_machine(
+            jt_aux,
+            b_tree,
+            [init_lam],
+            tol=tol,
+            maxiter=maxiter,
+            restart=restart,
+            aux=True,
+            neumann={"init": init_lam, "use_init": use_init, "maxiter": maxiter},
+        )
+
+    def matvec(v):
+        jt, a = jt_aux(v)
+        return jax.tree.map(lambda vi, ji: vi - ji, v, jt), a
+
+    lam, abs_resid, b_norm, a = _gmres_machine(
+        matvec,
+        b_tree,
+        [init_lam, b_tree],
+        tol=tol,
+        maxiter=maxiter,
+        restart=restart,
+        aux=True,
+        neumann=None,
+    )
+    return (
+        jnp.array(False),
+        jnp.array(False),
+        jnp.int32(0),
+        init_lam,
+        jnp.array(jnp.inf, dtype=abs_resid.dtype),
+        lam,
+        abs_resid,
+        b_norm,
+        a,
+    )
