@@ -241,11 +241,30 @@ def test_one_backward_linearises_once(spy):
 
 from tests.test_neumann_then_gmres import _assert_same, _oracle  # noqa: E402
 
-_DOT = re.compile(r"\bdot_general\[")
-
 
 def _dot_count(fn, *args):
-    return len(_DOT.findall(str(jax.make_jaxpr(fn)(*args))))
+    """dot_general sites, counting every occurrence of a repeated sub-jaxpr.
+
+    The jaxpr printer names a repeated identical sub-jaxpr once and refers
+    to it afterwards, so a text count misses a second copy of a pullback.
+    """
+    count = 0
+
+    def walk(jaxpr):
+        nonlocal count
+        for eqn in jaxpr.eqns:
+            if eqn.primitive.name == "dot_general":
+                count += 1
+            for p in eqn.params.values():
+                for sub in p if isinstance(p, (list, tuple)) else (p,):
+                    inner = getattr(sub, "jaxpr", None)
+                    if inner is not None and hasattr(inner, "eqns"):
+                        walk(inner)
+                    elif hasattr(sub, "eqns"):
+                        walk(sub)
+
+    walk(jax.make_jaxpr(fn)(*args).jaxpr)
+    return count
 
 
 def _joint_solve_call(spy):
