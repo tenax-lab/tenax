@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
-from tenax.algorithms._block_sparse_jit import block_sparse_jit
+from tenax.algorithms._block_sparse_jit import _wants_no_fusion, block_sparse_jit
 from tenax.algorithms._cache_fingerprint import callback_key_parts, lru_get, lru_put
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
@@ -341,6 +341,21 @@ def _neumann_loop(apply_Jt, dE_denv, init_lam, use_init, *, tol, maxiter):
     converged = final_diff <= tol_arr
     b_norm = jnp.sqrt(sum(jnp.sum(jnp.abs(b) ** 2) for b in dE_denv)).astype(real_dtype)
     return diverged, converged, n_iter, lam_final, abs_resid, b_norm
+
+
+def _fusion_variant(prog, params_data_tuple, *, by_bond_dim):
+    """``prog.block_sparse`` when the site tensors call for it, else ``prog.dense``.
+
+    A program that takes the sweep's pullback (a ``jax.tree_util.Partial`` of
+    plain arrays) has no ``SymmetricTensor`` argument, so ``block_sparse_jit``'s
+    own dispatch would always pick the fused CPU variant.  The site tensors
+    decide instead, by the rule the program would have used on
+    ``(params, env)``: ``by_bond_dim=True`` for a joint program, ``False`` for
+    one that is the sweep VJP only.
+    """
+    if _wants_no_fusion((params_data_tuple,), {}, None, by_bond_dim):
+        return prog.block_sparse
+    return prog.dense
 
 
 # #1028: the flowing projector backward, and the frozen value its backward

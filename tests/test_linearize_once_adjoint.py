@@ -90,3 +90,39 @@ def test_the_warm_start_is_used_only_when_asked():
     n_cold = int(_loop(M, b, init=exact, use_init=False)[2])
     assert n_warm == 1
     assert n_cold > 5
+
+
+# --------------------------------------------------------- _fusion_variant
+
+needs_no_fusion = pytest.mark.skipif(
+    jax.default_backend() != "cpu"
+    or not _block_sparse_jit.JIT_TAKES_COMPILER_OPTIONS
+    or not _block_sparse_jit.no_fusion_compiles(),
+    reason="the no-fusion variant is CPU-only and needs compiler_options",
+)
+
+
+@pytest.fixture
+def any_size(monkeypatch):
+    """Drop the size threshold, so a small U(1) state dispatches as a large one."""
+    monkeypatch.setattr(_block_sparse_jit, "NO_FUSION_MIN_SITE_BLOCKS", 1)
+
+
+@needs_no_fusion
+@pytest.mark.parametrize("by_bond_dim", [True, False])
+def test_a_large_symmetric_site_picks_the_no_fusion_variant(any_size, by_bond_dim):
+    from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
+
+    A, B = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
+    prog = _block_sparse_jit.block_sparse_jit(lambda x: x)
+    got = cea._fusion_variant(prog, (A, B), by_bond_dim=by_bond_dim)
+    assert got is prog.block_sparse
+
+
+@needs_no_fusion
+def test_dense_sites_pick_the_default_variant(any_size):
+    prog = _block_sparse_jit.block_sparse_jit(lambda x: x)
+    got = cea._fusion_variant(
+        prog, (_wrap_as_dense_tensor(jnp.ones((2, 2, 2, 2, 2))),), by_bond_dim=True
+    )
+    assert got is prog.dense
