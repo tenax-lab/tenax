@@ -1,11 +1,12 @@
 """Linearise once, jit only the transpose, for the implicit-AD adjoint.
 
 The default backward (``adjoint_chain_rule="joint"``) builds the gauge-fixed
-sweep's pullback once (``_jit_linearize_joint``) and hands it to the Neumann
-loop (``_jit_neumann_bwd``) and the joint GMRES solve
-(``_jit_gmres_joint_solve``), which then compile only the transpose.  The
-oracle is ``"separate"``, whose programs are unchanged.  Spec:
-docs/superpowers/specs/2026-10-25-linearize-once-adjoint-design.md
+sweep's pullback once (``_jit_linearize_joint``) and hands it to one joint
+adjoint solve (``_jit_joint_adjoint_solve``): the Neumann loop and GMRES as
+phases of one program, with one copy of the transpose.  The oracle is
+``"separate"``, whose programs are unchanged.  Specs:
+docs/superpowers/specs/2026-10-25-linearize-once-adjoint-design.md,
+docs/superpowers/specs/2026-10-25-single-transpose-adjoint-design.md
 """
 
 from __future__ import annotations
@@ -137,7 +138,7 @@ _GATE = heisenberg_gate()
 #: seed 0.
 _FUSED_SEED = 0
 
-_SOLVERS = ("_jit_neumann_bwd", "_jit_gmres_joint_solve")
+_SOLVERS = ("_jit_joint_adjoint_solve",)
 _NEW_PROGRAMS = ("_jit_linearize_joint", *_SOLVERS)
 
 
@@ -235,8 +236,118 @@ def test_one_backward_linearises_once(spy):
     _grad(_site(_FUSED_SEED), "joint")
     names = [c[0] for c in spy]
     assert names.count("_jit_linearize_joint") == 1, names
-    solver_args = [c[3][0] for c in spy if c[0] in _SOLVERS]
-    assert len(solver_args) == 2 and solver_args[0] is solver_args[1], names
+    assert names.count("_jit_joint_adjoint_solve") == 1, names
+
+
+from tests.test_neumann_then_gmres import _assert_same, _oracle  # noqa: E402
+
+_DOT = re.compile(r"\bdot_general\[")
+
+
+def _dot_count(fn, *args):
+    return len(_DOT.findall(str(jax.make_jaxpr(fn)(*args))))
+
+
+def _joint_solve_call(spy):
+    (call,) = [c for c in spy if c[0] == "_jit_joint_adjoint_solve"]
+    return call
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_the_joint_solve_holds_one_transpose(spy):
+    """Neumann and GMRES share one matvec call site, so the program's
+    contractions are one pullback's plus the Krylov bookkeeping."""
+    _grad(_site(_FUSED_SEED), "joint")
+    _name, _kind, variant, args, kwargs = _joint_solve_call(spy)
+    vjp_joint, rhs = args[0], args[1]
+    one = _dot_count(lambda f, v: f(tuple(v)), vjp_joint, rhs)
+    assert one > 16  # regime: a second copy would stand out
+    assert _dot_count(lambda *a: variant(*a, **kwargs), *args) <= one + 16
+
+
+def _check_against_oracle(call):
+    _name, _kind, variant, args, kwargs = call
+    got = variant(*args, **kwargs)
+    kw = {k: kwargs[k] for k in ("tol", "maxiter", "restart")}
+
+    def oracle(f, b, i, u):
+        def jt_aux(v):
+            params_ct, env_ct = f(tuple(v))
+            return env_ct, params_ct
+
+        return _oracle(jt_aux, b, i, u, **kw)
+
+    want = jax.jit(oracle)(*args)
+    _assert_same(got, want)
+    return got
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+@pytest.mark.parametrize("case", ["cold", "warm", "unsolved", "complex"])
+def test_the_joint_solve_matches_the_two_solvers_composed(spy, case):
+    dtype = jnp.complex128 if case == "complex" else jnp.float64
+    A0 = _site(_FUSED_SEED, dtype=dtype)
+    kw = dict(gmres_maxiter=3) if case == "unsolved" else {}
+    _grad(A0, "joint", **kw)
+    if case == "warm":
+        spy.clear()
+        _grad(A0 * (1.0 + 1e-3), "joint")
+    call = _joint_solve_call(spy)
+    assert call[4]["neumann"] is True
+    if case == "warm":
+        assert bool(call[3][3])  # regime: the warm start is used
+    got = _check_against_oracle(call)
+    if case == "unsolved":
+        assert not bool(got[1])  # regime: the Neumann phase did not solve
+    else:
+        assert bool(got[1]) and not bool(got[0])
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_a_u1_joint_solve_matches_the_two_solvers_composed(spy):
+    from tests.test_block_sparse_ctm_ad import _make_u1_symmetric_ipeps
+
+    A_sym = _make_u1_symmetric_ipeps()
+    jax.grad(
+        lambda A: jnp.real(
+            ctm_energy_implicit(
+                {(0, 0): A},
+                SINGLE_SITE_NEIGHBORS,
+                _GATE,
+                chi=4,
+                max_iter=30,
+                conv_tol=1e-8,
+                gmres_tol=1e-11,
+                adjoint_chain_rule="joint",
+            )
+        )
+    )(A_sym)
+    got = _check_against_oracle(_joint_solve_call(spy))
+    assert int(got[2]) > 0  # regime: the Neumann phase ran
+
+
+@pytest.fixture
+def rule_spy(monkeypatch):
+    """``{program name: by_bond_dim}`` for each ``_fusion_variant`` call."""
+    rules = {}
+    real = cea._fusion_variant
+
+    def spying(prog, params_data_tuple, *, by_bond_dim):
+        rules[prog.__name__] = by_bond_dim
+        return real(prog, params_data_tuple, by_bond_dim=by_bond_dim)
+
+    monkeypatch.setattr(cea, "_fusion_variant", spying)
+    return rules
+
+
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_the_joint_solve_takes_the_joint_fusion_rule(rule_spy):
+    """It holds the params VJP, so the joint programs' rule applies."""
+    _grad(_site(_FUSED_SEED), "joint")
+    assert rule_spy == {
+        "_jit_linearize_joint": False,
+        "_jit_joint_adjoint_solve": True,
+    }, rule_spy
 
 
 @pytest.mark.usefixtures("fresh_vjp_cache")
@@ -396,3 +507,36 @@ def test_a_fermionic_su_state_matches_separate():
         )((A, B))
 
     _assert_tree_close(grad("joint"), grad("separate"))
+
+
+@pytest.mark.slow
+@pytest.mark.usefixtures("fresh_vjp_cache")
+def test_a_fermionic_joint_solve_matches_the_two_solvers_composed(spy):
+    from tenax.algorithms.fermionic_ipeps import (
+        FPEPSConfig,
+        _fpeps_simple_update,
+        _initialize_fpeps,
+        spinless_fermion_gate,
+    )
+
+    cfg = FPEPSConfig(D=2, t=1.0, V=1.0, mu=2.0, dt=0.05)
+    H = spinless_fermion_gate(cfg)
+    A = _initialize_fpeps(cfg, jax.random.PRNGKey(0))
+    B = _initialize_fpeps(cfg, jax.random.PRNGKey(1))
+    A, B, _ = _fpeps_simple_update(A, H, max_D=2, dt=0.05, steps=100, B=B)
+    jax.grad(
+        lambda p: jnp.real(
+            ctm_energy_implicit(
+                {(0, 0): p[0], (1, 0): p[1]},
+                CHECKERBOARD_NEIGHBORS,
+                H,
+                chi=8,
+                max_iter=200,
+                conv_tol=1e-10,
+                gmres_tol=1e-11,
+                adjoint_chain_rule="joint",
+            )
+        )
+    )((A, B))
+    got = _check_against_oracle(_joint_solve_call(spy))
+    assert int(got[2]) > 0  # regime: the Neumann phase ran

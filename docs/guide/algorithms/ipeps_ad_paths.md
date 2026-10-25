@@ -311,10 +311,10 @@ compiled unfused automatically:
 
 Under the default `"joint"` chain rule the backward linearises the
 gauge-fixed sweep once (`_jit_linearize_joint`) and passes the saved
-pullback to the Neumann loop (`_jit_neumann_bwd`) and the joint GMRES solve
-(`_jit_gmres_joint_solve`), which compile only the transpose.  Those two
-take no `SymmetricTensor` argument, so the backward picks their variant
-from the site tensors by the rules above.
+pullback to one joint adjoint solve (`_jit_joint_adjoint_solve`): the
+Neumann loop and GMRES as phases of one program, which compiles the
+transpose once.  It takes no `SymmetricTensor` argument, so the backward
+picks its variant from the site tensors by the rules above.
 
 Blocks are counted per site tensor, not per unit cell.  Everything else keeps
 the default pipeline:
@@ -379,13 +379,13 @@ change (not re-measured).
 which the default `"auto"` runs on the fused CTM, takes the chain rule's
 indirect term `J_params^T λ` from the adjoint solve.  `_jit_linearize_joint`
 linearises the gauge-fixed sweep over `(params, env)` once per backward and
-keeps the pullback.  The Neumann loop (`_jit_neumann_bwd`) runs on the env
-half of that pullback and compiles only the transpose.  It is not the
-env-only program of `"separate"`.  A joint GMRES solve
-(`_jit_gmres_joint_solve`) takes the same pullback and returns `J_params^T`
-of its best iterate.  It always follows the loop, seeded with the loop's `λ`
-(usually accepted after one matvec) or, when the loop gave up, started cold
-as the fallback is.  So the separate params-VJP program (`_jit_chain_rule`,
+keeps the pullback.  One joint solve (`_jit_joint_adjoint_solve`) runs the
+Neumann loop on the env half of that pullback and then GMRES, at one matvec
+call site, so the transpose compiles once.  It is not the env-only program
+of `"separate"`.  GMRES returns `J_params^T` of its best iterate.  It always
+follows the loop in the same program, seeded with the loop's `λ` (usually
+accepted after one matvec) or, when the loop gave up, started cold as the
+fallback is.  So the separate params-VJP program (`_jit_chain_rule`,
 the largest single compile at D=3) is never built.  The gradient equals
 `"separate"` to round-off on every path.
 

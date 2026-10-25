@@ -210,9 +210,8 @@ _BACKWARD_FNS = {
     "_jit_chain_rule",
     "_jit_apply_Jt",
     "_jit_gmres_one_matvec_solve",
-    "_jit_gmres_joint_solve",  # the default chain rule ("auto" -> "joint")
-    "_jit_linearize_joint",  # its pullback feeds the two solvers below
-    "_jit_neumann_bwd",
+    "_jit_joint_adjoint_solve",  # the default chain rule ("auto" -> "joint")
+    "_jit_linearize_joint",  # its pullback feeds the joint solve
     "_jit_direct",
 }
 _TRACED: list[str] = []

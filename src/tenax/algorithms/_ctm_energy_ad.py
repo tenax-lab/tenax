@@ -47,7 +47,11 @@ from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms._gmres_lax import gmres_pytree, gmres_single_matvec
+from tenax.algorithms._gmres_lax import (
+    gmres_pytree,
+    gmres_single_matvec,
+    neumann_then_gmres,
+)
 from tenax.algorithms.ad_utils import (
     CTMRGGradientError,
     _bond_gauge_families,
@@ -235,37 +239,41 @@ def _jit_gmres_one_matvec_solve(
     )
 
 
-@partial(block_sparse_jit, static_argnames=("tol", "maxiter", "restart"))
-def _jit_gmres_joint_solve(vjp_joint, rhs, candidates, *, tol, maxiter, restart):
-    """:func:`gmres_single_matvec` on the saved joint linearisation.
+@partial(block_sparse_jit, static_argnames=("tol", "maxiter", "restart", "neumann"))
+def _jit_joint_adjoint_solve(
+    vjp_joint, rhs, init_lam, use_init, *, tol, maxiter, restart, neumann
+):
+    """The joint adjoint solve on the saved linearisation: one program, one J^T.
 
     ``vjp_joint`` is the gauge-fixed sweep's pullback over ``(params, env)``
     from ``_jit_linearize_joint``: ``vjp_joint(v) == (J_params^T v,
-    J_env^T v)``.  The matvec is ``((I - J_env^T) v, J_params^T v)``, and
-    :func:`gmres_single_matvec` (``aux=True``) carries ``J_params^T`` of its
-    best iterate, so the chain rule's indirect term comes out of the solve
-    and ``_jit_chain_rule`` never compiles (#1123).  This program holds only
-    the transpose: the forward sweep compiled once, in the linearise program
-    (spec 2026-10-25-linearize-once-adjoint-design.md).  Call it through
-    :func:`_fusion_variant` with ``by_bond_dim=True`` (the chain rule's
-    rule; this program contains the params-VJP): its arguments carry no
-    ``SymmetricTensor``.  ``candidates`` must keep the same pytree structure
-    from call to call or it recompiles (#1087).  Returns
-    ``(lam, abs_resid, b_norm, indirect)``.
+    J_env^T v)``.  :func:`neumann_then_gmres` runs the Neumann loop (with
+    ``neumann``, the fixed-point method) and then GMRES on
+    ``(I - J_env^T) lam = rhs`` at one matvec call site, and carries
+    ``J_params^T`` of its best iterate, so the chain rule's indirect term comes
+    out of the solve and ``_jit_chain_rule`` never compiles (#1123).  Before,
+    the Neumann loop and the joint GMRES solve were two programs, each with its
+    own copy of the transpose (spec
+    2026-10-25-single-transpose-adjoint-design.md).  Call it through
+    :func:`_fusion_variant` with ``by_bond_dim=True``: it holds the params VJP
+    and its arguments carry no ``SymmetricTensor``.  ``init_lam`` must keep
+    ``rhs``'s pytree structure from call to call or it recompiles (#1087).
+    Returns :func:`neumann_then_gmres`'s 9-tuple.
     """
 
-    def matvec(v):
+    def jt_aux(v):
         params_ct, env_ct = vjp_joint(tuple(v))
-        return tuple(vi - ji for vi, ji in zip(v, env_ct)), params_ct
+        return env_ct, params_ct
 
-    return gmres_single_matvec(
-        matvec,
+    return neumann_then_gmres(
+        jt_aux,
         rhs,
-        list(candidates),
+        init_lam,
+        use_init,
         tol=tol,
         maxiter=maxiter,
         restart=restart,
-        aux=True,
+        neumann=neumann,
     )
 
 
@@ -273,8 +281,9 @@ def _neumann_loop(apply_Jt, dE_denv, init_lam, use_init, *, tol, maxiter):
     """The adjoint fixed point ``λ_{k+1} = b + Jᵀλ_k``, ``b = dE_denv``, as one
     ``lax.while_loop``.
 
-    Shared by ``_jit_fused_fixed_point_bwd`` (``"separate"``) and
-    ``_jit_neumann_bwd`` (``"joint"``), so both chain rules run the same loop.
+    Used by ``_jit_fused_fixed_point_bwd`` (``"separate"``).  The ``"joint"``
+    chain rule runs the same arithmetic as the first phase of
+    :func:`neumann_then_gmres`.
     ``apply_Jt`` returns ``Jᵀ v`` (not ``(I - Jᵀ) v``).  Cold start
     (``use_init`` false) seeds from ``dE_denv``; ``use_init`` is traced, so warm
     and cold calls share one compiled program.  Returns
@@ -349,25 +358,6 @@ def _fusion_variant(prog, params_data_tuple, *, by_bond_dim):
     if _wants_no_fusion((params_data_tuple,), {}, None, by_bond_dim):
         return prog.block_sparse
     return prog.dense
-
-
-@partial(block_sparse_jit, by_bond_dim=False, static_argnames=("tol", "maxiter"))
-def _jit_neumann_bwd(vjp_joint, dE_denv, init_lam, use_init, *, tol, maxiter):
-    """The Neumann adjoint loop on the saved joint linearisation.
-
-    ``J_env^T v = vjp_joint(v)[1]``; XLA drops the unused params half.  The
-    program holds only the transpose.  Call it through
-    :func:`_fusion_variant` with ``by_bond_dim=False`` (it is the sweep VJP
-    only).  Returns :func:`_neumann_loop`'s tuple.
-    """
-    return _neumann_loop(
-        lambda v: vjp_joint(tuple(v))[1],
-        dE_denv,
-        init_lam,
-        use_init,
-        tol=tol,
-        maxiter=maxiter,
-    )
 
 
 # #1028: the flowing projector backward, and the frozen value its backward
@@ -2137,9 +2127,8 @@ def _make_implicit_vjp_fn(
         backward.
 
         Returns :func:`jax.vjp`'s pullback, a ``jax.tree_util.Partial`` whose
-        leaves are the residuals.  ``_jit_neumann_bwd`` and
-        ``_jit_gmres_joint_solve`` take it as an argument and compile only the
-        transpose.  A cached call returns the same pullback function object,
+        leaves are the residuals.  ``_jit_joint_adjoint_solve`` takes it as an
+        argument and compiles only the transpose.  A cached call returns the same pullback function object,
         so they hit their caches too; a new ``chi``/``pb``/layout recompiles
         all three, as it recompiled their predecessors.
         """
@@ -2453,9 +2442,9 @@ def _make_implicit_vjp_fn(
                 use_init = jnp.array(True)
 
             if adjoint_chain_rule == "joint":
-                # Linearise once (spec 2026-10-25): the Neumann loop and the
-                # joint GMRES solve below share this pullback and compile only
-                # the transpose.
+                # Linearise once (spec 2026-10-25), then ONE joint solve: the
+                # Neumann loop and GMRES are phases of one program, so the
+                # transpose compiles once (spec 2026-10-25-single-transpose).
                 vjp_joint = pick_variant(_jit_linearize_joint, False)(
                     params_data_tuple, env_leaves, chi=chi_post, pb=pb
                 )
@@ -2466,14 +2455,19 @@ def _make_implicit_vjp_fn(
                     _n_iter,
                     lam_final,
                     _abs_resid,
+                    joint_lam,
+                    joint_abs,
                     _b_norm,
-                ) = pick_variant(_jit_neumann_bwd, False)(
+                    joint_indirect,
+                ) = pick_variant(_jit_joint_adjoint_solve, True)(
                     vjp_joint,
                     fused_rhs,
                     init_lam,
                     use_init,
                     tol=gmres_tol,
                     maxiter=gmres_maxiter,
+                    restart=gmres_restart,
+                    neumann=True,
                 )
             else:
                 (
@@ -2551,7 +2545,7 @@ def _make_implicit_vjp_fn(
             )
             if adjoint_chain_rule == "joint":
                 # #1123: the fused loop stays env-only -- the same program as
-                # "separate" -- and the joint GMRES solve ALWAYS follows,
+                # "separate" -- and GMRES ALWAYS follows, in the same program,
                 # seeded with the loop's lambda when the loop solved the
                 # system (usually accepted at the seed, one joint matvec) and
                 # from rhs otherwise (zero ties the incumbent and loses; it
@@ -2572,18 +2566,13 @@ def _make_implicit_vjp_fn(
                         gmres_tol,
                         gmres_restart,
                     )
-                seed = (
-                    tuple(lam_final)
-                    if fused_solved
-                    else tuple(jnp.zeros_like(r) for r in fused_rhs)
-                )
-                lam, _abs, _bn, indirect = pick_variant(_jit_gmres_joint_solve, True)(
-                    vjp_joint,
-                    fused_rhs,
-                    [seed, fused_rhs],
-                    tol=gmres_tol,
-                    maxiter=gmres_maxiter,
-                    restart=gmres_restart,
+                # The joint solve above already ran GMRES from these seeds:
+                # [lam_final if fused_solved else 0, rhs].
+                lam, _abs, _bn, indirect = (
+                    joint_lam,
+                    joint_abs,
+                    _b_norm,
+                    joint_indirect,
                 )
                 _rel, _solved = _report_adjoint(
                     float(jax.device_get(_abs)),
@@ -2709,13 +2698,17 @@ def _make_implicit_vjp_fn(
                 vjp_joint = pick_variant(_jit_linearize_joint, False)(
                     params_data_tuple, env_leaves, chi=chi_post, pb=pb
                 )
-                lam, _abs, _bn, indirect = pick_variant(_jit_gmres_joint_solve, True)(
+                *_neumann, lam, _abs, _bn, indirect = pick_variant(
+                    _jit_joint_adjoint_solve, True
+                )(
                     vjp_joint,
                     rhs,
-                    [warm, rhs],
+                    warm,
+                    jnp.array(True),
                     tol=gmres_tol,
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
+                    neumann=False,
                 )
             else:
                 lam, _abs, _bn = _jit_gmres_one_matvec_solve(
