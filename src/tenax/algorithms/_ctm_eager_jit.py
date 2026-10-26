@@ -5,8 +5,8 @@ shape.  An eager symmetric CTM sweep runs thousands of block-level
 primitives, so at chi=16 the #1098 layout phase spends hours compiling
 (measured 2026-10-23: 3249 compiles in one D=3 chi=8 sweep).  Only the M'
 truncation needs concrete values; :func:`call` runs every other piece under
-one compiled executable per function and input structure, kept in a small
-LRU cache (:data:`_MAX_EXECUTABLES`).
+one ``jax.jit`` per function and input structure.  It is off by default
+(see :data:`_ENABLED`) until its memory is bounded.
 
 Under an enclosing trace (the jitted ``_step``, AD) :func:`call` calls the
 function directly, so the traced program is the one it was before.  It also
@@ -23,7 +23,6 @@ values are part of the cache key: a new value gives a new executable.  While
 
 from __future__ import annotations
 
-import collections
 import functools
 import os
 from collections.abc import Callable
@@ -34,7 +33,12 @@ from tenax.contraction import contractor as _contractor
 from tenax.core.tensor import SymmetricTensor
 
 # Module switch: ``False`` runs every piece eagerly, as before this module.
-_ENABLED = True
+# Off by default: a jitted eager sweep keeps a peak RSS of 14.7 GB in
+# ``test_ctm_symmetric_rdm_positive_853[20]`` (5.3 GB eager), which exhausts
+# a 16 GB CI runner, so every later compile in that process fails with
+# ``LLVM compilation error: Cannot allocate memory``.  Turn it back on once
+# that memory is bounded.
+_ENABLED = False
 
 
 # The env flags that the contraction path reads per call, so a trace bakes
@@ -54,55 +58,20 @@ def _env_flags() -> tuple[str | None, ...]:
     return tuple(os.environ.get(name) for name in _CONTRACTION_ENV_FLAGS)
 
 
-# Bounded LRU of compiled pieces, keyed by function, static values, flag
-# snapshot and input structure.  ``jax.jit`` keeps every executable it has
-# compiled until ``jax.clear_caches()``, and an eager sweep rarely repeats a
-# layout: in ``test_ctm_symmetric_rdm_positive_853[20]`` 482 of 562
-# executables ran once, and one ``_symmetric_projector_prime`` executable
-# held ~130 MB, so an unbounded cache peaked at 14.7 GB RSS.  Evicting the
-# oldest entry frees its executable.  Measured on that test (CPU), peak RSS /
-# wall time: 4 -> 4.6 GB / 12.5 min, 16 -> 5.0 GB / 11.4 min, 64 -> 6.0 GB /
-# 11.3 min; unbounded 14.7 GB / 11.6 min; jit off 5.3 GB / 90 min.
-_MAX_EXECUTABLES = 16
-_executables: collections.OrderedDict = collections.OrderedDict()
+@functools.cache
+def _jitted(
+    fn: Callable, static_argnames: tuple[str, ...], flags: tuple[str | None, ...]
+) -> Callable:
+    # JAX keys its trace cache on the function object, so a second
+    # ``jax.jit(fn)`` would reuse the first trace and the flags baked into it.
+    # A fresh wrapper per flag snapshot gets its own trace and executable.
+    del flags
 
-
-def _clear() -> None:
-    """Drop every cached executable."""
-    _executables.clear()
-
-
-def _key(fn, static_argnames, args, kwargs):
-    static = tuple((k, kwargs[k]) for k in static_argnames if k in kwargs)
-    dynamic = {k: v for k, v in kwargs.items() if k not in static_argnames}
-    leaves, treedef = jax.tree.flatten((args, dynamic))
-    avals = tuple(jax.typeof(x) for x in leaves)
-    # An ahead-of-time executable is bound to its input shardings, so the
-    # same layout on another device needs its own entry.
-    shardings = tuple(getattr(x, "sharding", None) for x in leaves)
-    return (fn, static, _env_flags(), treedef, avals, shardings), dynamic
-
-
-def _compiled(fn: Callable, static_argnames: tuple[str, ...], args, kwargs):
-    """The compiled piece for these inputs and the dynamic kwargs to call it with."""
-    key, dynamic = _key(fn, static_argnames, args, kwargs)
-    hit = _executables.get(key)
-    if hit is not None:
-        _executables.move_to_end(key)
-        return hit, dynamic
-
-    # A fresh wrapper per entry, so JAX's trace cache for it dies with it.
     @functools.wraps(fn)
-    def piece(*a, **kw):
-        return fn(*a, **kw)
+    def piece(*args, **kwargs):
+        return fn(*args, **kwargs)
 
-    compiled = (
-        jax.jit(piece, static_argnames=static_argnames).lower(*args, **kwargs).compile()
-    )
-    _executables[key] = compiled
-    while len(_executables) > _MAX_EXECUTABLES:
-        _executables.popitem(last=False)
-    return compiled, dynamic
+    return jax.jit(piece, static_argnames=static_argnames)
 
 
 def _has_tracer(tree) -> bool:
@@ -118,7 +87,7 @@ def _has_symmetric(tree) -> bool:
 
 
 def call(fn: Callable, *args, static_argnames: tuple[str, ...] = (), **kwargs):
-    """``fn(*args, **kwargs)``, compiled and cached (bounded) for concrete symmetric inputs."""
+    """``fn(*args, **kwargs)``, under a cached ``jax.jit`` for concrete symmetric inputs."""
     if not _ENABLED or _has_tracer((args, kwargs)):
         return fn(*args, **kwargs)
     if not _has_symmetric((args, kwargs)):
@@ -127,5 +96,4 @@ def call(fn: Callable, *args, static_argnames: tuple[str, ...] = (), **kwargs):
     if _contractor._strict_contract():
         # A cached executable would skip the per-call #834 checks.
         return fn(*args, **kwargs)
-    compiled, dynamic = _compiled(fn, tuple(static_argnames), args, kwargs)
-    return compiled(*args, **dynamic)
+    return _jitted(fn, tuple(static_argnames), _env_flags())(*args, **kwargs)

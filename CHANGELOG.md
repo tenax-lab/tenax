@@ -646,19 +646,16 @@
 
 ### Fixed
 
-- **The eager-sweep jit (#1142) keeps a bounded cache.**  #1142 jitted the
-  static-shape pieces of an eager symmetric CTM sweep, and `jax.jit` keeps
-  every executable it compiles.  An eager sweep rarely repeats a layout: in
-  `test_ctm_symmetric_rdm_positive_853[20]` 482 of 562 executables ran once,
-  and one `_symmetric_projector_prime` executable held ~130 MB, so that test
-  peaked at 14.7 GB RSS.  On a 16 GB CI runner every later compile in the
-  process then failed with `LLVM compilation error: Cannot allocate memory` /
-  `Failed to materialize symbols` (macOS runners were OOM-killed, exit 137).
-  The helper now keeps at most 16 executables, in an LRU of ahead-of-time
-  compiled pieces: 5.0 GB peak in 11.4 min (unbounded: 14.7 GB / 11.6 min;
-  jit off: 5.3 GB / 90 min, which ran the slow CI shards past their 4 h
-  limit).  `test_fermionic_eager_sweeps_match` also no longer compares a chi
-  cut that splits an exactly degenerate +q/-q pair (#1101), where the kept
+- **The eager CTM sweep no longer runs its pieces under `jax.jit` by default.**
+  #1142 jitted the static-shape pieces of an eager symmetric sweep.  That made
+  `test_ctm_symmetric_rdm_positive_853[20]` 5x faster (18 min vs 90 min) but
+  raised its peak RSS from 5.3 GB to 14.7 GB, which exhausts a 16 GB CI runner:
+  every later compile in the process failed with `LLVM compilation error:
+  Cannot allocate memory` / `Failed to materialize symbols` (and macOS runners
+  were OOM-killed, exit 137).  `_ctm_eager_jit._ENABLED` now defaults to
+  `False`, which is the pre-#1142 behaviour; it goes back on once that memory
+  is bounded.  `test_fermionic_eager_sweeps_match` also no longer compares a
+  chi cut that splits an exactly degenerate +q/-q pair (#1101), where the kept
   member is decided by rounding.
 
 - **The joint chain rule's eager fallback logs again.**  When the fused

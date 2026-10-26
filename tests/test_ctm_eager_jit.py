@@ -13,6 +13,13 @@ from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 
+@pytest.fixture(autouse=True)
+def _jit_on(monkeypatch):
+    # The helper is off by default (memory, see ``_ENABLED``); these tests
+    # are about what it does when it is on.
+    monkeypatch.setattr(ej, "_ENABLED", True)
+
+
 def _sym(seed=0):
     U1 = U1Symmetry()
     q = np.array([-1, 0, 0, 1], np.int32)
@@ -35,42 +42,42 @@ def _scale(x, *, k):
     return x * k
 
 
-def test_concrete_call_runs_through_one_cached_executable():
-    ej._clear()
+def test_concrete_call_runs_through_one_cached_jit():
+    ej._jitted.cache_clear()
     t = _sym()
     assert _close(ej.call(_double, t), t, 2.0)
-    assert len(ej._executables) == 1
-    (compiled,) = ej._executables.values()
-    ej.call(_double, _sym(1))  # same structure: no new compile
-    assert list(ej._executables.values()) == [compiled]
+    jitted = ej._jitted(_double, (), ej._env_flags())
+    assert jitted._cache_size() == 1
+    ej.call(_double, _sym(1))  # same structure: no new trace
+    assert jitted._cache_size() == 1
 
 
 def test_traced_call_bypasses_the_jit():
-    ej._clear()
+    ej._jitted.cache_clear()
     jax.jit(lambda x: ej.call(_double, x))(_sym())
-    assert len(ej._executables) == 0
+    assert ej._jitted.cache_info().currsize == 0
 
 
 def test_disabled_calls_the_raw_function(monkeypatch):
-    ej._clear()
+    ej._jitted.cache_clear()
     monkeypatch.setattr(ej, "_ENABLED", False)
     t = _sym()
     assert _close(ej.call(_double, t), t, 2.0)
-    assert len(ej._executables) == 0
+    assert ej._jitted.cache_info().currsize == 0
 
 
 def test_static_argnames_are_static():
-    ej._clear()
+    ej._jitted.cache_clear()
     t = _sym()
     a = ej.call(_scale, t, k=3.0, static_argnames=("k",))
     b = ej.call(_scale, t, k=5.0, static_argnames=("k",))
     assert _close(a, t, 3.0) and _close(b, t, 5.0)
-    assert len(ej._executables) == 2
+    assert ej._jitted(_scale, ("k",), ej._env_flags())._cache_size() == 2
 
 
 def test_a_patched_function_gets_its_own_jit():
     """Review Focus 3: the jit is keyed by the function object at call time."""
-    ej._clear()
+    ej._jitted.cache_clear()
 
     def f1(x):
         return x * 2.0
@@ -81,36 +88,7 @@ def test_a_patched_function_gets_its_own_jit():
     t = _sym()
     assert _close(ej.call(f1, t), t, 2.0)
     assert _close(ej.call(f2, t), t, 10.0)
-    assert len(ej._executables) == 2
-
-
-def test_the_cache_keeps_only_the_most_recent_executables(monkeypatch):
-    """An eager sweep rarely repeats a layout, so the cache is a bounded LRU."""
-    ej._clear()
-    monkeypatch.setattr(ej, "_MAX_EXECUTABLES", 2)
-    t = _sym()
-    for k in (1.0, 2.0, 3.0):
-        ej.call(_scale, t, k=k, static_argnames=("k",))
-    assert [key[1] for key in ej._executables] == [(("k", 2.0),), (("k", 3.0),)]
-    ej.call(_scale, t, k=2.0, static_argnames=("k",))  # a hit moves to the end
-    ej.call(_scale, t, k=4.0, static_argnames=("k",))  # evicts k=3.0
-    assert [key[1] for key in ej._executables] == [(("k", 2.0),), (("k", 4.0),)]
-    assert _close(ej.call(_scale, t, k=2.0, static_argnames=("k",)), t, 2.0)
-
-
-def test_the_same_layout_on_another_device_gets_its_own_executable():
-    """An AOT executable cannot dispatch to another device (Codex P2 on #1145)."""
-    devices = jax.devices()
-    if len(devices) < 2:
-        pytest.skip("needs two devices")
-    ej._clear()
-    t = _sym()
-    for d in devices[:2]:
-        on_d = jax.device_put(t, d)
-        out = ej.call(_double, on_d)
-        assert _close(out, on_d, 2.0)
-        assert out._data.devices() == {d}
-    assert len(ej._executables) == 2
+    assert ej._jitted.cache_info().currsize == 2
 
 
 # --------------------------------------- per-call contraction env flags (R14 F1)
@@ -127,7 +105,7 @@ def test_armed_strict_mode_runs_every_call_eagerly(monkeypatch):
     """
     from tenax.contraction import contractor
 
-    ej._clear()
+    ej._jitted.cache_clear()
     runs = []
 
     def body(x):
@@ -150,7 +128,7 @@ def test_a_new_contraction_flag_value_gets_a_new_executable(monkeypatch):
     """A flag read at trace time is baked in; a new value must retrace."""
     import os
 
-    ej._clear()
+    ej._jitted.cache_clear()
     flag = "TENAX_BATCH_BLOCKSPARSE"
     assert flag in ej._CONTRACTION_ENV_FLAGS
 
@@ -162,20 +140,20 @@ def test_a_new_contraction_flag_value_gets_a_new_executable(monkeypatch):
     assert _close(ej.call(body, t), t, 1.0)
     monkeypatch.setenv(flag, "1")
     assert _close(ej.call(body, t), t, 2.0)
-    assert len(ej._executables) == 2
+    assert ej._jitted.cache_info().currsize == 2
 
 
 # ------------------------------------------- dense input is not jitted (R14 F2)
 def test_dense_input_calls_the_function_directly(monkeypatch):
     """The dense eager path must not change: no jit without a SymmetricTensor."""
     hits = []
-    real = ej._compiled
+    real = ej._jitted
 
     def spy(*a):
         hits.append(a)
         return real(*a)
 
-    monkeypatch.setattr(ej, "_compiled", spy)
+    monkeypatch.setattr(ej, "_jitted", spy)
     runs = []
 
     def body(*xs):
