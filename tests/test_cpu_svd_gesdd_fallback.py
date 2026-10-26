@@ -53,7 +53,16 @@ def failing_gesdd(monkeypatch):
             compute_uv=compute_uv,
         )
 
+    # jax.jit(f) reuses an earlier trace of f, which would skip the fake.
+    jax.clear_caches()
     monkeypatch.setattr(jnp.linalg, "svd", fake)
+    yield
+    jax.clear_caches()
+
+
+needs_gesvd = pytest.mark.skipif(
+    not tl._cpu_has_gesvd(), reason="this JAX has no CPU gesvd; no fallback"
+)
 
 
 def _assert_is_the_svd_of(m, u, s, vh):
@@ -64,10 +73,6 @@ def _assert_is_the_svd_of(m, u, s, vh):
     )
 
 
-def test_this_jax_has_a_cpu_gesvd():
-    assert tl._cpu_has_gesvd()
-
-
 def test_a_converged_gesdd_result_is_returned_unchanged():
     x = _x()
     for f in (tl._dense_svd, jax.jit(tl._dense_svd)):
@@ -76,6 +81,7 @@ def test_a_converged_gesdd_result_is_returned_unchanged():
             np.testing.assert_array_equal(a, b)
 
 
+@needs_gesvd
 @pytest.mark.parametrize("mode", ["eager", "jit"])
 def test_a_nan_gesdd_result_is_replaced_by_gesvd(failing_gesdd, mode):
     x = _fails(_x())
@@ -83,6 +89,7 @@ def test_a_nan_gesdd_result_is_replaced_by_gesvd(failing_gesdd, mode):
     _assert_is_the_svd_of(x, *f(x))
 
 
+@needs_gesvd
 def test_the_singular_values_only_call_falls_back_too(failing_gesdd):
     x = _fails(_x())
     s = tl._dense_svd(x, compute_uv=False)
@@ -91,6 +98,7 @@ def test_the_singular_values_only_call_falls_back_too(failing_gesdd):
     )
 
 
+@needs_gesvd
 def test_a_failed_matrix_in_a_vmap_batch_is_recomputed(failing_gesdd):
     xs = jnp.stack([_x(seed=k) for k in range(3)])
     xs = xs.at[:, 0, 0].set(jnp.array([-1.0, 1.0, -1.0]))  # only [1] fails
@@ -110,6 +118,7 @@ def _expected_grad(x):
     return u @ vh + 2 * x  # d(sum s)/dM = U Vh, d|M|^2/dM = 2M
 
 
+@needs_gesvd
 @pytest.mark.parametrize("mode", ["eager", "jit"])
 def test_the_gradient_through_a_failed_gesdd_is_finite_and_right(failing_gesdd, mode):
     # Differentiating the failed gesdd itself gives NaN (0 * NaN in the
@@ -119,6 +128,7 @@ def test_the_gradient_through_a_failed_gesdd_is_finite_and_right(failing_gesdd, 
     np.testing.assert_allclose(g(x), _expected_grad(x), atol=1e-10)
 
 
+@needs_gesvd
 @pytest.mark.parametrize(
     ("shape", "dtype", "compute_uv"),
     [
@@ -149,6 +159,7 @@ def test_the_custom_jvp_equals_jaxs_svd_jvp(shape, dtype, compute_uv):
         np.testing.assert_allclose(a, b, rtol=1e-10, atol=1e-12)
 
 
+@needs_gesvd
 def test_an_eager_call_traces_no_cond(monkeypatch):
     # An eager lax.cond builds new branch closures per call, so JAX re-traces
     # and re-compiles it every time (#1087's no-recompile test caught this).
@@ -180,6 +191,7 @@ def test_a_non_finite_input_stays_non_finite():
     assert not np.all(np.isfinite(s))
 
 
+@needs_gesvd
 def test_the_matrix_accelerate_gesdd_does_not_converge_on():
     # A 54x54 bottom-projector matrix from #1144's frozen-layout test, cond 1e8,
     # smallest singular values 1.5e-9 and 1.2e-9.  On the macos-26-arm64 runner
