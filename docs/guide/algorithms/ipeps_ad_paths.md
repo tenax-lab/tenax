@@ -301,13 +301,12 @@ So on CPU some implicit-AD backward programs of a large symmetric state are
 compiled unfused automatically:
 
 - `dE/denv`, the chain rule, the fused fixed-point backward (`"separate"`
-  chain rule) and the joint GMRES solve go unfused when a site tensor has a
-  virtual leg (`u`, `d`, `l`, `r`) of dimension 3 or more, or 20 or more
-  charge blocks.
-- The `J^T` product, the eager GMRES solve, the linearise program and the
-  Neumann loop contain only the sweep or its VJP.  They go unfused only when
-  a site tensor has 20 or more charge blocks (a many-sector U(1) state; a
-  D=3 U(1) site has 35).
+  chain rule) and the joint adjoint solve (the Neumann loop and GMRES in one
+  program) go unfused when a site tensor has a virtual leg (`u`, `d`, `l`,
+  `r`) of dimension 3 or more, or 20 or more charge blocks.
+- The `J^T` product, the eager GMRES solve and the linearise program contain
+  only the sweep or its VJP.  They go unfused only when a site tensor has 20
+  or more charge blocks (a many-sector U(1) state; a D=3 U(1) site has 35).
 
 Under the default `"joint"` chain rule the backward linearises the
 gauge-fixed sweep once (`_jit_linearize_joint`) and passes the saved

@@ -203,8 +203,11 @@ direct 562.1), ratio 0.613.
 is the clean rerun. The first head run (1.097) had a CPU job beside it, so it
 was not graded; the clean run repeats it to ~1%. The sum of `step_times` is
 equal (89.13 s head, 89.50 s base, 0.996): the first two entries are faster
-on head (-24%, -3%), the third is slower (+8.4%). §4.2 predicted this cost
-class: each Neumann iteration also computes `J_params^T v` and drops it.
+on head (-24%, -3%), the third is slower (+8.4%). The cause is not measured.
+Candidates: each Neumann iteration also computes `J_params^T v` and drops it
+(§4.2); the Neumann loop reads the saved pullback residuals instead of
+recomputing them in one fused program; each iteration passes a 4-way
+`lax.switch` whose state carries the GMRES basis.
 
 **A3 = 8.0e-15: PASS** (bar 1e-8). Relative L2 distance of the SU-state
 gradients. Step-1 E = -0.5529995394 and GMRES resid = 1.329e-06, as base.
