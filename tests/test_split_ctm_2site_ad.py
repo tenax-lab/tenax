@@ -17,8 +17,8 @@ regime (``test_2site_implicit_grad_matches_explicit_clean_regime``, XXZ Δ=0.3):
 there the projector singular values are well separated, the Lorentzian SVD
 backward is exact, and rel~1e-15. At the SU(2)-symmetric Heisenberg point the
 degenerate-SV SVD backward imposes a ~5e-4 regularization floor on the *explicit
-reference*, so that test gates direction + energy + self-consistency instead
-(see its docstring).
+reference*; the Heisenberg-point twin that gated only direction + energy there
+was removed in the slow-bucket prune (#1149).
 """
 
 import jax
@@ -118,132 +118,11 @@ def test_converge_split_env_2site_matches_forward(su_state):
     assert abs(E - E_ref) < 1e-9, f"forward converge mismatch: {E} vs {E_ref}"
 
 
-def test_explicit_multisite_converge_grad_finite(su_state):
-    """Unrolled explicit multisite converge yields a finite, non-zero gradient
-    w.r.t. A on the convergent state."""
-    from tenax.algorithms._split_ctm_energy_ad import (
-        _explicit_split_multisite_converge,
-    )
-    from tenax.algorithms._split_ctm_tensor_energy import (
-        compute_energy_split_ctm_tensor_2site,
-    )
-
-    A, B = su_state
-    gate = _heisenberg_gate()
-    chi = 4
-
-    def loss(a):
-        envs = _explicit_split_multisite_converge(
-            {(0, 0): a, (1, 0): B},
-            CHECKERBOARD_NEIGHBORS,
-            chi=chi,
-            chi_I=chi,
-            warmup_steps=10,
-            backprop_steps=10,
-        )
-        return compute_energy_split_ctm_tensor_2site(
-            a, B, envs[(0, 0)], envs[(1, 0)], gate, d=2
-        ).real
-
-    e, g = jax.value_and_grad(loss)(A)
-    gs = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g)])
-    assert jnp.isfinite(e)
-    assert jnp.all(jnp.isfinite(gs)) and float(jnp.sum(jnp.abs(gs))) > 0
-
-
-def test_2site_implicit_grad_matches_explicit(su_state):
-    """PRIMARY Tier-3 gate: 2-site split implicit (Neumann) gradient parity.
-
-    implicit==explicit, NOT implicit==FD -- for cost, not for trust.  (The
-    "Wirtinger gap" this docstring used to cite was the #750 SVD-adjoint bug,
-    now fixed; see the module docstring.)
-    Gradient taken w.r.t. sublattice A only (B held fixed) for a clean scalar
-    parity, at the lossless chi_I=chi fixed point.
-
-    Two levels of parity are asserted, per the diagnostic below:
-
-    * **Implicit self-consistency (machine-exact):** the Neumann VJP at
-      conv_tol=1e-14 vs conv_tol=1e-15 agrees to rel~3e-15 / cos=1.0.  This
-      proves the fixed-point adjoint is FULLY CONVERGED and seed/depth-
-      independent — it does NOT by itself prove the VJP is correct (a
-      converged-but-wrong VJP would still be self-consistent).  The actual
-      VJP-correctness gate is the machine-exact clean-regime companion,
-      ``test_2site_implicit_grad_matches_explicit_clean_regime``, which lifts
-      the projector SV degeneracy (XXZ Δ=0.3) so implicit==explicit becomes
-      exact.  At the Heisenberg point here, we therefore assert only direction
-      (cos) + energy, with the magnitude bound (rel<1e-3) reflecting the
-      documented regularized-SVD floor rather than the VJP itself.
-    * **Implicit vs explicit (direction + energy):** cos>1-1e-6 and energy to
-      1e-9.  A tight rel<1e-6 magnitude match is NOT reachable here and is NOT a
-      VJP bug: the 2×2 split projector uses the Lorentzian-regularized
-      degenerate-SV SVD backward (``truncated_svd_symmetric_ad``), so the
-      *explicit* reference — which differentiates through 60 stacked regularized
-      SVDs — carries a fixed rel~4.7e-4 deviation from the implicit path's single
-      SVD + Neumann series.  That deviation is INVARIANT to explicit depth
-      (rel is identical to 13 digits at warmup/backprop 30, 60, 90), which rules
-      out under-convergence and localises it to the regularized SVD adjoint, not
-      the Task-2 VJP.  Direction (cos) still guards against a genuine
-      sign/structure bug in the VJP.
-    """
-    from tenax.algorithms._split_ctm_energy_ad import (
-        ctm_energy_split_explicit_2site,
-        ctm_energy_split_implicit_2site,
-    )
-
-    A, B = su_state
-    gate = _heisenberg_gate()
-    chi = 4  # chi = D*D lossless on a physical low-interlayer-rank state
-
-    def loss_imp(a, conv_tol=1e-14):
-        return ctm_energy_split_implicit_2site(
-            {(0, 0): a, (1, 0): B},
-            CHECKERBOARD_NEIGHBORS,
-            gate,
-            chi=chi,
-            chi_I=chi,
-            max_iter=120,
-            conv_tol=conv_tol,
-            min_iter=2,
-        ).real
-
-    def loss_exp(a):
-        return ctm_energy_split_explicit_2site(
-            {(0, 0): a, (1, 0): B},
-            CHECKERBOARD_NEIGHBORS,
-            gate,
-            chi=chi,
-            chi_I=chi,
-            warmup_steps=60,
-            backprop_steps=60,
-        ).real
-
-    e_i, g_i = jax.value_and_grad(loss_imp)(A)
-    e_e, g_e = jax.value_and_grad(loss_exp)(A)
-    # Independent implicit run at a tighter fixed-point tol: self-consistency.
-    _, g_i2 = jax.value_and_grad(lambda a: loss_imp(a, conv_tol=1e-15))(A)
-
-    gi = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g_i)])
-    ge = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g_e)])
-    gi2 = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g_i2)])
-
-    # (1) Machine-exact self-consistency of the Neumann VJP under test.
-    rel_self = float(jnp.linalg.norm(gi - gi2) / jnp.linalg.norm(gi2))
-    cos_self = float(
-        jnp.real(jnp.vdot(gi, gi2)) / (jnp.linalg.norm(gi) * jnp.linalg.norm(gi2))
-    )
-    # (2) Implicit-vs-explicit direction + energy.
-    cos = float(
-        jnp.real(jnp.vdot(gi, ge)) / (jnp.linalg.norm(gi) * jnp.linalg.norm(ge))
-    )
-    rel = float(jnp.linalg.norm(gi - ge) / jnp.linalg.norm(ge))
-
-    assert rel_self < 1e-10, f"implicit VJP not self-consistent: rel={rel_self}"
-    assert cos_self > 1 - 1e-12, f"implicit VJP self-direction: cos={cos_self}"
-    assert jnp.allclose(e_i, e_e, atol=1e-9), f"energy mismatch: {e_i} vs {e_e}"
-    assert cos > 1 - 1e-6, f"gradient direction mismatch: cos={cos}"
-    # rel bound reflects the regularized-SVD reference floor (see docstring);
-    # this is a ceiling on the explicit reference, not the VJP under test.
-    assert rel < 1e-3, f"gradient magnitude mismatch: rel={rel}"
+# The Heisenberg-point implicit==explicit test (direction + energy only,
+# rel<1e-3 because of the degenerate-SV floor) and the explicit-converge
+# finiteness test were removed in the slow-bucket prune (#1149): the
+# clean-regime test below makes the implicit==explicit claim to machine
+# precision, and a non-finite explicit gradient fails its cos/rel gates.
 
 
 def test_2site_implicit_grad_matches_explicit_clean_regime():
@@ -251,9 +130,9 @@ def test_2site_implicit_grad_matches_explicit_clean_regime():
     convergent state, the implicit (Neumann) gradient matches the explicit
     (unrolled) gradient to MACHINE PRECISION.
 
-    This is the tight companion to test_2site_implicit_grad_matches_explicit
-    (which runs at the SU(2)-symmetric Heisenberg point, where a degenerate-SV
-    SVD-backward floor caps magnitude parity at rel~5e-4). Breaking the symmetry
+    This was the tight companion to a Heisenberg-point twin (removed in #1149)
+    where a degenerate-SV SVD-backward floor capped magnitude parity at
+    rel~5e-4 (invariant to explicit depth 30/60/90). Breaking the symmetry
     with Δ != 1 lifts the projector SV degeneracy, so the Lorentzian SVD-backward
     regularization becomes negligible and implicit==explicit becomes exact —
     proving the rel~5e-4 at Heisenberg is the regularized-SVD reference floor,
@@ -348,8 +227,10 @@ def test_2site_split_energy_matches_fused_ad_path(su_state):
 def _grad_vs_fd(su_state):
     """(cos, rel) between the implicit-AD gradient and central differences.
 
-    Computed once: the AD pass plus 24 CTM convergences is the expensive part
-    of this file, and both gates below score the same comparison.
+    Computed once: the AD pass plus the FD CTM convergences is the expensive
+    part of this file, and both gates below score the same comparison.  4
+    sampled directions (8 convergences; was 12 / 24 before the slow-bucket
+    prune, #1149) -- see the measured numbers at ``idxs`` below.
     """
     from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_implicit_2site
     from tenax.algorithms.ipeps import _wrap_as_dense_tensor
@@ -376,7 +257,7 @@ def _grad_vs_fd(su_state):
     A_data = A.todense()
     eps = 1e-5
     flat = A_data.ravel()
-    idxs = list(range(0, flat.size, max(1, flat.size // 12)))[:12]  # sample ~12 dirs
+    idxs = list(range(0, flat.size, max(1, flat.size // 4)))[:4]  # sample 4 dirs
     g_fd = []
     for i in idxs:
         pert = flat.at[i].add(eps).reshape(A_data.shape)
@@ -449,8 +330,11 @@ def test_validate_split_ctm_config_allows_2site():
 
 def test_make_ctm_energy_fn_dispatches_2site_split(su_state):
     """make_ctm_energy_fn routes a 2-coord site dict to the 2-site split path
-    (fuse=False, recipe='2x2'), matching a direct implicit-2site call, with a
-    finite gradient through the dispatch closure."""
+    (fuse=False, recipe='2x2'), matching a direct implicit-2site call.
+
+    The gradient through the dispatch closure is exercised end to end by
+    ``test_optimize_gs_ad_2site_split_runs``; the extra ``value_and_grad``
+    here was dropped in the slow-bucket prune (#1149)."""
     from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_implicit_2site
     from tenax.algorithms.ipeps_ad_policy import make_ctm_energy_fn
     from tenax.algorithms.ipeps_config import CTMConfig
@@ -492,13 +376,6 @@ def test_make_ctm_energy_fn_dispatches_2site_split(su_state):
         ).real
     )
     assert abs(E_dispatch - E_direct) < 1e-10
-
-    def loss(a):
-        return fn({(0, 0): a, (1, 0): B}).real
-
-    _, g = jax.value_and_grad(loss)(A)
-    gs = jax.tree.leaves(g)[0]
-    assert bool(abs(gs).sum() > 0) and bool((gs == gs).all())
 
 
 def test_optimize_gs_ad_2site_split_runs(su_state):
