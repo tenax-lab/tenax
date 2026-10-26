@@ -43,9 +43,12 @@ def failing_gesdd(monkeypatch):
     """``gesdd`` returns NaN for the matrices whose [0, 0] entry is > 0."""
 
     def fake(m, full_matrices=True, compute_uv=True):
+        # Add a stop-gradient NaN, not jnp.where(bad, nan, m): where's
+        # transpose would zero the NaN cotangent and hide the derivative bug.
         bad = (m[..., 0, 0] > 0)[..., None, None]
+        nan = jax.lax.stop_gradient(jnp.where(bad, jnp.nan, 0.0))
         return _REAL_GESDD(
-            jnp.where(bad, jnp.nan, m),
+            m + nan,
             full_matrices=full_matrices,
             compute_uv=compute_uv,
         )
