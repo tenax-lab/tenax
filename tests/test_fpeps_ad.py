@@ -16,7 +16,7 @@ from tenax.algorithms.ipeps_optimize import (
     optimize_fpeps_ad,
     optimize_gs_ad,
 )
-from tenax.core.tensor import DenseTensor, SymmetricTensor
+from tenax.core.tensor import SymmetricTensor
 
 # ------------------------------------------------------------------ #
 # Fixtures                                                             #
@@ -135,12 +135,12 @@ class TestFermionic2SiteADRegression:
     def test_fermionic_2site_ad_completes(self):
         """One step of 2-site FermionParity AD completes with finite energy.
 
-        Wrapped in a generous wall-clock guard (the compile is the cost,
-        not a deadlock — see #566): a regression to a true hang fails the
-        test loudly instead of stalling the suite indefinitely.
+        The #565 "hang" was a one-time compile, not a deadlock (see #566), so
+        what is pinned is completion + the result types.  The 600 s
+        ``threading`` wall-clock guard this used to carry was a timing
+        budget, not behaviour, and was dropped in the slow-bucket prune
+        (#1149); a true hang still fails at the CI job timeout.
         """
-        import threading
-
         fcfg = FPEPSConfig(D=2, t=1.0, V=2.0)
         gate = spinless_fermion_gate(fcfg)
         A = _build_initial_fpeps_tensor(fcfg, jax.random.PRNGKey(1))
@@ -157,30 +157,10 @@ class TestFermionic2SiteADRegression:
             ctm=CTMConfig(chi=4, max_iter=20, conv_tol=1e-4),
         )
 
-        result: dict = {}
-
-        def _run():
-            try:
-                (A_opt, B_opt), _envs, E = optimize_gs_ad(gate, (A, B), config)
-                result.update(A_opt=A_opt, B_opt=B_opt, E=E)
-            except BaseException as exc:  # noqa: BLE001 - re-raise in main thread
-                result["exc"] = exc
-
-        # XLA compile releases the GIL, so join(timeout) on the main thread
-        # observes a real wall-clock bound.  600s is generous for D=2 chi=4
-        # (~2-4 min) yet well under the >30 min #565 hang.
-        worker = threading.Thread(target=_run, daemon=True)
-        worker.start()
-        worker.join(timeout=600.0)
-
-        assert not worker.is_alive(), (
-            "Fermionic 2-site AD did not complete within 600s — possible "
-            "regression to the #565 hang."
-        )
-        assert "exc" not in result, f"2-site fermionic AD raised: {result['exc']!r}"
-        assert np.isfinite(float(result["E"])), f"Non-finite energy: {result['E']}"
-        assert isinstance(result["A_opt"], SymmetricTensor)
-        assert isinstance(result["B_opt"], SymmetricTensor)
+        (A_opt, B_opt), _envs, E = optimize_gs_ad(gate, (A, B), config)
+        assert np.isfinite(float(E)), f"Non-finite energy: {E}"
+        assert isinstance(A_opt, SymmetricTensor)
+        assert isinstance(B_opt, SymmetricTensor)
 
 
 # ------------------------------------------------------------------ #
@@ -219,49 +199,9 @@ class TestTodenseGradientFlow:
 
         return loss_fn
 
-    @pytest.mark.algorithm
-    @pytest.mark.slow
-    def test_dense_tensor_gradient_finite(self):
-        """DenseTensor (the workaround path) produces finite gradients."""
-        from tenax.algorithms._ctm_tensor import initialize_ctm_tensor_env
-        from tenax.algorithms.ad_utils import _config_to_tuple
-
-        fpeps_cfg = FPEPSConfig(D=2, t=1.0, V=0.0)
-        # adjoint_arnoldi_precheck=False: this fixture's backward has
-        # rho ~ 6.97 which crosses the default raise threshold (5.0,
-        # default since #334); the precheck tripping is incidental to
-        # the gradient-finiteness contract this test exercises.
-        ctm_cfg = iPEPSConfig(
-            max_bond_dim=2,
-            ctm=CTMConfig(
-                chi=4, max_iter=10, conv_tol=1e-4, adjoint_arnoldi_precheck=False
-            ),
-        )
-
-        # Build a SymmetricTensor then convert to DenseTensor (the workaround)
-        A_sym = _build_initial_fpeps_tensor(fpeps_cfg, jax.random.PRNGKey(42))
-        A_dense = DenseTensor(A_sym.todense(), A_sym.indices)
-
-        gate = spinless_fermion_gate(fpeps_cfg).todense().reshape(2, 2, 2, 2)
-        config_tuple = _config_to_tuple(ctm_cfg.ctm)
-
-        env_template = initialize_ctm_tensor_env(A_dense, ctm_cfg.ctm.chi)
-        env_treedef = jax.tree.structure(env_template)
-        prev_env_leaves = tuple(jax.tree.leaves(env_template))
-
-        loss_fn = self._build_loss_fn(
-            A_dense, config_tuple, env_treedef, prev_env_leaves, gate, 2
-        )
-
-        energy, grads = jax.value_and_grad(loss_fn)(A_dense)
-
-        # Energy should be finite
-        assert np.isfinite(float(energy)), f"Energy is not finite: {energy}"
-
-        # Gradient should be finite and non-zero
-        grad_data = grads.todense()
-        assert jnp.all(jnp.isfinite(grad_data)), "DenseTensor gradient has NaN/inf"
-        assert float(jnp.linalg.norm(grad_data)) > 0, "DenseTensor gradient is zero"
+    # ``test_dense_tensor_gradient_finite`` (finite gradient on the DenseTensor
+    # workaround path at chi=4, max_iter=10) was removed in the slow-bucket
+    # prune (#1149): a smoke check on a workaround, not on what users run.
 
     @pytest.mark.algorithm
     def test_symmetric_nontrivial_energy_finite(self):

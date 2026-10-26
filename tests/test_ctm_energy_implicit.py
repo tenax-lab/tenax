@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 import pytest
 
@@ -48,96 +47,23 @@ def _make_minimal_site_tensors_for_validation(seed: int = 0):
 
 
 def _make_su_tensor(D=2, d=2):
-    """Create a simple-update initialized tensor (well-conditioned for CTM)."""
+    """Create a simple-update initialized tensor (well-conditioned for CTM).
+
+    ``compute_energy=False``: the state is all that is used; the CTM
+    ``ipeps()`` would run to read off its energy is skipped.
+    """
     gate = heisenberg_gate()
     config = iPEPSConfig(max_bond_dim=D, num_imaginary_steps=100, dt=0.05)
-    _, (A_su, _), _ = ipeps(gate, None, config)
+    _, (A_su, _), _ = ipeps(gate, None, config, compute_energy=False)
     data = A_su.todense()
     data = data / jnp.linalg.norm(data)
     return _wrap_as_dense_tensor(data)
 
 
-@pytest.mark.slow
-def test_ctm_energy_implicit_gradient_is_finite_and_nontrivial():
-    """Gradient from GMRES backward is finite, non-zero, and well-scaled.
-
-    Captures the production contract for implicit-AD: the optimizer needs
-    a finite, non-zero gradient with magnitude comparable to the energy.
-
-    Strict FD-parity is *not* checked here.  This docstring used to put a
-    number on why -- "~25% FD bias" from the 2x2 plaquette projector's
-    stop_gradient (PR #447) dropping ∂(projector)/∂A -- and that number was
-    never a measurement of this path.  #983 measured the projector response
-    directly, on a single sweep: freezing it costs ratios spanning
-    -7.98..+14.95, and letting it flow gives 1.000000.
-
-    The stop_gradient is still in place here, because this is the implicit
-    path.  Letting the response flow restores the CTM gauge mode in ``J``,
-    and the adjoint ``(I - Jᵀ)λ = dE/denv`` then has no reliable solution
-    (residual 4.5e-15 at ctm_max_iter=40 but 7.9e-01 at 300, flat in Krylov
-    restart and maxiter).  That is #841 again: the forward here is not an
-    element-wise fixed point -- the implicit-AD guard reports a 3.3e-01
-    stationarity residual on this state -- so linearizing the true step map
-    around it is ill-posed, and an FD-vs-AD ratio measures the
-    non-stationary forward rather than the adjoint.
-
-    The projector-response guard that CAN be stated cleanly lives in
-    ``test_ctm_2x2_projector_backward_983.py``, which measures one sweep
-    under ``projector_backward="flow"`` and so needs no fixed-point premise.
-    """
-    A = _make_su_tensor(D=2, d=2)
-    chi = 4
-    gate = heisenberg_gate()
-    neighbors = SINGLE_SITE_NEIGHBORS
-    A_data = A.todense()
-
-    def energy_fn(params_data):
-        A_local = _wrap_as_dense_tensor(params_data)
-        site_tensors = {(0, 0): A_local}
-        return ctm_energy_implicit(
-            site_tensors,
-            neighbors,
-            gate,
-            chi=chi,
-            max_iter=100,
-            conv_tol=1e-12,
-            gmres_tol=1e-10,
-            gmres_maxiter=300,
-            gmres_restart=50,
-        )
-
-    E = float(energy_fn(A_data))
-    grad_ad = jax.grad(energy_fn)(A_data)
-
-    assert jnp.all(jnp.isfinite(grad_ad)), "Gradient has NaN/Inf entries"
-    g_norm = float(jnp.linalg.norm(grad_ad))
-    assert g_norm > 1e-6 * (abs(E) + 1e-12), (
-        f"Gradient norm too small: g_norm={g_norm:.3e}, E={E:.3e}"
-    )
-    assert g_norm < 1e6 * (abs(E) + 1e-12), (
-        f"Gradient norm too large: g_norm={g_norm:.3e}, E={E:.3e}"
-    )
-
-
-@pytest.mark.slow
-def test_ctm_energy_implicit_forward_runs():
-    """Smoke test: forward pass produces a reasonable energy."""
-    A = _make_su_tensor(D=2, d=2)
-    chi = 4
-    gate = heisenberg_gate()
-    neighbors = SINGLE_SITE_NEIGHBORS
-
-    site_tensors = {(0, 0): A}
-    energy = ctm_energy_implicit(
-        site_tensors,
-        neighbors,
-        gate,
-        chi=chi,
-        max_iter=40,
-        conv_tol=1e-8,
-    )
-    assert jnp.isfinite(energy), f"Energy is not finite: {energy}"
-    assert energy.shape == (), f"Energy should be scalar, got shape {energy.shape}"
+# The finite/non-trivial-gradient and forward smoke tests that stood here were
+# removed in the slow-bucket prune (#1149): the default implicit gradient is
+# checked against finite differences by
+# test_projector_backward_default_1028.py, which implies both.
 
 
 def test_ctm_energy_implicit_chi_max_required_when_bump_enabled():
@@ -342,7 +268,7 @@ def test_sv_converged_su_state_is_stationary_after_1055():
     with _warnings.catch_warnings():
         # ipeps()'s own #839 CTM warning is not under test here.
         _warnings.simplefilter("ignore")
-        _, (A_su, _), _ = ipeps(gate, None, config)
+        _, (A_su, _), _ = ipeps(gate, None, config, compute_energy=False)
     data = A_su.todense()
     site = _wrap_as_dense_tensor(data / jnp.linalg.norm(data))
 

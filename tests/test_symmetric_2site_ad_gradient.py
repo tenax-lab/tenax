@@ -44,7 +44,11 @@ from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
 from tenax.core.tensor import SymmetricTensor
 
 D, DELTA = 2, 0.3
-_DENSE_SWEEPS = 200
+# 100 forced sweeps (200 before the slow-bucket prune, #1149): the sweeps vs
+# sweeps+1 stationarity check passes there too, and the energy equals the
+# 200-sweep one to 3e-16 for both cases (measured: u1 -0.4936972191654310,
+# z2 -0.5207609010927974).
+_DENSE_SWEEPS = 100
 # chi per case: a clean cut in the adapted (#1098) spectrum.  U(1) chi=8 cuts
 # inside a near-degenerate set; chi=6 has relative gap 0.62.  Z2 chi=8: 0.32.
 _CASES = {
@@ -169,13 +173,9 @@ def test_gradient_matches_a_converged_fd(point):
         assert abs(gd - r["fd"]) < tol, (k, gd, r["fd"], r["fd_unc"], r["scan"])
 
 
-@pytest.mark.slow
-def test_the_dense_reference_refuses_a_moving_environment(point):
-    """Two sweeps from a cold start are far from the fixed point, so one more
-    sweep moves the spectra; the stationarity check must say so."""
-    chi, A, B, gate, _ = point
-    with pytest.raises(AssertionError, match="dense (energy|spectra) move"):
-        _dense_reference(A, B, gate, chi, sweeps=2)
+# ``test_the_dense_reference_refuses_a_moving_environment`` (a self-test of
+# the ``_dense_reference`` helper above, two cold sweeps per case) was removed
+# in the slow-bucket prune (#1149): it tested the test, not tenax.
 
 
 def test_fixture_rejects_trivial_charges():
