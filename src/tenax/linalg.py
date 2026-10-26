@@ -14,6 +14,7 @@ dense ``jnp.linalg`` for ``DenseTensor``.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Sequence
 
 import jax
@@ -84,29 +85,127 @@ def _all_finite(result) -> jax.Array:
     return jnp.all(jnp.stack([jnp.all(jnp.isfinite(x)) for x in leaves]))
 
 
+def _gesdd(m: jax.Array, full_matrices: bool, compute_uv: bool):
+    r = jnp.linalg.svd(m, full_matrices=full_matrices, compute_uv=compute_uv)
+    return tuple(r) if compute_uv else r
+
+
+def _gesvd(m: jax.Array, full_matrices: bool, compute_uv: bool):
+    return _lax_svd_with(_SvdAlgorithm.QR, full_matrices, compute_uv)(m)
+
+
+@functools.cache
+def _cpu_has_gesvd() -> bool:
+    """Whether this JAX lowers ``lax.linalg.svd(algorithm=QR)`` on CPU.
+
+    The 0.4.3x floor does not ("The SVD algorithm parameter is not
+    implemented on CPU"); there the CPU SVD keeps plain ``gesdd``.
+    """
+    try:
+        x = jax.device_put(np.eye(2, dtype=np.float32), jax.devices("cpu")[0])
+        jax.block_until_ready(_gesvd(x, False, False))
+    except NotImplementedError:
+        return False
+    return True
+
+
+def _svd_with_fallback(m: jax.Array, full_matrices: bool, compute_uv: bool):
+    """``gesdd``, or ``gesvd`` when the ``gesdd`` result is not finite.
+
+    A concrete (eager) input takes a Python branch, so an eager call runs one
+    SVD and traces nothing; a traced input takes a ``lax.cond``.
+    """
+    r = _gesdd(m, full_matrices, compute_uv)
+    if not isinstance(m, jax.core.Tracer):
+        return r if bool(_all_finite(r)) else _gesvd(m, full_matrices, compute_uv)
+    return jax.lax.cond(
+        _all_finite(r), lambda: r, lambda: _gesvd(m, full_matrices, compute_uv)
+    )
+
+
+def _T(x: jax.Array) -> jax.Array:
+    return jnp.swapaxes(x, -1, -2)
+
+
+def _H(x: jax.Array) -> jax.Array:
+    return _T(x).conj()
+
+
+def _svd_jvp_from_factors(a, da, u, s, vh):
+    """Tangents ``(ds, du, dvh)`` of the thin SVD ``a = u @ diag(s) @ vh``.
+
+    JAX's ``_svd_jvp_rule`` (``jax/_src/lax/linalg.py``, Apache-2.0) with the
+    factors passed in: that rule recomputes them with ``svd_p``, which on CPU
+    is the ``gesdd`` that may have failed.
+    """
+    ut, v = _H(u), _H(vh)
+    s_dim = s[..., None, :]
+    dS = ut @ da @ v
+    ds = jnp.real(jnp.diagonal(dS, axis1=-2, axis2=-1))
+    eye = jnp.eye(s.shape[-1], dtype=s.dtype)
+    s_diffs = (s_dim + _T(s_dim)) * (s_dim - _T(s_dim))
+    F = (1 / (s_diffs + eye) - eye).astype(a.dtype)
+    dSS = s_dim.astype(a.dtype) * dS
+    SdS = _T(s_dim.astype(a.dtype)) * dS
+    s_zeros = (s == 0).astype(s.dtype)
+    s_inv = 1 / (s + s_zeros) - s_zeros
+    dUdV_diag = 0.5 * (dS - _H(dS)) * (eye * s_inv[..., None, :]).astype(a.dtype)
+    du = u @ (F * (dSS + _H(dSS)) + dUdV_diag)
+    dv = v @ (F * (SdS + _H(SdS)))
+    m, n = a.shape[-2:]
+    if m > n:
+        dAV = da @ v
+        du = du + (dAV - u @ (ut @ dAV)) / s_dim.astype(a.dtype)
+    if n > m:
+        dAHU = _H(da) @ u
+        dv = dv + (dAHU - v @ (vh @ dAHU)) / s_dim.astype(a.dtype)
+    return ds, du, _H(dv)
+
+
+@functools.cache
+def _cpu_svd_fn(full_matrices: bool, compute_uv: bool):
+    @jax.custom_jvp
+    def svd(m):
+        return _svd_with_fallback(m, full_matrices, compute_uv)
+
+    @svd.defjvp
+    def _svd_jvp(primals, tangents):
+        (m,), (dm,) = primals, tangents
+        if compute_uv and full_matrices and m.shape[-2] != m.shape[-1]:
+            raise NotImplementedError(
+                "Singular value decomposition JVP not implemented for full matrices"
+            )
+        u, s, vh = _svd_with_fallback(m, False, True)
+        ds, du, dvh = _svd_jvp_from_factors(m, dm, u, s, vh)
+        if not compute_uv:
+            return s, ds
+        return (u, s, vh), (du, ds, dvh)
+
+    return svd
+
+
 def _cpu_svd(m: jax.Array, full_matrices: bool, compute_uv: bool):
     """CPU SVD: LAPACK ``gesdd``, recomputed with ``gesvd`` if it is not finite.
 
     ``gesdd`` (divide and conquer) can fail to converge on a finite,
     ill-conditioned matrix; JAX then fills the result with NaN.  Apple
-    Accelerate (the LAPACK of numpy, scipy and jaxlib on macOS arm64) does
-    this on a 54x54 CTM projector matrix with condition number 1e8 and two
-    close singular values near 1e-9, where ``gesvd`` (QR) and OpenBLAS
-    ``gesdd`` both converge.  So a non-finite ``gesdd`` result is replaced
-    by the ``gesvd`` one; a non-finite input stays non-finite.
+    Accelerate on the ``macos-26-arm64`` runner does this on a 54x54 CTM
+    projector matrix with condition number 1e8 and two close singular values
+    near 1e-9 (macOS 27 and OpenBLAS converge on it).  So a non-finite
+    ``gesdd`` result is replaced by the ``gesvd`` one; a non-finite input
+    stays non-finite.
 
-    The check is a ``lax.cond``, so a converged call runs one SVD.  Under
-    ``vmap`` the predicate is batched and the ``cond`` becomes a ``select``
-    that runs both SVDs; only the opt-in ``TENAX_BATCH_BLOCKSPARSE`` sector
-    batching vmaps this function.
+    The derivative is a ``custom_jvp`` on the factors actually returned:
+    differentiating the failed ``gesdd`` would give NaN even after the
+    forward result is repaired (0 * NaN in the transpose).  A converged call
+    runs one SVD, eager or traced.  Under ``vmap`` the ``lax.cond`` predicate
+    is batched and becomes a ``select`` that runs both SVDs; only the opt-in
+    ``TENAX_BATCH_BLOCKSPARSE`` sector batching vmaps this function.  On a
+    JAX without a CPU ``gesvd`` (:func:`_cpu_has_gesvd`) it stays ``gesdd``.
     """
-    r = jnp.linalg.svd(m, full_matrices=full_matrices, compute_uv=compute_uv)
-    r = tuple(r) if compute_uv else r
-    return jax.lax.cond(
-        _all_finite(r),
-        lambda: r,
-        lambda: _lax_svd_with(_SvdAlgorithm.QR, full_matrices, compute_uv)(m),
-    )
+    if not _cpu_has_gesvd():
+        return _gesdd(m, full_matrices, compute_uv)
+    return _cpu_svd_fn(full_matrices, compute_uv)(m)
 
 
 def _lax_svd_with(algorithm: _SvdAlgorithm, full_matrices: bool, compute_uv: bool):
@@ -190,8 +289,10 @@ def _dense_svd(
         result = _gpu_process_svd(
             matrix, full_matrices=full_matrices, compute_uv=compute_uv
         )
-    else:
+    elif jax.default_backend() == "cpu":
         result = _cpu_svd(matrix, full_matrices, compute_uv)
+    else:  # TPU: SvdAlgorithm.QR does not lower there
+        result = _gesdd(matrix, full_matrices, compute_uv)
     if compute_uv:
         u, s, vh = result  # SVDResult (CPU) or tuple (GPU) -> bare tuple
         return u, s, vh
