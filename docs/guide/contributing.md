@@ -42,12 +42,14 @@ Tests are auto-marked by filename via `tests/conftest.py`:
 | `core` | `test_tensor.py`, `test_contraction.py`, etc. | Tensor ops, symmetry, indexing |
 | `algorithm` | `test_dmrg.py`, `test_ipeps.py`, etc. | DMRG, TRG, iPEPS, AutoMPO |
 | `slow` | Tests decorated with `@pytest.mark.slow` | Expensive convergence benchmarks |
+| `diagnostic` | Tests decorated with `@pytest.mark.diagnostic` | Measurements, research findings, acceptance sweeps of unshipped engines; skipped unless `TENAX_RUN_DIAGNOSTIC=1` |
 
 ```bash
 uv run pytest -m core              # Fast (~30s) — run before every commit
 uv run pytest -m algorithm         # Algorithm tests (~2 min)
 uv run pytest -m "not slow"        # Everything except expensive benchmarks
 uv run pytest                      # Full suite
+TENAX_RUN_DIAGNOSTIC=1 uv run pytest -m diagnostic   # Opt-in diagnostics
 ```
 
 CI required checks run `pytest -m core` on Python 3.11, 3.12 (Linux) and
@@ -91,6 +93,11 @@ latest `main`.
 - For algorithm tests, compare against known reference values (exact solutions,
   published benchmarks).
 - Mark expensive tests (>30s) with `@pytest.mark.slow`.
+- A test should pin behaviour users rely on (a correct result, a documented
+  option, a user-facing error, an invariant). A measurement (timing, memory,
+  compile counts), a research finding, or an acceptance sweep of an engine
+  that is not shipped yet gets `@pytest.mark.diagnostic` as well as `slow`:
+  no CI job runs it, and `TENAX_RUN_DIAGNOSTIC=1` runs it on demand.
 
 ## Adding new public API
 
