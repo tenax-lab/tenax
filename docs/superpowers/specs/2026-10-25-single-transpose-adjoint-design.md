@@ -158,3 +158,61 @@ unasked.
   total ops).
 - The step-2 recompile on a new chi layout (both arms; a separate concern).
 - `"separate"`, the split CTM, the C4v path, the forward CTM.
+
+## 9. Results (2026-10-27)
+
+Run conditions: GPU 1 (CUDA_VISIBLE_DEVICES=1), D=3 chi=16, `--steps 4`,
+compile cache off, cores 32-47, host-memory guard at 12 GB. Base `b71f5a5`
+(the parent spec's base arm), head `49661c2` (`57d5deb` changes tests only).
+G0 ran on CPU at D=2 chi=8.
+
+**G0 = 0.614: PASS** (bar 0.7). Step-1 programs, lowered StableHLO ops /
+optimised HLO instructions:
+
+| Program | Base | Head |
+|---|---|---|
+| `_jit_fused_fixed_point_bwd` | 160,289 / 435,955 | — |
+| `_jit_gmres_joint_solve` | 143,315 / 394,498 | — |
+| `_jit_linearize_joint` | — | 62,571 / 128,771 |
+| `_jit_dE_denv` | — | 23,349 / 73,723 |
+| `_jit_joint_adjoint_solve` | — | 79,869 / 307,395 |
+| **Total** | **303,604 / 830,453** | **165,789 / 509,889** |
+
+The joint solve (Neumann phase and GMRES in one program) is the size of the
+parent head's GMRES program alone (79,696 / 306,806): the second copy of
+J^T v is gone. The solve holds 0 SVDs after optimisation.
+
+**A1 = 0.685: PASS** (bar 0.7). Step-1 backward compile, seconds:
+
+| Program | Base | Head |
+|---|---|---|
+| `_jit_fused_fixed_point_bwd` | 790.2 | — |
+| `_jit_gmres_joint_solve` | 1116.4 | — |
+| `_jit_linearize_joint` | — | 163.5 |
+| `_jit_dE_denv` | — | 106.4 |
+| `_jit_joint_adjoint_solve` | — | 917.0 |
+| `_jit_direct` | 496.9 | 458.4 |
+| **Total** | **2403.5** | **1645.3** |
+
+Step 2 recompiles the backward on both arms (a new chi layout): base
+5127.2 s, head 3145.1 s (linearize 339.9 + dE_denv 212.5 + joint 2030.6 +
+direct 562.1), ratio 0.613.
+
+**A2 = 1.084: MISS** (bar 1.05). Median `step_times`: head 35.943 s (steps
+`[4.911, 48.272, 35.943]`), base 33.145 s (`[6.446, 49.911, 33.145]`). This
+is the clean rerun. The first head run (1.097) had a CPU job beside it, so it
+was not graded; the clean run repeats it to ~1%. The sum of `step_times` is
+equal (89.13 s head, 89.50 s base, 0.996): the first two entries are faster
+on head (-24%, -3%), the third is slower (+8.4%). §4.2 predicted this cost
+class: each Neumann iteration also computes `J_params^T v` and drops it.
+
+**A3 = 8.0e-15: PASS** (bar 1e-8). Relative L2 distance of the SU-state
+gradients. Step-1 E = -0.5529995394 and GMRES resid = 1.329e-06, as base.
+Energies at steps 1-4 equal base.
+
+**A4 = 1.024: PASS** (bar 1.2). `device_peak_bytes` 1,597,896,448 head /
+1,561,049,088 base. The value is process-lifetime: SU and the forward CTM
+are included.
+
+Optimize wall time: 12,723 s head, 16,103 s base (0.790). Most of the gain
+is compile time.
