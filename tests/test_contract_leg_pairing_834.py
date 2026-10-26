@@ -548,12 +548,15 @@ def test_a_trace_within_one_tensor_is_not_treated_as_a_pairing(monkeypatch):
 def _charged_u1_sweep(max_iter: int = 1):
     # One sweep reaches every refusal site: with the #905 flow flip put back
     # in ``_apply_proj_unfused``, strict mode raises in sweep 1 (measured
-    # 2026-10-20; 3 sweeps cost 155 s, 1 sweep 50 s).
+    # 2026-10-20; 3 sweeps cost 155 s, 1 sweep 50 s).  chi=4 (8 until the
+    # 2026-10-26 test-trim pass): re-measured with the flip put back, strict
+    # mode still raises in sweep 1 at chi=4 (a discarded block product), and
+    # the clean sweep costs ~28 s against ~89 s at chi=8, cold cache.
     from tenax.algorithms._ctm_tensor import ctm_tensor_2site
     from tenax.algorithms.ipeps import heisenberg_u1sz_init_pair
 
     A, B = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(0))
-    return ctm_tensor_2site(A, B, chi=8, max_iter=max_iter, conv_tol=1e-8)
+    return ctm_tensor_2site(A, B, chi=4, max_iter=max_iter, conv_tol=1e-8)
 
 
 def test_strict_mode_finds_no_weight_loss_in_the_ctm_sweep(monkeypatch):

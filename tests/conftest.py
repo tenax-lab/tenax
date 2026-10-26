@@ -473,8 +473,10 @@ _FILE_MARKERS = {
     # slow-bucket prune: D=3 is covered by the full-support test here and, at
     # the energy level, by test_ctm_chi_truncation_policy_922.py.)
     "test_enlarged_corner_flow_invariant_834.py": "core",
-    # #905: the charged environment sectors themselves.  Two D=2 chi=8 2-site
-    # CTM convergences (one symmetric, one dense) plus one RDM, and the 1-site
+    # #905: the charged environment sectors themselves.  Two D=2 2-site CTM
+    # runs (one symmetric, one dense) at chi=D**2=4, 2 sweeps -- the defect is
+    # structural, and still caught there (2026-10-26 trim: ~9 min -> ~1 min
+    # locally, cold cache) -- plus one RDM, and the 1-site
     # ``ctm_tensor`` sym==dense + RDM-positivity anchor that replaced #853's
     # D=3 control (~95 s, compile-bound).  (The slow chi-flatness scan was
     # deleted in the slow-bucket prune: parity is the guard, and

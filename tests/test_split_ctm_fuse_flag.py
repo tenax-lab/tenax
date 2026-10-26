@@ -73,7 +73,10 @@ def _split_explicit_loss(D):
     return loss, A
 
 
-@pytest.mark.parametrize("D", [2, 3])
+# The D=3 rows of the two explicit finite-checks were dropped in the
+# 2026-10-26 test-trim pass (41 s; same mechanism, as for the implicit rows
+# below, whose D=3 rows went in the slow-bucket prune).
+@pytest.mark.parametrize("D", [2])
 def test_split_explicit_energy_finite(D):
     """ctm_energy_split_explicit returns a finite energy (forward correctness).
 
@@ -87,7 +90,7 @@ def test_split_explicit_energy_finite(D):
     assert jnp.isfinite(e), f"energy is not finite: {e}"
 
 
-@pytest.mark.parametrize("D", [2, 3])
+@pytest.mark.parametrize("D", [2])
 def test_split_explicit_grad_finite(D):
     """ctm_energy_split_explicit returns a finite, non-zero gradient.
 
@@ -314,7 +317,10 @@ def test_make_ctm_energy_fn_dispatches_to_split_implicit():
 
     With ``fuse_virtual_legs=False`` + ``recipe='1x1'`` the implicit branch
     must produce the same energy as a direct ``ctm_energy_split_implicit``
-    call, and a finite gradient through the dispatch closure.
+    call.  (The finite gradient through the dispatch closure that this test
+    also took was dropped in the 2026-10-26 test-trim pass: the split
+    optimizer tests below differentiate through the same closure on every
+    step.)
     """
     from tenax.algorithms._split_ctm_energy_ad import ctm_energy_split_implicit
     from tenax.algorithms.ipeps_ad_policy import make_ctm_energy_fn
@@ -342,7 +348,7 @@ def test_make_ctm_energy_fn_dispatches_to_split_implicit():
         explicit_steps=3,
         recipe="1x1",
     )
-    e, g = jax.value_and_grad(lambda a: fn({(0, 0): a}).real)(A)
+    e = fn({(0, 0): A}).real
     e_direct = ctm_energy_split_implicit(
         {(0, 0): A},
         SINGLE_SITE_NEIGHBORS,
@@ -360,9 +366,8 @@ def test_make_ctm_energy_fn_dispatches_to_split_implicit():
         recipe="1x1",
     ).real
 
+    assert jnp.isfinite(e)
     assert jnp.allclose(e, e_direct, atol=1e-10)
-    gs = jnp.concatenate([x.ravel() for x in jax.tree.leaves(g)])
-    assert jnp.all(jnp.isfinite(gs)) and float(jnp.sum(jnp.abs(gs))) > 0
 
 
 def test_make_ctm_energy_fn_split_rejects_unsupported_recipe():
@@ -531,7 +536,10 @@ def _split_opt_config(fuse, **overrides):
         unit_cell="1x1",
         gs_recipe="1x1",
         gs_implicit_ad=True,
-        gs_num_steps=2,
+        # One step runs every forward these tests check the type of (warm
+        # start, line-search probe, final eval); 2 until the 2026-10-26
+        # test-trim pass.
+        gs_num_steps=1,
         gs_log_interval=1,
         su_init=False,
     )

@@ -32,16 +32,30 @@ charged products from the first absorption sweep — and the energy guard is a
 same-budget PARITY between the symmetric and dense paths, not an absolute
 value.  Scanned before freezing the budget (2026-09-10, this box):
 
-    max_iter   sym-vs-dense gap   charged  dead  rank>n_q0
-    60         2.2e-08            2        0     8>4
-    20         8.3e-07            2        0     8>4
-    10         7.4e-06            2        0     8>4
-    6          2.3e-05            2        0     8>4
+    chi  max_iter   sym-vs-dense gap   charged  dead  rank>n_q0
+    8    60         2.2e-08            2        0     8>4
+    8    20         8.3e-07            2        0     8>4
+    8    10         7.4e-06            2        0     8>4
+    8    6          2.3e-05            2        0     8>4
 
-Every structural signal is budget-invariant, and the parity gap stays two
-orders of magnitude inside the 5e-3 tolerance (four inside the 0.16 defect)
-at every point of the scan.  ``_MAX_ITER`` below picks the scan point with a
-3x margin to the tolerance-relevant one.  (A slow flatness-in-chi scan used to
+Every structural signal is budget-invariant.  The cost is the block-sparse
+compile of each new sector layout (~20 s per sweep here), not the sweeps, so
+the test-trim pass (2026-10-26) re-scanned the cheap end, cold JAX cache,
+together with the #905 defect re-introduced (the ``_flow_flip_no_conj`` of
+``P_un`` put back in ``_apply_proj_unfused``):
+
+    chi  max_iter   gap      dead  rank>n_q0   with the defect: gap  dead  rank
+    8    3          4.5e-05  0     8>4                           -     -     -
+    8    2          2.2e-04  0     7>4                         1.2e-02  2   4==4
+    4    3          1.1e-16  0     4>2                           -     -     -
+    4    2          0.0      0     4>2                         1.1e-02  2   2==2
+
+``chi=4`` is ``D**2``, so the two-sweep environment is untruncated and the two
+paths agree exactly, while the defect still kills both charged C1 blocks and
+misses by ~1e-2 (above the 5e-3 guard and two orders above the 1e-4 regime
+pin).  ``chi=8, max_iter=2`` would trip the regime pin (2.2e-04), which is why
+the 2-site guards run at ``_CHI_2SITE=4``: 43 s symmetric instead of the
+~6 minutes ``chi=8, max_iter=20`` cost.  (A slow flatness-in-chi scan used to
 live here too; it was the diagnostic, not the guard, and was deleted in the
 slow-bucket prune -- ``test_ctm_chi_truncation_policy_922.py`` pins converged
 D=3 chi=16 parity to 1e-9, which no confined environment can satisfy.)
@@ -53,11 +67,14 @@ import jax
 import numpy as np
 import pytest
 
-# See the module docstring's scan table before changing either number.  The
+# See the module docstring's scan tables before changing any of these.  The
 # conv_tol is unreachable at this max_iter by design: the budget is the
 # max_iter, and both paths run the SAME budget, which is what makes the
 # energy comparison a parity rather than a convergence claim.
-_MAX_ITER = 20
+_MAX_ITER = 2
+#: The 2-site guards' chi (``D**2``; see the second scan table).
+_CHI_2SITE = 4
+#: The 1-site anchor's chi.
 _CHI = 8
 
 
@@ -88,10 +105,10 @@ def swept_envs():
     from tenax.core.tensor import DenseTensor
 
     A, B = _pair()
-    envA, envB = _converge(A, B, chi=_CHI)
+    envA, envB = _converge(A, B, chi=_CHI_2SITE)
     Ad = DenseTensor(A.todense(), A.indices)
     Bd = DenseTensor(B.todense(), B.indices)
-    envAd, envBd = _converge(Ad, Bd, chi=_CHI)
+    envAd, envBd = _converge(Ad, Bd, chi=_CHI_2SITE)
     return A, B, envA, envB, Ad, Bd, envAd, envBd
 
 
@@ -127,12 +144,12 @@ def test_swept_corner_has_non_zero_charged_blocks(swept_envs):
 def test_symmetric_energy_matches_the_dense_reference(swept_envs):
     """``DenseTensor`` contraction ignores flow, so E_dense is the ground truth.
 
-    The symmetric and dense paths are not expected to agree bit-for-bit — the
-    block-sparse SVD allocates chi per charge sector rather than taking a global
-    top-chi — but a confined environment misses by ~0.16, two orders of
-    magnitude above the tolerance here, which itself sits three orders above
-    the measured same-budget gap (8.3e-07 at ``_MAX_ITER=20``; scan table in
-    the module docstring).
+    The symmetric and dense paths are not expected to agree bit-for-bit once
+    the cut truncates — the block-sparse SVD allocates chi per charge sector
+    rather than taking a global top-chi — but a confined environment misses by
+    ~0.16 at convergence (1.1e-02 at this fixture's two-sweep budget, still
+    above the 5e-3 tolerance), while the measured same-budget gap here is 0.0
+    (``chi = D**2`` is untruncated; scan tables in the module docstring).
     """
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor_2site
     from tenax.algorithms.ipeps import heisenberg_gate
@@ -152,8 +169,8 @@ def test_symmetric_energy_matches_the_dense_reference(swept_envs):
     # it means the fixture drifted (different budget, different init) rather
     # than that the guard is comfortably green (#884's fixture lesson).
     assert abs(E_sym - E_dense) < 1e-4, (
-        f"gap {abs(E_sym - E_dense):.3e} is an order above the measured "
-        "regime (8.3e-07); the fixture or budget drifted — re-run the scan "
+        f"gap {abs(E_sym - E_dense):.3e} is far above the measured "
+        "regime (0.0); the fixture or budget drifted — re-run the scan "
         "in the module docstring before touching the 5e-3 guard."
     )
 

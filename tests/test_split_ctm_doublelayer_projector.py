@@ -70,6 +70,12 @@ def test_fused_to_split_roundtrip(D):
 from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
 from tenax.algorithms._split_ctm_tensor_energy import compute_energy_split_ctm_tensor
 
+#: Forced sweeps for the lossless parity (300 until the 2026-10-26 test-trim
+#: pass).  The parity is a fixed-point claim, NOT a per-sweep one: measured,
+#: at 20 sweeps the two paths still differ by 5.7e-06 (chi=4) / 1.1e-06
+#: (chi=8), at 100 by 4.0e-16 / 7.2e-16 -- the same as at 300.
+_SWEEPS = 100
+
 
 @pytest.mark.parametrize(
     "D,chi",
@@ -105,9 +111,11 @@ def test_split_matches_fused_lossless_chi_I(D, chi):
     # carry a genuine rank-4..6 corner, so this is now a real oracle.
     # Measured agreement: 2.5e-16 (D=2,chi=4), 9.0e-16 (D=2,chi=8),
     # 5.0e-16 (D=3,chi=6, row since dropped) — well inside the 1e-8 tolerance.
-    fused_env, _ = ctm_tensor(A, chi=chi, max_iter=300, conv_tol=0.0)
+    fused_env, _ = ctm_tensor(A, chi=chi, max_iter=_SWEEPS, conv_tol=0.0)
     E_fused = float(compute_energy_ctm_tensor(A, fused_env, gate))
-    split_env = ctm_split_tensor(A, chi=chi, chi_I=chi * D, max_iter=300, conv_tol=0.0)
+    split_env = ctm_split_tensor(
+        A, chi=chi, chi_I=chi * D, max_iter=_SWEEPS, conv_tol=0.0
+    )
     E_split = float(compute_energy_split_ctm_tensor(A, split_env, gate))
     np.testing.assert_allclose(E_split, E_fused, atol=1e-8)
 
