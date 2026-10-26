@@ -108,9 +108,13 @@ def _cpu_has_gesvd() -> bool:
     The 0.4.3x floor does not ("The SVD algorithm parameter is not
     implemented on CPU"); there the CPU SVD keeps plain ``gesdd``.
     """
+    # The first call may come inside a jit trace, where device_put and the
+    # SVD would be staged (and fail later, at the caller's lowering); run the
+    # probe eagerly instead.
     try:
-        x = jax.device_put(np.eye(2, dtype=np.float32), jax.devices("cpu")[0])
-        jax.block_until_ready(_gesvd(x, False, False))
+        with jax.ensure_compile_time_eval():
+            x = jax.device_put(np.eye(2, dtype=np.float32), jax.devices("cpu")[0])
+            jax.block_until_ready(_gesvd(x, False, False))
     except NotImplementedError:
         return False
     return True

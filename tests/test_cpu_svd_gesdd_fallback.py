@@ -179,6 +179,33 @@ def test_a_jax_without_cpu_gesvd_keeps_plain_gesdd(monkeypatch, failing_gesdd):
     assert not np.all(np.isfinite(tl._dense_svd(_fails(_x()), compute_uv=False)))
 
 
+@pytest.fixture
+def fresh_probe():
+    tl._cpu_has_gesvd.cache_clear()
+    yield
+    tl._cpu_has_gesvd.cache_clear()
+
+
+def test_the_cpu_gesvd_probe_runs_eagerly_inside_a_jit_trace(monkeypatch, fresh_probe):
+    # Old JAX fails only when QR is lowered for CPU: a staged probe inside the
+    # caller's jit trace would "succeed" and cache True.  This fake gesvd
+    # traces fine and raises only when run on concrete values.
+    def gesvd(x, full_matrices, compute_uv):
+        if not isinstance(x, jax.core.Tracer):
+            raise NotImplementedError("no CPU gesvd")
+        return _REAL_GESDD(x, full_matrices=full_matrices, compute_uv=compute_uv)
+
+    monkeypatch.setattr(tl, "_gesvd", gesvd)
+    seen = []
+
+    def f(y):
+        seen.append(tl._cpu_has_gesvd())
+        return y
+
+    jax.jit(f)(_x())
+    assert seen == [False]
+
+
 def test_a_non_cpu_backend_skips_the_fallback(monkeypatch):
     # TPU supports only SvdAlgorithm.POLAR, so the QR branch must not lower there.
     monkeypatch.setattr(jax, "default_backend", lambda: "tpu")
