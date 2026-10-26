@@ -71,6 +71,12 @@ def _fresh_vjp_cache():
 
 @pytest.mark.usefixtures("_fresh_vjp_cache")
 @pytest.mark.parametrize("adjoint_method", ["fixed_point", "gmres"])
+# Only complex -> real is the #1113 failure: a complex lambda cannot seed a
+# real solve (ValueError / TypeError with the dtype check removed).  A real
+# lambda is a valid starting guess for a complex solve -- with the check
+# removed it IS used, and the gradient still matches a cold start (1.7e-7
+# fixed_point, exact gmres; #1151).  So real -> complex pins that the switch
+# in that direction gives the right gradient, not the dtype check itself.
 @pytest.mark.parametrize("first, second", [("complex", "real"), ("real", "complex")])
 def test_a_dtype_switch_starts_the_adjoint_cold(adjoint_method, first, second):
     with warnings.catch_warnings():
