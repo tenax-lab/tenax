@@ -18,12 +18,10 @@
 # The old cksum split predicted 236.3 / 224.1 / 165.4 at its worst shard;
 # timeout-minutes is 240.
 1 tests/test_complex128_ad.py
-1 tests/test_ctm_700_env_collapse.py
 1 tests/test_ctm_charged_sectors_905.py
 1 tests/test_ctm_hold.py
 1 tests/test_ctm_honeycomb_cross_path.py
 1 tests/test_ctm_implicit_warm_start_adjoint.py
-1 tests/test_ctm_symmetric_rdm_positive_853.py
 1 tests/test_fermionic_ed_reference.py
 1 tests/test_graded_contract_oracle.py
 1 tests/test_ipeps.py
@@ -36,7 +34,6 @@
 1 tests/test_split_ctm_doublelayer_projector.py
 1 tests/test_split_ctm_fuse_flag.py
 1 tests/test_split_ctm_large_d_memory.py
-1 tests/test_split_ctm_production_correctness.py
 1 tests/test_su_667_product_state.py
 1 tests/test_trg.py
 2 tests/test_block_sparse_ctm_ad.py
@@ -53,14 +50,11 @@
 2 tests/test_ipeps_u1sz.py
 2 tests/test_multisite_clamped_gate.py
 2 tests/test_pess_3site_multisite_rdm_invariants.py
-2 tests/test_profiler_u1sz_arm.py
 2 tests/test_root_implicit_wiring.py
 3 tests/test_cbe_validation.py
 3 tests/test_ctm_chi_truncation_policy_922.py
 3 tests/test_ctm_energy_implicit.py
 3 tests/test_ctm_energy_implicit_chi_bump.py
-3 tests/test_ctm_honeycomb_lukin_sotnikov.py
-3 tests/test_ctm_multisite_2x2_contract.py
 3 tests/test_ctm_recipe_2x2_production_correctness.py
 3 tests/test_ctm_root_implicit_multisite.py
 3 tests/test_dmrg3s.py
@@ -73,7 +67,6 @@
 3 tests/test_joint_chain_rule.py
 3 tests/test_optimize_gs_ad_chi_schedule_unified.py
 3 tests/test_optimizer_run_independence_973.py
-3 tests/test_pess_ad_honeycomb.py
 3 tests/test_projector_backward_default_1028.py
 3 tests/test_root_implicit_ignored_knobs.py
 3 tests/test_split_ctm_2site_ad.py

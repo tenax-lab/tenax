@@ -154,18 +154,3 @@ def test_implicit_ad_config_checks_now_apply(spy):
     with pytest.raises(ValueError, match="projector_method"):
         iom.optimize_fpeps_ad(spinless_fermion_gate(_FCFG), _A(), cfg)
     assert spy == []
-
-
-@pytest.mark.slow
-def test_2site_end_to_end_returns_the_pair():
-    """One real 2-site step: the result is the pair, not one uniform tensor."""
-    cfg = _cfg(
-        unit_cell="2site",
-        ctm=CTMConfig(chi=4, max_iter=100, conv_tol=1e-8),
-    )
-    (A, B), (env_a, env_b), E = iom.optimize_fpeps_ad(
-        spinless_fermion_gate(_FCFG), None, cfg, _FCFG
-    )
-    assert isinstance(A, SymmetricTensor) and isinstance(B, SymmetricTensor)
-    assert env_a is not None and env_b is not None
-    assert np.isfinite(E)

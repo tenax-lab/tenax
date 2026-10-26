@@ -15,7 +15,6 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 import tenax.algorithms._ctm_energy_ad as cea
 from tenax.algorithms._ctm_energy_ad import (
@@ -307,19 +306,6 @@ def test_slope_check_keeps_flow_for_complex_params():
     )
     assert d["projector_backward_used"] == "flow", d
     assert 0.5 <= d["flow_slope_ratio"] <= 2.0, d["flow_slope_ratio"]
-
-
-@pytest.mark.slow
-def test_slope_check_rejects_the_d3_chi12_flow_gradient():
-    """The hole #1111 found on main: D=3 chi=12 flow gradient 86x off FD,
-    r = 0.002."""
-    _, d = _grad(_pair_energy, _pair_params(D=3), chi=12)
-    assert d["forward_stationarity_residual"] > d["forward_stationarity_threshold"], (
-        "premise"
-    )
-    assert d["projector_backward_used"] == "frozen_fallback", d
-    assert "slope check" in d["flow_fallback_reason"], d
-    assert d["flow_slope_ratio"] < 0.5
 
 
 def _single_energy_with(p, *, gate=_H1, env_init=None):

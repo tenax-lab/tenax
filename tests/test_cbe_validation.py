@@ -1,15 +1,18 @@
-"""Validation: compare 1-site+CBE against 2-site DMRG on Heisenberg chain."""
+"""Validation of CBE's ``expand_bond``: the added directions are orthogonal.
+
+(A slow "1-site+CBE vs 2-site DMRG" comparison used to live here; it never
+called CBE -- CBE is not wired into the DMRG sweep -- and was deleted in the
+slow-bucket prune.)
+"""
 
 from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from tenax import DMRGConfig, build_mpo_heisenberg, dmrg
 from tenax.algorithms.cbe import expand_bond
 from tenax.algorithms.dmrg import (
     _build_right_environments_list,
@@ -22,64 +25,11 @@ from tenax.algorithms.dmrg import (
     _update_right_env_symmetric,
 )
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.mps import FiniteMPS
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 
 class TestCBEValidation:
-    @pytest.mark.slow
-    def test_cbe_improves_over_1site(self):
-        """After CBE + re-optimize, energy should improve over fixed-bond 1-site.
-
-        Strategy: run 1-site DMRG at chi=4, then 2-site DMRG at chi=6.
-        Compare energies to verify the test infrastructure works.
-        A full CBE sweep integration test requires wiring CBE into
-        the DMRG sweep loop, which is planned for follow-up.
-        """
-        L = 6
-        chi_small = 4
-        chi_large = 6
-
-        mpo = build_mpo_heisenberg(L)
-
-        # 1-site DMRG at chi=4
-        mps1 = FiniteMPS.random(
-            L,
-            d=2,
-            chi=chi_small,
-            key=jax.random.PRNGKey(42),
-            symmetric=True,
-            symmetry=U1Symmetry(),
-            target_charge=0,
-        )
-        result_1s = dmrg(
-            mpo, mps1, DMRGConfig(max_bond_dim=chi_small, num_sweeps=10, two_site=False)
-        )
-        E_1site = result_1s.energy
-
-        # 2-site DMRG at chi=6 (reference)
-        mps2 = FiniteMPS.random(
-            L,
-            d=2,
-            chi=chi_small,
-            key=jax.random.PRNGKey(42),
-            symmetric=True,
-            symmetry=U1Symmetry(),
-            target_charge=0,
-        )
-        result_2s = dmrg(mpo, mps2, DMRGConfig(max_bond_dim=chi_large, num_sweeps=15))
-        E_2site = result_2s.energy
-
-        print(f"\nE_1site(chi={chi_small})={E_1site:.8f}")
-        print(f"E_2site(chi={chi_large})={E_2site:.8f}")
-        print(f"Improvement: {E_1site - E_2site:.6f}")
-
-        # 2-site with larger chi must achieve lower energy
-        assert E_2site < E_1site - 1e-4, (
-            f"2-site (E={E_2site:.6f}) should beat 1-site (E={E_1site:.6f})"
-        )
-
     def test_expand_bond_produces_orthogonal_directions(self):
         """CBE expansion adds columns orthogonal to the original site tensor.
 
