@@ -24,7 +24,6 @@
 1 tests/test_ctm_implicit_warm_start_adjoint.py
 1 tests/test_fermionic_ed_reference.py
 1 tests/test_graded_contract_oracle.py
-1 tests/test_ipeps.py
 1 tests/test_ipeps_checkpoint_resume.py
 1 tests/test_ipeps_grad_spike_guard.py
 1 tests/test_ipeps_su_mutations.py

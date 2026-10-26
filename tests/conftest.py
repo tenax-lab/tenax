@@ -117,9 +117,12 @@ _FILE_MARKERS = {
     # cycles). The envs_init seed/refusal tests use ``light_AB``/
     # ``_fake_envs`` (no SU, no CTM) rather than the module-scope
     # ``seeded_d2`` fixture (a real 28 s SU growth plus a ~126 s eager CTM),
-    # which only this file's ``slow``-marked tests build (final-review
-    # finding I2 -- an earlier version of this comment predated that fix
-    # and undercounted the not-slow bucket's cost).
+    # which only this file's ``slow``-marked tests build.  Since the
+    # slow-bucket prune (#1149) that is true of the scripted layout-recheck
+    # tests too: they stub the CTM (``_stub_ctm``) and run on ``light_AB`` or
+    # the bosonic ``seeded_xxz_d2``, leaving one real re-check run; the
+    # non-slow half went from ~2700 s (CI) to ~550 s locally, and the D=3
+    # ``frozen_state``/``eager_envs`` fixtures of the slow half are gone.
     "test_frozen_layout_ad.py": "algorithm",
     "test_fermionic_ed_reference.py": "algorithm",
     "test_ipeps_excitations.py": "algorithm",
@@ -232,7 +235,9 @@ _FILE_MARKERS = {
     # bug ("small dt causes the bond lambdas to converge to a product-like fixed
     # point") as intended behaviour.  A guard against a silent-wrong-answer
     # defect of that shape belongs in the gate that blocks a merge.  The D=2 run
-    # is shared across the cases via a module fixture; the D=4 case is @slow.
+    # is shared across the cases via a module fixture.  The D=3/D=4 survival
+    # rows were dropped in the slow-bucket prune (#1149); the slow half is the
+    # D=3 spectrum-vs-dense check.
     "test_su_865_symmetric_collapse.py": "core",
     "test_su_667_product_state.py": "core",
     # #851: the four-phase checkerboard sweep stored two Schmidt spectra for
@@ -752,9 +757,10 @@ _FILE_MARKERS = {
     "test_ctm_honeycomb_projector.py": "core",  # 7.9s / 10
     # slow: >150s with no self-declared slow marks, so the whole file
     # runs only in the slow bucket rather than bloating fast-other (#960).
-    "test_split_ctm_chi_frozen_726.py": "slow",  # 164s / 9
-    "test_ctm_670_symmetric_2x2.py": "slow",  # 267s / 2
-    "test_pess_3site_multisite_rdm_invariants.py": "slow",  # 375s / 7
+    # (Second figures: local CPU after the slow-bucket prune, #1149.)
+    "test_split_ctm_chi_frozen_726.py": "slow",  # 164s / 9 -> 54s / 2
+    "test_ctm_670_symmetric_2x2.py": "slow",  # 267s / 2 -> 197s / 2
+    "test_pess_3site_multisite_rdm_invariants.py": "slow",  # 375s / 7 -> 335s / 6
     # algorithm: moderate cost; runs push-to-main + nightly.
     "test_ctm_honeycomb_ad.py": "algorithm",  # 15.2s / 2
     "test_ctm_honeycomb_convergence.py": "algorithm",

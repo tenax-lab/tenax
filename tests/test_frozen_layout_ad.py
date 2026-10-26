@@ -46,11 +46,12 @@ from tenax.algorithms.ipeps_simple_update import _simple_update_checkerboard_swe
 
 jax.config.update("jax_enable_x64", True)
 
-CHI = 12
 # Ruling R16 (Task 5): the plumbing/end-to-end tests use their OWN D=2, chi=8
-# fixture (``seeded_d2`` below), not ``frozen_state``/``eager_envs`` (D=3,
-# chi=12): the latter costs ~10 min to build and its implicit-AD forward does
-# not reliably reach a #841 element-wise fixed point (Task 4 rounds 1-5).
+# fixture (``seeded_d2`` below), not the D=3 chi=12 ``frozen_state``/
+# ``eager_envs`` pair (~10 min to build, and its implicit-AD forward did not
+# reliably reach a #841 element-wise fixed point, Task 4 rounds 1-5).  Since
+# the slow-bucket prune (#1149) that pair is gone and every test here runs at
+# D=2.
 CHI_D2 = 8
 # The bosonic ``seeded_xxz_d2`` fixture's chi (see its docstring).
 CHI_XXZ = 4
@@ -309,42 +310,14 @@ def test_growth_puts_the_new_slot_where_the_discarded_weight_is():
     assert out.stages[1][3] == (int((par == 0).sum()), int((par == 1).sum()))
 
 
-@pytest.fixture(scope="module")
-def frozen_state():
-    cfg = FPEPSConfig(D=3, t=1.0, V=0.0, dt=0.05)
-    H = spinless_fermion_gate(cfg)
-    out = su_grow_layout(H, cfg, D_start=2, key=jax.random.PRNGKey(2))
-    assert out.frozen
-    return out.A, out.B, H, 2
-
-
-@pytest.fixture(scope="module")
-def eager_envs(frozen_state):
-    # Cost (Ruling R3), measured on this clone (CPU, D=3, key=PRNGKey(2)):
-    # su_grow_layout ~64 s; the eager CTM's per-sweep max-corner-SV diff
-    # (same metric ctm_tensor_2site checks against conv_tol) traced sweep by
-    # sweep: 1.07e-7 at sweep 150 (the brief's original max_iter, which does
-    # NOT reach 1e-10 and would leave eager_envs short of the fixed point the
-    # design assumes), then a monotone tail -- 4.2e-8 (160), 6.5e-9 (180),
-    # 1.0e-9 (200), 3.9e-10 (210) -- crossing 1e-10 at sweep 225, ~443 s
-    # total. max_iter=260 below gives a 35-sweep margin over that measured
-    # crossing while staying at ~510 s (~8.5 min), well under the ~30 min
-    # budget in Decision 1 -- so conv_tol stays at the brief's 1e-10 rather
-    # than being relaxed.
-    A, B, _, _ = frozen_state
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        eA, eB = ctm_tensor_2site(A, B, CHI, max_iter=260, conv_tol=1e-10)
-    assert eA.C1.indices[0].dim == CHI  # regime: the corner is truncated
-    envs = {(0, 0): eA, (1, 0): eB}
-    # YASTN's fixed-point check (fixed_pt.py:369): one more eager sweep must
-    # not move any sector size, or there is no fixed point to hand to AD.
-    dls = {(0, 0): _build_double_layer_tensor(A), (1, 0): _build_double_layer_tensor(B)}
-    again, _, _ = _ctm_tensor_sweep_multisite(
-        envs, dls, CHECKERBOARD_NEIGHBORS, CHI, True
-    )
-    assert jax.tree_util.tree_structure(again) == jax.tree_util.tree_structure(envs)
-    return envs
+# Slow-bucket prune (#1149): the D=3 chi=12 ``frozen_state`` / ``eager_envs``
+# fixtures (``su_grow_layout`` ~64 s plus a 260-sweep eager fermionic CTM to
+# 1e-10, ~510 s) are gone.  The two tests that used them are re-pointed at
+# ``seeded_d2`` (D=2 chi=8, built for the ``envs_init`` tests anyway): the
+# layout-keeping claim and the graded bra-leg sign in the readout's backward
+# are D-independent.  ``test_the_cold_traced_ctm_is_why_the_seed_exists`` was
+# deleted: after #1098 it measured the ``eager_layout_sweeps=0`` opt-out, not
+# a default-path behaviour.
 
 
 def _E(A, B, envs, H, d):
@@ -387,15 +360,13 @@ def _layout(envs):
 
 
 @pytest.mark.slow
-def test_the_seeded_traced_ctm_keeps_the_layout_and_the_energy(
-    frozen_state, eager_envs
-):
-    A, B, H, d = frozen_state
+def test_the_seeded_traced_ctm_keeps_the_layout_and_the_energy(seeded_d2):
+    A, B, H, d, eager_envs = seeded_d2
     site = {(0, 0): A, (1, 0): B}
     envs, _ = python_loop_ctm_converge(
         site,
         CHECKERBOARD_NEIGHBORS,
-        chi=CHI,
+        chi=CHI_D2,
         max_iter=50,
         conv_tol=1e-10,
         env_init=eager_envs,
@@ -412,7 +383,7 @@ def test_the_seeded_traced_ctm_keeps_the_layout_and_the_energy(
     again, _ = python_loop_ctm_converge(
         site,
         CHECKERBOARD_NEIGHBORS,
-        chi=CHI,
+        chi=CHI_D2,
         max_iter=1,
         conv_tol=1e-10,
         env_init=envs,
@@ -423,31 +394,8 @@ def test_the_seeded_traced_ctm_keeps_the_layout_and_the_energy(
 
 
 @pytest.mark.slow
-def test_the_cold_traced_ctm_is_why_the_seed_exists(frozen_state, eager_envs):
-    """Measurement, kept as a regime guard: from the tiled initial
-    environment the traced CTM lands on a different sector layout (sizes, not
-    basis order -- see ``_layout``).  If this ever fails, the seed is a no-op
-    for this fixture and Task 3's first test certifies nothing -- pick a
-    fixture where it matters.
-
-    ``eager_layout_sweeps=0`` (#1098): ``python_loop_ctm_converge`` now runs
-    eager sweeps first and so adapts the layout itself; the traced-only CTM
-    this guard measures is its opt-out."""
-    A, B, _, _ = frozen_state
-    envs, _ = python_loop_ctm_converge(
-        {(0, 0): A, (1, 0): B},
-        CHECKERBOARD_NEIGHBORS,
-        chi=CHI,
-        max_iter=50,
-        conv_tol=1e-10,
-        eager_layout_sweeps=0,
-    )
-    assert _layout(envs) != _layout(eager_envs)
-
-
-@pytest.mark.slow
 def test_the_graded_energy_gradient_matches_finite_differences_at_a_fixed_environment(
-    frozen_state, eager_envs
+    seeded_d2,
 ):
     """R15 (Task 4, round 6): FD-vs-AD certification of the graded energy
     *readout's* backward, at a fixed (constant, un-differentiated) CTM
@@ -480,12 +428,11 @@ def test_the_graded_energy_gradient_matches_finite_differences_at_a_fixed_enviro
     VJPs) -- that remains uncertified by an FD test on current fixtures, per
     the round 5 finding.
 
-    Real-fixture check (this file's own module-scope ``frozen_state``/
-    ``eager_envs``, D=3, chi=12, key=PRNGKey(2)): seed 0 (below) passed the
-    regime and comparison asserts on the first try, confirmed beforehand
-    against a bit-identical cached copy of the same fixture (Task 3's
-    ``eager_cache.pkl``, same D/chi/key/max_iter/conv_tol -- see the Task 4
-    report round 1) -- so no second ``V`` seed was needed.
+    Real-fixture check: written against a D=3, chi=12, key=PRNGKey(2) frozen
+    state; since the slow-bucket prune (#1149) it runs on ``seeded_d2`` (D=2,
+    chi=8, key=PRNGKey(4)), where seed 0 (below) also passes the regime
+    (slope measurable against the h-scan spread) and comparison asserts.  The
+    graded bra-leg sign this guards does not depend on D.
 
     Dtype/pairing note (memory: complex cotangents pair UNCONJUGATED): the
     site tensors and the Hamiltonian gate here are real (float64) --
@@ -493,7 +440,7 @@ def test_the_graded_energy_gradient_matches_finite_differences_at_a_fixed_enviro
     ``jnp.vdot(a, b)`` is a no-op and conjugation does not matter; the
     ordinary real inner product is used.
     """
-    A, B, H, d = frozen_state
+    A, B, H, d, eager_envs = seeded_d2
 
     def f(A_):
         # A_.norm() only -- SymmetricTensor has no __truediv__, so multiply
@@ -910,8 +857,12 @@ def test_the_seed_check_reads_the_faces_the_builder_makes(kind):
 def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
     seeded_d2, monkeypatch
 ):
-    """R16/R10, fix round 1 (Task 5 review, ruling R17): 5 AD steps (the
-    brief's 10, halved per the ruling).
+    """R16/R10, fix round 1 (Task 5 review, ruling R17): 3 AD steps (the
+    brief's 10, halved per the ruling, then cut to 3 in the slow-bucket prune,
+    #1149: the spy's "every seeded call has the seed's layout" and
+    ``E1 <= E0`` hold from step 1; the L-BFGS stall-reset path seen at step
+    4-5 is no longer reached here, and ``_reset_env_cache_2s`` is pinned by
+    the scripted rollback test below).
 
     Deviates from R10's literal ``_layout(envs1) == _layout(seed)`` on the
     optimizer's RETURN value for a reason this task's own probing surfaced
@@ -935,7 +886,7 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
     (confirmed the actual first-forward call site by the spy tests above,
     and by direct instrumentation: scratch/probe_spy_order.py). So this test
     spies on it non-invasively (calls straight through) and records every
-    ``env_init`` it was ever seeded with, across all 5 steps including any
+    ``env_init`` it was ever seeded with, across all steps including any
     interior line-search/HZ-probe re-evaluations.
 
     Round-1 history (a first implementation of this test, superseded here):
@@ -992,7 +943,7 @@ def test_frozen_layout_ad_lowers_the_energy_and_keeps_the_layouts(
         (A1, B1), (_env_A1, _env_B1), E1 = optimize_gs_ad(
             H,
             (A, B),
-            _ad_config(5, gs={"gs_layout_recheck": False}, max_iter=400),
+            _ad_config(3, gs={"gs_layout_recheck": False}, max_iter=400),
             envs_init=envs,
         )
     seed_layout = _layout(envs)
@@ -1012,8 +963,9 @@ def _surrogate_energy(monkeypatch, A, B):
     """Replace the energy with ``-(<A, R_A> + <B, R_B>) / 2`` on the normalized
     pair, ``R`` a fixed 10% perturbation of the start.  No AD backward runs
     through the CTM (minutes per call on block-sparse tensors); the real CTM
-    still runs for the env cache, the line-search probes and the re-checks,
-    and L-BFGS still builds real ``(s, y)`` pairs.  These tests check the
+    still runs for the env cache, the line-search probes and the re-checks
+    (unless ``_stub_ctm`` replaces it too), and L-BFGS still builds real
+    ``(s, y)`` pairs.  These tests check the
     optimizer's bookkeeping, not the physics.
 
     Both energy entries are patched with the same function, so the line
@@ -1068,32 +1020,55 @@ def _caller():
     return sys._getframe(2).f_code.co_name
 
 
-def _certify_rechecks(monkeypatch):
-    """Report every step-boundary re-check as layout-certified.
+def _stub_ctm(monkeypatch, seed, *, recheck_converged=True):
+    """Replace ``python_loop_ctm_converge`` by a stub: a fresh copy of its
+    ``env_init`` (the seed on a cold call), reported converged and
+    layout-certified.  Returns the list of ``(caller, kwargs)`` it saw.
 
-    The scripted-change tests force ``_layout_changed``; the optimizer acts
-    on a change only when the re-check also certified its layout (final
-    review I1).  On ``seeded_d2`` the real re-checks end in an eager
-    two-cycle (measured: RuntimeWarning "alternated" from the re-check
-    call), so they must script the certificate too.
+    For the scripted tests below (slow-bucket prune, #1149).  They already
+    script the energy (``_surrogate_energy``) and the layout verdict
+    (``_layout_changed``), so the real CTM only paid for environments whose
+    content none of their assertions read -- ~100-600 s per test on the
+    fermionic D=2 chi=8 seed.  A copy, not the object itself, so identity
+    checks against ``envs_init`` keep the meaning they have on a real run
+    (where every CTM output is a new object).  The re-check is certified
+    because the scripted-change tests force ``_layout_changed`` and the
+    optimizer acts on a change only when the re-check also certified its
+    layout (final review I1); ``recheck_converged=False`` scripts the
+    unconverged re-check instead.  The real re-check / refresh / probe
+    wiring is pinned on a real run by
+    ``test_the_recheck_runs_unfrozen_with_the_configured_tie_rtol``.
     """
     import tenax.algorithms._ctm_python_loop as cpl
+    from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
 
-    real = cpl.python_loop_ctm_converge
+    calls = []
 
-    def _spy(*a, **kw):
-        out_envs, info = real(*a, **kw)
-        if _caller() == "_recheck_layout_2s":
-            info = info._replace(layout_certified=True)
-        return out_envs, info
+    def _stub(site_tensors, neighbors, **kw):
+        who = _caller()
+        calls.append((who, kw))
+        env = kw.get("env_init") or seed
+        converged = recheck_converged or who != "_recheck_layout_2s"
+        info = CTMConvergeInfo(
+            converged=converged, iterations=1, sv_diff=0.0, best_iteration=1
+        )
+        return jax.tree_util.tree_map(lambda x: x, env), info
 
-    monkeypatch.setattr(cpl, "python_loop_ctm_converge", _spy)
+    monkeypatch.setattr(cpl, "python_loop_ctm_converge", _stub)
+    return calls
 
 
-def test_layout_changed_compares_chi_layouts(seeded_d2, light_envs):
+def test_layout_changed_compares_chi_layouts(light_envs):
+    """Two fermionic chi=8 environments with the same shapes and a different
+    chi-sector split: ``light_envs`` (virtual charges [0, 1], measured split
+    {0: 6, 1: 2} per corner leg) against the initial seed of an all-even site
+    ({0: 8}).  (Was ``seeded_d2`` against ``light_envs``; neither side needs
+    a converged CTM to exercise the comparison, so the slow-bucket prune,
+    #1149, dropped the ~155 s fixture from the non-slow half.)"""
     import tenax.algorithms._ctm_python_loop as cpl
 
-    *_, envs = seeded_d2
+    S = _site([0, 0], 0)
+    envs = {(0, 0): _seed_env(S), (1, 0): _seed_env(S)}
     assert cpl._chi_layout(envs) != cpl._chi_layout(light_envs)  # regime
     assert not ipo._layout_changed(None, envs)
     assert not ipo._layout_changed(envs, envs)
@@ -1180,7 +1155,11 @@ def test_a_layout_change_resets_the_optimizer_state(request, monkeypatch, kind):
     The metric case runs on the bosonic ``seeded_xxz_d2``: on the fermionic
     ``seeded_d2`` #1099 turns the metric off, so ``lbfgs_two_loop`` never
     runs there.  Adam is an optax optimizer too: its moments from the old
-    layout must not reach the first update on the new one (Codex on #1135)."""
+    layout must not reach the first update on the new one (Codex on #1135).
+
+    The CTM is stubbed (``_stub_ctm``, #1149): every assertion here reads
+    optimizer bookkeeping on the surrogate energy.  The optax-L-BFGS cell
+    runs on the cheap fermionic ``light_AB`` instead of ``seeded_d2``."""
     import tenax.algorithms._metric_precond as mp
 
     metric = kind == "metric_lbfgs"
@@ -1191,7 +1170,8 @@ def test_a_layout_change_resets_the_optimizer_state(request, monkeypatch, kind):
         A, B, H, envs = request.getfixturevalue("seeded_xxz_d2")
         chi = CHI_XXZ
     else:
-        A, B, H, _d, envs = request.getfixturevalue("seeded_d2")
+        A, B, H = request.getfixturevalue("light_AB")
+        envs = request.getfixturevalue("light_envs")
         chi = CHI_D2
     _surrogate_energy(monkeypatch, A, B)
     events = []
@@ -1236,7 +1216,7 @@ def test_a_layout_change_resets_the_optimizer_state(request, monkeypatch, kind):
         events.append(("accept", kw["current_best"]))
         return real_accept(**kw)
 
-    _certify_rechecks(monkeypatch)
+    _stub_ctm(monkeypatch, envs)
     monkeypatch.setattr(ipo, "_layout_changed", _changed)
     monkeypatch.setattr(ipo, "_site1_value_and_grad", _vg)
     monkeypatch.setattr(ipo, "_build_optimizer", _build)
@@ -1282,9 +1262,10 @@ def test_a_resumed_run_rechecks_its_first_step(seeded_xxz_d2, monkeypatch, tmp_p
     """A fresh run skips the re-check at its first step: ``envs_init`` was
     converged at those tensors.  A resumed run must not: the checkpoint's
     tensors were updated after its last evaluation (Codex on #1135).  Each
-    re-check calls ``_layout_changed`` once."""
+    re-check calls ``_layout_changed`` once.  CTM stubbed (#1149)."""
     A, B, H, envs = seeded_xxz_d2
     _surrogate_energy(monkeypatch, A, B)
+    _stub_ctm(monkeypatch, envs)
     calls = []
     real = ipo._layout_changed
 
@@ -1308,24 +1289,13 @@ def test_a_resumed_run_rechecks_its_first_step(seeded_xxz_d2, monkeypatch, tmp_p
     assert len(calls) - n_fresh == 1, calls  # the resumed step 3 re-checks
 
 
-def test_an_unconverged_recheck_is_not_a_change(seeded_d2, monkeypatch):
+def test_an_unconverged_recheck_is_not_a_change(light_AB, light_envs, monkeypatch):
     """A re-check that does not converge is never acted on, even if its
-    layout differs."""
-    import tenax.algorithms._ctm_python_loop as cpl
-
-    A, B, H, _d, envs = seeded_d2
+    layout differs.  CTM stubbed, on ``light_AB`` (#1149)."""
+    A, B, H = light_AB
+    envs = light_envs
     _surrogate_energy(monkeypatch, A, B)
-    real = cpl.python_loop_ctm_converge
-    n_rechecks = []
-
-    def _spy(*a, **kw):
-        out_envs, info = real(*a, **kw)
-        if _caller() == "_recheck_layout_2s":
-            n_rechecks.append(1)
-            info = info._replace(converged=False)
-        return out_envs, info
-
-    monkeypatch.setattr(cpl, "python_loop_ctm_converge", _spy)
+    calls = _stub_ctm(monkeypatch, envs, recheck_converged=False)
     monkeypatch.setattr(ipo, "_layout_changed", lambda old, new: True)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -1337,11 +1307,14 @@ def test_an_unconverged_recheck_is_not_a_change(seeded_d2, monkeypatch):
         )
     # Regime: the re-check ran (steps 2 and 3), so [] is its verdict, not
     # the absence of one.
-    assert len(n_rechecks) == 2, n_rechecks
+    n_rechecks = [who for who, _ in calls if who == "_recheck_layout_2s"]
+    assert len(n_rechecks) == 2, [who for who, _ in calls]
     assert hist["layout_changes"] == []
 
 
-def test_a_rollback_after_a_change_restores_the_new_layout(seeded_d2, monkeypatch):
+def test_a_rollback_after_a_change_restores_the_new_layout(
+    light_AB, light_envs, monkeypatch
+):
     """After an acted-on change, a rollback restores the re-checked env,
     never the seed: ``_reset_env_cache_2s`` falls back to ``envs_init``
     only when no best snapshot exists, and the change clears best tracking,
@@ -1361,10 +1334,15 @@ def test_a_rollback_after_a_change_restores_the_new_layout(seeded_d2, monkeypatc
     forward after the change may be seeded with the seed object either.
     ``make_ctm_energy_fn`` imports ``ctm_energy_implicit`` from
     ``_ctm_energy_ad`` (``ea``) when the optimizer builds its loss, so
-    patching ``ea`` before the call is seen."""
+    patching ``ea`` before the call is seen.
+
+    CTM stubbed, on ``light_AB`` (#1149): the stub hands back a *copy* of its
+    ``env_init``, so ``old is envs`` is true only of the seed object itself,
+    exactly as on a real run."""
     from tenax.algorithms._ad_primitives import CTMRGGradientError
 
-    A, B, H, _d, envs = seeded_d2
+    A, B, H = light_AB
+    envs = light_envs
     _surrogate_energy(monkeypatch, A, B)
     events = []
     real_drop = ipo._drop_env_cache_for_reset
@@ -1399,7 +1377,7 @@ def test_a_rollback_after_a_change_restores_the_new_layout(seeded_d2, monkeypatc
         events.append(("fwd", kw.get("env_init") is envs))
         return real_fwd(*a, **kw)
 
-    _certify_rechecks(monkeypatch)
+    _stub_ctm(monkeypatch, envs)
     monkeypatch.setattr(ipo, "_layout_changed", _changed)
     monkeypatch.setattr(ipo, "_drop_env_cache_for_reset", _drop)
     monkeypatch.setattr(ipo, "_site1_value_and_grad", _vg)
