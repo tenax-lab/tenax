@@ -79,7 +79,7 @@ def test_the_singular_values_only_call_falls_back_too(failing_gesdd):
     )
 
 
-def test_one_failed_matrix_in_a_vmap_batch_recomputes_the_batch(failing_gesdd):
+def test_a_failed_matrix_in_a_vmap_batch_is_recomputed(failing_gesdd):
     xs = jnp.stack([_x(seed=k) for k in range(3)])
     xs = xs.at[:, 0, 0].set(jnp.array([-1.0, 1.0, -1.0]))  # only [1] fails
     u, s, vh = jax.vmap(tl._dense_svd)(xs)
