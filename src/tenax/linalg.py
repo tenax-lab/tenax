@@ -79,9 +79,34 @@ def _gpu_svd_algorithm(shape: tuple[int, ...]) -> _SvdAlgorithm:
     return _SvdAlgorithm.QR
 
 
+def _all_finite(result) -> jax.Array:
+    leaves = result if isinstance(result, tuple) else (result,)
+    return jnp.all(jnp.stack([jnp.all(jnp.isfinite(x)) for x in leaves]))
+
+
 def _cpu_svd(m: jax.Array, full_matrices: bool, compute_uv: bool):
+    """CPU SVD: LAPACK ``gesdd``, recomputed with ``gesvd`` if it is not finite.
+
+    ``gesdd`` (divide and conquer) can fail to converge on a finite,
+    ill-conditioned matrix; JAX then fills the result with NaN.  Apple
+    Accelerate (the LAPACK of numpy, scipy and jaxlib on macOS arm64) does
+    this on a 54x54 CTM projector matrix with condition number 1e8 and two
+    close singular values near 1e-9, where ``gesvd`` (QR) and OpenBLAS
+    ``gesdd`` both converge.  So a non-finite ``gesdd`` result is replaced
+    by the ``gesvd`` one; a non-finite input stays non-finite.
+
+    The check is a ``lax.cond``, so a converged call runs one SVD.  Under
+    ``vmap`` the predicate is batched and the ``cond`` becomes a ``select``
+    that runs both SVDs; only the opt-in ``TENAX_BATCH_BLOCKSPARSE`` sector
+    batching vmaps this function.
+    """
     r = jnp.linalg.svd(m, full_matrices=full_matrices, compute_uv=compute_uv)
-    return tuple(r) if compute_uv else r
+    r = tuple(r) if compute_uv else r
+    return jax.lax.cond(
+        _all_finite(r),
+        lambda: r,
+        lambda: _lax_svd_with(_SvdAlgorithm.QR, full_matrices, compute_uv)(m),
+    )
 
 
 def _lax_svd_with(algorithm: _SvdAlgorithm, full_matrices: bool, compute_uv: bool):
@@ -138,8 +163,9 @@ def _dense_svd(
     (the Jacobi SVD), whose iteration fails to converge (``info != 0`` -> the
     output is filled with NaN) on ill-conditioned f64 matrices such as the HOTRG
     HOSVD and CTM environment/projector tensors. The QR-based algorithm
-    (``gesvd``) always converges and matches the CPU/LAPACK result. CPU (LAPACK
-    ``gesdd``) is unaffected and faster, so only the GPU path is switched.
+    (``gesvd``) always converges and matches the CPU/LAPACK result. CPU keeps
+    LAPACK ``gesdd``, which is faster, and falls back to ``gesvd`` only when
+    ``gesdd`` does not converge (see :func:`_cpu_svd`).
 
     Ref: cuSOLVER 12.2.2.18 (jaxlib 0.10.1) -> 12.2.6.9 (jaxlib 0.10.2) regressed
     ``gesvdj`` convergence on ill-conditioned inputs; JAX then NaN-fills the
