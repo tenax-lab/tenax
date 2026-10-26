@@ -52,7 +52,7 @@ _FILE_MARKERS = {
     "test_graded_simple_update.py": "core",
     "test_dmrg.py": "algorithm",
     "test_layout_helpers.py": "core",  # ~6 s
-    "test_symmetric_layout_seed.py": "algorithm",  # ~105 s
+    "test_symmetric_layout_seed.py": "algorithm",  # ~1100 s CPU cold cache (1500 before the 2026-10-26 trim)
     "test_symmetric_ad_validation_guards.py": "core",  # 2 tests ~28 s CPU
     # FD tests are @slow (~16 min GPU, both cases); the regime guard is fast.
     "test_symmetric_2site_ad_gradient.py": "algorithm",

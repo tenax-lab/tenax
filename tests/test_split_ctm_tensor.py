@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -513,6 +515,13 @@ class TestSplitEdgeHelper:
         assert len(all_d) == 8  # all distinct
 
 
+@functools.cache
+def _seed30_env(D: int, chi: int):
+    """The seed-30 site and its 20-sweep split env, built once per (D, chi)."""
+    A = make_random_dense_site(D, d=2, seed=30)
+    return A, ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+
+
 class TestSplitRDMs:
     """RDM tests for the split-CTM path.
 
@@ -590,7 +599,12 @@ class TestSplitRDMs:
         rdm_single = _rdm2x1_split_tensor(A, env_A)
         assert not jnp.allclose(rdm_split, rdm_single, atol=1e-6)
 
-    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12), (4, 16)])
+    # (4, 16) was dropped from the two native-energy tests and (3, 12) from the
+    # gradient one in the 2026-10-26 test-trim pass: the split-aware RDM
+    # contraction is D-generic on dense tensors, so D=2 and D=3 carry the
+    # forward parity and D=2 the backward; the two tests share one env per
+    # (D, chi) through ``_seed30_env``.
+    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12)])
     def test_compute_energy_split_native_matches_shim(self, D, chi, heisenberg_gate):
         """Split-aware energy must match shim energy at small D."""
         from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
@@ -599,8 +613,7 @@ class TestSplitRDMs:
             compute_energy_split_ctm_tensor,
         )
 
-        A = make_random_dense_site(D, d=2, seed=30)
-        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        A, env = _seed30_env(D, chi)
 
         E_split = compute_energy_split_ctm_tensor(A, env, heisenberg_gate, d=2)
         E_shim = compute_energy_ctm_tensor(
@@ -608,7 +621,7 @@ class TestSplitRDMs:
         )
         assert jnp.allclose(E_split, E_shim, atol=1e-10)
 
-    @pytest.mark.parametrize("D, chi", [(2, 8), (3, 12), (4, 16)])
+    @pytest.mark.parametrize("D, chi", [(2, 8)])
     def test_compute_energy_split_native_grad_matches_shim(
         self, D, chi, heisenberg_gate
     ):
@@ -631,8 +644,7 @@ class TestSplitRDMs:
             compute_energy_split_ctm_tensor,
         )
 
-        A = make_random_dense_site(D, d=2, seed=30)
-        env = ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+        A, env = _seed30_env(D, chi)
         env_std = _split_env_to_tensor_standard(env)
 
         def loss_split(a):

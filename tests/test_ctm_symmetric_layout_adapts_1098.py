@@ -151,6 +151,11 @@ def case(request):
     # (measured; the dense criterion never certifies on this fixture).
     envs_d, _ = _run(Ad, Bd, chi, max_iter=200)
     envs, info = _run(A, B, chi)
+    # The traced-only (pre-fix, ``eager_layout_sweeps=0``) fixed point.  Eight
+    # tests each re-converged it until the 2026-10-26 test-trim pass; it is a
+    # pure function of (A, B, chi), so it is built once here, with no spy
+    # installed.
+    envs_frozen, _ = _run(A, B, chi, eager_layout_sweeps=0)
     return SimpleNamespace(
         name=request.param,
         chi=chi,
@@ -162,7 +167,18 @@ def case(request):
         E_dense=_energy(Ad, Bd, envs_d),
         envs=envs,
         info=info,
+        envs_frozen=envs_frozen,
     )
+
+
+#: The eager-phase control flow (warnings, sweep counts, re-entry caps, cycle
+#: detection, the probe/check plumbing) is symmetry-agnostic code, so those
+#: tests run on the U(1) case only; both symmetries keep the physics (the
+#: dense energy and spectrum, the frozen- and cold-init warm starts -- the
+#: latter is the Z2-specific trap -- the converged-call check and the dense
+#: path).  The Z2 cells of the control-flow tests (~470 s locally) were dropped
+#: in the 2026-10-26 test-trim pass.
+_U1_ONLY = pytest.mark.parametrize("case", ["u1"], indirect=True)
 
 
 def test_the_jitted_symmetric_ctm_reaches_the_dense_energy(case):
@@ -185,7 +201,7 @@ def test_the_jitted_symmetric_ctm_reaches_the_dense_energy(case):
     # Regime guard: the traced-only path (the pre-fix behaviour, reachable
     # through the opt-out) still sits on the frozen layout with a real gap.
     # If this ever fails, the fixture no longer exercises #1098.
-    envs_frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    envs_frozen = case.envs_frozen
     gap_frozen = abs(_energy(A, B, envs_frozen) - E_dense)
     assert gap_frozen > 1e-7, (name, gap_frozen)
     assert _layout(envs_frozen[(0, 0)].C1) == _layout(cold.C1), name
@@ -247,6 +263,7 @@ def _count_eager(monkeypatch):
     return calls
 
 
+@_U1_ONLY
 def test_a_settled_warm_start_runs_no_eager_sweep_and_no_recompile(case, monkeypatch):
     """A warm start whose layout is already the eager top-chi layout is
     certified by one jitted probe sweep: no eager sweep.  A second warm start
@@ -268,6 +285,7 @@ def test_a_settled_warm_start_runs_no_eager_sweep_and_no_recompile(case, monkeyp
     assert step._cache_size() == n_compiled, (name, n_compiled, step._cache_size())
 
 
+@_U1_ONLY
 def test_layout_tie_rtol_reaches_the_probe_and_the_end_of_call_check(case, monkeypatch):
     """The warm-start probe and the end-of-call check both decide with the
     caller's ``layout_tie_rtol``, not the module default."""
@@ -333,7 +351,7 @@ def test_a_warm_start_from_the_frozen_layout_still_adapts(case, monkeypatch):
     of the traced-only path) is the bug, not a settled warm start; it gets
     the two-sweep rule and reaches the dense energy."""
     name, A, B, E_dense = case.name, case.A, case.B, case.E_dense
-    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    frozen = case.envs_frozen
     calls = _count_eager(monkeypatch)
     envs, info = _run(A, B, case.chi, env_init=frozen)
     assert len(calls) >= 2, (name, len(calls))
@@ -381,6 +399,7 @@ def test_the_dense_path_never_enters_the_eager_phase(case, monkeypatch):
     assert probes == [], len(probes)  # no probe sweep, so no probe compile
 
 
+@_U1_ONLY
 def test_the_cap_warns_and_the_eager_sweeps_count_toward_max_iter(case, monkeypatch):
     """A cap of 1 cannot certify a layout (that needs two consecutive eager
     sweeps), so it warns; and the eager sweep is spent from ``max_iter``, as
@@ -407,6 +426,7 @@ def test_the_cap_warns_and_the_eager_sweeps_count_toward_max_iter(case, monkeypa
     assert info.best_iteration == 4, (name, info)
 
 
+@_U1_ONLY
 def test_running_out_of_max_iter_inside_the_eager_phase_warns(case):
     """A cold start needs two eager sweeps to certify; ``max_iter=1`` ends
     the phase first, and says so (not only the ``eager_layout_sweeps`` cap)."""
@@ -416,6 +436,7 @@ def test_running_out_of_max_iter_inside_the_eager_phase_warns(case):
     assert info.iterations == 1, (name, info)
 
 
+@_U1_ONLY
 def test_a_qr_warm_up_that_uses_the_whole_budget_warns(case, monkeypatch):
     """With ``projector_method="qr"`` the jitted eigh warm-up runs first.  If it
     uses all of ``max_iter``, no eager sweep is left, so the layout is not
@@ -433,6 +454,7 @@ def test_a_qr_warm_up_that_uses_the_whole_budget_warns(case, monkeypatch):
     assert eager == [], (name, eager)
 
 
+@_U1_ONLY
 def test_a_1x1_warm_start_runs_no_probe_sweep(case, monkeypatch):
     """The probe records only the traced 2x2 cut, so under ``recipe="1x1"``
     it could never certify a layout; it must be skipped, not run in front of
@@ -546,9 +568,10 @@ def _force_frozen_pre_loop_layout(monkeypatch, frozen):
     return calls
 
 
+@_U1_ONLY
 def test_the_end_of_call_check_catches_a_layout_the_loop_left_behind(case, monkeypatch):
     name, A, B, E_dense = case.name, case.A, case.B, case.E_dense
-    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    frozen = case.envs_frozen
     assert abs(_energy(A, B, frozen) - E_dense) > 1e-7, name  # regime
 
     adapt_calls = _force_frozen_pre_loop_layout(monkeypatch, frozen)
@@ -574,11 +597,12 @@ def test_the_end_of_call_check_catches_a_layout_the_loop_left_behind(case, monke
     assert info.best_iteration == info.iterations, (name, info)
 
 
+@_U1_ONLY
 def test_a_failed_check_with_no_budget_left_warns(case, monkeypatch):
     """Same forced layout, but ``max_iter`` ends at the check: no re-entry,
     a warning, and the loop's env and counts are returned."""
     name, A, B = case.name, case.A, case.B
-    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    frozen = case.envs_frozen
     adapt_calls = _force_frozen_pre_loop_layout(monkeypatch, frozen)
     checks = _spy(monkeypatch, "_end_of_call_layout_check")
     with pytest.warns(UserWarning, match=r"end-of-call layout check.*#1098"):
@@ -594,6 +618,7 @@ def test_a_failed_check_with_no_budget_left_warns(case, monkeypatch):
     assert cpl._chi_layout(envs) == cpl._chi_layout(frozen), name
 
 
+@_U1_ONLY
 def test_the_re_entries_are_capped(case, monkeypatch):
     """A check that never certifies stops after the cap of re-entries, with
     budget left, and warns."""
@@ -617,6 +642,7 @@ def test_the_re_entries_are_capped(case, monkeypatch):
     assert info.iterations < 500, (name, info)
 
 
+@_U1_ONLY
 def test_a_1x1_call_checks_with_one_eager_sweep_and_no_probe(case, monkeypatch):
     """Where the probe cannot certify (``recipe="1x1"``), the end-of-call
     check is one eager sweep.  The jitted 1x1 loop is replaced by a stand-in
@@ -664,6 +690,7 @@ def test_a_1x1_call_checks_with_one_eager_sweep_and_no_probe(case, monkeypatch):
     assert info.best_iteration == info.iterations, (name, info)
 
 
+@_U1_ONLY
 def test_every_sweep_that_runs_is_counted(case, monkeypatch):
     """Review I2: a probe that records no cut (forced here) is a sweep that
     ran -- counted when the pre-loop phase rejects it, and counted with the
@@ -693,6 +720,7 @@ def test_every_sweep_that_runs_is_counted(case, monkeypatch):
     assert info.iterations == 1 + n_phase + loop.iterations + 2, (name, info)
 
 
+@_U1_ONLY
 def test_a_two_cycle_in_the_eager_phase_stops_and_warns_once(case, monkeypatch):
     """Review I3: an eager phase whose cut alternates between two layouts
     stops at the first repeat (not at the cap), warns once, and runs no
@@ -706,7 +734,7 @@ def test_a_two_cycle_in_the_eager_phase_stops_and_warns_once(case, monkeypatch):
     M8 rule keeps ``X``."""
     name, A, B = case.name, case.A, case.B
     st = {(0, 0): A, (1, 0): B}
-    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    frozen = case.envs_frozen
     X, Y = case.envs, frozen
     assert cpl._chi_layout(X) != cpl._chi_layout(Y), name  # regime
     assert cpl._chi_layout(Y) == cpl._cold_init_layout(st, case.chi), name
@@ -732,6 +760,7 @@ def test_a_two_cycle_in_the_eager_phase_stops_and_warns_once(case, monkeypatch):
     assert info.iterations == 4 + loop.iterations, (name, info)
 
 
+@_U1_ONLY
 def test_a_re_entry_that_settles_on_the_last_sweep_does_not_warn(case, monkeypatch):
     """Review M6: after a failed check, a re-entry whose eager phase certifies
     the layout but spends the last of ``max_iter`` leaves the loop no sweep.
@@ -740,7 +769,7 @@ def test_a_re_entry_that_settles_on_the_last_sweep_does_not_warn(case, monkeypat
     run of the same forced case: 2 (forced phase) + loop + 1 check + the
     re-entry's eager sweeps."""
     name, A, B = case.name, case.A, case.B
-    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    frozen = case.envs_frozen
 
     with monkeypatch.context() as mp:
         _force_frozen_pre_loop_layout(mp, frozen)
@@ -768,6 +797,7 @@ def test_a_re_entry_that_settles_on_the_last_sweep_does_not_warn(case, monkeypat
     assert cpl._chi_layout(envs) != cpl._chi_layout(frozen), name
 
 
+@_U1_ONLY
 def test_iterations_never_exceed_max_iter(case, monkeypatch):
     """Review M7: with probes that record no cut (forced), the check's eager
     fallback needs a second sweep.  When the loop has used its budget only
@@ -791,6 +821,7 @@ def test_iterations_never_exceed_max_iter(case, monkeypatch):
     assert info.iterations == max_iter, (name, info)
 
 
+@_U1_ONLY
 def test_a_cold_two_cycle_through_the_cold_tiling_keeps_the_other_layout(
     case, monkeypatch
 ):
@@ -802,7 +833,7 @@ def test_a_cold_two_cycle_through_the_cold_tiling_keeps_the_other_layout(
     current output (``X``) by the plain rule; M8 does not fire."""
     name, A, B = case.name, case.A, case.B
     st = {(0, 0): A, (1, 0): B}
-    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    frozen = case.envs_frozen
     T_env, X_env = frozen, case.envs
     cold = cpl._cold_init_layout(st, case.chi)
     assert cpl._chi_layout(T_env) == cold, name  # regime: T is the tiling
@@ -824,6 +855,7 @@ def test_a_cold_two_cycle_through_the_cold_tiling_keeps_the_other_layout(
     assert cpl._chi_layout(envs) == cpl._chi_layout(X_env), name
 
 
+@_U1_ONLY
 def test_a_cold_first_output_that_echoes_the_tiling_is_not_a_two_cycle(
     case, monkeypatch
 ):
@@ -834,7 +866,7 @@ def test_a_cold_first_output_that_echoes_the_tiling_is_not_a_two_cycle(
     end-of-call check runs (it is skipped after a cycle)."""
     name, A, B = case.name, case.A, case.B
     st = {(0, 0): A, (1, 0): B}
-    frozen, _ = _run(A, B, case.chi, eager_layout_sweeps=0)
+    frozen = case.envs_frozen
     T_env, X_env = frozen, case.envs
     cold = cpl._cold_init_layout(st, case.chi)
     assert cpl._chi_layout(T_env) == cold, name  # regime: T is the tiling

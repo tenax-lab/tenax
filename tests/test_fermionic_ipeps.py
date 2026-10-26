@@ -415,8 +415,12 @@ class TestFPEPS2SiteSimpleUpdate:
 class TestFPEPS:
     """Tests for the fpeps entry point with CTM evaluation."""
 
-    def test_fpeps_runs(self):
-        """fpeps should return a finite energy."""
+    def test_fpeps_runs_and_returns_symmetric_tensors(self):
+        """fpeps returns a finite energy and SymmetricTensor sites.
+
+        One run for both checks: they used to be two tests running this
+        identical ``fpeps()`` config (merged in the 2026-10-26 test-trim pass).
+        """
         cfg = FPEPSConfig(
             D=2,
             t=1.0,
@@ -432,23 +436,6 @@ class TestFPEPS:
         # #878: 2-site checkerboard, so state and env are pairs.
         energy, (A_opt, B_opt), (env_A, env_B) = fpeps(H, cfg, key=key)
         assert jnp.isfinite(energy)
-
-    def test_fpeps_returns_symmetric_tensor(self):
-        """A_opt should be a SymmetricTensor."""
-        cfg = FPEPSConfig(
-            D=2,
-            t=1.0,
-            V=0.0,
-            dt=0.01,
-            num_imaginary_steps=5,
-            ctm_chi=4,
-            ctm_max_iter=10,
-            ctm_conv_tol=1e-4,
-        )
-        H = spinless_fermion_gate(cfg)
-        key = jax.random.PRNGKey(99)
-        # #878: 2-site checkerboard, so state and env are pairs.
-        energy, (A_opt, B_opt), (env_A, env_B) = fpeps(H, cfg, key=key)
         assert isinstance(A_opt, SymmetricTensor)
         assert isinstance(B_opt, SymmetricTensor)
 
