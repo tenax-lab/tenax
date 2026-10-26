@@ -94,6 +94,13 @@ def _gesvd(m: jax.Array, full_matrices: bool, compute_uv: bool):
     return _lax_svd_with(_SvdAlgorithm.QR, full_matrices, compute_uv)(m)
 
 
+def _all_finite_host(result) -> bool:
+    # Eager check in NumPy: a CPU array reaches the host without a copy, and
+    # this skips the jit dispatch (2x the cost of an 8x8 SVD).
+    leaves = result if isinstance(result, tuple) else (result,)
+    return all(np.isfinite(np.asarray(x)).all() for x in leaves)
+
+
 @functools.cache
 def _cpu_has_gesvd() -> bool:
     """Whether this JAX lowers ``lax.linalg.svd(algorithm=QR)`` on CPU.
@@ -115,9 +122,10 @@ def _svd_with_fallback(m: jax.Array, full_matrices: bool, compute_uv: bool):
     A concrete (eager) input takes a Python branch, so an eager call runs one
     SVD and traces nothing; a traced input takes a ``lax.cond``.
     """
-    r = _gesdd(m, full_matrices, compute_uv)
     if not isinstance(m, jax.core.Tracer):
-        return r if bool(_all_finite(r)) else _gesvd(m, full_matrices, compute_uv)
+        r = _gesdd(m, full_matrices, compute_uv)
+        return r if _all_finite_host(r) else _gesvd(m, full_matrices, compute_uv)
+    r = _gesdd(m, full_matrices, compute_uv)
     return jax.lax.cond(
         _all_finite(r), lambda: r, lambda: _gesvd(m, full_matrices, compute_uv)
     )
@@ -205,6 +213,8 @@ def _cpu_svd(m: jax.Array, full_matrices: bool, compute_uv: bool):
     """
     if not _cpu_has_gesvd():
         return _gesdd(m, full_matrices, compute_uv)
+    if not isinstance(m, jax.core.Tracer):  # eager: nothing to differentiate
+        return _svd_with_fallback(m, full_matrices, compute_uv)
     return _cpu_svd_fn(full_matrices, compute_uv)(m)
 
 
