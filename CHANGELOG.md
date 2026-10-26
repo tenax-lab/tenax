@@ -654,8 +654,11 @@
   peaked at 14.7 GB RSS.  On a 16 GB CI runner every later compile in the
   process then failed with `LLVM compilation error: Cannot allocate memory` /
   `Failed to materialize symbols` (macOS runners were OOM-killed, exit 137).
-  The helper now keeps at most 16 executables, in an LRU of ahead-of-time
-  compiled pieces: 5.0 GB peak in 11.4 min (unbounded: 14.7 GB / 11.6 min;
+  The helper now keeps an LRU of ahead-of-time compiled pieces budgeted at
+  400k ops of lowered StableHLO (a cap on the number of entries cannot fit
+  both a few 112 MB projectors and a converged sweep that cycles through 335
+  small ones): 6.4 GB peak in 11.4 min, with no recompiles of evicted
+  layouts on the fermionic 2-site AD test (unbounded: 14.7 GB / 11.6 min;
   jit off: 5.3 GB / 90 min, which ran the slow CI shards past their 4 h
   limit).  `test_fermionic_eager_sweeps_match` also no longer compares a chi
   cut that splits an exactly degenerate +q/-q pair (#1101), where the kept

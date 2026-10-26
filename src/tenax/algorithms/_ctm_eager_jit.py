@@ -55,21 +55,27 @@ def _env_flags() -> tuple[str | None, ...]:
 
 
 # Bounded LRU of compiled pieces, keyed by function, static values, flag
-# snapshot and input structure.  ``jax.jit`` keeps every executable it has
-# compiled until ``jax.clear_caches()``, and an eager sweep rarely repeats a
-# layout: in ``test_ctm_symmetric_rdm_positive_853[20]`` 482 of 562
-# executables ran once, and one ``_symmetric_projector_prime`` executable
-# held ~130 MB, so an unbounded cache peaked at 14.7 GB RSS.  Evicting the
-# oldest entry frees its executable.  Measured on that test (CPU), peak RSS /
-# wall time: 4 -> 4.6 GB / 12.5 min, 16 -> 5.0 GB / 11.4 min, 64 -> 6.0 GB /
-# 11.3 min; unbounded 14.7 GB / 11.6 min; jit off 5.3 GB / 90 min.
-_MAX_EXECUTABLES = 16
+# snapshot, input structure and placement.  ``jax.jit`` keeps every
+# executable it has compiled until ``jax.clear_caches()``; in
+# ``test_ctm_symmetric_rdm_positive_853[20]`` that is 562 executables, 482 of
+# them run once, ~15 GB RSS.  A cap on the NUMBER of entries cannot fit every
+# workload: one ``_symmetric_projector_prime`` executable there costs ~112 MB,
+# while a converged sweep in ``test_fermionic_2site_ad_completes`` cycles
+# through 335 small ones (an LRU below that recompiles every call).  So the
+# budget is on cost, estimated by the number of ops in the lowered program
+# (correlation 0.87 with the measured RSS cost; ~1-1.5 MB per 1000 ops, up to
+# ~7 MB for the largest projectors).  XLA's ``memory_analysis`` reports no
+# code size on CPU, so it cannot be the measure.
+_MAX_CACHED_OPS = 400_000
 _executables: collections.OrderedDict = collections.OrderedDict()
+_cached_ops = 0
 
 
 def _clear() -> None:
     """Drop every cached executable."""
+    global _cached_ops
     _executables.clear()
+    _cached_ops = 0
 
 
 def _key(fn, static_argnames, args, kwargs):
@@ -83,25 +89,34 @@ def _key(fn, static_argnames, args, kwargs):
     return (fn, static, _env_flags(), treedef, avals, shardings), dynamic
 
 
+def _n_ops(lowered) -> int:
+    """Ops in a lowered program: one ``%x = ...`` line each in its StableHLO text."""
+    return lowered.as_text().count(" = ")
+
+
 def _compiled(fn: Callable, static_argnames: tuple[str, ...], args, kwargs):
     """The compiled piece for these inputs and the dynamic kwargs to call it with."""
+    global _cached_ops
     key, dynamic = _key(fn, static_argnames, args, kwargs)
     hit = _executables.get(key)
     if hit is not None:
         _executables.move_to_end(key)
-        return hit, dynamic
+        return hit[0], dynamic
 
     # A fresh wrapper per entry, so JAX's trace cache for it dies with it.
     @functools.wraps(fn)
     def piece(*a, **kw):
         return fn(*a, **kw)
 
-    compiled = (
-        jax.jit(piece, static_argnames=static_argnames).lower(*args, **kwargs).compile()
-    )
-    _executables[key] = compiled
-    while len(_executables) > _MAX_EXECUTABLES:
-        _executables.popitem(last=False)
+    lowered = jax.jit(piece, static_argnames=static_argnames).lower(*args, **kwargs)
+    n_ops = _n_ops(lowered)
+    compiled = lowered.compile()
+    _executables[key] = (compiled, n_ops)
+    _cached_ops += n_ops
+    # Keep the newest entry even when it alone is over budget.
+    while _cached_ops > _MAX_CACHED_OPS and len(_executables) > 1:
+        _, (_, old_ops) = _executables.popitem(last=False)
+        _cached_ops -= old_ops
     return compiled, dynamic
 
 

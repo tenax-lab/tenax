@@ -343,8 +343,27 @@ def eager_envs(frozen_state):
     again, _, _ = _ctm_tensor_sweep_multisite(
         envs, dls, CHECKERBOARD_NEIGHBORS, CHI, True
     )
-    assert jax.tree_util.tree_structure(again) == jax.tree_util.tree_structure(envs)
+    moved = [
+        (c, f)
+        for c in envs
+        for f in envs[c]._fields
+        if jax.tree_util.tree_structure(getattr(again[c], f))
+        != jax.tree_util.tree_structure(getattr(envs[c], f))
+    ]
+    assert not moved, "one more eager sweep changed the structure of " + ", ".join(
+        f"{c}.{f}: {_layout(getattr(envs[c], f))} -> {_layout(getattr(again[c], f))}"
+        for c, f in moved
+    )
     return envs
+
+
+def _layout(t):
+    """Per-leg ``{charge: multiplicity}`` and the block keys of a SymmetricTensor."""
+    legs = {
+        i.label: dict(zip(*np.unique(np.asarray(i.charges), return_counts=True)))
+        for i in t.indices
+    }
+    return {"legs": legs, "blocks": list(t._block_keys)}
 
 
 def _E(A, B, envs, H, d):

@@ -40,9 +40,9 @@ def test_concrete_call_runs_through_one_cached_executable():
     t = _sym()
     assert _close(ej.call(_double, t), t, 2.0)
     assert len(ej._executables) == 1
-    (compiled,) = ej._executables.values()
+    (entry,) = ej._executables.values()
     ej.call(_double, _sym(1))  # same structure: no new compile
-    assert list(ej._executables.values()) == [compiled]
+    assert list(ej._executables.values()) == [entry]
 
 
 def test_traced_call_bypasses_the_jit():
@@ -84,18 +84,30 @@ def test_a_patched_function_gets_its_own_jit():
     assert len(ej._executables) == 2
 
 
-def test_the_cache_keeps_only_the_most_recent_executables(monkeypatch):
+def test_the_cache_evicts_the_oldest_entries_over_its_op_budget(monkeypatch):
     """An eager sweep rarely repeats a layout, so the cache is a bounded LRU."""
     ej._clear()
-    monkeypatch.setattr(ej, "_MAX_EXECUTABLES", 2)
     t = _sym()
-    for k in (1.0, 2.0, 3.0):
+    ej.call(_scale, t, k=1.0, static_argnames=("k",))
+    (one,) = [ops for _, ops in ej._executables.values()]
+    monkeypatch.setattr(ej, "_MAX_CACHED_OPS", 2 * one)
+    for k in (2.0, 3.0):
         ej.call(_scale, t, k=k, static_argnames=("k",))
     assert [key[1] for key in ej._executables] == [(("k", 2.0),), (("k", 3.0),)]
     ej.call(_scale, t, k=2.0, static_argnames=("k",))  # a hit moves to the end
     ej.call(_scale, t, k=4.0, static_argnames=("k",))  # evicts k=3.0
     assert [key[1] for key in ej._executables] == [(("k", 2.0),), (("k", 4.0),)]
+    assert ej._cached_ops == 2 * one
     assert _close(ej.call(_scale, t, k=2.0, static_argnames=("k",)), t, 2.0)
+
+
+def test_an_entry_over_the_whole_budget_is_still_kept(monkeypatch):
+    ej._clear()
+    monkeypatch.setattr(ej, "_MAX_CACHED_OPS", 0)
+    t = _sym()
+    ej.call(_scale, t, k=1.0, static_argnames=("k",))
+    ej.call(_scale, t, k=2.0, static_argnames=("k",))
+    assert [key[1] for key in ej._executables] == [(("k", 2.0),)]
 
 
 def test_the_same_layout_on_another_device_gets_its_own_executable():
