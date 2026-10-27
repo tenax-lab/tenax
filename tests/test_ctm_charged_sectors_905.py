@@ -41,9 +41,10 @@ value.  Scanned before freezing the budget (2026-09-10, this box):
 Every structural signal is budget-invariant, and the parity gap stays two
 orders of magnitude inside the 5e-3 tolerance (four inside the 0.16 defect)
 at every point of the scan.  ``_MAX_ITER`` below picks the scan point with a
-3x margin to the tolerance-relevant one; the absolute-convergence oracle
-(flatness in chi) lives in the ``slow`` test, unchanged, where convergence is
-genuinely the property under test.
+3x margin to the tolerance-relevant one.  (A slow flatness-in-chi scan used to
+live here too; it was the diagnostic, not the guard, and was deleted in the
+slow-bucket prune -- ``test_ctm_chi_truncation_policy_922.py`` pins converged
+D=3 chi=16 parity to 1e-9, which no confined environment can satisfy.)
 """
 
 from __future__ import annotations
@@ -157,29 +158,88 @@ def test_symmetric_energy_matches_the_dense_reference(swept_envs):
     )
 
 
-@pytest.mark.slow
-def test_the_symmetric_energy_still_moves_with_chi():
-    """Flatness in chi was the diagnostic that the sectors were dead.
+# --------------------------------------------------------------------------- #
+# The 1-site ``ctm_tensor`` path (the #853 control's subject)                   #
+# --------------------------------------------------------------------------- #
 
-    A confined environment has nothing left to resolve, so raising chi changes
-    the energy by less than 1e-10.  A live one behaves like the dense path and
-    keeps moving.  Convergence is genuinely the property under test here, so
-    this keeps its own full-budget sweeps and stays ``slow``.
+#: ``compute_energy_ctm_tensor`` returns ``E_h + E_v`` for ``H = S_i . S_j``
+#: (eigenvalues -3/4 and +1/4), so any genuine expectation value lies in
+#: [-1.5, +0.5] however poorly converged the environment is.
+_E_ATTAINABLE = (-1.5, 0.5)
+
+#: Same-budget sweeps for the 1-site anchor.  Measured sym-vs-dense gap
+#: (2026-10-26, CPU): 2.4e-09 at 3 sweeps, 6.2e-11 at 6, 5.6e-17 at 20 -- all
+#: far inside the 1e-6 tolerance, which is itself far inside the ~0.16 #905
+#: miss.  The cost is the block-sparse compile of each new sector layout
+#: (70 s / 94 s / 120 s symmetric at 3 / 6 / 20 sweeps), so keep it small.
+_SINGLE_SITE_SWEEPS = 4
+
+
+def _rdm_min_eig_rel(rdm) -> float:
+    """Smallest eigenvalue of a trace-normalised RDM, over its spectral radius."""
+    M = np.asarray(rdm)
+    M = M.reshape(M.shape[0] * M.shape[1], -1)
+    M = M / np.trace(M)
+    w = np.linalg.eigvalsh(0.5 * (M + M.conj().T))
+    return float(w.min()) / max(float(np.max(np.abs(w))), 1e-300)
+
+
+def test_the_single_site_symmetric_ctm_matches_dense_and_keeps_the_rdm_a_state():
+    """1-site ``ctm_tensor`` on a charged U(1)-Sz site: sym == dense, RDMs PSD.
+
+    The tests above run ``ctm_tensor_2site``; this is the same guard on the
+    1-site entry point, which the #853 control (deleted in the slow-bucket
+    prune: one D=3 chi=12 run, ~96 min of slow-bucket time) was the only test
+    of on a *charged* site -- the other 1-site sym-vs-dense checks
+    (``test_ctm_tensor.py``, ``test_block_sparse_ctm_ad.py``) use trivial
+    charges, i.e. a single block, which cannot drop a sector.
+
+    Same-budget PARITY, as above: both paths run ``_SINGLE_SITE_SWEEPS`` sweeps
+    at chi=8, so the comparison does not depend on reaching a fixed point (the
+    sector annihilation #905 fixed is structural from the first absorption).
+    The #905 defect missed by ~0.16, so the 1e-6 tolerance is loose against
+    roundoff and tight against any dropped sector.  The RDM-positivity and
+    attainable-energy assertions are #853's: an inaccurate environment still
+    yields a density matrix, a block-pairing defect does not.
     """
-    from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor_2site
-    from tenax.algorithms.ipeps import heisenberg_gate
+    from tenax import compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_diagnostics import ctm_corner_rank
+    from tenax.algorithms._ctm_tensor import ctm_tensor
+    from tenax.algorithms._ctm_tensor_energy import _rdm1x2_tensor, _rdm2x1_tensor
+    from tenax.algorithms.ipeps import heisenberg_gate_u1sz
+    from tenax.core.tensor import DenseTensor, SymmetricTensor
 
-    A, B = _pair()
-    gate = heisenberg_gate().todense()
+    A, _B = _pair()
+    assert isinstance(A, SymmetricTensor) and len(A.blocks) > 1, "not charged"
+    gate = heisenberg_gate_u1sz()
 
-    energies = []
-    for chi in (8, 16):
-        envA, envB = _converge(A, B, chi=chi, max_iter=60)
-        energies.append(
-            float(compute_energy_ctm_tensor_2site(A, B, envA, envB, gate, d=2))
-        )
+    n = _SINGLE_SITE_SWEEPS
+    env, _ = ctm_tensor(A, chi=_CHI, max_iter=n, conv_tol=1e-10)
+    Ad = DenseTensor(A.todense(), A.indices)
+    env_d, _ = ctm_tensor(Ad, chi=_CHI, max_iter=n, conv_tol=1e-10)
 
-    assert abs(energies[1] - energies[0]) > 1e-9, (
-        f"symmetric energy is flat in chi: {energies} — the environment is "
-        "confined to the q=0 sector (#905)."
+    # Regime: a charged, non-collapsed environment (#723, #905).
+    assert isinstance(env.C1, SymmetricTensor)
+    chi_charges = set(np.asarray(env.C1.indices[0].charges).tolist())
+    assert chi_charges - {0}, f"chi bond carries only q=0: {chi_charges}"
+    assert ctm_corner_rank(env) > 1, "collapsed to a rank-1 corner (#723)"
+
+    E_sym = float(compute_energy_ctm_tensor(A, env, gate))
+    E_dense = float(compute_energy_ctm_tensor(Ad, env_d, gate))
+    assert abs(E_sym - E_dense) < 1e-6, (
+        f"1-site E_sym={E_sym!r} vs E_dense={E_dense!r} "
+        f"(gap {abs(E_sym - E_dense):.3e}): the symmetric CTM drops weight "
+        "the flow-insensitive dense contraction keeps (#905 class)."
     )
+    lo, hi = _E_ATTAINABLE
+    assert lo <= E_sym <= hi, f"E_sym={E_sym} is not attainable by any state (#853)"
+
+    for name, rdm in (
+        ("2x1 horizontal", _rdm2x1_tensor(A, env)),
+        ("1x2 vertical", _rdm1x2_tensor(A, env)),
+    ):
+        min_eig = _rdm_min_eig_rel(rdm)
+        assert min_eig >= -1e-8, (
+            f"the {name} RDM of the symmetric 1-site CTM reaches {min_eig:.4e} "
+            "of its spectral radius below zero: not a density matrix (#853)."
+        )

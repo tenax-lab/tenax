@@ -29,6 +29,11 @@ import tracemalloc
 import jax
 import pytest
 
+# A memory measurement (and a D=4 size extension of a parity that
+# test_coarse_grain pins at D=2,3), so opt-in: skipped unless
+# TENAX_RUN_DIAGNOSTIC=1.  ``slow`` comes from the conftest registry.
+pytestmark = pytest.mark.diagnostic
+
 # Skip the entire module if the canonical Liao replication harness isn't here.
 liao_harness = pytest.importorskip("examples.kagome_spin12_pess_liao2017_replication")
 
