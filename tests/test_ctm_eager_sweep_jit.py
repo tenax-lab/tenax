@@ -36,6 +36,13 @@ D = 2
 CHI = 6  # U(1) chi=6 cuts the eager C1 spectrum in a clean gap (#1098 test)
 
 
+@pytest.fixture(autouse=True)
+def _jit_on(monkeypatch):
+    # The helper is off by default (memory, see ``_ENABLED``); these tests
+    # are about what it does when it is on.
+    monkeypatch.setattr(ej, "_ENABLED", True)
+
+
 def _sweep_kwargs(chi):
     return dict(
         neighbors=CHECKERBOARD_NEIGHBORS,
@@ -265,10 +272,22 @@ def test_chi8_energy_matches_with_jit_on_and_off(monkeypatch):
 
 
 def test_fermionic_eager_sweeps_match(monkeypatch):
-    """Review Focus 4: a random FermionicU1 pair through the jitted pieces."""
+    """Review Focus 4: a random FermionicU1 pair through the jitted pieces.
+
+    This pair's M' spectrum is exactly degenerate between charges +q and -q.
+    At chi=8 the cut splits such a pair, so which member is kept is decided by
+    rounding and the two runs keep opposite ones (#1101), although M' agrees
+    to 13 digits.  chi=10 keeps whole pairs on every leg; the guard below says
+    so if a change to the fixture makes the cut split one again.
+    """
     sites = _fermionic_pair()
-    plain = _sweeps(sites, 8, 2, False, monkeypatch)
-    jitted = _sweeps(sites, 8, 2, True, monkeypatch)
+    plain = _sweeps(sites, 10, 2, False, monkeypatch)
+    for leg in cpl._chi_layout(plain):
+        counts = dict(leg[-1])
+        assert all(counts.get(-q, 0) == n for q, n in counts.items()), (
+            f"the chi cut splits a +q/-q pair on {leg[:3]}: {counts} (#1101)"
+        )
+    jitted = _sweeps(sites, 10, 2, True, monkeypatch)
     _assert_same_envs(plain, jitted)
 
 
