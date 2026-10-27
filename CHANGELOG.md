@@ -2041,6 +2041,24 @@
 
 ### CI / tests
 
+- **Slow-bucket prune: tests pin behaviour, not scaffolding.**  Deleted slow
+  tests whose claim a kept test asserts at least as strongly (the #853 D=3
+  control, the D=3 / chi-scan / one-step U(1)-Sz duplicates of the #922 and
+  #905 sym==dense parity anchors, the #834 D=3 call-site spy, the 1059 / 1111 /
+  block-sparse / DMRG3S / CBE / #865-mutation duplicates, the
+  deprecated-`1x1` split production run, the #566 stacked-backend profiler
+  file) and three files that could not fail (always skipped).  Demoted
+  measurements, research findings and the acceptance sweep of the unshipped
+  `ipeps_su` engine (`test_ipeps_su.py`, the symmetric-D=3 / fermionic cells
+  of `test_ipeps_gauge.py`, the #785 anti-correlation pin, the split-CG
+  memory budget, the fake-device sharding parity, the excitation benchmark)
+  to a new opt-in `diagnostic` marker, skipped unless `TENAX_RUN_DIAGNOSTIC=1`
+  (`TENAX_RUN_DIAGNOSTIC=1 pytest -m diagnostic`; it replaces
+  `RUN_EXCITATION_BENCH=1`).  Estimated saving ~15,300 s of slow-bucket CI
+  time (per-file max over the three platforms, summed).  One cheap anchor
+  replaces the #853 control: 1-site `ctm_tensor` sym==dense energy plus RDM
+  positivity on a charged U(1)-Sz site at D=2 chi=8
+  (`test_ctm_charged_sectors_905.py`, core, ~95 s).
 - **Removed two unfixable `recipe="1x1"` QR tests and added a duplicate-definition
   guard** (#931, #926).  `test_implicit_qr_gradient_matches_fd` failed
   intermittently on main CI (directional FD off by 0.364 against TOL 0.35,

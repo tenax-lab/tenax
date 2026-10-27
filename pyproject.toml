@@ -121,6 +121,10 @@ markers = [
     # instruments the Python-bound half of any compile measurement.  See the
     # note in tests/test_ipeps_gauge_perf.py.
     "timing: reports a wall-clock measurement; needs a quiet machine",
+    # Opt-in: skipped unless TENAX_RUN_DIAGNOSTIC=1 (tests/conftest.py), so it
+    # needs no CI-workflow change.  Run with
+    # TENAX_RUN_DIAGNOSTIC=1 pytest -m diagnostic.
+    "diagnostic: measurements, research findings and acceptance sweeps of unshipped engines -- run on demand (TENAX_RUN_DIAGNOSTIC=1)",
 ]
 filterwarnings = [
     # optax 0.2.8 still imports `optax.contrib._complex_valued`, which on

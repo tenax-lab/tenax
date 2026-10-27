@@ -30,7 +30,7 @@ them.
 **Why the fixture zeroes a corner rather than finding a non-PSD run.**  The
 headline case in production is #854 (a negative eigenvalue), but a *deterministic*
 non-PSD RDM is not a stable CI hook -- which corner basis a live CTM lands on
-shifts with the JAX/LAPACK build (see ``test_ctm_symmetric_rdm_positive_853``).
+shifts with the JAX/LAPACK build (#853).
 Zeroing ``env_A.C1`` reproduces the same *observable* the gate keys on -- a bond
 whose RDM fails ``check_rdm`` while the energy stays finite -- deterministically
 on every build (the #845 trace-collapse mechanism, as in

@@ -3,10 +3,10 @@
 ``gs_recipe`` selects the CTM projector scheme: ``"2x2"`` (Fishman plaquette,
 the :class:`iPEPSConfig` default) or ``"1x1"`` (reduced-corner single-site).
 Both are production paths, but only ``"1x1"`` had coverage --
-``test_split_ctm_production_correctness`` pins ``"1x1"`` energies, the kagome
-multisite tests skip without a saved ``logs/d4_ad_optimum.npz``, and the
-bipartite ``E < -0.66`` checks in ``test_ipeps.py`` exercise simple update
-rather than the AD path.  So the config *default* recipe had no green test.
+the (since deleted) split production test pinned ``"1x1"`` energies, the
+(since deleted) kagome multisite tests skipped without a saved
+``logs/d4_ad_optimum.npz``, and the bipartite ``E < -0.66`` checks in
+``test_ipeps.py`` exercise simple update rather than the AD path.  So the config *default* recipe had no green test.
 
 This module is the cheap, forward-only half of closing that gap; the
 end-to-end physical anchor lives in
