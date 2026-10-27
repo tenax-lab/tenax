@@ -33,7 +33,12 @@ from tenax.algorithms.ipeps import heisenberg_gate
 from tests.test_split_ctm_fuse_flag import _make_site
 
 
-@pytest.mark.parametrize("recipe", ["2x2", "1x1"])
+# ``"2x2"`` only: the ``"1x1"`` cell was dropped in the 2026-10-26 test-trim
+# pass.  That recipe is deprecated (#911, ``test_recipe_1x1_deprecation.py``:
+# it collapses D>1 corners to rank 1 and is going away), so the cell pinned
+# the bond bookkeeping of a path users are told to leave; the default recipe
+# is the one this file exists to cover (see the module docstring).
+@pytest.mark.parametrize("recipe", ["2x2"])
 def test_uniform_tiling_consistency(recipe):
     """A uniform tiling must give the same per-site energy at every cell size.
 

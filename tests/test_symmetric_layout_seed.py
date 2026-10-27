@@ -39,6 +39,14 @@ def _cfg(**kw):
     )
 
 
+@pytest.fixture(scope="module")
+def seed_chi4(su_pair):
+    """The chi=4, 20-forced-sweep seed of ``su_pair``.  Two tests ran this
+    identical call each until the 2026-10-26 test-trim pass."""
+    cfg = dataclasses.replace(_cfg(), chi=4)
+    return symmetric_layout_seed(*su_pair, xxz_gate_u1sz(0.3), cfg, forced_sweeps=20)
+
+
 def test_seed_is_converged_and_stable(su_pair):
     r = symmetric_layout_seed(*su_pair, xxz_gate_u1sz(0.3), _cfg(), forced_sweeps=100)
     assert r.cold_converged
@@ -55,10 +63,10 @@ def test_seed_is_converged_and_stable(su_pair):
     assert np.isfinite(r.cut_gap) and 0 <= r.cut_gap < 1e-12, r.cut_gap
 
 
-def test_cut_gap_is_finite_when_the_cut_bites(su_pair):
+def test_cut_gap_is_finite_when_the_cut_bites(su_pair, seed_chi4):
     # chi=4 cuts inside the nonzero spectrum, so the gap is a real number.
     cfg = dataclasses.replace(_cfg(), chi=4)
-    r = symmetric_layout_seed(*su_pair, xxz_gate_u1sz(0.3), cfg, forced_sweeps=20)
+    r = seed_chi4
     assert np.isfinite(r.cut_gap) and 0 < r.cut_gap <= 1
     # Independent value: chi+4 solve, global sort of block singular values.
     A_n, B_n = normalized_pair(*su_pair)
@@ -80,23 +88,31 @@ def test_cut_gap_is_finite_when_the_cut_bites(su_pair):
     assert abs(min(gaps) - r.cut_gap) < 1e-12
 
 
+# The two 3-sweep tests run at chi=4 (chi=8 until the 2026-10-26 test-trim
+# pass): what they pin -- an early stop is caught, an unconverged gap solve is
+# reported -- is about the budget, not the cut.  Measured at chi=4: planted
+# energy_cold -0.4936786 vs forced -0.4936904 (not stable), and neither the
+# cold nor the chi+4 solve converges in 3 sweeps.
 def test_planted_early_stop_is_not_stable(su_pair):
     early = _cfg(on_unconverged="warn")
-    early = dataclasses.replace(early, max_iter=3, min_iter=1)
+    early = dataclasses.replace(early, max_iter=3, min_iter=1, chi=4)
     r = symmetric_layout_seed(*su_pair, xxz_gate_u1sz(0.3), early, forced_sweeps=100)
+    assert not r.cold_converged  # regime: the stop is planted
     assert not r.stable
 
 
 def test_an_unconverged_gap_solve_is_reported(su_pair):
     """The chi+4 solve that ``cut_gap`` reads can stop unconverged; the seed
     must say so, not return the gap as if it were valid (Codex on #1133)."""
-    early = dataclasses.replace(_cfg(on_unconverged="warn"), max_iter=3, min_iter=1)
+    early = dataclasses.replace(
+        _cfg(on_unconverged="warn"), max_iter=3, min_iter=1, chi=4
+    )
     r = symmetric_layout_seed(*su_pair, xxz_gate_u1sz(0.3), early, forced_sweeps=0)
     assert not r.cold_converged  # regime: 3 sweeps cannot converge this point
     assert not r.gap_converged
 
 
-def test_seed_accepts_dense_pair(su_pair):
+def test_seed_accepts_dense_pair(su_pair, seed_chi4):
     A, B = (DenseTensor(t.todense(), t.indices) for t in su_pair)
     cfg = dataclasses.replace(_cfg(), chi=4)
     gate = xxz_gate_u1sz(0.3)
@@ -107,5 +123,4 @@ def test_seed_accepts_dense_pair(su_pair):
     assert r.layout == layout_of(r.envs_init)
     # dense chi legs carry one sector (the symmetric seed has several)
     assert all(len(v) == 1 for k, v in r.layout.items() if k[1].startswith("C"))
-    rs = symmetric_layout_seed(*su_pair, gate, cfg, forced_sweeps=20)
-    assert abs(r.energy_cold - rs.energy_cold) < 1e-8
+    assert abs(r.energy_cold - seed_chi4.energy_cold) < 1e-8

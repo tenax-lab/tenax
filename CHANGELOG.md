@@ -2070,7 +2070,20 @@
   time (per-file max over the three platforms, summed).  One cheap anchor
   replaces the #853 control: 1-site `ctm_tensor` sym==dense energy plus RDM
   positivity on a charged U(1)-Sz site at D=2 chi=8
-  (`test_ctm_charged_sectors_905.py`, core, ~95 s).
+  (`test_ctm_charged_sectors_905.py`, core, ~95 s).  A second pass trimmed 26
+  slow-bucket files to the behaviour they pin (duplicate cells, smoke tests
+  an FD/parity test implies, sweeps of PRNG keys and jitters, mutation
+  scaffolding, fixtures rebuilt per test; the #898 pair densified, the
+  `test_frozen_layout_ad.py` scripted re-check tests run on a stubbed CTM),
+  cutting the affected tests from 14,301 s to 5,802 s locally (CPU, one run
+  each) and the slow collection from 210 to 129 tests.  A third pass trimmed
+  15 core and fast-other files the same way (the #905 2-site guards and the
+  #834 strict sweep at chi=4, re-checked against the restored #905 defect;
+  `fuse_indices` checked against the dense reference instead of a copy of
+  its old implementation; shared fixtures for envs rebuilt per test; the
+  control-flow cells of the #1098 layout tests on U(1) only), cutting them
+  from 2,026 s to 1,055 s (core) and 5,358 s to 3,913 s (fast-other) locally,
+  cold compile cache; one graded-CTM parity check (~276 s) moved to slow.
 - **Removed two unfixable `recipe="1x1"` QR tests and added a duplicate-definition
   guard** (#931, #926).  `test_implicit_qr_gradient_matches_fd` failed
   intermittently on main CI (directional FD off by 0.364 against TOL 0.35,

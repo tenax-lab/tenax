@@ -70,12 +70,12 @@ def _symmetric_run(D=3, steps=60):
     "D",
     [
         2,
-        # D=3 and D=4 reproduce the same defect and cost 26s and 176s against
-        # D=2's 6s, so they are withheld from the required gate.  D=2 is not a
-        # weaker check: it kills the defect mutant on its own (the collapse
-        # happens at every D, only the survival time grows with it).
-        pytest.param(3, marks=pytest.mark.slow),
-        pytest.param(4, marks=pytest.mark.slow),
+        # D=3 and D=4 reproduced the same defect at 26s and 176s against D=2's
+        # 6s.  D=2 is not a weaker check: it kills the defect mutant on its own
+        # (the collapse happens at every D, only the survival time grows with
+        # it), and D=3 survival is implied by the slow spectrum-vs-dense test
+        # below, so the two slow rows were dropped in the slow-bucket prune
+        # (#1149).
     ],
 )
 def test_the_symmetric_state_survives_and_stays_normalised(D):

@@ -532,7 +532,16 @@ def test_a_mispaired_gauge_is_caught(midgap_baseline):
     )
 
 
-def test_the_gap_tracks_the_charge_density_wave(su_pair):
+@pytest.fixture(scope="module")
+def su_envs(su_pair):
+    """The V=4 pair's 12-sweep chi=4 environments, shared by the CDW-tracking
+    and no-densify tests (each converged its own until the 2026-10-26
+    test-trim pass)."""
+    A, B = su_pair
+    return ctm_tensor_2site(A, B, CHI, max_iter=12, conv_tol=1e-10)
+
+
+def test_the_gap_tracks_the_charge_density_wave(su_pair, su_envs):
     """The diagnostic has to answer the question it exists for.
 
     Gauge invariance alone is satisfied by any constant.  What makes this the
@@ -553,7 +562,7 @@ def test_the_gap_tracks_the_charge_density_wave(su_pair):
     gap_free = sublattice_gap(A, B, *ctm_tensor_2site(A, B, CHI, **kw))
 
     A4, B4 = su_pair
-    gap_cdw = sublattice_gap(A4, B4, *ctm_tensor_2site(A4, B4, CHI, **kw))
+    gap_cdw = sublattice_gap(A4, B4, *su_envs)
 
     assert gap_free < 0.1, (
         f"gap {gap_free:.4f} at V=0, where free spinless fermions have no "
@@ -565,7 +574,7 @@ def test_the_gap_tracks_the_charge_density_wave(su_pair):
     )
 
 
-def test_the_gap_never_densifies_the_site_tensor(su_pair, monkeypatch):
+def test_the_gap_never_densifies_the_site_tensor(su_pair, su_envs, monkeypatch):
     """Block-sparse throughout: nothing of size ``D**4 * d`` is densified.
 
     The Gram version called ``todense()`` on the full rank-5 site tensor, twice
@@ -575,7 +584,7 @@ def test_the_gap_never_densifies_the_site_tensor(su_pair, monkeypatch):
     P1-2, and ``CLAUDE.md``'s standing rule).
     """
     A, B = su_pair
-    envs = ctm_tensor_2site(A, B, CHI, max_iter=12, conv_tol=1e-10)
+    envs = su_envs
 
     original = SymmetricTensor.todense
     ranks = []

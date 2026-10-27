@@ -20,16 +20,20 @@ CHI = 4
 
 @pytest.fixture(scope="module")
 def pair_and_envs():
-    """A U(1) pair and an eagerly converged chi=4 environment (no seed checks:
-    the guards need only an environment of known chi)."""
+    """A U(1) pair and a one-sweep chi=4 environment (no seed checks: the
+    guards need only an environment of known chi, so the fixture stopped
+    converging it in the 2026-10-26 test-trim pass)."""
     A, B = heisenberg_u1sz_init_pair(D=2, key=jax.random.PRNGKey(1))
     A_n, B_n = normalized_pair(A, B)
-    cfg = dataclasses.replace(CTMConfig(chi=CHI), on_unconverged="warn")
+    cfg = dataclasses.replace(
+        CTMConfig(chi=CHI), on_unconverged="warn", max_iter=1, min_iter=1
+    )
     envs, _ = python_loop_ctm_converge(
         {(0, 0): A_n, (1, 0): B_n},
         CHECKERBOARD_NEIGHBORS,
         **ctm_converge_kwargs(cfg),
     )
+    assert envs[(0, 0)].C1.indices[0].dim == CHI  # regime: the chi under test
     return A, B, envs
 
 
