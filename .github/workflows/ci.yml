@@ -537,16 +537,24 @@ jobs:
         if: matrix.shard == '1'
         run: uv run ruff check src/ tests/
 
-      - name: "THROWAWAY: #1153 flow-residual diagnostic (head, then main)"
+      - name: "THROWAWAY: #1153 diagnostic 2 (capture, check and replay the flow operator)"
         env:
           JAX_PLATFORMS: cpu
         run: |
-          uv run --no-sync python .github/diag/diag_1153.py head
-          git fetch --depth=1 origin main
-          git worktree add --detach "$RUNNER_TEMP/main" FETCH_HEAD
-          cp src/tenax/_version.py "$RUNNER_TEMP/main/src/tenax/" || echo "__version__ = \"0+diag\"" > "$RUNNER_TEMP/main/src/tenax/_version.py"
-          PYTHONPATH="$RUNNER_TEMP/main/src" uv run --no-sync python .github/diag/diag_1153.py main
-          uv run --no-sync pytest tests/test_flow_slope_check_1111.py::test_slope_check_rejects_the_1028_flow_gradient --no-cov -v || true
+          mkdir -p "$RUNNER_TEMP/diag"
+          echo "### runner operator"
+          uv run --no-sync python .github/diag/diag_1153b.py "$RUNNER_TEMP/diag/mac_op.npz"
+          echo "### Linux operator replayed on the runner"
+          uv run --no-sync python .github/diag/diag_1153b.py "$RUNNER_TEMP/diag/unused.npz" .github/diag/linux_op.npz
+          rm -f "$RUNNER_TEMP/diag/unused.npz"
+
+      - name: "THROWAWAY: upload the runner operator"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-1153-mac-op
+          path: ${{ runner.temp }}/diag/mac_op.npz
+          retention-days: 7
 
   # Carries the branch-protected "Tests (macOS, Python 3.12)" context; see the
   # ubuntu aggregator above for why the name has to survive verbatim.
