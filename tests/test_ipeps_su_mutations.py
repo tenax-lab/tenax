@@ -70,7 +70,7 @@ mutant  re-introduces                killed by                              read
 865     ``base_charges`` pinned to   ``..._the_vidal_metric_matches_a_...`` ratio = 15.266305x
         the old bond layout          ``spectrum_derived_outside_tenax``
 865     ``base_charges`` pinned to   ``..._su_step_keeps_the_largest_``    err = 1.787e-01
-        the old bond layout          ``singular_values`` (``slow``)
+        the old bond layout          ``singular_values`` (row deleted)
 869     the metric never re-derived  ``..._su_step_truncates_in_the_...``   ratio = 1.010944x
         (weights flat at one)
 6.2a    all of ``sigma`` on the      ``..._su_step_splits_sqrt_sigma_...``  |G_i-G_j| = 3.450e+00
@@ -80,14 +80,14 @@ mutant  re-introduces                killed by                              read
 Every one of those numbers is the guard's **own** formatting of its **own**
 reading, lifted out of the assertion message rather than recomputed here.
 
-**#865 appears twice on purpose.**  The guard the tree names for it --
-``test_su_step_keeps_the_largest_singular_values`` -- could not demonstrate a
-kill at ``01cd473``, because its symmetric meta-assertion builds its reference
-with the same pin the defect applies and so pre-empted the claim; fix round 1
-reordered the two in ``test_ipeps_su.py`` and the pinned negative finding became
-the second row, at 1.787e-01 (the number the meta-assertion held before the
-swap).  The cheap external-anchor kill stays: two independent kills on one
-defect, one of them at 23 s, is worth more than either alone.
+**#865 appears twice in the table, once in ``_MUTANTS``.**  The guard the tree
+names for it -- ``test_su_step_keeps_the_largest_singular_values`` -- could not
+demonstrate a kill at ``01cd473``, because its symmetric meta-assertion builds
+its reference with the same pin the defect applies and so pre-empted the claim;
+fix round 1 reordered the two in ``test_ipeps_su.py`` and the pinned negative
+finding became a second row, at 1.787e-01 (the number the meta-assertion held
+before the swap).  That ``slow`` row (234 s) was deleted in the slow-bucket
+prune; the cheap external-anchor kill (23 s) stays.
 
 Two of them reproduce figures already recorded in the tree from probes that no
 longer exist, which is the point of committing this file rather than quoting a
@@ -648,13 +648,14 @@ def _mutant_62a():
 #   blind.  The claim was never 16 orders from firing -- it was 16 orders *past*
 #   its own gate and simply not evaluated: under the pin the two readings swap
 #   exactly, ``sep`` 1.787e-01 -> 6.237e-16 and ``err`` 6.237e-16 -> 1.787e-01,
-#   both against gates of 1e-3 and 1e-11 respectively.  The pinned finding is
-#   therefore now a real kill -- the row below whose id is
+#   both against gates of 1e-3 and 1e-11 respectively.  The pinned finding
+#   was therefore a real kill -- the row whose id was
 #   ``865-base-charges-pinned-on-the-truncation-guard`` -- at **1.787e-01**, for
-#   the same ~240 s the pin cost.  It is the one row here that carries ``slow``.
+#   the same ~240 s the pin cost.  It was the one row here that carried
+#   ``slow``, and it was deleted in the slow-bucket prune as a second kill of a
+#   defect the cheap row below already kills.
 #
-#   #865 keeps its second, cheap kill as well, and two independent kills on one
-#   defect is the point rather than an accident:
+#   #865 keeps its cheap kill:
 #   ``test_the_vidal_metric_matches_a_spectrum_derived_outside_tenax``
 #   (collected id ``[h_AB-horizontal-symmetric]``; stacked ``parametrize``
 #   renders bottom-decorator-first) scores ``_su_step``'s truncation in its
@@ -718,16 +719,10 @@ def _mutant_62a():
 #: marker and withholds it only for ``core``-mapped files carrying an explicit
 #: ``slow``, so these three end up ``core`` **and** ``algorithm``.
 #:
-#: The sixth row is the exception and carries ``slow`` for it:
-#: ``865-base-charges-pinned-on-the-truncation-guard`` runs the symmetric
-#: ``D=3`` truncation guard and costs **234.34 s** (load 6.4 -> 4.0),
-#: effectively all of it eager BP solves on that pair, twice over because C-1
-#: wants the unmutated side.  There is no cheaper symmetric arm for that guard,
-#: and it is the *same* wall-clock the negative finding it replaces used to
-#: cost -- bought back as a kill.  The mark sits on the ``pytest.param``, not on
-#: the function, because ``_MUTANTS`` is a single parametrised test; verified by
-#: collection that ``-m "not slow"`` deselects exactly this id and ``-m slow``
-#: selects exactly it.
+#: A sixth row, ``865-base-charges-pinned-on-the-truncation-guard`` (the
+#: symmetric ``D=3`` truncation guard, 234.34 s, the only ``slow`` row), was
+#: deleted in the slow-bucket prune: it was a second kill of #865, which the
+#: 23 s ``865-base-charges-pinned`` row already kills.
 _MUTANTS = [
     pytest.param(
         (
@@ -741,8 +736,8 @@ _MUTANTS = [
             r"E=(-?\d+\.\d+) -- at or above the product state",
             # (-0.55, -0.40), not the shipped (-0.60, 0.0).  The old ``lo``
             # could not fire **by construction**, which is this branch's own
-            # recurring defect and the standard this file sets for itself in
-            # the 865-own-guard row below: the pattern above matches only
+            # recurring defect and the standard this file set for itself in
+            # the (since deleted) 865-own-guard row: the pattern above matches only
             # ``test_ipeps_su.py``'s "at or above the product state" message,
             # which exists **only** when ``assert E < -0.60`` has already
             # failed -- i.e. only when ``E >= -0.60``, which under
@@ -813,52 +808,6 @@ _MUTANTS = [
         ),
         marks=pytest.mark.core,
         id="6.2a-sigma-all-on-one-factor",
-    ),
-    pytest.param(
-        (
-            "865 (own guard)",
-            _mutant_865,
-            lambda: guards.test_su_step_keeps_the_largest_singular_values(
-                "symmetric", "h_AB", _fresh_su_cache()
-            ),
-            r"\(relative error ([0-9.e+-]+)\)\.  The truncation is not taking "
-            r"the globally largest singular values",
-            # (0.1, 0.3), not the neighbours' looser (lo, 10x) shape -- fix
-            # round 2, F8.  The *upper* bound is a provable property of the
-            # reading, not a measurement: err = max|sigma_kept -
-            # sigma_full[:D]| / sigma_full[0], and both spectra lie in
-            # [0, sigma_full[0]] by construction, so err in [0, 1] for every
-            # possible input.  Any upper bound above 1.0 therefore has a half
-            # that cannot fire by construction -- this branch's own recurring
-            # defect (an assertion that cannot fire), which is why this row
-            # does not get to ship one.  The comparison below is
-            # ``lo <= reading <= hi`` (inclusive both ends), so this is not
-            # cosmetic: an inclusive 1.0 upper bound would still admit a
-            # reading of exactly 1.000, and on this cell's own measured
-            # spectrum "keep the smallest max_D" -- the dense arm's
-            # 1.000e+00 in the comment table above -- lands at err = 1.000
-            # exactly.  Separating that from #865's own reading is what the
-            # 0.3 upper bound buys and 1.0 would not.
-            #
-            # 0.1 and 0.3 bracket the reading with headroom on both sides,
-            # measured rather than assumed: killed at 1.787e-01 inside pytest
-            # (``{err:.3e}`` in the message) and at 1.786891e-01 to full
-            # precision outside it.  The nearest *other* value in this cell's
-            # own spectrum is sigma_4 / sigma_0 = 0.434414 -- 4.4% away from
-            # the reading -- and the largest known source of run-to-run drift
-            # is the BP gauge's own convergence tolerance
-            # (``ipeps_gauge.gauge_fix``, ``tol = 1e-6``), roughly five orders
-            # of magnitude below the ~40% of headroom this band leaves before
-            # either edge is threatened.  That is the whole basis for this row
-            # being tighter than its four siblings, and it is a bound from
-            # one box's numbers, not a proof: cross-platform stability of
-            # 1.787e-01 is unverified, and the headroom argument above rests
-            # on a single machine's BP-gauge tolerance, not a measurement on
-            # a second one.
-            (0.1, 0.3),
-        ),
-        marks=pytest.mark.slow,
-        id="865-base-charges-pinned-on-the-truncation-guard",
     ),
 ]
 

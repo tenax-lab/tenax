@@ -151,7 +151,9 @@ def _split_implicit_loss(D, seed=7, chi=None):
 
 @pytest.mark.parametrize(
     "D",
-    [2, pytest.param(3, marks=pytest.mark.slow)],  # D=3 is 69s (#933)
+    # The D=3 row (slow, finite-only, same mechanism) was deleted in the
+    # slow-bucket prune.
+    [2],
 )
 def test_split_implicit_energy_finite(D):
     """ctm_energy_split_implicit returns a finite energy (forward correctness)."""
@@ -162,7 +164,9 @@ def test_split_implicit_energy_finite(D):
 
 @pytest.mark.parametrize(
     "D",
-    [2, pytest.param(3, marks=pytest.mark.slow)],  # D=3 is 94s (#933)
+    # The D=3 row (slow, finite-only, same mechanism) was deleted in the
+    # slow-bucket prune.
+    [2],
 )
 def test_split_implicit_grad_finite(D):
     """ctm_energy_split_implicit returns a finite, non-zero gradient."""

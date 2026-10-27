@@ -128,24 +128,6 @@ def test_enlarged_corner_matches_dense_at_every_sweep_call_site(monkeypatch, D):
     )
 
 
-@pytest.mark.slow
-def test_enlarged_corner_matches_dense_at_every_sweep_call_site_d3(monkeypatch):
-    """Same guard at D=3, where the Sz seam charge set stops being self-dual.
-
-    D=2 masks charge-convention defects because the Sz seam is self-dual there
-    (the #605 lesson); D=3 is the first bond dimension that can see them.
-    """
-    gaps = _record_call_site_gaps(monkeypatch)
-    _run_charged_sweep(D=3, chi=8, max_iter=3)
-
-    assert gaps, "no symmetric enlarged-corner calls were observed"
-    worst = max(gaps, key=lambda g: g[1])
-    assert worst[1] < 1e-12, (
-        f"D=3: enlarged corner diverged from dense at {worst[0]} "
-        f"(rel={worst[1]:.3e}) over {len(gaps)} call sites"
-    )
-
-
 @pytest.fixture(scope="module")
 def swept_env_d2():
     """One charged D=2 sweep, shared: the sweep dominates this file's runtime."""

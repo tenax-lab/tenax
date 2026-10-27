@@ -2,10 +2,10 @@
 
 ``gs_recipe="2x2"`` (Fishman plaquette) is the :class:`iPEPSConfig` default,
 yet before this test no green test pinned a physical energy through it --
-``test_split_ctm_production_correctness`` uses ``"1x1"``, the kagome multisite
-tests skip without a saved ``logs/d4_ad_optimum.npz``, and the bipartite
-``E < -0.66`` checks in ``test_ipeps.py`` exercise simple update rather than
-the AD path.
+the (since deleted) split production test used ``"1x1"``, the (since
+deleted) kagome multisite tests skipped without a saved
+``logs/d4_ad_optimum.npz``, and the bipartite ``E < -0.66`` checks in
+``test_ipeps.py`` exercise simple update rather than the AD path.
 
 The cheap forward-only half of this coverage lives in
 ``test_ctm_recipe_2x2_consistency.py`` (``core`` bucket).  That test proves
