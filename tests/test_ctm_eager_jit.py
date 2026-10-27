@@ -5,11 +5,19 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import tenax.algorithms._ctm_eager_jit as ej
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
+
+
+@pytest.fixture(autouse=True)
+def _jit_on(monkeypatch):
+    # The helper is off by default (memory, see ``_ENABLED``); these tests
+    # are about what it does when it is on.
+    monkeypatch.setattr(ej, "_ENABLED", True)
 
 
 def _sym(seed=0):
