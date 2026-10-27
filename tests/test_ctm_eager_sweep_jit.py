@@ -38,6 +38,13 @@ D = 2
 CHI = 6  # U(1) chi=6 cuts the eager C1 spectrum in a clean gap (#1098 test)
 
 
+@pytest.fixture(autouse=True)
+def _jit_on(monkeypatch):
+    # The helper is off by default (memory, see ``_ENABLED``); these tests
+    # are about what it does when it is on.
+    monkeypatch.setattr(ej, "_ENABLED", True)
+
+
 def _sweep_kwargs(chi):
     return dict(
         neighbors=CHECKERBOARD_NEIGHBORS,
@@ -303,10 +310,11 @@ def _cut_margins(monkeypatch):
 def test_fermionic_eager_sweeps_match(monkeypatch):
     """Review Focus 4: a random FermionicU1 pair through the jitted pieces.
 
-    chi=8 split an exactly degenerate +1/-1 pair at a cut (#1142's version of
-    this test): the plain and jitted sweeps then kept different sectors.  Of
-    chi=4..12 only chi=6 cuts every one of the 16 cuts in a gap (worst margin
-    0.068, measured 2026-10-27 on jax 0.10.2 and 0.12).
+    chi=8 split an exactly degenerate +1/-1 pair at a cut (#1101, #1142's
+    version of this test): the plain and jitted sweeps then kept different
+    sectors.  Of chi=4..12 only chi=6 cuts every one of the 16 cuts in a gap
+    (worst margin 0.068, measured 2026-10-27 on jax 0.10.2 and 0.12).  chi=10
+    (#1145) keeps whole pairs, but 7 of its 16 cuts sit on an exact tie.
     """
     sites = _fermionic_pair()
     margins = _cut_margins(monkeypatch)
@@ -315,6 +323,11 @@ def test_fermionic_eager_sweeps_match(monkeypatch):
     finite = [m for m in margins if np.isfinite(m)]
     assert finite, "no cut competed: the test cannot see a cut choice"
     assert min(margins) > 1e-3, margins  # no cut sits on a tie
+    for leg in cpl._chi_layout(plain):
+        counts = dict(leg[-1])
+        assert all(counts.get(-q, 0) == n for q, n in counts.items()), (
+            f"the chi cut splits a +q/-q pair on {leg[:3]}: {counts} (#1101)"
+        )
     jitted = _sweeps(sites, 6, 2, True, monkeypatch)
     _assert_same_envs(plain, jitted)
 
