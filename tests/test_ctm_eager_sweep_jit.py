@@ -7,7 +7,8 @@ effect is downstream: the eager M' cut (``_select_chi_slots``, a global
 top-chi) receives inputs that differ at roundoff level.  At an exact
 cross-sector degeneracy (common for +q/-q pairs in U(1)-Sz) the cut can then
 keep the other slot.  The plain eager sweep was equally sensitive to
-roundoff there.  No test in this file exercises a tie.
+roundoff there.  The tests must not cut through a tie, so the fermionic one
+asserts a gap at every cut (``_cut_margins``).
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import pytest
 
 import tenax.algorithms._ctm_eager_jit as ej
 import tenax.algorithms._ctm_python_loop as cpl
+import tenax.algorithms._ctm_utils as cu
 from tenax import CTMConfig, ipeps, iPEPSConfig
 from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
@@ -264,11 +266,56 @@ def test_chi8_energy_matches_with_jit_on_and_off(monkeypatch):
     assert abs(energies[0] - energies[1]) < 1e-9, energies
 
 
+def _cut_margins(monkeypatch):
+    """Record, for every eager chi cut, the gap the cut falls in.
+
+    The margin is (smallest freely kept value - largest dropped value) / max,
+    over the slots the global top-chi competes for.  Slots that the
+    ``base_charges`` floor reserves are not in the competition: the floor takes
+    them whatever their value.  A margin near 0 is a tie, and roundoff then
+    picks the slot (and its sector).  ``inf``: no slot competed.
+    """
+    margins = []
+    raw = cu._select_chi_slots
+
+    def spy(values, slot_charges, *, base_charges, chi, floor=1):
+        kept = raw(
+            values, slot_charges, base_charges=base_charges, chi=chi, floor=floor
+        )
+        v = np.asarray(values, dtype=float)
+        q = np.asarray(slot_charges)
+        order = np.argsort(-v, kind="stable")
+        reserved = set()
+        for c, want in cu._sector_floor(base_charges, floor=floor).items():
+            reserved.update(int(j) for j in order[q[order] == c][:want])
+        free = [j for j in kept if j not in reserved]
+        dropped = sorted(set(range(len(v))) - set(kept))
+        if free and dropped:
+            margins.append((v[free].min() - v[dropped].max()) / v.max())
+        else:
+            margins.append(np.inf)
+        return kept
+
+    monkeypatch.setattr(cu, "_select_chi_slots", spy)
+    return margins
+
+
 def test_fermionic_eager_sweeps_match(monkeypatch):
-    """Review Focus 4: a random FermionicU1 pair through the jitted pieces."""
+    """Review Focus 4: a random FermionicU1 pair through the jitted pieces.
+
+    chi=8 split an exactly degenerate +1/-1 pair at a cut (#1142's version of
+    this test): the plain and jitted sweeps then kept different sectors.  Of
+    chi=4..12 only chi=6 cuts every one of the 16 cuts in a gap (worst margin
+    0.068, measured 2026-10-27 on jax 0.10.2 and 0.12).
+    """
     sites = _fermionic_pair()
-    plain = _sweeps(sites, 8, 2, False, monkeypatch)
-    jitted = _sweeps(sites, 8, 2, True, monkeypatch)
+    margins = _cut_margins(monkeypatch)
+    plain = _sweeps(sites, 6, 2, False, monkeypatch)
+    assert len(margins) == 16, len(margins)
+    finite = [m for m in margins if np.isfinite(m)]
+    assert finite, "no cut competed: the test cannot see a cut choice"
+    assert min(margins) > 1e-3, margins  # no cut sits on a tie
+    jitted = _sweeps(sites, 6, 2, True, monkeypatch)
     _assert_same_envs(plain, jitted)
 
 
