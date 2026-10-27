@@ -34,13 +34,16 @@ def test_gpu_algorithm_is_polar_from_128(shape, expected):
     )
 
 
-def test_cpu_branch_is_unchanged(monkeypatch):
-    calls = []
-    monkeypatch.setattr(tl, "_lax_svd", lambda *a, **k: calls.append(k))
+def test_cpu_branch_is_unchanged():
+    # CPU keeps gesdd; gesvd is only its non-convergence fallback
+    # (test_cpu_svd_gesdd_fallback.py).
     if jax.default_backend() == "gpu":
         pytest.skip("CPU-only check")
-    tl._dense_svd(jnp.eye(200))
-    assert calls == []
+    x = jnp.asarray(np.random.default_rng(0).standard_normal((200, 200)))
+    for a, b in zip(
+        tl._dense_svd(x), jnp.linalg.svd(x, full_matrices=False), strict=True
+    ):
+        np.testing.assert_array_equal(a, b)
 
 
 @pytest.mark.skipif(jax.default_backend() != "gpu", reason="needs a CUDA device")
