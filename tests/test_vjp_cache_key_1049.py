@@ -487,10 +487,15 @@ def test_a_different_captured_tenax_function_changes_the_key():
 
 
 def test_frozensets_are_keyed_by_value_and_sets_are_not():
-    a = frozenset({("A", "right"), ("B", "left")})
-    b = frozenset(tuple(a))  # equal, and built in a's iteration order
+    # Int tuples, not str: str hashes change with PYTHONHASHSEED, and
+    # frozenset(tuple(a)) then iterates differently from a for ~1 seed in 8.
+    # Iteration order is part of the key (next test), so with str elements
+    # this failed on CI whenever the seed landed there.
+    a = frozenset({(1, 2), (3, 4)})
+    b = frozenset(tuple(a))  # a distinct, equal frozenset
+    assert b is not a and list(b) == list(a)
     assert _exact(a) and _key(a) == _key(b)
-    assert _key(a) != _key(frozenset({("A", "right"), ("C", "left")}))
+    assert _key(a) != _key(frozenset({(1, 2), (5, 6)}))
     assert not _exact({("A", "right")})  # a mutable set
     assert not _exact(frozenset({object()}))
 
