@@ -290,6 +290,7 @@ _FILE_MARKERS = {
     # #1087: a second eager-GMRES backward must compile nothing (~14s).
     "test_gmres_adjoint_no_recompile_1087.py": "core",
     "test_gmres_single_matvec.py": "core",
+    "test_neumann_then_gmres.py": "core",
     "test_gmres_single_matvec_wiring.py": "core",
     # #1049: the implicit-AD compile cache is keyed by value and bounded (~45s).
     "test_vjp_cache_key_1049.py": "algorithm",
@@ -304,6 +305,7 @@ _FILE_MARKERS = {
     # (~75s: a fused and a gmres backward at D=2 chi=4).
     "test_shared_chain_rule_bwd.py": "algorithm",
     "test_joint_chain_rule.py": "algorithm",
+    "test_linearize_once_adjoint.py": "algorithm",
     # MPS/MPO physical-basis agreement (#816).  A mismatched charge ORDER
     # still converges and reports the correct energy while returning a
     # permuted state, so the energy check that normally catches everything

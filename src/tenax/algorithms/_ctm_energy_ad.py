@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms._arnoldi import arnoldi_spectral_radius_pytree
-from tenax.algorithms._block_sparse_jit import block_sparse_jit
+from tenax.algorithms._block_sparse_jit import _wants_no_fusion, block_sparse_jit
 from tenax.algorithms._cache_fingerprint import callback_key_parts, lru_get, lru_put
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
@@ -47,7 +47,11 @@ from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms._gmres_lax import gmres_pytree, gmres_single_matvec
+from tenax.algorithms._gmres_lax import (
+    gmres_pytree,
+    gmres_single_matvec,
+    neumann_then_gmres,
+)
 from tenax.algorithms.ad_utils import (
     CTMRGGradientError,
     _bond_gauge_families,
@@ -235,45 +239,125 @@ def _jit_gmres_one_matvec_solve(
     )
 
 
-@partial(
-    block_sparse_jit,
-    static_argnames=("apply_joint", "chi", "pb", "tol", "maxiter", "restart"),
-)
-def _jit_gmres_joint_solve(
-    params_data_tuple,
-    env_leaves,
-    rhs,
-    candidates,
-    *,
-    apply_joint,
-    chi,
-    pb,
-    tol,
-    maxiter,
-    restart,
+@partial(block_sparse_jit, static_argnames=("tol", "maxiter", "restart", "neumann"))
+def _jit_joint_adjoint_solve(
+    vjp_joint, rhs, init_lam, use_init, *, tol, maxiter, restart, neumann
 ):
-    """:func:`_jit_gmres_one_matvec_solve` with the joint-VJP matvec.
+    """The joint adjoint solve on the saved linearisation: one program, one J^T.
 
-    ``apply_joint`` returns ``((I - J_env^T) v, J_params^T v)`` from one VJP,
-    and :func:`gmres_single_matvec` (``aux=True``) carries ``J_params^T`` of
-    its best iterate, so the chain rule's indirect term comes out of the
-    solve and ``_jit_chain_rule`` never compiles.  Gated with the default
-    ``by_bond_dim=True`` (the chain rule's rule): this program contains the
-    params-VJP too.  Returns ``(lam, abs_resid, b_norm, indirect)``.
+    ``vjp_joint`` is the gauge-fixed sweep's pullback over ``(params, env)``
+    from ``_jit_linearize_joint``: ``vjp_joint(v) == (J_params^T v,
+    J_env^T v)``.  :func:`neumann_then_gmres` runs the Neumann loop (with
+    ``neumann``, the fixed-point method) and then GMRES on
+    ``(I - J_env^T) lam = rhs`` at one matvec call site, and carries
+    ``J_params^T`` of its best iterate, so the chain rule's indirect term comes
+    out of the solve and ``_jit_chain_rule`` never compiles (#1123).  Before,
+    the Neumann loop and the joint GMRES solve were two programs, each with its
+    own copy of the transpose (spec
+    2026-10-25-single-transpose-adjoint-design.md).  Call it through
+    :func:`_fusion_variant` with ``by_bond_dim=True``: it holds the params VJP
+    and its arguments carry no ``SymmetricTensor``.  ``init_lam`` must keep
+    ``rhs``'s pytree structure from call to call or it recompiles (#1087).
+    Returns :func:`neumann_then_gmres`'s 9-tuple.
     """
 
-    def matvec(v):
-        return apply_joint(params_data_tuple, env_leaves, v, chi=chi, pb=pb)
+    def jt_aux(v):
+        params_ct, env_ct = vjp_joint(tuple(v))
+        return env_ct, params_ct
 
-    return gmres_single_matvec(
-        matvec,
+    return neumann_then_gmres(
+        jt_aux,
         rhs,
-        list(candidates),
+        init_lam,
+        use_init,
         tol=tol,
         maxiter=maxiter,
         restart=restart,
-        aux=True,
+        neumann=neumann,
     )
+
+
+def _neumann_loop(apply_Jt, dE_denv, init_lam, use_init, *, tol, maxiter):
+    """The adjoint fixed point ``λ_{k+1} = b + Jᵀλ_k``, ``b = dE_denv``, as one
+    ``lax.while_loop``.
+
+    Used by ``_jit_fused_fixed_point_bwd`` (``"separate"``).  The ``"joint"``
+    chain rule runs the same arithmetic as the first phase of
+    :func:`neumann_then_gmres`.
+    ``apply_Jt`` returns ``Jᵀ v`` (not ``(I - Jᵀ) v``).  Cold start
+    (``use_init`` false) seeds from ``dE_denv``; ``use_init`` is traced, so warm
+    and cold calls share one compiled program.  Returns
+    ``(diverged, converged, n_iter, lam_final, abs_resid, b_norm)``; see
+    ``_jit_fused_fixed_point_bwd`` for what each one means.
+    """
+    # --- 3. Adjoint fixed-point inside lax.while_loop ---
+    # ``init_lam`` is the caller-supplied warm-start seed (cold-start
+    # uses ``dE_denv``; warm-start uses the previous ``lam_final``).
+    # The RHS ``b = dE_denv`` of the Neumann step ``λ_{k+1} = b + J^T λ_k``
+    # is unchanged — only the initial guess is seeded from cache.
+    real_dtype = jnp.real(dE_denv[0]).dtype if dE_denv else jnp.float64
+    # Cold start seeds from this program's own dE_denv: passing it in
+    # from the standalone _jit_dE_denv compiled a second copy of the
+    # energy VJP just to make the seed.  ``use_init`` is traced, so warm
+    # and cold calls share this compiled program.
+    init_lam_local = tuple(jnp.where(use_init, w, d) for w, d in zip(init_lam, dE_denv))
+    init_diff = jnp.array(jnp.inf, dtype=real_dtype)
+    init_k = jnp.array(0, dtype=jnp.int32)
+    init_diverged = jnp.array(False)
+    # Fails closed: if the body never runs (gmres_maxiter=0) this stays inf
+    # and ``_adjoint_converged`` reports not-converged rather than nothing.
+    init_resid = jnp.array(jnp.inf, dtype=real_dtype)
+
+    tol_arr = jnp.array(tol, dtype=real_dtype)
+    maxiter_arr = jnp.array(maxiter, dtype=jnp.int32)
+
+    def cond_fn(carry):
+        _lam, prev_diff, k, diverged, _resid = carry
+        return (k < maxiter_arr) & (~diverged) & (prev_diff > tol_arr)
+
+    def body_fn(carry):
+        lam, prev_diff, k, _diverged, _resid = carry
+        jt_lam = apply_Jt(lam)
+        new_lam = tuple(b + j for b, j in zip(dE_denv, jt_lam))
+        delta = tuple(n - p for n, p in zip(new_lam, lam))
+        diff = sum(jnp.linalg.norm(d) for d in delta).astype(real_dtype)
+        # ‖(I - Jᵀ)λ_k - b‖ for free: the Neumann step *is* the residual,
+        #   λ_{k+1} - λ_k = b + Jᵀλ_k - λ_k = b - (I - Jᵀ)λ_k
+        # so this is one L2 over an array already formed, not a second Jᵀ
+        # application.  Kept separate from ``diff``, which is an ℓ1-of-ℓ2
+        # sum over leaves and drives the stopping criterion — the two are
+        # different norms and only this one is what the GMRES branch gates
+        # and reports (#824).
+        resid = jnp.sqrt(sum(jnp.sum(jnp.abs(d) ** 2) for d in delta)).astype(
+            real_dtype
+        )
+        # Divergence guard: same trigger as F2 Python loop.
+        new_diverged = (diff > prev_diff) & (k > jnp.array(5, jnp.int32))
+        return (new_lam, diff, k + jnp.array(1, jnp.int32), new_diverged, resid)
+
+    lam_final, final_diff, n_iter, diverged, abs_resid = jax.lax.while_loop(
+        cond_fn,
+        body_fn,
+        (init_lam_local, init_diff, init_k, init_diverged, init_resid),
+    )
+    converged = final_diff <= tol_arr
+    b_norm = jnp.sqrt(sum(jnp.sum(jnp.abs(b) ** 2) for b in dE_denv)).astype(real_dtype)
+    return diverged, converged, n_iter, lam_final, abs_resid, b_norm
+
+
+def _fusion_variant(prog, params_data_tuple, *, by_bond_dim):
+    """``prog.block_sparse`` when the site tensors call for it, else ``prog.dense``.
+
+    A program that takes the sweep's pullback (a ``jax.tree_util.Partial`` of
+    plain arrays) has no ``SymmetricTensor`` argument, so ``block_sparse_jit``'s
+    own dispatch would always pick the fused CPU variant.  The site tensors
+    decide instead, by the rule the program would have used on
+    ``(params, env)``: ``by_bond_dim=True`` for a joint program, ``False`` for
+    one that is the sweep VJP only.
+    """
+    if _wants_no_fusion((params_data_tuple,), {}, None, by_bond_dim):
+        return prog.block_sparse
+    return prog.dense
 
 
 # #1028: the flowing projector backward, and the frozen value its backward
@@ -2037,16 +2121,23 @@ def _make_implicit_vjp_fn(
         )
         return tuple(jax.tree.leaves(_apply_gauge_fix(e_out, e_ref)))
 
-    @partial(block_sparse_jit, static_argnames=("chi", "pb"))
-    def _jit_apply_joint(params_data_tuple, env_leaves, v, *, chi, pb):
-        """``((I - J_env^T) v, J_params^T v)`` from ONE VJP of the sweep."""
+    @partial(block_sparse_jit, by_bond_dim=False, static_argnames=("chi", "pb"))
+    def _jit_linearize_joint(params_data_tuple, env_leaves, *, chi, pb):
+        """The gauge-fixed sweep's pullback over ``(params, env)``, once per
+        backward.
+
+        Returns :func:`jax.vjp`'s pullback, a ``jax.tree_util.Partial`` whose
+        leaves are the residuals.  ``_jit_joint_adjoint_solve`` takes it as an
+        argument and compiles only the transpose.  A cached call returns the same pullback function object,
+        so they hit their caches too; a new ``chi``/``pb``/layout recompiles
+        all three, as it recompiled their predecessors.
+        """
         _, vjp_fn = jax.vjp(
             partial(_gauge_fixed_sweep_joint, chi=chi, pb=pb),
             params_data_tuple,
             env_leaves,
         )
-        pc, jt_v = vjp_fn(v)
-        return tuple(vi - ji for vi, ji in zip(v, jt_v)), pc
+        return vjp_fn
 
     @block_sparse_jit
     def _jit_direct(params_data_tuple, env_leaves):
@@ -2187,60 +2278,8 @@ def _make_implicit_vjp_fn(
             return vjp_env_fn(v)[0]
 
         # --- 3. Adjoint fixed-point inside lax.while_loop ---
-        # ``init_lam`` is the caller-supplied warm-start seed (cold-start
-        # uses ``dE_denv``; warm-start uses the previous ``lam_final``).
-        # The RHS ``b = dE_denv`` of the Neumann step ``λ_{k+1} = b + J^T λ_k``
-        # is unchanged — only the initial guess is seeded from cache.
-        real_dtype = jnp.real(dE_denv[0]).dtype if dE_denv else jnp.float64
-        # Cold start seeds from this program's own dE_denv: passing it in
-        # from the standalone _jit_dE_denv compiled a second copy of the
-        # energy VJP just to make the seed.  ``use_init`` is traced, so warm
-        # and cold calls share this compiled program.
-        init_lam_local = tuple(
-            jnp.where(use_init, w, d) for w, d in zip(init_lam, dE_denv)
-        )
-        init_diff = jnp.array(jnp.inf, dtype=real_dtype)
-        init_k = jnp.array(0, dtype=jnp.int32)
-        init_diverged = jnp.array(False)
-        # Fails closed: if the body never runs (gmres_maxiter=0) this stays inf
-        # and ``_adjoint_converged`` reports not-converged rather than nothing.
-        init_resid = jnp.array(jnp.inf, dtype=real_dtype)
-
-        tol_arr = jnp.array(gmres_tol, dtype=real_dtype)
-        maxiter_arr = jnp.array(gmres_maxiter, dtype=jnp.int32)
-
-        def cond_fn(carry):
-            _lam, prev_diff, k, diverged, _resid = carry
-            return (k < maxiter_arr) & (~diverged) & (prev_diff > tol_arr)
-
-        def body_fn(carry):
-            lam, prev_diff, k, _diverged, _resid = carry
-            jt_lam = apply_Jt(lam)
-            new_lam = tuple(b + j for b, j in zip(dE_denv, jt_lam))
-            delta = tuple(n - p for n, p in zip(new_lam, lam))
-            diff = sum(jnp.linalg.norm(d) for d in delta).astype(real_dtype)
-            # ‖(I - Jᵀ)λ_k - b‖ for free: the Neumann step *is* the residual,
-            #   λ_{k+1} - λ_k = b + Jᵀλ_k - λ_k = b - (I - Jᵀ)λ_k
-            # so this is one L2 over an array already formed, not a second Jᵀ
-            # application.  Kept separate from ``diff``, which is an ℓ1-of-ℓ2
-            # sum over leaves and drives the stopping criterion — the two are
-            # different norms and only this one is what the GMRES branch gates
-            # and reports (#824).
-            resid = jnp.sqrt(sum(jnp.sum(jnp.abs(d) ** 2) for d in delta)).astype(
-                real_dtype
-            )
-            # Divergence guard: same trigger as F2 Python loop.
-            new_diverged = (diff > prev_diff) & (k > jnp.array(5, jnp.int32))
-            return (new_lam, diff, k + jnp.array(1, jnp.int32), new_diverged, resid)
-
-        lam_final, final_diff, n_iter, diverged, abs_resid = jax.lax.while_loop(
-            cond_fn,
-            body_fn,
-            (init_lam_local, init_diff, init_k, init_diverged, init_resid),
-        )
-        converged = final_diff <= tol_arr
-        b_norm = jnp.sqrt(sum(jnp.sum(jnp.abs(b) ** 2) for b in dE_denv)).astype(
-            real_dtype
+        diverged, converged, n_iter, lam_final, abs_resid, b_norm = _neumann_loop(
+            apply_Jt, dE_denv, init_lam, use_init, tol=gmres_tol, maxiter=gmres_maxiter
         )
 
         return diverged, converged, n_iter, lam_final, abs_resid, b_norm, dE_denv
@@ -2301,6 +2340,10 @@ def _make_implicit_vjp_fn(
         """
         params_data_tuple, env_leaves, chi_post, run_token = residuals[:4]
         run = _run_state(mutables, int(run_token))
+
+        def pick_variant(prog, by_bond_dim):
+            # Looked up at call time, so tests can spy on _fusion_variant.
+            return _fusion_variant(prog, params_data_tuple, by_bond_dim=by_bond_dim)
 
         # Drop the previous backward's residual before any branch can return.
         # ``_F3_LAST_DIAGNOSTICS`` is module-global, so a path that fails to
@@ -2398,17 +2441,51 @@ def _make_implicit_vjp_fn(
                 init_lam = prev_lam
                 use_init = jnp.array(True)
 
-            (
-                diverged,
-                _converged,
-                _n_iter,
-                lam_final,
-                _abs_resid,
-                _b_norm,
-                fused_rhs,
-            ) = _jit_fused_fixed_point_bwd(
-                params_data_tuple, env_leaves, init_lam, use_init, chi=chi_post, pb=pb
-            )
+            if adjoint_chain_rule == "joint":
+                # Linearise once (spec 2026-10-25), then ONE joint solve: the
+                # Neumann loop and GMRES are phases of one program, so the
+                # transpose compiles once (spec 2026-10-25-single-transpose).
+                vjp_joint = pick_variant(_jit_linearize_joint, False)(
+                    params_data_tuple, env_leaves, chi=chi_post, pb=pb
+                )
+                fused_rhs = _eager_dE_denv()
+                (
+                    diverged,
+                    _converged,
+                    _n_iter,
+                    lam_final,
+                    _abs_resid,
+                    joint_lam,
+                    joint_abs,
+                    _b_norm,
+                    joint_indirect,
+                ) = pick_variant(_jit_joint_adjoint_solve, True)(
+                    vjp_joint,
+                    fused_rhs,
+                    init_lam,
+                    use_init,
+                    tol=gmres_tol,
+                    maxiter=gmres_maxiter,
+                    restart=gmres_restart,
+                    neumann=True,
+                )
+            else:
+                (
+                    diverged,
+                    _converged,
+                    _n_iter,
+                    lam_final,
+                    _abs_resid,
+                    _b_norm,
+                    fused_rhs,
+                ) = _jit_fused_fixed_point_bwd(
+                    params_data_tuple,
+                    env_leaves,
+                    init_lam,
+                    use_init,
+                    chi=chi_post,
+                    pb=pb,
+                )
             _F3_LAST_DIAGNOSTICS["diverged"] = bool(jax.device_get(diverged))
             _F3_LAST_DIAGNOSTICS["converged"] = bool(jax.device_get(_converged))
             _F3_LAST_DIAGNOSTICS["n_iter"] = int(jax.device_get(_n_iter))
@@ -2468,7 +2545,7 @@ def _make_implicit_vjp_fn(
             )
             if adjoint_chain_rule == "joint":
                 # #1123: the fused loop stays env-only -- the same program as
-                # "separate" -- and the joint GMRES solve ALWAYS follows,
+                # "separate" -- and GMRES ALWAYS follows, in the same program,
                 # seeded with the loop's lambda when the loop solved the
                 # system (usually accepted at the seed, one joint matvec) and
                 # from rhs otherwise (zero ties the incumbent and loses; it
@@ -2489,22 +2566,13 @@ def _make_implicit_vjp_fn(
                         gmres_tol,
                         gmres_restart,
                     )
-                seed = (
-                    tuple(lam_final)
-                    if fused_solved
-                    else tuple(jnp.zeros_like(r) for r in fused_rhs)
-                )
-                lam, _abs, _bn, indirect = _jit_gmres_joint_solve(
-                    params_data_tuple,
-                    env_leaves,
-                    fused_rhs,
-                    [seed, fused_rhs],
-                    apply_joint=_jit_apply_joint,
-                    chi=chi_post,
-                    pb=pb,
-                    tol=gmres_tol,
-                    maxiter=gmres_maxiter,
-                    restart=gmres_restart,
+                # The joint solve above already ran GMRES from these seeds:
+                # [lam_final if fused_solved else 0, rhs].
+                lam, _abs, _bn, indirect = (
+                    joint_lam,
+                    joint_abs,
+                    _b_norm,
+                    joint_indirect,
                 )
                 _rel, _solved = _report_adjoint(
                     float(jax.device_get(_abs)),
@@ -2627,17 +2695,20 @@ def _make_implicit_vjp_fn(
                 prev_lam is not None,
             )
             if adjoint_chain_rule == "joint":
-                lam, _abs, _bn, indirect = _jit_gmres_joint_solve(
-                    params_data_tuple,
-                    env_leaves,
+                vjp_joint = pick_variant(_jit_linearize_joint, False)(
+                    params_data_tuple, env_leaves, chi=chi_post, pb=pb
+                )
+                *_neumann, lam, _abs, _bn, indirect = pick_variant(
+                    _jit_joint_adjoint_solve, True
+                )(
+                    vjp_joint,
                     rhs,
-                    [warm, rhs],
-                    apply_joint=_jit_apply_joint,
-                    chi=chi_post,
-                    pb=pb,
+                    warm,
+                    jnp.array(True),
                     tol=gmres_tol,
                     maxiter=gmres_maxiter,
                     restart=gmres_restart,
+                    neumann=False,
                 )
             else:
                 lam, _abs, _bn = _jit_gmres_one_matvec_solve(

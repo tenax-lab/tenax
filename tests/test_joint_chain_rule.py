@@ -113,11 +113,11 @@ def test_auto_runs_joint_and_shares_its_programs():
     g_auto = _grad(A0, "auto")
     traced = set(_TRACED[mark:])
     assert "_jit_chain_rule" not in traced, sorted(traced)
-    assert {"_jit_gmres_joint_solve", "_jit_direct"} <= traced, sorted(traced)
+    assert {"_jit_joint_adjoint_solve", "_jit_direct"} <= traced, sorted(traced)
     mark = len(_TRACED)
     g_joint = _grad(A0, "joint")
     assert len(cea._VJP_CACHE) == 1, list(cea._VJP_CACHE)
-    assert not set(_TRACED[mark:]) & {"_jit_gmres_joint_solve", "_jit_direct"}
+    assert not set(_TRACED[mark:]) & {"_jit_joint_adjoint_solve", "_jit_direct"}
     # Not bit-equal: the shared entry warm-starts the second solve from the
     # first one's lambda (#501), so they agree to the solve tolerance.
     np.testing.assert_allclose(
@@ -189,7 +189,7 @@ def test_joint_gmres_never_traces_the_separate_chain_rule():
     _grad(_site(_FUSED_SEED), "joint", method="gmres")
     traced = set(_TRACED[mark:])
     assert "_jit_chain_rule" not in traced, sorted(traced)
-    assert {"_jit_gmres_joint_solve", "_jit_direct"} <= traced, sorted(traced)
+    assert {"_jit_joint_adjoint_solve", "_jit_direct"} <= traced, sorted(traced)
 
 
 @pytest.mark.usefixtures("fresh_vjp_cache")
@@ -198,7 +198,7 @@ def test_separate_gmres_never_traces_the_joint_programs():
     _grad(_site(_FUSED_SEED), "separate", method="gmres")
     traced = set(_TRACED[mark:])
     assert "_jit_chain_rule" in traced
-    assert not traced & {"_jit_gmres_joint_solve", "_jit_direct", "_jit_apply_joint"}
+    assert not traced & {"_jit_joint_adjoint_solve", "_jit_direct", "_jit_apply_joint"}
 
 
 # ------------------------------------------------------- fused fixed point
@@ -287,7 +287,7 @@ def test_joint_fused_and_fallback_never_trace_the_separate_chain_rule():
     assert d.get("diverged") or not d.get("converged"), "premise: fallback ran"
     traced = set(_TRACED[mark:])
     assert "_jit_chain_rule" not in traced, sorted(traced)
-    assert {"_jit_gmres_joint_solve", "_jit_direct"} <= traced, sorted(traced)
+    assert {"_jit_joint_adjoint_solve", "_jit_direct"} <= traced, sorted(traced)
 
 
 @pytest.mark.slow
