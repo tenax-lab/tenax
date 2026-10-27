@@ -31,6 +31,8 @@ _FILE_MARKERS = {
     "test_ctm_eager_sweep_jit.py": "algorithm",
     "test_tensor.py": "core",
     "test_dense_svd_gpu_algorithm.py": "core",
+    # CPU gesdd -> gesvd fallback: faked failures + one 54x54 matrix.
+    "test_cpu_svd_gesdd_fallback.py": "core",
     "test_ctm_normalize_maxabs_kink.py": "core",
     # PR #986 Phase 1: the swap-gate primitive.  Pure block-metadata sign
     # tests, no CTM, ~1s; the graded-transpose cross-check is the mutation

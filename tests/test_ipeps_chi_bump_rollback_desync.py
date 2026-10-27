@@ -1,23 +1,26 @@
 """Regression test for env_cache + stall-rollback desync (#518).
 
-When ``ctmrg_heuristic_increase_chi=True`` (in-CTM χ-bump enabled) is
-combined with ``gs_stall_recovery="reset"``, the optimizer's rollback
-to ``best_params`` also restored ``_env_cache`` from a ``best_env_cache``
-snapshot that may have been taken at a pre-bump (smaller) χ.  The next
-CTM forward then fed a smaller-χ env into the post-bump ``ctm_cfg.chi``
-and crashed inside the projector contraction with::
+When an outer χ bump (``chi_auto_bump`` / ``gs_chi_schedule_steps``) is
+combined with a rollback to ``best_params``, the optimizer used to restore
+``_env_cache`` from a ``best_env_cache`` snapshot taken at the pre-bump
+(smaller) χ.  On the 2x2 forward of the time the next CTM call then crashed
+inside the projector contraction with::
 
     ValueError: Size of label 'd' for operand 1 (N) does not match
     previous terms (M).
 
-The fix (Option A from the issue) is to clear ``_env_cache`` on
-rollback rather than restore it from the chi-stale snapshot; the next
-CTM call starts cold at the current ``ctm_cfg.chi``.  The test
-reproduces by letting line-search succeed once (so ``best_env_cache``
-gets snapshotted), then forcing failures (which trigger the rollback).
-``chi_auto_bump_eps=1e-30`` guarantees the reactive bump fires
-unconditionally after each successful step, so the snapshot is
-guaranteed to be at a pre-bump (now-stale) χ when the rollback runs.
+The fix (#519) clears ``_env_cache`` on rollback instead.
+
+What this pins now (#1150).  Re-introducing the pre-#519 restore no longer
+crashes: the forward accepts a smaller-χ seed and grows it to ``ctm_cfg.chi``,
+so a stale snapshot is just a worse warm start, and the fix and the bug are
+indistinguishable from outside.  The behaviour that still matters is that a
+rollback which restores a pre-bump snapshot completes and leaves the run at
+the bumped χ.  The original test reached its rollbacks through line-search
+stalls, after the step's own evaluation had already re-snapshotted the best
+env at the bumped χ (#1095), so it never restored a stale snapshot at all.
+This version reaches the regime through the gradient-spike rollback, which
+runs before the re-snapshot, and asserts that it did.
 
 Marker: ``core``.
 """
@@ -61,48 +64,43 @@ def _random_2site_init(d, D, seed):
 
 
 @pytest.mark.core
-def test_rollback_after_chi_bump_does_not_crash_2site(monkeypatch):
-    """#518: rollback must not feed a stale-χ env into a post-bump ctm_cfg.
+def test_a_rollback_right_after_a_chi_bump_completes_at_the_bumped_chi(monkeypatch):
+    """#518/#1150: a rollback that restores a pre-bump snapshot still completes.
 
-    Sequence with the bug present:
-
-    1. Step 1 line search succeeds (mock) → ``best_env_cache`` snapshot
-       at the initial χ.
-    2. End-of-step reactive bump (``chi_auto_bump_eps=1e-30``) raises
-       ``ctm_cfg.chi`` by ``chi_auto_bump_step``.  ``_env_cache`` is
-       padded to the new χ but ``best_env_cache`` is NOT.
-    3. Step 2 line search fails (mock) → reset block fires.
-       Pre-fix: ``_env_cache.update(best_env_cache)`` writes
-       pre-bump-χ envs into the live cache.
-    4. Step 3 value_and_grad warm-starts CTM from ``_env_cache`` at the
-       stale χ against ``ctm_cfg.chi`` at the post-bump χ → contraction
-       crashes with ``Size of label 'd' ... does not match``.
-
-    Fix: rollback clears ``_env_cache`` instead of restoring stale
-    state; the next CTM call cold-starts at the post-bump χ.
-
-    The test asserts the run completes without raising.
+    1. Step 1 is accepted: ``best_env_cache`` is snapshotted at chi=4.
+    2. The end-of-step reactive bump (``chi_auto_bump_eps=1e-30``) raises
+       ``ctm_cfg.chi`` to 6.
+    3. Step 2's gradient norm is reported as a spike, so the guard rolls
+       back to ``best_params`` *before* that step re-snapshots the best env:
+       the snapshot it could restore is still at chi=4.
+    4. The run must carry on and finish at the bumped chi.
     """
-    calls = {"n": 0}
 
-    def _succeed_once_then_fail(_phi, _dphi, phi0, _slope, **_kwargs):
-        """First call: report improvement so step is accepted as best.
+    def _always_succeed(_phi, _dphi, phi0, _slope, **_kwargs):
+        return 1e-3, phi0 - 1e-3, True
 
-        Subsequent calls: report ``f_alpha == phi0`` so the optimizer
-        increments ``stall_count`` and enters the reset block on the
-        very next iteration.
-        """
-        calls["n"] += 1
-        if calls["n"] == 1:
-            # f_alpha strictly below phi0 triggers ``stall_count = 0``
-            # and the line-search "success" branch (params updated).
-            return 1e-3, phi0 - 1e-3, True
-        return 0.0, phi0, False
+    monkeypatch.setattr(_ls_mod, "hager_zhang_line_search", _always_succeed)
 
-    monkeypatch.setattr(_ls_mod, "hager_zhang_line_search", _succeed_once_then_fail)
+    real_norm = _opt._grad_l2_norm
+    norms = []
+
+    def _spike_after_the_first(grads):
+        v = float(real_norm(grads))
+        norms.append(v)
+        return v if len(norms) == 1 else 1e6 * (1.0 + v)
+
+    monkeypatch.setattr(_opt, "_grad_l2_norm", _spike_after_the_first)
+
+    real_bump = _opt._apply_chi_bump
+    events = []
+
+    def _record_bump(ctm_cfg, env_cache, chi_new, **kw):
+        events.append(("bump", ctm_cfg.chi, chi_new, len(norms)))
+        return real_bump(ctm_cfg, env_cache, chi_new, **kw)
+
+    monkeypatch.setattr(_opt, "_apply_chi_bump", _record_bump)
 
     d = 2
-    gate = _heisenberg_gate(d)
     cfg = iPEPSConfig(
         unit_cell="2site",
         max_bond_dim=2,
@@ -110,37 +108,32 @@ def test_rollback_after_chi_bump_does_not_crash_2site(monkeypatch):
             chi=4,
             chi_max=8,
             chi_auto_bump=True,
-            # 1e-30 is well below any realistic eps_T → bump fires every
-            # step.  This guarantees a chi-stale ``best_env_cache``.
+            # 1e-30 is below any realistic eps_T: the bump fires every step.
             chi_auto_bump_eps=1e-30,
             chi_auto_bump_step=2,
         ),
-        gs_num_steps=6,
-        gs_stall_recovery="reset",
-        gs_stall_recovery_retries=2,
+        gs_num_steps=4,
         gs_line_search_method="hager_zhang",
+        gs_grad_spike_ratio=2.0,
+        gs_grad_spike_window=1,
         su_init=False,
-        # ``grad_norm`` keeps the dE underflow from short-circuiting the
-        # outer loop before the rollback fires.
+        # ``grad_norm`` keeps the dE underflow from ending the loop early.
         gs_conv_criterion="grad_norm",
     )
-    A_init = _random_2site_init(d, D=2, seed=0)
-
-    # The non-C4v 2-site path emits a UserWarning about variational
-    # caveats; not relevant to this regression.
     with warnings.catch_warnings():
+        # chi_auto_bump's deprecation and the non-C4v 2-site caveat.
         warnings.simplefilter("ignore", category=UserWarning)
-        # Pre-fix: this raises ValueError("Size of label 'd' ...")
-        # inside the post-rollback CTM step.  Post-fix: runs to
-        # completion (or to the gs_stall_recovery_retries cap).
-        _opt.optimize_gs_ad(gate, A_init, cfg)
+        warnings.simplefilter("ignore", category=DeprecationWarning)
+        _, envs, _ = _opt.optimize_gs_ad(
+            _heisenberg_gate(d), _random_2site_init(d, D=2, seed=0), cfg
+        )
 
-    # Sanity probe: the monkeypatch must reach both the success branch
-    # (call #1) and the failure branch (call >=2) for the regression
-    # path to be exercised.  Without these calls the bug scenario
-    # never sets up.
-    assert calls["n"] >= 2, (
-        f"line-search mock invoked {calls['n']} times; expected >=2 so "
-        f"both the snapshot-then-stale-bump sequence and the rollback "
-        f"fire.  Monkeypatch target may be stale."
-    )
+    # Regime: a bump from 4 fired after step 1's gradient and before step
+    # 2's, so step 2's spike rollback faced a chi=4 snapshot at chi=6.  If a
+    # change moves the bump or the guard, this says so instead of passing
+    # vacuously (#1150).
+    assert len(norms) >= 2, norms
+    assert ("bump", 4, 6, 1) in events, events
+    # Behaviour: the run finished at the last bumped chi.
+    env_a, _ = envs
+    assert env_a.C1.todense().shape[0] == events[-1][2], events
