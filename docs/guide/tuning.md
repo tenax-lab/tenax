@@ -181,9 +181,9 @@ Values: `"cg"` (default), `"lbfgs"`, `"adam"`
 
 ### `iPEPSConfig.gs_conv_criterion` (default `"grad_norm"`)
 
-Exit test for the outer loop.  `"grad_norm"` (default since v0.8.4) stops at
+Exit test for the outer loop.  `"grad_norm"` (default since v0.9.0) stops at
 `‖∇E‖₂ < gs_grad_norm_tol` (default `1e-5`, variPEPS's
-`optimizer_convergence_eps`).  The pre-v0.8.4 default `"dE"`
+`optimizer_convergence_eps`).  The pre-v0.9.0 default `"dE"`
 (`|ΔE| < gs_conv_tol`) is deprecated: it declared convergence with
 `‖∇E‖` between `1e-2` and `0.69` in all four D=2/3 square-Heisenberg
 validation runs.  `"both"` needs both.  `gs_conv_tol` is read only by `"dE"`
@@ -220,7 +220,7 @@ Values: `None` (auto), `"noise"`, `"reset"`
   near a settled energy is not undone: on D=3 Heisenberg it took a 1x1
   run from E=-0.66819 to -0.033.
 - **`None`** (default) — `"reset"` on every unit cell (1-site was
-  `"noise"` before v0.8.4). The `ctm_ad_mode` engines (`"c4v_reference"`, `"root_implicit"`,
+  `"noise"` before v0.9.0). The `ctm_ad_mode` engines (`"c4v_reference"`, `"root_implicit"`,
   `"root_implicit_symmetric"`) have no stall recovery and ignore this
   setting.
 

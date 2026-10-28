@@ -1071,7 +1071,7 @@ _register(
         description=(
             "Energy-change convergence tolerance for the outer L-BFGS/CG "
             "ground-state optimizer. Read only when gs_conv_criterion is "
-            "'dE' or 'both' (the default since v0.8.4 is 'grad_norm', which "
+            "'dE' or 'both' (the default since v0.9.0 is 'grad_norm', which "
             "uses gs_grad_norm_tol); 'dE' exits when "
             "|E_k - E_{k-1}| < gs_conv_tol."
         ),

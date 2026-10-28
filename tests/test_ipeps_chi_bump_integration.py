@@ -180,7 +180,7 @@ def test_optimize_gs_ad_auto_bump_fires_on_convergence_break():
             conv_tol=1e-3,
         ),
         gs_num_steps=5,
-        # Force an iter-1 conv break on dE.  Explicit since v0.8.4 made
+        # Force an iter-1 conv break on dE.  Explicit since v0.9.0 made
         # "grad_norm" the default: under it this run never breaks, the
         # end-of-step bump alone reaches chi>=6, and the test goes vacuous.
         gs_conv_criterion="dE",

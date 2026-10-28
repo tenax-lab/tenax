@@ -328,7 +328,7 @@ _FILE_MARKERS = {
     # (energy, grad) pairs, so the only real work is one final D=2/chi=4 env
     # per test (~1s).  Guards control flow a benchmark consumer cannot see.
     "test_root_implicit_masked_convergence.py": "core",
-    # The outer-loop default is "grad_norm" (#448, v0.8.4).  Scripted energy
+    # The outer-loop default is "grad_norm" (#448, v0.9.0).  Scripted energy
     # (value and gradient set independently), D=2/chi=4, ~10s for the file.
     "test_ipeps_grad_norm_default.py": "core",
     # Environment-phase (gauge) invariance of the RDM builders (#748, follow-up

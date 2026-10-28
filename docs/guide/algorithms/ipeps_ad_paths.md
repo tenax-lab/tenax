@@ -1182,7 +1182,7 @@ have no stall recovery: they skip a failed step and continue, and ignore
   variPEPS does.
 - ``"noise"`` (legacy) — inject a ``gs_noise_amplitude`` (default 10 %)
   Frobenius perturbation on the *current* params and reset the L-BFGS
-  history, with no rollback. It was the 1-site default until v0.8.4, to
+  history, with no rollback. It was the 1-site default until v0.9.0, to
   break the C4v run off an SU-init plateau with gradient norms ~1e-10;
   that plateau no longer reproduces (the SU start has |g| = 0.30 at D=2
   and 0.54 at D=3). Near a settled energy the kick is destructive: on

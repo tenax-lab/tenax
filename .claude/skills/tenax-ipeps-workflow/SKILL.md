@@ -290,7 +290,7 @@ prefer `ctmrg_heuristic_increase_chi`.
   natural gradient (Rader et al., arXiv:2511.09546), which dramatically
   improves convergence for L-BFGS and CG.
 - **Convergence is a gradient test** (`gs_conv_criterion="grad_norm"`,
-  default since v0.8.4): the loop stops at `‖∇E‖₂ < gs_grad_norm_tol`
+  default since v0.9.0): the loop stops at `‖∇E‖₂ < gs_grad_norm_tol`
   (`1e-5`), otherwise at `gs_num_steps` with `converged=False` in the
   history.  `gs_conv_tol` only matters for `"dE"`/`"both"`.  Do not switch
   back to `"dE"` to make a run "converge" sooner — it stops on a tiny
