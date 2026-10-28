@@ -52,10 +52,9 @@ def test_split_corner_init_is_rank1(D):
         assert rank == 1, f"{name} init rank={rank} (spectrum {np.round(s, 3)})"
 
 
-@pytest.mark.parametrize(
-    "D",
-    [2, pytest.param(3, marks=pytest.mark.slow)],  # D=3 is 99s (#933)
-)
+# D=2 only: the D=3 row (99 s, slow) raised confidence in D, not in the
+# mechanism, and was dropped in the slow-bucket prune (#1149).
+@pytest.mark.parametrize("D", [2])
 def test_fused_to_split_roundtrip(D):
     make_site, heisenberg_gate, fused_env_to_split = _oracle()
     A = make_site(D, 2, seed=7)
@@ -71,16 +70,21 @@ def test_fused_to_split_roundtrip(D):
 from tenax.algorithms._split_ctm_tensor_convergence import ctm_split_tensor
 from tenax.algorithms._split_ctm_tensor_energy import compute_energy_split_ctm_tensor
 
+#: Forced sweeps for the lossless parity (300 until the 2026-10-26 test-trim
+#: pass).  The parity is a fixed-point claim, NOT a per-sweep one: measured,
+#: at 20 sweeps the two paths still differ by 5.7e-06 (chi=4) / 1.1e-06
+#: (chi=8), at 100 by 4.0e-16 / 7.2e-16 -- the same as at 300.
+_SWEEPS = 100
+
 
 @pytest.mark.parametrize(
     "D,chi",
     [
         (2, 4),
         (2, 8),
-        # 371s alone -- 8% of the whole required gate (#933).  The D=2 rows
-        # above cover the same parity claim; this one raises confidence in D,
-        # not in the mechanism, so it belongs in the nightly bucket.
-        pytest.param(3, 6, marks=pytest.mark.slow),
+        # The (3, 6) row (371 s, slow since #933) raised confidence in D, not
+        # in the mechanism -- the D=2 rows cover the same parity claim -- and
+        # was dropped in the slow-bucket prune (#1149).
     ],
 )
 def test_split_matches_fused_lossless_chi_I(D, chi):
@@ -106,10 +110,12 @@ def test_split_matches_fused_lossless_chi_I(D, chi):
     # physics, only that the factorization was faithful.  On 2x2 both sides
     # carry a genuine rank-4..6 corner, so this is now a real oracle.
     # Measured agreement: 2.5e-16 (D=2,chi=4), 9.0e-16 (D=2,chi=8),
-    # 5.0e-16 (D=3,chi=6) — well inside the 1e-8 tolerance.
-    fused_env, _ = ctm_tensor(A, chi=chi, max_iter=300, conv_tol=0.0)
+    # 5.0e-16 (D=3,chi=6, row since dropped) — well inside the 1e-8 tolerance.
+    fused_env, _ = ctm_tensor(A, chi=chi, max_iter=_SWEEPS, conv_tol=0.0)
     E_fused = float(compute_energy_ctm_tensor(A, fused_env, gate))
-    split_env = ctm_split_tensor(A, chi=chi, chi_I=chi * D, max_iter=300, conv_tol=0.0)
+    split_env = ctm_split_tensor(
+        A, chi=chi, chi_I=chi * D, max_iter=_SWEEPS, conv_tol=0.0
+    )
     E_split = float(compute_energy_split_ctm_tensor(A, split_env, gate))
     np.testing.assert_allclose(E_split, E_fused, atol=1e-8)
 
@@ -171,6 +177,11 @@ def test_split_production_chi_I_converges_to_lossless():
 
     conv_tol=0.0 forces full sweeps so we compare true fixed points (the
     corner-SV criterion is blind to the degenerate corner; see DL-Task 6).
+
+    Stays at D=3: the slow-bucket prune (#1149) measured the D=2 seed-7 site
+    and its interlayer error does *not* shrink with chi there (2.38e-2 /
+    2.69e-2 / 2.76e-2 at chi 4 / 6 / 8), so a D=2 version cannot carry the
+    claim.
     """
     make_site, heisenberg_gate, _ = _oracle()
     D = 3

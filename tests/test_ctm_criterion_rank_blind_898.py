@@ -197,10 +197,26 @@ def _collapsing_pair():
     Imported from the direction-dependent-bonds test rather than rebuilt, so
     this file cannot drift into exercising a different state than the one #898
     was measured on.
+
+    Densified, exactly as ``test_ctm_670_symmetric_2x2.py`` does with the same
+    pair (slow-bucket prune, #1149).  The criterion under test
+    (``_ctm_sv_diff`` + ``_spectrum_is_uninformative``) is array algebra on
+    corner spectra and cannot tell the representations apart, while the
+    symmetric CTM cost ~2 min per sweep (every new block shape is a fresh XLA
+    compile).  The collapse itself is representation-independent: 670 asserts
+    ``ctm_corner_rank == 1`` and the "could not be certified" warning on the
+    dense pair.
     """
+    import numpy as np
     from test_ctm_direction_dependent_bonds import _su_direction_dependent_pair
 
-    return _su_direction_dependent_pair()
+    from tenax.core.tensor import DenseTensor
+
+    A, B = _su_direction_dependent_pair()
+    return (
+        DenseTensor(np.array(A.todense()), A.indices),
+        DenseTensor(np.array(B.todense()), B.indices),
+    )
 
 
 #: The two budgets straddle the blind loop's exit.  Measured on this fixture
@@ -210,7 +226,10 @@ def _collapsing_pair():
 #: to ``max_iter=3`` (-0.424537656216 both); the guarded loop moves on to
 #: -0.428340678043.  Budgets used to be (4, 12, 30) -- 46 sweeps at ~2 min each
 #: and growing (every new block shape is a fresh XLA compile), 2h37m locally,
-#: which timed the slow shard out at the 240 min cap on every CI run.
+#: which timed the slow shard out at the 240 min cap on every CI run.  Since
+#: the pair is densified (#1149) the guarded loop returns the same two
+#: energies to 12 digits (-0.42453765621562 / -0.42834067804325) and the
+#: fixture costs ~38 s instead of ~414 s.
 _BUDGETS = (3, 4)
 
 

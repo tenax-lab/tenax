@@ -1,7 +1,6 @@
 """Tests for iPEPS excitation calculations."""
 
 import logging
-import os
 
 import jax
 import jax.numpy as jnp
@@ -529,24 +528,24 @@ class TestMomentumPath:
 
 
 # ---------------------------------------------------------------------------
-# Opt-in benchmark: RUN_EXCITATION_BENCH=1 for local/nightly runs
+# Opt-in benchmark: TENAX_RUN_DIAGNOSTIC=1 (the ``diagnostic`` marker; it was
+# RUN_EXCITATION_BENCH=1).  Opt-in because the GEV is ill-conditioned at D=2
+# and the results are BLAS-dependent; the exact-environment oracles (#954/
+# #955/#956, core) carry the correctness of compute_excitations.
 # ---------------------------------------------------------------------------
-
-_RUN_BENCH = os.environ.get("RUN_EXCITATION_BENCH", "") == "1"
-_bench_reason = "Set RUN_EXCITATION_BENCH=1 to run (GEV is ill-conditioned at D=2)"
 
 logger = logging.getLogger(__name__)
 
 
 @pytest.mark.slow
+@pytest.mark.diagnostic
 class TestExcitationBenchmark:
-    @pytest.mark.skipif(not _RUN_BENCH, reason=_bench_reason)
     def test_heisenberg_excitation_dispersion(self, heisenberg_gate):
         """Verify excitation spectrum for 2D Heisenberg AFM (D=2, chi=16).
 
         Checks that the excitation spectrum is physically reasonable:
         finite excitation energies and positive gaps at zone-boundary
-        momenta. Opt-in via ``RUN_EXCITATION_BENCH=1`` because the GEV
+        momenta. Opt-in via ``TENAX_RUN_DIAGNOSTIC=1`` because the GEV
         is ill-conditioned at D=2 and results are BLAS-dependent.
         """
         D, d = 2, 2

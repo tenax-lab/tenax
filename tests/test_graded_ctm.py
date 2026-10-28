@@ -219,8 +219,28 @@ def test_ctm_tensor_keeps_an_asymmetric_fermionic_site_on_the_graded_path():
     different sector layouts, which on a fermionic site silently handed the
     CTM a sign-free (hard-core-boson) double layer (Codex P1 on #1044).  The
     2x2 recipe needs no uniform layout, so a fermionic site stays symmetric
-    and graded.  The 1-site energy must then agree with the certified fused
-    2-site path on the same state (``B = A``)."""
+    and graded.
+
+    One sweep, no energy: the densification happens before the first sweep,
+    so a one-sweep environment already shows it.  Measured (2026-10-26, cold
+    cache): the sweep costs ~66 s and the 1-site fermionic energy ~150 s of
+    compile, so the energy parity below is its own slow test."""
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
+    from tenax.core.tensor import SymmetricTensor
+
+    A = _asymmetric_fermionic_site(3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        env, _eps = ctm_tensor(A, 8, max_iter=1, conv_tol=1e-10)
+    assert isinstance(env.C1, SymmetricTensor)
+    assert env.C1.indices[0].symmetry.is_fermionic
+
+
+@pytest.mark.slow
+def test_the_asymmetric_fermionic_site_energy_matches_the_2site_path():
+    """The 1-site energy of the site above must agree with the certified fused
+    2-site path on the same state (``B = A``).  Split off the core test above
+    in the 2026-10-26 test-trim pass (~275 s, mostly energy compile)."""
     from tenax.algorithms._ctm_tensor_convergence import ctm_tensor, ctm_tensor_2site
     from tenax.algorithms._ctm_tensor_energy import (
         compute_energy_ctm_tensor,

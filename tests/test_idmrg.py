@@ -405,12 +405,15 @@ class TestBuildBulkMPOSymmetric:
 
 class TestiDMRGSymmetric:
     @pytest.mark.slow
-    def test_symmetric_idmrg_energy_accuracy(self, numpy_blockwise):
-        """Symmetric iDMRG at chi=16 should match exact within 0.5%."""
+    def test_symmetric_idmrg_energy_accuracy(self):
+        """Symmetric iDMRG at chi=16 should match exact within 0.5%.
+
+        Default backend (``numpy_blockwise=True``) only: the jax backend's
+        agreement with it is pinned by ``test_symmetric_matches_dense_energy``,
+        which runs both (slow-bucket prune, #1149).
+        """
         W = build_bulk_mpo_heisenberg_symmetric()
-        cfg = iDMRGConfig(
-            max_bond_dim=16, max_iterations=50, numpy_blockwise=numpy_blockwise
-        )
+        cfg = iDMRGConfig(max_bond_dim=16, max_iterations=50)
         result = idmrg(W, cfg)
         exact_e = -0.4431471805
         rel_err = abs(result.energy_per_site - exact_e) / abs(exact_e)

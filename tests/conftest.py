@@ -1,5 +1,7 @@
 """Shared fixtures for the Tenax test suite."""
 
+import os
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -19,7 +21,7 @@ _FILE_MARKERS = {
     # #1059 finding 27: metric preconditioning dropped for fermions; spies.
     "test_metric_precond_fermions_1059.py": "core",
     # #1059 finding 1: optimize_fpeps_ad dispatch; spies on the branch
-    # targets, so no tensor work (the one end-to-end test is marked slow).
+    # targets, so no tensor work.
     "test_fpeps_ad_dispatch_1059.py": "core",
     # #1059 findings 2 and 3 + fermionic gate on non-fermionic sites: the
     # refusals fire before any tensor work, and the branch targets are spies.
@@ -54,7 +56,7 @@ _FILE_MARKERS = {
     "test_graded_simple_update.py": "core",
     "test_dmrg.py": "algorithm",
     "test_layout_helpers.py": "core",  # ~6 s
-    "test_symmetric_layout_seed.py": "algorithm",  # ~105 s
+    "test_symmetric_layout_seed.py": "algorithm",  # ~1100 s CPU cold cache (1500 before the 2026-10-26 trim)
     "test_symmetric_ad_validation_guards.py": "core",  # 2 tests ~28 s CPU
     # FD tests are @slow (~16 min GPU, both cases); the regime guard is fast.
     "test_symmetric_2site_ad_gradient.py": "algorithm",
@@ -67,6 +69,9 @@ _FILE_MARKERS = {
     "test_ipeps.py": "algorithm",
     "test_ipeps_bp_gauge.py": "algorithm",
     "test_bp_gauge_rank_collapse.py": "core",
+    # The ``symmetric D=3`` BP-solve cells and the fermionic planar witness
+    # carry ``slow`` + ``diagnostic``: ``gauge_fix``'s only caller is the
+    # unshipped ``ipeps_su`` engine (#882), so they run only on demand.
     "test_ipeps_gauge.py": "algorithm",
     # #882 Tasks 7 and 7b: the dense ``gauge_fix`` is one traced call -- a
     # ``lax.while_loop`` solve with ``absorb_weights`` compiled around it --
@@ -80,19 +85,21 @@ _FILE_MARKERS = {
     "test_ipeps_gauge_perf.py": "algorithm",
     # #882 Phase 2: the simple-update engine with no stored bond spectrum.
     # Every test runs at least one BP gauge solve (and the split guard runs
-    # three), which puts it well past the `core` budget.
+    # three), which puts it well past the `core` budget.  The engine is not
+    # shipped yet (private until #882 Phase 4), so its acceptance sweep -- every
+    # cell that carries ``slow`` -- also carries ``diagnostic`` and runs only
+    # with TENAX_RUN_DIAGNOSTIC=1.
     "test_ipeps_su.py": "algorithm",
     # #882 Task 13: every guard in test_ipeps_su.py killed by a faithful
     # re-introduction of the defect it is named for.  Each cell runs its
     # guard twice -- unmutated (which must pass) and mutated (which must
     # fail, on the named assertion, at a number in range) -- so it costs
-    # about twice the guard.  Eight cells; exactly one carries `slow`, and
-    # it is a `pytest.param` mark rather than a function mark because the
-    # kills are one parametrised test.  Measured on CPU with --no-cov, box
-    # load 4-7: -m "not slow" is 45.6 s over seven cells (the two dearest
-    # being the D=2 imaginary-time run at 17.7 s -- which is NOT the slow
-    # one -- and the symmetric chain anchor at 22.6 s), and -m slow is
-    # 234 s in that single cell, the symmetric D=3 truncation guard.
+    # about twice the guard.  Measured on CPU with --no-cov, box load 4-7:
+    # -m "not slow" is 45.6 s over seven cells (the two dearest being the D=2
+    # imaginary-time run at 17.7 s and the symmetric chain anchor at 22.6 s).
+    # The one former `slow` cell (a 234 s second kill of #865 on the symmetric
+    # D=3 truncation guard) was deleted in the slow-bucket prune; #865 keeps
+    # its 23 s kill via the Vidal-metric chain anchor.
     #
     # **Three of its rows carry an explicit `core` mark** (851, 869, 6.2a --
     # 2.35 s, 0.46 s and 0.03 s both sides), so the file contributes to the
@@ -114,9 +121,12 @@ _FILE_MARKERS = {
     # cycles). The envs_init seed/refusal tests use ``light_AB``/
     # ``_fake_envs`` (no SU, no CTM) rather than the module-scope
     # ``seeded_d2`` fixture (a real 28 s SU growth plus a ~126 s eager CTM),
-    # which only this file's ``slow``-marked tests build (final-review
-    # finding I2 -- an earlier version of this comment predated that fix
-    # and undercounted the not-slow bucket's cost).
+    # which only this file's ``slow``-marked tests build.  Since the
+    # slow-bucket prune (#1149) that is true of the scripted layout-recheck
+    # tests too: they stub the CTM (``_stub_ctm``) and run on ``light_AB`` or
+    # the bosonic ``seeded_xxz_d2``, leaving one real re-check run; the
+    # non-slow half went from ~2700 s (CI) to ~550 s locally, and the D=3
+    # ``frozen_state``/``eager_envs`` fixtures of the slow half are gone.
     "test_frozen_layout_ad.py": "algorithm",
     "test_fermionic_ed_reference.py": "algorithm",
     "test_ipeps_excitations.py": "algorithm",
@@ -221,14 +231,17 @@ _FILE_MARKERS = {
     # anywhere (~0.2s), so the measurement semantics -- a wrong gradient
     # reported wrong by the right amount, an unresolvable scan reported as
     # unresolvable -- are cheap enough for the required gate.  The rank-matched
-    # pair that pins the residual's anti-correlation is @slow (~6 min).
+    # pair that pins the residual's anti-correlation (a #785 research finding,
+    # ~6 min) is ``slow`` + ``diagnostic``: run with TENAX_RUN_DIAGNOSTIC=1.
     "test_root_implicit_gradient_check.py": "core",
     # #667: simple update converged to the product state, and survived because
     # *no test asserted a simple-update energy* -- one test even documented the
     # bug ("small dt causes the bond lambdas to converge to a product-like fixed
     # point") as intended behaviour.  A guard against a silent-wrong-answer
     # defect of that shape belongs in the gate that blocks a merge.  The D=2 run
-    # is shared across the cases via a module fixture; the D=4 case is @slow.
+    # is shared across the cases via a module fixture.  The D=3/D=4 survival
+    # rows were dropped in the slow-bucket prune (#1149); the slow half is the
+    # D=3 spectrum-vs-dense check.
     "test_su_865_symmetric_collapse.py": "core",
     "test_su_667_product_state.py": "core",
     # #851: the four-phase checkerboard sweep stored two Schmidt spectra for
@@ -284,6 +297,7 @@ _FILE_MARKERS = {
     # #1087: a second eager-GMRES backward must compile nothing (~14s).
     "test_gmres_adjoint_no_recompile_1087.py": "core",
     "test_gmres_single_matvec.py": "core",
+    "test_neumann_then_gmres.py": "core",
     "test_gmres_single_matvec_wiring.py": "core",
     # #1049: the implicit-AD compile cache is keyed by value and bounded (~45s).
     "test_vjp_cache_key_1049.py": "algorithm",
@@ -298,6 +312,7 @@ _FILE_MARKERS = {
     # (~75s: a fused and a gmres backward at D=2 chi=4).
     "test_shared_chain_rule_bwd.py": "algorithm",
     "test_joint_chain_rule.py": "algorithm",
+    "test_linearize_once_adjoint.py": "algorithm",
     # MPS/MPO physical-basis agreement (#816).  A mismatched charge ORDER
     # still converges and reports the correct energy while returning a
     # permuted state, so the energy check that normally catches everything
@@ -460,11 +475,18 @@ _FILE_MARKERS = {
     # The invariant that keeps the 2x2 enlarged corner contraction-correct
     # (#834/#762/#905).  Since #905 it is a property of the flow convention
     # rather than of the sweep, but still nothing in the type system enforces
-    # it -- required gate.  The D=3 case carries its own ``@pytest.mark.slow``.
+    # it -- required gate.  (The slow D=3 sweep spy was deleted in the
+    # slow-bucket prune: D=3 is covered by the full-support test here and, at
+    # the energy level, by test_ctm_chi_truncation_policy_922.py.)
     "test_enlarged_corner_flow_invariant_834.py": "core",
-    # #905: the charged environment sectors themselves.  Two D=2 chi=8 CTM
-    # convergences (one symmetric, one dense) plus one RDM -- core budget; the
-    # chi-scan that needs chi=16 carries its own ``@pytest.mark.slow``.
+    # #905: the charged environment sectors themselves.  Two D=2 2-site CTM
+    # runs (one symmetric, one dense) at chi=D**2=4, 2 sweeps -- the defect is
+    # structural, and still caught there (2026-10-26 trim: ~9 min -> ~1 min
+    # locally, cold cache) -- plus one RDM, and the 1-site
+    # ``ctm_tensor`` sym==dense + RDM-positivity anchor that replaced #853's
+    # D=3 control (~95 s, compile-bound).  (The slow chi-flatness scan was
+    # deleted in the slow-bucket prune: parity is the guard, and
+    # test_ctm_chi_truncation_policy_922.py pins D=3 chi=16 parity to 1e-9.)
     "test_ctm_charged_sectors_905.py": "core",
     # #957: complex cotangents fed unconjugated to Optax — the optimizer
     # ASCENDED on complex tensors and the result depended on the initial
@@ -472,16 +494,12 @@ _FILE_MARKERS = {
     # gate; the fixture is an exact D=chi=1 product state, ~15s for all nine
     # cases with in-process compile sharing.
     "test_ipeps_optimize_complex_grads_957.py": "core",
-    # #853's severity-attribution control, relocated out of the deleted #610
-    # prototype suite (review of #959): the only PSD-and-attainable-energy
-    # check on the plain symmetric U(1)-Sz CTM path.  One D=3 chi=12
-    # convergence at ~44 min cold -- far too expensive for the gate, and
-    # "algorithm" is currently aspirational: the fast-other bucket has hit the
-    # 6h job limit on every run since at least 2026-09-03 (#960), so nothing
-    # this deep in it executes.  Registered here so the control survives in
-    # the tree and runs the day #960 is fixed, not as a claim that it runs
-    # today.
-    "test_ctm_symmetric_rdm_positive_853.py": "algorithm",
+    # (test_ctm_symmetric_rdm_positive_853.py, the #853 control -- one D=3
+    # chi=12 1-site symmetric CTM at ~96 min in the slow bucket -- was deleted
+    # in the slow-bucket prune.  Its claim is carried by sym==dense energy
+    # parity: test_ctm_charged_sectors_905.py (core, 2-site D=2, plus a 1-site
+    # ``ctm_tensor`` D=2 chi=8 parity + RDM-positivity anchor) and
+    # test_ctm_chi_truncation_policy_922.py (slow, D=3 chi=16, 1e-9).)
     "test_ctm_chi_truncation_policy_922.py": "core",
     "test_ctm_traced_chi_inventory_929.py": "core",
     "test_integration_regression.py": "algorithm",
@@ -596,6 +614,9 @@ _FILE_MARKERS = {
     "test_showcase_scaling.py": "algorithm",
     "test_heisenberg_d4_chi_scaling.py": "algorithm",
     "test_heisenberg_d8_chi_scaling.py": "algorithm",
+    # Multi-GPU dense CTM parity on fake CPU devices.  Dense multi-GPU CTM is
+    # deferred post-1.0 (#632), so the file is ``diagnostic`` (module-level
+    # ``pytestmark``): ``slow`` here, skipped unless TENAX_RUN_DIAGNOSTIC=1.
     "test_ctm_sharding_parity.py": "slow",
     # Chunked dense-CTM edge absorption (chunk x shard #632 Increment 1): fast
     # mechanism unit tests; collected as core so CI required checks run them.
@@ -654,18 +675,20 @@ _FILE_MARKERS = {
     "test_regularized_qr.py": "core",
     "test_varipeps_compare_payload.py": "core",
     #
-    # Tier A, part 2: every test in these 7 already carries an explicit
+    # Tier A, part 2: every test in these already carries an explicit
     # ``@pytest.mark.slow``, and ``pytest_collection_modifyitems`` deliberately
     # withholds ``core`` from a slow-marked test -- so no bucket here can add
     # anything to the gate.  ``slow`` is simply the honest label: they run in
-    # the ``slow`` CI bucket today and continue to.
-    "test_ctm_honeycomb_lukin_sotnikov.py": "slow",
-    "test_ctm_multisite_2x2_contract.py": "slow",
+    # the ``slow`` CI bucket today and continue to.  (Four former members were
+    # deleted in the slow-bucket prune: the two kagome/honeycomb files that
+    # could not fail -- always skipped -- the permanently skipped PESS
+    # honeycomb placeholder, and the deprecated-``1x1`` split production run.)
     "test_ctm_recipe_2x2_production_correctness.py": "slow",
     "test_optimize_gs_ad_chi_schedule_unified.py": "slow",
-    "test_pess_ad_honeycomb.py": "slow",
+    # ``slow`` keeps it out of the gate and fast-other; its module-level
+    # ``pytestmark = pytest.mark.diagnostic`` skips it unless
+    # TENAX_RUN_DIAGNOSTIC=1 -- a tracemalloc budget is a measurement.
     "test_split_ctm_large_d_memory.py": "slow",
-    "test_split_ctm_production_correctness.py": "slow",
     #
     # Tier B, part 1 -- decomposition adjoints, linear solvers, line search
     # (9 files, +66 gate tests, +38 s marginal).  This is the class
@@ -742,10 +765,10 @@ _FILE_MARKERS = {
     "test_ctm_honeycomb_projector.py": "core",  # 7.9s / 10
     # slow: >150s with no self-declared slow marks, so the whole file
     # runs only in the slow bucket rather than bloating fast-other (#960).
-    "test_split_ctm_chi_frozen_726.py": "slow",  # 164s / 9
-    "test_ctm_670_symmetric_2x2.py": "slow",  # 267s / 2
-    "test_ctm_700_env_collapse.py": "slow",  # 102s local 2-core / 1 (was ~2.5h/chi on CI x5)
-    "test_pess_3site_multisite_rdm_invariants.py": "slow",  # 375s / 7
+    # (Second figures: local CPU after the slow-bucket prune, #1149.)
+    "test_split_ctm_chi_frozen_726.py": "slow",  # 164s / 9 -> 54s / 2
+    "test_ctm_670_symmetric_2x2.py": "slow",  # 267s / 2 -> 197s / 2
+    "test_pess_3site_multisite_rdm_invariants.py": "slow",  # 375s / 7 -> 335s / 6
     # algorithm: moderate cost; runs push-to-main + nightly.
     "test_ctm_honeycomb_ad.py": "algorithm",  # 15.2s / 2
     "test_ctm_honeycomb_convergence.py": "algorithm",
@@ -770,9 +793,8 @@ _FILE_MARKERS = {
     "test_ipeps_history_lengths_1082.py": "algorithm",
     "test_ctm_warning_dedupe_1083.py": "algorithm",
     "test_ipeps_checkpoint_resume.py": "algorithm",  # 134s / 6
-    "test_ipeps_u1sz.py": "algorithm",  # has a slow-marked case
+    "test_ipeps_u1sz.py": "algorithm",
     "test_metric_precond.py": "algorithm",  # 59s / 9
-    "test_profiler_u1sz_arm.py": "algorithm",
     "test_reduced_corner_qr.py": "algorithm",
     "test_split_ctm_energy_gauge.py": "algorithm",
     "test_sublattice_rotation.py": "algorithm",  # 89s / 24
@@ -884,6 +906,22 @@ def pytest_collection_modifyitems(items):
         if marker == "core" and item.get_closest_marker("slow") is not None:
             continue
         item.add_marker(getattr(pytest.mark, marker))
+
+    # ``diagnostic`` is opt-in, not a bucket: measurements, research findings
+    # and acceptance sweeps of engines that are not shipped yet.  They pin no
+    # promise the library makes to users, so no CI job runs them; they are
+    # skipped (not deselected) so ``-m slow`` still shows them as present.
+    # Every diagnostic test also carries ``slow`` (explicitly, or through its
+    # file's ``"slow"`` registry entry), which keeps it out of ``-m core`` and
+    # ``-m "not core and not slow"`` even when the variable is set.
+    if os.environ.get("TENAX_RUN_DIAGNOSTIC") != "1":
+        skip_diagnostic = pytest.mark.skip(
+            reason="diagnostic test (measurement / research finding / unshipped "
+            "engine); set TENAX_RUN_DIAGNOSTIC=1 to run it"
+        )
+        for item in items:
+            if item.get_closest_marker("diagnostic") is not None:
+                item.add_marker(skip_diagnostic)
 
 
 # ------------------------------------------------------------------ #

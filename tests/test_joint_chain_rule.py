@@ -113,11 +113,11 @@ def test_auto_runs_joint_and_shares_its_programs():
     g_auto = _grad(A0, "auto")
     traced = set(_TRACED[mark:])
     assert "_jit_chain_rule" not in traced, sorted(traced)
-    assert {"_jit_gmres_joint_solve", "_jit_direct"} <= traced, sorted(traced)
+    assert {"_jit_joint_adjoint_solve", "_jit_direct"} <= traced, sorted(traced)
     mark = len(_TRACED)
     g_joint = _grad(A0, "joint")
     assert len(cea._VJP_CACHE) == 1, list(cea._VJP_CACHE)
-    assert not set(_TRACED[mark:]) & {"_jit_gmres_joint_solve", "_jit_direct"}
+    assert not set(_TRACED[mark:]) & {"_jit_joint_adjoint_solve", "_jit_direct"}
     # Not bit-equal: the shared entry warm-starts the second solve from the
     # first one's lambda (#501), so they agree to the solve tolerance.
     np.testing.assert_allclose(
@@ -164,6 +164,9 @@ def test_joint_gmres_matches_separate_complex():
     g_sep = _grad(A0, "separate", method="gmres")
     g_joint = _grad(A0, "joint", method="gmres")
     assert g_joint.dtype == jnp.complex128
+    # assert_allclose passes on two NaN gradients (equal_nan); this test also
+    # stands in for the deleted test_complex128_ad 1-site finiteness check.
+    assert np.all(np.isfinite(np.asarray(g_joint)))
     np.testing.assert_allclose(
         np.asarray(g_joint), np.asarray(g_sep), rtol=1e-12, atol=1e-14
     )
@@ -189,7 +192,7 @@ def test_joint_gmres_never_traces_the_separate_chain_rule():
     _grad(_site(_FUSED_SEED), "joint", method="gmres")
     traced = set(_TRACED[mark:])
     assert "_jit_chain_rule" not in traced, sorted(traced)
-    assert {"_jit_gmres_joint_solve", "_jit_direct"} <= traced, sorted(traced)
+    assert {"_jit_joint_adjoint_solve", "_jit_direct"} <= traced, sorted(traced)
 
 
 @pytest.mark.usefixtures("fresh_vjp_cache")
@@ -198,7 +201,7 @@ def test_separate_gmres_never_traces_the_joint_programs():
     _grad(_site(_FUSED_SEED), "separate", method="gmres")
     traced = set(_TRACED[mark:])
     assert "_jit_chain_rule" in traced
-    assert not traced & {"_jit_gmres_joint_solve", "_jit_direct", "_jit_apply_joint"}
+    assert not traced & {"_jit_joint_adjoint_solve", "_jit_direct", "_jit_apply_joint"}
 
 
 # ------------------------------------------------------- fused fixed point
@@ -287,46 +290,19 @@ def test_joint_fused_and_fallback_never_trace_the_separate_chain_rule():
     assert d.get("diverged") or not d.get("converged"), "premise: fallback ran"
     traced = set(_TRACED[mark:])
     assert "_jit_chain_rule" not in traced, sorted(traced)
-    assert {"_jit_gmres_joint_solve", "_jit_direct"} <= traced, sorted(traced)
-
-
-@pytest.mark.slow
-def test_joint_fused_matches_separate_u1():
-    """Block-sparse params: the cotangent is a SymmetricTensor pytree carried
-    through the GMRES loop.  Trivial-charge U(1) fixture of
-    tests/test_block_sparse_ctm_ad.py (one block, full block-sparse path)."""
-    from tests.test_block_sparse_ctm_ad import _make_u1_symmetric_ipeps
-
-    A_sym = _make_u1_symmetric_ipeps()
-
-    def grad(mode):
-        return jax.grad(
-            lambda A: jnp.real(
-                ctm_energy_implicit(
-                    {(0, 0): A},
-                    SINGLE_SITE_NEIGHBORS,
-                    _GATE,
-                    chi=4,
-                    max_iter=30,
-                    conv_tol=1e-8,
-                    gmres_tol=1e-11,
-                    adjoint_chain_rule=mode,
-                )
-            )
-        )(A_sym)
-
-    g_sep, g_joint = grad("separate"), grad("joint")
-    assert type(g_joint) is type(g_sep)
-    np.testing.assert_allclose(
-        np.asarray(g_joint._data), np.asarray(g_sep._data), rtol=1e-10, atol=1e-12
-    )
+    assert {"_jit_joint_adjoint_solve", "_jit_direct"} <= traced, sorted(traced)
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("method", ["gmres", "fixed_point"])
 def test_joint_matches_separate_u1_multiblock(method):
     """Multi-block U(1) site, built as benchmarks/bench_chain_rule_compile.py
-    ``_site(2, "u1", 0)`` does (copied: ``benchmarks`` is not a package)."""
+    ``_site(2, "u1", 0)`` does (copied: ``benchmarks`` is not a package).
+
+    The block-sparse cotangent pytree carried through the GMRES loop is
+    exercised here on a real multi-block site; the trivial-charge (one block)
+    U(1) twin this file used to carry was a strict subset of it and was
+    removed in the slow-bucket prune (#1149)."""
     from tenax.algorithms.ipeps import (
         heisenberg_gate_u1sz,
         heisenberg_u1sz_init_pair,
@@ -364,6 +340,7 @@ def test_joint_matches_separate_u1_multiblock(method):
     if method == "fixed_point":
         _fused_premise()
     assert type(g_joint) is type(g_sep)
+    assert np.all(np.isfinite(np.asarray(g_joint._data)))  # equal_nan below
     np.testing.assert_allclose(
         np.asarray(g_joint._data),
         np.asarray(g_sep._data),

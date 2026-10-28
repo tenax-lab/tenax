@@ -513,30 +513,6 @@ class TestIPEPS2Site:
             f"E < -0.60 even through the unconverged 2-site CTM"
         )
 
-    @pytest.mark.slow
-    def test_2site_heisenberg_D4_energy(self, heisenberg_gate):
-        """2-site D=4 iPEPS smoke test on the energy ``ipeps()`` reports.
-
-        Same framing as the D=2 case above: dt moved from 0.3 to a physical step
-        (#667), and the bound is loose because ``ctm_2site`` does not converge
-        on the resulting state -- measured -0.6350 here against the -0.6674 a
-        converged 1x1 CTM gives for the same state, which *is* the "literature
-        ~-0.667" this test used to claim.  That claim is asserted properly in
-        ``test_su_667_product_state.py::test_d4_beats_d2``.
-        """
-        config = iPEPSConfig(
-            max_bond_dim=4,
-            num_imaginary_steps=400,
-            dt=0.05,
-            ctm=CTMConfig(chi=20, max_iter=60),
-            unit_cell="2site",
-        )
-        energy, _, _ = ipeps(heisenberg_gate, None, config)
-        assert float(energy) < -0.60, (
-            f"Energy {float(energy)} not low enough — D=4 iPEPS should give "
-            f"E < -0.60 even through the unconverged 2-site CTM"
-        )
-
     def test_2site_with_initial_peps(self, heisenberg_gate):
         """2-site iPEPS should accept initial (A, B) tuple."""
         D, d = 2, 2
@@ -833,7 +809,6 @@ class TestOptimizeGsAd2Site:
         assert abs(A_norm - 1.0) < 1e-4, f"||A_opt|| = {A_norm}, expected ~1.0"
         assert abs(B_norm - 1.0) < 1e-4, f"||B_opt|| = {B_norm}, expected ~1.0"
 
-    @pytest.mark.slow
     def test_tangent_project_unit_complex_is_hermitian(self):
         """Regression for PR #330 review: _tangent_project_unit must use
         the Hermitian inner product (vdot) so complex-valued tensors get

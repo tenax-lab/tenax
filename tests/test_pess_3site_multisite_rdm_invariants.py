@@ -82,8 +82,14 @@ def _contract_multisite_3x3_torus(sites: dict[str, jnp.ndarray]) -> jnp.ndarray:
 # in the merge gate.  They are oracle checks against exact contraction, so
 # their value is catching a wrong answer, not catching it *fast*; the full
 # suite (push to main, ``run-full-tests`` label, nightly) is the right cadence.
+#
+# Slow-bucket prune (#1149): the translation check runs at D in (1, 2) only (an
+# encoding bug is visible at D=1; D=3 added size, not coverage), and
+# ``test_brute_force_rdm_is_physical`` was removed -- Hermitian / trace-1 / PSD
+# of an RDM traced from an exact pure state is a numpy identity and tested
+# nothing in tenax.
 @pytest.mark.slow
-@pytest.mark.parametrize("D", [1, 2, 3])
+@pytest.mark.parametrize("D", [1, 2])
 def test_multisite_3x3_torus_translation_invariant_diagonal(D):
     """ψ on the 3×3 PBC torus must be invariant under the (1,-1) diagonal
     shift: this preserves the (x+y) mod 3 sublattice assignment, so a
@@ -158,41 +164,6 @@ def _brute_force_rdm_from_torus_psi(
     k = len(sites_to_keep)
     perm = tuple(perm_ket) + tuple(p + k for p in perm_ket)
     return jnp.transpose(rho, perm)
-
-
-@pytest.mark.slow  # brute-force oracle; see the note above
-@pytest.mark.parametrize("D", [1, 2, 3])
-def test_brute_force_rdm_is_physical(D):
-    """Brute-force RDMs from the 3×3 torus ψ must be Hermitian, trace 1, PSD."""
-    state = IPESSState.random(D=D, d=2, key=jax.random.PRNGKey(0))
-    sites = pess_to_kagome_3site_multisite(
-        state.R_a,
-        state.R_b,
-        state.R_c,
-        state.T_u,
-        state.T_d,
-        state.lambdas,
-    )
-    psi = _contract_multisite_3x3_torus(sites)
-    d = 2
-
-    failures: list[str] = []
-    for sites_to_keep in [(0, 1), (0, 3), (2, 0), (2, 5), (1, 2), (3, 6)]:
-        rho_t = _brute_force_rdm_from_torus_psi(psi, sites_to_keep)
-        k = len(sites_to_keep)
-        rho = jnp.reshape(rho_t, (d**k, d**k))
-
-        err_h = float(jnp.linalg.norm(rho - jnp.conj(rho.T)))
-        if err_h >= 1e-10:
-            failures.append(f"sites={sites_to_keep}: not Hermitian, ‖ρ-ρ†‖={err_h:.3e}")
-        tr = complex(jnp.trace(rho))
-        if abs(tr - 1.0) >= 1e-10:
-            failures.append(f"sites={sites_to_keep}: trace ≠ 1, tr={tr}")
-        eig = np.linalg.eigvalsh(np.asarray(rho))
-        if eig.min() <= -1e-10:
-            failures.append(f"sites={sites_to_keep}: not PSD, λ_min={eig.min():.3e}")
-
-    assert not failures, f"D={D} failures:\n  " + "\n  ".join(failures)
 
 
 def _collect_ctm_rdms(

@@ -32,18 +32,33 @@ charged products from the first absorption sweep — and the energy guard is a
 same-budget PARITY between the symmetric and dense paths, not an absolute
 value.  Scanned before freezing the budget (2026-09-10, this box):
 
-    max_iter   sym-vs-dense gap   charged  dead  rank>n_q0
-    60         2.2e-08            2        0     8>4
-    20         8.3e-07            2        0     8>4
-    10         7.4e-06            2        0     8>4
-    6          2.3e-05            2        0     8>4
+    chi  max_iter   sym-vs-dense gap   charged  dead  rank>n_q0
+    8    60         2.2e-08            2        0     8>4
+    8    20         8.3e-07            2        0     8>4
+    8    10         7.4e-06            2        0     8>4
+    8    6          2.3e-05            2        0     8>4
 
-Every structural signal is budget-invariant, and the parity gap stays two
-orders of magnitude inside the 5e-3 tolerance (four inside the 0.16 defect)
-at every point of the scan.  ``_MAX_ITER`` below picks the scan point with a
-3x margin to the tolerance-relevant one; the absolute-convergence oracle
-(flatness in chi) lives in the ``slow`` test, unchanged, where convergence is
-genuinely the property under test.
+Every structural signal is budget-invariant.  The cost is the block-sparse
+compile of each new sector layout (~20 s per sweep here), not the sweeps, so
+the test-trim pass (2026-10-26) re-scanned the cheap end, cold JAX cache,
+together with the #905 defect re-introduced (the ``_flow_flip_no_conj`` of
+``P_un`` put back in ``_apply_proj_unfused``):
+
+    chi  max_iter   gap      dead  rank>n_q0   with the defect: gap  dead  rank
+    8    3          4.5e-05  0     8>4                           -     -     -
+    8    2          2.2e-04  0     7>4                         1.2e-02  2   4==4
+    4    3          1.1e-16  0     4>2                           -     -     -
+    4    2          0.0      0     4>2                         1.1e-02  2   2==2
+
+``chi=4`` is ``D**2``, so the two-sweep environment is untruncated and the two
+paths agree exactly, while the defect still kills both charged C1 blocks and
+misses by ~1e-2 (above the 5e-3 guard and two orders above the 1e-4 regime
+pin).  ``chi=8, max_iter=2`` would trip the regime pin (2.2e-04), which is why
+the 2-site guards run at ``_CHI_2SITE=4``: 43 s symmetric instead of the
+~6 minutes ``chi=8, max_iter=20`` cost.  (A slow flatness-in-chi scan used to
+live here too; it was the diagnostic, not the guard, and was deleted in the
+slow-bucket prune -- ``test_ctm_chi_truncation_policy_922.py`` pins converged
+D=3 chi=16 parity to 1e-9, which no confined environment can satisfy.)
 """
 
 from __future__ import annotations
@@ -52,11 +67,14 @@ import jax
 import numpy as np
 import pytest
 
-# See the module docstring's scan table before changing either number.  The
+# See the module docstring's scan tables before changing any of these.  The
 # conv_tol is unreachable at this max_iter by design: the budget is the
 # max_iter, and both paths run the SAME budget, which is what makes the
 # energy comparison a parity rather than a convergence claim.
-_MAX_ITER = 20
+_MAX_ITER = 2
+#: The 2-site guards' chi (``D**2``; see the second scan table).
+_CHI_2SITE = 4
+#: The 1-site anchor's chi.
 _CHI = 8
 
 
@@ -87,10 +105,10 @@ def swept_envs():
     from tenax.core.tensor import DenseTensor
 
     A, B = _pair()
-    envA, envB = _converge(A, B, chi=_CHI)
+    envA, envB = _converge(A, B, chi=_CHI_2SITE)
     Ad = DenseTensor(A.todense(), A.indices)
     Bd = DenseTensor(B.todense(), B.indices)
-    envAd, envBd = _converge(Ad, Bd, chi=_CHI)
+    envAd, envBd = _converge(Ad, Bd, chi=_CHI_2SITE)
     return A, B, envA, envB, Ad, Bd, envAd, envBd
 
 
@@ -126,12 +144,12 @@ def test_swept_corner_has_non_zero_charged_blocks(swept_envs):
 def test_symmetric_energy_matches_the_dense_reference(swept_envs):
     """``DenseTensor`` contraction ignores flow, so E_dense is the ground truth.
 
-    The symmetric and dense paths are not expected to agree bit-for-bit — the
-    block-sparse SVD allocates chi per charge sector rather than taking a global
-    top-chi — but a confined environment misses by ~0.16, two orders of
-    magnitude above the tolerance here, which itself sits three orders above
-    the measured same-budget gap (8.3e-07 at ``_MAX_ITER=20``; scan table in
-    the module docstring).
+    The symmetric and dense paths are not expected to agree bit-for-bit once
+    the cut truncates — the block-sparse SVD allocates chi per charge sector
+    rather than taking a global top-chi — but a confined environment misses by
+    ~0.16 at convergence (1.1e-02 at this fixture's two-sweep budget, still
+    above the 5e-3 tolerance), while the measured same-budget gap here is 0.0
+    (``chi = D**2`` is untruncated; scan tables in the module docstring).
     """
     from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor_2site
     from tenax.algorithms.ipeps import heisenberg_gate
@@ -151,35 +169,94 @@ def test_symmetric_energy_matches_the_dense_reference(swept_envs):
     # it means the fixture drifted (different budget, different init) rather
     # than that the guard is comfortably green (#884's fixture lesson).
     assert abs(E_sym - E_dense) < 1e-4, (
-        f"gap {abs(E_sym - E_dense):.3e} is an order above the measured "
-        "regime (8.3e-07); the fixture or budget drifted — re-run the scan "
+        f"gap {abs(E_sym - E_dense):.3e} is far above the measured "
+        "regime (0.0); the fixture or budget drifted — re-run the scan "
         "in the module docstring before touching the 5e-3 guard."
     )
 
 
-@pytest.mark.slow
-def test_the_symmetric_energy_still_moves_with_chi():
-    """Flatness in chi was the diagnostic that the sectors were dead.
+# --------------------------------------------------------------------------- #
+# The 1-site ``ctm_tensor`` path (the #853 control's subject)                   #
+# --------------------------------------------------------------------------- #
 
-    A confined environment has nothing left to resolve, so raising chi changes
-    the energy by less than 1e-10.  A live one behaves like the dense path and
-    keeps moving.  Convergence is genuinely the property under test here, so
-    this keeps its own full-budget sweeps and stays ``slow``.
+#: ``compute_energy_ctm_tensor`` returns ``E_h + E_v`` for ``H = S_i . S_j``
+#: (eigenvalues -3/4 and +1/4), so any genuine expectation value lies in
+#: [-1.5, +0.5] however poorly converged the environment is.
+_E_ATTAINABLE = (-1.5, 0.5)
+
+#: Same-budget sweeps for the 1-site anchor.  Measured sym-vs-dense gap
+#: (2026-10-26, CPU): 2.4e-09 at 3 sweeps, 6.2e-11 at 6, 5.6e-17 at 20 -- all
+#: far inside the 1e-6 tolerance, which is itself far inside the ~0.16 #905
+#: miss.  The cost is the block-sparse compile of each new sector layout
+#: (70 s / 94 s / 120 s symmetric at 3 / 6 / 20 sweeps), so keep it small.
+_SINGLE_SITE_SWEEPS = 4
+
+
+def _rdm_min_eig_rel(rdm) -> float:
+    """Smallest eigenvalue of a trace-normalised RDM, over its spectral radius."""
+    M = np.asarray(rdm)
+    M = M.reshape(M.shape[0] * M.shape[1], -1)
+    M = M / np.trace(M)
+    w = np.linalg.eigvalsh(0.5 * (M + M.conj().T))
+    return float(w.min()) / max(float(np.max(np.abs(w))), 1e-300)
+
+
+def test_the_single_site_symmetric_ctm_matches_dense_and_keeps_the_rdm_a_state():
+    """1-site ``ctm_tensor`` on a charged U(1)-Sz site: sym == dense, RDMs PSD.
+
+    The tests above run ``ctm_tensor_2site``; this is the same guard on the
+    1-site entry point, which the #853 control (deleted in the slow-bucket
+    prune: one D=3 chi=12 run, ~96 min of slow-bucket time) was the only test
+    of on a *charged* site -- the other 1-site sym-vs-dense checks
+    (``test_ctm_tensor.py``, ``test_block_sparse_ctm_ad.py``) use trivial
+    charges, i.e. a single block, which cannot drop a sector.
+
+    Same-budget PARITY, as above: both paths run ``_SINGLE_SITE_SWEEPS`` sweeps
+    at chi=8, so the comparison does not depend on reaching a fixed point (the
+    sector annihilation #905 fixed is structural from the first absorption).
+    The #905 defect missed by ~0.16, so the 1e-6 tolerance is loose against
+    roundoff and tight against any dropped sector.  The RDM-positivity and
+    attainable-energy assertions are #853's: an inaccurate environment still
+    yields a density matrix, a block-pairing defect does not.
     """
-    from tenax.algorithms._ctm_tensor import compute_energy_ctm_tensor_2site
-    from tenax.algorithms.ipeps import heisenberg_gate
+    from tenax import compute_energy_ctm_tensor
+    from tenax.algorithms._ctm_diagnostics import ctm_corner_rank
+    from tenax.algorithms._ctm_tensor import ctm_tensor
+    from tenax.algorithms._ctm_tensor_energy import _rdm1x2_tensor, _rdm2x1_tensor
+    from tenax.algorithms.ipeps import heisenberg_gate_u1sz
+    from tenax.core.tensor import DenseTensor, SymmetricTensor
 
-    A, B = _pair()
-    gate = heisenberg_gate().todense()
+    A, _B = _pair()
+    assert isinstance(A, SymmetricTensor) and len(A.blocks) > 1, "not charged"
+    gate = heisenberg_gate_u1sz()
 
-    energies = []
-    for chi in (8, 16):
-        envA, envB = _converge(A, B, chi=chi, max_iter=60)
-        energies.append(
-            float(compute_energy_ctm_tensor_2site(A, B, envA, envB, gate, d=2))
-        )
+    n = _SINGLE_SITE_SWEEPS
+    env, _ = ctm_tensor(A, chi=_CHI, max_iter=n, conv_tol=1e-10)
+    Ad = DenseTensor(A.todense(), A.indices)
+    env_d, _ = ctm_tensor(Ad, chi=_CHI, max_iter=n, conv_tol=1e-10)
 
-    assert abs(energies[1] - energies[0]) > 1e-9, (
-        f"symmetric energy is flat in chi: {energies} — the environment is "
-        "confined to the q=0 sector (#905)."
+    # Regime: a charged, non-collapsed environment (#723, #905).
+    assert isinstance(env.C1, SymmetricTensor)
+    chi_charges = set(np.asarray(env.C1.indices[0].charges).tolist())
+    assert chi_charges - {0}, f"chi bond carries only q=0: {chi_charges}"
+    assert ctm_corner_rank(env) > 1, "collapsed to a rank-1 corner (#723)"
+
+    E_sym = float(compute_energy_ctm_tensor(A, env, gate))
+    E_dense = float(compute_energy_ctm_tensor(Ad, env_d, gate))
+    assert abs(E_sym - E_dense) < 1e-6, (
+        f"1-site E_sym={E_sym!r} vs E_dense={E_dense!r} "
+        f"(gap {abs(E_sym - E_dense):.3e}): the symmetric CTM drops weight "
+        "the flow-insensitive dense contraction keeps (#905 class)."
     )
+    lo, hi = _E_ATTAINABLE
+    assert lo <= E_sym <= hi, f"E_sym={E_sym} is not attainable by any state (#853)"
+
+    for name, rdm in (
+        ("2x1 horizontal", _rdm2x1_tensor(A, env)),
+        ("1x2 vertical", _rdm1x2_tensor(A, env)),
+    ):
+        min_eig = _rdm_min_eig_rel(rdm)
+        assert min_eig >= -1e-8, (
+            f"the {name} RDM of the symmetric 1-site CTM reaches {min_eig:.4e} "
+            "of its spectral radius below zero: not a density matrix (#853)."
+        )

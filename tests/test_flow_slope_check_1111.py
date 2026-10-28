@@ -15,7 +15,6 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 import tenax.algorithms._ctm_energy_ad as cea
 from tenax.algorithms._ctm_energy_ad import (
@@ -47,7 +46,7 @@ def _pair_params(D=2, seed=0):
     return (jnp.asarray(A.todense()), jnp.asarray(B.todense()))
 
 
-def _pair_energy(p, *, chi=8, max_iter=20, pb="flow"):
+def _pair_energy(p, *, chi=8, max_iter=20, pb="flow", gmres_restart=30):
     return jnp.real(
         ctm_energy_implicit(
             {(0, 0): _wrap_as_dense_tensor(p[0]), (1, 0): _wrap_as_dense_tensor(p[1])},
@@ -59,6 +58,7 @@ def _pair_energy(p, *, chi=8, max_iter=20, pb="flow"):
             forward_gauge="bond_phase",
             conv_method="elementwise",
             projector_backward=pb,
+            gmres_restart=gmres_restart,
         )
     )
 
@@ -107,15 +107,22 @@ def test_slope_check_rejects_the_1028_flow_gradient():
     # The rejection depends on the dense wrapping of the #1028 pair: with raw
     # SymmetricTensor params the same fixture keeps flow (r = 0.746, FD errors
     # 35%/37% vs frozen's 13%/4%) -- the check catches gross errors only.
+    #
+    # Restart 60, not the default 30: the forward is not converged, so its
+    # state depends on round-off, and on some states (the macos-26-arm64
+    # runner's, |J^T| ~ 9e3) GMRES(30) stagnates by chance -- a 1e-13 change
+    # of the right-hand side flips it between 9e-7 and 6e-4, in either solver
+    # (#1153, diagnosed on #1156).  The flow solve then fails before the
+    # slope check runs.  Restart 45 and 60 did not stall in 12 tries each.
     p = _pair_params()
-    g, d = _grad(_pair_energy, p)
+    g, d = _grad(_pair_energy, p, gmres_restart=60)
     assert d["forward_stationarity_residual"] > d["forward_stationarity_threshold"], (
         "premise"
     )
     assert d["projector_backward_used"] == "frozen_fallback", d
     assert "slope check" in d["flow_fallback_reason"], d["flow_fallback_reason"]
     assert d["flow_slope_ratio"] < 0.5, d["flow_slope_ratio"]
-    g_frozen, _ = _grad(_pair_energy, p, pb="auto")
+    g_frozen, _ = _grad(_pair_energy, p, pb="auto", gmres_restart=60)
     for a, b in zip(jax.tree.leaves(g), jax.tree.leaves(g_frozen)):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-12)
 
@@ -307,19 +314,6 @@ def test_slope_check_keeps_flow_for_complex_params():
     )
     assert d["projector_backward_used"] == "flow", d
     assert 0.5 <= d["flow_slope_ratio"] <= 2.0, d["flow_slope_ratio"]
-
-
-@pytest.mark.slow
-def test_slope_check_rejects_the_d3_chi12_flow_gradient():
-    """The hole #1111 found on main: D=3 chi=12 flow gradient 86x off FD,
-    r = 0.002."""
-    _, d = _grad(_pair_energy, _pair_params(D=3), chi=12)
-    assert d["forward_stationarity_residual"] > d["forward_stationarity_threshold"], (
-        "premise"
-    )
-    assert d["projector_backward_used"] == "frozen_fallback", d
-    assert "slope check" in d["flow_fallback_reason"], d
-    assert d["flow_slope_ratio"] < 0.5
 
 
 def _single_energy_with(p, *, gate=_H1, env_init=None):

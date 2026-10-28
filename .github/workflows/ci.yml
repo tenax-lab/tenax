@@ -76,17 +76,14 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
-          # uv.lock is gitignored in this repo, so the action's default
-          # ``**/uv.lock`` glob would match nothing and the cache would never
-          # invalidate; key on pyproject.toml instead.
           enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
+          cache-dependency-glob: "uv.lock"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       # tenax enables JAX's persistent compile cache (~/.cache/jax, see
       # src/tenax/__init__.py) but CI never restored it, so every run compiled
@@ -298,17 +295,14 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
-          # uv.lock is gitignored in this repo, so the action's default
-          # ``**/uv.lock`` glob would match nothing and the cache would never
-          # invalidate; key on pyproject.toml instead (same as the gate).
           enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
+          cache-dependency-glob: "uv.lock"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       # Same lever as the gate's cache step (see the ``test`` job): tenax
       # writes JAX's persistent compile cache to ~/.cache/jax on every
@@ -444,7 +438,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Run core tests (fallback path)
         env:
@@ -511,16 +505,14 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
-          # Same rationale as the ubuntu job: uv.lock is gitignored, so key
-          # the package cache on pyproject.toml.
           enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
+          cache-dependency-glob: "uv.lock"
 
       - name: Set up Python 3.12
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       # See the ubuntu job for sizing; keyed by runner.os because jaxlib's
       # compiled artifacts differ per platform.
@@ -628,7 +620,7 @@ jobs:
         run: uv python install 3.11
 
       - name: Install dependencies
-        run: uv sync --python 3.11 --extra dev
+        run: uv sync --locked --python 3.11 --extra dev
 
       - name: Pin JAX
         env:
@@ -696,7 +688,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --extra docs --dev
+        run: uv sync --locked --extra docs --dev
 
       - name: Build docs (warnings as errors)
         run: uv run sphinx-build -W -b html docs docs/_build/html

@@ -53,8 +53,13 @@ from tenax.core.tensor import SymmetricTensor
 jax.config.update("jax_enable_x64", True)
 
 # 2x2 is the required-gate case (~1 s each); 2x3 adds a second plaquette and a
-# 2^20-dim Fock space (~20 s per test), so it runs in the slow bucket.
-CLUSTERS = [(2, 2), pytest.param(2, 3, marks=pytest.mark.slow)]
+# 2^20-dim Fock space (~20 s per test), so it runs in the slow bucket -- and,
+# since the slow-bucket prune (#1149), only on the two tests that run tenax
+# code (the derived local rule and the tenax double layer: the multi-loop sign
+# structure #1037 is about).  The oracle's own self-checks (closed form,
+# fermion/boson separation, variational floor) stay at 2x2.
+ORACLE_CLUSTERS = [(2, 2)]
+CLUSTERS = [*ORACLE_CLUSTERS, pytest.param(2, 3, marks=pytest.mark.slow)]
 
 
 # ------------------------------------------------------------------ #
@@ -62,7 +67,7 @@ CLUSTERS = [(2, 2), pytest.param(2, 3, marks=pytest.mark.slow)]
 # ------------------------------------------------------------------ #
 
 
-@pytest.mark.parametrize("R,C", CLUSTERS)
+@pytest.mark.parametrize("R,C", ORACLE_CLUSTERS)
 def test_the_operator_algebra_matches_the_closed_form_on_every_configuration(R, C):
     """Two independent derivations of every sign, compared exhaustively."""
     sites, bonds = sites_of(R, C), bonds_of(R, C)
@@ -93,7 +98,8 @@ def test_the_operator_algebra_matches_the_closed_form_on_every_configuration(R, 
     "R,C,E_F,E_B",
     [
         (2, 2, -2.0, -2.0 * np.sqrt(2.0)),
-        pytest.param(2, 3, -3.414213562373095, -3.924681, marks=pytest.mark.slow),
+        # 2x3 (dropped in #1149, an oracle self-check): E_F = -3.414213562373095,
+        # E_B = -3.924681.
     ],
 )
 def test_the_clusters_separate_fermions_from_hard_core_bosons(R, C, E_F, E_B):
@@ -104,7 +110,7 @@ def test_the_clusters_separate_fermions_from_hard_core_bosons(R, C, E_F, E_B):
     assert E_F - E_B > 0.5
 
 
-@pytest.mark.parametrize("R,C", CLUSTERS)
+@pytest.mark.parametrize("R,C", ORACLE_CLUSTERS)
 def test_an_oracle_state_never_goes_below_the_fermionic_ground_state(R, C):
     E_F = ground_energy(R, C, fermion=True)
     rng = np.random.default_rng(0)

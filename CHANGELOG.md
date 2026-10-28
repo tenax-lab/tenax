@@ -646,6 +646,18 @@
 
 ### Fixed
 
+- **The eager CTM sweep no longer runs its pieces under `jax.jit` by default.**
+  #1142 jitted the static-shape pieces of an eager symmetric sweep.  That made
+  `test_ctm_symmetric_rdm_positive_853[20]` 5x faster (18 min vs 90 min) but
+  raised its peak RSS from 5.3 GB to 14.7 GB, which exhausts a 16 GB CI runner:
+  every later compile in the process failed with `LLVM compilation error:
+  Cannot allocate memory` / `Failed to materialize symbols` (and macOS runners
+  were OOM-killed, exit 137).  `_ctm_eager_jit._ENABLED` now defaults to
+  `False`, which is the pre-#1142 behaviour; it goes back on once that memory
+  is bounded.  `test_fermionic_eager_sweeps_match` also no longer compares a
+  chi cut that splits an exactly degenerate +q/-q pair (#1101), where the kept
+  member is decided by rounding.
+
 - **The joint chain rule's eager fallback logs again.**  When the fused
   fixed-point loop does not solve the adjoint, the `"joint"` branch (the
   default since `adjoint_chain_rule="auto"`, #1125) falls back to an eager GMRES
@@ -2041,6 +2053,37 @@
 
 ### CI / tests
 
+- **Slow-bucket prune: tests pin behaviour, not scaffolding.**  Deleted slow
+  tests whose claim a kept test asserts at least as strongly (the #853 D=3
+  control, the D=3 / chi-scan / one-step U(1)-Sz duplicates of the #922 and
+  #905 sym==dense parity anchors, the #834 D=3 call-site spy, the 1059 / 1111 /
+  block-sparse / DMRG3S / CBE / #865-mutation duplicates, the
+  deprecated-`1x1` split production run, the #566 stacked-backend profiler
+  file) and three files that could not fail (always skipped).  Demoted
+  measurements, research findings and the acceptance sweep of the unshipped
+  `ipeps_su` engine (`test_ipeps_su.py`, the symmetric-D=3 / fermionic cells
+  of `test_ipeps_gauge.py`, the #785 anti-correlation pin, the split-CG
+  memory budget, the fake-device sharding parity, the excitation benchmark)
+  to a new opt-in `diagnostic` marker, skipped unless `TENAX_RUN_DIAGNOSTIC=1`
+  (`TENAX_RUN_DIAGNOSTIC=1 pytest -m diagnostic`; it replaces
+  `RUN_EXCITATION_BENCH=1`).  Estimated saving ~15,300 s of slow-bucket CI
+  time (per-file max over the three platforms, summed).  One cheap anchor
+  replaces the #853 control: 1-site `ctm_tensor` sym==dense energy plus RDM
+  positivity on a charged U(1)-Sz site at D=2 chi=8
+  (`test_ctm_charged_sectors_905.py`, core, ~95 s).  A second pass trimmed 26
+  slow-bucket files to the behaviour they pin (duplicate cells, smoke tests
+  an FD/parity test implies, sweeps of PRNG keys and jitters, mutation
+  scaffolding, fixtures rebuilt per test; the #898 pair densified, the
+  `test_frozen_layout_ad.py` scripted re-check tests run on a stubbed CTM),
+  cutting the affected tests from 14,301 s to 5,802 s locally (CPU, one run
+  each) and the slow collection from 210 to 129 tests.  A third pass trimmed
+  15 core and fast-other files the same way (the #905 2-site guards and the
+  #834 strict sweep at chi=4, re-checked against the restored #905 defect;
+  `fuse_indices` checked against the dense reference instead of a copy of
+  its old implementation; shared fixtures for envs rebuilt per test; the
+  control-flow cells of the #1098 layout tests on U(1) only), cutting them
+  from 2,026 s to 1,055 s (core) and 5,358 s to 3,913 s (fast-other) locally,
+  cold compile cache; one graded-CTM parity check (~276 s) moved to slow.
 - **Removed two unfixable `recipe="1x1"` QR tests and added a duplicate-definition
   guard** (#931, #926).  `test_implicit_qr_gradient_matches_fd` failed
   intermittently on main CI (directional FD off by 0.364 against TOL 0.35,
