@@ -176,7 +176,7 @@ from tenax import ctm_tensor, ctm_tensor_c4v, compute_energy_ctm_tensor
 
 # A is an iPEPS site tensor (DenseTensor or SymmetricTensor)
 # with 5 legs (u, d, l, r, phys)
-env = ctm_tensor(A, chi=32, max_iter=100, conv_tol=1e-10)
+env, _ = ctm_tensor(A, chi=32, max_iter=100, conv_tol=1e-10)  # (env, max truncation error)
 E = compute_energy_ctm_tensor(A, env, hamiltonian_gate, d=2)
 
 # Or with C4v symmetry (1-site, no sublattice)

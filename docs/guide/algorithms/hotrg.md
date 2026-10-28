@@ -47,9 +47,10 @@ tensor = compute_ising_tensor(beta_c)
 config = HOTRGConfig(max_bond_dim=16, num_steps=20)
 log_Z_per_site = hotrg(tensor, config)
 
-exact = ising_free_energy_exact(beta_c)
-print(f"HOTRG log(Z)/N = {float(log_Z_per_site):.8f}")
-print(f"Exact          = {exact:.8f}")
+f_hotrg = float(-log_Z_per_site / beta_c)  # free energy per site, f = -ln(Z)/(N*beta)
+f_exact = ising_free_energy_exact(beta_c)
+print(f"HOTRG f = {f_hotrg:.8f}")
+print(f"Exact f = {f_exact:.8f}")
 ```
 
 ## TRG vs HOTRG

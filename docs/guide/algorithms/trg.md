@@ -49,9 +49,10 @@ config = TRGConfig(max_bond_dim=16, num_steps=20)
 log_Z_per_site = trg(tensor, config)
 
 # Compare with the exact Onsager solution
-exact = ising_free_energy_exact(beta_c)
-print(f"TRG  log(Z)/N = {float(log_Z_per_site):.8f}")
-print(f"Exact         = {exact:.8f}")
+f_trg = float(-log_Z_per_site / beta_c)  # free energy per site, f = -ln(Z)/(N*beta)
+f_exact = ising_free_energy_exact(beta_c)
+print(f"TRG   f = {f_trg:.8f}")
+print(f"Exact f = {f_exact:.8f}")
 ```
 
 ## Helper functions

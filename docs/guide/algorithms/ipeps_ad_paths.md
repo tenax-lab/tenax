@@ -507,7 +507,7 @@ config = iPEPSConfig(
     unit_cell="2site",
     gs_c4v=True,
 )
-_, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+_, _, E_gs = optimize_gs_ad(heisenberg_gate(), None, config)
 ```
 
 **Constraints:**
