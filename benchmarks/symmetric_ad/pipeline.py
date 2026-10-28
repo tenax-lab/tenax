@@ -81,6 +81,16 @@ BOUND_TOL = 1e-5
 # gmres_tol=1e-6 the adjoint residual (4e-6 on the Z2 chi=8 point) alone put
 # one direction 1.6e-6 (relative) off the converged FD.
 GRAD_GMRES_TOL = 1e-9
+# S5 CTM tolerance and exit test (user decision 2026-10-28).  At conv_tol=1e-10
+# the xxz03 u1 D=3 chi=16 point sat on an element-wise floor of 1.01e-10 from
+# step 16: no warm-start refresh certified, HZ ran 50-60 probes per step and
+# |g| never reached 1e-5 while E moved by ~4e-6 per step.  The energy is
+# constant to <=1e-10 once the residual is below 1e-8, far below the per-step
+# change, so S5 converges its CTM to 1e-8 and stops on the energy: |dE| < 1e-6
+# on 3 consecutive steps.  The reference CTMs keep REF_TOL.
+S5_CTM_CONV_TOL = 1e-8
+S5_DE_TOL = 1e-6
+S5_DE_PATIENCE = 3
 _DIAG_KEYS = (
     "forward_converged",
     "forward_stationarity_residual",
@@ -125,6 +135,9 @@ def split_legs(envs, sym):
 def _s5_config(D, chi, opt_steps):
     """Optimizer config of S5: unconverged CTM forwards raise (#1059).
 
+    CTM to ``S5_CTM_CONV_TOL``; exit when ``|dE| < S5_DE_TOL`` holds on
+    ``S5_DE_PATIENCE`` consecutive steps (see the constants).
+
     ``gs_verbose`` with ``gs_log_interval=1`` prints one line per step to stdout.
     ``gs_layout_recheck`` is the default; it is stated so that a run on code
     without the field fails loudly.
@@ -132,10 +145,13 @@ def _s5_config(D, chi, opt_steps):
     return iPEPSConfig(
         max_bond_dim=D,
         unit_cell="2site",
-        ctm=dataclasses.replace(_ctm(chi), on_unconverged="raise"),
+        ctm=dataclasses.replace(
+            _ctm(chi), conv_tol=S5_CTM_CONV_TOL, on_unconverged="raise"
+        ),
         gs_num_steps=opt_steps,
-        gs_conv_criterion="grad_norm",
-        gs_grad_norm_tol=1e-5,
+        gs_conv_criterion="dE",
+        gs_conv_tol=S5_DE_TOL,
+        gs_conv_patience=S5_DE_PATIENCE,
         return_history=True,
         gs_verbose=True,
         gs_log_interval=1,
