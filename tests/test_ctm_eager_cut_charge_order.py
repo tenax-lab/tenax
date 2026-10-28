@@ -157,7 +157,7 @@ def test_sorted_cut_converges_to_the_same_energy_and_layout(monkeypatch):
     assert abs(e_new - e_old) < 1e-9, (e_new, e_old)
 
 
-def test_a_settled_eager_sweep_retraces_no_jitted_piece():
+def test_a_settled_eager_sweep_retraces_no_jitted_piece(monkeypatch):
     """With the layout settled, the next eager sweep traces no jitted piece.
 
     A guard against value-dependent metadata in any piece's input.  It does
@@ -169,6 +169,9 @@ def test_a_settled_eager_sweep_retraces_no_jitted_piece():
     layout unchanged, then measures the next sweep, whose layout must not move
     either, so any trace there is metadata churn, not a layout change.
     """
+    # The helper is off by default (memory, see ``_ENABLED``, #1145); with it
+    # off every piece runs op by op and traces each op, so turn it on.
+    monkeypatch.setattr(ej, "_ENABLED", True)
     sites = _su_u1_pair()
     envs = {c: initialize_ctm_tensor_env(t, CHI) for c, t in sites.items()}
     dls = {c: cpl._build_double_layer_tensor(t) for c, t in sites.items()}
