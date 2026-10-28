@@ -767,8 +767,8 @@ any of these paths. Details and measurements are in the entries below.
 
 ### Fixed
 
-- **The eager CTM sweep no longer runs its pieces under `jax.jit` by default.**
-  #1142 jitted the static-shape pieces of an eager symmetric sweep.  That made
+- **The eager CTM sweep's piecewise `jax.jit` (#1142) ships off by default.**
+  No release ran it on, so v0.8.3 behaviour is unchanged.  #1142 jitted the static-shape pieces of an eager symmetric sweep.  That made
   `test_ctm_symmetric_rdm_positive_853[20]` 5x faster (18 min vs 90 min) but
   raised its peak RSS from 5.3 GB to 14.7 GB, which exhausts a 16 GB CI runner:
   every later compile in the process failed with `LLVM compilation error:
