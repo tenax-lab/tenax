@@ -214,6 +214,16 @@ def _log_ad_converged(
     print(" ".join(parts), flush=True)
 
 
+def _next_conv_streak(streak: int, met: bool) -> int:
+    """Count consecutive steps that met the outer criterion.
+
+    The loop exits when the count reaches ``config.gs_conv_patience``; a
+    step that misses the criterion (or is skipped: rollback, SU guard,
+    warmup, non-finite energy) starts the count again.
+    """
+    return streak + 1 if met else 0
+
+
 def _converged_outer(
     config: iPEPSConfig, delta_energy: float, grad_norm: float | None
 ) -> bool:

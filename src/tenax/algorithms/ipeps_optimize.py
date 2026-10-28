@@ -25,6 +25,7 @@ from tenax.algorithms._ipeps_optimize_shared import (  # noqa: F401
     _euclidean_grads,
     _grad_l2_norm,
     _log_ad_converged,
+    _next_conv_streak,
     _normalize_params,
     _should_accept_best,
     _su_start_guard_armed,
@@ -1514,6 +1515,8 @@ def _optimize_gs_ad_tensor_reference_c4v(
     best_energy = float("inf")
     best_params = params
     prev_energy = float("inf")
+    # Consecutive steps that met the outer criterion (``gs_conv_patience``).
+    _conv_streak = 0
 
     def _project_c4v_and_normalize(A_data: jax.Array) -> jax.Array:
         coeffs = c4v_coeffs_from_tensor(A_data, c4v_basis)
@@ -1586,9 +1589,15 @@ def _optimize_gs_ad_tensor_reference_c4v(
             else None
         )
         _skip_conv, _su_guard = _su_guard, False
+        _conv_streak = _next_conv_streak(
+            _conv_streak,
+            not n_nonfinite
+            and not _skip_conv
+            and _converged_outer(config, delta_energy, grad_norm_val),
+        )
         if n_nonfinite:
             prev_energy = float("inf")
-        elif not _skip_conv and _converged_outer(config, delta_energy, grad_norm_val):
+        elif _conv_streak >= config.gs_conv_patience:
             if config.gs_verbose:
                 _log_ad_converged(
                     "c4v_reference",
@@ -1989,6 +1998,8 @@ def _optimize_gs_ad_tensor(
     # count toward convergence.  Only the convergence decisions consume it;
     # delta_energy itself (log, metric preconditioner) stays as measured.
     _rolled_back = False
+    # Consecutive steps that met the outer criterion (``gs_conv_patience``).
+    _conv_streak = 0
     prev_grad = None
     cg_direction = None
     prev_precond_grad = None  # for preconditioned CG beta
@@ -2599,7 +2610,11 @@ def _optimize_gs_ad_tensor(
         _conv_dE = float("inf") if _rolled_back else delta_energy
         _rolled_back = False
         _skip_conv, _su_guard = _su_guard, False
-        if not _skip_conv and _converged_outer(config, _conv_dE, grad_norm_val):
+        _conv_streak = _next_conv_streak(
+            _conv_streak,
+            not _skip_conv and _converged_outer(config, _conv_dE, grad_norm_val),
+        )
+        if _conv_streak >= config.gs_conv_patience:
             # Convergence break short-circuits the end-of-iter bump. If
             # the energy stalled because χ is too small (high eps_T from
             # _update_env_cache above), the user-requested auto-bump
@@ -2680,6 +2695,8 @@ def _optimize_gs_ad_tensor(
             if _accepted_best_this_iter:
                 best_env_cache = dict(_env_cache)
             if bump_fired or stage_advanced:
+                # A new chi is a new landscape: the streak starts again.
+                _conv_streak = 0
                 # #455 PR2: converged at non-final stage → advance and
                 # continue, NOT break.  The reset block above already
                 # cleared stall_count, L-BFGS history, and opt_state at
@@ -3044,6 +3061,8 @@ def _optimize_gs_ad_tensor(
                                     flush=True,
                                 )
                         if bump_fired or stage_advanced:
+                            # A new chi is a new landscape: the streak starts again.
+                            _conv_streak = 0
                             # Force a checkpoint on stall-cap stage advance
                             # before continuing (mirror 2-site, Codex P2 #497).
                             _maybe_save_1s_checkpoint(
@@ -3893,6 +3912,8 @@ def _optimize_gs_ad_tensor_2site(
     # count toward convergence.  Only the convergence decisions consume it;
     # delta_energy itself (log, metric preconditioner) stays as measured.
     _rolled_back = False
+    # Consecutive steps that met the outer criterion (``gs_conv_patience``).
+    _conv_streak = 0
     prev_grad = None
     cg_direction = None
     prev_precond_grad = None
@@ -4670,7 +4691,11 @@ def _optimize_gs_ad_tensor_2site(
             _conv_dE = float("inf") if _rolled_back else delta_energy
             _rolled_back = False
             _skip_conv, _su_guard = _su_guard, False
-            if not _skip_conv and _converged_outer(config, _conv_dE, grad_norm_val):
+            _conv_streak = _next_conv_streak(
+                _conv_streak,
+                not _skip_conv and _converged_outer(config, _conv_dE, grad_norm_val),
+            )
+            if _conv_streak >= config.gs_conv_patience:
                 # #455 PR2: at non-final χ stages, treat convergence as a
                 # signal to advance to the next stage rather than exit.
                 # Mirrors the 1-site convergence-block intercept, including
@@ -4750,6 +4775,8 @@ def _optimize_gs_ad_tensor_2site(
                             flush=True,
                         )
                 if bump_fired or stage_advanced:
+                    # A new chi is a new landscape: the streak starts again.
+                    _conv_streak = 0
                     # Force a checkpoint on stage advance before continuing
                     # so a crash inside the next stage's first step doesn't
                     # roll back across the boundary (Codex P2 #497).
@@ -5146,6 +5173,8 @@ def _optimize_gs_ad_tensor_2site(
                                         flush=True,
                                     )
                             if bump_fired or stage_advanced:
+                                # A new chi is a new landscape: the streak starts again.
+                                _conv_streak = 0
                                 # Force a checkpoint on stall-cap stage
                                 # advance before continuing (Codex P2 #497).
                                 _maybe_save_2s_checkpoint(
@@ -5612,6 +5641,8 @@ def _optimize_gs_ad_multisite(
     # count toward convergence.  Only the convergence decisions consume it;
     # delta_energy itself (log, metric preconditioner) stays as measured.
     _rolled_back = False
+    # Consecutive steps that met the outer criterion (``gs_conv_patience``).
+    _conv_streak = 0
     prev_grad = None
     cg_direction = None
     prev_precond_grad = None
@@ -5850,7 +5881,11 @@ def _optimize_gs_ad_multisite(
         warmup_ok = (not needs_warmup) or (step > 5 and stall_count == 0)
         _conv_dE = float("inf") if _rolled_back else delta_energy
         _rolled_back = False
-        if _converged_outer(config, _conv_dE, grad_norm_val) and warmup_ok:
+        _conv_streak = _next_conv_streak(
+            _conv_streak,
+            warmup_ok and _converged_outer(config, _conv_dE, grad_norm_val),
+        )
+        if _conv_streak >= config.gs_conv_patience:
             # #455 PR2: at non-final χ stages, treat convergence as a
             # signal to advance to the next stage rather than exit.
             # Mirrors the 1-site / 2-site convergence-block intercepts,
@@ -5928,6 +5963,8 @@ def _optimize_gs_ad_multisite(
                         flush=True,
                     )
             if bump_fired or stage_advanced:
+                # A new chi is a new landscape: the streak starts again.
+                _conv_streak = 0
                 continue
             if config.gs_verbose:
                 if not logged:
@@ -6236,6 +6273,8 @@ def _optimize_gs_ad_multisite(
                                     flush=True,
                                 )
                         if bump_fired or stage_advanced:
+                            # A new chi is a new landscape: the streak starts again.
+                            _conv_streak = 0
                             continue
                     n_resets_done = stall_count - 1
                     if config.gs_verbose:

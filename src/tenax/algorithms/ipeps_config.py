@@ -699,6 +699,14 @@ class iPEPSConfig:
         gs_grad_norm_tol:      ``||grad E||_2`` tolerance (default ``1e-5``,
                                variPEPS ``optimizer_convergence_eps``); used
                                by ``"grad_norm"`` and ``"both"``.
+        gs_conv_patience:      Number of consecutive steps on which
+                               ``gs_conv_criterion`` must hold before the
+                               loop exits (default ``1``: the first such
+                               step).  A rollback, skipped or non-finite
+                               step, or a chi change starts the count
+                               again.  With ``"dE"`` a patience above 1
+                               stops one barely-moving line search from
+                               ending the run.
         gs_verbose:            If True, print AD optimization progress.
         gs_log_interval:       Print every N AD steps when ``gs_verbose`` is
                                enabled. The first and final steps are always
@@ -813,6 +821,9 @@ class iPEPSConfig:
     # criteria. The default ``1e-5`` matches variPEPS
     # ``optimizer_convergence_eps``.
     gs_grad_norm_tol: float = 1e-5
+    # Consecutive steps on which ``gs_conv_criterion`` must hold before the
+    # outer loop exits; 1 keeps the single-step test.
+    gs_conv_patience: int = 1
     # Outer-loop χ schedule for ``optimize_gs_ad_chi_schedule``
     # (#453 / #455).  List of ``(target_chi, max_steps_in_stage)``
     # pairs.  Each pair specifies one stage: at most
@@ -1106,6 +1117,14 @@ class iPEPSConfig:
             raise ValueError(
                 f"gs_conv_criterion must be one of {valid_conv_criteria}, "
                 f"got {self.gs_conv_criterion!r}"
+            )
+        if (
+            isinstance(self.gs_conv_patience, bool)
+            or not isinstance(self.gs_conv_patience, int)
+            or self.gs_conv_patience < 1
+        ):
+            raise ValueError(
+                f"gs_conv_patience must be an int >= 1, got {self.gs_conv_patience!r}"
             )
         if self.gs_grad_norm_tol <= 0:
             raise ValueError(
