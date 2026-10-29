@@ -120,23 +120,27 @@ H_bond = (
 config = iPEPSConfig(
     max_bond_dim=2,
     num_imaginary_steps=200,
-    dt=0.01,
+    dt=0.05,  # dt=0.01 has not reached the ground state by 200 steps (E > 0)
     ctm=CTMConfig(chi=10, max_iter=50),
 )
 
-energy, peps, env = ipeps(H_bond, initial_peps=None, config=config)
-print(f"Energy per site: {energy:.6f}")
+energy, (A, B), (env_A, env_B) = ipeps(H_bond, initial_peps=None, config=config)
+print(f"Energy per site: {energy:.6f}")  # ~ -0.66
 ```
 
 ## Result
 
-`ipeps()` returns a 3-tuple:
+`ipeps()` always runs the 2-site checkerboard simple update and returns a
+3-tuple (it does not read `iPEPSConfig.unit_cell`, which only selects the
+`optimize_gs_ad` ansatz):
 
 | Element | Type | Description |
 |---------|------|-------------|
 | `energy` | `float` | Energy per site |
-| `peps` | `TensorNetwork` | Optimised PEPS (1x1 unit cell) |
-| `env` | `CTMEnvironment` | Converged CTM environment tensors |
+| `(A, B)` | `tuple[DenseTensor, DenseTensor]` | Site tensors of the two sublattices |
+| `(env_A, env_B)` | `tuple[CTMEnvironment, CTMEnvironment]` | Converged CTM environments |
+
+With `compute_energy=False` it returns `(None, (A, B), None)`.
 
 ## CTMEnvironment
 
@@ -159,9 +163,10 @@ env = ctm(A_tensor, CTMConfig(chi=20, max_iter=100))
 ## 2-site checkerboard unit cell
 
 A single-site unit cell cannot capture antiferromagnetic (Néel) order
-because both sublattices share the same tensor. Setting
-`unit_cell="2site"` in `iPEPSConfig` uses a 2-site checkerboard unit cell
-with independent tensors $A$ (sublattice 0) and $B$ (sublattice 1).
+because both sublattices share the same tensor. The 2-site checkerboard
+unit cell has independent tensors $A$ (sublattice 0) and $B$ (sublattice 1).
+Simple update (`ipeps()`) always uses it; for `optimize_gs_ad`, select it
+with `unit_cell="2site"` in `iPEPSConfig`.
 
 On the checkerboard every neighbour of $A$ is $B$ and vice versa, which
 is the minimal unit cell for Néel-ordered states.
@@ -186,9 +191,8 @@ config = iPEPSConfig(
     num_imaginary_steps=200,
     dt=0.05,
     ctm=CTMConfig(chi=10, max_iter=40),
-    unit_cell="2site",
 )
-energy, peps, (env_A, env_B) = ipeps(gate, None, config)
+energy, (A, B), (env_A, env_B) = ipeps(gate, None, config)
 print(f"Energy per site: {energy:.6f}")  # ~ -0.63
 ```
 

@@ -52,7 +52,12 @@ See [capabilities](docs/guide/capabilities.md) for a map of what each path is (a
 
 ## Installation
 
-> **Note:** The PyPI package (`tenax-tn`) is not yet available. Install from source using the instructions below.
+```bash
+pip install tenax-tn
+```
+
+The PyPI package is `tenax-tn`; the import name is `tenax`. To work on Tenax
+itself, install from source:
 
 ```bash
 git clone https://github.com/tenax-lab/tenax.git

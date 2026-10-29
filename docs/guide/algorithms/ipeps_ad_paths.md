@@ -669,7 +669,7 @@ config_root = iPEPSConfig(
     gs_num_steps=20,
     gs_optimizer="adam",
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config_root)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_root)  # 1x1 AFM: sublattice_rotate_gate(gate)
 ```
 
 (measure-gradient-error)=
@@ -852,6 +852,7 @@ from tenax import (
     ExcitationConfig,
     compute_excitations,
     make_momentum_path,
+    sublattice_rotate_gate,
 )
 
 # Build a 2-site Heisenberg gate
@@ -861,6 +862,10 @@ Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
 gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
     jnp.einsum("ij,kl->ikjl", Sp, Sm) + jnp.einsum("ij,kl->ikjl", Sm, Sp)
 )
+# A 1x1 ansatz puts the same tensor on both sublattices, so the Neel state
+# needs the sublattice-rotated gate.  With the plain gate the 1x1 runs below
+# optimize the ferromagnet (E ~ +0.497 after 8 steps vs -0.6602 rotated).
+gate_1x1 = sublattice_rotate_gate(gate)
 
 # Explicit-AD configuration: L-BFGS + explicit AD + QR projectors.
 # forward_gauge defaults to "auto"; on this explicit route it resolves to
@@ -887,7 +892,7 @@ config = iPEPSConfig(
     gs_c4v=True,  # C4v basis parameterization
     su_init=True,
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
+A_opt, env, E_gs = optimize_gs_ad(gate_1x1, None, config)
 print(f"Ground-state energy: {E_gs:.6f}")
 
 # Chi-ramping schedule: progressively increase chi for faster convergence.
@@ -896,7 +901,7 @@ print(f"Ground-state energy: {E_gs:.6f}")
 # padded to max(chi) from step 1, so the JIT-compiled CTM / energy / backward
 # kernels never see a shape change (issue #453).
 chi_schedule = [(4, 30), (8, 30), (16, 20)]
-A_opt, env, E_gs = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
+A_opt, env, E_gs = optimize_gs_ad_chi_schedule(gate_1x1, None, config, chi_schedule)
 
 # 2-site shared-tensor C4v AD for antiferromagnets (Neel order)
 # A single C4v-parameterized tensor is optimized; B is derived from A via
@@ -927,7 +932,7 @@ config_svd = iPEPSConfig(
     gs_optimizer="lbfgs",
     gs_line_search_method="hager_zhang",
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config_svd)
+A_opt, env, E_gs = optimize_gs_ad(gate_1x1, None, config_svd)
 
 # Opt-in reference-mode dense C4v mode (Francuz et al., App. C-F)
 config_reference = iPEPSConfig(
@@ -947,12 +952,12 @@ config_reference = iPEPSConfig(
     gs_num_steps=100,
     gs_optimizer="adam",
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config_reference)
+A_opt, env, E_gs = optimize_gs_ad(gate_1x1, None, config_reference)
 
 # Quasiparticle excitations (Ponsioen et al. 2022)
 momenta = make_momentum_path("brillouin", num_points=20)
 exc_config = ExcitationConfig(num_excitations=3)
-result = compute_excitations(A_opt, env, gate, E_gs, momenta, exc_config)
+result = compute_excitations(A_opt, env, gate_1x1, E_gs, momenta, exc_config)  # the gate A_opt was optimized with
 print(result.energies.shape)  # (20, 3)
 ```
 
