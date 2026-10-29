@@ -233,9 +233,16 @@ for i in range(L - 1):
     auto += (-t, "Cd", i + 1, "C", i)   # -t c†_{i+1} c_i
 ```
 
-The operators are Jordan-Wigner matrices on the qubit basis, so write the
-fermionic term as-is (measured: at L=6 this reproduces the open-chain free-fermion
-ground energy −3.49396).
+Write every two-fermion term **creation-first**, `(coef, "Cd", i, "C", j)` for
+c†_i c_j, in either site order. AutoMPO sorts the operators by site and inserts
+the `F` strings between them, but it does not supply the sign from
+anticommuting the operators themselves, so a term written annihilation-first
+silently becomes a different Hamiltonian: `(+t, "C", j, "Cd", i)` is *not*
+read as c_j c†_i = −c†_i c_j. Measured at L=6 with NN hopping 1.0, NNN hopping
+0.6 and μ=0.3: creation-first reproduces the exact free-fermion energy
+−4.496054; the same NNN terms written annihilation-first give −5.051679.
+Anticommute other orderings (and pairing terms c c / c† c†) into this form
+yourself, and check against ED on a small chain.
 
 ### Hubbard (d=4: |0⟩, |↑⟩, |↓⟩, |↑↓⟩)
 Requires custom d=4 operators (`c_up`, `c_dn`, `n_up`, `n_dn`, and a parity `F`)
