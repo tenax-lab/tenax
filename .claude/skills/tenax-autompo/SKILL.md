@@ -241,8 +241,13 @@ silently becomes a different Hamiltonian: `(+t, "C", j, "Cd", i)` is *not*
 read as c_j c†_i = −c†_i c_j. Measured at L=6 with NN hopping 1.0, NNN hopping
 0.6 and μ=0.3: creation-first reproduces the exact free-fermion energy
 −4.496054; the same NNN terms written annihilation-first give −5.051679.
-Anticommute other orderings (and pairing terms c c / c† c†) into this form
-yourself, and check against ED on a small chain.
+This applies to **hopping** terms: anticommute a c c† ordering into c† c
+yourself. Pairing terms (c_i c_j, c†_i c†_j) cannot be put in that form,
+since anticommuting changes the order of the operators, not their type.
+They need their own construction: keep the operator types, supply the
+left-endpoint parity factor and the ordering sign by hand (see the Hubbard
+recipe below for the endpoint factor), and check against ED on a small
+chain. This skill gives no verified pairing recipe.
 
 ### Hubbard (d=4: |0⟩, |↑⟩, |↓⟩, |↑↓⟩)
 There is no built-in Hubbard builder; pass custom d=4 operators as `site_ops`.
