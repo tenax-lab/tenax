@@ -862,6 +862,10 @@ _FILE_MARKERS = {
     # Mechanism tests only (spied env_init, a scripted line search), D=2 chi=4.
     "test_hz_probe_warm_start.py": "core",
     "test_metric_precond_1site_current_params.py": "core",
+    # gs_log_probes: one log line + history record per line-search probe.
+    # ``core``: diagnostics on the HZ probe path.  Mechanism tests only
+    # (scripted line search, D=2 chi=4), one optimizer step each.
+    "test_ipeps_probe_log.py": "core",
 }
 
 

@@ -912,6 +912,15 @@ class iPEPSConfig:
     # ``converged=False`` line searches.  Honoured on the iPEPS 1-site /
     # 2-site / multisite Tensor AD paths.
     gs_hz_max_iter: int = 40
+    # Diagnostics: print one line per line-search probe (phi = forward-only
+    # energy, dphi = implicit-AD value_and_grad) regardless of ``gs_verbose``,
+    # with alpha, energy, CTM sweeps / sv_diff / converged flag and an md5
+    # prefix of the seed env (``cold`` if none), so a false accept can be
+    # replayed.  With ``return_history`` the same data lands in
+    # ``history["probes"]``.  Costs a device-to-host copy of the seed env per
+    # probe, so keep it off outside debugging.  Honoured on the iPEPS 1-site /
+    # 2-site / multisite Tensor AD paths.
+    gs_log_probes: bool = False
     # Chi-ceiling bail-out (variPEPS §2.8.2 mechanism).  When > 0 and the
     # CTM is at ``ctm.chi_max`` AND the bump indicator (``eps_T`` or
     # ``norm_smallest_S`` per ``chi_auto_bump_metric``) exceeds
