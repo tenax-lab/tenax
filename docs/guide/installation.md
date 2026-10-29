@@ -5,9 +5,17 @@
 - Python 3.11 or 3.12
 - A working JAX installation (CPU or GPU)
 
-## Install from source
+## Install from PyPI
 
-> **Note:** The PyPI package (`tenax-tn`) is not yet available. Install from source using the instructions below.
+```bash
+pip install tenax-tn
+```
+
+The PyPI package is `tenax-tn`; the import name is `tenax`.  Accelerator
+extras (`tenax-tn[cuda13]`, `[cuda12]`, `[tpu]`, `[metal]`) pull in the
+matching JAX; see below.
+
+## Install from source
 
 ### With uv (recommended)
 
