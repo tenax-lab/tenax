@@ -90,7 +90,10 @@ The simple update is the fastest way to get an initial iPEPS. It applies
 imaginary time evolution gates e^{-δτ h} to evolve toward the ground state,
 using a Trotter decomposition.
 
-### 1-site unit cell
+`ipeps()` always runs the **2-site checkerboard** simple update (A on one
+sublattice, B on the other, all four inequivalent bonds driven) and returns a
+pair. It ignores `iPEPSConfig.unit_cell`; that field only matters for
+`optimize_gs_ad` (Stage 3).
 
 ```python
 from tenax import iPEPSConfig, CTMConfig, ipeps
@@ -98,29 +101,49 @@ from tenax import iPEPSConfig, CTMConfig, ipeps
 config = iPEPSConfig(
     max_bond_dim=2,              # iPEPS bond dimension D
     num_imaginary_steps=200,     # Number of Trotter steps
-    dt=0.3,                      # Imaginary time step δτ
-    ctm=CTMConfig(chi=10, max_iter=40),  # CTM environment params
-    unit_cell="1x1",             # Translationally invariant
+    dt=0.05,                     # Imaginary time step δτ (0.3 gives E ≈ -0.53)
+    ctm=CTMConfig(chi=10, max_iter=40),  # CTM used to measure the energy
 )
-energy, peps, envs = ipeps(gate, None, config)
-print(f"Energy per site: {energy:.6f}")
+energy, (A, B), (env_A, env_B) = ipeps(gate, None, config)
+print(f"Energy per site: {energy:.6f}")  # ≈ -0.63 for Heisenberg
 ```
 
-### 2-site unit cell (checkerboard)
-
-For states with broken translational symmetry (e.g., Néel order):
+The energy `ipeps()` reports comes from the legacy 2-site CTM, which sits ~0.02
+above the truth on an entangled state. For an accurate number, measure the
+returned pair with the Tensor CTM (`ctm_tensor_2site`, default `recipe="2x2"`):
 
 ```python
-config = iPEPSConfig(
-    max_bond_dim=2,
-    num_imaginary_steps=200,
-    dt=0.3,
-    ctm=CTMConfig(chi=10, max_iter=40),
-    unit_cell="2site",           # A-B checkerboard
-)
-energy, peps, (env_A, env_B) = ipeps(gate, None, config)
-print(f"Energy per site: {energy:.6f}")  # ≈ -0.65 for Heisenberg
+from tenax import ctm_tensor_2site, compute_energy_ctm_tensor_2site
+
+env_A, env_B = ctm_tensor_2site(A, B, chi=16)
+E = compute_energy_ctm_tensor_2site(A, B, env_A, env_B, gate, d=2)
 ```
+
+The config above gives −0.6568 this way (vs −0.6328 from `ipeps()` itself); a
+converged D=2 simple-update state reaches −0.65933, χ-converged. Use
+`ipeps(..., compute_energy=False)` to get just `(None, (A, B), None)` as a warm
+start.
+
+⚠️ **Simple update was fixed in v0.9.0** (#667, #865): before that it converged
+to the product state (D=2 Heisenberg −0.548), and a "D=3" `ipeps()` state was in
+effect D=2. Recompute any earlier simple-update result.
+
+The stored bond weights λ are **not** the Schmidt spectra after a non-unitary
+sweep (#869). Before reading λ as a spectrum (entanglement entropy, truncation
+error, a symmetric CTM gauge), re-derive them with the BP gauge — an exact gauge
+transformation, so the state does not move:
+
+```python
+from tenax import BondWeights, bp_gauge_checkerboard
+
+# A, B: bare Vidal Gamma tensors; lam_h, lam_v: the weights they carry
+stored = BondWeights(h_AB=lam_h, h_BA=lam_h, v_AB=lam_v, v_BA=lam_v)
+A, B, weights, info = bp_gauge_checkerboard(A, B, stored)
+```
+
+The weights are required (pass `BondWeights.ones(D, D)` for genuinely
+unweighted bonds); `ipeps()` returns physical-form tensors, so this applies to
+Gamma/λ pairs you hold yourself.
 
 **AD stage: prefer the shared-tensor C4v path for spin-1/2 AFMs.**
 Under AD (Stage 3), the unconstrained 2-site optimizer is known to drift
@@ -136,17 +159,19 @@ physical dimension d=2.
 | Parameter | Role | Guidance |
 |-----------|------|----------|
 | `max_bond_dim` (D) | iPEPS expressiveness | Start D=2, increase to 3,4,5 |
-| `dt` | Trotter time step | Start 0.3, reduce to 0.1, 0.01 for accuracy |
+| `dt` | Trotter time step | Start 0.05–0.1 (0.3 has large Trotter error), reduce for accuracy |
 | `num_imaginary_steps` | Evolution length | 200–500; increase if not converged |
 | `ctm.chi` | CTM environment bond dim | χ ≥ D² for accuracy; start 10–20 |
 | `ctm.max_iter` | CTM convergence iterations | 40–100 |
-| `unit_cell` | Translational symmetry | "1x1" or "2site" |
+| `unit_cell` | AD ansatz (ignored by `ipeps()`) | "1x1" or "2site" for `optimize_gs_ad` |
 
 ### What to watch for
 
 - **Energy not decreasing** → δτ too large (Trotter error dominates). Reduce dt.
-- **Energy oscillating** → try a 2-site unit cell if using 1-site (maybe the
-  ground state breaks translational symmetry).
+- **Dimerised result** → by default each bond pair shares one spectrum;
+  `su_independent_bond_lambdas=True` frees all four (for genuinely dimerised
+  phases only). Do not judge A vs B by `‖A − B‖` (gauge-dependent); compare
+  one-site RDMs from one joint 2-site RDM.
 - **Energy converged but too high** → D too small, or CTM χ too small.
 
 ---
@@ -179,8 +204,16 @@ is resolved; an explicit ``ctm.forward_gauge`` (``"phase"``,
 
 ### Recommended AD configuration
 
+A 1-site (`unit_cell="1x1"`, the default) ansatz uses one tensor on both
+sublattices, so an antiferromagnet needs the **sublattice-rotated** gate;
+with the plain Heisenberg gate the 1x1 optimizer starts from a ferromagnet
+(E ≈ +0.5).
+
 ```python
-from tenax import iPEPSConfig, CTMConfig, optimize_gs_ad
+from tenax import (iPEPSConfig, CTMConfig, optimize_gs_ad,
+                   heisenberg_gate, sublattice_rotate_gate)
+
+H_rot = sublattice_rotate_gate(heisenberg_gate())  # 1x1 AFM needs this
 
 config = iPEPSConfig(
     max_bond_dim=2,
@@ -199,8 +232,8 @@ config = iPEPSConfig(
 )
 
 # Can start from scratch or from simple-update result
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
-print(f"Ground-state energy: {E_gs:.6f}")
+A_opt, env, E_gs = optimize_gs_ad(H_rot, None, config)  # 1x1: (A, env, E)
+print(f"Ground-state energy: {E_gs:.6f}")  # D=2, chi=16 optimum ≈ -0.6625
 ```
 
 ### Explicit AD configuration (alternative; no forward gauge is applied, #1074)
@@ -224,7 +257,7 @@ config = iPEPSConfig(
     gs_c4v=True,
     su_init=True,
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
+A_opt, env, E_gs = optimize_gs_ad(H_rot, None, config)
 ```
 
 ### Chi-ramping schedule
@@ -237,8 +270,10 @@ large chi (Zhang, Yang & Corboz, arXiv:2505.00494):
 from tenax import optimize_gs_ad_chi_schedule
 
 chi_schedule = [(8, 30), (16, 20), (32, 15)]
-result = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
+A_opt, env, E_gs = optimize_gs_ad_chi_schedule(H_rot, None, config, chi_schedule)
 ```
+
+It returns the same tuple as `optimize_gs_ad` for the unit cell.
 
 Each tuple is `(chi, num_optimization_steps)`. The schedule overrides
 `config.ctm.chi` and `config.gs_num_steps` at each level.
@@ -296,6 +331,21 @@ prefer `ctmrg_heuristic_increase_chi`.
   back to `"dE"` to make a run "converge" sooner — it stops on a tiny
   `|ΔE|` that a barely-moving line search or a stall rollback produces with
   `‖∇E‖` still at `1e-2`–`0.7`.  Quote `|g|` alongside the energy.
+- **Projector response is in the gradient** (v0.9.0): on the default fused
+  implicit path, `CTMConfig.projector_backward="auto"` resolves to `"flow"`
+  (#1028), with a slope check that falls back to frozen projectors when a
+  flowing gradient on a non-stationary forward is grossly wrong (#1111).
+  `projector_backward="standard"` restores the pre-v0.9.0 frozen projectors.
+- **Stall recovery** defaults to `gs_stall_recovery="reset"` (roll back to the
+  best point and clear the L-BFGS history) on every unit cell; `"noise"` is the
+  legacy kick.
+- **Root-implicit engines** (`ctm_ad_mode="root_implicit"`, and the
+  block-sparse `"root_implicit_symmetric"` wired to `optimize_gs_ad` in
+  v0.9.0) differentiate the CTM root directly; `measure_gradient_error`
+  compares any `energy_and_grad` callable against finite differences. The
+  optimizer wiring was measured on the dense engine at D=2 only; the
+  symmetric and multisite engines are untested there, and symmetric U(1)
+  iPEPS-AD at D≥3 is **not** certified (#1101).
 - **Arnoldi precheck** (`adjoint_arnoldi_precheck=True`, default): for
   implicit AD, checks the spectral radius ρ(J^T) of the CTM Jacobian
   before the backward pass. If ρ ≥ `adjoint_arnoldi_threshold` (default 5.0),
@@ -361,7 +411,7 @@ A_opt, env, E_gs = optimize_gs_ad(gate, None, config)  # env is a SplitCTMTensor
 
 Constraints (each raises a clear `NotImplementedError` otherwise):
 
-- **Single-site dense only** — `unit_cell="1x1"`, `DenseTensor`, on the default
+- **Single-site dense only** (v0.9.0) — `unit_cell="1x1"`, `DenseTensor`, on the default
   `gs_recipe="2x2"`. The split CTM is dense-only: SymmetricTensor (U(1)/Z_n or
   fermionic) input is refused; use the fused CTM for symmetric iPEPS. (`gs_recipe="1x1"` is still *accepted* on this path but deprecated and
   non-convergent — #911.)
@@ -410,7 +460,9 @@ momenta = make_momentum_path("brillouin", num_points=20)
 
 # Compute excitation energies
 exc_config = ExcitationConfig(num_excitations=3, chi=16)
-result = compute_excitations(A_opt, env, gate, E_gs, momenta, exc_config)
+# Pass the same gate the ground state was optimized with (H_rot for 1x1 AFM;
+# momenta are then in the sublattice-rotated frame)
+result = compute_excitations(A_opt, env, H_rot, E_gs, momenta, exc_config)
 
 print(result.energies.shape)  # (num_momenta, num_excitations) = (20, 3)
 ```
@@ -488,7 +540,7 @@ for AD optimization with 2-site cells, use `optimize_gs_ad()` with
 
 ```python
 from tenax import ctm_multisite, kagome
-from tenax.algorithms._ctm_tensor_convergence import ctm_tensor, ctm_tensor_2site
+from tenax import ctm_tensor, ctm_tensor_2site
 
 lat = kagome()
 # site_tensors: dict mapping site names to DenseTensor/SymmetricTensor
@@ -497,7 +549,10 @@ envs = ctm_multisite(site_tensors, lat, chi=16, max_iter=60)
 ```
 
 For 1-site and 2-site cells, prefer `ctm_tensor()` and `ctm_tensor_2site()`
-which are optimized for those cases.
+which are optimized for those cases. `ctm_tensor(A, chi)` returns
+`(env, max_truncation_error)`; all three default to `recipe="2x2"` (the
+deprecated `"1x1"` recipe collapses to rank-1 corners, #911). Check
+`rank(C1) > 1` before trusting a CTM reference.
 
 ---
 
@@ -515,7 +570,8 @@ E = compute_energy_split_ctm(A, env_split, gate, d)
 ```
 
 The `chi_I` parameter controls the interlayer bond dimension. Set `chi_I >= chi`
-(typical: `chi_I = 2 * chi`).
+(typical: `chi_I = 2 * chi`). The split CTM is dense-only: since v0.9.0 every
+split entry point refuses `SymmetricTensor` input with `NotImplementedError`.
 
 ---
 
@@ -536,7 +592,7 @@ for D in [2, 3, 4, 5]:
         gs_c4v=True,
         su_init=True,
     )
-    A, env, E = optimize_gs_ad(gate, None, config)
+    A, env, E = optimize_gs_ad(H_rot, None, config)
     print(f"D={D}: E/site = {E:.8f}")
 ```
 
@@ -558,8 +614,8 @@ config = iPEPSConfig(
     su_init=True,
 )
 chi_schedule = [(10, 30), (20, 20), (40, 15), (60, 10)]
-result = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
-print(f"Final energy: {result.energy:.8f}")
+A, env, E = optimize_gs_ad_chi_schedule(H_rot, None, config, chi_schedule)
+print(f"Final energy: {E:.8f}")
 ```
 
 ---
@@ -568,7 +624,7 @@ print(f"Final energy: {result.energy:.8f}")
 
 | Model | iPEPS D=2 | iPEPS D→∞ (extrap.) | QMC/exact |
 |-------|-----------|-------------------|-----------|
-| 2D Heisenberg | ≈ −0.6548 | ≈ −0.6694 | −0.6694 |
+| 2D Heisenberg | ≈ −0.6625 (AD, χ=16); −0.6593 (SU, measured with `ctm_tensor_2site`) | ≈ −0.6694 | −0.6694 |
 | J1-J2 at J2/J1=0.5 | model-dependent | — | Debated |
 
 ---
@@ -583,10 +639,12 @@ print(f"Final energy: {result.energy:.8f}")
 | AD gradients noisy/chaotic | eigh projector + explicit AD | Switch to `projector_method="qr"` |
 | Implicit VJP backward diverges | ρ(J^T) ≫ 1 at CTM fixed point | Increase χ, or switch to explicit AD (`gs_implicit_ad=False`) |
 | `CTMRGGradientError` raised | Arnoldi precheck detected ρ ≥ threshold | Increase χ, or switch to explicit AD path |
-| NaN at large chi (chi>16) | eigh backward without regularization | Use QR projectors, or ensure `projector_backward="lorentzian"` |
+| NaN at large chi (chi>16) | eigh backward without regularization | Use QR projectors; on explicit AD with eigh, `"auto"` already promotes to `projector_backward="lorentzian"` |
 | First AD step takes hours, later steps seconds | Backward compile (symmetric D≥3) | Keep the default `adjoint_chain_rule="auto"` (not `"separate"`); keep the compilation cache on |
-| CTM not converging | χ too small or max_iter too low | Increase both; try `chi_ramp` for faster convergence |
+| CTM not converging | χ too small or max_iter too low | Increase both; `ctmrg_heuristic_increase_chi=True` (+ `chi_max`) grows χ in-CTM (`chi_ramp` is deprecated) |
 | Wrong symmetry breaking | Wrong unit cell | Try "2site" for AFM order |
+| 1x1 Heisenberg AD gives E ≈ +0.5 | Plain gate on a uniform ansatz | Pass `sublattice_rotate_gate(heisenberg_gate())` |
+| `converged=False` after many steps | Gradient test (`grad_norm`, default since v0.9.0) not met | Expected more often than with the old `dE` test; quote `‖∇E‖`, don't switch back to `"dE"` |
 | NaN in gradients | SVD degeneracy | Reduce learning rate, check gate is Hermitian |
 
 ## Pedagogical Notes

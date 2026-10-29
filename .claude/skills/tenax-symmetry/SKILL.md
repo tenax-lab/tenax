@@ -122,13 +122,13 @@ phys_charges = np.array([-1, 1], dtype=np.int32)  # spin-1/2: Sz = ±1/2 (×2)
 bond_charges = np.array([-1, 0, 1], dtype=np.int32)
 
 # Physical leg (ket side — incoming)
-phys = TensorIndex(u1, phys_charges, FlowDirection.IN, label="phys")
+phys = TensorIndex.from_charges(u1, phys_charges, FlowDirection.IN, label="phys")
 
 # Bond leg (outgoing to the right)
-bond_R = TensorIndex(u1, bond_charges, FlowDirection.OUT, label="bond_R")
+bond_R = TensorIndex.from_charges(u1, bond_charges, FlowDirection.OUT, label="bond_R")
 
 # Bond leg (incoming from the left)
-bond_L = TensorIndex(u1, bond_charges, FlowDirection.IN, label="bond_L")
+bond_L = TensorIndex.from_charges(u1, bond_charges, FlowDirection.IN, label="bond_L")
 ```
 
 ### FlowDirection: the bra-ket convention
@@ -149,6 +149,14 @@ This ensures charge conservation: what flows in must flow out.
 
 If both legs are IN (or both OUT), the contraction violates charge conservation
 and will produce wrong results or errors.
+
+The partner leg must have the **opposite flow and identical charges** — what
+`idx.flip_flow()` (or `bar()` on a tensor) produces. `idx.dual()` also negates
+the charges, and block-sparse contraction pairs blocks by charge *value* while
+dense pairs by *position*, so mixing the two conventions gives a silently
+representation-dependent answer (#834). To audit a path, run with
+`TENAX_STRICT_CONTRACT=1`, which makes `contract()` raise `ValueError` when the
+two representations would disagree (opt-in; not for production).
 
 ### Charge arrays
 
@@ -178,9 +186,9 @@ key = jax.random.PRNGKey(0)
 
 A = SymmetricTensor.random_normal(
     indices=(
-        TensorIndex(u1, phys_charges, FlowDirection.IN,  label="p0"),
-        TensorIndex(u1, bond_charges, FlowDirection.IN,  label="left"),
-        TensorIndex(u1, bond_charges, FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(u1, phys_charges, FlowDirection.IN,  label="p0"),
+        TensorIndex.from_charges(u1, bond_charges, FlowDirection.IN,  label="left"),
+        TensorIndex.from_charges(u1, bond_charges, FlowDirection.OUT, label="right"),
     ),
     key=key,
 )
@@ -207,9 +215,9 @@ from tenax import contract
 
 B = SymmetricTensor.random_normal(
     indices=(
-        TensorIndex(u1, phys_charges, FlowDirection.IN,  label="p1"),
-        TensorIndex(u1, bond_charges, FlowDirection.IN,  label="right"),  # Matches A's "right"
-        TensorIndex(u1, bond_charges, FlowDirection.OUT, label="far_right"),
+        TensorIndex.from_charges(u1, phys_charges, FlowDirection.IN,  label="p1"),
+        TensorIndex.from_charges(u1, bond_charges, FlowDirection.IN,  label="right"),  # Matches A's "right"
+        TensorIndex.from_charges(u1, bond_charges, FlowDirection.OUT, label="far_right"),
     ),
     key=jax.random.PRNGKey(1),
 )
@@ -230,8 +238,11 @@ Tenax provides symmetry-aware SVD and QR that preserve block structure.
 
 ### Block-sparse SVD
 
-Used in DMRG truncation: decompose a tensor and keep only the largest singular
-values within each charge sector.
+Used in DMRG truncation: each charge block is decomposed separately, and
+truncation keeps the globally largest singular values, ranked across all
+sectors (`tenax.linalg.svd` / `truncated_svd`). `bond_order="sector"` instead
+returns the untruncated bond charge-grouped, which is the form that runs under
+`jax.jit` (v0.9.0).
 
 ### Block-sparse QR
 
@@ -271,6 +282,12 @@ that Sp carries charge +1, Sm carries charge -1, and Sz carries charge 0.
   the symmetry from the spectrum, then switch to symmetric.
 - **When D or χ is very small** — the overhead of block-sparse bookkeeping
   may outweigh the savings. Typically worthwhile for bond dim ≥ 20.
+- **iPEPS-AD at D ≥ 3** — the block-sparse CTM-AD backward has a long first
+  compile and dense is usually faster; symmetric U(1) iPEPS-AD at D ≥ 3 is
+  not certified (#1101). Symmetric CTM results from before v0.9.0 zeroed the
+  charged environment sectors (#905) and should be recomputed.
+- **Avoid `todense()` on large symmetric tensors** — it defeats the point;
+  use the block-sparse `tenax.linalg.svd` / `qr` / `eigh` instead.
 
 ---
 

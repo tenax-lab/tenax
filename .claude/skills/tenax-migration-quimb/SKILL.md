@@ -70,7 +70,9 @@ symmetries. Block-sparse storage saves memory and compute:
 ```python
 from tenax import U1Symmetry, SymmetricTensor
 
-# Block-sparse MPO that exploits Sz conservation
+# Block-sparse MPO that exploits Sz conservation; dmrg() then needs a
+# symmetric MPS: FiniteMPS.random(..., symmetric=True, symmetry=U1Symmetry(),
+# target_charge=0)
 mpo = auto.to_mpo(symmetric=True)
 ```
 
@@ -208,7 +210,7 @@ print(f"Energy: {result.energy:.10f}")
 - **Tag system** — flexible tensor selection/grouping
 - **`cotengra` integration** — advanced contraction path optimization
 - **Visualization** — `tn.draw()` for tensor network diagrams
-- **TEBD / TDVP** — not yet in Tenax
+- **Real-time TEBD** — not in Tenax; finite-MPS time evolution is `tdvp(mps, mpo, TDVPConfig(...))` (1-/2-site, real or imaginary time), and `itebd_groundstate` is an imaginary-time iTEBD ground-state solver
 - **Backend flexibility** — Tenax is JAX-only; quimb supports multiple backends
 - **Arbitrary geometry TN** — quimb's `TensorNetwork` is more flexible for
   non-standard topologies

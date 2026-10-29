@@ -26,7 +26,7 @@ state with operator insertions.
 result = dmrg(mpo, mps, config)
 result.energy              # Total ground state energy (float)
 result.energies_per_sweep  # Energy history (list[float])
-result.mps                 # Optimized MPS (TensorNetwork)
+result.mps                 # Optimized MPS (FiniteMPS)
 result.truncation_errors   # Truncation errors per bond update
 result.converged           # Whether DMRG converged (bool)
 ```
@@ -37,17 +37,21 @@ result.converged           # Whether DMRG converged (bool)
 result = idmrg(W, config)
 result.energy_per_site     # Energy per site (float)
 result.energies_per_step   # Energy history
-result.mps_tensors         # [A_L, A_R] unit cell tensors
-result.singular_values     # Centre bond singular values (jax.Array)
+result.mps                 # InfiniteMPS: 2-site unit cell
+result.mps.tensors         # [A_l, A_r] unit cell tensors
+result.mps.singular_values # per bond, length 3; [1] is the centre bond
 result.converged           # bool
 ```
 
-### iPEPS → (energy, peps, env)
+### iPEPS → energy, tensors, environments
 
 ```python
-energy, peps, env = ipeps(gate, None, config)
-# or
+# Simple update: always a 2-site checkerboard
+energy, (A, B), (env_A, env_B) = ipeps(gate, None, config)
+# AD, 1x1 unit cell (use sublattice_rotate_gate(...) for an AFM)
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
+# AD, unit_cell="2site"
+(A_opt, B_opt), (env_A, env_B), E_gs = optimize_gs_ad(gate, None, config)
 ```
 
 The CTM environment `env` enables observable computation via reduced
@@ -63,7 +67,10 @@ directly — no extra contraction needed.
 ```python
 import jax.numpy as jnp
 
-S = result.singular_values
+S_ent = result.mps.entanglement_entropy(bond=1)   # built-in
+
+# or by hand from the centre-bond singular values
+S = result.mps.singular_values[1]
 # Normalize
 S_norm = S / jnp.linalg.norm(S)
 # Von Neumann entropy
@@ -110,10 +117,13 @@ vector and use standard linear algebra:
 ```python
 import jax.numpy as jnp
 
-psi = result.mps.contract().todense().flatten()
-# Embed operator in full Hilbert space
-Sz_full = build_full_operator(Sz, site=i, L=L)
-expectation = jnp.real(psi.conj() @ Sz_full @ psi)
+from tenax import contract
+
+phys = [f"p{i}" for i in range(L)]          # FiniteMPS physical labels
+T = contract(*result.mps.tensors)           # boundary legs have dim 1
+bonds = [l for l in T.labels() if l not in phys]
+psi = contract(*result.mps.tensors, output_labels=bonds + phys).todense().reshape(-1)
+# psi is ordered site 0 most significant, matching np.kron(op_0, op_1, ...)
 ```
 
 ---
@@ -187,11 +197,16 @@ density matrices.
 ### Energy (built-in)
 
 ```python
-from tenax import compute_energy_ctm_2site
+from tenax import ctm_tensor_2site, compute_energy_ctm_tensor_2site
 
-# For 2-site unit cell
-energy = compute_energy_ctm_2site(peps_a, peps_b, gate, env_a, env_b)
+# Re-measure a 2-site state with the Tensor CTM (default recipe "2x2").
+# ipeps()'s own energy uses the legacy CTM, which reads ~0.02 high.
+env_A, env_B = ctm_tensor_2site(A, B, chi=16)
+energy = compute_energy_ctm_tensor_2site(A, B, env_A, env_B, gate, d=2)
 ```
+
+The legacy `compute_energy_ctm_2site(A, B, env_A, env_B, gate, d)` takes raw
+arrays and the `CTMEnvironment`s from `ctm_2site`.
 
 ### Custom observables from RDMs
 
@@ -274,6 +289,9 @@ S_q = structure_factor(correlations, q_values, L)
   what phase you're in — you need correlations and order parameters.
 - For 1D systems, the entanglement entropy scaling (constant vs logarithmic)
   immediately tells you if the system is gapped or gapless.
+- **Simple-update bond weights are not Schmidt spectra** after a non-unitary
+  sweep (#869); re-derive them with `bp_gauge_checkerboard` before reading an
+  iPEPS entanglement spectrum off λ.
 - Always compare observables across multiple bond dimensions to assess
   convergence. If ⟨Sz_0 Sz_r⟩ changes significantly when you double χ,
   you need more bond dimension.

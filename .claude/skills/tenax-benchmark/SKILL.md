@@ -26,11 +26,11 @@ python -m benchmarks.run [OPTIONS]
 
 | Flag | Description | Values |
 |------|-------------|--------|
-| `-b`, `--backend` | Hardware backend | `cpu`, `cuda`, `tpu`, `metal` |
-| `-a`, `--algorithm` | Algorithm(s) to benchmark | `dmrg`, `idmrg`, `trg`, `hotrg`, `ipeps`, `all` |
+| `-b`, `--backend` | Hardware backend | `cpu`, `cuda` (alias `gpu`), `tpu`, `metal`, `auto` (default) |
+| `-a`, `--algorithm` | Algorithm(s) to benchmark | `dmrg`, `idmrg`, `trg`, `hotrg`, `ipeps`, `ipeps_ad`, `dmrg_sharded` (default: all) |
 | `-s`, `--size` | Problem size(s) | `small`, `medium`, `large`, `all` |
-| `-n`, `--trials` | Number of trials per config | Integer (default varies) |
-| `-o`, `--output` | Save results to JSON | File path |
+| `-n`, `--trials` | Number of trials per config | Integer (default 3) |
+| `-o`, `--output` | Save results to JSON | File path (default `benchmarks/results/<backend>_<timestamp>.json`) |
 | `--csv` | Save results to CSV | File path |
 | `--list-backends` | Show available backends | — |
 
@@ -147,19 +147,27 @@ for truly 2D problems in the thermodynamic limit.
 
 ## iPEPS Performance Tuning
 
-### Chi ramping
+### Chi growth
 
-Use `CTMConfig.chi_ramp` to warm up CTM convergence at small chi before
-the target chi. Typical speedup: 1.2–2.1× on GPU. Example:
+`CTMConfig.chi_ramp` (and `chi_auto_bump`) still work but emit a
+`DeprecationWarning` (#512). Grow χ inside CTM convergence instead:
 
 ```python
-ctm=CTMConfig(chi=32, chi_ramp=[(8, 10), (16, 10), (32, None)])
+ctm=CTMConfig(chi=8, chi_max=32, ctmrg_heuristic_increase_chi=True)
 ```
 
-Each tuple is `(chi_value, max_steps)`: run up to `max_steps` CTM steps at
-that chi, then move to the next. The final entry with `None` runs until
-convergence at the target chi. This avoids wasting iterations at full chi
-when the environment is far from converged.
+χ grows by `ctmrg_heuristic_increase_chi_step_size` whenever the smallest kept
+singular value (relative to the largest) exceeds
+`ctmrg_heuristic_increase_chi_threshold`, so every gradient is taken at a
+converged environment.
+
+### Compile time vs warm time
+
+For iPEPS-AD, the first gradient includes XLA compilation of the implicit-AD
+backward; for block-sparse states at D ≥ 3 that compile can take hours while
+later steps take seconds. Benchmark warm steps separately from the first
+step, keep the persistent compilation cache on, and compare flags in
+separate processes (an in-process trace cache contaminates the comparison).
 
 ## Pedagogical Notes
 

@@ -64,7 +64,8 @@ For standard models, Tenax has ready-made functions:
 ```python
 from tenax.algorithms.dmrg import build_mpo_heisenberg
 
-# Finite Heisenberg chain, L=20 sites
+# Finite Heisenberg chain, L=20 sites -- a U(1) block-sparse MPO, so it
+# needs a symmetric initial MPS (Stage 3)
 L = 20
 mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
 ```
@@ -171,11 +172,10 @@ key = jax.random.PRNGKey(0)
 mps = FiniteMPS.random(L=20, d=2, chi=16, key=key)
 ```
 
-Or using the legacy builder (still supported):
-```python
-from tenax import build_random_mps
-mps = build_random_mps(20, physical_dim=2, bond_dim=16)
-```
+The legacy builders `build_random_mps` and `build_random_symmetric_mps` are
+deprecated (they emit `DeprecationWarning`); use `FiniteMPS.random`, with
+`symmetric=True, symmetry=U1Symmetry(), target_charge=0` in place of
+`build_random_symmetric_mps`.
 
 ### Key points
 
@@ -184,6 +184,10 @@ mps = build_random_mps(20, physical_dim=2, bond_dim=16)
 - **`max_bond_dim` in DMRGConfig controls truncation.** The initial MPS bond
   dimension just needs to be ≤ max_bond_dim. DMRG will grow it as needed
   (in two-site DMRG).
+- **Match the MPO type.** `dmrg()` requires the MPO and MPS to be all
+  `DenseTensor` or all `SymmetricTensor` (else `TypeError: dmrg() requires
+  uniform tensor types`). `build_mpo_heisenberg` and `to_mpo(symmetric=True)`
+  are symmetric; `auto.to_mpo()` is dense.
 - **Symmetry sectors.** For symmetric MPS, pass `symmetric=True` and
   `target_charge`:
   ```python
@@ -291,7 +295,7 @@ energies = []
 for chi in chis:
     config = DMRGConfig(max_bond_dim=chi, num_sweeps=15)
     key = jax.random.PRNGKey(chi)
-    mps = FiniteMPS.random(L=L, d=2, chi=16, key=key)
+    mps = FiniteMPS.random(L=L, d=2, chi=16, key=key)  # dense: pair with auto.to_mpo()
     result = dmrg(mpo, mps, config)
     energies.append(result.energy)
     print(f"χ = {chi:4d} → E = {result.energy:.10f}")
@@ -366,16 +370,17 @@ the result is in the correct quantum number sector.
 ### Comparison with iPEPS for 2D
 For truly 2D problems, iPEPS may be more natural than cylinder DMRG:
 ```python
-from tenax import iPEPSConfig, CTMConfig, ipeps
+from tenax import iPEPSConfig, CTMConfig, ipeps, heisenberg_gate
 
+gate = heisenberg_gate()
 config = iPEPSConfig(
     max_bond_dim=2,
     num_imaginary_steps=200,
-    dt=0.3,
+    dt=0.05,
     ctm=CTMConfig(chi=10, max_iter=40),
-    unit_cell="2site",
 )
-energy, peps, envs = ipeps(gate, None, config)
+# simple update on the 2-site checkerboard (always)
+energy, (A, B), (env_A, env_B) = ipeps(gate, None, config)
 ```
 
 ---
@@ -390,6 +395,7 @@ energy, peps, envs = ipeps(gate, None, config)
 | Wrong energy for cylinder | Site ordering wrong | Check `min(i,j)`, modular y |
 | iDMRG gives wrong E/site for cylinder | Forgot to divide by Ly | `e_per_spin = result.energy_per_site / Ly` |
 | Symmetric MPO crashes | Initial MPS in wrong sector | Match quantum numbers |
+| `TypeError: dmrg() requires uniform tensor types` | Symmetric MPO + dense MPS (or vice versa) | `FiniteMPS.random(..., symmetric=True, symmetry=U1Symmetry(), target_charge=0)` |
 
 ---
 

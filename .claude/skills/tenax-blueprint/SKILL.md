@@ -71,6 +71,11 @@ bp.put_tensor("A", new_A)
 result2 = bp.launch()
 ```
 
+Each tensor's labels must equal its node's leg names (as a set); otherwise
+`put_tensor` raises `ValueError`. Pass `label_order=[...]` to
+`put_tensor(name, tensor, label_order=...)` to map a tensor's own labels onto
+the node's legs positionally.
+
 Best for: inner loops (DMRG sweeps, CTM iterations), where the topology is fixed
 but tensors change every step.
 
