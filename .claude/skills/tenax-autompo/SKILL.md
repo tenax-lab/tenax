@@ -245,11 +245,44 @@ Anticommute other orderings (and pairing terms c c / c† c†) into this form
 yourself, and check against ED on a small chain.
 
 ### Hubbard (d=4: |0⟩, |↑⟩, |↓⟩, |↑↓⟩)
-Requires custom d=4 operators (`c_up`, `c_dn`, `n_up`, `n_dn`, and a parity `F`)
-passed as `site_ops`, with `fermionic_ops` naming the fermionic ones. AutoMPO
-only inserts `F` on the sites *between* operators, so the up/down ordering sign
-within a site must be built into the `c_up`/`c_dn` matrices; check against ED on
-a small chain.
+There is no built-in Hubbard builder; pass custom d=4 operators as `site_ops`.
+Two signs are yours to supply, because AutoMPO only inserts `F` on the sites
+strictly *between* the two operators:
+
+1. **Within a site**, build the up/down order into the matrices (Jordan-Wigner
+   over the two modes, up first): `c_dn` carries the up-parity factor.
+2. **At the left endpoint**, for i < j the Jordan-Wigner string also covers
+   site i: c†_i c_j = (c† F)_i … c_j and c†_j c_i = (F c)_i … c†_j. For
+   spinless fermions c†F = c† and Fc = c, which is why the spinless recipe
+   needs nothing extra; for d=4 they differ, so register the dressed
+   operators and put them on the left site.
+
+```python
+import numpy as np
+from tenax import AutoMPO
+
+a, Z, I2 = np.array([[0., 1.], [0., 0.]]), np.diag([1., -1.]), np.eye(2)
+P = np.eye(4)[[0, 2, 1, 3]]                 # (n_up, n_dn) order -> |0>,|up>,|dn>,|updn>
+loc = lambda M: P @ M @ P.T
+cu, cd = loc(np.kron(a, I2)), loc(np.kron(Z, a))   # c_dn carries the up parity
+F = loc(np.kron(Z, Z)); nu, nd = cu.T @ cu, cd.T @ cd
+ops = {"Cu": cu, "Cdu": cu.T, "Cd": cd, "Cdd": cd.T, "F": F, "Id": np.eye(4),
+       "CduF": cu.T @ F, "CddF": cd.T @ F, "FCu": F @ cu, "FCd": F @ cd,
+       "Onsite": U * nu @ nd - mu * (nu + nd)}
+auto = AutoMPO(L=L, d=4, site_ops=ops,
+               fermionic_ops={"Cu", "Cdu", "Cd", "Cdd", "CduF", "CddF", "FCu", "FCd"})
+for i in range(L - 1):                      # i < j = i + 1
+    for cdag, c in [("Cdu", "Cu"), ("Cdd", "Cd")]:
+        auto += (-t, cdag + "F", i, c, i + 1)   # c†_i c_j
+        auto += (-t, "F" + c, i, cdag, i + 1)   # c†_j c_i
+for i in range(L):
+    auto += (1.0, "Onsite", i)
+```
+
+Measured against ED at L=3 (NN t=1, NNN t=0.5, U=2, μ=0.4): this gives
+−3.643050 (ED −3.643050); the same terms with bare `Cdu`/`Cu` on the left
+site give −3.169031. Check any new fermionic model against ED on a small
+chain the same way.
 
 ### Spin-1 (d=3)
 ```python
