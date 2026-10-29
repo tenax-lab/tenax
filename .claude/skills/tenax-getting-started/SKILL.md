@@ -47,7 +47,7 @@ uv sync --all-extras --dev
 
 ```python
 import tenax
-print(tenax.__version__)  # 0.1.0
+print(tenax.__version__)  # e.g. 0.9.0
 
 # Check which backend JAX is using
 import jax
@@ -55,7 +55,8 @@ print(jax.devices())      # [CpuDevice(...)] or [CudaDevice(...)]
 ```
 
 Tenax automatically enables 64-bit mode (`jax_enable_x64`) on import. All
-tensors and algorithms default to `float64`.
+tensors and algorithms default to `float64`. Tenax requires Python ≥ 3.11 and
+`jax>=0.4.35` (the floor since v0.9.0).
 
 ## Backend Selection
 
@@ -81,16 +82,17 @@ energy of the spin-1/2 Heisenberg antiferromagnet.
 ```python
 import jax
 from tenax import (
-    dmrg, build_mpo_heisenberg, FiniteMPS, DMRGConfig
+    dmrg, build_mpo_heisenberg, FiniteMPS, DMRGConfig, U1Symmetry
 )
 
-# 1. Build the Hamiltonian as an MPO
+# 1. Build the Hamiltonian as an MPO (U(1) block-sparse)
 L = 20
 mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
 
-# 2. Build a random initial MPS
+# 2. Build a random initial MPS -- symmetric, to match the MPO type
 key = jax.random.PRNGKey(0)
-mps = FiniteMPS.random(L=L, d=2, chi=16, key=key)
+mps = FiniteMPS.random(L=L, d=2, chi=16, key=key,
+                       symmetric=True, symmetry=U1Symmetry(), target_charge=0)
 
 # 3. Configure and run DMRG
 config = DMRGConfig(max_bond_dim=64, num_sweeps=10, verbose=True)
@@ -140,6 +142,7 @@ print(f"Exact (Onsager):   {f_exact:.8f}")
 | `ModuleNotFoundError: tenax` | Wrong package name | `pip install tenax-tn` (not `tenax`) |
 | Arrays are float32 | Imported JAX before tenax | Import `tenax` first, or set `jax_enable_x64` manually |
 | Slow first run | JAX JIT compilation | Normal — subsequent runs are fast |
+| `TypeError: dmrg() requires uniform tensor types` | Symmetric MPO (`build_mpo_heisenberg`, `to_mpo(symmetric=True)`) with a dense MPS, or vice versa | Use `FiniteMPS.random(..., symmetric=True, symmetry=U1Symmetry(), target_charge=0)`, or a dense `auto.to_mpo()` |
 | GPU not detected | Missing jaxlib GPU build | Install with `[cuda12]` or `[cuda13]` extra |
 | macOS Metal errors | Experimental backend | Use CPU for production; Metal for experimentation |
 

@@ -138,9 +138,17 @@ print(f"Number of nonzero Schmidt values: {np.sum(S_exact > 1e-14)}")
 
 ### From DMRG
 
-The DMRG result's MPS contains the Schmidt values implicitly in its canonical
-form. After convergence, the singular values at the midpoint bond give the
-DMRG entanglement spectrum (truncated to χ values).
+The singular values at the midpoint bond give the DMRG entanglement spectrum
+(truncated to χ values). `compute_singular_values()` returns a new
+right-canonical `FiniteMPS` with every bond populated (entry `i` is the bond
+between sites `i` and `i+1`):
+
+```python
+S_dmrg = {}
+for chi in [4, 8, 16]:
+    mps_c = results[chi].mps.compute_singular_values()
+    S_dmrg[chi] = np.asarray(mps_c.singular_values[L // 2 - 1])
+```
 
 ### Comparison
 
@@ -151,7 +159,7 @@ fig, ax = plt.subplots()
 ax.semilogy(S_exact[:30], 'ko-', label='Exact')
 for chi in [4, 8, 16]:
     # Plot the first chi Schmidt values from DMRG
-    ax.semilogy(range(chi), S_dmrg[chi], 's-', label=f'DMRG χ={chi}')
+    ax.semilogy(S_dmrg[chi], 's-', label=f'DMRG χ={chi}')
 ax.set_xlabel("Schmidt value index")
 ax.set_ylabel("Schmidt value (log scale)")
 ax.legend()
@@ -174,9 +182,17 @@ measure how close the DMRG state is to the true ground state.
 ```python
 # Convert the DMRG MPS to a full state vector
 # (only possible for small L due to exponential size)
-psi_dmrg_full = mps_to_full_vector(result.mps)  # Custom helper needed
+from tenax import contract
+
+phys = [f"p{i}" for i in range(L)]
+T = contract(*result.mps.tensors)                 # dim-1 boundary legs remain
+bonds = [l for l in T.labels() if l not in phys]
+psi_dmrg_full = np.asarray(
+    contract(*result.mps.tensors, output_labels=bonds + phys).todense().reshape(-1)
+)  # site 0 most significant, same ordering as the kron-built H
 
 fidelity = abs(np.dot(psi_exact.conj().flatten(), psi_dmrg_full))**2
+# measured: L=8 Heisenberg, chi=16 -> 1 - 2e-15
 print(f"Fidelity: {fidelity:.10f}")
 ```
 
@@ -196,15 +212,25 @@ Compare ⟨S^z_0 S^z_r⟩ from ED and DMRG:
 ```python
 correlations_exact = []
 for r in range(L):
-    Sz0_Szr = embed_two_site(Sz, Sz, 0, r, L) if r > 0 else embed_one_site(Sz @ Sz, 0, L)
-    C = psi_exact.conj() @ Sz0_Szr @ psi_exact
+    if r > 0:
+        Sz0_Szr = embed_two_site(Sz, Sz, 0, r, L)
+    else:  # one-site Sz^2 = 1/4 on site 0
+        Sz0_Szr = embed_two_site(Sz @ Sz, I, 0, 1, L)
+    C = psi_exact[:, 0].conj() @ (Sz0_Szr @ psi_exact[:, 0])
     correlations_exact.append(float(C.real))
 ```
 
 ### From DMRG
 
 Compute expectation values using the MPS structure (efficient — does not
-require expanding to the full Hilbert space).
+require expanding to the full Hilbert space):
+
+```python
+from tenax.algorithms.observables import correlation
+
+Sz_np = 0.5 * np.array([[1.0, 0.0], [0.0, -1.0]])
+correlations_dmrg = [correlation(result.mps, Sz_np, 0, Sz_np, r) for r in range(L)]
+```
 
 ### Comparison
 

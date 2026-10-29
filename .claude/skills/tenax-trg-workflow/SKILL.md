@@ -10,7 +10,7 @@ description: >
   transfer matrix, coarse-graining, real-space renormalization, free energy
   calculation, critical temperature, critical exponents, or "how to study phase
   transitions with tensor networks". Also trigger for compute_ising_tensor,
-  TRGConfig, or classical stat mech problems.
+  TRGConfig, GILT, Gilt-TNR, or classical stat mech problems.
 ---
 
 # TRG/HOTRG Workflow — Classical Stat Mech with Tenax
@@ -43,8 +43,9 @@ from tenax.algorithms.trg import compute_ising_tensor
 import jax.numpy as jnp
 
 beta = 0.44  # Inverse temperature (near T_c ≈ 2.269, β_c ≈ 0.4407)
-T = compute_ising_tensor(beta)
-print(T.shape)  # (2, 2, 2, 2) — one index per lattice direction
+T = compute_ising_tensor(beta)        # DenseTensor; symmetric=True gives Z2
+print(T.labels())          # ('up', 'down', 'left', 'right')
+print(T.todense().shape)   # (2, 2, 2, 2) — tensors have no .shape
 ```
 
 The tensor `T` encodes the Boltzmann weights exp(βJ σ_i σ_j) for all spin
@@ -56,7 +57,8 @@ For models beyond Ising, build the tensor from the Boltzmann weights manually.
 The general recipe:
 
 1. Write the energy as a sum over bonds: E = Σ_{⟨ij⟩} ε(σ_i, σ_j)
-2. For each site, form a tensor T[u,r,d,l] = Π_{bonds} √(W(σ_bond)) where
+2. For each site, form a tensor T[u,d,l,r] (labels `up, down, left, right`,
+   the order `trg` expects) = Π_{bonds} √(W(σ_bond)) where
    W(σ_i, σ_j) = exp(-β ε(σ_i, σ_j)) and the square root is split between
    the two sites sharing each bond.
 3. For the Ising model with σ = ±1:
@@ -81,8 +83,9 @@ config = TRGConfig(
     max_bond_dim=16,   # Truncation bond dimension χ
     num_steps=20,      # Number of coarse-graining steps
 )
-free_energy = trg(T, config)
-print(f"Free energy per site: {free_energy:.8f}")
+log_z = trg(T, config)          # returns ln(Z)/N, NOT the free energy
+f = -float(log_z) / beta        # f = -ln(Z)/(N β)
+print(f"Free energy per site: {f:.8f}")
 ```
 
 ### What happens at each step
@@ -106,8 +109,30 @@ better accuracy at the same χ.
 from tenax import hotrg, HOTRGConfig  # HOTRG is a separate module
 
 config = HOTRGConfig(max_bond_dim=16, num_steps=20)
-free_energy = hotrg(T, config)
+f_hotrg = -float(hotrg(T, config)) / beta   # hotrg also returns ln(Z)/N
 ```
+
+### GILT / Gilt-TNR (new in v0.9.0)
+
+Plain TRG plateaus near criticality: corner-double-line (CDL) short-range
+entanglement accumulates and a larger χ does not help. Gilt-TNR applies the
+graph-independent local truncation (Hauru–Delcamp–Mizera) to each plaquette
+before every TRG step. `gilt_tnr` is a drop-in counterpart of `trg` (same
+input, same `ln(Z)/N` output):
+
+```python
+from tenax import gilt_tnr, GiltTNRConfig, GiltConfig
+
+config = GiltTNRConfig(max_bond_dim=8, num_steps=20,
+                       gilt=GiltConfig(gilt_eps=1e-6))
+f_gilt = -float(gilt_tnr(T, config)) / beta
+```
+
+Measured at β_c (error in ln Z per site vs Onsager): χ=8 Gilt-TNR 5.5e-5 vs
+plain TRG 2.1e-3; χ=12 4.8e-6 vs 2.1e-3. It is several times slower per step
+than TRG (χ=8, 20 steps: ~44 s vs ~5 s on CPU). Works on `DenseTensor` and
+bosonic `SymmetricTensor`; fermionic symmetries raise `NotImplementedError`.
+Lower-level pieces: `gilt_plaquette`, `gilt_tnr_step`.
 
 ---
 
@@ -124,8 +149,8 @@ config = TRGConfig(max_bond_dim=24, num_steps=20)
 
 for beta in betas:
     T = compute_ising_tensor(beta)
-    f = trg(T, config)
-    free_energies.append(float(f))
+    f = -float(trg(T, config)) / beta
+    free_energies.append(f)
 
 # Plot f(β) — look for the non-analyticity at β_c
 ```
@@ -136,15 +161,15 @@ The free energy itself is continuous at T_c (2D Ising is a second-order
 transition), but its second derivative (specific heat) diverges.
 
 ```python
-# Numerical second derivative
-f = np.array(free_energies)
-d2f = np.gradient(np.gradient(f, betas), betas)
-# The peak of |d²f/dβ²| locates T_c
+# Numerical second derivative of ln(Z)/N = -β f
+log_z = -betas * np.array(free_energies)
+C = betas**2 * np.gradient(np.gradient(log_z, betas), betas)
+# The peak of C locates T_c
 ```
 
 ### Specific heat
 
-C = -β² ∂²f/∂β² (per site). The 2D Ising model has a logarithmic divergence:
+C = β² ∂²(ln Z/N)/∂β² = -β² ∂²(βf)/∂β² (per site). The 2D Ising model has a logarithmic divergence:
 C ∼ -ln|T - T_c|.
 
 ### Magnetization (order parameter)
@@ -164,24 +189,27 @@ beta = 0.4407  # At criticality — hardest case
 for chi in [4, 8, 16, 32, 64]:
     config = TRGConfig(max_bond_dim=chi, num_steps=20)
     T = compute_ising_tensor(beta)
-    f = trg(T, config)
+    f = -float(trg(T, config)) / beta
     print(f"χ = {chi:3d}: f = {f:.10f}")
 ```
 
 Away from T_c, even χ=4 gives good results. At T_c, large χ is needed because
-correlations are long-range and the truncation error is largest.
+correlations are long-range and the truncation error is largest — and plain
+TRG stalls there (measured: f error 4.8e-3 at both χ=8 and χ=16). That plateau
+is the CDL accumulation; Gilt-TNR removes it.
 
 ### TRG vs HOTRG comparison
 
 ```python
 for chi in [8, 16, 32]:
     T = compute_ising_tensor(0.4407)
-    f_trg = float(trg(T, TRGConfig(max_bond_dim=chi, num_steps=20)))
-    f_hotrg = float(hotrg(T, HOTRGConfig(max_bond_dim=chi, num_steps=20)))
+    f_trg = -float(trg(T, TRGConfig(max_bond_dim=chi, num_steps=20))) / 0.4407
+    f_hotrg = -float(hotrg(T, HOTRGConfig(max_bond_dim=chi, num_steps=20))) / 0.4407
     print(f"χ={chi}: TRG={f_trg:.10f}, HOTRG={f_hotrg:.10f}")
 ```
 
-HOTRG should be more accurate at the same χ, especially near criticality.
+HOTRG should be more accurate at the same χ, especially near criticality
+(measured at β_c, χ=8: f error 2.1e-3 vs TRG 4.8e-3; Gilt-TNR 1.2e-4).
 
 ### Exact result for validation
 
@@ -189,16 +217,19 @@ The exact free energy of the 2D Ising model (Onsager):
 
     f_exact(β) = -kT [ln(2) + (1/2π²) ∫∫ ln(cosh²(2βJ) - sinh(2βJ)(cos θ₁ + cos θ₂)) dθ₁ dθ₂]
 
-At β_c: f ≈ -2.1009 (per site, J=1). Students should compare their TRG result.
+At β_c = 0.4407: f ≈ -2.10961 (per site, J=1). Students should compare their TRG result.
 
 Tenax provides a built-in exact solution for validation:
 
 ```python
 from tenax import ising_free_energy_exact
 
-f_exact = ising_free_energy_exact(beta=0.4407)
-print(f"Exact free energy: {f_exact:.10f}")
+f_exact = ising_free_energy_exact(beta=0.4407)   # f = -ln(Z)/(N β)
+print(f"Exact free energy: {f_exact:.10f}")      # -2.1096089420
 ```
+
+`ising_free_energy_exact` returns the free energy `f`, not `ln(Z)/N`: compare it
+with `-trg(...) / beta`.
 
 ---
 
@@ -225,7 +256,8 @@ The tensor encodes the constraint that each site is covered by exactly one dimer
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Free energy wrong far from T_c | Too few RG steps | Increase `num_steps` |
-| Free energy wrong near T_c | χ too small | Increase `max_bond_dim` |
+| Free energy wrong near T_c | χ too small, or the TRG CDL plateau | Increase `max_bond_dim`; if the error stops shrinking with χ, switch to `gilt_tnr` |
+| "Free energy" ≈ +0.93 at β_c, off by a factor and sign | Printed `trg()`'s `ln(Z)/N` directly | `f = -trg(T, cfg) / beta` |
 | NaN or Inf in free energy | Overflow in exp(βJ) at large β | Use log-space arithmetic |
 | Specific heat peak at wrong T | Finite-χ shift | Increase χ and extrapolate |
 

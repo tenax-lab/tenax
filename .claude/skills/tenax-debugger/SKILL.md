@@ -84,10 +84,10 @@ mismatches, charge sector incompatibilities, or FlowDirection conflicts.
   ```python
   # Bug: "bond_left" vs "bond" — no shared label, no contraction
   A = SymmetricTensor.random_normal(indices=(
-      TensorIndex(u1, charges, FlowDirection.IN, label="bond_left"), ...
+      TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="bond_left"), ...
   ), key=key)
   B = SymmetricTensor.random_normal(indices=(
-      TensorIndex(u1, charges, FlowDirection.IN, label="bond"), ...
+      TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="bond"), ...
   ), key=key)
   result = contract(A, B)  # No legs contracted!
 
@@ -99,11 +99,11 @@ mismatches, charge sector incompatibilities, or FlowDirection conflicts.
   the charge sectors won't align correctly.
   ```python
   # Bug: both legs are FlowDirection.IN
-  idx_A = TensorIndex(u1, charges, FlowDirection.IN, label="bond")
-  idx_B = TensorIndex(u1, charges, FlowDirection.IN, label="bond")  # Should be OUT
+  idx_A = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="bond")
+  idx_B = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="bond")  # Should be OUT
 
   # Fix:
-  idx_B = TensorIndex(u1, charges, FlowDirection.OUT, label="bond")
+  idx_B = TensorIndex.from_charges(u1, charges, FlowDirection.OUT, label="bond")
   ```
 
 - **Charge sector incompatibility.** If two legs share a label but have
@@ -244,15 +244,18 @@ The algorithm runs without crashing but gives wrong or non-converging results.
 
 ```python
 import jax
-from tenax import dmrg, build_mpo_heisenberg, DMRGConfig, FiniteMPS
+from tenax import dmrg, build_mpo_heisenberg, DMRGConfig, FiniteMPS, U1Symmetry
 
 L = 20
-mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)
-mps = FiniteMPS.random(L=L, d=2, chi=16, key=jax.random.PRNGKey(0))
+mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)       # U(1) block-sparse MPO
+mps = FiniteMPS.random(L=L, d=2, chi=16, key=jax.random.PRNGKey(0),
+                       symmetric=True, symmetry=U1Symmetry(), target_charge=0)
 config = DMRGConfig(max_bond_dim=64, num_sweeps=10, verbose=True)
 result = dmrg(mpo, mps, config)
 ```
 
+- **`TypeError: dmrg() requires uniform tensor types`** → MPO and MPS mix
+  `DenseTensor` and `SymmetricTensor`; `build_mpo_heisenberg` is symmetric.
 - **Bond dimension too small** → energy plateaus above exact value. Increase
   `max_bond_dim`.
 - **Too few sweeps** → gapless systems need more. Check `result.converged`.
@@ -277,22 +280,47 @@ result = idmrg(W, config)
 
 ### TRG
 
-- Near criticality, increase `max_bond_dim` (32–64).
+- `trg()` / `hotrg()` / `gilt_tnr()` return `ln(Z)/N`; the free energy is
+  `-trg(...) / beta` (which is what `ising_free_energy_exact` returns).
+- Near criticality, increase `max_bond_dim` (32–64). If the error stops
+  shrinking with χ, plain TRG has hit its CDL plateau — use `gilt_tnr`.
 - Ensure enough RG steps (20 steps = 2^20 sites).
 
 ### iPEPS
 
 - **CTM not converged** → increase `ctm.chi` and `ctm.max_iter`.
 - **dt too large** → reduce imaginary time step (0.1, 0.05).
-- **Wrong unit cell** → use `"2site"` for Néel order.
+- **Wrong unit cell** → use `"2site"` for Néel order (AD); a 1x1 AD run of an
+  AFM needs `sublattice_rotate_gate(gate)`, else E ≈ +0.5. `ipeps()` always
+  runs the 2-site checkerboard.
+- **`converged=False` from `optimize_gs_ad`** → since v0.9.0 the stop test is
+  `‖∇E‖ < gs_grad_norm_tol` (`gs_conv_criterion="grad_norm"`); runs report
+  more steps and `False` where the old `|ΔE|` test said `True`. Quote `‖∇E‖`.
+- **A "converged" CTM you don't trust** → check `rank(C1) > 1` (a rank-1
+  corner is the collapsed fixed point of the deprecated `recipe="1x1"`).
+- **Pre-v0.9.0 results** → simple update (#667, #865) and the symmetric CTM
+  (#905, #922) returned plausible wrong numbers; recompute.
+
+### v0.9.0 refusals (not bugs)
+
+- `NotImplementedError` from the split CTM (`fuse_virtual_legs=False`,
+  `ctm_split_*`) on `SymmetricTensor` input — it is dense-only; use the fused CTM.
+- `NotImplementedError` for fermionic gates/sites with `gs_c4v=True`, a
+  root-implicit `ctm_ad_mode`, or non-fermionic sites (#1059) — these used to
+  drop the fermionic signs silently.
+- `UserWarning` that `gs_metric_precond` was disabled — fermionic input; expected.
+- Suspect a block-sparse contraction? Rerun with `TENAX_STRICT_CONTRACT=1`:
+  `contract()` raises `ValueError` where block-sparse and dense would disagree
+  (legs must have opposite flows and *identical* charges, i.e. `flip_flow()`,
+  not `dual()`).
 
 ### Reference values
 
 | Model | Exact E/site | Tenax builder |
 |-------|-------------|----------------|
 | 1D Heisenberg S=1/2 | ≈ −0.4431 | `build_bulk_mpo_heisenberg(Jz=1.0, Jxy=1.0)` |
-| 2D Ising β_c | ≈ 0.4407 | `compute_ising_tensor(beta)` |
-| 2D Heisenberg iPEPS D=2 | ≈ −0.6548 | `ipeps(gate, None, config)` |
+| 2D Ising at β_c ≈ 0.4407 | f ≈ −2.10961 | `compute_ising_tensor(beta)`, `ising_free_energy_exact(beta)` |
+| 2D Heisenberg iPEPS D=2 | ≈ −0.6593 (SU, re-measured with `ctm_tensor_2site`); ≈ −0.6625 (AD, χ=16) | `ipeps(gate, None, config)` / `optimize_gs_ad` |
 
 ---
 

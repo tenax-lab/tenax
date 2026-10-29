@@ -30,7 +30,8 @@ auto = AutoMPO(L=L, d=2)  # d = local Hilbert space dimension
 
 # Add terms: (coefficient, "Op1", site1, "Op2", site2, ...)
 auto += (1.0, "Sz", 0, "Sz", 1)       # Two-site term
-auto += (0.5, "X", 3)                   # Single-site term
+auto += (0.5, "Sz", 3)                  # Single-site term (custom names like
+                                        # "X" need AutoMPO(..., site_ops=...))
 
 mpo = auto.to_mpo()                     # Dense MPO
 mpo = auto.to_mpo(symmetric=True)       # U(1) block-sparse MPO
@@ -106,8 +107,9 @@ For XXZ: Jz ≠ Jxy (anisotropic).
 
 ### Site ordering constraint
 
-AutoMPO requires **site indices in ascending order** within each term.
-For two-site terms, always use `min(i,j)` and `max(i,j)`:
+AutoMPO sorts each term's operators by site itself, so the order you write
+them in does not matter. Writing `min(i,j)` / `max(i,j)` keeps the code
+readable:
 
 ```python
 auto += (J, "Sz", min(i,j), "Sz", max(i,j))
@@ -202,10 +204,12 @@ for x in range(Lx):
 
 ### Transverse-field Ising
 ```python
+# "Sx" is not built in: use Sx = (Sp + Sm)/2
 for i in range(L - 1):
     auto += (-J, "Sz", i, "Sz", i + 1)
 for i in range(L):
-    auto += (-h, "Sx", i)     # or equivalently: (-h/2, "Sp", i) + (-h/2, "Sm", i)
+    auto += (-h / 2, "Sp", i)
+    auto += (-h / 2, "Sm", i)
 ```
 
 ### XXZ model
@@ -216,10 +220,29 @@ for i in range(L - 1):
     auto += (0.5, "Sm", i, "Sp", i + 1)
 ```
 
+### Spinless fermions
+`fermion_site_ops()` gives `C`, `Cd`, `N`, `F`, `Id` (d=2). Declare the
+fermionic names and AutoMPO inserts the Jordan-Wigner `F` strings between them:
+
+```python
+from tenax import AutoMPO, fermion_site_ops
+
+auto = AutoMPO(L=L, d=2, site_ops=fermion_site_ops(), fermionic_ops={"C", "Cd"})
+for i in range(L - 1):
+    auto += (-t, "Cd", i, "C", i + 1)   # -t c†_i c_{i+1}
+    auto += (-t, "Cd", i + 1, "C", i)   # -t c†_{i+1} c_i
+```
+
+The operators are Jordan-Wigner matrices on the qubit basis, so write the
+fermionic term as-is (measured: at L=6 this reproduces the open-chain free-fermion
+ground energy −3.49396).
+
 ### Hubbard (d=4: |0⟩, |↑⟩, |↓⟩, |↑↓⟩)
-Requires custom operators for creation/annihilation with Jordan-Wigner strings.
-Guide the user through defining `c_up`, `c_dn`, `n_up`, `n_dn` matrices and
-using `build_auto_mpo` with `site_ops`.
+Requires custom d=4 operators (`c_up`, `c_dn`, `n_up`, `n_dn`, and a parity `F`)
+passed as `site_ops`, with `fermionic_ops` naming the fermionic ones. AutoMPO
+only inserts `F` on the sites *between* operators, so the up/down ordering sign
+within a site must be built into the `c_up`/`c_dn` matrices; check against ED on
+a small chain.
 
 ### Spin-1 (d=3)
 ```python
