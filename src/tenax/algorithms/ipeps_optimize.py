@@ -877,6 +877,54 @@ def _is_real_decrease(
     return new_energy < old_energy - noise
 
 
+def _accepted_step_rose(
+    energy: float,
+    pending: tuple[float, int] | None,
+    *,
+    chi: int,
+    rolled_back: bool,
+) -> bool:
+    """True iff the converged energy at a line-search-accepted point is above
+    that line search's φ0 (``gs_reject_energy_rise``).
+
+    The line search accepts α on its φ probe, a forward-only CTM; a probe
+    that stops on a CTM plateau can report a decrease that the converged
+    fixed point does not have.  ``energy`` is the next step's converged
+    gradient-forward energy at the accepted point.  ``pending`` is
+    ``(φ0, χ)`` recorded at the accept, or ``None`` when the previous step
+    accepted nothing.  A rollback since the accept (the point is now
+    ``best_params``, not the trial) or a χ change (energies at two χ are not
+    comparable) disarms the check.  A rise must exceed the stall noise floor.
+    """
+    if pending is None or rolled_back:
+        return False
+    phi0, chi0 = pending
+    if chi != chi0:
+        return False
+    return _is_real_decrease(phi0, energy)
+
+
+def _log_energy_rise_reject(
+    tag: str,
+    step: int,
+    num_steps: int,
+    phi0: float,
+    energy: float,
+    n: int,
+    retries: int,
+    verbose: bool,
+) -> None:
+    msg = (
+        f"[iPEPS-AD:{tag}] step {step + 1}/{num_steps} energy rose after an "
+        f"accepted line search: phi0={phi0:.10f} -> E={energy:.10f} "
+        f"(+{energy - phi0:.3e}); rollback to best, clear history "
+        f"(reject {n}/{retries + 1})"
+    )
+    _logger.warning(msg)
+    if verbose:
+        print(msg, flush=True)
+
+
 def _resolve_line_search_method(config: iPEPSConfig, ctm_cfg: CTMConfig) -> str:
     """Return the concrete line-search method ("armijo" or "hager_zhang").
 
@@ -2169,6 +2217,10 @@ def _optimize_gs_ad_tensor(
     # count toward convergence.  Only the convergence decisions consume it;
     # delta_energy itself (log, metric preconditioner) stays as measured.
     _rolled_back = False
+    # gs_reject_energy_rise: (φ0, χ) of the line search that accepted the
+    # current point, checked against the next converged energy.
+    _rise_pending = None
+    _rise_rejects = 0  # consecutive rejections
     prev_grad = None
     cg_direction = None
     prev_precond_grad = None  # for preconditioned CG beta
@@ -2699,6 +2751,51 @@ def _optimize_gs_ad_tensor(
                 _history_step_times.append(float(_step_dt))
             _history_energies.append(energy_float)
 
+        # gs_reject_energy_rise: the converged energy at a line-search-accepted
+        # point must not be above that search's φ0 (a φ probe can stop on a CTM
+        # plateau below the fixed point).  Roll back before the bad point can
+        # update the env cache, best-state tracking or the curvature history.
+        _pending, _rise_pending = _rise_pending, None
+        if config.gs_reject_energy_rise and _accepted_step_rose(
+            energy_float, _pending, chi=ctm_cfg.chi, rolled_back=_rolled_back
+        ):
+            _rise_rejects += 1
+            _log_energy_rise_reject(
+                "1site-tensor",
+                step,
+                config.gs_num_steps,
+                _pending[0],
+                energy_float,
+                _rise_rejects,
+                config.gs_stall_recovery_retries,
+                config.gs_verbose,
+            )
+            params = best_params
+            if _rise_rejects > config.gs_stall_recovery_retries:
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD] energy-rise budget exhausted after "
+                        f"{_rise_rejects} rejections, "
+                        f"returning best E={best_energy:.10f}",
+                        flush=True,
+                    )
+                break
+            _rolled_back = True  # next step re-measures best_params
+            _drop_env_cache_for_reset(_env_cache)
+            if is_metric_lbfgs:
+                lbfgs_history.clear()
+                prev_A_flat = None
+                prev_grad_flat = None
+            if is_cg:
+                cg_direction = None
+                prev_grad = None
+                prev_precond_grad = None
+            if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                opt_state = optimizer.init(params)
+            continue
+        if _pending is not None and not _rolled_back:
+            _rise_rejects = 0  # an accepted step held its decrease
+
         # Gradient-spike guard (ported from the 2-site path, #524): a
         # non-variational implicit-AD step shows up as a >Nx gradient blowup
         # (e.g. |g| jumping from ~0.2 to ~5e3) whose energy can dip below the
@@ -3097,6 +3194,7 @@ def _optimize_gs_ad_tensor(
                 if _is_real_decrease(f_alpha, energy_float):
                     params = _ls_eval.accept(alpha, params, direction)
                     stall_count = 0
+                    _rise_pending = (energy_float, ctm_cfg.chi)
                 else:
                     stall_count += 1
             else:
@@ -3115,6 +3213,7 @@ def _optimize_gs_ad_tensor(
                 )
                 if _is_real_decrease(new_energy, energy_float):
                     stall_count = 0
+                    _rise_pending = (energy_float, ctm_cfg.chi)
                 else:
                     stall_count += 1
 
@@ -4093,6 +4192,10 @@ def _optimize_gs_ad_tensor_2site(
     # count toward convergence.  Only the convergence decisions consume it;
     # delta_energy itself (log, metric preconditioner) stays as measured.
     _rolled_back = False
+    # gs_reject_energy_rise: (φ0, χ) of the line search that accepted the
+    # current point, checked against the next converged energy.
+    _rise_pending = None
+    _rise_rejects = 0  # consecutive rejections
     prev_grad = None
     cg_direction = None
     prev_precond_grad = None
@@ -4756,6 +4859,51 @@ def _optimize_gs_ad_tensor_2site(
                     _history_step_times.append(float(_step_dt))
                 _history_energies.append(energy_float)
 
+            # gs_reject_energy_rise: the converged energy at a line-search-accepted
+            # point must not be above that search's φ0 (a φ probe can stop on a CTM
+            # plateau below the fixed point).  Roll back before the bad point can
+            # update the env cache, best-state tracking or the curvature history.
+            _pending, _rise_pending = _rise_pending, None
+            if config.gs_reject_energy_rise and _accepted_step_rose(
+                energy_float, _pending, chi=ctm_cfg_2s.chi, rolled_back=_rolled_back
+            ):
+                _rise_rejects += 1
+                _log_energy_rise_reject(
+                    "2site-tensor",
+                    step,
+                    config.gs_num_steps,
+                    _pending[0],
+                    energy_float,
+                    _rise_rejects,
+                    config.gs_stall_recovery_retries,
+                    config.gs_verbose,
+                )
+                params = best_params
+                if _rise_rejects > config.gs_stall_recovery_retries:
+                    if config.gs_verbose:
+                        print(
+                            f"[iPEPS-AD] energy-rise budget exhausted after "
+                            f"{_rise_rejects} rejections, "
+                            f"returning best E={best_energy:.10f}",
+                            flush=True,
+                        )
+                    break
+                _rolled_back = True  # next step re-measures best_params
+                _reset_env_cache_2s()  # #518 / R17
+                if is_metric_lbfgs:
+                    lbfgs_history.clear()
+                    prev_params_flat = None
+                    prev_grad_flat = None
+                if is_cg:
+                    cg_direction = None
+                    prev_grad = None
+                    prev_precond_grad = None
+                if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                    opt_state = optimizer.init(params)
+                continue
+            if _pending is not None and not _rolled_back:
+                _rise_rejects = 0  # an accepted step held its decrease
+
             # Update env cache for warm-starting next step
             _update_env_cache_2s(params)
 
@@ -5225,6 +5373,7 @@ def _optimize_gs_ad_tensor_2site(
                     if _is_real_decrease(f_alpha, energy_float):
                         params = _ls_eval.accept(alpha, params, direction)
                         stall_count = 0
+                        _rise_pending = (energy_float, ctm_cfg_2s.chi)
                     else:
                         stall_count += 1
                 else:
@@ -5245,6 +5394,7 @@ def _optimize_gs_ad_tensor_2site(
                     )
                     if _is_real_decrease(new_energy, energy_float):
                         stall_count = 0
+                        _rise_pending = (energy_float, ctm_cfg_2s.chi)
                     else:
                         stall_count += 1
 
@@ -5845,6 +5995,10 @@ def _optimize_gs_ad_multisite(
     # count toward convergence.  Only the convergence decisions consume it;
     # delta_energy itself (log, metric preconditioner) stays as measured.
     _rolled_back = False
+    # gs_reject_energy_rise: (φ0, χ) of the line search that accepted the
+    # current point, checked against the next converged energy.
+    _rise_pending = None
+    _rise_rejects = 0  # consecutive rejections
     prev_grad = None
     cg_direction = None
     prev_precond_grad = None
@@ -6037,6 +6191,51 @@ def _optimize_gs_ad_multisite(
             else:
                 _history_step_times.append(float(_step_dt))
             _history_energies.append(energy_float)
+
+        # gs_reject_energy_rise: the converged energy at a line-search-accepted
+        # point must not be above that search's φ0 (a φ probe can stop on a CTM
+        # plateau below the fixed point).  Roll back before the bad point can
+        # update the env cache, best-state tracking or the curvature history.
+        _pending, _rise_pending = _rise_pending, None
+        if config.gs_reject_energy_rise and _accepted_step_rose(
+            energy_float, _pending, chi=ctm_cfg.chi, rolled_back=_rolled_back
+        ):
+            _rise_rejects += 1
+            _log_energy_rise_reject(
+                "multisite-tensor",
+                step,
+                config.gs_num_steps,
+                _pending[0],
+                energy_float,
+                _rise_rejects,
+                config.gs_stall_recovery_retries,
+                config.gs_verbose,
+            )
+            params = best_params
+            if _rise_rejects > config.gs_stall_recovery_retries:
+                if config.gs_verbose:
+                    print(
+                        f"[iPEPS-AD] energy-rise budget exhausted after "
+                        f"{_rise_rejects} rejections, "
+                        f"returning best E={best_energy:.10f}",
+                        flush=True,
+                    )
+                break
+            _rolled_back = True  # next step re-measures best_params
+            _drop_env_cache_for_reset(_env_cache)
+            if is_metric_lbfgs:
+                lbfgs_history.clear()
+                prev_params_flat = None
+                prev_grad_flat = None
+            if is_cg:
+                cg_direction = None
+                prev_grad = None
+                prev_precond_grad = None
+            if optimizer is not None and config.gs_optimizer.lower() == "lbfgs":
+                opt_state = optimizer.init(params)
+            continue
+        if _pending is not None and not _rolled_back:
+            _rise_rejects = 0  # an accepted step held its decrease
 
         # Update env cache for warm-starting next step
         _update_env_cache(params)
@@ -6370,6 +6569,7 @@ def _optimize_gs_ad_multisite(
                 if _is_real_decrease(f_alpha, energy_float):
                     params = _ls_eval.accept(alpha, params, direction)
                     stall_count = 0
+                    _rise_pending = (energy_float, ctm_cfg.chi)
                 else:
                     stall_count += 1
             else:
@@ -6389,6 +6589,7 @@ def _optimize_gs_ad_multisite(
                 )
                 if _is_real_decrease(new_energy, energy_float):
                     stall_count = 0
+                    _rise_pending = (energy_float, ctm_cfg.chi)
                 else:
                     stall_count += 1
 
