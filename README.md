@@ -147,11 +147,15 @@ version, the options, and the caveats.
 ### DMRG
 
 ```python
-from tenax import DMRGConfig, build_mpo_heisenberg, build_random_symmetric_mps, dmrg
+import jax
+from tenax import DMRGConfig, FiniteMPS, U1Symmetry, build_mpo_heisenberg, dmrg
 
 L = 10  # chain length
 mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)  # U(1) block-sparse MPO
-mps = build_random_symmetric_mps(L, bond_dim=8)  # matching block-sparse MPS
+mps = FiniteMPS.random(
+    L=L, d=2, chi=8, key=jax.random.PRNGKey(0),
+    symmetric=True, symmetry=U1Symmetry(), target_charge=0,  # matching block-sparse MPS, Sz=0
+)
 
 config = DMRGConfig(max_bond_dim=50, num_sweeps=10)
 result = dmrg(mpo, mps, config)

@@ -237,10 +237,10 @@ def _converged_outer(
 
     Honors ``config.gs_conv_criterion``:
 
-    - ``"grad_norm"`` (default since v0.8.4): exit on
+    - ``"grad_norm"`` (default since v0.9.0): exit on
       ``||grad||_2 < gs_grad_norm_tol`` (variPEPS
       ``optimizer_convergence_eps`` analog, issue #448).
-    - ``"dE"`` (default before v0.8.4, deprecated): exit on
+    - ``"dE"`` (default before v0.9.0, deprecated): exit on
       ``|dE| < gs_conv_tol``.
     - ``"both"``: require both to hold simultaneously.
 

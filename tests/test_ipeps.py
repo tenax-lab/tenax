@@ -1697,8 +1697,8 @@ class TestPostPR291ADBaseline:
 def test_stall_recovery_auto_defaults():
     """Every unit cell -> 'reset' when user leaves gs_stall_recovery=None.
 
-    1-site was 'noise' before v0.8.4; a noise kick near a settled energy is
-    not rolled back (issue #298, and the D=3 1x1 collapse in the v0.8.4
+    1-site was 'noise' before v0.9.0; a noise kick near a settled energy is
+    not rolled back (issue #298, and the D=3 1x1 collapse in the v0.9.0
     validation).
     """
     from tenax.algorithms.ipeps_config import iPEPSConfig

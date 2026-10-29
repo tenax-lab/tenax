@@ -728,10 +728,10 @@ class iPEPSConfig:
                                random initialization.  Ignored when ``A_init``
                                is provided explicitly.
         gs_conv_criterion:     Outer-loop exit test for ``optimize_gs_ad``.
-                               ``"grad_norm"`` (default since v0.8.4) exits
+                               ``"grad_norm"`` (default since v0.9.0) exits
                                when ``||grad E||_2 < gs_grad_norm_tol`` -- a
                                stationarity test, as in variPEPS.  ``"dE"``
-                               (the default before v0.8.4, deprecated) exits
+                               (the default before v0.9.0, deprecated) exits
                                when ``|E_k - E_{k-1}| < gs_conv_tol``, which
                                also fires when a line search barely moves or
                                right after a rollback / noise injection, with
@@ -806,7 +806,7 @@ class iPEPSConfig:
                                perturbation with no rollback.  ``None``
                                (default) resolves to ``"reset"`` on every
                                unit cell (1-site was ``"noise"`` before
-                               v0.8.4).  The ``ctm_ad_mode`` engines have no
+                               v0.9.0).  The ``ctm_ad_mode`` engines have no
                                stall recovery and ignore this field.
         gs_stall_recovery_retries:
                                Maximum consecutive resets allowed on the
@@ -844,14 +844,14 @@ class iPEPSConfig:
     gs_num_steps: int = 200
     gs_conv_tol: float = 1e-8
     # Outer convergence criterion for ``optimize_gs_ad``. ``"grad_norm"``
-    # (the default since v0.8.4) matches variPEPS by exiting when
+    # (the default since v0.9.0) matches variPEPS by exiting when
     # ``||grad E||_2 < gs_grad_norm_tol`` (a true stationarity test).
-    # ``"dE"`` (the default before v0.8.4, **deprecated** — see
+    # ``"dE"`` (the default before v0.9.0, **deprecated** — see
     # ``__post_init__``) exits when ``|E_step - E_step-1| < gs_conv_tol`` —
     # variationally fragile near flat minima, after a barely-moving line
     # search, or right after a stall recovery, where ``|dE|`` underflows
     # ``gs_conv_tol`` while the gradient is still large (|g| = 1e-2 .. 0.69
-    # at "convergence" in the v0.8.4 validation runs).  ``"both"`` requires
+    # at "convergence" in the v0.9.0 validation runs).  ``"both"`` requires
     # both to hold simultaneously (most conservative). See issue #448.
     gs_conv_criterion: Literal["dE", "grad_norm", "both"] = "grad_norm"
     # Gradient-norm tolerance used by the ``"grad_norm"`` and ``"both"``
@@ -932,7 +932,7 @@ class iPEPSConfig:
     #   "reset"  -> clear L-BFGS (s, y) history, roll back params to best_params,
     #               force steepest descent on next step.  Matches variPEPS.
     #   None     -> "reset" on every unit cell (1-site was "noise" before
-    #               v0.8.4).  Set by optimize_gs_ad at entry.  The
+    #               v0.9.0).  Set by optimize_gs_ad at entry.  The
     #               ctm_ad_mode engines (c4v_reference, root_implicit*) have
     #               no stall recovery and ignore it.
     gs_stall_recovery: Literal["noise", "reset"] | None = None
@@ -1221,7 +1221,7 @@ class iPEPSConfig:
         if self.gs_conv_criterion == "dE":
             warnings.warn(
                 "gs_conv_criterion='dE' is deprecated; it was the default "
-                "before v0.8.4, and the default is now 'grad_norm' (issue "
+                "before v0.9.0, and the default is now 'grad_norm' (issue "
                 "#448). The dE criterion underflows near flat minima, after "
                 "a barely-moving line search and after stall recoveries, "
                 "declaring convergence while ||grad E|| is still large. "

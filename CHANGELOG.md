@@ -1,6 +1,70 @@
 # Changelog
 
-## Unreleased
+## v0.9.0 (2026-10-28)
+
+A correctness release with breaking defaults, 202 commits after v0.8.3. As in
+v0.8.3, the reason to upgrade is a set of defects that produced **plausible,
+non-crashing, wrong numbers**: simple update, the symmetric (block-sparse) CTM,
+and the CTM convergence test were all affected. The implicit-AD optimizer's
+defaults also change, so iPEPS-AD trajectories, step counts and `converged`
+flags differ from v0.8.3 even where nothing was wrong. New: GILT / Gilt-TNR,
+`ctm_ad_mode="root_implicit_symmetric"` in `optimize_gs_ad`, the BP gauge
+(`bp_gauge_checkerboard`), and much shorter compiles for the block-sparse
+CTM-AD backward.
+
+### ⚠️ Results affected — please re-check
+
+If you have results from v0.8.3 or earlier, check whether they came through
+any of these paths. Details and measurements are in the entries below.
+
+- **Simple update converged to the product state** (#667). Every `ipeps()`
+  result is affected: the sweep drove only 2 of the checkerboard's 4 bonds,
+  and each bond carried `λ^1.5`. D=2 Heisenberg goes from −0.548 to −0.6593.
+  A "D=3" state from `ipeps()` before the fix was in effect D=2.
+- **`fpeps()` returned a state that was exactly `0.0`** (#878). It now returns
+  a 2-site checkerboard, and its return value changes shape (see Breaking).
+- **Symmetric simple update threw away the largest singular value** (#865).
+  `base_charges` fixed the per-sector keep counts, so U(1)-Sz states kept 26%
+  of the weight at step 0 and reached exactly zero by step 22.
+- **The symmetric CTM zeroed its charged environment sectors** (#905). The
+  sectors were then capped by a per-sector quota (#922, #929). Symmetric CTM
+  energies were flat in chi and sat above the dense reference. Any
+  `SymmetricTensor` CTM result from v0.8.3 should be recomputed.
+- **`converged=True` did not mean converged.** The spectral criterion
+  certified a rank-1 (collapsed) environment (#898). The default elementwise
+  criterion certified an all-NaN environment (#974). A bond whose RDM
+  contracted to zero was summed into the energy as `0` (#845, #848).
+- **`optimize_gs_ad`'s returned energy was not an evaluation of the returned
+  tensor** when a line search was active (#899). It came from a stale
+  environment seed, 1.3e-3 off at D=2.
+- **The sigma forward gauge on the 2x2 recipe corrupted the environment**
+  (#798). Energies were off by 2.3e-3 at D=2 and ~1e-2 at D=3.
+- **Fermionic runs silently became hard-core bosons** (#1059). This happened
+  with `gs_c4v=True`, with the root-implicit engines, and with a fermionic gate
+  on non-fermionic sites. `optimize_fpeps_ad` also ignored `unit_cell`. These
+  now raise or are routed correctly.
+- **The symmetry core accepted non-conserving tensors** (#799). U(1) charge
+  sums wrapped at int32, and a non-canonical `Z_n` block key validated, then
+  `todense()` dropped it.
+- **The kagome PESS AD benchmark numbers are backend-dependent garbage**
+  (#1002); discard them. The v0.8.2 split-CTM / multi-GPU frontier numbers are
+  retracted (#747, #825); see that section.
+
+### ⚠️ Breaking changes and changed defaults
+
+- `fpeps()` returns `(energy, (A, B), (env_A, env_B))` (#878).
+- The split CTM (`fuse_virtual_legs=False`) refuses `SymmetricTensor` input.
+- `CTMConfig.projector_backward="auto"` resolves to `"flow"` on the default
+  fused implicit-AD path, so the gradient includes the projector response
+  (#1028). `"standard"` restores the old behaviour.
+- `iPEPSConfig.gs_conv_criterion` defaults to `"grad_norm"` (#448). Expect
+  more steps, and `converged=False` where `True` was reported before.
+- `gs_stall_recovery` defaults to `"reset"` on 1-site cells too (#298).
+- `CTMConfig.adjoint_chain_rule` defaults to `"auto"` (the joint VJP).
+- Fermionic input disables `gs_metric_precond`, and is refused wherever its
+  signs would be dropped (#1059).
+- GPU SVDs with `min(m, n) >= 128` use the polar algorithm.
+- The JAX floor is `jax>=0.4.35` (#1105).
 
 ### Behavior Changes
 
@@ -644,10 +708,67 @@
   return contract are unchanged, `BPGaugeInfo` is still `(int, float, bool)`,
   and a `SymmetricTensor` pair still takes the eager route bit-identically.
 
+- **`TENAX_STRICT_CONTRACT=1` detects block-sparse contractions that disagree
+  with the densified one** (#834). The block-sparse path pairs blocks by charge
+  **value**; dense einsum pairs by **position**. Where those differ the
+  mismatched products were discarded with a bare `continue` — no error, no
+  warning. Measured: 22 of 64 flow/charge configurations disagreed, by 4.2e-01
+  to 1.5e+00 relative, with `|sym|/|den|` from 0.458 to **1.514**. A result
+  *larger* than the true one is not discarded weight, so blocks were being
+  mis-paired. At all-zero charges every combination is exact, which is why this
+  survived — negation is the identity there, so the position→charge map cannot
+  be permuted.
+
+  With the flag set, `contract()` raises `ValueError` naming both legs.
+  Refusing is the only available answer, not a conservative one: the dense
+  result of such a contraction is generally not a symmetric tensor. With `A.k`
+  OUT `[-1,0,1]` against `B.k` IN `[1,0,-1]`, dense pairs charge −1 with charge
+  +1 and puts weight on output block `(i=1, j=-1)`, whose charge is −2 — no
+  `SymmetricTensor` over those indices can carry it. Over 256 configurations
+  strict mode is sound *and* complete: it admits every one that agrees with
+  dense and refuses every one that does not.
+
+  While armed the flag also **pins execution to the reference per-block path**,
+  overriding `TENAX_BATCH_BLOCKSPARSE`, `TENAX_STACK_BLOCKSPARSE` and
+  `TENAX_USE_CUTENSOR_BLOCKSPARSE`. Each of those returns before the discard
+  check and drops out-of-set output keys with its own bare `continue`, so an
+  audit that left them enabled reported clean on exactly the products it never
+  inspected — a partial audit is worse than none, since the contract of a
+  diagnostic is that silence means agreement.
+
+  **It is opt-in, and that is a measured decision rather than a cautious one.**
+  Both checks are structural — leg charges, flows, block keys — while whether
+  the two representations actually differ depends on the blocks' *values*, which
+  are traced. Scoring every `_contract_symmetric` call of a D=2, χ=8 charged
+  U(1)-Sz sweep against the densified contraction of the same operands, the
+  structural verdict is anti-correlated with the truth:
+
+  | call site | calls | max rel. gap |
+  |---|---|---|
+  | *refused*: `_apply_proj_unfused` | 40 | 1.7e-16 |
+  | *refused*: `_build_enlarged_corner` (4 frames) | 82 | 0.0 |
+  | *refused*: `_ctm_tensor_absorb_*_2plaq` (4) | 16 | 0.0 |
+  | *allowed*: `_apply_proj_unfused` | 56 | **8.3e-01** |
+
+  Every refusal is a false alarm — the discarded products are exactly zero — and
+  the one genuinely wrong site is allowed. A default-on check would break the
+  default CTM path *and* still miss the defect on it.
+
+  That last row is a real defect and is filed separately: its mechanism is
+  target inference over mixed-charge operands, not leg pairing. `test_contract_leg_pairing_834.py`
+  pins it so a fix announces itself.
+
+  `TensorIndex.is_dual_of()` is **not** the predicate — it is this tree's other
+  duality convention (opposite flow + *negated* charges) and admits 28 of those
+  256 configurations that produce wrong answers. Its docstring now says so, and
+  the two test fixtures that were built on it (`test_padded_block_array.py`,
+  `test_fermionic.py`) now use `flip_flow`; the latter was also a 2×2 with a
+  single nonzero, so it could not have caught this.
+
 ### Fixed
 
-- **The eager CTM sweep no longer runs its pieces under `jax.jit` by default.**
-  #1142 jitted the static-shape pieces of an eager symmetric sweep.  That made
+- **The eager CTM sweep's piecewise `jax.jit` (#1142) ships off by default.**
+  No release ran it on, so v0.8.3 behaviour is unchanged.  #1142 jitted the static-shape pieces of an eager symmetric sweep.  That made
   `test_ctm_symmetric_rdm_positive_853[20]` 5x faster (18 min vs 90 min) but
   raised its peak RSS from 5.3 GB to 14.7 GB, which exhausts a 16 GB CI runner:
   every later compile in the process failed with `LLVM compilation error:
@@ -1886,99 +2007,6 @@
   strict `xfail` on a known-dying seed rather than papering over with a luckier
   one.
 
-### Added
-
-- **`TENAX_STRICT_CONTRACT=1` detects block-sparse contractions that disagree
-  with the densified one** (#834). The block-sparse path pairs blocks by charge
-  **value**; dense einsum pairs by **position**. Where those differ the
-  mismatched products were discarded with a bare `continue` — no error, no
-  warning. Measured: 22 of 64 flow/charge configurations disagreed, by 4.2e-01
-  to 1.5e+00 relative, with `|sym|/|den|` from 0.458 to **1.514**. A result
-  *larger* than the true one is not discarded weight, so blocks were being
-  mis-paired. At all-zero charges every combination is exact, which is why this
-  survived — negation is the identity there, so the position→charge map cannot
-  be permuted.
-
-  With the flag set, `contract()` raises `ValueError` naming both legs.
-  Refusing is the only available answer, not a conservative one: the dense
-  result of such a contraction is generally not a symmetric tensor. With `A.k`
-  OUT `[-1,0,1]` against `B.k` IN `[1,0,-1]`, dense pairs charge −1 with charge
-  +1 and puts weight on output block `(i=1, j=-1)`, whose charge is −2 — no
-  `SymmetricTensor` over those indices can carry it. Over 256 configurations
-  strict mode is sound *and* complete: it admits every one that agrees with
-  dense and refuses every one that does not.
-
-  While armed the flag also **pins execution to the reference per-block path**,
-  overriding `TENAX_BATCH_BLOCKSPARSE`, `TENAX_STACK_BLOCKSPARSE` and
-  `TENAX_USE_CUTENSOR_BLOCKSPARSE`. Each of those returns before the discard
-  check and drops out-of-set output keys with its own bare `continue`, so an
-  audit that left them enabled reported clean on exactly the products it never
-  inspected — a partial audit is worse than none, since the contract of a
-  diagnostic is that silence means agreement.
-
-  **It is opt-in, and that is a measured decision rather than a cautious one.**
-  Both checks are structural — leg charges, flows, block keys — while whether
-  the two representations actually differ depends on the blocks' *values*, which
-  are traced. Scoring every `_contract_symmetric` call of a D=2, χ=8 charged
-  U(1)-Sz sweep against the densified contraction of the same operands, the
-  structural verdict is anti-correlated with the truth:
-
-  | call site | calls | max rel. gap |
-  |---|---|---|
-  | *refused*: `_apply_proj_unfused` | 40 | 1.7e-16 |
-  | *refused*: `_build_enlarged_corner` (4 frames) | 82 | 0.0 |
-  | *refused*: `_ctm_tensor_absorb_*_2plaq` (4) | 16 | 0.0 |
-  | *allowed*: `_apply_proj_unfused` | 56 | **8.3e-01** |
-
-  Every refusal is a false alarm — the discarded products are exactly zero — and
-  the one genuinely wrong site is allowed. A default-on check would break the
-  default CTM path *and* still miss the defect on it.
-
-  That last row is a real defect and is filed separately: its mechanism is
-  target inference over mixed-charge operands, not leg pairing. `test_contract_leg_pairing_834.py`
-  pins it so a fix announces itself.
-
-  `TensorIndex.is_dual_of()` is **not** the predicate — it is this tree's other
-  duality convention (opposite flow + *negated* charges) and admits 28 of those
-  256 configurations that produce wrong answers. Its docstring now says so, and
-  the two test fixtures that were built on it (`test_padded_block_array.py`,
-  `test_fermionic.py`) now use `flip_flow`; the latter was also a 2×2 with a
-  single nonzero, so it could not have caught this.
-
-### ⚠️ Published performance claims retracted
-
-- **The v0.8.2 iPEPS multi-GPU / split-CTM frontier numbers were measured
-  against a collapsed CTM environment and are retracted** (#747, #825). The
-  #672 benchmark ran `recipe="1x1"` on both arms; that projector drives the
-  environment to a rank-1 corner (#723/#726), i.e. a χ_eff=1 mean-field
-  boundary, so its (D,χ) reach figures described how cheaply *that* scales
-  rather than the reach of a converged CTM. Re-derived at `recipe="2x2"` on
-  A100-80GB, with `corner_rank` gated and every ceiling walled:
-
-  | claim as published | re-measured |
-  |---|---|
-  | "split-CTM on 1 GPU beats dense on 2 across the whole (D,χ) frontier" | **ties** dense-2GPU at D=8 (χ=96) and D=10 (χ=48); wins **2× only at D=12** |
-  | frontier reach D=10 χ≥128, D=12 χ96 | **D=8 χ=96, D=10 χ=48, D=12 χ=32** |
-  | split-1GPU ceilings χ=224 (D=8) / χ=128 (D=10), compile-bound | **χ=96 / χ=48**, and **memory**-bound — every autotuner wall converts to a plain OOM under `--xla_gpu_autotune_level=0` |
-  | dense shard relief ~1.1–1.4×/device, never extends D-reach | **0.88–1.77×/device** (at D=12 sharding *costs* 14%); extends reach once, D=8 χ=64→96 |
-
-  **The multi-GPU CTM-AD NO-GO itself is unaffected** — it rests on the
-  SVD-replication mechanism, which is recipe-independent. What changed is the
-  split-vs-dense comparison layered on top of it. Split-CTM is still the better
-  path on equal hardware (1.5× in χ at D=8, 2× at D=12) and still matches a
-  2-GPU dense run using one GPU at D=12; the advantage is simply much smaller
-  than published, and it *erodes with χ* — 2.66× in peak at χ=16 down to 1.02×
-  at the ceiling.
-
-  One caveat on attribution: a same-recipe control showed that replacing the
-  BFC allocator with `cuda_async` alone moves the *dense* arm (D=12 χ=16 goes
-  autotuner-fail → OK at unchanged `1x1`), so #672's "dense cannot compile even
-  χ16 / split is the only path that runs D=12" falls to the allocator rather
-  than the recipe. The split-side collapse is cleanly the recipe — its controls
-  reproduce to ≤1.8%.
-
-### Fixes
-
 - **Simple update converged to the product state; every `ipeps()` result is
   affected** (#667). Two independent defects in the simple-update path:
 
@@ -2050,6 +2078,38 @@
   (#860) — direction fine, and flat at 5.48e-2 across FD steps 1e-3…1e-6, which
   is what rules out a finite-difference artifact. That one is gated by a strict
   `xfail`, not by a loosened threshold.
+
+### ⚠️ Published performance claims retracted
+
+- **The v0.8.2 iPEPS multi-GPU / split-CTM frontier numbers were measured
+  against a collapsed CTM environment and are retracted** (#747, #825). The
+  #672 benchmark ran `recipe="1x1"` on both arms; that projector drives the
+  environment to a rank-1 corner (#723/#726), i.e. a χ_eff=1 mean-field
+  boundary, so its (D,χ) reach figures described how cheaply *that* scales
+  rather than the reach of a converged CTM. Re-derived at `recipe="2x2"` on
+  A100-80GB, with `corner_rank` gated and every ceiling walled:
+
+  | claim as published | re-measured |
+  |---|---|
+  | "split-CTM on 1 GPU beats dense on 2 across the whole (D,χ) frontier" | **ties** dense-2GPU at D=8 (χ=96) and D=10 (χ=48); wins **2× only at D=12** |
+  | frontier reach D=10 χ≥128, D=12 χ96 | **D=8 χ=96, D=10 χ=48, D=12 χ=32** |
+  | split-1GPU ceilings χ=224 (D=8) / χ=128 (D=10), compile-bound | **χ=96 / χ=48**, and **memory**-bound — every autotuner wall converts to a plain OOM under `--xla_gpu_autotune_level=0` |
+  | dense shard relief ~1.1–1.4×/device, never extends D-reach | **0.88–1.77×/device** (at D=12 sharding *costs* 14%); extends reach once, D=8 χ=64→96 |
+
+  **The multi-GPU CTM-AD NO-GO itself is unaffected** — it rests on the
+  SVD-replication mechanism, which is recipe-independent. What changed is the
+  split-vs-dense comparison layered on top of it. Split-CTM is still the better
+  path on equal hardware (1.5× in χ at D=8, 2× at D=12) and still matches a
+  2-GPU dense run using one GPU at D=12; the advantage is simply much smaller
+  than published, and it *erodes with χ* — 2.66× in peak at χ=16 down to 1.02×
+  at the ceiling.
+
+  One caveat on attribution: a same-recipe control showed that replacing the
+  BFC allocator with `cuda_async` alone moves the *dense* arm (D=12 χ=16 goes
+  autotuner-fail → OK at unchanged `1x1`), so #672's "dense cannot compile even
+  χ16 / split is the only path that runs D=12" falls to the allocator rather
+  than the recipe. The split-side collapse is cleanly the recipe — its controls
+  reproduce to ≤1.8%.
 
 ### CI / tests
 
@@ -2380,7 +2440,7 @@ additive features (multi-GPU HOTRG, 2-site split-CTM, Potts helpers).
   all-gathers whatever GSPMD sharded. TRG is likewise not a sharding target
   (no χ⁶ intermediate); HOTRG is, and shipped above. **The NO-GO stands, but
   two figures published in this entry were measured against a collapsed CTM
-  environment and are retracted — see Unreleased (#747, #825).** They were:
+  environment and are retracted — see v0.9.0 (#747, #825).** They were:
   "dense sharding gives only ~1.1–1.4×/device and never extends D-reach"
   (re-measured: 0.88–1.77×/device, and it does extend reach once, D=8 χ=64→96)
   and "split-CTM on 1 GPU beats dense on 2 across the whole (D,χ) frontier"

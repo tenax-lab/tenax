@@ -6,7 +6,7 @@ zero so the best-so-far state survives.  That rescue is also what makes the run
 
 * ``gs_conv_criterion='grad_norm'`` -- a fully masked gradient has L2 norm
   *exactly* ``0.0``, below any tolerance.  Fires on the masked step itself.
-* ``gs_conv_criterion='dE'`` (the default before v0.8.4) -- a fully masked step is a
+* ``gs_conv_criterion='dE'`` (the default before v0.9.0) -- a fully masked step is a
   no-op, so the *next* step re-evaluates identical params and sees
   ``delta_energy == 0.0``.  Fires one step later.
 

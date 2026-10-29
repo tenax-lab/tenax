@@ -51,13 +51,16 @@ import jax
 from tenax import (
     TDVPConfig, tdvp, tdvp_step,
     DMRGConfig, dmrg,
-    build_mpo_heisenberg, FiniteMPS,
+    build_mpo_heisenberg, FiniteMPS, U1Symmetry,
 )
 
 # Prepare ground state via DMRG
 L = 20
-mpo = build_mpo_heisenberg(L)
-mps = FiniteMPS.random(L=L, d=2, chi=16, key=jax.random.PRNGKey(0))
+mpo = build_mpo_heisenberg(L)  # U(1) block-sparse MPO
+mps = FiniteMPS.random(
+    L=L, d=2, chi=16, key=jax.random.PRNGKey(0),
+    symmetric=True, symmetry=U1Symmetry(), target_charge=0,  # matching block-sparse MPS
+)
 result = dmrg(mpo, mps, DMRGConfig(max_bond_dim=32, num_sweeps=20))
 mps_gs = result.mps
 

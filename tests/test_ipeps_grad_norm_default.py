@@ -1,4 +1,4 @@
-"""``gs_conv_criterion`` defaults to ``"grad_norm"`` (v0.8.4, issue #448).
+"""``gs_conv_criterion`` defaults to ``"grad_norm"`` (v0.9.0, issue #448).
 
 The legacy ``"dE"`` default, ``|E_k - E_{k-1}| < gs_conv_tol``, declared
 convergence with ``||grad E||`` between 1e-2 and 0.69 in all four D=2/3
@@ -111,7 +111,7 @@ def test_explicit_dE_still_selectable_and_warns():
     with pytest.warns(DeprecationWarning, match="gs_conv_criterion='dE'") as rec:
         cfg = iPEPSConfig(gs_conv_criterion="dE")
     assert cfg.gs_conv_criterion == "dE"
-    assert "before v0.8.4" in str(rec[0].message)
+    assert "before v0.9.0" in str(rec[0].message)
 
 
 # --- (b) dE == 0 with a large gradient does not converge -------------------

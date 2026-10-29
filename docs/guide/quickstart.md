@@ -43,11 +43,14 @@ print(C.todense().shape)  # (3, 5)
 
 ```python
 import jax
-from tenax import DMRGConfig, dmrg, build_mpo_heisenberg, build_random_symmetric_mps
+from tenax import DMRGConfig, dmrg, build_mpo_heisenberg, FiniteMPS, U1Symmetry
 
 L = 10  # 10-site chain
 mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)  # U(1) block-sparse MPO
-mps = build_random_symmetric_mps(L, bond_dim=4)  # matching block-sparse MPS
+mps = FiniteMPS.random(
+    L=L, d=2, chi=4, key=jax.random.PRNGKey(0),
+    symmetric=True, symmetry=U1Symmetry(), target_charge=0,  # matching block-sparse MPS, Sz=0
+)
 
 config = DMRGConfig(
     max_bond_dim=32,
@@ -74,9 +77,10 @@ tensor = compute_ising_tensor(beta_c)
 config = TRGConfig(max_bond_dim=16, num_steps=20)
 log_Z_per_site = trg(tensor, config)
 
-exact = ising_free_energy_exact(beta_c)
-print(f"TRG  log(Z)/N = {float(log_Z_per_site):.6f}")
-print(f"Exact         = {exact:.6f}")
+f_trg = float(-log_Z_per_site / beta_c)  # free energy per site, f = -ln(Z)/(N*beta)
+f_exact = ising_free_energy_exact(beta_c)
+print(f"TRG   f = {f_trg:.6f}")
+print(f"Exact f = {f_exact:.6f}")
 ```
 
 ## Next steps
