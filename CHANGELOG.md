@@ -4,6 +4,24 @@
 
 ### Fixed
 
+- **Dense iDMRG converges again; its energy was pinned 3.5e-4 above the
+  truth at every chi.**  Every `orthogonalize_interval` sweeps (default 10)
+  the dense 2-site and 1-site loops re-orthogonalized the unit cell and
+  re-solved `L_env`/`R_env` as fixed points.  That solve zeroes the energy the
+  environments had accumulated, so the next `(E_total - E_prev) / 2` was
+  garbage (+3.98 per site on the Heisenberg chain), and the estimate then
+  needed more than 10 sweeps to re-settle.  The run cycled with period 10,
+  never met `convergence_tol`, and reported the cycle's last value: on the
+  Heisenberg chain −0.442801 at both chi=32 and chi=64 (error 3.46e-4, flat in
+  chi).  The in-loop pass is gone; any `orthogonalize_interval > 0` still
+  orthogonalizes once after the loop.  Now: error 9.4e-6 at chi=32, and
+  chi=64 converges in 145 steps to −0.443144 (exact −0.443147).  **Dense
+  iDMRG energies from v0.9.0 and earlier carry this error** (infinite
+  cylinders included); the symmetric path did not re-solve in-loop and is
+  unaffected.  The two energy tests had tolerances (0.01, 0.1 %) that let the
+  pinned value through; they are now 5e-5 and 0.03 %, and fail on the old
+  code.
+
 - **The Hager-Zhang zoom no longer spends its whole budget at a +inf cliff.**
   When the line crosses a point past which every probe is rejected as +inf
   (an iPEPS CTM that does not converge, #1059) and the slope stays steep up
@@ -16,7 +34,7 @@
   iPEPS optimizer accepts as a real decrease). On the reproduction: 7 `phi`
   and 4 `dphi` probes, at 99.3% of the cliff.
 
-## v0.9.0 (2026-10-28)
+## v0.9.0 (2026-10-29)
 
 A correctness release with breaking defaults, 202 commits after v0.8.3. As in
 v0.8.3, the reason to upgrade is a set of defects that produced **plausible,
