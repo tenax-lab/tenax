@@ -162,3 +162,29 @@ def test_helper_skips_without_a_comparable_phi0():
     assert not _opt._accepted_step_rose(
         float("inf"), (-0.6, 4), chi=4, rolled_back=False
     )
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("unit_cell", UNIT_CELLS)
+def test_a_held_decrease_resets_the_reject_count(monkeypatch, unit_cell):
+    """Uphill, downhill, then uphill: the real decrease restarts the count.
+
+    The budget counts CONSECUTIVE rejections, so the one before the real
+    decrease must not count toward the RETRIES + 1 that end the run.
+    """
+    calls = {"n": 0}
+
+    def _hz(_phi, _dphi, phi0, _slope, **kwargs):
+        calls["n"] += 1
+        sign = 0.2 if calls["n"] == 2 else -0.5  # call 2 steps downhill
+        return sign * kwargs["alpha_init"], phi0 - 1.0, True
+
+    monkeypatch.setattr(_ls_mod, "hager_zhang_line_search", _hz)
+    history = _run(_config(unit_cell, "hager_zhang", gs_num_steps=20))
+    energies = history["energies"]
+
+    # Regime: step 1 rose (rejected), step 3 held a real decrease.
+    assert energies[1] > energies[0] + 1e-9, energies[:4]
+    assert energies[3] < energies[2] - 1e-9, energies[:4]
+    # 1 reject, 1 held accept, then RETRIES + 1 rejects.
+    assert calls["n"] == RETRIES + 3, (unit_cell, calls["n"], energies)
