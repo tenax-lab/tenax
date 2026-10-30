@@ -69,9 +69,10 @@ print(f"Steps:       {len(result.energies_per_step)}")
 This converges (`converged=True`) after 145 steps at E/site = −0.443144,
 3e-6 above the exact value.  At χ=32 the error is 9.4e-6 after 100 steps, but
 successive estimates still alternate by ~3e-6, so a `convergence_tol=1e-8` is
-not met; the gapless chain needs the larger χ to settle.  Before the fix in
-the changelog's Unreleased section, periodic re-orthogonalization pinned the
-error at 3.46e-4 for every χ and `converged` was always `False`.
+not met; the gapless chain needs the larger χ to settle.  Before v0.9.1,
+periodic re-orthogonalization pinned the
+error at 3.46e-4 for every χ and `converged` was always `False`; on v0.9.0
+and earlier, pass `orthogonalize_interval=0` to avoid it.
 
 `build_bulk_mpo_heisenberg` returns a `DenseTensor` with legs
 `("w_l", "mpo_top", "mpo_bot", "w_r")` and shape `(5, 2, 2, 5)`.

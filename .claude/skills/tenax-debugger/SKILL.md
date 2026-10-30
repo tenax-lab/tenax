@@ -270,10 +270,17 @@ result = dmrg(mpo, mps, config)
 from tenax import idmrg, build_bulk_mpo_heisenberg, iDMRGConfig
 
 W = build_bulk_mpo_heisenberg(Jz=1.0, Jxy=1.0)
-config = iDMRGConfig(max_bond_dim=32, max_iterations=100, convergence_tol=1e-8)
+config = iDMRGConfig(max_bond_dim=64, max_iterations=200, convergence_tol=1e-8)
 result = idmrg(W, config)
-# Expected: result.energy_per_site ≈ -0.4431
+# Expected: result.energy_per_site ≈ -0.443144, converged=True (v0.9.1+)
 ```
+
+- **`converged=False` and the same energy at every chi** (Heisenberg
+  −0.442801 at chi=32 and 64) → tenax ≤ 0.9.0: dense iDMRG re-solved its
+  environments every `orthogonalize_interval` sweeps, which reset the energy
+  estimate (`energies_per_step` shows a +3.98 spike every 10 steps). Upgrade
+  to 0.9.1, or on 0.9.0 pass `orthogonalize_interval=0` (error 8e-6 at
+  chi=32). Symmetric iDMRG was not affected.
 
 - For infinite cylinders: `build_bulk_mpo_heisenberg_cylinder(Ly=4)` creates
   super-sites of Ly spins (d=2^Ly). Divide: `e_per_spin = result.energy_per_site / Ly`.

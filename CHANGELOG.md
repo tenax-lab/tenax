@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## v0.9.1 (2026-10-30)
+
+A bug-fix release.  **Dense iDMRG never converged in v0.9.0 and earlier**:
+its energy was pinned 3.5e-4 above the truth at every bond dimension
+(infinite cylinders included), and `converged` was always `False`.  If you
+cannot upgrade, `iDMRGConfig(orthogonalize_interval=0)` avoids it on v0.9.0
+(measured: error 8e-6 at chi=32).  Also: the Hager-Zhang line search no
+longer spends its whole budget at a non-converging CTM probe, and the
+recommended iPEPS-AD configuration in the guide runs to completion.
 
 ### Fixed
 
@@ -33,6 +41,17 @@
   is non-finite, and returns the best point (`converged=False`, which the
   iPEPS optimizer accepts as a real decrease). On the reproduction: 7 `phi`
   and 4 `dphi` probes, at 99.3% of the cliff.
+
+### Docs
+
+- **The recommended iPEPS-AD schedule stops at the corner's rank**
+  (`docs/guide/algorithms/ipeps_ad_paths.md`, #1164).  Its chi=32 stage
+  raised `CTMNotConvergedError`: at the optimised D=2 state the corner has 25
+  nonzero singular values, so chi=32 adds null directions (and chi=24 cuts a
+  degenerate pair) that the element-wise test cannot settle, however many
+  sweeps.  The schedule now ends at chi=16.
+- The README iDMRG example uses chi=64 and 200 sweeps, which converges; the
+  measured numbers are in the iDMRG guide.
 
 ## v0.9.0 (2026-10-29)
 
