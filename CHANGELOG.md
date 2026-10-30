@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.9.0 (2026-10-28)
+## v0.9.0 (2026-10-29)
 
 A correctness release with breaking defaults, 202 commits after v0.8.3. As in
 v0.8.3, the reason to upgrade is a set of defects that produced **plausible,
