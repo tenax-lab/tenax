@@ -329,6 +329,35 @@ first compile is not shortened, and the directory has no size limit by
 default.  See "Persistent compilation cache" in
 `docs/guide/algorithms/ipeps_ad_paths.md`.
 
+## Diagnostics knobs
+
+### `iPEPSConfig.gs_log_probes` (default `False`)
+
+Prints one line per line-search probe, so that a false accept can be
+traced and replayed.  The line search accepts α on its probes, and a
+probe whose CTM stopped early can report a decrease that the converged
+energy does not have (#1166).  Each line has the form:
+
+```
+[iPEPS-AD:2site-tensor] step 12 probe phi alpha=5.000e-03 E=-0.5729735284 sweeps=41 sv_diff=8.312e-09 conv=True seed=3fa2c1d0
+```
+
+- `phi` is the forward-only energy probe; `dphi` is the implicit-AD
+  `value_and_grad` probe.
+- `seed` is an md5 prefix of the env that the probe's CTM starts from
+  (`cold` if none).
+- `E=inf`: `on_unconverged="raise"` rejected the probe.
+- `sweeps=n/a sv_diff=n/a conv=n/a`: no forward wrote diagnostics (a
+  `dphi` probe under explicit AD, `gs_implicit_ad=False`).
+- `alpha=nan`: a backtracking (`armijo`) probe, which has no HZ alpha.
+
+With `return_history=True` the same data goes to `history["probes"]`, one
+dict per probe with the keys `step`, `kind`, `alpha`, `energy`, `sweeps`,
+`sv_diff`, `converged` and `seed` (`None` for `n/a`).  The flag does not
+change the optimization.  It costs one device-to-host copy of the seed
+env per probe, so keep it off outside debugging.  Used on the 1-site,
+2-site and multisite Tensor AD paths.
+
 ---
 
 ## See also

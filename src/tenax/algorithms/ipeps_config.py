@@ -827,6 +827,19 @@ class iPEPSConfig:
                                restart the optimizer state when it changes.
         gs_layout_tie_rtol:    Hysteresis margin of that re-check (relative
                                to the cut's largest singular value).
+        gs_log_probes:         Diagnostics.  Print one line per line-search
+                               probe (``phi``: forward-only energy; ``dphi``:
+                               implicit-AD ``value_and_grad``) with alpha,
+                               energy, CTM sweeps, ``sv_diff``, the converged
+                               flag and an md5 prefix of the seed env
+                               (``cold`` if none).  With ``return_history``
+                               the same records go to ``history["probes"]``.
+                               A probe that ``on_unconverged="raise"`` rejects
+                               shows ``E=inf``; diagnostics that no forward
+                               wrote (explicit AD) show ``n/a`` (``None`` in
+                               the record); backtracking probes have alpha
+                               NaN.  Default ``False``; it costs one
+                               device-to-host copy of the seed env per probe.
     """
 
     max_bond_dim: int = 2
