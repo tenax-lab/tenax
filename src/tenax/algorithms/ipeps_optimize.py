@@ -877,11 +877,32 @@ def _is_real_decrease(
     return new_energy < old_energy - noise
 
 
+def _rise_chi(ctm_cfg, envs) -> int | None:
+    """The χ that keys a ``gs_reject_energy_rise`` comparison.
+
+    ``ctm_cfg.chi``, except under ``ctmrg_heuristic_increase_chi``: the forward
+    then grows the env inside the CTM loop and ``ctm_cfg.chi`` is never synced
+    (see ``_should_restore_best_env``), so the env's own χ is read.  ``None``
+    (unknown, which disarms the check) when that env is missing or has no
+    readable corner.
+    """
+    if not getattr(ctm_cfg, "ctmrg_heuristic_increase_chi", False):
+        return ctm_cfg.chi
+    if not envs:
+        return None
+    from tenax.algorithms.ad_utils import _env_chi
+
+    try:
+        return int(_env_chi(envs))
+    except (AttributeError, TypeError, IndexError, StopIteration):
+        return None
+
+
 def _accepted_step_rose(
     energy: float,
-    pending: tuple[float, int] | None,
+    pending: tuple[float, int | None] | None,
     *,
-    chi: int,
+    chi: int | None,
     rolled_back: bool,
 ) -> bool:
     """True iff the converged energy at a line-search-accepted point is above
@@ -894,12 +915,13 @@ def _accepted_step_rose(
     ``(φ0, χ)`` recorded at the accept, or ``None`` when the previous step
     accepted nothing.  A rollback since the accept (the point is now
     ``best_params``, not the trial) or a χ change (energies at two χ are not
-    comparable) disarms the check.  A rise must exceed the stall noise floor.
+    comparable; ``None`` is an unknown χ, see ``_rise_chi``) disarms the
+    check.  A rise must exceed the stall noise floor.
     """
     if pending is None or rolled_back:
         return False
     phi0, chi0 = pending
-    if chi != chi0:
+    if chi is None or chi0 is None or chi != chi0:
         return False
     return _is_real_decrease(phi0, energy)
 
@@ -2763,7 +2785,10 @@ def _optimize_gs_ad_tensor(
         # update the env cache, best-state tracking or the curvature history.
         _pending, _rise_pending = _rise_pending, None
         if config.gs_reject_energy_rise and _accepted_step_rose(
-            energy_float, _pending, chi=ctm_cfg.chi, rolled_back=_rolled_back
+            energy_float,
+            _pending,
+            chi=_rise_chi(ctm_cfg, _env_cache.get("envs")),
+            rolled_back=_rolled_back,
         ):
             _rise_rejects += 1
             _log_energy_rise_reject(
@@ -3200,7 +3225,7 @@ def _optimize_gs_ad_tensor(
                 if _is_real_decrease(f_alpha, energy_float):
                     params = _ls_eval.accept(alpha, params, direction)
                     stall_count = 0
-                    _rise_pending = (energy_float, ctm_cfg.chi)
+                    _rise_pending = (energy_float, _rise_chi(ctm_cfg, _ls_env_snap[1]))
                 else:
                     stall_count += 1
             else:
@@ -3219,7 +3244,7 @@ def _optimize_gs_ad_tensor(
                 )
                 if _is_real_decrease(new_energy, energy_float):
                     stall_count = 0
-                    _rise_pending = (energy_float, ctm_cfg.chi)
+                    _rise_pending = (energy_float, _rise_chi(ctm_cfg, _ls_env_snap[1]))
                 else:
                     stall_count += 1
 
@@ -4877,7 +4902,10 @@ def _optimize_gs_ad_tensor_2site(
             # update the env cache, best-state tracking or the curvature history.
             _pending, _rise_pending = _rise_pending, None
             if config.gs_reject_energy_rise and _accepted_step_rose(
-                energy_float, _pending, chi=ctm_cfg_2s.chi, rolled_back=_rolled_back
+                energy_float,
+                _pending,
+                chi=_rise_chi(ctm_cfg_2s, _env_cache_2s.get("envs")),
+                rolled_back=_rolled_back,
             ):
                 _rise_rejects += 1
                 _log_energy_rise_reject(
@@ -5385,7 +5413,10 @@ def _optimize_gs_ad_tensor_2site(
                     if _is_real_decrease(f_alpha, energy_float):
                         params = _ls_eval.accept(alpha, params, direction)
                         stall_count = 0
-                        _rise_pending = (energy_float, ctm_cfg_2s.chi)
+                        _rise_pending = (
+                            energy_float,
+                            _rise_chi(ctm_cfg_2s, _ls_env_snap[1]),
+                        )
                     else:
                         stall_count += 1
                 else:
@@ -5406,7 +5437,10 @@ def _optimize_gs_ad_tensor_2site(
                     )
                     if _is_real_decrease(new_energy, energy_float):
                         stall_count = 0
-                        _rise_pending = (energy_float, ctm_cfg_2s.chi)
+                        _rise_pending = (
+                            energy_float,
+                            _rise_chi(ctm_cfg_2s, _ls_env_snap[1]),
+                        )
                     else:
                         stall_count += 1
 
@@ -6210,7 +6244,10 @@ def _optimize_gs_ad_multisite(
         # update the env cache, best-state tracking or the curvature history.
         _pending, _rise_pending = _rise_pending, None
         if config.gs_reject_energy_rise and _accepted_step_rose(
-            energy_float, _pending, chi=ctm_cfg.chi, rolled_back=_rolled_back
+            energy_float,
+            _pending,
+            chi=_rise_chi(ctm_cfg, _env_cache.get("envs")),
+            rolled_back=_rolled_back,
         ):
             _rise_rejects += 1
             _log_energy_rise_reject(
@@ -6581,7 +6618,7 @@ def _optimize_gs_ad_multisite(
                 if _is_real_decrease(f_alpha, energy_float):
                     params = _ls_eval.accept(alpha, params, direction)
                     stall_count = 0
-                    _rise_pending = (energy_float, ctm_cfg.chi)
+                    _rise_pending = (energy_float, _rise_chi(ctm_cfg, _ls_env_snap[1]))
                 else:
                     stall_count += 1
             else:
@@ -6601,7 +6638,7 @@ def _optimize_gs_ad_multisite(
                 )
                 if _is_real_decrease(new_energy, energy_float):
                     stall_count = 0
-                    _rise_pending = (energy_float, ctm_cfg.chi)
+                    _rise_pending = (energy_float, _rise_chi(ctm_cfg, _ls_env_snap[1]))
                 else:
                     stall_count += 1
 

@@ -219,3 +219,33 @@ def test_guard_state_survives_checkpoint_resume(monkeypatch, tmp_path, unit_cell
         f"{unit_cell}: the resumed run ran {calls['n']} line searches -- the "
         f"pending φ0 or the reject count was not checkpointed/restored"
     )
+
+
+def test_rise_chi_reads_the_env_under_in_ctm_growth():
+    """With in-CTM growth the env's chi, not the nominal ``ctm_cfg.chi``."""
+    from types import SimpleNamespace
+
+    def env(chi):  # ``_env_chi`` reads the first corner's leading dimension
+        corner = SimpleNamespace(todense=lambda: jnp.zeros((chi, chi)))
+        return {(0, 0): SimpleNamespace(C1=corner)}
+
+    grow = SimpleNamespace(chi=4, ctmrg_heuristic_increase_chi=True)
+    fixed = SimpleNamespace(chi=4, ctmrg_heuristic_increase_chi=False)
+    assert _opt._rise_chi(grow, env(6)) == 6
+    assert _opt._rise_chi(fixed, env(6)) == 4
+    # No env, or one whose chi cannot be read: unknown, which disarms the check.
+    assert _opt._rise_chi(grow, None) is None
+    assert _opt._rise_chi(grow, {(0, 0): object()}) is None
+    assert not _opt._accepted_step_rose(-0.5, (-0.6, None), chi=None, rolled_back=False)
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("unit_cell", UNIT_CELLS)
+def test_in_ctm_chi_growth_disarms_the_check(monkeypatch, unit_cell):
+    """The env chi grows between the accept and the check: no reject."""
+    calls = {"n": 0}
+    _patch_uphill_accept(monkeypatch, "hager_zhang", calls)
+    grown = iter(range(4, 10_000))
+    monkeypatch.setattr(_opt, "_rise_chi", lambda _cfg, _envs: next(grown))
+    _run(_config(unit_cell, "hager_zhang"))
+    assert calls["n"] == NUM_STEPS, (unit_cell, calls["n"])
