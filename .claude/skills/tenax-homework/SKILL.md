@@ -139,7 +139,7 @@ trade-offs?
 2D Heisenberg model because the entanglement in 2D follows an area law, and
 D=2 already satisfies the area law bound."
 *(Misleading: while area law holds, the prefactor matters. D=2 gives
-E ≈ -0.6625 (AD, χ=16) vs exact E ≈ -0.6694. Higher D is needed for quantitative accuracy.
+E ≈ -0.6602 (AD, χ=16) vs exact E ≈ -0.6694. Higher D is needed for quantitative accuracy.
 The area law guarantees efficiency scaling, not that the smallest D suffices.)*
 
 ## Generating a Problem

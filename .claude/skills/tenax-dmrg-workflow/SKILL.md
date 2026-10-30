@@ -233,14 +233,14 @@ from tenax import idmrg, build_bulk_mpo_heisenberg, iDMRGConfig
 
 W = build_bulk_mpo_heisenberg(Jz=1.0, Jxy=1.0)
 config = iDMRGConfig(
-    max_bond_dim=32,
-    max_iterations=100,
+    max_bond_dim=64,       # the gapless chain needs chi=64 to meet 1e-8
+    max_iterations=200,
     convergence_tol=1e-8,
 )
 result = idmrg(W, config)
 
-print(f"Energy per site: {result.energy_per_site:.8f}")  # ≈ -0.4431
-print(f"Converged: {result.converged}")
+print(f"Energy per site: {result.energy_per_site:.8f}")  # ≈ -0.443144 (exact -0.443147)
+print(f"Converged: {result.converged}")  # True after ~145 steps (v0.9.1+)
 ```
 
 ### iDMRG (infinite cylinder)

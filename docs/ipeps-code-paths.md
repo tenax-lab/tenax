@@ -468,14 +468,14 @@ The 2-site L-BFGS path still has a separate convergence gap at
 
 | D | chi | Path                                        | E (best)   | Literature / exact |
 |---|-----|---------------------------------------------|------------|--------------------|
-| 2 | 16  | qr + phase + explicit AD (1-site C4v)       | -0.6628    | -0.66251 (converged D=2 χ=16, 2026-10-03) |
+| 2 | 16  | qr + phase + explicit AD (1-site C4v)       | -0.6628    | -0.660231 (converged D=2 χ=16, 2026-10-30) |
 | 2 | 8   | qr + phase + explicit AD (1-site C4v)       | -0.6610    | —                  |
 | 2 | 8   | svd + phase + implicit AD (2-site C4v)      | -0.6602    | —                  |
 | 3 | 16  | svd + phase + implicit AD (2-site C4v)      | -0.6521    | (50 steps, monotonic, 7.9 s/step) |
 
-Historical numbers.  The converged D=2, χ=16 optimum is −0.66251 (Tenax
-implicit AD and variPEPS agree to 4e-7, 2026-10-03), not the "−0.6548"
-formerly quoted.  The explicit-AD rows predate #1074 (the explicit energy
+Historical numbers.  The converged D=2, χ=16 optimum is −0.660231 (the
+recommended implicit-AD configuration, every route measured 2026-10-30), not
+the "−0.6548" or "−0.66251" formerly quoted.  The explicit-AD rows predate #1074 (the explicit energy
 now applies no forward gauge), and −0.6628 lies *below* that optimum, so it
 is not a converged variational energy.
 | 2 | 16  | svd + phase + implicit AD (2-site, complex128, non-C4v) | -0.6406 | variational; ≈1 min/step on GPU |

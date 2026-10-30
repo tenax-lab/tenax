@@ -233,7 +233,7 @@ config = iPEPSConfig(
 
 # Can start from scratch or from simple-update result
 A_opt, env, E_gs = optimize_gs_ad(H_rot, None, config)  # 1x1: (A, env, E)
-print(f"Ground-state energy: {E_gs:.6f}")  # D=2, chi=16 optimum ≈ -0.6625
+print(f"Ground-state energy: {E_gs:.6f}")  # D=2, chi=16 optimum ≈ -0.6602
 ```
 
 ### Explicit AD configuration (alternative; no forward gauge is applied, #1074)
@@ -624,7 +624,7 @@ print(f"Final energy: {E:.8f}")
 
 | Model | iPEPS D=2 | iPEPS D→∞ (extrap.) | QMC/exact |
 |-------|-----------|-------------------|-----------|
-| 2D Heisenberg | ≈ −0.6625 (AD, χ=16); −0.6593 (SU, measured with `ctm_tensor_2site`) | ≈ −0.6694 | −0.6694 |
+| 2D Heisenberg | ≈ −0.6602 (AD, χ=16; −0.660231 measured); −0.6593 (SU, measured with `ctm_tensor_2site`) | ≈ −0.6694 | −0.6694 |
 | J1-J2 at J2/J1=0.5 | model-dependent | — | Debated |
 
 ---
