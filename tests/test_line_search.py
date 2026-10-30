@@ -619,3 +619,97 @@ class TestBracketEndsNeedADecrease:
         _, dphi = self._phi_dphi()
         assert dphi(0.2276 * 1.5) >= 0.0
         self._search(0.2276, bracket_only_phi=False)
+
+
+class TestZoomStopsAtAnInfCliff:
+    """phi is smooth up to a cliff and +inf past it (an iPEPS probe whose CTM
+    does not converge is rejected as +inf, #1059), and the slope stays steep
+    right up to the cliff.  No point satisfies Wolfe curvature, so the zoom
+    can only bisect onto the cliff.  It must stop after a few probes and
+    return the best point, not spend ``max_iter`` zoom iterations there: an
+    S5 step (symmetric D=3, chi=16) spent 63 phi and 44 dphi probes, 4.5 h.
+    """
+
+    CLIFF = 0.0717392908
+
+    def _counted(self):
+        calls = {"phi": 0, "dphi": 0}
+
+        def phi(alpha):
+            calls["phi"] += 1
+            return -0.5733 - 0.003 * alpha if alpha < self.CLIFF else float("inf")
+
+        def dphi(alpha):
+            calls["dphi"] += 1
+            return -0.003
+
+        return phi, dphi, calls
+
+    def test_stops_after_few_probes_with_a_decrease(self):
+        from tenax.algorithms._line_search import hager_zhang_line_search
+
+        phi, dphi, calls = self._counted()
+        phi0, dphi0 = phi(0.0), dphi(0.0)
+        calls.update(phi=0, dphi=0)
+        # The iPEPS 2-site call: alpha0 = 0.06, max_step = 2 alpha0, rho 1.5.
+        alpha, f_alpha, converged = hager_zhang_line_search(
+            phi,
+            dphi,
+            phi0,
+            dphi0,
+            alpha_init=0.06,
+            rho=1.5,
+            max_step=0.12,
+            bracket_only_phi=True,
+        )
+        assert not converged
+        assert 0.0 < alpha < self.CLIFF
+        assert f_alpha == phi(alpha) and f_alpha < phi0
+        assert calls["dphi"] <= 8, calls
+        assert calls["phi"] <= 16, calls
+
+    def test_slope_that_flattens_before_the_cliff_still_converges(self):
+        """The exit must not pre-empt a Wolfe point below the cliff."""
+        from tenax.algorithms._line_search import hager_zhang_line_search
+
+        def phi(alpha):
+            return (alpha - 0.05) ** 2 if alpha < self.CLIFF else float("inf")
+
+        def dphi(alpha):
+            return 2.0 * (alpha - 0.05)
+
+        alpha, f_alpha, converged = hager_zhang_line_search(
+            phi,
+            dphi,
+            phi(0.0),
+            dphi(0.0),
+            alpha_init=0.06,
+            rho=1.5,
+            max_step=0.12,
+            bracket_only_phi=True,
+        )
+        assert converged
+        assert 0.0 < alpha < self.CLIFF
+
+    def test_cliff_near_zero_still_finds_a_decrease(self):
+        """With no decrease in hand (left end alpha = 0) the exit must wait:
+        the bisection shrinks b past many +inf probes to the first finite one."""
+        from tenax.algorithms._line_search import hager_zhang_line_search
+
+        cliff = 1e-4
+
+        def phi(alpha):
+            return -0.003 * alpha if alpha < cliff else float("inf")
+
+        alpha, f_alpha, converged = hager_zhang_line_search(
+            phi,
+            lambda a: -0.003,
+            0.0,
+            -0.003,
+            alpha_init=0.06,
+            rho=1.5,
+            max_step=0.12,
+            bracket_only_phi=True,
+        )
+        assert 0.0 < alpha < cliff
+        assert f_alpha < 0.0
