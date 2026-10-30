@@ -4376,7 +4376,6 @@ def _optimize_gs_ad_tensor_2site(
         if use_split_2s:
             # Same gauge-fixed split forward + split energy as the AD loss, so
             # φ(α) (this probe) and dφ/dα (the implicit-AD gradient) agree.
-            envs = _split_forward_2s(site_tensors, _env_cache_2s.get("envs", None))
             _seed_split = _env_cache_2s.get("envs", None)
             envs = _split_forward_2s(site_tensors, _seed_split)
             _env_cache_2s["envs"] = envs
