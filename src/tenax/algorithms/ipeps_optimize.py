@@ -667,12 +667,12 @@ class _AcceptedProbeEval:
             except CTMRGGradientError:
                 # The backward's spectral precheck fired ahead of the verdict
                 # below; an unconverged forward is still a rejection, not a
-                # gradient error (Codex P2 on #1070).
-                if self._check_policy and _probe_forward_rejected(
-                    _cea.get_last_implicit_ad_diagnostics(), cfg
-                ):
+                # gradient error (Codex P2 on #1070).  The log shows the
+                # forward diagnostics that the verdict read (Codex P2 on #1168).
+                diag = _cea.get_last_implicit_ad_diagnostics()
+                if self._check_policy and _probe_forward_rejected(diag, cfg):
                     if plog is not None:
-                        plog.log_dphi(float("inf"), seed_env, None)
+                        plog.log_dphi(float("inf"), seed_env, diag)
                     return None
                 raise
         grads = _euclidean_grads(grads)

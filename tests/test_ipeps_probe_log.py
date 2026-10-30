@@ -227,3 +227,30 @@ def test_backtracking_probes_have_nan_alpha(monkeypatch, capsys, unit_cell):
 
 def test_config_default_is_off():
     assert iPEPSConfig().gs_log_probes is False
+
+
+def test_dphi_reject_after_a_backward_error_keeps_the_diagnostics(monkeypatch):
+    """The backward's spectral precheck raises before the #1059 verdict.
+
+    The verdict reads the forward diagnostics; the log must show them too,
+    not ``n/a`` (Codex P2 on #1168).
+    """
+    from tenax.algorithms.ad_utils import CTMRGGradientError
+
+    diag = {"forward_converged": False, "forward_iterations": 7, "forward_sv_diff": 0.5}
+    monkeypatch.setattr(_cea, "reset_forward_diagnostics", lambda: None)
+    monkeypatch.setattr(_cea, "get_last_implicit_ad_diagnostics", lambda: dict(diag))
+
+    def loss(x):
+        raise CTMRGGradientError(1.5)
+
+    logged = []
+
+    class _Plog:
+        def log_dphi(self, energy, seed_env, d):
+            logged.append((energy, d))
+
+    ev = _opt._AcceptedProbeEval(True, check_policy=True)
+    cfg = CTMConfig(chi=4, conv_tol=1e-8, on_unconverged="raise")
+    assert ev.probe(loss, 1e-3, jnp.ones(2), cfg, plog=_Plog()) is None
+    assert logged == [(float("inf"), diag)]
