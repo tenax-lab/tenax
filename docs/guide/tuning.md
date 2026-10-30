@@ -239,7 +239,9 @@ the stall noise floor), the optimizer rolls back to `best_params`,
 resets the environment, and clears the L-BFGS / CG / optax state.
 
 - The check is skipped after a rollback and after a chi change, because
-  the two energies are not comparable then.
+  the two energies are not comparable then. With
+  `ctmrg_heuristic_increase_chi=True`, the chi of the CTM environment is
+  compared (the CTM grows it without changing `CTMConfig.chi`).
 - `gs_stall_recovery_retries` limits the number of consecutive rejects.
   After that many, the run stops. A step that keeps its decrease sets
   the count back to zero.
