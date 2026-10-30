@@ -42,6 +42,7 @@ from tenax.algorithms._ctm_tensor_init import (
     OUT,
     CTMTensorEnv,
     _fuse_pair_by_label,
+    _to_corner_order,
 )
 from tenax.algorithms._ctm_tensor_projector_2x2 import (
     _build_enlarged_corner,
@@ -688,7 +689,7 @@ def _ctm_tensor_absorb_left_2plaq(
     C1_new = _phase_fix_normalize_tensor(C1_new)
     C4_new = _phase_fix_normalize_tensor(C4_new)
     T4_new = _phase_fix_normalize_tensor(T4_new)
-    return C1_new, T4_new, C4_new
+    return _to_corner_order(C1_new, "C1"), T4_new, _to_corner_order(C4_new, "C4")
 
 
 def _ctm_tensor_absorb_right_2plaq(
@@ -771,7 +772,7 @@ def _ctm_tensor_absorb_right_2plaq(
     C2_new = _phase_fix_normalize_tensor(C2_new)
     C3_new = _phase_fix_normalize_tensor(C3_new)
     T2_new = _phase_fix_normalize_tensor(T2_new)
-    return C2_new, T2_new, C3_new
+    return _to_corner_order(C2_new, "C2"), T2_new, _to_corner_order(C3_new, "C3")
 
 
 def _ctm_tensor_absorb_top_2plaq(
@@ -843,7 +844,7 @@ def _ctm_tensor_absorb_top_2plaq(
     C1_new = _phase_fix_normalize_tensor(C1_new)
     C2_new = _phase_fix_normalize_tensor(C2_new)
     T1_new = _phase_fix_normalize_tensor(T1_new)
-    return C1_new, T1_new, C2_new
+    return _to_corner_order(C1_new, "C1"), T1_new, _to_corner_order(C2_new, "C2")
 
 
 def _ctm_tensor_absorb_bottom_2plaq(
@@ -896,7 +897,7 @@ def _ctm_tensor_absorb_bottom_2plaq(
     C4_new = _phase_fix_normalize_tensor(C4_new)
     C3_new = _phase_fix_normalize_tensor(C3_new)
     T3_new = _phase_fix_normalize_tensor(T3_new)
-    return C4_new, T3_new, C3_new
+    return _to_corner_order(C4_new, "C4"), T3_new, _to_corner_order(C3_new, "C3")
 
 
 def _chunked_T_new_apply(

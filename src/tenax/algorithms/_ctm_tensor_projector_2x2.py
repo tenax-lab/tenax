@@ -1085,6 +1085,20 @@ def _compute_2x2_projector(
     )
 
 
+def _charge_ordered_slots(keep: list[int], charges: np.ndarray) -> list[int]:
+    """``keep`` reordered by ascending charge, stable within each sector.
+
+    The full SVD's bond runs in singular-value order, so a top-chi cut taken
+    in that order gives a value-dependent charge *sequence* on the new bond.
+    Every jitted consumer keys on that sequence (``TensorIndex`` aux data), so
+    each eager sweep retraced them.  The jitted projector and the cold init
+    emit ascending charge order; this makes the eager cut do the same.  Stable,
+    so each sector keeps its slot order and its block columns.
+    """
+    q = np.asarray(charges)[np.asarray(keep, dtype=np.int64)]
+    return [keep[i] for i in np.argsort(q, kind="stable")]
+
+
 def _retruncate_chi_bond(
     U_T: SymmetricTensor,
     S: jax.Array,
@@ -1124,6 +1138,7 @@ def _retruncate_chi_bond(
         chi=chi,
     )
 
+    keep_global = _charge_ordered_slots(keep_global, bond_charges_full)
     new_bond_charges = bond_charges_full[np.asarray(keep_global, dtype=np.int32)]
     S_new = jnp.asarray(S)[jnp.asarray(keep_global)]
 

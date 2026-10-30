@@ -203,8 +203,8 @@ def _chi_layout(envs: dict[Coord, CTMTensorEnv]) -> tuple:
     The layout of a ``SymmetricTensor`` chi leg is what the traced projector
     can never change (it reuses the leg's sector sizes, #929).  Dense tensors
     have no layout and contribute nothing.  Keyed by leg label and sorted, so
-    a sweep that only reorders a tensor's legs (the cold-init corners come
-    back with their two legs swapped) is not a layout change.
+    a tensor whose legs come in another order (a warm-start env may hold
+    them so) is not a layout change.
     """
     out = []
     for c in sorted(envs):

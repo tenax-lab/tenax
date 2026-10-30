@@ -188,9 +188,15 @@ def test_fused_bottom_c3_uses_authority_c3u_t2d_pairing():
     C3_u = env_src.C3.relabel("c3_u", "t2_d")
     C3g = contract(C3_u, env_src.T2)  # free legs: (c3_l, t2_u, r2)
     C3_ref = _apply_proj_unfused(P_top_curr, C3g, "c3_l", "r2")
-    C3_ref = C3_ref.relabels({"chi_new": "c3_u", "t2_u": "c3_l"})
+    # T2's up leg stays the corner's up leg; the projected bond is its left leg.
+    C3_ref = C3_ref.relabels({"chi_new": "c3_l", "t2_u": "c3_u"})
     C3_ref = _phase_fix_normalize_tensor(C3_ref)
 
+    # Compare by label, not by position: the fused path may return the legs in
+    # another order.  ``transpose`` carries the fermionic sign.
+    ref_labels = C3_ref.labels()
+    C3_ref = C3_ref.transpose(tuple(ref_labels.index(lab) for lab in C3_new.labels()))
+    assert C3_ref.labels() == C3_new.labels()
     got = np.asarray(C3_new.todense())
     ref = np.asarray(C3_ref.todense())
     max_abs = float(np.abs(got - ref).max())
