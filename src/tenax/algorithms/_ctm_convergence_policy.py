@@ -154,11 +154,12 @@ def _describe(info, site, step, conv_tol, chi) -> str:
         )
     if _two_state_cycle(info):
         msg += (
-            " The step multiplier marks a two-state cycle around an unstable "
-            "fixed point, which linear mixing damps without moving the fixed "
-            "point: try CTMConfig(ctm_mixing=0.5), or a larger value if it is "
-            "already set (needs forward_gauge='bond_phase', the implicit-AD "
-            "default)."
+            " The step multiplier marks a two-state cycle. Linear mixing "
+            "can damp it without moving the fixed point: try "
+            "CTMConfig(ctm_mixing=beta) with beta between 0.5 and 0.9 (needs "
+            "forward_gauge='bond_phase', the implicit-AD default). Mixing "
+            "does not cure every cycle, and it slows a forward that converges "
+            "without it."
         )
     return msg + " Set CTMConfig(on_unconverged='warn') to continue anyway."
 
