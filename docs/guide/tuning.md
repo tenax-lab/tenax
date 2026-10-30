@@ -224,6 +224,31 @@ Values: `None` (auto), `"noise"`, `"reset"`
   `"root_implicit_symmetric"`) have no stall recovery and ignore this
   setting.
 
+### `iPEPSConfig.gs_reject_energy_rise` (default `True`)
+
+The line search accepts a step on its φ probe, a forward-only CTM
+warm-started from the step's environment. A probe that stops on a CTM
+plateau can report a decrease that the converged fixed point does not
+have. In the symmetric S5 run (chi=8), the probe was below
+φ0 = -0.5729735284, but the next step's converged energy was
+-0.5728248944.
+
+With this flag on, each step compares its converged energy with the φ0
+of the line search that made the point. If the energy rose (by more than
+the stall noise floor), the optimizer rolls back to `best_params`,
+resets the environment, and clears the L-BFGS / CG / optax state.
+
+- The check is skipped after a rollback and after a chi change, because
+  the two energies are not comparable then.
+- `gs_stall_recovery_retries` limits the number of consecutive rejects.
+  After that many, the run stops. A step that keeps its decrease sets
+  the count back to zero.
+- The pending φ0 and the reject count are saved in checkpoints.
+- Applies to the 1-site, 2-site and multisite AD optimizers, with HZ
+  and Armijo line searches. The `ctm_ad_mode` engines do not use it.
+
+Set `gs_reject_energy_rise=False` to get the behaviour before #1166.
+
 ---
 
 ## Initialization
