@@ -434,6 +434,102 @@ def _site3_reject(info, ctm_cfg) -> bool:
     return False
 
 
+def _env_seed_hash(env) -> str:
+    """First 8 hex chars of the md5 of every array leaf of ``env``; ``cold`` if None.
+
+    Pulls each leaf to the host, so call it only when probe logging is on.
+    """
+    if env is None:
+        return "cold"
+    h = hashlib.md5()
+    for leaf in jax.tree_util.tree_leaves(env):
+        h.update(np.asarray(leaf).tobytes())
+    return h.hexdigest()[:8]
+
+
+def _format_probe_line(
+    tag, step, kind, alpha, energy, sweeps, sv_diff, converged, seed
+) -> str:
+    """One ``gs_log_probes`` line; ``None`` sweeps/sv_diff/converged print ``n/a``."""
+    na = sweeps is None
+    return (
+        f"[iPEPS-AD:{tag}] step {step} probe {kind} "
+        f"alpha={float(alpha):.3e} E={float(energy):.10f} "
+        f"sweeps={'n/a' if na else int(sweeps)} "
+        f"sv_diff={'n/a' if na else format(float(sv_diff), '.3e')} "
+        f"conv={'n/a' if na else bool(converged)} seed={seed}"
+    )
+
+
+def _probe_log_kw(plog, env_cache) -> dict:
+    """``_AcceptedProbeEval.probe`` kwargs; empty (call unchanged) when logging is off."""
+    if not plog.enabled:
+        return {}
+    return {"plog": plog, "seed_env": env_cache.get("envs")}
+
+
+class _ProbeLog:
+    """Opt-in (``gs_log_probes``) record of every line-search probe.
+
+    One instance per optimizer.  ``step`` and ``alpha`` are set by the line
+    search around each probe (``alpha`` stays NaN on the backtracking path,
+    which has no alpha).  Does nothing when ``enabled`` is False.
+    """
+
+    def __init__(self, tag: str, enabled: bool):
+        self.tag = tag
+        self.enabled = enabled
+        self.step = 0
+        self.alpha = float("nan")
+        self.records: list[dict] = []
+
+    def log(self, kind, energy, seed_env, sweeps=None, sv_diff=None, converged=None):
+        if not self.enabled:
+            return
+        seed = _env_seed_hash(seed_env)
+        energy = float(energy)
+        self.records.append(
+            {
+                "step": self.step,
+                "kind": kind,
+                "alpha": self.alpha,
+                "energy": energy,
+                "sweeps": sweeps,
+                "sv_diff": sv_diff,
+                "converged": converged,
+                "seed": seed,
+            }
+        )
+        print(
+            _format_probe_line(
+                self.tag,
+                self.step,
+                kind,
+                self.alpha,
+                energy,
+                sweeps,
+                sv_diff,
+                converged,
+                seed,
+            ),
+            flush=True,
+        )
+
+    def log_phi(self, energy, seed_env, info):
+        """Log a φ probe from the ``python_loop_ctm_converge`` info."""
+        self.log("phi", energy, seed_env, info.iterations, info.sv_diff, info.converged)
+
+    def log_dphi(self, energy, seed_env, diag):
+        """Log a dφ probe from implicit-AD forward diagnostics (None -> n/a)."""
+        info = _gradient_forward_info(diag) if diag else None
+        if info is None:
+            self.log("dphi", energy, seed_env)
+        else:
+            self.log(
+                "dphi", energy, seed_env, info.iterations, info.sv_diff, info.converged
+            )
+
+
 def _probe_forward_rejected(diag: dict, ctm_cfg) -> bool:
     """#1059 for the HZ ``dφ`` probe: reject a gradient from an unconverged forward.
 
@@ -545,7 +641,7 @@ class _AcceptedProbeEval:
         self._probe = None
         self._carry = None
 
-    def probe(self, loss_fn, alpha, trial, cfg):
+    def probe(self, loss_fn, alpha, trial, cfg, plog=None, seed_env=None):
         """``value_and_grad`` at the ``dφ`` trial point.
 
         Returns the grads, or (with ``check_policy``) None when the probe's
@@ -571,24 +667,32 @@ class _AcceptedProbeEval:
             except CTMRGGradientError:
                 # The backward's spectral precheck fired ahead of the verdict
                 # below; an unconverged forward is still a rejection, not a
-                # gradient error (Codex P2 on #1070).
-                if self._check_policy and _probe_forward_rejected(
-                    _cea.get_last_implicit_ad_diagnostics(), cfg
-                ):
+                # gradient error (Codex P2 on #1070).  The log shows the
+                # forward diagnostics that the verdict read (Codex P2 on #1168).
+                diag = _cea.get_last_implicit_ad_diagnostics()
+                if self._check_policy and _probe_forward_rejected(diag, cfg):
+                    if plog is not None:
+                        plog.log_dphi(float("inf"), seed_env, diag)
                     return None
                 raise
         grads = _euclidean_grads(grads)
+        diag = None
         if self._enabled:
             # Snapshot now: later φ probes and env refreshes overwrite the
             # module diagnostics before the next step's site-1 check.
             diag = _cea.get_last_implicit_ad_diagnostics()
             if self._check_policy and _probe_forward_rejected(diag, cfg):
+                if plog is not None:
+                    plog.log_dphi(float("inf"), seed_env, diag)
                 return None
             # Async backends (CUDA/TPU) return once the work is enqueued; sync
             # so ``dt`` is evaluation time, like the fresh path's step timer.
             jax.block_until_ready((energy, grads))
             dt = _time.perf_counter() - t0
             self._probe = (alpha, trial, cfg, energy, grads, dt, diag)
+        if plog is not None:
+            # Explicit AD writes no forward diagnostics (diag stays None: n/a).
+            plog.log_dphi(energy, seed_env, diag)
         return grads
 
     def accept(self, alpha, params, direction):
@@ -2188,6 +2292,8 @@ def _optimize_gs_ad_tensor(
         _wrap_tensor,
     )
 
+    _plog = _ProbeLog("1site-tensor", config.gs_log_probes)
+
     def loss_fn_fwd(p):
         """Forward-only loss for line search — warm-starts CTM from env cache."""
         A_norm = _params_to_A_norm(p)
@@ -2197,18 +2303,22 @@ def _optimize_gs_ad_tensor(
             seed = _split_env_seed(_env_cache.get("envs"))
             env = _split_forward(A_norm, env_init=seed)
             _env_cache["envs"] = {(0, 0): env}
-            return float(compute_energy_split_ctm_tensor(A_norm, env, gate))
+            E_split = float(compute_energy_split_ctm_tensor(A_norm, env, gate))
+            _plog.log("phi", E_split, seed)
+            return E_split
         site_tensors = {(0, 0): A_norm}
+        _seed_env = _env_cache.get("envs", None)
         envs, info = python_loop_ctm_converge(
             site_tensors,
             SINGLE_SITE_NEIGHBORS,
             **ctm_converge_kwargs(
                 ctm_cfg,
-                env_init=_env_cache.get("envs", None),
+                env_init=_seed_env,
                 for_probe=True,
             ),
         )
         if _site3_reject(info, ctm_cfg):
+            _plog.log_phi(float("inf"), _seed_env, info)
             return float("inf")
         # Issue #502: share the just-converged env with the subsequent
         # ``_dphi(α)`` call (and any nearby ``_phi(α')`` probe).  The
@@ -2220,8 +2330,15 @@ def _optimize_gs_ad_tensor(
         # the L-BFGS step boundary.
         _env_cache["envs"] = envs
         if _use_cg:
-            return float(compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, _cg_d_eff))
-        return float(compute_energy_ctm_tensor(A_norm, envs[(0, 0)], gate, d_phys))
+            E_probe = float(
+                compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, _cg_d_eff)
+            )
+        else:
+            E_probe = float(
+                compute_energy_ctm_tensor(A_norm, envs[(0, 0)], gate, d_phys)
+            )
+        _plog.log_phi(E_probe, _seed_env, info)
+        return E_probe
 
     stall_count = 0  # noise recovery: consecutive line search failures
     # HZ dφ evaluation carried into the next step (see _AcceptedProbeEval).
@@ -3029,6 +3146,8 @@ def _optimize_gs_ad_tensor(
             # Snapshot for env-cache restore after the line search; see
             # ``_restore_env_cache_after_line_search`` (#502 Codex P1).
             _ls_env_snap = ("envs" in _env_cache, _env_cache.get("envs"))
+            _plog.step = step + 1
+            _plog.alpha = float("nan")
             if line_search_method == "hager_zhang":
                 from tenax.algorithms._line_search import (
                     LineSearchAborted,
@@ -3057,7 +3176,11 @@ def _optimize_gs_ad_tensor(
                     # as +inf (#1059) right where the decrease is.  dphi
                     # at this alpha still reuses this probe's env.
                     _restore_env_cache_after_line_search(_env_cache, _ls_env_snap)
-                    return loss_fn_fwd(trial)
+                    _plog.alpha = alpha
+                    try:
+                        return loss_fn_fwd(trial)
+                    finally:
+                        _plog.alpha = float("nan")
 
                 def _dphi(alpha):
                     hz_counter["dphi"] += 1
@@ -3066,7 +3189,17 @@ def _optimize_gs_ad_tensor(
                     )
                     # Keeps the energy too: on acceptance at this α the next step
                     # reuses this evaluation instead of repeating it.
-                    g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg)
+                    _plog.alpha = alpha
+                    try:
+                        g = _ls_eval.probe(
+                            loss_fn,
+                            alpha,
+                            trial,
+                            ctm_cfg,
+                            **_probe_log_kw(_plog, _env_cache),
+                        )
+                    finally:
+                        _plog.alpha = float("nan")
                     if g is None:  # unconverged forward rejected (#1059)
                         raise LineSearchAborted
                     return _tree_dot(g, direction)
@@ -3479,6 +3612,8 @@ def _optimize_gs_ad_tensor(
             "ctm_stationarity": _hist_ctm_stationarity,
             "final_env_source": _final_env_source,
         }
+        if _plog.enabled:
+            history["probes"] = _plog.records
         return A_final, env, E_gs, history
     return A_final, env, E_gs
 
@@ -4227,6 +4362,8 @@ def _optimize_gs_ad_tensor_2site(
                 patience = p
         return patience
 
+    _plog = _ProbeLog("2site-tensor", config.gs_log_probes)
+
     def loss_fn_fwd(params_):
         """Forward-only loss for line search — warm-starts CTM from env cache."""
         if use_c4v:
@@ -4239,24 +4376,29 @@ def _optimize_gs_ad_tensor_2site(
         if use_split_2s:
             # Same gauge-fixed split forward + split energy as the AD loss, so
             # φ(α) (this probe) and dφ/dα (the implicit-AD gradient) agree.
-            envs = _split_forward_2s(site_tensors, _env_cache_2s.get("envs", None))
+            _seed_split = _env_cache_2s.get("envs", None)
+            envs = _split_forward_2s(site_tensors, _seed_split)
             _env_cache_2s["envs"] = envs
-            return float(_forward_energy_2s(A_norm, B_norm, envs))
+            E_split = float(_forward_energy_2s(A_norm, B_norm, envs))
+            _plog.log("phi", E_split, _seed_split)
+            return E_split
+        _seed_env = _env_cache_2s.get("envs", None)
         envs, info = python_loop_ctm_converge(
             site_tensors,
             CHECKERBOARD_NEIGHBORS,
             **ctm_converge_kwargs(
                 ctm_cfg_2s,
-                env_init=_env_cache_2s.get("envs", None),
+                env_init=_seed_env,
                 for_probe=True,
             ),
             **_seeded_layout_kw,
         )
         if _site3_reject(info, ctm_cfg_2s):
+            _plog.log_phi(float("inf"), _seed_env, info)
             return float("inf")
         # Issue #502: see 1-site loss_fn_fwd above for rationale.
         _env_cache_2s["envs"] = envs
-        return float(
+        E_probe = float(
             compute_energy_ctm_tensor_2site(
                 A_norm,
                 B_norm,
@@ -4266,6 +4408,8 @@ def _optimize_gs_ad_tensor_2site(
                 d_phys,
             )
         )
+        _plog.log_phi(E_probe, _seed_env, info)
+        return E_probe
 
     # Base charges for SymmetricTensor env-padding (#453).  Same shape
     # infrastructure used by the 1-site auto-bump.  ``A``'s bond charges
@@ -5153,6 +5297,8 @@ def _optimize_gs_ad_tensor_2site(
                     "envs" in _env_cache_2s,
                     _env_cache_2s.get("envs"),
                 )
+                _plog.step = step + 1
+                _plog.alpha = float("nan")
                 if line_search_method == "hager_zhang":
                     from tenax.algorithms._line_search import (
                         LineSearchAborted,
@@ -5185,7 +5331,11 @@ def _optimize_gs_ad_tensor_2site(
                         _restore_env_cache_after_line_search(
                             _env_cache_2s, _ls_env_snap
                         )
-                        return loss_fn_fwd(trial)
+                        _plog.alpha = alpha
+                        try:
+                            return loss_fn_fwd(trial)
+                        finally:
+                            _plog.alpha = float("nan")
 
                     def _dphi(alpha):
                         hz_counter["dphi"] += 1
@@ -5194,7 +5344,17 @@ def _optimize_gs_ad_tensor_2site(
                         )
                         # Keeps the energy too: on acceptance at this α the next step
                         # reuses this evaluation instead of repeating it.
-                        g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg_2s)
+                        _plog.alpha = alpha
+                        try:
+                            g = _ls_eval.probe(
+                                loss_fn,
+                                alpha,
+                                trial,
+                                ctm_cfg_2s,
+                                **_probe_log_kw(_plog, _env_cache_2s),
+                            )
+                        finally:
+                            _plog.alpha = float("nan")
                         if g is None:  # unconverged forward rejected (#1059)
                             raise LineSearchAborted
                         return _tree_dot(g, direction)
@@ -5661,6 +5821,8 @@ def _optimize_gs_ad_tensor_2site(
                 "layout_seed_key": _layout_seed_key,
                 "layout_recheck_uncertified": _layout_recheck_uncertified,
             }
+            if _plog.enabled:
+                history["probes"] = _plog.records
             return (A_final, B_final), (env_A, env_B), E_gs, history
         return (A_final, B_final), (env_A, env_B), E_gs
     finally:
@@ -5799,24 +5961,27 @@ def _optimize_gs_ad_multisite(
         # multisite forward stack with the default recipe.
         _env_cache["max_truncation_error"] = float(info.max_truncation_error)
 
+    _plog = _ProbeLog("multisite-tensor", config.gs_log_probes)
+
     def loss_fn_fwd(params_):
         """Forward-only loss for line search — warm-starts CTM from env cache."""
         site_tensors = {}
         for i, c in enumerate(coords):
             p = params_[i]
             site_tensors[c] = p * (1.0 / (p.norm() + 1e-10))
-        envs, _ = python_loop_ctm_converge(
+        _seed_env = _env_cache.get("envs", None)
+        envs, info = python_loop_ctm_converge(
             site_tensors,
             neighbors,
             **ctm_converge_kwargs(
                 ctm_cfg,
-                env_init=_env_cache.get("envs", None),
+                env_init=_seed_env,
                 for_probe=True,
             ),
         )
         # Issue #502: see 1-site loss_fn_fwd above for rationale.
         _env_cache["envs"] = envs
-        return float(
+        E_probe = float(
             compute_energy_ctm_tensor_multisite(
                 site_tensors,
                 envs,
@@ -5824,6 +5989,8 @@ def _optimize_gs_ad_multisite(
                 gate,
             )
         )
+        _plog.log_phi(E_probe, _seed_env, info)
+        return E_probe
 
     # ── Optimizer setup ──────────────────────────────────────────────────
     is_metric_lbfgs = (
@@ -6301,6 +6468,8 @@ def _optimize_gs_ad_multisite(
             # Snapshot for env-cache restore after the line search; see
             # ``_restore_env_cache_after_line_search`` (#502 Codex P1).
             _ls_env_snap = ("envs" in _env_cache, _env_cache.get("envs"))
+            _plog.step = step + 1
+            _plog.alpha = float("nan")
             if line_search_method == "hager_zhang":
                 from tenax.algorithms._line_search import (
                     LineSearchAborted,
@@ -6330,7 +6499,11 @@ def _optimize_gs_ad_multisite(
                     # as +inf (#1059) right where the decrease is.  dphi
                     # at this alpha still reuses this probe's env.
                     _restore_env_cache_after_line_search(_env_cache, _ls_env_snap)
-                    return loss_fn_fwd(trial)
+                    _plog.alpha = alpha
+                    try:
+                        return loss_fn_fwd(trial)
+                    finally:
+                        _plog.alpha = float("nan")
 
                 def _dphi(alpha):
                     hz_counter["dphi"] += 1
@@ -6339,7 +6512,17 @@ def _optimize_gs_ad_multisite(
                     )
                     # Keeps the energy too: on acceptance at this α the next step
                     # reuses this evaluation instead of repeating it.
-                    g = _ls_eval.probe(loss_fn, alpha, trial, ctm_cfg)
+                    _plog.alpha = alpha
+                    try:
+                        g = _ls_eval.probe(
+                            loss_fn,
+                            alpha,
+                            trial,
+                            ctm_cfg,
+                            **_probe_log_kw(_plog, _env_cache),
+                        )
+                    finally:
+                        _plog.alpha = float("nan")
                     if g is None:  # unconverged forward rejected (#1059)
                         raise LineSearchAborted
                     return _tree_dot(g, direction)
@@ -6681,6 +6864,8 @@ def _optimize_gs_ad_multisite(
             "num_steps": len(_history_energies),
             "converged": _converged,
         }
+        if _plog.enabled:
+            history["probes"] = _plog.records
         return out_tensors, out_envs_named, E_gs, history
     return out_tensors, out_envs_named, E_gs
 
