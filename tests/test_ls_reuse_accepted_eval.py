@@ -245,6 +245,10 @@ _REJECT = (0.5, 0.5, False)
 def _scripted_2site(su_2site, num_steps, **over):
     A, B = su_2site
     over.setdefault("gs_stall_recovery_retries", 50)
+    # The scripted verdict fakes a decrease where φ may rise; the energy-rise
+    # guard would roll those steps back and break the reuse bookkeeping
+    # these tests pin.  test_ad_reject_energy_rise.py covers the guard.
+    over.setdefault("gs_reject_energy_rise", False)
     cfg = _ad_config("2site", num_steps=num_steps, gs_c4v=False, **over)
     return heisenberg_gate(), (A, B), cfg
 
