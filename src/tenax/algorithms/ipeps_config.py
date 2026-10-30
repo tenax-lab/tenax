@@ -829,7 +829,7 @@ class iPEPSConfig:
                                consecutive rejections end the run with
                                ``best_params``.  Default ``True``; ``False``
                                restores the old behaviour.
-        gs_energy_floor:      Optional variational sanity floor on in-loop
+        gs_energy_floor:       Optional variational sanity floor on in-loop
                                best-state tracking (issue #298).  Candidate
                                energies strictly below this value are
                                rejected as non-variational CTM artifacts.
