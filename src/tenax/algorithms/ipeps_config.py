@@ -817,6 +817,18 @@ class iPEPSConfig:
                                matches variPEPS's
                                ``optimizer_random_noise_max_retries``.
                                (issue #454)
+        gs_reject_energy_rise:
+                               Roll back a line-search-accepted step whose
+                               converged energy (the next step's gradient
+                               forward) is above that line search's φ0.  The
+                               φ probe that accepted α is a forward-only CTM
+                               and can stop on a plateau below the fixed
+                               point.  A rejection rolls back to
+                               ``best_params`` and clears the optimizer
+                               history; ``gs_stall_recovery_retries + 1``
+                               consecutive rejections end the run with
+                               ``best_params``.  Default ``True``; ``False``
+                               restores the old behaviour.
         gs_energy_floor:       Optional variational sanity floor on in-loop
                                best-state tracking (issue #298).  Candidate
                                energies strictly below this value are
@@ -946,6 +958,8 @@ class iPEPSConfig:
     gs_chi_ceiling_bailout: int = 0
     gs_noise_recovery_retries: int = 3  # max retries with noise injection on stall
     gs_stall_recovery_retries: int = 5  # max consecutive resets before giving up (#454)
+    # Roll back an accepted step whose converged energy rose above φ0.
+    gs_reject_energy_rise: bool = True
     gs_noise_amplitude: float = 0.1  # relative noise amplitude for recovery
     # Stall recovery mode for L-BFGS / CG line search failures.
     #   "noise"  -> inject gs_noise_amplitude Frobenius perturbation, no
