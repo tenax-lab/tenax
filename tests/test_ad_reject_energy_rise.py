@@ -188,3 +188,34 @@ def test_a_held_decrease_resets_the_reject_count(monkeypatch, unit_cell):
     assert energies[3] < energies[2] - 1e-9, energies[:4]
     # 1 reject, 1 held accept, then RETRIES + 1 rejects.
     assert calls["n"] == RETRIES + 3, (unit_cell, calls["n"], energies)
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("unit_cell", ["1x1", "2site"])
+def test_guard_state_survives_checkpoint_resume(monkeypatch, tmp_path, unit_cell):
+    """A checkpoint written after a false accept carries the guard state.
+
+    RETRIES = 1.  Phase A: accept (uphill), reject, accept (uphill), then
+    checkpoint, so one reject is counted and a φ0 is pending.  Phase B
+    resumes: its first step must reject the pending accept (needs the saved
+    φ0), and that second consecutive reject must end the run (needs the
+    saved count), so phase B runs no line search.  (Multisite has no
+    checkpointing.)
+    """
+    calls = {"n": 0}
+    _patch_uphill_accept(monkeypatch, "hager_zhang", calls)
+    common = dict(
+        gs_stall_recovery_retries=1,
+        gs_checkpoint_path=str(tmp_path / f"ckpt_{unit_cell}"),
+        gs_checkpoint_every=1,
+    )
+
+    _run(_config(unit_cell, "hager_zhang", gs_num_steps=3, gs_resume=False, **common))
+    assert calls["n"] == 2, "phase A must end on its second (uphill) accept"
+
+    calls["n"] = 0
+    _run(_config(unit_cell, "hager_zhang", gs_num_steps=8, gs_resume=True, **common))
+    assert calls["n"] == 0, (
+        f"{unit_cell}: the resumed run ran {calls['n']} line searches -- the "
+        f"pending φ0 or the reject count was not checkpointed/restored"
+    )

@@ -2456,6 +2456,10 @@ def _optimize_gs_ad_tensor(
         _env_cache.update(bundle.get("env_cache", {}))
         best_env_cache = dict(bundle.get("best_env_cache", {}))
         stall_count = int(bundle.get("stall_count", 0))
+        # gs_reject_energy_rise: the φ0 of an accept not yet checked, and the
+        # consecutive-reject count.  Old checkpoints have neither: no check.
+        _rise_pending = bundle.get("rise_pending")
+        _rise_rejects = int(bundle.get("rise_rejects", 0))
 
         if _opt_compat:
             if optimizer is not None and bundle.get("opt_state") is not None:
@@ -2542,6 +2546,8 @@ def _optimize_gs_ad_tensor(
             "prev_grad": prev_grad,
             "prev_precond_grad": prev_precond_grad,
             "stall_count": stall_count,
+            "rise_pending": _rise_pending,
+            "rise_rejects": _rise_rejects,
             "current_stage_idx": current_stage_idx,
             "stage_start_step": stage_start_step,
             "ctm_cfg_chi": ctm_cfg.chi,
@@ -4457,6 +4463,10 @@ def _optimize_gs_ad_tensor_2site(
         _env_cache_2s.update(bundle.get("env_cache", {}))
         best_env_cache_2s = dict(bundle.get("best_env_cache", {}))
         stall_count = int(bundle.get("stall_count", 0))
+        # gs_reject_energy_rise: the φ0 of an accept not yet checked, and the
+        # consecutive-reject count.  Old checkpoints have neither: no check.
+        _rise_pending = bundle.get("rise_pending")
+        _rise_rejects = int(bundle.get("rise_rejects", 0))
 
         if _opt_compat:
             if optimizer is not None and bundle.get("opt_state") is not None:
@@ -4554,6 +4564,8 @@ def _optimize_gs_ad_tensor_2site(
             "prev_grad": prev_grad,
             "prev_precond_grad": prev_precond_grad,
             "stall_count": stall_count,
+            "rise_pending": _rise_pending,
+            "rise_rejects": _rise_rejects,
             "current_stage_idx": current_stage_idx,
             "stage_start_step": stage_start_step,
             "ctm_cfg_chi": ctm_cfg_2s.chi,
