@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The Hager-Zhang zoom no longer spends its whole budget at a +inf cliff.**
+  When the line crosses a point past which every probe is rejected as +inf
+  (an iPEPS CTM that does not converge, #1059) and the slope stays steep up
+  to it, no point meets Wolfe curvature, so the zoom only bisected onto the
+  cliff until `max_iter` ran out, with one `dphi` (an implicit-AD backward)
+  per pass. A symmetric D=3, chi=16 2-site step spent 63 `phi` and 44 `dphi`
+  probes (about 4.5 h) there. The new `max_cliff_iter` (default 3) ends the
+  search after that many passes once a decrease is in hand and the right end
+  is non-finite, and returns the best point (`converged=False`, which the
+  iPEPS optimizer accepts as a real decrease). On the reproduction: 7 `phi`
+  and 4 `dphi` probes, at 99.3% of the cliff.
+
 ## v0.9.0 (2026-10-29)
 
 A correctness release with breaking defaults, 202 commits after v0.8.3. As in
