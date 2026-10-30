@@ -43,8 +43,11 @@ config = iPEPSConfig(
     su_init=True,
 )
 
-# Chi-ramping for progressive refinement (recommended for chi > 16)
-chi_schedule = [(8, 30), (16, 30), (32, 30)]
+# Chi-ramping: cheap steps at chi=8, then refine at chi=16.  Do not ramp past
+# the environment's numerical rank: at D=2 the corner has only 25 nonzero
+# singular values, so a chi=24 or chi=32 stage cuts a degenerate multiplet or
+# adds null directions and the CTM never converges (CTMNotConvergedError).
+chi_schedule = [(8, 30), (16, 30)]
 A_opt, env, E = optimize_gs_ad_chi_schedule(H_rot, None, config, chi_schedule)
 ```
 

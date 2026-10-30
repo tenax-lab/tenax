@@ -150,7 +150,7 @@ require them to be uniform, and route to `_dense_ops()` or
 | Perturbative noise   | `noise`                        | `0`        | `!=0` → `NotImplementedError`                |
 | iDMRG cell size      | `unit_cell_size`               | `2`        | `>2` → `NotImplementedError`                 |
 | iDMRG fixed-pt tol   | `arnoldi_tol`                  | —          | left/right transfer-matrix solve             |
-| iDMRG reorth         | `orthogonalize_interval`       | —          | full-reorth period                           |
+| iDMRG reorth         | `orthogonalize_interval`       | —          | > 0: orthogonalize once after the sweeps     |
 | TDVP time type       | `time_type`                    | —          | `"real"` / `"imaginary"`                     |
 | TDVP time step       | `dt`                           | —          | complex allowed                              |
 
