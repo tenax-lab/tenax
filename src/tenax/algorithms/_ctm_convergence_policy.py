@@ -99,6 +99,20 @@ def format_step_multiplier(info) -> str:
     return "n/a" if math.isnan(m) else f"{m:.3g}"
 
 
+# A step multiplier at or below this is a two-state cycle (#1060): -1 is a
+# pure flip, below -1 the cycle grows; above it an oscillation still decays.
+_CYCLE_MULTIPLIER = -0.9
+
+
+def _two_state_cycle(info) -> bool:
+    """True when ``info.step_multiplier`` flags a two-state cycle."""
+    try:
+        m = float(getattr(info, "step_multiplier", None))
+    except (TypeError, ValueError):
+        return False
+    return m <= _CYCLE_MULTIPLIER  # False for NaN
+
+
 def _fmt(x, spec: str) -> str:
     if x is None:
         return "n/a"
@@ -137,6 +151,14 @@ def _describe(info, site, step, conv_tol, chi) -> str:
             f"on max_iter, so raising max_iter alone will not help: try a "
             f"larger CTMConfig(plateau_patience=...) (None disables the bail) "
             f"or a different chi."
+        )
+    if _two_state_cycle(info):
+        msg += (
+            " The step multiplier marks a two-state cycle around an unstable "
+            "fixed point, which linear mixing damps without moving the fixed "
+            "point: try CTMConfig(ctm_mixing=0.5), or a larger value if it is "
+            "already set (needs forward_gauge='bond_phase', the implicit-AD "
+            "default)."
         )
     return msg + " Set CTMConfig(on_unconverged='warn') to continue anyway."
 
