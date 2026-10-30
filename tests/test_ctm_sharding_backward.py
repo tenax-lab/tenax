@@ -7,9 +7,38 @@ adjoint correctly: on a well-conditioned state the sharded gradient matches the
 single-device gradient to machine precision.
 """
 
+import functools
 import os
 import subprocess
 import sys
+
+# The fake devices of one process share a host thread pool, so on a loaded
+# 4-vCPU CI runner a device can reach a collective long after its peers.  XLA's
+# CPU collectives give up after 40 s and abort the child (SIGABRT, "Expected 4
+# threads to join the rendezvous, but only 2 of them arrived"), which is a
+# scheduling stall, not a gradient mismatch: it hit main and #1157 on
+# 2026-10-27 and passes locally in ~2 min.  The subprocess timeout below still
+# bounds a real hang.
+_COLLECTIVE_TIMEOUT_FLAGS = (
+    "--xla_cpu_collective_call_terminate_timeout_seconds=600"
+    " --xla_cpu_collective_timeout_seconds=600"
+)
+
+
+@functools.cache
+def _xla_flags(n_dev):
+    """``XLA_FLAGS`` for an ``n_dev`` fake-CPU-device child; the timeout flags
+    only when this jaxlib knows them (an unknown flag aborts XLA at start-up,
+    and the jax floor predates them)."""
+    base = f"--xla_force_host_platform_device_count={n_dev}"
+    flags = f"{base} {_COLLECTIVE_TIMEOUT_FLAGS}"
+    probe = subprocess.run(
+        [sys.executable, "-c", "import jax; jax.devices()"],
+        env=dict(os.environ, XLA_FLAGS=flags, JAX_PLATFORMS="cpu"),
+        capture_output=True,
+        timeout=120,
+    )
+    return flags if probe.returncode == 0 else base
 
 
 def test_sharded_backward_grad_matches_single_device():
@@ -30,7 +59,7 @@ def test_sharded_backward_grad_matches_single_device():
     """
     env = dict(
         os.environ,
-        XLA_FLAGS="--xla_force_host_platform_device_count=4",
+        XLA_FLAGS=_xla_flags(4),
         JAX_PLATFORMS="cpu",
     )
     r = subprocess.run(
@@ -52,7 +81,7 @@ def test_sharded_optimize_gs_ad_matches_single_device():
     sharded, must reach the same energy + tensor to <1e-8 (fake CPU devices)."""
     env = dict(
         os.environ,
-        XLA_FLAGS="--xla_force_host_platform_device_count=4",
+        XLA_FLAGS=_xla_flags(4),
         JAX_PLATFORMS="cpu",
     )
     r = subprocess.run(

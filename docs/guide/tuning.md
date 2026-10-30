@@ -181,9 +181,9 @@ Values: `"cg"` (default), `"lbfgs"`, `"adam"`
 
 ### `iPEPSConfig.gs_conv_criterion` (default `"grad_norm"`)
 
-Exit test for the outer loop.  `"grad_norm"` (default since v0.8.4) stops at
+Exit test for the outer loop.  `"grad_norm"` (default since v0.9.0) stops at
 `‖∇E‖₂ < gs_grad_norm_tol` (default `1e-5`, variPEPS's
-`optimizer_convergence_eps`).  The pre-v0.8.4 default `"dE"`
+`optimizer_convergence_eps`).  The pre-v0.9.0 default `"dE"`
 (`|ΔE| < gs_conv_tol`) is deprecated: it declared convergence with
 `‖∇E‖` between `1e-2` and `0.69` in all four D=2/3 square-Heisenberg
 validation runs.  `"both"` needs both.  `gs_conv_tol` is read only by `"dE"`
@@ -220,7 +220,7 @@ Values: `None` (auto), `"noise"`, `"reset"`
   near a settled energy is not undone: on D=3 Heisenberg it took a 1x1
   run from E=-0.66819 to -0.033.
 - **`None`** (default) — `"reset"` on every unit cell (1-site was
-  `"noise"` before v0.8.4). The `ctm_ad_mode` engines (`"c4v_reference"`, `"root_implicit"`,
+  `"noise"` before v0.9.0). The `ctm_ad_mode` engines (`"c4v_reference"`, `"root_implicit"`,
   `"root_implicit_symmetric"`) have no stall recovery and ignore this
   setting.
 
@@ -306,6 +306,28 @@ fixed number of sweeps at a small chi before the final stage converges
 at the target chi.  Example: ``chi_ramp=[(8, 10), (16, 10), (32, None)]``
 does 10 sweeps at chi=8, 10 at chi=16, then converges at chi=32.
 Benchmarks show 1.2–2.1× GPU speedup with identical energies.
+
+### `CTMConfig.adjoint_chain_rule` (default `"auto"`)
+
+`"joint"` gets the chain rule's indirect term out of a GMRES adjoint solve
+over `(params, env)` instead of compiling a separate params-VJP program, the
+largest single backward compile at D≥3.  The default `"auto"` runs `"joint"`
+on the fused CTM; the split CTM (`fuse_virtual_legs=False`) keeps its own
+chain rule and refuses an explicit `"joint"`.  The gradient is the same as
+`"separate"` to round-off and warm steps cost the same.  Measured at U(1) D=3
+chi=16 on one A100, step 1: compile 7,795 → 5,977 s (−23%), peak RSS
+51 → 39 GB.  Set `"separate"` only to reproduce runs from before the flip.  Details under "Symmetric tensors: compile time
+and XLA fusion" in `docs/guide/algorithms/ipeps_ad_paths.md`.
+
+### Persistent compilation cache (on by default)
+
+`import tenax` makes JAX store compiled programs in `~/.cache/jax`
+(override with `JAX_COMPILATION_CACHE_DIR`), so a repeat run can load a
+program instead of compiling it.  On CPU, loading a large block-sparse
+backward costs most of a compile (D=3 U(1): 870 s against 1048 s).  The
+first compile is not shortened, and the directory has no size limit by
+default.  See "Persistent compilation cache" in
+`docs/guide/algorithms/ipeps_ad_paths.md`.
 
 ---
 

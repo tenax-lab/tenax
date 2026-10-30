@@ -1002,12 +1002,18 @@ def _assert_the_d2_point_holds(held):
 # this point on main at the loop's cap of 63 sweeps.  ~40 s per hold.
 _REJECTING_KEYS = (12, 19)
 
+# Slow-bucket prune (#1149): the other 18 keys of the investigation's 20 were a
+# sweep, not a guard.  The two keys main rejected stay in core and one key it
+# accepted (s = 0) stays in slow, so a verdict that flips with the key is
+# still caught in both directions.
+_HOLD_KEYS = (0, *_REJECTING_KEYS)
+
 
 @pytest.mark.parametrize(
     "s",
     [
         s if s in _REJECTING_KEYS else pytest.param(s, marks=pytest.mark.slow)
-        for s in range(20)
+        for s in _HOLD_KEYS
     ],
 )
 def test_the_d2_point_holds_under_every_hold_key(s):
@@ -1024,12 +1030,19 @@ def test_the_d2_point_holds_under_every_hold_key(s):
 # read 1.0261 against the macOS runner's 1.0258.
 _REJECTING_JITTERS = ((1e-14, 1),)
 
+# Slow-bucket prune (#1149): only the jitters main rejected are kept -- the
+# first in core, the other three (one per eps) in slow.  The five jitters main
+# already accepted could not discriminate the #1063 defect and were dropped.
+# ``_JITTERS`` itself is unchanged: ``_jittered_pair`` replays the rng draws
+# in its order.
+_KEPT_JITTERS = ((1e-14, 1), (1e-14, 2), (1e-12, 0), (1e-10, 1))
+
 
 @pytest.mark.parametrize(
     "eps, rep",
     [
         j if j in _REJECTING_JITTERS else pytest.param(*j, marks=pytest.mark.slow)
-        for j in _JITTERS
+        for j in _KEPT_JITTERS
     ],
 )
 def test_the_d2_point_holds_under_roundoff_jitter_of_the_state(eps, rep):

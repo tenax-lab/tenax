@@ -7,13 +7,15 @@ import jax.numpy as jnp
 import pytest
 
 from tenax.algorithms._ctm_energy_ad import ctm_energy_implicit
-from tenax.algorithms._ctm_tensor_convergence import (
-    CHECKERBOARD_NEIGHBORS,
-    SINGLE_SITE_NEIGHBORS,
-)
+from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
 from tenax.algorithms.ipeps import heisenberg_gate
 from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
+
+# The complex128 1-site implicit gradient is pinned by
+# test_joint_chain_rule.py::test_joint_gmres_matches_separate_complex (finite,
+# complex dtype, joint == separate); its slow twin here was removed in the
+# slow-bucket prune (#1149).
 
 
 def _make_complex_A(D=2, d=2, key=None):
@@ -62,42 +64,6 @@ def test_c4v_sublattice_rotation_complex():
     B_data = jnp.einsum("luRDs,sS->luRDS", A_data, U_sub)
     assert B_data.dtype == jnp.complex128
     assert jnp.all(jnp.isfinite(B_data))
-
-
-@pytest.mark.slow
-def test_complex128_1site_gradient():
-    """Verify gradient computation works for complex128 1-site.
-
-    Uses a small complex perturbation on a well-conditioned real tensor
-    to ensure the CTM environment is contractive (rho(J^T) < 1).
-    """
-    # Start from a real tensor that gives contractive CTM, add small imag part
-    key = jax.random.PRNGKey(42)
-    k1, k2 = jax.random.split(key)
-    real_part = jax.random.normal(k1, (2, 2, 2, 2, 2), dtype=jnp.float64)
-    imag_part = 0.1 * jax.random.normal(k2, (2, 2, 2, 2, 2), dtype=jnp.float64)
-    data = real_part + 1j * imag_part
-    data = data / jnp.linalg.norm(data)
-    A = _wrap_as_dense_tensor(data)
-    gate = heisenberg_gate()
-
-    def loss(p):
-        A_local = _wrap_as_dense_tensor(p)
-        return ctm_energy_implicit(
-            {(0, 0): A_local},
-            SINGLE_SITE_NEIGHBORS,
-            gate,
-            chi=8,
-            max_iter=80,
-            conv_tol=1e-9,
-        )
-
-    params = A.todense()
-    e, g = jax.value_and_grad(loss)(params)
-
-    assert jnp.isfinite(e), f"Energy is not finite: {e}"
-    assert g.dtype == jnp.complex128
-    assert jnp.all(jnp.isfinite(g))
 
 
 @pytest.mark.slow

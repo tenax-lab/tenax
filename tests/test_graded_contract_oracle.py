@@ -42,7 +42,12 @@ import tenax.algorithms._graded_double_layer as _gdl
 from tenax.algorithms._ctm_tensor_projector_2x2 import _scale_bond_by_diag
 from tenax.core._graded import graded_contract, graded_reorder, graded_svd
 
-CLUSTERS = [(2, 2), pytest.param(2, 3, marks=pytest.mark.slow)]
+# Slow-bucket prune (#1149): the 2x3 (two-plaquette) cluster runs only on the
+# production path, ``test_the_graded_double_layer_energy_matches_fock``.  The
+# ``order``-parametrised reference contractor and the odd-tensor auxiliary-leg
+# case keep their 2x2 cells in core; their sign rules are exercised there.
+CLUSTERS = [(2, 2)]
+PRODUCTION_CLUSTERS = [*CLUSTERS, pytest.param(2, 3, marks=pytest.mark.slow)]
 
 
 def test_the_ordered_fock_state_is_the_oracle_state_for_even_tensors():
@@ -263,7 +268,7 @@ def test_go_no_go_a_truncated_two_site_update_matches_fock(keep):
 # ------------------------------------------------------------------ #
 
 
-@pytest.mark.parametrize("R,C", CLUSTERS)
+@pytest.mark.parametrize("R,C", PRODUCTION_CLUSTERS)
 def test_the_graded_double_layer_energy_matches_fock(R, C):
     """Production-shaped double layers (``build_graded_double_layer``: same
     labels, flows and fused legs as ``_build_double_layer_tensor``),

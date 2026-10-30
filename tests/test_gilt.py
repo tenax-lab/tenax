@@ -213,3 +213,64 @@ class TestGiltTNRFreeEnergy:
     def test_rejects_non_tensor(self):
         with pytest.raises(TypeError):
             gilt_tnr(np.zeros((2, 2, 2, 2)), GiltTNRConfig())
+
+
+def _ising_vertex(beta) -> np.ndarray:
+    """Charge-basis Ising vertex, complex for a complex coupling."""
+    w = np.array([2 * np.cosh(beta), 2 * np.sinh(beta)], dtype=complex)
+    sw = np.sqrt(w)
+    arr = np.zeros((2, 2, 2, 2), dtype=complex)
+    for u, d, lf, rt in np.ndindex(2, 2, 2, 2):
+        if (u + lf - d - rt) % 2 == 0:
+            arr[u, d, lf, rt] = sw[u] * sw[d] * sw[lf] * sw[rt]
+    return arr if np.iscomplexobj(beta) else arr.real
+
+
+class TestGiltComplex:
+    """The environment gram is assembled with the ket index pair first (the complex
+    conjugate of the gram of the GILT objective), so the optimal bond matrix is
+    conj(U) w U^T vec(1) in its eigenbasis.  U w U^dagger vec(1) -- its complex conjugate --
+    agrees for real tensors only; at K = 0.5 + 0.03i it put the Gilt-TNR free energy
+    2e-2..4e-2 off while the unfiltered and the real-coupling runs agreed to 1e-6."""
+
+    def test_optimal_q_minimizes_the_gilt_objective_on_a_complex_environment(self):
+        from tenax.algorithms.gilt import _gram_from_tensor, _optimal_q
+
+        rng = np.random.default_rng(1)
+        ra = rb = 3
+        n_ext = 7
+        E = rng.normal(size=(n_ext, ra, rb)) + 1j * rng.normal(size=(n_ext, ra, rb))
+        E[:, 0, 1] *= 1e-3  # a weak environment direction, so the filter acts
+        M = np.einsum("xij,xIJ->ijIJ", E, E.conj())  # ket pair first, as built
+        sym = U1Symmetry()
+        z = np.zeros(ra, dtype=np.int32)
+        idx = (
+            TensorIndex.from_charges(sym, z, FlowDirection.IN, label="i"),
+            TensorIndex.from_charges(sym, z, FlowDirection.OUT, label="j"),
+            TensorIndex.from_charges(sym, z, FlowDirection.OUT, label="I"),
+            TensorIndex.from_charges(sym, z, FlowDirection.IN, label="J"),
+        )
+        eps = 1e-2
+        Q = np.asarray(
+            _optimal_q(_gram_from_tensor(DenseTensor(jnp.array(M), idx)), eps)
+        )
+        # the objective |E vec(Q) - E vec(1)|^2 in the sum-normalized convention
+        G = np.einsum("xij,xIJ->ijIJ", E.conj(), E).reshape(ra * rb, ra * rb)
+        w, U = np.linalg.eigh(0.5 * (G + G.conj().T))
+        s = np.sqrt(np.clip(w, 0.0, None))
+        sh = s / s.sum()
+        one = np.eye(ra, rb).reshape(-1)
+        q_opt = U @ ((sh**2 / (sh**2 + eps**2)) * (U.conj().T @ one))
+        np.testing.assert_allclose(Q.reshape(-1), q_opt, atol=1e-12)
+        assert (
+            np.max(np.abs(q_opt.conj() - q_opt)) > 1e-3
+        )  # the test can tell Q from conj Q
+
+    @pytest.mark.parametrize("beta", [0.5, 0.5 + 0.03j])
+    def test_filter_costs_as_little_at_complex_as_at_real_coupling(self, beta):
+        T = _make_dense_tensor(_ising_vertex(beta))
+        on = GiltTNRConfig(max_bond_dim=8, num_steps=16, gilt=GiltConfig(gilt_eps=1e-4))
+        off = GiltTNRConfig(max_bond_dim=8, num_steps=16, gilt=GiltConfig(gilt_eps=0.0))
+        f_on = complex(gilt_tnr(T, on))
+        f_off = complex(gilt_tnr(T, off))
+        assert abs(f_on.real - f_off.real) < 1e-4

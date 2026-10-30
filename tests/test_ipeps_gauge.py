@@ -100,11 +100,20 @@ ABSORB_TOL = 1e-13
 #: The ``core`` chain anchors below are deliberately **not** here: they are the
 #: only externally certified claims in the rewrite and must stay in the required
 #: gate.
+#:
+#: The ``symmetric D=3`` cell also carries ``diagnostic`` (skipped unless
+#: ``TENAX_RUN_DIAGNOSTIC=1``): ``gauge_fix``'s only caller is the unshipped
+#: ``ipeps_su`` engine (#882), so the cell pins nothing a user can reach yet.
 _KIND_D_SOLVE_CASES = [
     pytest.param("dense", 2, id="2-dense"),
     pytest.param("dense", 3, id="3-dense"),
     pytest.param("symmetric", 2, id="2-symmetric"),
-    pytest.param("symmetric", 3, id="3-symmetric", marks=pytest.mark.slow),
+    pytest.param(
+        "symmetric",
+        3,
+        id="3-symmetric",
+        marks=(pytest.mark.slow, pytest.mark.diagnostic),
+    ),
 ]
 
 
@@ -522,11 +531,16 @@ def _rdm_rel(x, y):
 #: **three** block-sparse CTM convergences at chi=8 and costs 167 s against the
 #: dense arm's 18 -- a fermionic CTM in the ``fast-other`` bucket -- and the
 #: fermionic line is deferred to #882 §5.2 anyway, so it belongs in the bucket
-#: that runs on push to main rather than on every PR.  Derived from ``_WITNESS_PAIRS`` rather than
+#: that runs on push to main rather than on every PR -- and, being a diagnostic
+#: on a deferred line whose floor is flat in chi, it is also ``diagnostic``
+#: (``TENAX_RUN_DIAGNOSTIC=1``).  Derived from ``_WITNESS_PAIRS`` rather than
 #: written out, so adding an arm there cannot silently skip this decision.  The
 #: ids stay ``[dense]`` / ``[fermionic]``.
 _WITNESS_CASES = [
-    pytest.param(k, marks=[pytest.mark.slow] if k == "fermionic" else [])
+    pytest.param(
+        k,
+        marks=[pytest.mark.slow, pytest.mark.diagnostic] if k == "fermionic" else [],
+    )
     for k in _WITNESS_PAIRS
 ]
 

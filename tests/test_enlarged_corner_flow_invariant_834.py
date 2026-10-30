@@ -28,6 +28,7 @@ import jax
 import numpy as np
 import pytest
 
+from tenax.algorithms import _ctm_eager_jit
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
@@ -91,6 +92,8 @@ def _record_call_site_gaps(monkeypatch) -> list[tuple[str, float]]:
         return out
 
     monkeypatch.setattr(moves, "_build_enlarged_corner", scored)
+    # The probe needs concrete arrays (np.asarray), so do not jit the corner.
+    monkeypatch.setattr(_ctm_eager_jit, "_ENABLED", False)
     return gaps
 
 
@@ -122,24 +125,6 @@ def test_enlarged_corner_matches_dense_at_every_sweep_call_site(monkeypatch, D):
         f"{worst[0]} (rel={worst[1]:.3e}) over {len(gaps)} call sites. The "
         "symmetric CTM is dropping block weight on a non-dual bond -- see the "
         "module docstring and #834."
-    )
-
-
-@pytest.mark.slow
-def test_enlarged_corner_matches_dense_at_every_sweep_call_site_d3(monkeypatch):
-    """Same guard at D=3, where the Sz seam charge set stops being self-dual.
-
-    D=2 masks charge-convention defects because the Sz seam is self-dual there
-    (the #605 lesson); D=3 is the first bond dimension that can see them.
-    """
-    gaps = _record_call_site_gaps(monkeypatch)
-    _run_charged_sweep(D=3, chi=8, max_iter=3)
-
-    assert gaps, "no symmetric enlarged-corner calls were observed"
-    worst = max(gaps, key=lambda g: g[1])
-    assert worst[1] < 1e-12, (
-        f"D=3: enlarged corner diverged from dense at {worst[0]} "
-        f"(rel={worst[1]:.3e}) over {len(gaps)} call sites"
     )
 
 

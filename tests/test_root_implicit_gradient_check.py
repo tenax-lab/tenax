@@ -217,7 +217,11 @@ def test_a_symmetric_tensor_is_refused_rather_than_silently_perturbed():
 # --------------------------------------------------------------------------- #
 
 
+# A #785 research finding (two root-implicit convergences + two FD scans, ~3
+# min), not a library promise: ``measure_gradient_error``'s contract is pinned
+# by the closed-form tests above.  Opt-in via TENAX_RUN_DIAGNOSTIC=1.
 @pytest.mark.slow
+@pytest.mark.diagnostic
 def test_the_residual_is_anticorrelated_with_gradient_error_on_a_rank_matched_pair():
     """Same ``usable_rank``; larger residual, better gradient (#785).
 

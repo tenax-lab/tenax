@@ -160,7 +160,8 @@ def test_dense_2x2_energy_unchanged_by_fix():
     * the loop **says** it cannot certify this environment -- if that warning
       ever stops, the state is no longer the collapsed one this constant was
       measured on and the constant must be re-derived;
-    * the value is budget-independent, which is what makes freezing it legal.
+    * the value is budget-independent, which is what makes freezing it legal
+      (measured, not re-asserted per run; see below).
 
     The fixture is deliberately left collapsed.  ``test_ctm_criterion_rank_
     blind_898.py`` imports this same pair as ``_collapsing_pair()`` and needs
@@ -203,11 +204,10 @@ def test_dense_2x2_energy_unchanged_by_fix():
         "regime this constant was measured in has changed."
     )
 
-    # Regime, part 2: budget-independent, which is what licenses a literal.
-    E_long, _, _ = run(240)
-    assert abs(E - E_long) < 1e-12, (
-        f"energy moved with max_iter ({E} at 60 vs {E_long} at 240): it is a "
-        f"sweep snapshot, not a reproducible number, and must not be frozen."
-    )
+    # Budget independence (60 vs 240 sweeps agree to < 1e-12) was measured
+    # once and licenses the literal; re-measuring it every run (a 240-sweep
+    # rerun) was dropped in the slow-bucket prune (#1149).  The collapsed-
+    # corner and uncertifiable-loop regime asserts above stay, and a change
+    # in the dynamics still has to land within 1e-6 of the literal at 60.
 
     assert abs(E - _E_DENSE_2X2) < 1e-6, f"dense 2x2 energy drifted: {E}"

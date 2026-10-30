@@ -99,10 +99,12 @@ site = SpinHalfSite(conserve="Sz")  # U(1) Sz conservation
 from tenax import U1Symmetry, TensorIndex, FlowDirection, SymmetricTensor
 
 u1 = U1Symmetry()
-phys = TensorIndex(u1, np.array([-1, 1], dtype=np.int32), FlowDirection.IN, label="p")
+phys = TensorIndex.from_charges(u1, np.array([-1, 1], dtype=np.int32), FlowDirection.IN, label="p")
 ```
 
-Or simply use `auto.to_mpo(symmetric=True)` and the MPO handles it.
+Or simply use `auto.to_mpo(symmetric=True)` and the MPO handles it — then the
+initial MPS must be symmetric too (`FiniteMPS.random(..., symmetric=True,
+symmetry=U1Symmetry(), target_charge=0)`); `dmrg()` refuses a dense/symmetric mix.
 
 ### 4. NumPy vs JAX
 
@@ -138,11 +140,11 @@ corr_f = correlation(result.mps, Cdag, 0, C, 3, anticommute=True)
 Entanglement entropy from iDMRG singular values:
 
 ```python
-import jax.numpy as jnp
+# Finite DMRG: von Neumann entropy at the bond between sites b and b+1
+entropy = result.mps.entanglement_entropy(L // 2 - 1)
 
-S = result.singular_values
-p = (S / jnp.linalg.norm(S))**2
-entropy = -jnp.sum(p * jnp.log(p))
+# iDMRG: result.mps is an InfiniteMPS; bond 1 is the centre bond
+# entropy = idmrg_result.mps.entanglement_entropy(bond=1)
 ```
 
 See the **observables skill** for full guidance.
@@ -217,6 +219,6 @@ print(f"Energy: {result.energy:.10f}")
 - **Built-in observables** — `expectation_value()`, `correlation_function()`,
   `entanglement_entropy()` are not available as methods
 - **Product state initialization** — Tenax uses random MPS; no `from_lat_product_state`
-- **TEBD / TDVP** — not yet in Tenax
+- **Real-time TEBD** — not in Tenax; finite-MPS time evolution is `tdvp(mps, mpo, TDVPConfig(...))` (1-/2-site, real or imaginary time), and `itebd_groundstate` is an imaginary-time iTEBD ground-state solver
 - **Detailed documentation** — TeNPy has extensive user guides and tutorials
 - **Per-sweep parameter schedules** — TeNPy supports chi ramp-up per sweep

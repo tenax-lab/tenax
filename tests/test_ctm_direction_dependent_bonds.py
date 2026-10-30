@@ -64,7 +64,7 @@ def test_su_output_is_direction_dependent_but_cell_consistent():
     assert _charges(A, "l") == _charges(B, "r"), "A.l must match B.r (cell-consistent)"
 
 
-_SWEEPS = 2
+_SWEEPS = 1
 
 
 def test_symmetric_2site_ctm_matches_dense_on_direction_dependent_bonds():
@@ -82,8 +82,12 @@ def test_symmetric_2site_ctm_matches_dense_on_direction_dependent_bonds():
     XLA compile per new block shape), which timed the CI fast-other shard out
     at the 240 min cap on every run.  Measured 2026-09-27: dense and symmetric
     agree to 4.7e-14 after 1 sweep and 1.1e-16 after 2 (E=-0.418147440020).
-    Mutant: the symmetric projector's ``S**-1/2`` replaced by ``S**-1`` (the
-    dense projector is a separate function) -- this test fails.
+    Mutant: ``S**-1/2`` replaced by ``S**-1`` in
+    ``_ctm_tensor_projector_2x2._compute_2x2_projector_symmetric`` (the dense
+    path is ``_compute_2x2_projector``) -- this test fails (2026-10-21: E_sym
+    -2.6e6 at 2 sweeps, -1.7e9 at 1).  The same edit in
+    ``_ctm_projector._svd_projector_symmetric`` survives: this recipe never
+    calls it.
     """
     A, B = _su_direction_dependent_pair()
     Hd = heisenberg_gate()
@@ -105,7 +109,11 @@ def test_symmetric_2site_ctm_matches_dense_on_direction_dependent_bonds():
 
     assert c1 > 1e-8, f"symmetric CTM corner collapsed (C1 norm={c1})"
     assert abs(E_sym - E_dense) < 1e-10, f"sym {E_sym} != dense {E_dense}"
-    assert E_sym < -0.3, f"energy {E_sym} unphysical (expected AFM, ~ -0.5 to -0.7)"
+    # A sanity floor, not a physics check.  Without base_charges the SU does not
+    # approach the ground state (-0.6694): the 40-step pair converges, by a
+    # dense chi=12 CTM, to -0.4333, above the Neel product state (-0.5).  At 12
+    # and 20 SU steps the pair gives exactly -0.5000000 at 1 to 200 sweeps.
+    assert E_sym < -0.3, f"energy {E_sym} unphysical (40-step fixture: ~ -0.41)"
 
 
 def test_2x2_enlarged_corners_build_on_direction_dependent_init():

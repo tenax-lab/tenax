@@ -76,17 +76,14 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
-          # uv.lock is gitignored in this repo, so the action's default
-          # ``**/uv.lock`` glob would match nothing and the cache would never
-          # invalidate; key on pyproject.toml instead.
           enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
+          cache-dependency-glob: "uv.lock"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       # tenax enables JAX's persistent compile cache (~/.cache/jax, see
       # src/tenax/__init__.py) but CI never restored it, so every run compiled
@@ -298,17 +295,14 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
-          # uv.lock is gitignored in this repo, so the action's default
-          # ``**/uv.lock`` glob would match nothing and the cache would never
-          # invalidate; key on pyproject.toml instead (same as the gate).
           enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
+          cache-dependency-glob: "uv.lock"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       # Same lever as the gate's cache step (see the ``test`` job): tenax
       # writes JAX's persistent compile cache to ~/.cache/jax on every
@@ -444,7 +438,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Run core tests (fallback path)
         env:
@@ -511,16 +505,14 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
-          # Same rationale as the ubuntu job: uv.lock is gitignored, so key
-          # the package cache on pyproject.toml.
           enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
+          cache-dependency-glob: "uv.lock"
 
       - name: Set up Python 3.12
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       # See the ubuntu job for sizing; keyed by runner.os because jaxlib's
       # compiled artifacts differ per platform.
@@ -591,6 +583,82 @@ jobs:
           fi
           echo "All macOS core shards passed."
 
+  # The declared JAX floor, tested (#1105).  Every other job resolves the
+  # newest JAX, so nothing ever ran against ``jax>=<floor>`` in pyproject: the
+  # floor said 0.4.30 while ``import tenax`` needed 0.4.35 (``SvdAlgorithm``,
+  # #691), and nothing reported it.  The floor is READ from pyproject, so the
+  # job follows it instead of drifting from a copy here.
+  #
+  # The second pin is 0.4.36, the first JAX whose ``jax.jit`` takes
+  # ``compiler_options``: from there tenax's no-fusion dispatch (#1102) is
+  # live, and test_block_sparse_jit.py runs instead of skipping.  On 0.4.36 it
+  # fails ("Protocol Buffer reflection usage error", 8 tests, measured
+  # 2026-10-14), so an import-only check on the floor would not catch it.
+  #
+  # Not a branch-protection context; skipped on ``merge_group`` for the same
+  # scheduling reason as the docs job below.
+  min-jax:
+    name: Minimum JAX (${{ matrix.jax }}, Python 3.11)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'merge_group'
+    strategy:
+      fail-fast: false
+      matrix:
+        jax: ["floor", "0.4.36"]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --locked --python 3.11 --extra dev
+
+      - name: Pin JAX
+        env:
+          PIN: ${{ matrix.jax }}
+        run: |
+          if [ "$PIN" = "floor" ]; then
+            PIN=$(python3 - <<'PY'
+          import re, tomllib
+          deps = tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]
+          (spec,) = [d for d in deps if re.match(r"jax\s*>=", d)]
+          print(re.search(r">=\s*([0-9][0-9.]*)", spec).group(1))
+          PY
+            )
+          fi
+          echo "Pinning jax==$PIN jaxlib==$PIN"
+          # Re-resolve the whole project under the pin, not just jax/jaxlib:
+          # the synced optax (0.2.8 needs jax>=0.5.3) must be swapped for one
+          # that accepts the pin, or the job tests an environment no user can
+          # resolve.
+          uv pip install -e ".[dev]" "jax==$PIN" "jaxlib==$PIN"
+          uv pip check
+          echo "JAX_PIN=$PIN" >> "$GITHUB_ENV"
+
+      # ``--no-sync`` throughout: a plain ``uv run`` re-syncs the environment
+      # and silently undoes the pin.
+      - name: Check the pinned version and the import
+        run: |
+          uv run --no-sync python -c "import jax, sys; print('jax', jax.__version__); sys.exit(jax.__version__ != '$JAX_PIN')"
+          uv run --no-sync python -c "import tenax"
+
+      - name: Run smoke tests
+        env:
+          JAX_PLATFORMS: cpu
+        run: >
+          uv run --no-sync pytest -m core --no-cov -q
+          tests/test_index.py tests/test_symmetry.py tests/test_tensor.py
+          tests/test_block_sparse_jit.py
+
   docs:
     name: Build documentation
     runs-on: ubuntu-latest
@@ -620,7 +688,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --extra docs --dev
+        run: uv sync --locked --extra docs --dev
 
       - name: Build docs (warnings as errors)
         run: uv run sphinx-build -W -b html docs docs/_build/html

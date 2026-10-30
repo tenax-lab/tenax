@@ -19,11 +19,11 @@ DMRG), but differ in language (Julia/C++ vs Python/JAX) and tensor design.
 
 | ITensor (Julia) | Tenax (Python) | Notes |
 |-----------------|----------------|-------|
-| `Index(dim, "label")` | `TensorIndex(sym, charges, flow, label)` | Tenax carries symmetry + flow |
+| `Index(dim, "label")` | `TensorIndex.from_charges(sym, charges, flow, label)` | Tenax carries symmetry + flow |
 | `ITensor(idx1, idx2)` | `DenseTensor(data, indices)` | Tenax requires explicit data |
-| `randomITensor(idx1, idx2)` | `DenseTensor.random_normal(indices, key)` | JAX needs explicit RNG key |
-| `Index(dim, "l"; tags="Link")` | `TensorIndex(..., label="l")` | Tenax uses labels, not tags |
-| `dag(idx)` | `idx.dual()` | Flip FlowDirection |
+| `randomITensor(idx1, idx2)` | `DenseTensor(jax.random.normal(key, shape), indices)` | JAX needs explicit RNG key |
+| `Index(dim, "l"; tags="Link")` | `TensorIndex.from_charges(..., label="l")` | Tenax uses labels, not tags |
+| `dag(idx)` | `idx.flip_flow()` | Flips the flow, keeps the charges — the leg you contract against. `idx.dual()` also negates the charges, so do not use it to build a contraction partner (#834) |
 | `A * B` | `contract(A, B)` | Both label-based |
 | `svd(T, i1, i2)` | `truncated_svd(T, left_labels, right_labels)` | By labels, not Index objects |
 | `qr(T, i1, i2)` | `qr_decompose(T, left_labels, right_labels)` | Same pattern |
@@ -50,11 +50,13 @@ l = Index(4, "Link,l=3")     # Tagged link index
 of tags:
 
 ```python
-from tenax import TensorIndex, FlowDirection
+from tenax import TensorIndex, FlowDirection, U1Symmetry
 import numpy as np
 
-phys = TensorIndex(None, np.array([], dtype=np.int32), FlowDirection.IN, label="s3")
-bond = TensorIndex(None, np.array([], dtype=np.int32), FlowDirection.OUT, label="l3")
+# Dense (non-QN) legs: trivial all-zero charges, one per basis state
+u1 = U1Symmetry()
+phys = TensorIndex.from_charges(u1, np.zeros(2, dtype=np.int32), FlowDirection.IN, label="s3")
+bond = TensorIndex.from_charges(u1, np.zeros(4, dtype=np.int32), FlowDirection.OUT, label="l3")
 ```
 
 ### 2. Explicit Data, Explicit RNG
@@ -70,7 +72,9 @@ B = ITensor(i, j)             # Zero tensor
 
 ```python
 import jax
-A = DenseTensor.random_normal(indices=(i, j, k), key=jax.random.PRNGKey(0))
+from tenax import DenseTensor
+# i, j, k are TensorIndex objects of dims (di, dj, dk)
+A = DenseTensor(jax.random.normal(jax.random.PRNGKey(0), (di, dj, dk)), (i, j, k))
 ```
 
 ### 3. FlowDirection (Arrows)
@@ -223,6 +227,6 @@ print(f"Energy: {result.energy:.10f}")
 - **Tag system** — replaced by simple string labels
 - **Per-sweep bond dimension schedule** — use multiple DMRG runs instead
 - **`expect()` / `correlation_matrix()`** — basic versions available via `expectation_value()` / `correlation()`
-- **TEBD / TDVP** — not yet implemented in Tenax
+- **Real-time TEBD** — not in Tenax; finite-MPS time evolution is `tdvp(mps, mpo, TDVPConfig(...))` (1-/2-site, real or imaginary time), and `itebd_groundstate` is an imaginary-time iTEBD ground-state solver
 - **Non-Abelian symmetry** — Tenax currently supports only Abelian (U(1), Z_n)
-- **MPS/MPO as first-class types** — Tenax uses `TensorNetwork` (generic graph)
+- **MPO as a first-class type** — MPOs are a `TensorNetwork` (generic graph); MPS states are `FiniteMPS` / `InfiniteMPS`

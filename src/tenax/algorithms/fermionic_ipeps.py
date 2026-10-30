@@ -122,10 +122,12 @@ def spinless_fermion_gate(config: FPEPSConfig) -> SymmetricTensor:
 
     The chemical-potential term is distributed over the bonds as
     ``-(config.mu / z) * (n_i + n_j)`` with ``z = 4``, the coordination
-    number of the square lattice this gate is built for (verified: every
-    caller in ``src/`` -- :func:`fpeps`, :func:`su_grow_layout`,
-    :func:`optimize_fpeps_ad` -- applies it on the 2-site bipartite/
-    checkerboard square lattice, where each site touches exactly 4 bonds).
+    number of the square lattice this gate is built for. :func:`fpeps` and
+    :func:`su_grow_layout` apply it on the 2-site checkerboard square
+    lattice; :func:`optimize_fpeps_ad` applies it on the square lattice of
+    whatever ``iPEPSConfig.unit_cell`` selects (the default ``"1x1"`` is a
+    uniform state, which cannot hold a CDW -- use ``"2site"`` for one).
+    Every site touches exactly 4 bonds either way.
     Summed over the 4 bonds of a site, that gives exactly ``-mu * n_i`` per
     site. ``config.mu = 0.0`` (the default) leaves the gate unchanged.
 

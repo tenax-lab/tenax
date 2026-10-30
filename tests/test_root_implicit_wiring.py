@@ -354,84 +354,11 @@ def test_production_heisenberg_run_through_optimize_gs_ad():
     assert E > -0.669437, f"non-variational energy below the exact ground state: {E}"
 
 
-@pytest.mark.slow
-def test_the_root_implicit_gradient_descends_the_energy():
-    """A few plain gradient steps must lower the energy monotonically.
-
-    Uses the engine directly, so no optimizer schedule sits between the
-    gradient and the assertion.  A wrong-sign or badly-scaled gradient shows
-    up here immediately -- that was the failure mode #718 spent a long time
-    on, where the energy boundary was mis-glued and the gradient was off by
-    3e-2 relative while every residual looked healthy.
-
-    **Marked slow, reluctantly.**  This was written to give the *required*
-    gate (``-m core``) coverage of the claim that the gradient points
-    downhill, which it otherwise has none of.  It cost 4.2 GB in-suite when
-    that was written, against a 210 MB baseline for the rest of this file.
-    ``-m core`` already peaks at 6.35 GB against ~7 GB runners (#732), and JAX
-    caches persist across tests within a session, so landing 4 GB on top of an
-    accumulated cache risked an OOM presenting as a confusing flake.
-
-    **Two things in the original note were wrong, and #731 fixed the second.**
-    The cost was never "the adjoint solve's Krylov basis": the real embedding
-    at D=2 chi=4 is n = 384, so a 30-dimensional basis is **91 KB**.  It was
-    XLA compiling the operator inside GMRES's ``lax.while_loop``.  Taking the
-    loop out of the jit and leaving the matvec in it drops one isolated
-    gradient here from **2.94 GB / 90.0 s to 1.74 GB / 39.0 s**, gradient
-    identical to ten digits (measured in a fresh process, which is why both
-    numbers sit below the 4.2 GB in-suite figure).
-
-    So the memory argument for this marker is gone and the wall time is what
-    is left.  Promoting it into ``-m core`` is a CI-budget decision rather
-    than a memory one now, and is deliberately not taken here.
-    """
-    import jax
-    import jax.numpy as jnp
-
-    jax.config.update("jax_enable_x64", True)
-    from tenax.algorithms._ctm_root_implicit_asym import (
-        asym_root_implicit_energy_and_grad,
-    )
-    from tenax.algorithms.ipeps import heisenberg_gate, sublattice_rotate_gate
-    from tenax.core.index import FlowDirection, TensorIndex
-    from tenax.core.symmetry import U1Symmetry
-    from tenax.core.tensor import DenseTensor
-
-    D = d = 2
-    sym = U1Symmetry()
-    zeros = [0] * D
-    zphys = [0] * d
-    indices = (
-        TensorIndex.from_charges(sym, list(zeros), FlowDirection.OUT, label="u"),
-        TensorIndex.from_charges(sym, list(zeros), FlowDirection.IN, label="d"),
-        TensorIndex.from_charges(sym, list(zeros), FlowDirection.OUT, label="l"),
-        TensorIndex.from_charges(sym, list(zeros), FlowDirection.IN, label="r"),
-        TensorIndex.from_charges(sym, list(zphys), FlowDirection.IN, label="phys"),
-    )
-    key = jax.random.PRNGKey(0)
-    params = jax.random.normal(key, (D, D, D, D, d))
-    params = params / jnp.linalg.norm(params)
-
-    gate = sublattice_rotate_gate(heisenberg_gate())
-    energies = []
-    lr = 0.05
-    for _ in range(3):
-        E, g = asym_root_implicit_energy_and_grad(
-            DenseTensor(params, indices),
-            gate,
-            chi=4,
-            max_iter=40,
-            conv_tol=1e-10,
-        )
-        assert bool(jnp.all(jnp.isfinite(g))), "non-finite gradient"
-        energies.append(float(jnp.real(E)))
-        params = params - lr * g
-        params = params / jnp.linalg.norm(params)
-
-    assert all(energies[i + 1] < energies[i] for i in range(len(energies) - 1)), (
-        f"energy did not decrease monotonically: {energies}"
-    )
-    assert energies[-1] > -0.669437, f"below the exact ground state: {energies}"
+# ``test_the_root_implicit_gradient_descends_the_energy`` (3 plain GD steps on
+# the private ``asym_root_implicit_energy_and_grad`` engine) was removed in
+# the slow-bucket prune (#1149): descent is pinned on the public path by the
+# production run above, and gradient correctness by the FD-parity tests in
+# test_ctm_root_implicit_asym.py.
 
 
 # ------------------------------------------------------------------ #

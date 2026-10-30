@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._cache_fingerprint import declare_cache_key
 from tenax.algorithms._ctm_energy_ad import (
     ctm_energy_implicit,
     invalidate_implicit_ad_warm_start,
@@ -94,6 +95,8 @@ def build_pess_loss(
         through the implicit-AD square CTM.
     """
     d_eff = int(cg_gates.h_intra.shape[0])
+    # Without map_fn/init_fn, so the callback is keyed by value (#1049).
+    energy_gates = cg_gates._energy_gates()
 
     def _energy_fn(site_tensors, envs, _gate):
         # Custom energy function for ctm_energy_implicit's energy_fn hook.
@@ -101,7 +104,10 @@ def build_pess_loss(
         # compute_energy_cg, which handles intra (1-site RDM × h_intra)
         # plus 3 inter (h/v/diag 2-site RDM × h_inter) terms.
         A_norm = site_tensors[(0, 0)]
-        return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, d_eff)
+        return compute_energy_cg(A_norm, envs[(0, 0)], energy_gates, d_eff)
+
+    # #1049: keyed by value; lists exactly what the closure captures.
+    declare_cache_key(_energy_fn, energy_gates, d_eff)
 
     def loss_fn(state: IPESSState) -> jnp.ndarray:
         A_super = pess_to_kagome_supersite(
@@ -136,6 +142,7 @@ def build_pess_loss(
             gmres_restart=config.gmres_restart,
             arnoldi_precheck=False,
             adjoint_method=config.adjoint_method,
+            adjoint_chain_rule=config.adjoint_chain_rule,
             plateau_patience=config.plateau_patience,
             # In-CTM χ-bump (variPEPS §2.8.2; Issue #492 / #411).  Defaults
             # in CTMConfig keep the bump off, so existing PESS callers see
@@ -186,10 +193,15 @@ def build_pess_loss_exact(
     from tenax.algorithms.pess import pess_to_kagome_supersite_exact
 
     d_eff = int(cg_gates.h_intra.shape[0])
+    # Without map_fn/init_fn, so the callback is keyed by value (#1049).
+    energy_gates = cg_gates._energy_gates()
 
     def _energy_fn(site_tensors, envs, _gate):
         A_norm = site_tensors[(0, 0)]
-        return compute_energy_cg(A_norm, envs[(0, 0)], cg_gates, d_eff)
+        return compute_energy_cg(A_norm, envs[(0, 0)], energy_gates, d_eff)
+
+    # #1049: keyed by value; lists exactly what the closure captures.
+    declare_cache_key(_energy_fn, energy_gates, d_eff)
 
     def loss_fn(state: IPESSState) -> jnp.ndarray:
         A_super = pess_to_kagome_supersite_exact(
@@ -221,6 +233,7 @@ def build_pess_loss_exact(
             gmres_restart=config.gmres_restart,
             arnoldi_precheck=False,
             adjoint_method=config.adjoint_method,
+            adjoint_chain_rule=config.adjoint_chain_rule,
             plateau_patience=config.plateau_patience,
             ctmrg_heuristic_increase_chi=config.ctmrg_heuristic_increase_chi,
             ctmrg_heuristic_increase_chi_threshold=(
@@ -520,7 +533,7 @@ def optimize_pess_ad(
     """
     # #973: drop any previous run's adjoint seed before this run's first
     # gradient -- see invalidate_implicit_ad_warm_start's docstring.
-    invalidate_implicit_ad_warm_start()
+    invalidate_implicit_ad_warm_start(run_start=True)
     import optax
 
     if loss_builder == "convc":
@@ -710,6 +723,9 @@ def build_pess_loss_3site_multisite(
             d=d,
         )
 
+    # #1049: keyed by value; lists exactly what the closure captures.
+    declare_cache_key(_energy_fn, bond_gates_arr, d)
+
     def loss_fn(state: IPESSState) -> jnp.ndarray:
         sites = pess_to_kagome_3site_multisite(
             state.R_a,
@@ -754,6 +770,7 @@ def build_pess_loss_3site_multisite(
             gmres_restart=config.gmres_restart,
             arnoldi_precheck=False,
             adjoint_method=config.adjoint_method,
+            adjoint_chain_rule=config.adjoint_chain_rule,
             plateau_patience=config.plateau_patience,
             # In-CTM χ-bump (variPEPS §2.8.2; Issue #492 / #411).  Mirror
             # the 1-site PESS call above so the AD-traced energy and the
@@ -802,7 +819,7 @@ def optimize_pess_3site_multisite_ad(
     """
     # #973: drop any previous run's adjoint seed before this run's first
     # gradient -- see invalidate_implicit_ad_warm_start's docstring.
-    invalidate_implicit_ad_warm_start()
+    invalidate_implicit_ad_warm_start(run_start=True)
     import optax
 
     # Promote Tensor-valued gates to ndarray once at the optimizer entry

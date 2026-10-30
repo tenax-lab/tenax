@@ -42,12 +42,14 @@ Tests are auto-marked by filename via `tests/conftest.py`:
 | `core` | `test_tensor.py`, `test_contraction.py`, etc. | Tensor ops, symmetry, indexing |
 | `algorithm` | `test_dmrg.py`, `test_ipeps.py`, etc. | DMRG, TRG, iPEPS, AutoMPO |
 | `slow` | Tests decorated with `@pytest.mark.slow` | Expensive convergence benchmarks |
+| `diagnostic` | Tests decorated with `@pytest.mark.diagnostic` | Measurements, research findings, acceptance sweeps of unshipped engines; skipped unless `TENAX_RUN_DIAGNOSTIC=1` |
 
 ```bash
 uv run pytest -m core              # Fast (~30s) — run before every commit
 uv run pytest -m algorithm         # Algorithm tests (~2 min)
 uv run pytest -m "not slow"        # Everything except expensive benchmarks
 uv run pytest                      # Full suite
+TENAX_RUN_DIAGNOSTIC=1 uv run pytest -m diagnostic   # Opt-in diagnostics
 ```
 
 CI required checks run `pytest -m core` on Python 3.11, 3.12 (Linux) and
@@ -69,14 +71,18 @@ CI required checks run `pytest -m core` on Python 3.11, 3.12 (Linux) and
    gh pr create
    ```
 
-4. CI must pass before merge. PRs are squash-merged:
+4. CI must pass before merge. PRs are squash-merged through the merge queue:
    ```bash
-   gh pr merge <number> --squash --delete-branch --auto
+   gh pr merge <number> --squash --auto
    ```
+   Do not pass `--delete-branch`. The merge queue deletes the head branch
+   when the PR merges. With the flag, `gh` deletes the branch when the PR
+   enters the queue, and that closes the PR and removes it from the queue.
 
 **Branch protection:** `main` requires three passing checks — `Tests (Python 3.11)`,
-`Tests (Python 3.12)`, and `Tests (macOS, Python 3.12)`. The PR branch must be
-up-to-date with `main`.
+`Tests (Python 3.12)`, and `Tests (macOS, Python 3.12)`. The PR branch does not
+have to be up-to-date with `main`: the merge queue tests each PR against the
+latest `main`.
 
 ## Writing tests
 
@@ -87,6 +93,11 @@ up-to-date with `main`.
 - For algorithm tests, compare against known reference values (exact solutions,
   published benchmarks).
 - Mark expensive tests (>30s) with `@pytest.mark.slow`.
+- A test should pin behaviour users rely on (a correct result, a documented
+  option, a user-facing error, an invariant). A measurement (timing, memory,
+  compile counts), a research finding, or an acceptance sweep of an engine
+  that is not shipped yet gets `@pytest.mark.diagnostic` as well as `slow`:
+  no CI job runs it, and `TENAX_RUN_DIAGNOSTIC=1` runs it on demand.
 
 ## Adding new public API
 

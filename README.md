@@ -32,24 +32,12 @@ Each entry links to its guide page; the full documentation is at [tenax.readthed
 - **iPEPS simple update** — 1-site and 2-site unit cells, with a belief-propagation gauge for the bond weights ([iPEPS](docs/guide/algorithms/ipeps.md))
 - **AD ground-state optimization** — implicit, explicit, C4v and root-implicit AD through CTM; on the fused-CTM implicit-AD 1x1 and 2-site paths an unconverged CTM forward raises `CTMNotConvergedError` (or warns with `CTMNotConvergedWarning`) ([AD paths](docs/guide/algorithms/ipeps_ad_paths.md))
 - **CTM environments** — SVD/eigh/QR projectors, in-CTM χ growth, convergence and saddle checks, optional mixing for two-state cycles, split-CTMRG ([CTM](docs/guide/algorithms/ctm.md))
+- **Chi-layout seed for symmetric AD** — converge and check the chi sector layout before a frozen-layout 2-site AD run ([CTM](docs/guide/algorithms/ctm.md#chi-sector-layout-and-the-layout-seed))
+- **Layout re-check during symmetric AD** — re-check the seeded chi layout at every optimizer step and restart the optimizer state when it changes ([AD paths](docs/guide/algorithms/ipeps_ad_paths.md#seeded-symmetric-2-site-runs-the-layout-re-check))
 - **Fermionic iPEPS (fPEPS)** — graded tensors for spinless fermions / the t-V model ([fPEPS](docs/guide/algorithms/fpeps.md))
 - **Honeycomb and kagome** — native honeycomb CTM and kagome iPESS with AD ([guide](docs/guide/algorithms/honeycomb_kagome.md))
 - **Quasiparticle excitations** — iPEPS excitation spectra at arbitrary momenta ([AD excitations](docs/guide/algorithms/ad_excitations.md))
-
-**Model gates**
-
-- `heisenberg_gate` — dense Heisenberg Hamiltonian.
-- `heisenberg_gate_u1sz` — U(1)-Sz block-sparse Heisenberg with charges `[+1, −1]`.
-- `xxz_gate` — dense XXZ Hamiltonian with anisotropy parameter.
-- `xxz_gate_u1sz` — U(1)-Sz block-sparse XXZ with charges `[+1, −1]`.
-- `xxz_gate_z2` — Z2 block-sparse XXZ with charges `[0, 1]` (spin-down parity).
-- `xxz_z2_init_pair` — Random Z2-symmetric 2-site iPEPS pair.
-
-**CTM chi layout**
-
-- `symmetric_layout_seed(A, B, gate, ctm_cfg)` — converge an eager 2-site CTM, check it with forced sweeps, and return it as `envs_init` (with its layout and a `stable` flag) for AD seeded with that chi sector layout: frozen within each optimizer step, re-checked at every step boundary (`gs_layout_recheck=True`, the default), or frozen for the whole run with `gs_layout_recheck=False`.
-- `layout_of(envs)` — per-sector size of every environment leg.
-- `same_layout(a, b)` — True if two layouts have the same (charge, size) pairs on every leg.
+- **Symmetric model gates** — U(1)-Sz and Z2 XXZ gates and a Z2 initial pair for 2-site iPEPS ([guide](docs/guide/algorithms/ipeps.md))
 
 **Classical statistical mechanics**
 
@@ -64,7 +52,12 @@ See [capabilities](docs/guide/capabilities.md) for a map of what each path is (a
 
 ## Installation
 
-> **Note:** The PyPI package (`tenax-tn`) is not yet available. Install from source using the instructions below.
+```bash
+pip install tenax-tn
+```
+
+The PyPI package is `tenax-tn`; the import name is `tenax`. To work on Tenax
+itself, install from source:
 
 ```bash
 git clone https://github.com/tenax-lab/tenax.git
@@ -159,11 +152,15 @@ version, the options, and the caveats.
 ### DMRG
 
 ```python
-from tenax import DMRGConfig, build_mpo_heisenberg, build_random_symmetric_mps, dmrg
+import jax
+from tenax import DMRGConfig, FiniteMPS, U1Symmetry, build_mpo_heisenberg, dmrg
 
 L = 10  # chain length
 mpo = build_mpo_heisenberg(L, Jz=1.0, Jxy=1.0)  # U(1) block-sparse MPO
-mps = build_random_symmetric_mps(L, bond_dim=8)  # matching block-sparse MPS
+mps = FiniteMPS.random(
+    L=L, d=2, chi=8, key=jax.random.PRNGKey(0),
+    symmetric=True, symmetry=U1Symmetry(), target_charge=0,  # matching block-sparse MPS, Sz=0
+)
 
 config = DMRGConfig(max_bond_dim=50, num_sweeps=10)
 result = dmrg(mpo, mps, config)
@@ -179,7 +176,7 @@ print(f"Ground state energy: {result.energy:.8f}")
 from tenax import idmrg, build_bulk_mpo_heisenberg, iDMRGConfig
 
 W = build_bulk_mpo_heisenberg(Jz=1.0, Jxy=1.0)
-config = iDMRGConfig(max_bond_dim=32, max_iterations=100, convergence_tol=1e-8)
+config = iDMRGConfig(max_bond_dim=64, max_iterations=200, convergence_tol=1e-8)
 result = idmrg(W, config)
 print(f"Energy per site: {result.energy_per_site:.6f}")  # ~ -0.4431
 print(f"Converged: {result.converged}")

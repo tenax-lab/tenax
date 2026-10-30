@@ -250,14 +250,17 @@ def test_fixed_point_arnoldi_rejects_high_rho():
     ``forward_gauge="none"`` at chi=4), the backward must raise
     ``CTMRGGradientError`` instead of looping to ``gmres_maxiter``.
 
-    ``seed=42`` is chosen because it lands on ρ(J^T) ≈ 3.20 on the
-    current CTM iteration — comfortably above the rejection threshold
-    (1.0) and not borderline. The previous ``seed=1`` fixture drifted to
-    ρ ≈ 0.54 < 1 after later CTM-iteration fixes shipped, so the precheck
-    stopped firing (issue #469). Other rejecting seeds at this config: 25.
+    ``seed=43`` lands on ρ(J^T) ≈ 1.14 (20-step Arnoldi estimate), the
+    largest of seeds 0..79 at this config.  The fixture has drifted before:
+    ``seed=1`` fell to ρ ≈ 0.54 after CTM-iteration fixes (issue #469), and
+    ``seed=42``, chosen then at ρ ≈ 3.20, had drifted to 1.0014 -- a 0.14%
+    margin -- by the time the CTM renormalisation stopped differentiating
+    through ``max`` (0.9998 after it).  That change moved only the large
+    eigenvalues of this gauge-free fixture (seed 43: 1.44 -> 1.14; every seed
+    below ρ ≈ 0.92 moved by < 1e-5).  Re-measure before trusting the margin.
     """
     H = _heisenberg_gate()
-    A = _wrap_as_dense_tensor(_random_peps(seed=42))
+    A = _wrap_as_dense_tensor(_random_peps(seed=43))
 
     def loss(A_):
         return ctm_energy_implicit(

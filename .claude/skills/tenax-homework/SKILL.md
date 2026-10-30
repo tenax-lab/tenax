@@ -79,7 +79,7 @@ auto = AutoMPO(L=N, d=2)
 # TODO: Add Heisenberg bonds for a cylinder geometry
 # Hint 1: Within-ring bonds are periodic in y: j = x*Ly + (y+1) % Ly
 # Hint 2: Between-ring bonds connect site (x,y) to ((x+1),y)
-# Hint 3: AutoMPO requires site indices in ascending order: use min(i,j), max(i,j)
+# Hint 3: AutoMPO sorts each term by site; min(i,j), max(i,j) keeps it readable
 
 # YOUR CODE HERE
 
@@ -139,7 +139,7 @@ trade-offs?
 2D Heisenberg model because the entanglement in 2D follows an area law, and
 D=2 already satisfies the area law bound."
 *(Misleading: while area law holds, the prefactor matters. D=2 gives
-E ≈ -0.6548 vs exact E ≈ -0.6694. Higher D is needed for quantitative accuracy.
+E ≈ -0.6625 (AD, χ=16) vs exact E ≈ -0.6694. Higher D is needed for quantitative accuracy.
 The area law guarantees efficiency scaling, not that the smallest D suffices.)*
 
 ## Generating a Problem

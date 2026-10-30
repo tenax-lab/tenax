@@ -19,6 +19,10 @@ class LineSearchAborted(Exception):
     """
 
 
+class _CliffReached(Exception):
+    """Internal: the zoom has pressed against a non-finite right end long enough."""
+
+
 def hager_zhang_line_search(
     phi: Callable[[float], float],
     dphi: Callable[[float], float],
@@ -35,6 +39,7 @@ def hager_zhang_line_search(
     max_step: float | None = None,
     energy_bound: float | None = None,
     bracket_only_phi: bool = False,
+    max_cliff_iter: int = 3,
 ) -> tuple[float, float, bool]:
     """Hager-Zhang line search with approximate Wolfe conditions.
 
@@ -67,6 +72,13 @@ def hager_zhang_line_search(
             extra zoom-phase iterations.  iPEPS HZ call sites pass
             ``True`` explicitly to capture the implicit-AD backward
             savings (issue #504).
+        max_cliff_iter: Zoom or bisection passes allowed while the bracket's
+            right end is non-finite and its left end already gives a
+            decrease.  Past that the search returns the best
+            point.  A probe past a cliff (an iPEPS CTM that does not
+            converge, rejected as +inf) has no slope, so with the slope
+            still steep at the cliff no point meets Wolfe curvature and
+            the passes only bisect onto the cliff, each paying a ``dphi``.
 
     ``phi`` or ``dphi`` may raise :class:`LineSearchAborted` to end the
     search early; the best ``phi`` point seen so far is returned.
@@ -80,6 +92,7 @@ def hager_zhang_line_search(
     # Track best point seen (lowest phi value) as fallback
     best_alpha = 0.0
     best_phi = phi0
+    cliff_iters = 0
 
     def _is_finite(x: float) -> bool:
         return math.isfinite(x)
@@ -130,6 +143,17 @@ def hager_zhang_line_search(
 
     def _wolfe_ok(alpha: float, f: float, df: float) -> bool:
         return _standard_wolfe(alpha, f, df) or _approx_wolfe(alpha, f, df)
+
+    def _check_cliff(a: float, fa: float, fb: float) -> None:
+        """Stop the search after ``max_cliff_iter`` passes against a cliff."""
+        nonlocal cliff_iters
+        # Only once a decrease is in hand: with a = 0 the bisection must go on
+        # shrinking b until it finds a finite point below the cliff.
+        if _is_finite(fb) or not (a > 0 and fa < phi0):
+            return
+        cliff_iters += 1
+        if cliff_iters > max_cliff_iter:
+            raise _CliffReached
 
     # ------------------------------------------------------------------
     # Secant step between two points with known derivatives
@@ -190,6 +214,7 @@ def hager_zhang_line_search(
         for _ in range(max_bisect):
             if abs(b - a) < 1e-15:
                 break
+            _check_cliff(a, fa, fb)
             mid = (1 - theta) * a + theta * b
             fm = _safe_phi(mid)
             _update_best(mid, fm)
@@ -310,6 +335,7 @@ def hager_zhang_line_search(
         for it in range(max_iter):
             if abs(b - a) < 1e-15:
                 break
+            _check_cliff(a, fa, fb)
 
             # Secant step using derivatives at bracket endpoints
             da_val = da if _is_finite(da) else 0.0
@@ -351,6 +377,8 @@ def hager_zhang_line_search(
 
     try:
         return _search()
+    except _CliffReached:
+        return best_alpha, best_phi, False
     except LineSearchAborted:
         # A probe refused to give a trustworthy value: stop here and return
         # the best phi point seen, as when the iterations run out.

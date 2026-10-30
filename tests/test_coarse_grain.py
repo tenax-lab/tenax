@@ -411,7 +411,12 @@ class TestComputeEnergyCGSplit:
 class TestHoneycombAD:
     @pytest.mark.slow
     def test_honeycomb_d2_energy_is_physical(self):
-        """Honeycomb D=2 AD optimization must produce finite negative E/site."""
+        """Honeycomb D=2 AD optimization must produce finite negative E/site.
+
+        3 L-BFGS steps (was 10; slow-bucket prune, #1149): the claim is a sign,
+        not a converged value, and the checkpoint cg tests already run
+        ``optimize_gs_ad`` + ``cg_gates`` end to end.
+        """
         from tenax.algorithms.coarse_grain import honeycomb_cg_gates
         from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
         from tenax.algorithms.ipeps_optimize import optimize_gs_ad
@@ -420,7 +425,7 @@ class TestHoneycombAD:
         config = iPEPSConfig(
             max_bond_dim=2,
             ctm=CTMConfig(chi=8, max_iter=20, min_iter=5),
-            gs_num_steps=10,
+            gs_num_steps=3,
             gs_learning_rate=1e-2,
             gs_optimizer="lbfgs",
             gs_line_search=True,

@@ -9,12 +9,9 @@ converge, and implicit-AD (fixed-point ``custom_vjp`` with Neumann backward)
 energy entries for each — ``ctm_energy_split_{explicit,implicit}`` (1×1) and
 ``ctm_energy_split_{explicit,implicit}_2site`` (2-site checkerboard).
 
-The split CTM is dense-bosonic and experimental (frozen by design).
-``DenseTensor`` and bosonic ``SymmetricTensor`` (U(1)/Z_n) both work on the
-eager forward and on the single-site (1×1) AD entries above; the ``_2site``
-entries refuse a *traced* ``SymmetricTensor`` multisite sweep instead of
-computing a wrong environment (#1048) -- use ``fuse_virtual_legs=True`` for
-symmetric multisite AD.  Fermionic input is refused outright (#1035).
+The split CTM is dense-only and experimental (frozen by design):
+``SymmetricTensor`` input, bosonic or fermionic, is refused; symmetric iPEPS
+uses the fused CTM (``fuse_virtual_legs=True``).
 """
 
 from __future__ import annotations

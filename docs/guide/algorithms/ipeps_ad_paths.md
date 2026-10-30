@@ -43,8 +43,11 @@ config = iPEPSConfig(
     su_init=True,
 )
 
-# Chi-ramping for progressive refinement (recommended for chi > 16)
-chi_schedule = [(8, 30), (16, 30), (32, 30)]
+# Chi-ramping: cheap steps at chi=8, then refine at chi=16.  Do not ramp past
+# the environment's numerical rank: at D=2 the corner has only 25 nonzero
+# singular values, so a chi=24 or chi=32 stage cuts a degenerate multiplet or
+# adds null directions and the CTM never converges (CTMNotConvergedError).
+chi_schedule = [(8, 30), (16, 30)]
 A_opt, env, E = optimize_gs_ad_chi_schedule(H_rot, None, config, chi_schedule)
 ```
 
@@ -176,6 +179,24 @@ constants (#983). `"standard"` and `"lorentzian"` freeze them. `"auto"`
   `"flow"` or `"frozen_fallback"`.
 - The eager CTM forward is bit-identical either way — only the VJP changes.
 
+On a forward that is not a fixed point, a solved flowing adjoint can still
+give a gradient that is badly wrong (#1111). The backward therefore checks a
+flowing gradient there: it evaluates the energy once more along the
+gradient's descent direction and keeps the gradient only if the measured
+change is 0.5-2x the predicted one. Otherwise it falls back to frozen
+projectors. `get_last_implicit_ad_diagnostics()` reports the ratio as
+`flow_slope_ratio` and the reason as `flow_fallback_reason`. The check costs
+one extra forward CTM evaluation per non-stationary flowing step (often every
+step at D>=3, #841): measured ~27% of the gradient's wall time at D=3 dense
+chi=12 on CPU (2.39 s of 8.81 s), plus a one-time recompile of the forward's
+programs inside the backward (per shape/chi; the backward runs under an empty
+mesh trace context, so the forward's jit caches miss). Stationary forwards pay
+nothing. The check catches grossly wrong flow gradients; it does not certify
+that flow beats frozen (on a raw-`SymmetricTensor` version of the #1028
+fixture flow is kept at r=0.746 with FD errors 35%/37% where frozen is
+13%/4%). For
+complex parameters it steps along `conj(G)`.
+
 **Why phase gauge works in backprop**: Each phase-gauge step is a
 Frobenius normalization plus a differentiable global-phase fix on each
 environment tensor. Applied inside the checkpointed unrolled graph, it
@@ -258,6 +279,204 @@ runs unless you set `gs_implicit_ad=False`. Reach for Path 1 when you want
 backprop through the unrolled sweeps — for a gauge other than `"phase"`, or
 to avoid the implicit backward entirely — not as a general default.
 
+#### Symmetric tensors: compile time and XLA fusion (CPU)
+
+When JAX compiles a program, XLA runs an *instruction-fusion* pass by
+default.  It merges chains of small operations into one combined kernel: a
+reshape, a multiply, an add and a transpose become a single loop over the
+data, and the intermediate arrays are never written to memory.  "Fused" below
+means compiled with this pass (the default); "unfused" means compiled with
+`xla_disable_hlo_passes=fusion`.  The numerical results are the same either
+way.
+
+Fusion helps a program made of a few large array operations, such as a dense
+CTM sweep.  It hurts a block-sparse backward.  A `SymmetricTensor`
+contraction emits one small operation per pair of charge blocks, so the
+implicit-AD backward of a symmetric state is hundreds of thousands of
+reshapes, scatters and small dots.  On a program that size the fusion pass
+scales worse than linearly.  It also copies cheap operations into every
+place that uses them, so the program grows.  On the D=3 U(1) chi=9
+`dE/denv` program (329k HLO instructions) the optimized module grew 7x, the
+compile took 8569 s fused and 905 s unfused, and the compiled program ran in
+92 ms fused and 62 ms unfused.
+
+So on CPU some implicit-AD backward programs of a large symmetric state are
+compiled unfused automatically:
+
+- `dE/denv`, the chain rule, the fused fixed-point backward (`"separate"`
+  chain rule) and the joint adjoint solve (the Neumann loop and GMRES in one
+  program) go unfused when a site tensor has a virtual leg (`u`, `d`, `l`,
+  `r`) of dimension 3 or more, or 20 or more charge blocks.
+- The `J^T` product, the eager GMRES solve and the linearise program contain
+  only the sweep or its VJP.  They go unfused only when a site tensor has 20
+  or more charge blocks (a many-sector U(1) state; a D=3 U(1) site has 35).
+
+Under the default `"joint"` chain rule the backward linearises the
+gauge-fixed sweep once (`_jit_linearize_joint`) and passes the saved
+pullback to one joint adjoint solve (`_jit_joint_adjoint_solve`): the
+Neumann loop and GMRES as phases of one program, which compiles the
+transpose once.  It takes no `SymmetricTensor` argument, so the backward
+picks its variant from the site tensors by the rules above.
+
+Blocks are counted per site tensor, not per unit cell.  Everything else keeps
+the default pipeline:
+
+- the forward CTM sweep and the forward energy, at every size;
+- D=2 states, for any unit cell;
+- dense tensors;
+- GPU and TPU (not measured);
+- calls inside another `jax.jit`, `grad` or `vmap` trace;
+- JAX older than 0.4.36.
+
+The rule follows measurements on U(1), Z2 and fermionic 2-site states (CPU,
+8 cores; fused / unfused):
+
+| Program | D=2 | D>=3 |
+|---|---|---|
+| Forward sweep | fused faster | fused compiles 1.5-3.6x faster; run time within 8% |
+| Sweep VJP (`J^T` product, GMRES) | fused faster | graded: fused compiles about 2x faster, run time within 15% or faster fused; many-sector U(1): unfused faster |
+| `dE/denv` | fused faster or a tie | unfused runs 1.2-2.4x faster |
+| Chain rule | fused 12x faster to compile | unfused compiles 3.4x faster and runs 2x faster |
+
+The chain rule is the largest backward program.  Fermionic, fused / unfused
+compile: 89 / 1062 s at D=2, 9363 / 2793 s at D=3, more than 8000 / 3018 s
+at D=4.  Even unfused it is now the main compile cost of a D>=3 gradient.
+
+The `dE/denv` warm run, fused / unfused:
+
+| D, chi | U(1) | Z2 | fermionic |
+|---|---|---|---|
+| 2, 4-16 | 4.4 / 3.1 ms (chi=16) | 1.35 / 1.49 ms | 1.68 / 2.32 ms |
+| 3, 6-9 | 14.7 / 10.5 ms (chi=6) | 8.65 / 7.41 ms | 26.3 / 10.9 ms |
+| 4, 16 | - | 170 / 127 ms | 446 / 287 ms |
+| 6, 36 | - | 11.5 / 10.0 s | 33.0 / 16.2 s |
+
+Two measurements explain why the rule is not "unfused everywhere":
+
+- With every block-sparse program unfused, a D=2 U(1) `optimize_gs_ad` step
+  took 3388 s against 1396 s.
+- At D>=3 the forward sweep and, for graded states, the sweep VJP gain
+  nothing at run time unfused, and compile slower.
+
+The operation count alone does not predict the outcome: a 52k-operation D=2
+sweep favours fusion, while a 30k-operation D=2 `dE/denv` ties.  The block
+count alone misses Z2 and fermionic states, which have 16 blocks per site at
+every D.  Hence the bond-dimension rule.
+
+The dispatch lives in `tenax.algorithms._block_sparse_jit` (#566, #1102).
+Do not set `XLA_FLAGS=--xla_disable_hlo_passes=fusion` process-wide: that
+also drops fusion for the forward sweep and for every small eager operation.
+In one measurement it doubled the setup time, 582 s to 1249 s.
+
+The GMRES adjoint (`adjoint_method="gmres"`, and the fallback when the fused
+Neumann loop does not converge) compiles the sweep VJP once, like the fused
+module.  JAX's own GMRES applied it at three places in one program, and XLA
+compiled each one; the solver tenax uses instead applies it at one.  Measured
+on CPU at D=2 chi=8 (U(1)), the first gradient with `adjoint_method="gmres"`
+dropped from 3,729 s to 1,188 s.  At D=3 the fallback is common near a slowly
+converging forward; one D=3 chi=16 run spent 12,357 s compiling it before this
+change (not re-measured).
+
+**Joint-VJP chain rule (the default).** `CTMConfig(adjoint_chain_rule="joint")`,
+which the default `"auto"` runs on the fused CTM, takes the chain rule's
+indirect term `J_params^T λ` from the adjoint solve.  `_jit_linearize_joint`
+linearises the gauge-fixed sweep over `(params, env)` once per backward and
+keeps the pullback.  One joint solve (`_jit_joint_adjoint_solve`) runs the
+Neumann loop on the env half of that pullback and then GMRES, at one matvec
+call site, so the transpose compiles once.  It is not the env-only program
+of `"separate"`.  GMRES returns `J_params^T` of its best iterate.  It always
+follows the loop in the same program, seeded with the loop's `λ` (usually
+accepted after one matvec) or, when the loop gave up, started cold as the
+fallback is.  So the separate params-VJP program (`_jit_chain_rule`,
+the largest single compile at D=3) is never built.  The gradient equals
+`"separate"` to round-off on every path.
+
+Measured on the first optimization step of a U(1) D=3 chi=16 two-site
+iPEPS on one A100 (empty compilation cache; the fused loop gave up and the
+fallback ran):
+
+| | `"separate"` | `"joint"` |
+|---|---|---|
+| XLA compile | 7,795 s | 5,977 s (−23%) |
+| first step, wall | 8,231 s | 6,388 s (−22%) |
+| warm value-and-grad | 4.7 / 3.8 s | 4.6 / 3.9 s |
+| peak host RSS | 51.1 GB | 39.0 GB |
+
+One run per mode; compile times on that host vary by about ±20%.  With
+`benchmarks/bench_chain_rule_compile.py` (D=2 chi=8 dense single-site, CPU)
+the GMRES-path backward compile drops 51%.  Carrying `J_params^T λ` through
+the fused loop instead was measured and rejected: it doubled the fused
+program's compile.  `"separate"` keeps the old programs, for reproducing
+runs from before the flip.  The split CTM (`fuse_virtual_legs=False`) has
+its own chain rule: `"auto"` leaves it alone there and an explicit `"joint"`
+is refused.
+
+#### Persistent compilation cache
+
+`import tenax` turns on JAX's persistent compilation cache.  JAX writes each
+compiled program that took 1 s or more to compile to disk, and a later
+process that compiles the same program loads it from there instead.  The
+default directory is `~/.cache/jax`; to use another one, set
+`JAX_COMPILATION_CACHE_DIR` in the environment before Python starts.
+JAX loads the cached programs and runs them without checking where they
+came from, so anyone who can write to the cache directory can run code in
+your process.  Do not point it at a directory that an untrusted user can
+write to, such as a shared scratch area.
+
+The cache can help the second and later runs only.  It does not shorten the
+first compile of a program, and nothing else does: ahead-of-time
+compilation (`jit(...).lower(...).compile()`) is the same compile at an
+earlier time.
+
+Loading a cached program is not free, and on CPU a large block-sparse
+program costs most of a compile to load.  Measured on CPU, U(1) `dE/denv`
+unfused (#1109 code, 16 cores); the load times are confirmed cache hits in
+the JAX debug log:
+
+| D, chi | first compile | load from cache |
+|---|---|---|
+| 2, 8 | 15.7 s | 6.2 s, 6.3 s |
+| 3, 9 | 1048 s | 828 s, 872 s |
+
+So do not count on the cache to remove the compile wall of a D>=3 symmetric
+gradient on CPU: a repeat run saves about a fifth of it.  The cache also
+stores the many small eager programs of the forward CTM; with it, the
+setup of the D=3 run took 531-534 s against 700 s.  GPU is not measured.
+
+The cache key is the compiled program, so a run misses the cache when any
+of these changes:
+
+- D, chi, the symmetry or the unit cell;
+- the charge layout of a CTM chi leg, which sets the block shapes;
+- the tenax code that builds the program;
+- the JAX or jaxlib version, the backend, or the compiler options.
+
+The cache has no size limit by default and nothing removes old entries.
+One development machine had 32 GB in 25,555 entries, the largest 1.7 GB.  To
+bound the directory, install `filelock` (not a tenax dependency) and set a
+limit in bytes after `import tenax` and before the first compile:
+
+```python
+import jax
+import tenax
+
+jax.config.update("jax_compilation_cache_max_size", 20 * 2**30)  # 20 GiB
+```
+
+JAX then evicts the least recently used entries.  Set the limit on an empty
+or new directory: entries written without a limit lack the access-time files
+that eviction reads, so on an existing unbounded cache the eviction fails
+with `FileNotFoundError` (JAX reports it as a warning) and the limit is not
+applied.
+
+To turn the cache off, call
+`jax.config.update("jax_enable_compilation_cache", False)` after
+`import tenax` and before the first compile.  JAX reads both settings once,
+at the first compile.
+
+For a timing measurement, use an empty directory per run, so that a cached
+program does not appear as a fast compile.
+
 ### Path 3: 2-site Shared-Tensor C4v (Checkerboard AFM)
 
 For antiferromagnetic models on the square lattice where the Néel order is
@@ -291,7 +510,7 @@ config = iPEPSConfig(
     unit_cell="2site",
     gs_c4v=True,
 )
-_, _, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
+_, _, E_gs = optimize_gs_ad(heisenberg_gate(), None, config)
 ```
 
 **Constraints:**
@@ -453,7 +672,7 @@ config_root = iPEPSConfig(
     gs_num_steps=20,
     gs_optimizer="adam",
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config_root)
+A_opt, env, E_gs = optimize_gs_ad(gate, None, config_root)  # 1x1 AFM: sublattice_rotate_gate(gate)
 ```
 
 (measure-gradient-error)=
@@ -581,6 +800,42 @@ gradient at all — at `D=3, chi=4` it returns NaN for every entry while this
 path is finite and finite-difference-correct — or to avoid the block-sparse
 SVD/eigh VJP compile wall (#566, #687).
 
+## Seeded symmetric 2-site runs: the layout re-check
+
+A 2-site run seeded with `envs_init` (for example from
+`symmetric_layout_seed`, see {doc}`ctm`) keeps the seed's chi sector layout
+inside each optimizer step: the traced projector cannot change it, and the line
+search needs one fixed function of the step length.  Between steps the layout
+is re-checked:
+
+- `gs_layout_recheck` (default `True`) — at the start of every optimizer step
+  after the first, run one warm, layout-adapting CTM call at the current
+  tensors.  After a resume (`gs_resume=True`) the first resumed step is
+  re-checked too, because its tensors were updated after the checkpointed
+  evaluation.  A change is acted on only when that call converged *and*
+  certified its layout as a global top-chi cut.  On a change, the step is
+  evaluated on the new layout, and the optimizer state is cleared: the
+  metric L-BFGS / CG history, a fresh `init` for any optax optimizer (L-BFGS
+  or Adam), best-energy tracking, and the line-search reuse.  `False` keeps
+  the seed's layout for the whole run.
+- `gs_layout_tie_rtol` (default `1e-8`) — the re-check's hysteresis margin,
+  relative to the largest singular value at the cut: a dropped value at most
+  this much above a kept one is a tie, and the layout is kept.  Measured on the
+  D=2 U(1) XXZ point: partner noise up to 1.5e-15, closest real gap 5.6e-5.
+  Must be finite and `>= 0`.
+
+The re-check is skipped for a dense seed (no chi layout) and on the split-CTM
+path.  With `return_history=True`, `history["layout_changes"]` lists the steps
+where the layout changed, and `history["layout_recheck_uncertified"]` the
+steps where a re-check found a different layout but did not certify it (not
+acted on).  A layout that recurs during a run raises a `RuntimeWarning`: the
+re-check is flip-flopping between layouts.
+
+Known limit: the re-check fixes a stale layout, not a too-small chi.  On the
+D=2 U(1) XXZ Δ=0.3 point at chi=8, the optimizer still follows the chi=8
+truncation bias below the variational bound; the converged chi=12 energy is
+higher by 7.6e-4 at step 17 and by 1.0e-2 at step 27.
+
 ## Configuration recipes
 
 The configurations below, one per path, in one script. Each runs on the
@@ -600,6 +855,7 @@ from tenax import (
     ExcitationConfig,
     compute_excitations,
     make_momentum_path,
+    sublattice_rotate_gate,
 )
 
 # Build a 2-site Heisenberg gate
@@ -609,6 +865,10 @@ Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
 gate = jnp.einsum("ij,kl->ikjl", Sz, Sz) + 0.5 * (
     jnp.einsum("ij,kl->ikjl", Sp, Sm) + jnp.einsum("ij,kl->ikjl", Sm, Sp)
 )
+# A 1x1 ansatz puts the same tensor on both sublattices, so the Neel state
+# needs the sublattice-rotated gate.  With the plain gate the 1x1 runs below
+# optimize the ferromagnet (E ~ +0.497 after 8 steps vs -0.6602 rotated).
+gate_1x1 = sublattice_rotate_gate(gate)
 
 # Explicit-AD configuration: L-BFGS + explicit AD + QR projectors.
 # forward_gauge defaults to "auto"; on this explicit route it resolves to
@@ -635,7 +895,7 @@ config = iPEPSConfig(
     gs_c4v=True,  # C4v basis parameterization
     su_init=True,
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
+A_opt, env, E_gs = optimize_gs_ad(gate_1x1, None, config)
 print(f"Ground-state energy: {E_gs:.6f}")
 
 # Chi-ramping schedule: progressively increase chi for faster convergence.
@@ -644,7 +904,7 @@ print(f"Ground-state energy: {E_gs:.6f}")
 # padded to max(chi) from step 1, so the JIT-compiled CTM / energy / backward
 # kernels never see a shape change (issue #453).
 chi_schedule = [(4, 30), (8, 30), (16, 20)]
-A_opt, env, E_gs = optimize_gs_ad_chi_schedule(gate, None, config, chi_schedule)
+A_opt, env, E_gs = optimize_gs_ad_chi_schedule(gate_1x1, None, config, chi_schedule)
 
 # 2-site shared-tensor C4v AD for antiferromagnets (Neel order)
 # A single C4v-parameterized tensor is optimized; B is derived from A via
@@ -675,7 +935,7 @@ config_svd = iPEPSConfig(
     gs_optimizer="lbfgs",
     gs_line_search_method="hager_zhang",
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config_svd)
+A_opt, env, E_gs = optimize_gs_ad(gate_1x1, None, config_svd)
 
 # Opt-in reference-mode dense C4v mode (Francuz et al., App. C-F)
 config_reference = iPEPSConfig(
@@ -695,12 +955,12 @@ config_reference = iPEPSConfig(
     gs_num_steps=100,
     gs_optimizer="adam",
 )
-A_opt, env, E_gs = optimize_gs_ad(gate, None, config_reference)
+A_opt, env, E_gs = optimize_gs_ad(gate_1x1, None, config_reference)
 
 # Quasiparticle excitations (Ponsioen et al. 2022)
 momenta = make_momentum_path("brillouin", num_points=20)
 exc_config = ExcitationConfig(num_excitations=3)
-result = compute_excitations(A_opt, env, gate, E_gs, momenta, exc_config)
+result = compute_excitations(A_opt, env, gate_1x1, E_gs, momenta, exc_config)  # the gate A_opt was optimized with
 print(result.energies.shape)  # (20, 3)
 ```
 
@@ -894,7 +1154,16 @@ acts on every forward's `converged` flag:
   params, and `history["final_env_source"]` records which.
 
 `CTMConfig(on_unconverged="warn")` keeps the old control flow and emits
-`CTMNotConvergedWarning` instead.
+`CTMNotConvergedWarning` instead.  Inside one `optimize_gs_ad` run it emits
+at most one warning per check site (gradient, warm-start cache, line search,
+final energy) and optimizer step (#1083); a step's further unconverged
+forwards at that site are counted, not shown.  The next warning that is shown
+says how many similar ones were suppressed, a run that ends with suppressed
+warnings still pending logs the count at INFO level, and
+`history["ctm_warnings_suppressed"]` (with `return_history=True`) holds the
+run's total.  The final best-point and last-iterate evaluations are counted
+separately.  Calls outside `optimize_gs_ad`, and `on_unconverged="raise"`, are
+unchanged.
 
 **Coverage.** All of this applies to the fused-CTM implicit-AD optimizers for
 `unit_cell="1x1"` and `"2site"`. With explicit AD (`gs_implicit_ad=False`)
@@ -921,7 +1190,7 @@ have no stall recovery: they skip a failed step and continue, and ignore
   variPEPS does.
 - ``"noise"`` (legacy) — inject a ``gs_noise_amplitude`` (default 10 %)
   Frobenius perturbation on the *current* params and reset the L-BFGS
-  history, with no rollback. It was the 1-site default until v0.8.4, to
+  history, with no rollback. It was the 1-site default until v0.9.0, to
   break the C4v run off an SU-init plateau with gradient norms ~1e-10;
   that plateau no longer reproduces (the SU start has |g| = 0.30 at D=2
   and 0.54 at D=3). Near a settled energy the kick is destructive: on

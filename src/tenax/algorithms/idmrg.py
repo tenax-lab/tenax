@@ -81,7 +81,9 @@ class iDMRGConfig:
         unit_cell_size:  Number of sites in the unit cell.
         two_site:        Use 2-site updates (True) or 1-site updates (False).
         arnoldi_tol:     Transfer matrix eigensolver tolerance.
-        orthogonalize_interval: Number of sweeps between orthogonalization steps.
+        orthogonalize_interval: Any value > 0 orthogonalizes the unit cell
+                         once, after the sweeps (dense paths); 0 skips it.
+                         It no longer re-orthogonalizes every N sweeps.
         mixing_factor:   DMRG3S subspace expansion mixing factor α (1-site only).
         numpy_blockwise: Use numpy-only path for symmetric iDMRG (no JAX
                          overhead). Default True.
@@ -1061,34 +1063,11 @@ def _idmrg_sweep(
                 flush=True,
             )
 
-        # ---- Periodic orthogonalization (configurable interval) ----
-        if (
-            config.orthogonalize_interval > 0
-            and (sweep + 1) % config.orthogonalize_interval == 0
-            and chi_env > 1
-            and A_L.shape[0] == A_L.shape[2]
-        ):
-            A_L_np, A_R_np, s_np = _orthogonalize_unit_cell_dense(
-                np.array(A_L),
-                np.array(A_R),
-                np.array(s_center),
-                tol=config.arnoldi_tol,
-            )
-            A_L = jnp.array(A_L_np)
-            A_R = jnp.array(A_R_np)
-            s_center = jnp.array(s_np)
-            L_env = jnp.array(
-                _solve_left_env_fixedpoint_dense(np.array(A_L), np.array(W))
-            )
-            R_env = jnp.array(
-                _solve_right_env_fixedpoint_dense(np.array(A_R), np.array(W))
-            )
-
-            if config.verbose:
-                print(
-                    f"  Applied periodic orthogonalization at sweep {sweep + 1}",
-                    flush=True,
-                )
+        # No in-loop re-orthogonalization: it re-solved L_env/R_env as fixed
+        # points, which zeroes the energy they have accumulated, so the next
+        # (E_total - E_prev) / 2 was garbage (+3.98 per site on the Heisenberg
+        # chain) and the estimate never re-settled within the interval.  The
+        # unit cell is orthogonalized once, after the loop.
 
         # ---- Check convergence ----
         if len(energies_per_step) >= 2:
@@ -1603,34 +1582,11 @@ def _idmrg_1site_sweep(
                 flush=True,
             )
 
-        # ---- Periodic orthogonalization (configurable interval) ----
-        if (
-            config.orthogonalize_interval > 0
-            and (sweep + 1) % config.orthogonalize_interval == 0
-            and chi_env > 1
-            and A_L.shape[0] == A_L.shape[2]
-        ):
-            A_L_np, A_R_np, s_np = _orthogonalize_unit_cell_dense(
-                np.array(A_L),
-                np.array(A_R),
-                np.array(s_center),
-                tol=config.arnoldi_tol,
-            )
-            A_L = jnp.array(A_L_np)
-            A_R = jnp.array(A_R_np)
-            s_center = jnp.array(s_np)
-            L_env = jnp.array(
-                _solve_left_env_fixedpoint_dense(np.array(A_L), np.array(W))
-            )
-            R_env = jnp.array(
-                _solve_right_env_fixedpoint_dense(np.array(A_R), np.array(W))
-            )
-
-            if config.verbose:
-                print(
-                    f"  Applied periodic orthogonalization at sweep {sweep + 1}",
-                    flush=True,
-                )
+        # No in-loop re-orthogonalization: it re-solved L_env/R_env as fixed
+        # points, which zeroes the energy they have accumulated, so the next
+        # (E_total - E_prev) / 2 was garbage (+3.98 per site on the Heisenberg
+        # chain) and the estimate never re-settled within the interval.  The
+        # unit cell is orthogonalized once, after the loop.
 
         # ---- Check convergence ----
         if len(energies_per_step) >= 2:

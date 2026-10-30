@@ -502,40 +502,10 @@ def test_tier5_reference_energy_finite():
         print(f"  WARNING: imaginary part {e.imag:.3e} is non-trivial")
 
 
-@pytest.mark.slow
-def test_tier5_compare_to_ipeps_ctm_energy():
-    """Compare contractor-reference energy vs the standard iPEPS CTM energy.
-
-    These are NOT expected to match exactly — the CTM energy is for the
-    infinite lattice while the reference is for a 2x2 PBC torus.  We
-    print both to anchor a baseline; the diff is a metric for how far
-    the iPEPS-CTM convention drifts from a direct PBC contraction.
-
-    The split-CTM arm this used to carry is gone: since #1035 step 4 the
-    split CTM refuses fermionic input (its split <-> fused conversions are
-    sign-free), and fermions run on the fused graded Tensor CTM.
-    """
-    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
-    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
-    from tenax.algorithms._split_ctm_tensor import ctm_split_tensor
-    from tenax.algorithms.fermionic_ipeps import FPEPSConfig, spinless_fermion_gate
-
-    A = _make_random_fermionic_site(D=2, d=2, seed=70)
-    gate = spinless_fermion_gate(FPEPSConfig(D=2, t=1.0, V=0.5))
-
-    e_ref = complex(reference_energy_2x2_pbc(A, gate))
-
-    chi = 8
-    env, _trunc = ctm_tensor(A, chi=chi, max_iter=20, conv_tol=1e-6)
-    e_ctm = float(compute_energy_ctm_tensor(A, env, gate, d=2))
-
-    print(f"\n[Tier 5] reference E (2x2 PBC, contractor):  {e_ref}")
-    print(f"[Tier 5] iPEPS-CTM E (infinite, chi={chi}):    {e_ctm:.10f}")
-    print(f"[Tier 5] |e_ref - e_ctm|:    {abs(e_ref - e_ctm):.3e}")
-    assert np.isfinite(e_ref.real) and np.isfinite(e_ctm)
-
-    with pytest.raises(NotImplementedError, match="split CTM: fermionic"):
-        ctm_split_tensor(A, chi=chi, max_iter=20, chi_I=chi)
+# Tier 5 (contractor reference vs the infinite-lattice CTM energy, printed
+# as a baseline; it asserted only finiteness and the split CTM's fermionic
+# refusal, which test_split_ctm_tensor.py::test_fermionic_ctm_is_refused pins
+# on the same seed-70 site) was removed in the slow-bucket prune (#1149).
 
 
 # ============================================================ #

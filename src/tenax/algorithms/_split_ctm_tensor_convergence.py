@@ -17,7 +17,6 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from tenax.algorithms._ctm_tensor_convergence import (
     CHECKERBOARD_NEIGHBORS,
@@ -32,6 +31,7 @@ from tenax.algorithms._ctm_tensor_convergence import (
 )
 from tenax.algorithms._split_ctm_tensor_init import (
     SplitCTMTensorEnv,
+    _refuse_symmetric_split,
     initialize_split_ctm_tensor_env,
 )
 from tenax.algorithms._split_ctm_tensor_moves import (
@@ -42,7 +42,7 @@ from tenax.algorithms._split_ctm_tensor_moves import (
 )
 from tenax.algorithms._tensor_utils import max_abs_normalize
 from tenax.core import EPS
-from tenax.core.tensor import SymmetricTensor, Tensor
+from tenax.core.tensor import Tensor
 
 
 class _SplitCTMInfo(NamedTuple):
@@ -65,6 +65,7 @@ def _split_ctm_tensor_sweep(
     renormalize: bool,
 ) -> SplitCTMTensorEnv:
     """One full split-CTM sweep: L/R/T/B moves + optional renormalize."""
+    _refuse_symmetric_split(A)
     A_bar = A.bar()
     # variPEPS sweep order (L/T/R/B), matching the fused ``_ctm_tensor_sweep``
     # so the split path tracks the same fixed point as the oracle.
@@ -131,6 +132,7 @@ def _refuse_fermionic_split_input(*site_tensors: Tensor) -> None:
             "conversion is sign-free, #1035); use the fused Tensor CTM "
             "(ctm_tensor / ctm_tensor_2site / fuse_virtual_legs=True)"
         )
+    _refuse_symmetric_split(*site_tensors)
 
 
 def ctm_split_tensor(
@@ -169,7 +171,7 @@ def ctm_split_tensor(
         ``1, 0.128, 0.127, 0.016, 2.1e-3, 2.0e-3``.
 
     Args:
-        A:          iPEPS site tensor (DenseTensor or SymmetricTensor) with
+        A:          Dense iPEPS site tensor with
                     5 legs ``(u, d, l, r, phys)``.
         chi:        Environment bond dimension.
         max_iter:   Maximum number of CTM iterations.
@@ -201,10 +203,8 @@ def ctm_split_tensor(
                      *same* projector the fused path used before #723; it is
                      shared verbatim, so this was never a split-CTM defect.
 
-    The split CTM is dense-bosonic and experimental.  This single-site (1x1)
-    entry point runs `DenseTensor` and bosonic `SymmetricTensor` alike, eager
-    or under AD -- source and destination cell coincide here, so the #1048
-    multisite refusal (see :func:`ctm_split_tensor_2site`) does not apply.
+    The split CTM is dense-only and experimental: ``SymmetricTensor`` input
+    is refused (use the fused ``ctm_tensor``).
 
     Returns:
         Converged SplitCTMTensorEnv.
@@ -278,31 +278,10 @@ def _initialize_split_multisite_env(
     chi: int,
     chi_I: int,
 ) -> dict[Coord, SplitCTMTensorEnv]:
-    """Per-coord split env init, with ONE chi seed shared by every cell.
-
-    Each cell's env is built by the single-site builder, but they must not each
-    seed their chi legs from their own site tensor.  The chi ring does not stop
-    at a cell boundary -- a 2x2 plaquette spans four cells, so ``Q_TL.chi_R``
-    (cell TL's ``T1.t1_r``) contracts against ``Q_TR.chi_L`` (cell TR's
-    ``T1.t1_l``).  ``_derive_charges`` tiles the charge ARRAY and is therefore
-    order-sensitive, and two sublattices can carry the same multiset in
-    different orders, so a per-cell seed lets the envs disagree even when each
-    one is internally consistent: measured on a D=3 fermionic pair, sublattice A
-    seeded ``{0: 11, 1: 5}`` throughout and sublattice B ``{0: 10, 1: 6}``, and
-    the plaquette died on 11-vs-10 (#1024).
-
-    Sorting the seeds would not fix it.  On a checkerboard ``A.u`` pairs with
-    ``B.d`` and ``B.u`` with ``A.d`` -- two different bonds, which need not
-    share a multiset at all.  One designated array is the only thing that makes
-    every cell agree, and the seed layout is arbitrary anyway.
-    """
-    seed = None
-    if site_tensors:
-        first = min(site_tensors)
-        ref = site_tensors[first].indices[0]
-        seed = np.asarray(ref.charges)
+    """Per-coord split env init (dense-only: every chi leg is charge-trivial)."""
+    _refuse_symmetric_split(*site_tensors.values())
     return {
-        c: initialize_split_ctm_tensor_env(A, chi, chi_I, chi_ref_charges=seed)
+        c: initialize_split_ctm_tensor_env(A, chi, chi_I)
         for c, A in site_tensors.items()
     }
 
@@ -317,247 +296,6 @@ _SPLIT_DIRECTION_MOVES = {
     "right": _split_ctm_move_right,
     "bottom": _split_ctm_move_bottom,
 }
-
-
-# ------------------------------------------------------------------ #
-# Fermionic (graded) routing — #463 Phase 4                            #
-# ------------------------------------------------------------------ #
-#
-# The split 2×2 grow/projector kernels build double-layer corners and edges
-# from graded ``A.bar()`` alone; they do NOT carry the order-dependent Koszul
-# signs that the *fused* 2-site path applies via its ``*_2plaq_fused`` variants
-# (gated by ``_env_is_fermionic``).  A raw fermionic split sweep therefore
-# diverges from the proven fused sweep — the corner GROW alone is already wrong
-# (#641).  Until a bounded (χ²·D⁴) Koszul-correct split kernel exists, fermionic
-# envs route through the fused sweep on the merged (χ²·D⁶) representation, then
-# the output edges are re-split back into ket/bra halves for storage.  The merge
-# (``_split_env_to_tensor_standard``) is a faithful inverse of the split, so this
-# is exact — see ``test_split_ctm_2site_fermionic``.
-
-
-def _split_env_is_fermionic(env: SplitCTMTensorEnv) -> bool:
-    """True when the split env tensors are graded (fermionic) SymmetricTensors."""
-    from tenax.core.tensor import SymmetricTensor
-
-    C1 = env.C1
-    return isinstance(C1, SymmetricTensor) and C1.indices[0].symmetry.is_fermionic
-
-
-def _refuse_traced_symmetric_multisite_split(
-    site_tensors: dict[Coord, Tensor],
-    envs: dict[Coord, SplitCTMTensorEnv],
-) -> None:
-    """Refuse a traced (jit/AD) multisite split-CTM sweep on symmetric input.
-
-    ``_compute_split_plaquette_projector_pair`` calls the shared
-    ``_compute_2x2_projector`` with ``base_charges`` but no destination-aware
-    ``incoming_chi_charges`` override.  On a *traced* call (blocks carry JAX
-    tracers -- inside ``jax.jit``, under ``jax.grad``/explicit-AD, or inside
-    the ``jax.vjp`` retrace that implicit-AD's Neumann backward uses),
-    ``_compute_2x2_projector_symmetric`` cannot read the singular values to
-    size ``chi_new``, so it falls back to ``_incoming_chi_charges``, which
-    reads the *absorbed* cell's chi leg off the enlarged corner.  Phase 2 of
-    ``_split_ctm_sweep_multisite_2x2`` writes the new edge into the
-    *neighbour's* environment instead, so on more than one cell the traced
-    projector inherits the wrong cell's sector counts whenever the two
-    cells' bond inventories differ (#1048, the split twin of #1035's fused
-    fix).
-
-    A single-cell unit cell is exempt: the absorbed cell and the destination
-    cell coincide there, so the fallback happens to read the right leg.
-
-    Eager (non-traced) symmetric multisite calls are unaffected: they take
-    the full-spectrum-SVD + ``_retruncate_chi_bond`` branch instead of the
-    ``_incoming_chi_charges`` fallback (see
-    ``_compute_2x2_projector_symmetric``), so this only refuses the branch
-    that is actually wrong.  Dense (``DenseTensor``) input is unaffected:
-    ``_compute_2x2_projector`` only dispatches to the symmetric pipeline for
-    ``SymmetricTensor`` input.
-
-    The split CTM is dense-bosonic and experimental (frozen by design); this
-    combination is refused rather than fixed -- see the fused CTM
-    (``fuse_virtual_legs=True``) for symmetric multisite AD.
-    """
-    if len(site_tensors) <= 1:
-        return
-    if not any(isinstance(A, SymmetricTensor) for A in site_tensors.values()):
-        return
-    # The environment is checked too: a caller can trace the environment
-    # while closing over concrete site tensors (``jax.vjp`` with respect to
-    # ``envs``, or a jitted closure), and the enlarged corners -- hence the
-    # projector's fallback -- are traced either way.
-    candidates = [*site_tensors.values()]
-    for env in envs.values():
-        candidates.extend(env)
-    is_traced = any(
-        isinstance(block, jax.core.Tracer)
-        for A in candidates
-        if isinstance(A, SymmetricTensor)
-        for block in A.blocks.values()
-    )
-    if is_traced:
-        raise NotImplementedError(
-            "split CTM (fuse_virtual_legs=False): a traced (jit/AD) multisite "
-            "sweep on SymmetricTensor site tensors is refused (#1048) -- the "
-            "traced 2x2 projector reads the wrong cell's chi-leg sector "
-            "counts when the two cells' bond inventories differ. The split "
-            "CTM is dense-bosonic and experimental; use the fused CTM "
-            "(fuse_virtual_legs=True) for symmetric multisite AD."
-        )
-
-
-# Per-edge spec to re-split a fused ``CTMTensorEnv`` edge into ket/bra halves.
-# Inverse of ``_split_env_to_tensor_standard._merge_edge``: the fused D² leg is
-# split back into its two parents (``d_ket``/``d_bra``), then an SVD over the
-# interlayer bond re-creates the ket ``(chi, D, chi_I)`` and bra ``(chi_I, D,
-# chi)`` halves with the standard split labels.
-_RESPLIT_SPEC = {
-    "T1": dict(
-        d2="u2",
-        left=("t1_l", "u_ket"),
-        right=("u_bra", "t1_r"),
-        ket_relabels={"t1_l": "t1k_l", "_svd_bond": "t1k_I"},
-        bra_relabels={"_svd_bond": "t1b_I", "t1_r": "t1b_r"},
-    ),
-    "T2": dict(
-        d2="r2",
-        left=("t2_u", "r_ket"),
-        right=("r_bra", "t2_d"),
-        ket_relabels={"t2_u": "t2k_u", "_svd_bond": "t2k_I"},
-        bra_relabels={"_svd_bond": "t2b_I", "t2_d": "t2b_d"},
-    ),
-    "T3": dict(
-        d2="d2",
-        left=("t3_r", "d_ket"),
-        right=("d_bra", "t3_l"),
-        ket_relabels={"t3_r": "t3k_r", "_svd_bond": "t3k_I"},
-        bra_relabels={"_svd_bond": "t3b_I", "t3_l": "t3b_l"},
-    ),
-    "T4": dict(
-        d2="l2",
-        left=("t4_d", "l_ket"),
-        right=("l_bra", "t4_u"),
-        ket_relabels={"t4_d": "t4k_d", "_svd_bond": "t4k_I"},
-        bra_relabels={"_svd_bond": "t4b_I", "t4_u": "t4b_u"},
-    ),
-}
-
-
-def _tensor_env_to_split_standard(
-    env, site_tensor: Tensor, chi_I: int
-) -> SplitCTMTensorEnv:
-    """Convert a fused ``CTMTensorEnv`` back to a ``SplitCTMTensorEnv``.
-
-    Inverse of ``_split_env_to_tensor_standard``: corners pass through
-    unchanged; each edge's fused D² leg is split into its two parents and an
-    SVD over the interlayer bond re-creates the ket/bra halves (truncated to
-    *chi_I*).
-
-    The fused edges produced by the fused CTM sweep carry no ``fuse_info`` on
-    their D² leg (it was built by projector application, not ``fuse_indices``),
-    so ``split_index`` cannot act on them directly.  Because the D² index
-    depends only on the site tensor (not the env), we transplant the
-    ``fuse_info``-bearing D² index from a freshly-initialised reference env of
-    the same site (sectors/multiplicities/flow are identical), then split.
-    """
-    from tenax.algorithms._split_ctm_tensor_energy import (
-        _split_env_to_tensor_standard,
-    )
-    from tenax.algorithms._split_ctm_tensor_moves import (
-        _split_base_charges,
-        _svd_split_edge_tensor,
-    )
-    from tenax.algorithms._tensor_utils import split_index
-    from tenax.core.tensor import SymmetricTensor
-
-    chi = env.C1.indices[0].dim
-    ref = _split_env_to_tensor_standard(
-        initialize_split_ctm_tensor_env(site_tensor, chi, chi_I)
-    )
-    base_charges = _split_base_charges(site_tensor)
-
-    halves = {}
-    for name, spec in _RESPLIT_SPEC.items():
-        edge = getattr(env, name)
-        ref_edge = getattr(ref, name)
-        d2 = spec["d2"]
-        ax = edge.labels().index(d2)
-        ref_d2 = ref_edge.indices[ref_edge.labels().index(d2)]
-        # Transplant the fuse_info-bearing D² index (shares block data).
-        new_indices = list(edge._indices)
-        new_indices[ax] = ref_d2.relabel(d2)
-        edge = SymmetricTensor._raw(
-            indices=tuple(new_indices),
-            data=edge._data,
-            block_keys=edge._block_keys,
-            block_shapes=edge._block_shapes,
-            block_offsets=edge._block_offsets,
-        )
-        edge = split_index(edge, ax)
-        halves[name] = _svd_split_edge_tensor(
-            edge,
-            left_labels=list(spec["left"]),
-            right_labels=list(spec["right"]),
-            chi_I=chi_I,
-            ket_relabels=spec["ket_relabels"],
-            bra_relabels=spec["bra_relabels"],
-            base_charges=base_charges,
-        )
-
-    return SplitCTMTensorEnv(
-        C1=env.C1,
-        C2=env.C2,
-        C3=env.C3,
-        C4=env.C4,
-        T1_ket=halves["T1"][0],
-        T1_bra=halves["T1"][1],
-        T2_ket=halves["T2"][0],
-        T2_bra=halves["T2"][1],
-        T3_ket=halves["T3"][0],
-        T3_bra=halves["T3"][1],
-        T4_ket=halves["T4"][0],
-        T4_bra=halves["T4"][1],
-    )
-
-
-def _split_ctm_sweep_multisite_2x2_via_fused(
-    envs: dict[Coord, SplitCTMTensorEnv],
-    site_tensors: dict[Coord, Tensor],
-    neighbors: dict[Coord, dict[str, Coord]],
-    chi: int,
-    chi_I: int,
-    renormalize: bool = True,
-    projector_backward: str = "auto",
-) -> dict[Coord, SplitCTMTensorEnv]:
-    """One fermionic 2×2 split sweep via ``merge → fused sweep → resplit``.
-
-    ``renormalize`` is honored on the merged (fused) representation so a caller
-    disabling per-sweep normalization gets the same raw fixed-point map as the
-    dense/bosonic split path — it is *not* hard-coded on (#690).
-    """
-    from tenax.algorithms._ctm_tensor_convergence import (
-        _ctm_tensor_sweep_multisite,
-    )
-    from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
-    from tenax.algorithms._split_ctm_tensor_energy import (
-        _split_env_to_tensor_standard,
-    )
-
-    fused_envs = {c: _split_env_to_tensor_standard(e) for c, e in envs.items()}
-    double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
-    new_fused, _eps, _sS = _ctm_tensor_sweep_multisite(
-        fused_envs,
-        double_layers,
-        neighbors,
-        chi,
-        renormalize,
-        recipe="2x2",
-        projector_backward=projector_backward,
-    )
-    return {
-        c: _tensor_env_to_split_standard(fe, site_tensors[c], chi_I)
-        for c, fe in new_fused.items()
-    }
 
 
 # ------------------------------------------------------------------ #
@@ -584,34 +322,14 @@ def _split_ctm_sweep_multisite_2x2(
     the destination env's corner + ket/bra edge fields.  Neighbour/anchor
     lookups and the cascade order mirror the fused sweep exactly.
 
-    Fermionic (graded) envs take the ``merge → fused sweep → resplit`` route
-    (see ``_split_ctm_sweep_multisite_2x2_via_fused``), since the split
-    double-layer kernels below do not yet carry the order-dependent Koszul
-    signs (#463 Phase 4 / #641).
-
-    ``renormalize`` is forwarded to the fermionic fused route so its internal
-    normalization matches the caller's flag (#690).  The bosonic branch does not
-    normalize here; :func:`_split_ctm_sweep_multisite` applies the post-sweep
-    ``renormalize`` for it.
+    ``renormalize`` is accepted for signature parity and unused: this sweep
+    does not normalize, :func:`_split_ctm_sweep_multisite` applies the
+    post-sweep ``renormalize``.
     """
-    if _split_env_is_fermionic(next(iter(envs.values()))):
-        # The split <-> fused conversions (merge, resplit) are sign-free, so a
-        # fermionic env comes out of them with hard-core-boson signs and
-        # inconsistent flows (#1035 step 4).  Fermions use the fused graded
-        # Tensor CTM (ctm_tensor_2site / ctm_multisite) instead.
-        raise NotImplementedError(
-            "split CTM: fermionic tensors are not supported (the split <-> fused "
-            "conversion is sign-free, #1035); use the fused Tensor CTM "
-            "(ctm_tensor_2site / fuse_virtual_legs=True)"
-        )
-    # #1048: refuses a traced multisite sweep on SymmetricTensor input (the
-    # single-cell unit cell is exempt -- see the helper's docstring).
-    _refuse_traced_symmetric_multisite_split(site_tensors, envs)
     # Function-local import: _split_ctm_tensor_moves imports from this module,
     # so importing the absorb helpers at module scope would form a cycle.
     from tenax.algorithms._split_ctm_tensor_moves import (
         _compute_split_plaquette_projector_pair,
-        _split_base_charges,
         _split_ctm_absorb_bottom_2plaq,
         _split_ctm_absorb_left_2plaq,
         _split_ctm_absorb_right_2plaq,
@@ -642,7 +360,6 @@ def _split_ctm_sweep_multisite_2x2(
                 bars[s_BR],
                 chi,
                 direction,
-                base_charges=_split_base_charges(site_tensors[s]),
                 projector_backward=projector_backward,
             )
             projectors[s] = (Pt, Pb)
@@ -754,6 +471,7 @@ def _split_ctm_sweep_multisite(
     Returns:
         Updated per-coord environments.
     """
+    _refuse_symmetric_split(*site_tensors.values())
     envs = dict(envs)
     all_coords = list(envs.keys())
     if recipe == "1x1":
@@ -912,14 +630,9 @@ def ctm_split_tensor_2site(
         recipe:     ``"2x2"`` (default, the genuine joint forward) or ``"1x1"``
                     (single-site-move reuse, for bisection).
 
-    The split CTM is dense-bosonic and experimental.  A plain (eager) call
-    here runs ``DenseTensor`` and bosonic ``SymmetricTensor`` alike.  If the
-    call is *traced* (inside ``jax.jit``, or differentiated with
-    ``jax.grad``/``jax.vjp``) with ``SymmetricTensor`` site tensors, the
-    sweep refuses with ``NotImplementedError`` instead of returning a wrong
-    environment (#1048) -- use ``fuse_virtual_legs=True`` for symmetric
-    multisite AD.  Fermionic input is refused outright, traced or not
-    (#1035).
+    The split CTM is dense-only and experimental: ``SymmetricTensor`` input
+    (U(1)/Z_n or fermionic) is refused with ``NotImplementedError``; use the
+    fused ``ctm_tensor_2site``.
 
     Returns:
         ``(env_A, env_B)`` -- the converged split environments at ``(0, 0)``

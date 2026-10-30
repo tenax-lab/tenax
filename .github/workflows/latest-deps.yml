@@ -1,0 +1,68 @@
+name: Latest dependencies
+
+# CI installs from the committed uv.lock, so a new JAX (or numpy, scipy, ...)
+# release no longer reaches a PR's checks.  This workflow is the one place that
+# still floats: it re-resolves every dependency to the newest allowed version
+# and runs the core gate on it.  It is not a required check -- a red run means
+# "the next lock bump will break", not "main is broken".
+on:
+  schedule:
+    - cron: "0 8 * * 1"  # 08:00 UTC every Monday
+  workflow_dispatch:
+
+concurrency:
+  group: latest-deps
+  cancel-in-progress: true
+
+jobs:
+  core-latest:
+    name: Core shard ${{ matrix.shard }} (latest deps, Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is what .python-version selects; newer JAX releases need 3.12.
+        python-version: ["3.11", "3.12"]
+        shard: ["1", "2", "3", "4"]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Resolve the newest dependencies
+        run: |
+          uv lock --upgrade
+          uv sync --locked --python ${{ matrix.python-version }} --extra dev
+          uv run --no-sync python -c "import jax, numpy, scipy; print('jax', jax.__version__, 'numpy', numpy.__version__, 'scipy', scipy.__version__)"
+
+      - name: Run core tests
+        env:
+          JAX_PLATFORMS: cpu
+          SHARD: ${{ matrix.shard }}
+          # The same file partition as ci.yml's core-shard job.
+          NSHARDS: 4
+        run: |
+          FILES=""
+          for f in $(find tests -name 'test_*.py' | LC_ALL=C sort); do
+            h=$(printf '%s' "$f" | cksum | cut -d' ' -f1)
+            if [ $(( h % NSHARDS )) -eq $(( SHARD - 1 )) ]; then
+              FILES="$FILES $f"
+            fi
+          done
+          set +e
+          uv run --no-sync pytest $FILES -m "core" --no-cov --durations=50 -v
+          rc=$?
+          set -e
+          # Exit 5 = this shard's files hold no ``core`` tests.
+          if [ "$rc" -eq 5 ]; then
+            echo "Shard collected no core tests; OK."
+            rc=0
+          fi
+          exit $rc

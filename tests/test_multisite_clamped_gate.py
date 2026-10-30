@@ -72,13 +72,17 @@ def _random_site(D=2, d=2, seed=42):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("chi", [4, 6])
+@pytest.mark.parametrize("chi", [6])
 def test_a_clamped_physical_state_is_not_rejected(chi):
     """The headline of #784: this raised ``RootResidualError`` before the fix.
 
     ``on_root_residual="raise"`` is the default and is left in place on
     purpose -- the whole failure is that the default policy aborts on a state
     the engine handles correctly.
+
+    chi=6 only (the 19x case; that the clamp is active there is asserted by
+    the rank-report test below).  chi=4 (8.5x) was the same claim at a
+    smaller margin and was dropped in the slow-bucket prune (#1149).
     """
     A = physical_su_d2()
     out = cell_root_implicit_energy_and_grad(

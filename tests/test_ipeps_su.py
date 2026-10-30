@@ -288,7 +288,8 @@ _TRUNCATION_CASES = [("dense", b) for b in _BONDS] + [("symmetric", "h_AB")]
 #: untruncated spectrum are ``1, 0.95831, 0.59483``, a relative error of
 #: 1.787e-01.  (Those are the figures
 #: ``test_su_step_keeps_the_largest_singular_values`` records and the
-#: ``865-base-charges-pinned-on-the-truncation-guard`` mutation row kills at.
+#: (since deleted) ``865-base-charges-pinned-on-the-truncation-guard`` mutation
+#: row killed at.
 #: This constant used to carry a second, stale copy -- "keeps 0.43903 where the
 #: top three are 1, 0.9915, 0.46407" -- which disagreed with it; there is now
 #: one set of numbers and it is the measured one.)
@@ -1268,9 +1269,10 @@ def test_su_step_keeps_the_largest_singular_values(kind, bond, su):
     *detected* the pin and never that its own assertion watches it.  Reordering
     weakens nothing, because the meta-assertion still runs on every green pass:
     a cell that has gone blind (a ``dt`` at which pinning stops separating) still
-    fails there, loudly.  The claim's own kill is pinned by the row named
+    fails there, loudly.  The claim's own kill was pinned by the ``slow`` row
     ``865-base-charges-pinned-on-the-truncation-guard`` in
-    ``tests/test_ipeps_su_mutations.py``.
+    ``tests/test_ipeps_su_mutations.py``, deleted in the slow-bucket prune;
+    #865 stays killed there by the Vidal-metric chain-anchor row.
     """
     A, B = su.pair(kind)
     weights = su.weights(kind)
@@ -3446,16 +3448,30 @@ def test_the_shipped_engines_stored_spectra_are_closer_than_the_plan_says():
 #: ``_bp_solve_eager``, the Python-loop driver, at "18.9 ms/sweep -- 555x the
 #: traced path's 0.034 ms" (that module's own docstring), and ``_su_step``
 #: re-derives the gauge on **every** step by design.
+#:
+#: Every ``slow`` mark in this file also carries ``diagnostic`` (opt-in,
+#: ``TENAX_RUN_DIAGNOSTIC=1``): the engine is private until #882 Phase 4 wires
+#: ``ipeps()`` to it, so its acceptance sweep pins nothing a user can reach
+#: yet.  When it ships, drop the ``diagnostic`` marks to put the sweep back in
+#: the slow bucket.
 _ARMS = [
     pytest.param("dense", id="dense"),
-    pytest.param("symmetric", marks=pytest.mark.slow, id="symmetric"),
+    pytest.param(
+        "symmetric",
+        marks=(pytest.mark.slow, pytest.mark.diagnostic),
+        id="symmetric",
+    ),
 ]
 
 
 @pytest.mark.parametrize("kind", _ARMS)
 @pytest.mark.parametrize(
     "seed",
-    [0] + [pytest.param(s, marks=pytest.mark.slow) for s in _SEEDS[1:]],
+    [0]
+    + [
+        pytest.param(s, marks=(pytest.mark.slow, pytest.mark.diagnostic))
+        for s in _SEEDS[1:]
+    ],
 )
 def test_d2_reaches_the_heisenberg_energy_not_the_product_state(seed, kind):
     """#667's guard: D=2 must reach ~-0.659, not -0.5.
@@ -3544,6 +3560,7 @@ def test_d2_reaches_the_heisenberg_energy_not_the_product_state(seed, kind):
 
 
 @pytest.mark.slow
+@pytest.mark.diagnostic
 @pytest.mark.parametrize("seed", _SEEDS)
 # The symmetric arm runs at D=3 only.  Its D=4 cells were ~22 min per seed on a
 # quiet local CPU (1321 s / 1350 s measured 2026-09-27) and, with the rest of
@@ -3629,6 +3646,7 @@ def test_su_evolve_reaches_the_simple_update_reference_energy(D, seed, kind):
 
 
 @pytest.mark.slow
+@pytest.mark.diagnostic
 @pytest.mark.parametrize("seed", _SEEDS)
 @pytest.mark.parametrize("D", [2, 3])
 def test_the_energy_does_not_drift_away_with_more_steps(D, seed):
@@ -3698,6 +3716,7 @@ def test_the_energy_does_not_drift_away_with_more_steps(D, seed):
 
 
 @pytest.mark.slow
+@pytest.mark.diagnostic
 @pytest.mark.parametrize("seed", _SEEDS)
 def test_d3_actually_uses_its_third_bond_direction(seed):
     """A nominally-D=3 state whose ``lam_3`` is 2e-6 is really D=2.
@@ -3774,6 +3793,7 @@ def test_d3_actually_uses_its_third_bond_direction(seed):
 
 
 @pytest.mark.slow
+@pytest.mark.diagnostic
 def test_su_evolve_collapses_from_a_maximally_random_init():
     """**A limitation, pinned rather than hidden.**  ``D=4`` from the shipped init.
 
@@ -4064,6 +4084,7 @@ def test_the_unrotated_gate_reaches_the_same_dense_energy():
 
 
 @pytest.mark.slow
+@pytest.mark.diagnostic
 def test_the_symmetric_and_dense_ctm_agree_on_the_same_d2_state():
     """**The symmetric arm's 8.8e-03 shortfall is the CTM, not the simple update.**
 
@@ -4203,6 +4224,7 @@ def test_the_symmetric_and_dense_ctm_agree_on_the_same_d2_state():
 
 
 @pytest.mark.slow
+@pytest.mark.diagnostic
 def test_symmetric_simple_update_survives_the_bp_gauge_at_D3():
     """**The blocker that stopped ``D >= 3`` -- lifted, and pinned open.**
 

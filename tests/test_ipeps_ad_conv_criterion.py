@@ -4,9 +4,9 @@
 ``optimize_gs_ad``:
 
 * ``"dE"``       — legacy ``|E_step - E_step-1| < gs_conv_tol`` (the
-  default before v0.8.4, deprecated).
+  default before v0.9.0, deprecated).
 * ``"grad_norm"`` — variPEPS-style ``||grad||_2 < gs_grad_norm_tol``
-  (default since v0.8.4).
+  (default since v0.9.0).
 * ``"both"``      — require both to hold simultaneously.
 
 These tests cover the helper, config validation, and end-to-end exit
@@ -28,7 +28,7 @@ from tenax.algorithms.ipeps_optimize import _converged_outer, _grad_l2_norm
 def test_iPEPSConfig_dE_emits_deprecation_warning():
     """An explicit ``gs_conv_criterion='dE'`` emits a DeprecationWarning.
 
-    Since v0.8.4 the default is ``'grad_norm'`` and does not warn (pinned
+    Since v0.9.0 the default is ``'grad_norm'`` and does not warn (pinned
     in ``tests/test_ipeps_grad_norm_default.py``).  The warning is
     suppressed project-wide in ``pyproject.toml``; this test un-suppresses
     it via ``pytest.warns`` to confirm it still fires.
@@ -168,7 +168,7 @@ def test_grad_norm_criterion_exits_when_grad_is_tiny():
 
 @pytest.mark.algorithm
 def test_dE_unchanged_when_dE_tol_loose():
-    """An explicit ``"dE"`` (the pre-v0.8.4 default) still exits via the dE branch."""
+    """An explicit ``"dE"`` (the pre-v0.9.0 default) still exits via the dE branch."""
     cfg = replace(
         _fast_base_cfg(),
         gs_conv_criterion="dE",

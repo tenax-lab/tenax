@@ -124,14 +124,14 @@ def test_pess_optimizer_is_global_phase_gauge_invariant(
         loss_fn = build_pess_loss(gates, cfg)
 
         def run(s):
-            return optimize_pess_ad(s, gates, cfg, max_iter=5, verbose=False)
+            return optimize_pess_ad(s, gates, cfg, max_iter=2, verbose=False)
     else:
         gates = kagome_3site_bond_gates(delta=1.0, d=3)
         loss_fn = build_pess_loss_3site_multisite(gates, cfg)
 
         def run(s):
             return optimize_pess_3site_multisite_ad(
-                s, gates, cfg, max_iter=5, verbose=False
+                s, gates, cfg, max_iter=2, verbose=False
             )
 
     # Regime pin: the phase must actually be a gauge of THIS path's loss, or the

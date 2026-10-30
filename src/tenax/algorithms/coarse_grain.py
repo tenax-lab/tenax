@@ -16,7 +16,7 @@ __all__ = [
 ]
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import jax
 import jax.numpy as jnp
@@ -55,6 +55,17 @@ class CGGates:
     n_sites: int
     map_fn: Callable | None = None
     init_fn: Callable | None = None
+
+    def _energy_gates(self) -> CGGates:
+        """A copy without ``map_fn``/``init_fn``, for an energy callback.
+
+        :func:`compute_energy_cg` reads only ``h_intra``, ``h_inter`` and
+        ``n_sites``.  A callback that captures this copy, rather than the
+        full gates, is keyed by value in the implicit-AD compile cache
+        (#1049): functions cannot be keyed by value, so capturing them would
+        make every run recompile its backward.
+        """
+        return replace(self, map_fn=None, init_fn=None)
 
 
 def _ss_2site(dtype=jnp.float64) -> jnp.ndarray:

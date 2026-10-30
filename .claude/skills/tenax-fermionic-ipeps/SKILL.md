@@ -27,7 +27,7 @@ tensor formalism.
 | **Symmetry class** | `U1Symmetry`, `ZnSymmetry` | `FermionParity`, `FermionicU1` |
 | **Sign handling** | None needed | Automatic via graded tensors |
 | **Gate builder** | `heisenberg_gate()`, `xxz_gate()` | `spinless_fermion_gate()` |
-| **Entry point** | `ipeps()` / `optimize_gs_ad()` | `fpeps()` |
+| **Entry point** | `ipeps()` / `optimize_gs_ad()` | `fpeps()` / `optimize_fpeps_ad()` |
 | **Models** | Heisenberg, XXZ, J1-J2 | Spinless fermions, t-V, Hubbard |
 
 Rule of thumb: if your Hamiltonian has creation/annihilation operators
@@ -160,10 +160,10 @@ H_mat = H_mat.at[3, 3].set(V)   # n_i n_j
 H_dense = H_mat.reshape(2, 2, 2, 2)
 
 indices = (
-    TensorIndex(fp, phys_charges.copy(), FlowDirection.IN,  label="si"),
-    TensorIndex(fp, phys_charges.copy(), FlowDirection.IN,  label="sj"),
-    TensorIndex(fp, phys_charges.copy(), FlowDirection.OUT, label="si_out"),
-    TensorIndex(fp, phys_charges.copy(), FlowDirection.OUT, label="sj_out"),
+    TensorIndex.from_charges(fp, phys_charges.copy(), FlowDirection.IN,  label="si"),
+    TensorIndex.from_charges(fp, phys_charges.copy(), FlowDirection.IN,  label="sj"),
+    TensorIndex.from_charges(fp, phys_charges.copy(), FlowDirection.OUT, label="si_out"),
+    TensorIndex.from_charges(fp, phys_charges.copy(), FlowDirection.OUT, label="sj_out"),
 )
 
 gate = SymmetricTensor.from_dense(H_dense, indices)
@@ -185,8 +185,8 @@ print("Spectrum:", jnp.sort(evals))                 # Free: [-t, 0, 0, +t]
 ## Stage 3: Run fPEPS
 
 The `fpeps()` function runs the full pipeline: random initialization →
-2-site checkerboard simple update (imaginary time evolution) → split-CTM energy
-evaluation.
+2-site checkerboard simple update (imaginary time evolution) → fused graded
+2-site CTM (`ctm_tensor_2site`) → energy.
 
 ```python
 from tenax import FPEPSConfig, fpeps, spinless_fermion_gate, sublattice_gap
@@ -210,7 +210,8 @@ print(f"Charge order:    {sublattice_gap(A, B, env_A, env_B):.4f}")
 
 ### Return values
 
-**The state and environment are pairs** (changed in #878). The t-V ground state
+**The state and environment are pairs** (changed in v0.9.0, #878; before
+that `fpeps()` returned a 1-site state that was exactly `0.0`). The t-V ground state
 at finite `V` is a checkerboard charge-density wave, which is inherently
 two-site; the 1-site ansatz that preceded this made `A` both ends of every bond,
 so its update kept only `U` from each SVD and the state collapsed to a product
@@ -220,7 +221,7 @@ state regardless of `dt`.
 |-------|------|-------------|
 | `energy` | float | Energy per site (see the caveat below — **not** certified) |
 | `(A, B)` | tuple[SymmetricTensor, SymmetricTensor] | The two sublattice tensors, shape (D,D,D,D,2) each, in physical (CTM-contractable) form |
-| `(env_A, env_B)` | tuple[SplitCTMTensorEnv, SplitCTMTensorEnv] | The coupled converged environments |
+| `(env_A, env_B)` | tuple[CTMTensorEnv, CTMTensorEnv] | The coupled converged environments |
 
 `sublattice_gap(A, B, env_A, env_B)` is the trace distance between the two
 sublattices' one-site RDMs — for spinless fermions exactly `|<n_A> - <n_B>|`,
@@ -232,9 +233,12 @@ fingerprint instead — neither is invariant under the bond gauge `T -> G T`.
 
 ⚠️ **Two standing caveats.** The sweep is **seed-dependent** (over seeds 0–4 at
 600 steps the surviving fraction is 4/5 at D=2, 2/5 at D=3, 4/5 at D=4, 4/5 at
-D=6), and the **absolute energy is not certified** (#392): `H` has no chemical
-potential, so both the empty state and the fully polarised checkerboard are
-exact `E = 0` eigenstates and the sweep is observed to settle on them.
+D=6), and the **absolute energy is not certified** (#392): at the default
+`FPEPSConfig.mu = 0.0`, `H` has no chemical potential, so both the empty state
+and the fully polarised checkerboard are exact `E = 0` eigenstates and the
+sweep is observed to settle on them. `FPEPSConfig(mu=...)` adds `-mu * n_i` per
+site (as `-(mu/4)(n_i + n_j)` per bond); `mu = 2 * V` is the
+particle-hole-symmetric half-filling point.
 
 ### Starting from an existing pair
 
@@ -247,6 +251,38 @@ A restart is not a continuation: the sweep always begins from
 `BondWeights.ones`, so its first cycle treats the outer legs as unweighted while
 the tensors handed in already carry `sqrt(lambda)`. `fpeps(N)` is not
 `fpeps(N/2)` restarted for another `N/2`.
+
+### AD optimization: `optimize_fpeps_ad`
+
+`optimize_fpeps_ad` is `optimize_gs_ad` with a fermionic initial state (v0.9.0,
+#1059): `unit_cell`, `ctm_ad_mode` and all of `optimize_gs_ad`'s checks apply,
+and the return shape follows the unit cell. The default `"1x1"` is a uniform
+state and cannot hold a CDW; use `"2site"`.
+
+```python
+from tenax import iPEPSConfig, CTMConfig, optimize_fpeps_ad
+
+fcfg = FPEPSConfig(D=2, t=1.0, V=4.0, mu=8.0)   # mu = 2V: half filling
+gate = spinless_fermion_gate(fcfg)
+config = iPEPSConfig(max_bond_dim=2, unit_cell="2site",
+                     ctm=CTMConfig(chi=8), gs_num_steps=50)
+(A, B), (env_A, env_B), E = optimize_fpeps_ad(gate, None, config,
+                                              fpeps_config=fcfg)
+```
+
+Fermionic input is guarded so its signs are never silently dropped:
+
+- `gs_metric_precond` is turned off (with a `UserWarning`) for fermionic
+  gates/sites under L-BFGS or CG — its metric was the hard-core-boson one.
+- `NotImplementedError` for `gs_c4v=True`, any root-implicit `ctm_ad_mode`
+  (incl. `"root_implicit_symmetric"`), and a fermionic gate on non-fermionic
+  sites (including `optimize_gs_ad(..., A_init=None)`, which builds a dense
+  site). Before v0.9.0 these ran a hard-core-boson model and reported its
+  energy as the fermionic one.
+- The split CTM (`fuse_virtual_legs=False`) is dense-only and refuses
+  `SymmetricTensor` input; use the default fused CTM.
+
+The absolute-energy caveat above (#392) applies to the AD path too.
 
 ---
 
@@ -283,6 +319,7 @@ l (OUT)—A—r (IN)
 | `ctm_chi` | CTM bond dim | χ ≥ D²; start 8–16 |
 | `ctm_max_iter` | CTM iterations | 40–100 |
 | `ctm_conv_tol` | CTM convergence | 1e-6 default |
+| `mu` | Chemical potential | 0.0 default (no filling control); `2 * V` = half filling |
 
 ---
 
@@ -306,7 +343,7 @@ h_BA : B.r <-> A.l      v_BA : B.d <-> A.u
 4. **Convert to physical form**: `sqrt(λ)` onto **each of the four legs of both
    sites**, so every bond of the lattice picks up `sqrt(λ)·sqrt(λ) = λ` exactly
    once — both ends contribute
-5. Run the coupled two-site split-CTM → compute energy
+5. Run the coupled two-site fused CTM → compute energy
 
 Steps 2 and 4 are where the earlier 1-site version went wrong, and both failures
 are worth knowing because they are easy to re-introduce:
@@ -417,7 +454,8 @@ whereas `sublattice_gap` is the order parameter itself.
 | Flat energy vs D | Trotter error dominates | Reduce dt first, then increase D |
 | "Charge mismatch" error | Wrong FlowDirection | Check IN/OUT pairing on gate legs |
 | Dense tensor where SymmetricTensor expected | Used jnp array directly | Wrap with `SymmetricTensor.from_dense()` |
-| `E ≈ 0` and `sublattice_gap ≈ 0` | Sweep settled on the empty state — an exact `E = 0` eigenstate, since `H` has no chemical potential (#392) | Not a code bug; try another seed, and read `sublattice_gap` rather than `E` |
+| `E ≈ 0` and `sublattice_gap ≈ 0` | Sweep settled on the empty state — an exact `E = 0` eigenstate at the default `mu = 0` (#392) | Not a code bug; try another seed or set `mu`, and read `sublattice_gap` rather than `E` |
+| `NotImplementedError` mentioning fermionic | `gs_c4v=True`, a root-implicit engine, or dense sites with a fermionic gate (#1059) | Use `optimize_fpeps_ad` with `FermionParity` sites and the default implicit engine |
 | Bond spectrum has a zero entry | Seed-dependent collapse (surviving seeds 0–4: 4/5 at D=2, **2/5 at D=3**, 4/5 at D=4, 4/5 at D=6) | Try another seed; check the spectrum, never the norm — the update normalises last, so `|A|` reads 1.0 right up to the step it is exactly 0 |
 | `fpeps(N)` ≠ `fpeps(N/2)` restarted | The sweep restarts from `BondWeights.ones` while the returned pair already carries `sqrt(λ)` | Expected; use restarts to continue annealing, not to reproduce a longer run |
 

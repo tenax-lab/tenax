@@ -2,7 +2,298 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Dense iDMRG converges again; its energy was pinned 3.5e-4 above the
+  truth at every chi.**  Every `orthogonalize_interval` sweeps (default 10)
+  the dense 2-site and 1-site loops re-orthogonalized the unit cell and
+  re-solved `L_env`/`R_env` as fixed points.  That solve zeroes the energy the
+  environments had accumulated, so the next `(E_total - E_prev) / 2` was
+  garbage (+3.98 per site on the Heisenberg chain), and the estimate then
+  needed more than 10 sweeps to re-settle.  The run cycled with period 10,
+  never met `convergence_tol`, and reported the cycle's last value: on the
+  Heisenberg chain −0.442801 at both chi=32 and chi=64 (error 3.46e-4, flat in
+  chi).  The in-loop pass is gone; any `orthogonalize_interval > 0` still
+  orthogonalizes once after the loop.  Now: error 9.4e-6 at chi=32, and
+  chi=64 converges in 145 steps to −0.443144 (exact −0.443147).  **Dense
+  iDMRG energies from v0.9.0 and earlier carry this error** (infinite
+  cylinders included); the symmetric path did not re-solve in-loop and is
+  unaffected.  The two energy tests had tolerances (0.01, 0.1 %) that let the
+  pinned value through; they are now 5e-5 and 0.03 %, and fail on the old
+  code.
+
+- **The Hager-Zhang zoom no longer spends its whole budget at a +inf cliff.**
+  When the line crosses a point past which every probe is rejected as +inf
+  (an iPEPS CTM that does not converge, #1059) and the slope stays steep up
+  to it, no point meets Wolfe curvature, so the zoom only bisected onto the
+  cliff until `max_iter` ran out, with one `dphi` (an implicit-AD backward)
+  per pass. A symmetric D=3, chi=16 2-site step spent 63 `phi` and 44 `dphi`
+  probes (about 4.5 h) there. The new `max_cliff_iter` (default 3) ends the
+  search after that many passes once a decrease is in hand and the right end
+  is non-finite, and returns the best point (`converged=False`, which the
+  iPEPS optimizer accepts as a real decrease). On the reproduction: 7 `phi`
+  and 4 `dphi` probes, at 99.3% of the cliff.
+
+## v0.9.0 (2026-10-29)
+
+A correctness release with breaking defaults, 202 commits after v0.8.3. As in
+v0.8.3, the reason to upgrade is a set of defects that produced **plausible,
+non-crashing, wrong numbers**: simple update, the symmetric (block-sparse) CTM,
+and the CTM convergence test were all affected. The implicit-AD optimizer's
+defaults also change, so iPEPS-AD trajectories, step counts and `converged`
+flags differ from v0.8.3 even where nothing was wrong. New: GILT / Gilt-TNR,
+`ctm_ad_mode="root_implicit_symmetric"` in `optimize_gs_ad`, the BP gauge
+(`bp_gauge_checkerboard`), and much shorter compiles for the block-sparse
+CTM-AD backward.
+
+### ⚠️ Results affected — please re-check
+
+If you have results from v0.8.3 or earlier, check whether they came through
+any of these paths. Details and measurements are in the entries below.
+
+- **Simple update converged to the product state** (#667). Every `ipeps()`
+  result is affected: the sweep drove only 2 of the checkerboard's 4 bonds,
+  and each bond carried `λ^1.5`. D=2 Heisenberg goes from −0.548 to −0.6593.
+  A "D=3" state from `ipeps()` before the fix was in effect D=2.
+- **`fpeps()` returned a state that was exactly `0.0`** (#878). It now returns
+  a 2-site checkerboard, and its return value changes shape (see Breaking).
+- **Symmetric simple update threw away the largest singular value** (#865).
+  `base_charges` fixed the per-sector keep counts, so U(1)-Sz states kept 26%
+  of the weight at step 0 and reached exactly zero by step 22.
+- **The symmetric CTM zeroed its charged environment sectors** (#905). The
+  sectors were then capped by a per-sector quota (#922, #929). Symmetric CTM
+  energies were flat in chi and sat above the dense reference. Any
+  `SymmetricTensor` CTM result from v0.8.3 should be recomputed.
+- **`converged=True` did not mean converged.** The spectral criterion
+  certified a rank-1 (collapsed) environment (#898). The default elementwise
+  criterion certified an all-NaN environment (#974). A bond whose RDM
+  contracted to zero was summed into the energy as `0` (#845, #848).
+- **`optimize_gs_ad`'s returned energy was not an evaluation of the returned
+  tensor** when a line search was active (#899). It came from a stale
+  environment seed, 1.3e-3 off at D=2.
+- **The sigma forward gauge on the 2x2 recipe corrupted the environment**
+  (#798). Energies were off by 2.3e-3 at D=2 and ~1e-2 at D=3.
+- **Fermionic runs silently became hard-core bosons** (#1059). This happened
+  with `gs_c4v=True`, with the root-implicit engines, and with a fermionic gate
+  on non-fermionic sites. `optimize_fpeps_ad` also ignored `unit_cell`. These
+  now raise or are routed correctly.
+- **The symmetry core accepted non-conserving tensors** (#799). U(1) charge
+  sums wrapped at int32, and a non-canonical `Z_n` block key validated, then
+  `todense()` dropped it.
+- **The kagome PESS AD benchmark numbers are backend-dependent garbage**
+  (#1002); discard them. The v0.8.2 split-CTM / multi-GPU frontier numbers are
+  retracted (#747, #825); see that section.
+
+### ⚠️ Breaking changes and changed defaults
+
+- `fpeps()` returns `(energy, (A, B), (env_A, env_B))` (#878).
+- The split CTM (`fuse_virtual_legs=False`) refuses `SymmetricTensor` input.
+- `CTMConfig.projector_backward="auto"` resolves to `"flow"` on the default
+  fused implicit-AD path, so the gradient includes the projector response
+  (#1028). `"standard"` restores the old behaviour.
+- `iPEPSConfig.gs_conv_criterion` defaults to `"grad_norm"` (#448). Expect
+  more steps, and `converged=False` where `True` was reported before.
+- `gs_stall_recovery` defaults to `"reset"` on 1-site cells too (#298).
+- `CTMConfig.adjoint_chain_rule` defaults to `"auto"` (the joint VJP).
+- Fermionic input disables `gs_metric_precond`, and is refused wherever its
+  signs would be dropped (#1059).
+- GPU SVDs with `min(m, n) >= 128` use the polar algorithm.
+- The JAX floor is `jax>=0.4.35` (#1105).
+
 ### Behavior Changes
+
+- **GPU SVDs of matrices with `min(m, n) >= 128` use the polar algorithm.**
+  `tenax.linalg._dense_svd`, which every tenax SVD goes through, used the
+  QR-based `gesvd` on GPU for all sizes (#691).  `gesvd` bidiagonalises column
+  by column, about 250 tiny kernel launches per call, so the A100 CTM sweep was
+  launch-bound: the spinless t-V 2x2 sweep launched 127k kernels at D=4 chi=32
+  and 370k at D=5 chi=50.  From `min(m, n) >= 128` it now uses polar
+  (`gesvdp`): 22k / 61k kernels, sweep 0.667 -> 0.472 s (1.41x) at D=4 and
+  2.08 -> 1.57 s (1.33x) at D=5; the implicit-AD `J^T v` matvec gains the
+  same (0.699 -> 0.503 s, 2.157 -> 1.656 s).  Below ~100 polar is about 2x slower, so
+  smaller matrices (U(1) sectors, small D) keep `gesvd`.  On cuSOLVER 12.3.5.3
+  polar produced no NaN on 84 stress matrices (spectra to 1e-30,
+  rank-deficient, degenerate, zero) or 1,056 matrices harvested from CTM
+  sweeps, matched `gesvd`'s singular values and subspaces, and gave the same
+  flow CTM-AD gradient to ~12 digits (AD/FD 0.9999986 / 1.0000007 /
+  1.0000023 on a U(1) D=3 state).  Jacobi (`gesvdj`) stays excluded: besides
+  the NaN history it was 2-3.4x slower than `gesvd` here.  CPU is unchanged.
+  On a JAX without `SvdAlgorithm.POLAR` the GPU path stays on `gesvd`.  The
+  algorithm is chosen per lowering platform, not per process: an operand on
+  the CPU of a GPU process (`jax.default_device(cpu)`, a committed CPU array)
+  takes the CPU path, since polar has no CPU lowering.
+
+- **The split CTM is dense-only.** `fuse_virtual_legs=False` (and the
+  `ctm_split_tensor*` / `ctm_energy_split_*` entry points) now refuse
+  `SymmetricTensor` site tensors with `NotImplementedError`.  Bosonic
+  U(1)/Z_n input used to run on the eager forward and on single-site AD.  The
+  split CTM's memory win is a large-D effect (D≳16, #825), where symmetric
+  iPEPS-AD in tenax already loses to dense, so the symmetric split path had
+  no use and had carried its own defects (#907, #1024, #1048).  Symmetric
+  iPEPS uses the fused CTM (`fuse_virtual_legs=True`, the default).
+  The now-unreachable symmetric code in the split modules is gone (~1,000
+  lines): the symmetric env init, per-sector interlayer truncation, the
+  fermionic merge→fused→resplit route, and the `chi_ref_charges` / `chi_seed`
+  keywords of `initialize_split_ctm_tensor_env` (unreleased, so no
+  deprecation period).
+
+- **The joint-VJP chain rule is the default.** `CTMConfig.adjoint_chain_rule`
+  now defaults to `"auto"`, which runs `"joint"` on the fused implicit-AD path
+  and leaves the split CTM (`fuse_virtual_legs=False`), which has its own chain
+  rule, as it was.  The separate params-VJP program (`_jit_chain_rule`) no
+  longer compiles.  Gradients equal the old default to round-off; U(1) D=3
+  chi=16 on one A100, first step: XLA compile 7,795→5,977 s (−23%), peak RSS
+  51→39 GB, warm steps unchanged.  `adjoint_chain_rule="separate"` restores the
+  old behaviour; an explicit `"joint"` is still refused on the split CTM.
+
+- **Flowing-projector gradients are slope-checked on non-stationary forwards
+  (#1111).** A solved flowing adjoint can still give a gradient orders of
+  magnitude off on a forward that is not a fixed point (measured 1497x on the
+  #1028 fixture, 86x at D=3 chi=12). When the forward is not stationary, the
+  backward now evaluates the energy once more along the gradient's descent
+  direction and keeps the flowing gradient only if the measured change is
+  0.5-2x the predicted one; otherwise it falls back to frozen projectors with
+  the reason in `flow_fallback_reason` and the ratio in `flow_slope_ratio`.
+  Measured: garbage flowing gradients 0.000-0.002, good ones 0.97-1.24. Cost:
+  one extra forward CTM evaluation per non-stationary flowing step (often every
+  step at D>=3, #841), measured ~27% of the gradient's wall time at D=3 dense
+  chi=12 on CPU (2.39 s of 8.81 s), plus a one-time recompile of the forward's
+  programs inside the backward (per shape/chi; ~2.3 s at D=2 chi=4, 7.7 s cold
+  vs 2.4 s warm at D=3 chi=12). Stationary forwards are unchanged. The check
+  catches grossly wrong flow gradients; it does not certify that flow beats
+  frozen (on a raw-`SymmetricTensor` version of the #1028 fixture flow is kept
+  at r=0.746 with FD errors 35%/37% where frozen is 13%/4%). For complex
+  parameters the check steps along `conj(G)`, JAX's descent convention.
+
+- **The eager-GMRES adjoint compiles the J^T matvec once.** The implicit-AD
+  backward's GMRES (`adjoint_method="gmres"`, and the fallback when the fused
+  Neumann loop does not converge) used JAX's GMRES, which applies the matvec
+  at three call sites (initial residual, Arnoldi step, restart residual), and
+  also compiled a fourth, standalone copy (`_jit_apply_Jt`) to choose the seed
+  and measure the residual (pre-optimization HLO: 4 matvec call sites, 3 of
+  them from JAX's GMRES; after XLA inlining, 2.42M HLO instructions, 2.8x the
+  standalone matvec's 852k). A new single-matvec GMRES does the seed choice, the solve
+  and the residual measurement in one program with one call site, and
+  `adjoint_method="fixed_point"` no longer compiles a separate `dE/denv` (the
+  `gmres` path still does).
+  Gradients agree with the previous solver to the solve tolerance, not bit
+  for bit. Measured on CPU, D=2 chi=8 U(1), first gradient with
+  `adjoint_method="gmres"`: 3,729 s -> 1,188 s.
+  The new solver also solves some flowing-projector adjoints that JAX's GMRES
+  stalled on, so `projector_backward="flow"` (the default under `bond_phase`)
+  is now accepted in cases where it used to fall back to frozen projectors.
+  On a non-stationary forward that flow gradient can be badly wrong (measured:
+  the D=2 #1028 fixture), and main already accepted such a gradient at D=3
+  chi=12; this is tracked in #1111.
+
+- **Block-sparse CTM-AD backward programs compile without XLA's CPU fusion
+  pass from D=3** (`_block_sparse_jit.py`; #566).  A `SymmetricTensor`
+  contraction traces one small op per pair of charge blocks.  The
+  implicit-AD backward of a symmetric state is therefore mostly reshapes,
+  transposes, scatters and small dots, which XLA's CPU instruction fusion
+  handles badly.  On CPU, at top level:
+
+  - `dE/denv`, the chain rule and the fused fixed-point backward compile
+    with `xla_disable_hlo_passes=fusion` when a site tensor has a virtual
+    bond of dimension 3 or more, or 20 or more charge blocks.
+  - The `J^T` product and the two GMRES solves, which contain only the
+    sweep VJP, go unfused only on the 20-block test (many-sector U(1)).
+    For graded states they compile about 2x faster fused.
+
+  Blocks are counted per site tensor, so D=2 states stay fused for any unit
+  cell.  The forward sweep and forward energy keep the default pipeline at
+  every size.  The chain rule, fermionic, compiled 89 / 1062 s fused /
+  unfused at D=2, 9363 / 2793 s at D=3, and more than 8000 / 3018 s at D=4.
+
+  From D=3 up, `dE/denv` runs faster unfused for every symmetry measured.
+  Warm run, fused against unfused:
+
+  | D, chi | U(1) | Z2 | fermionic |
+  |---|---|---|---|
+  | 2, 4-16 | 4.4 / 3.1 ms (chi=16) | 1.35 / 1.49 ms | 1.68 / 2.32 ms |
+  | 3, 6-9 | 14.7 / 10.5 ms (chi=6) | 8.65 / 7.41 ms | 26.3 / 10.9 ms |
+  | 4, 16 | - | 170 / 127 ms | 446 / 287 ms |
+  | 6, 36 | - | 11.5 / 10.0 s | 33.0 / 16.2 s |
+
+  The U(1) D=3 chi=9 `dE/denv` also compiled in 905 s unfused against
+  8569 s fused.  At D=2 every program favours fusion: the backward programs
+  of a D=2 U(1) `optimize_gs_ad` step compiled 1.8-3.5x slower unfused.  At
+  D>=3 the forward sweep, and the sweep VJP of graded states, compile
+  1.5-3.6x faster fused, and their run time differs by less than 15%.
+
+  Dense programs, other backends, calls inside an enclosing trace, and every
+  call on JAX older than 0.4.36 (no `compiler_options` on `jax.jit`) keep the
+  default pipeline.  Results are unchanged (D=2 U(1) `dE/denv`: maximum
+  difference 1.4e-17).
+
+- **Block-sparse `fuse_indices` and `split_index` emit no scatter**
+  (`_tensor_utils.py`; #566).  `fuse_indices` on a `SymmetricTensor` built
+  each fused block with one `.at[].set` scatter per input block.  It now
+  joins the sub-blocks of a fused block with one `concatenate`.  Legs whose
+  charges are not grouped by sector also get one fixed permutation (a
+  `take`; its backward is the only scatter left, one per reordered block).
+  `split_index` takes static slices where
+  the layout is contiguous.  Blocks are bit-identical to the old
+  implementation.  U(1) D=3 chi=9 `dE/denv`, before / after, measured side
+  by side:
+
+  | | before | after |
+  |---|---|---|
+  | jaxpr equations | 496,986 | 320,738 |
+  | `scatter` | 31,392 | 0 |
+  | compile, unfused | 1165 s | 967 s |
+  | warm run | 80.3 ms | 67.6 ms |
+
+  The remaining equations are the per-block-pair reshapes, transposes and
+  dots of the contractions themselves.
+
+- **Metric preconditioning is turned off for fermionic input** (#1059
+  finding 27).  `gs_metric_precond` (on by default) builds its norm matrix
+  with the sign-free contractor and `.todense()`, so on fermionic tensors it
+  was the hard-core-boson metric.  The descent guard kept it from changing
+  the fixed point or the reported energy, but L-BFGS and CG could lose
+  efficiency or fall back to steepest descent.  `optimize_gs_ad` (and so
+  `optimize_fpeps_ad`) now sets `gs_metric_precond=False` for a fermionic
+  gate, site or `gs_resume` checkpoint under L-BFGS or CG, with a `UserWarning`, as the split and
+  `cg_gates` map_fn paths already do.  Fermionic L-BFGS trajectories change.
+
+- **Fermionic input is refused where its signs would be dropped**
+  (#1059 findings 2 and 3).  Grading lives in the tensor type, so a
+  fermionic tensor made dense, or contracted without signs, silently
+  becomes a hard-core boson: the run optimised the boson model and
+  reported its energy as the fermionic one.  `NotImplementedError` now
+  fires, before any tensor work, for:
+  - `gs_c4v=True` with a fermionic gate or site (1-site and 2-site): the
+    C4v branches rebuild the site from a dense C4v basis;
+  - any root-implicit `ctm_ad_mode` with a fermionic gate or site:
+    `"root_implicit_symmetric"` contracts its graded double layer without
+    signs, and the dense engines make the gate dense.  The check sits in
+    `optimize_gs_ad_root_implicit`, so direct callers get it too;
+  - a fermionic gate with sites that are not all fermionic, including
+    `A_init=None`, which built a random dense site.  Pass `FermionParity`
+    `SymmetricTensor`s, or use `optimize_fpeps_ad` with an `FPEPSConfig`.
+
+  `optimize_fpeps_ad` runs the same checks.
+
+- **`optimize_fpeps_ad` now goes through `optimize_gs_ad`** (#1059
+  finding 1).  It called the private 1-site loop directly, so
+  `unit_cell="2site"` or a `Lattice` silently ran a uniform 1-site ansatz
+  (which cannot hold a CDW), `CTMConfig.ctm_ad_mode` was ignored, and none
+  of `optimize_gs_ad`'s config checks ran.  Now:
+  - every unit cell and AD engine `optimize_gs_ad` has is reachable, and
+    the return value has `optimize_gs_ad`'s shape for that unit cell
+    (`((A, B), (env_A, env_B), E)` for `"2site"`);
+  - `A_init=None` builds an `(A, B)` pair from `fpeps_config` for
+    `"2site"`, and is refused for a `Lattice`;
+  - a new keyword `envs_init` is passed through (the frozen-layout seed,
+    #1051);
+  - the default `unit_cell="1x1"` still runs the same 1-site loop with
+    the same gradients (its `projector_backward` was already resolved
+    inside that loop).  What it gains is the config validation: an
+    implicit-AD combination `optimize_gs_ad` refuses (e.g.
+    `projector_method="eigh"`, `forward_gauge="sigma"`, or a
+    `ctm_conv_method` other than `"elementwise"`) is now refused here too,
+    instead of running unchecked.
 
 - **The 1-site metric L-BFGS now has a memory.**  On the 1-site
   `optimize_gs_ad` path the metric L-BFGS built its curvature pair from
@@ -104,6 +395,15 @@
     so this costs nothing in the common case.
 
 ### Added
+
+- **Opt-in joint-VJP chain rule for the implicit-AD backward.**
+  `CTMConfig(adjoint_chain_rule="joint")` gets the chain rule's indirect term
+  from the GMRES adjoint solve's own VJP over `(params, env)`, so the separate
+  params-VJP program never compiles; the fused Neumann loop is unchanged and
+  is followed by that solve, seeded with its `λ`. Gradient equal to the
+  default to round-off. U(1) D=3 chi=16 two-site, one A100, first step: XLA
+  compile 7,795→5,977 s (−23%), wall 8,231→6,388 s, peak RSS 51→39 GB, warm
+  steps unchanged. (Now the default; see Behavior Changes.)
 
 - **CTM hold test: a saddle is not converged** (#1035): `ctm_tensor_2site`
   and `ctm_multisite` compared successive sweeps only, and that cannot tell
@@ -442,7 +742,100 @@
   return contract are unchanged, `BPGaugeInfo` is still `(int, float, bool)`,
   and a `SymmetricTensor` pair still takes the eager route bit-identically.
 
+- **`TENAX_STRICT_CONTRACT=1` detects block-sparse contractions that disagree
+  with the densified one** (#834). The block-sparse path pairs blocks by charge
+  **value**; dense einsum pairs by **position**. Where those differ the
+  mismatched products were discarded with a bare `continue` — no error, no
+  warning. Measured: 22 of 64 flow/charge configurations disagreed, by 4.2e-01
+  to 1.5e+00 relative, with `|sym|/|den|` from 0.458 to **1.514**. A result
+  *larger* than the true one is not discarded weight, so blocks were being
+  mis-paired. At all-zero charges every combination is exact, which is why this
+  survived — negation is the identity there, so the position→charge map cannot
+  be permuted.
+
+  With the flag set, `contract()` raises `ValueError` naming both legs.
+  Refusing is the only available answer, not a conservative one: the dense
+  result of such a contraction is generally not a symmetric tensor. With `A.k`
+  OUT `[-1,0,1]` against `B.k` IN `[1,0,-1]`, dense pairs charge −1 with charge
+  +1 and puts weight on output block `(i=1, j=-1)`, whose charge is −2 — no
+  `SymmetricTensor` over those indices can carry it. Over 256 configurations
+  strict mode is sound *and* complete: it admits every one that agrees with
+  dense and refuses every one that does not.
+
+  While armed the flag also **pins execution to the reference per-block path**,
+  overriding `TENAX_BATCH_BLOCKSPARSE`, `TENAX_STACK_BLOCKSPARSE` and
+  `TENAX_USE_CUTENSOR_BLOCKSPARSE`. Each of those returns before the discard
+  check and drops out-of-set output keys with its own bare `continue`, so an
+  audit that left them enabled reported clean on exactly the products it never
+  inspected — a partial audit is worse than none, since the contract of a
+  diagnostic is that silence means agreement.
+
+  **It is opt-in, and that is a measured decision rather than a cautious one.**
+  Both checks are structural — leg charges, flows, block keys — while whether
+  the two representations actually differ depends on the blocks' *values*, which
+  are traced. Scoring every `_contract_symmetric` call of a D=2, χ=8 charged
+  U(1)-Sz sweep against the densified contraction of the same operands, the
+  structural verdict is anti-correlated with the truth:
+
+  | call site | calls | max rel. gap |
+  |---|---|---|
+  | *refused*: `_apply_proj_unfused` | 40 | 1.7e-16 |
+  | *refused*: `_build_enlarged_corner` (4 frames) | 82 | 0.0 |
+  | *refused*: `_ctm_tensor_absorb_*_2plaq` (4) | 16 | 0.0 |
+  | *allowed*: `_apply_proj_unfused` | 56 | **8.3e-01** |
+
+  Every refusal is a false alarm — the discarded products are exactly zero — and
+  the one genuinely wrong site is allowed. A default-on check would break the
+  default CTM path *and* still miss the defect on it.
+
+  That last row is a real defect and is filed separately: its mechanism is
+  target inference over mixed-charge operands, not leg pairing. `test_contract_leg_pairing_834.py`
+  pins it so a fix announces itself.
+
+  `TensorIndex.is_dual_of()` is **not** the predicate — it is this tree's other
+  duality convention (opposite flow + *negated* charges) and admits 28 of those
+  256 configurations that produce wrong answers. Its docstring now says so, and
+  the two test fixtures that were built on it (`test_padded_block_array.py`,
+  `test_fermionic.py`) now use `flip_flow`; the latter was also a 2×2 with a
+  single nonzero, so it could not have caught this.
+
 ### Fixed
+
+- **The eager CTM sweep's piecewise `jax.jit` (#1142) ships off by default.**
+  No release ran it on, so v0.8.3 behaviour is unchanged.  #1142 jitted the static-shape pieces of an eager symmetric sweep.  That made
+  `test_ctm_symmetric_rdm_positive_853[20]` 5x faster (18 min vs 90 min) but
+  raised its peak RSS from 5.3 GB to 14.7 GB, which exhausts a 16 GB CI runner:
+  every later compile in the process failed with `LLVM compilation error:
+  Cannot allocate memory` / `Failed to materialize symbols` (and macOS runners
+  were OOM-killed, exit 137).  `_ctm_eager_jit._ENABLED` now defaults to
+  `False`, which is the pre-#1142 behaviour; it goes back on once that memory
+  is bounded.  `test_fermionic_eager_sweeps_match` also no longer compares a
+  chi cut that splits an exactly degenerate +q/-q pair (#1101), where the kept
+  member is decided by rounding.
+
+- **The joint chain rule's eager fallback logs again.**  When the fused
+  fixed-point loop does not solve the adjoint, the `"joint"` branch (the
+  default since `adjoint_chain_rule="auto"`, #1125) falls back to an eager GMRES
+  solve but no longer emitted the `tenax.ctm.gmres` debug line
+  `Eager GMRES: maxiter=... tol=... restart=...` that the `"separate"` branch
+  emits (#499).  The fallback itself always ran; only the log was missing.  This
+  had failed `test_gmres_logger_emits_at_eager_fallback` in every slow-bucket run
+  on `main` since #1125 (20 of 20 failed slow jobs, Oct 20-23).
+
+- **The CTM renormalisation no longer differentiates through `max`.**  The
+  CTM moves rescale every environment tensor by its largest `|entry|`, and the
+  gradient used to flow through that `max`.  The double-layer environment ties
+  the largest entry exactly (entries related by the ket<->bra swap), so the
+  sweep sat on a kink and the implicit-AD `J^T v` depended on which tied entry
+  rounding picked: on a D=3 U(1) chi=9 environment a 1e-15 relative change to
+  the input moved `J^T v` by 15% (34% with flowing projectors), and two
+  evaluations of the same program that round differently (JAX vs a torch
+  replay) disagreed by as much.  The scale is still `max |T|` in value, so the
+  forward is bit-identical, but its gradient is now that of
+  `(max|T| / ||T||_F) * ||T||_F` with the ratio held constant.  That is smooth,
+  and it still projects the scale direction out of the CTM Jacobian, which the
+  adjoint solve needs (freezing the scale outright left GMRES at a 7e-4
+  residual on a solve that converges).
 
 - **A symmetric `python_loop_ctm_converge` now chooses its chi-leg charge
   layout** (#1098, `_ctm_python_loop.py`).  Every sweep ran under
@@ -514,6 +907,102 @@
   - **Not covered:** chi slots added by the in-loop chi bump
     (`ctmrg_heuristic_increase_chi`) keep a frozen layout.
 
+- **The #1111 slope check's probe no longer recompiles the forward inside
+  the backward (#1116).**  A custom_vjp backward runs under JAX's recorded
+  equation context, which keys the jit and eager-dispatch caches on an empty
+  abstract mesh where top-level calls use the unset default, so the probe's
+  extra forward recompiled every program the forward had already compiled
+  (`_step`, `_bond_phase_fix_envs`, `_jit_forward_energy`, and the eager
+  primitives), once per process per signature.  Measured on CPU with the
+  forward pre-warmed: on the D=2 chi=4 1-site limit cycle the probe went
+  from 115 compiles / 3.69 s to 0 / 0.08 s and the whole gradient from
+  9.68 s to 5.90 s; on the D=2 chi=4 2-site pair the probe went from 99
+  compiles / 4.4 s to 0 / 0.15 s (cold gradient 21.7 s -> 17.1 s).  The probe now runs under the
+  top-level key; values, the slope ratio and the verdict are unchanged.  This
+  uses a private JAX API and is a no-op on a JAX that lacks it, or when the
+  caller set any abstract mesh (with axes, with an abstract device, or an
+  explicit empty one).
+
+- **`on_unconverged="warn"` no longer floods the log with one warning per
+  forward** (`_ctm_convergence_policy.py`, `ipeps_optimize.py`; #1083).  A
+  3-step run emitted ~19 near-identical warnings from five call sites, which
+  Python's once-per-location filter cannot merge.  `optimize_gs_ad` now emits
+  the first warning per (site, step) (best point and last iterate are kept
+  separate), the next warning says "(N similar suppressed)", and the total is
+  returned as `history["ctm_warnings_suppressed"]`.  Direct helper calls outside
+  a run still warn every time.
+
+- **The 1-site `return_history` lists no longer drift after a gradient-spike
+  rollback** (`ipeps_optimize.py`; #1082).  The 1-site loop appended each
+  step's CTM-forward entries but skipped the energy and timing of a rolled-back
+  step, so `energies` ended one short of `ctm_converged` / `ctm_sv_diff` per
+  rollback (3 vs 4 on a 4-step run).  The rolled-back step is now recorded, as
+  the 2-site loop already did.
+
+- **An unconverged best point no longer aborts the final evaluation when the
+  last iterate converges (#1081).** `optimize_gs_ad` re-evaluates the best
+  and the last parameters with a fresh CTM.  The best point was never allowed
+  to be dropped, so if its cold CTM missed the tolerance and no certified warm
+  environment existed, the run raised `CTMNotConvergedError` before the
+  converging last iterate was ever evaluated.  The best point is now skipped
+  in that case; the run still raises if both candidates are unconverged.
+
+- **The AD optimizer's best energy now follows a re-measurement of the best
+  state (#1095).** `best_energy` could only go down, so one in-loop energy
+  that read too low (for example from an under-converged CTM environment)
+  stayed the best for the rest of the run. After a rollback re-solved the
+  best tensors and measured them honestly higher, the honest value was
+  rejected and every later step was ranked against a value the state does
+  not have. When the energy is measured at the best tensors themselves and
+  that CTM forward is certified (converged, or not known to be
+  unconverged), it now replaces the stored best even if it is higher (still
+  subject to the finiteness and `gs_energy_floor` checks), on the 1-site,
+  2-site and multisite paths, and the 1-site and 2-site best checkpoint is
+  rewritten to match. An unconverged re-measure under
+  `on_unconverged="warn"` can still lower the best but never raise it. This
+  happens after every rollback to the best tensors, including the chi-bump
+  and stage-advance rollbacks, so the logged `E_best` is re-based at the new
+  chi and can jump up at stage boundaries.
+- **The implicit-AD warm start no longer reuses an adjoint of another dtype
+  (#1113).** The cached adjoint vector was reused when its leaf shapes matched,
+  regardless of dtype. A `jax.grad` over `ctm_energy_implicit` that switched
+  between complex and real site tensors while reusing the same gate and
+  neighbours objects raised a dtype `ValueError`. The seed check now also
+  compares dtypes, so such a backward starts cold. `optimize_gs_ad` was not
+  affected: it clears the warm start at the start of every run (#973).
+
+- **The JAX floor is now `jax>=0.4.35`, the oldest version tenax imports
+  on** (#1105).  `pyproject.toml` declared `jax>=0.4.30`, but
+  `src/tenax/linalg.py` imports `jax.lax.linalg.SvdAlgorithm` (#691), which
+  exists only from 0.4.35, so `import tenax` failed on 0.4.30-0.4.34.  The
+  floor of `dependencies` and of every accelerator extra is raised.  The
+  `cuda13` and `cuda13-local` extras get `jax>=0.7.0`, the first JAX that
+  defines those extras; an older JAX skips them with only a warning and
+  installs no CUDA 13 plugin.  On
+  0.4.35 the tensor, contraction, linalg, SVD, DMRG and block-sparse-jit
+  tests pass (306 passed, 20 skipped).
+
+- **The block-sparse no-fusion dispatch no longer raises on JAX
+  0.4.36-0.5.3** (#1102 follow-up).  `jax.jit` accepts `compiler_options` from
+  0.4.36, but XLA rejects `xla_disable_hlo_passes` as a string until 0.6.0
+  (`RuntimeError: ... Field is repeated`).  On those versions every D>=3
+  symmetric implicit-AD backward raised instead of compiling.  The dispatch
+  now compiles one scalar program with the option on the first call that
+  would go unfused, and if that fails every call keeps the default pipeline
+  (`no_fusion_compiles`).  Checked with real JAX 0.4.35, 0.4.36, 0.5.3, 0.6.0
+  and 0.10.2.
+
+- **`SymmetricTensor.blocks` no longer caches tracers on a concrete tensor**
+  (#1103).  The block dict is cached on the tensor the first time it is
+  read.  When that first read happened inside a `jax.jit` that closes over a
+  concrete tensor, the cached slices were tracers, and the next eager use of
+  the tensor raised `UnexpectedTracerError`.  It hit `ctm_energy_implicit`
+  with a `SymmetricTensor` gate, which the compiled energy programs close
+  over: `jax.grad` failed in the backward.  Slices are now cached only when
+  they are concrete or belong to the same trace as the tensor's data, so an
+  inner `jax.jit` over a tensor of an outer trace leaves no tracer either.
+  Eager reads, and repeated reads inside one trace, still use the cache.
+
 - **Hager-Zhang `phi` probes warm-start CTM from the step's env**
   (`ipeps_optimize.py`, 1-site, 2-site and multisite).  Each probe used to
   start from the previous probe's env (the #502 write-back), so the env a
@@ -557,6 +1046,37 @@
   call, so the same warnings -- or, under warnings-as-errors, the same
   `RuntimeWarning` -- reach the caller.  The line search's and final
   evaluation's own energy calls outside the dispatch are unchanged.
+
+- **A second `optimize_gs_ad` call no longer recompiles the implicit-AD
+  backward** (#1049, `_ctm_energy_ad.py`, `_ctm_honeycomb_ad.py`).  The
+  compile cache keyed the backward on `id(gate)`, `id(energy_fn)` and
+  `id(neighbors)`, and the optimizer builds its energy callback as a fresh
+  closure per call, so every call missed, re-traced and re-compiled the
+  backward (measured ~82-92 s per extra call at D=2 chi=8; a D=3 backward
+  compile takes hours on CPU) and left the old entry behind for good.  The
+  key now uses values where the value is the whole story
+  (`_cache_fingerprint.py`): data -- Python scalars by exact type (floats
+  by bit pattern), strings, tuples, lists, dicts in order, frozensets
+  (in iteration order), `jax.Array`s
+  (shape, exact dtype, weak-type bit, placement -- `committed` and `sharding` --,
+  contents), and tenax-owned types walked
+  field by field, NumPy metadata inside them included (`TensorIndex.__eq__`
+  ignores `fuse_info`, so equality is never trusted)
+  -- and the optimizers' own energy callbacks, which declare exactly what
+  they capture with `declare_cache_key` (checked at declaration).  User
+  callbacks, bound methods, mutable sets, a user's NumPy arrays and scalars
+  (whose flags and strides are observable too) and foreign objects keep the
+  old identity key -- and a user callback's gate and neighbors do too, since
+  it may branch on their identity -- since their behaviour can depend on state no fingerprint sees; that
+  can only miss.  A gate with different values still gets its own compiled
+  backward.  Only the compiled code is shared: the adjoint warm-start seed and
+  the once-per-run warning latches belong to one run -- one energy callback,
+  gate and neighbors by identity, which is what the key was before -- so a
+  new gate or callback starts cold even when it hits the cache, and a
+  backward uses the run of its own forward.  Each entry keeps at most 8 runs.  The cache is now an
+  LRU of at most 8 entries.  On the 2-site D=2 chi=4 repro, the second call drops
+  from 7.7 s (backward re-traced, a second cache entry) to 1.3 s (no
+  backward trace, one entry).
 - **The implicit-AD backward compiles its chain rule once, not once per
   solver** (`_ctm_energy_ad.py`).  The chain rule -- the params-VJP of the
   CTM sweep, most of the backward's compile -- lived inside the fused
@@ -1521,99 +2041,6 @@
   strict `xfail` on a known-dying seed rather than papering over with a luckier
   one.
 
-### Added
-
-- **`TENAX_STRICT_CONTRACT=1` detects block-sparse contractions that disagree
-  with the densified one** (#834). The block-sparse path pairs blocks by charge
-  **value**; dense einsum pairs by **position**. Where those differ the
-  mismatched products were discarded with a bare `continue` — no error, no
-  warning. Measured: 22 of 64 flow/charge configurations disagreed, by 4.2e-01
-  to 1.5e+00 relative, with `|sym|/|den|` from 0.458 to **1.514**. A result
-  *larger* than the true one is not discarded weight, so blocks were being
-  mis-paired. At all-zero charges every combination is exact, which is why this
-  survived — negation is the identity there, so the position→charge map cannot
-  be permuted.
-
-  With the flag set, `contract()` raises `ValueError` naming both legs.
-  Refusing is the only available answer, not a conservative one: the dense
-  result of such a contraction is generally not a symmetric tensor. With `A.k`
-  OUT `[-1,0,1]` against `B.k` IN `[1,0,-1]`, dense pairs charge −1 with charge
-  +1 and puts weight on output block `(i=1, j=-1)`, whose charge is −2 — no
-  `SymmetricTensor` over those indices can carry it. Over 256 configurations
-  strict mode is sound *and* complete: it admits every one that agrees with
-  dense and refuses every one that does not.
-
-  While armed the flag also **pins execution to the reference per-block path**,
-  overriding `TENAX_BATCH_BLOCKSPARSE`, `TENAX_STACK_BLOCKSPARSE` and
-  `TENAX_USE_CUTENSOR_BLOCKSPARSE`. Each of those returns before the discard
-  check and drops out-of-set output keys with its own bare `continue`, so an
-  audit that left them enabled reported clean on exactly the products it never
-  inspected — a partial audit is worse than none, since the contract of a
-  diagnostic is that silence means agreement.
-
-  **It is opt-in, and that is a measured decision rather than a cautious one.**
-  Both checks are structural — leg charges, flows, block keys — while whether
-  the two representations actually differ depends on the blocks' *values*, which
-  are traced. Scoring every `_contract_symmetric` call of a D=2, χ=8 charged
-  U(1)-Sz sweep against the densified contraction of the same operands, the
-  structural verdict is anti-correlated with the truth:
-
-  | call site | calls | max rel. gap |
-  |---|---|---|
-  | *refused*: `_apply_proj_unfused` | 40 | 1.7e-16 |
-  | *refused*: `_build_enlarged_corner` (4 frames) | 82 | 0.0 |
-  | *refused*: `_ctm_tensor_absorb_*_2plaq` (4) | 16 | 0.0 |
-  | *allowed*: `_apply_proj_unfused` | 56 | **8.3e-01** |
-
-  Every refusal is a false alarm — the discarded products are exactly zero — and
-  the one genuinely wrong site is allowed. A default-on check would break the
-  default CTM path *and* still miss the defect on it.
-
-  That last row is a real defect and is filed separately: its mechanism is
-  target inference over mixed-charge operands, not leg pairing. `test_contract_leg_pairing_834.py`
-  pins it so a fix announces itself.
-
-  `TensorIndex.is_dual_of()` is **not** the predicate — it is this tree's other
-  duality convention (opposite flow + *negated* charges) and admits 28 of those
-  256 configurations that produce wrong answers. Its docstring now says so, and
-  the two test fixtures that were built on it (`test_padded_block_array.py`,
-  `test_fermionic.py`) now use `flip_flow`; the latter was also a 2×2 with a
-  single nonzero, so it could not have caught this.
-
-### ⚠️ Published performance claims retracted
-
-- **The v0.8.2 iPEPS multi-GPU / split-CTM frontier numbers were measured
-  against a collapsed CTM environment and are retracted** (#747, #825). The
-  #672 benchmark ran `recipe="1x1"` on both arms; that projector drives the
-  environment to a rank-1 corner (#723/#726), i.e. a χ_eff=1 mean-field
-  boundary, so its (D,χ) reach figures described how cheaply *that* scales
-  rather than the reach of a converged CTM. Re-derived at `recipe="2x2"` on
-  A100-80GB, with `corner_rank` gated and every ceiling walled:
-
-  | claim as published | re-measured |
-  |---|---|
-  | "split-CTM on 1 GPU beats dense on 2 across the whole (D,χ) frontier" | **ties** dense-2GPU at D=8 (χ=96) and D=10 (χ=48); wins **2× only at D=12** |
-  | frontier reach D=10 χ≥128, D=12 χ96 | **D=8 χ=96, D=10 χ=48, D=12 χ=32** |
-  | split-1GPU ceilings χ=224 (D=8) / χ=128 (D=10), compile-bound | **χ=96 / χ=48**, and **memory**-bound — every autotuner wall converts to a plain OOM under `--xla_gpu_autotune_level=0` |
-  | dense shard relief ~1.1–1.4×/device, never extends D-reach | **0.88–1.77×/device** (at D=12 sharding *costs* 14%); extends reach once, D=8 χ=64→96 |
-
-  **The multi-GPU CTM-AD NO-GO itself is unaffected** — it rests on the
-  SVD-replication mechanism, which is recipe-independent. What changed is the
-  split-vs-dense comparison layered on top of it. Split-CTM is still the better
-  path on equal hardware (1.5× in χ at D=8, 2× at D=12) and still matches a
-  2-GPU dense run using one GPU at D=12; the advantage is simply much smaller
-  than published, and it *erodes with χ* — 2.66× in peak at χ=16 down to 1.02×
-  at the ceiling.
-
-  One caveat on attribution: a same-recipe control showed that replacing the
-  BFC allocator with `cuda_async` alone moves the *dense* arm (D=12 χ=16 goes
-  autotuner-fail → OK at unchanged `1x1`), so #672's "dense cannot compile even
-  χ16 / split is the only path that runs D=12" falls to the allocator rather
-  than the recipe. The split-side collapse is cleanly the recipe — its controls
-  reproduce to ≤1.8%.
-
-### Fixes
-
 - **Simple update converged to the product state; every `ipeps()` result is
   affected** (#667). Two independent defects in the simple-update path:
 
@@ -1686,7 +2113,82 @@
   is what rules out a finite-difference artifact. That one is gated by a strict
   `xfail`, not by a loosened threshold.
 
+### ⚠️ Published performance claims retracted
+
+- **The v0.8.2 iPEPS multi-GPU / split-CTM frontier numbers were measured
+  against a collapsed CTM environment and are retracted** (#747, #825). The
+  #672 benchmark ran `recipe="1x1"` on both arms; that projector drives the
+  environment to a rank-1 corner (#723/#726), i.e. a χ_eff=1 mean-field
+  boundary, so its (D,χ) reach figures described how cheaply *that* scales
+  rather than the reach of a converged CTM. Re-derived at `recipe="2x2"` on
+  A100-80GB, with `corner_rank` gated and every ceiling walled:
+
+  | claim as published | re-measured |
+  |---|---|
+  | "split-CTM on 1 GPU beats dense on 2 across the whole (D,χ) frontier" | **ties** dense-2GPU at D=8 (χ=96) and D=10 (χ=48); wins **2× only at D=12** |
+  | frontier reach D=10 χ≥128, D=12 χ96 | **D=8 χ=96, D=10 χ=48, D=12 χ=32** |
+  | split-1GPU ceilings χ=224 (D=8) / χ=128 (D=10), compile-bound | **χ=96 / χ=48**, and **memory**-bound — every autotuner wall converts to a plain OOM under `--xla_gpu_autotune_level=0` |
+  | dense shard relief ~1.1–1.4×/device, never extends D-reach | **0.88–1.77×/device** (at D=12 sharding *costs* 14%); extends reach once, D=8 χ=64→96 |
+
+  **The multi-GPU CTM-AD NO-GO itself is unaffected** — it rests on the
+  SVD-replication mechanism, which is recipe-independent. What changed is the
+  split-vs-dense comparison layered on top of it. Split-CTM is still the better
+  path on equal hardware (1.5× in χ at D=8, 2× at D=12) and still matches a
+  2-GPU dense run using one GPU at D=12; the advantage is simply much smaller
+  than published, and it *erodes with χ* — 2.66× in peak at χ=16 down to 1.02×
+  at the ceiling.
+
+  One caveat on attribution: a same-recipe control showed that replacing the
+  BFC allocator with `cuda_async` alone moves the *dense* arm (D=12 χ=16 goes
+  autotuner-fail → OK at unchanged `1x1`), so #672's "dense cannot compile even
+  χ16 / split is the only path that runs D=12" falls to the allocator rather
+  than the recipe. The split-side collapse is cleanly the recipe — its controls
+  reproduce to ≤1.8%.
+
 ### CI / tests
+
+- **Slow-bucket prune: tests pin behaviour, not scaffolding.**  Deleted slow
+  tests whose claim a kept test asserts at least as strongly (the #853 D=3
+  control, the D=3 / chi-scan / one-step U(1)-Sz duplicates of the #922 and
+  #905 sym==dense parity anchors, the #834 D=3 call-site spy, the 1059 / 1111 /
+  block-sparse / DMRG3S / CBE / #865-mutation duplicates, the
+  deprecated-`1x1` split production run, the #566 stacked-backend profiler
+  file) and three files that could not fail (always skipped).  Demoted
+  measurements, research findings and the acceptance sweep of the unshipped
+  `ipeps_su` engine (`test_ipeps_su.py`, the symmetric-D=3 / fermionic cells
+  of `test_ipeps_gauge.py`, the #785 anti-correlation pin, the split-CG
+  memory budget, the fake-device sharding parity, the excitation benchmark)
+  to a new opt-in `diagnostic` marker, skipped unless `TENAX_RUN_DIAGNOSTIC=1`
+  (`TENAX_RUN_DIAGNOSTIC=1 pytest -m diagnostic`; it replaces
+  `RUN_EXCITATION_BENCH=1`).  Estimated saving ~15,300 s of slow-bucket CI
+  time (per-file max over the three platforms, summed).  One cheap anchor
+  replaces the #853 control: 1-site `ctm_tensor` sym==dense energy plus RDM
+  positivity on a charged U(1)-Sz site at D=2 chi=8
+  (`test_ctm_charged_sectors_905.py`, core, ~95 s).  A second pass trimmed 26
+  slow-bucket files to the behaviour they pin (duplicate cells, smoke tests
+  an FD/parity test implies, sweeps of PRNG keys and jitters, mutation
+  scaffolding, fixtures rebuilt per test; the #898 pair densified, the
+  `test_frozen_layout_ad.py` scripted re-check tests run on a stubbed CTM),
+  cutting the affected tests from 14,301 s to 5,802 s locally (CPU, one run
+  each) and the slow collection from 210 to 129 tests.  A third pass trimmed
+  15 core and fast-other files the same way (the #905 2-site guards and the
+  #834 strict sweep at chi=4, re-checked against the restored #905 defect;
+  `fuse_indices` checked against the dense reference instead of a copy of
+  its old implementation; shared fixtures for envs rebuilt per test; the
+  control-flow cells of the #1098 layout tests on U(1) only), cutting them
+  from 2,026 s to 1,055 s (core) and 5,358 s to 3,913 s (fast-other) locally,
+  cold compile cache; one graded-CTM parity check (~276 s) moved to slow.
+- **Removed two unfixable `recipe="1x1"` QR tests and added a duplicate-definition
+  guard** (#931, #926).  `test_implicit_qr_gradient_matches_fd` failed
+  intermittently on main CI (directional FD off by 0.364 against TOL 0.35,
+  locally 0.166) and `test_implicit_qr_eigh_gradient_gap_shrinks_with_chi` was
+  an `xfail(strict=False)` that passed or failed by which chi pair it sampled;
+  both ran on a diverged rank-1 forward and cannot be re-pointed at a converged
+  configuration (the QR projector is inert on `recipe="2x2"`).  End-to-end
+  QR-projector gradient correctness is therefore now untested: the QR projector
+  only acts on `recipe="1x1"`, whose forward does not converge (#795).
+  `tests/test_no_duplicate_definitions.py` now fails on any repeated
+  class/function name at module or class scope in `src/tenax`.
 
 - **`test_regularized_qr_backward_finite_at_rank_deficiency` now fails when the
   `diag(R)` floor is removed** (#927).  It previously did not: the input was
@@ -1972,7 +2474,7 @@ additive features (multi-GPU HOTRG, 2-site split-CTM, Potts helpers).
   all-gathers whatever GSPMD sharded. TRG is likewise not a sharding target
   (no χ⁶ intermediate); HOTRG is, and shipped above. **The NO-GO stands, but
   two figures published in this entry were measured against a collapsed CTM
-  environment and are retracted — see Unreleased (#747, #825).** They were:
+  environment and are retracted — see v0.9.0 (#747, #825).** They were:
   "dense sharding gives only ~1.1–1.4×/device and never extends D-reach"
   (re-measured: 0.88–1.77×/device, and it does extend reach once, D=8 χ=64→96)
   and "split-CTM on 1 GPU beats dense on 2 across the whole (D,χ) frontier"

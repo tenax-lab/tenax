@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 # Defined in the leaf policy module so ``_ctm_tensor_convergence`` can build
 # one without importing this module (which imports it: an import cycle).
+from tenax.algorithms import _ctm_eager_jit as _ej
 from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
 from tenax.algorithms._ctm_loop_core import (
     _run_ctm_loop_with_bump,
@@ -174,7 +175,9 @@ def _ctm_sweep(
 
     Called directly (not jitted) by the #1098 eager layout phase.
     """
-    double_layers = {c: _build_double_layer_tensor(A) for c, A in site_tensors.items()}
+    double_layers = {
+        c: _ej.call(_build_double_layer_tensor, A) for c, A in site_tensors.items()
+    }
     return _ctm_tensor_sweep_multisite(
         envs,
         double_layers,
@@ -916,6 +919,21 @@ def python_loop_ctm_converge(
     pre = warmup
     eager_budget = min(eager_layout_sweeps, max_iter - warmup)
     layout_phase = eager_budget > 0 and _needs_eager_layout_phase(site_tensors, envs)
+    if (
+        warmup > 0
+        and eager_budget <= 0
+        and _needs_eager_layout_phase(site_tensors, envs)
+    ):
+        # The jitted warm-up keeps the layout it is handed, so with no sweep
+        # left there is no layout phase and no end-of-call check either.
+        warnings.warn(
+            "python_loop_ctm_converge: the QR warm-up "
+            f"(qr_warmup_steps={qr_warmup_steps}) used the whole iteration "
+            f"budget (max_iter={max_iter}), so the symmetric chi-leg layout "
+            "was not adapted (#1098).  The result may be the energy of the "
+            "cold-init layout; raise max_iter.",
+            stacklevel=2,
+        )
     outcome = "stable"
     # #1098: False on every branch below that warns the layout is uncertified.
     layout_certified = True

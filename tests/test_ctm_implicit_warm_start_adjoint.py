@@ -38,13 +38,25 @@ from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor
 
 
 def _make_su_tensor(D: int = 2, d: int = 2):
-    """SU-initialized site tensor (well-conditioned for CTM)."""
+    """SU-initialized site tensor (well-conditioned for CTM).
+
+    ``compute_energy=False``: only the SU state is used, never the energy
+    ``ipeps()`` would read off its own CTM.
+    """
     gate = heisenberg_gate()
     config = iPEPSConfig(max_bond_dim=D, num_imaginary_steps=100, dt=0.05)
-    _, (A_su, _), _ = ipeps(gate, None, config)
+    _, (A_su, _), _ = ipeps(gate, None, config, compute_energy=False)
     data = A_su.todense()
     data = data / jnp.linalg.norm(data)
     return data  # raw jax.Array; wrapped per-call inside _loss
+
+
+@pytest.fixture(scope="module")
+def su_params():
+    """One SU tensor for the whole module (slow-bucket prune, #1149): every
+    test used to rebuild the same deterministic state.  Read-only -- each
+    test wraps it per call inside ``_loss``."""
+    return _make_su_tensor(D=2, d=2)
 
 
 def _make_loss_fn(*, gmres_maxiter: int = 200, gmres_tol: float = 1e-6):
@@ -68,7 +80,7 @@ def _make_loss_fn(*, gmres_maxiter: int = 200, gmres_tol: float = 1e-6):
     return _loss
 
 
-def test_adjoint_warm_start_grad_unchanged():
+def test_adjoint_warm_start_grad_unchanged(su_params):
     """Repeated ``jax.grad`` calls on the same params return identical grads.
 
     Warm-start must converge to the same fixed point as cold-start; if
@@ -85,7 +97,7 @@ def test_adjoint_warm_start_grad_unchanged():
     1e-10 the assertion has ~2000x of margin, which also keeps it off the
     platform-tolerance rocks that #756 hit.
     """
-    params = _make_su_tensor(D=2, d=2)
+    params = su_params
     loss = _make_loss_fn(gmres_tol=1e-10)
 
     g1 = jax.grad(loss)(params)
@@ -99,13 +111,14 @@ def test_adjoint_warm_start_grad_unchanged():
 
 
 @pytest.mark.slow  # ~31s; performance, not correctness -- warm start being *faster* cannot produce a wrong answer (#933)
-def test_adjoint_warm_start_reduces_iters():
+@pytest.mark.diagnostic  # a measurement; opt in with TENAX_RUN_DIAGNOSTIC=1 (#1149)
+def test_adjoint_warm_start_reduces_iters(su_params):
     """Second ``jax.grad`` call uses cached warm-start, converging in <= iters.
 
     Reads ``_F3_LAST_DIAGNOSTICS["n_iter"]`` after each call.  The second
     call should match or beat the first.
     """
-    params = _make_su_tensor(D=2, d=2)
+    params = su_params
     loss = _make_loss_fn()
 
     # Cold start: init_lam = dE_denv.
@@ -144,13 +157,13 @@ def test_adjoint_warm_start_reduces_iters():
     )
 
 
-def test_adjoint_warm_start_invalidated_on_divergence():
+def test_adjoint_warm_start_invalidated_on_divergence(su_params):
     """When the fused JIT loop fails to converge, the cache is invalidated
     and the eager-GMRES fallback fires.  ``warm_start_invalidated`` is set;
     the eager-solve result then refills the cache so the next call still
     warm-starts (and may even converge directly in the fused JIT loop).
     """
-    params = _make_su_tensor(D=2, d=2)
+    params = su_params
     # gmres_maxiter=1 forces the Neumann loop to bail without reaching
     # gmres_tol on the cold call — pushes the first call through the
     # eager-GMRES fallback.  The eager solver may not converge either,
@@ -181,30 +194,7 @@ def test_adjoint_warm_start_invalidated_on_divergence():
     # exception already verifies.
 
 
-@pytest.mark.slow  # ~31s; asserts a log line, not a numerical result (#933)
-def test_gmres_logger_emits_at_f3_path(caplog):
-    """f_bwd's F3 success path emits a DEBUG record on the tenax.ctm.gmres logger.
-
-    Task 10 (#499): the F3 fused-fixed-point adjoint solve must emit
-    diagnostics (n_iter / converged / diverged / tol) on the
-    ``tenax.ctm.gmres`` logger after each backward.  The log is DEBUG
-    level so it stays silent by default and observable when users opt in.
-    """
-    params = _make_su_tensor(D=2, d=2)
-    loss = _make_loss_fn()
-
-    with caplog.at_level(logging.DEBUG, logger="tenax.ctm.gmres"):
-        jax.grad(loss)(params)
-
-    # At least one DEBUG record matching "F3 adjoint" must appear.
-    assert any(
-        "F3 adjoint" in rec.message
-        for rec in caplog.records
-        if rec.name == "tenax.ctm.gmres" and rec.levelno == logging.DEBUG
-    ), f"No F3 adjoint log; got {[r.message for r in caplog.records]}"
-
-
-def test_adjoint_warm_start_invalidated_on_shape_mismatch():
+def test_adjoint_warm_start_invalidated_on_shape_mismatch(su_params):
     """Warm-start cache rejects stale lam_leaves with mismatched shapes.
 
     Regression for PR #515 Codex review: changing site_tensor shape
@@ -215,7 +205,7 @@ def test_adjoint_warm_start_invalidated_on_shape_mismatch():
     The ``_VJP_CACHE`` key derives from (coords, chi, gate id, neighbors
     id, ...) — it does NOT include ``site_tensor`` shape.  So a D-sweep
     that keeps coords/gate/neighbors constant hits the SAME cached VJP
-    closure (and the same ``_cached["prev_lam_leaves"]`` dict) with
+    closure (and the same run's ``prev_lam_leaves``) with
     differently-shaped env_leaves.  We simulate this by manually
     injecting a wrong-shape ``prev_lam_leaves`` into the cached closure
     and verifying the next ``jax.grad`` call invalidates it (rather than
@@ -230,15 +220,14 @@ def test_adjoint_warm_start_invalidated_on_shape_mismatch():
     # pick the wrong one.
     _VJP_CACHE.clear()
 
-    params = _make_su_tensor(D=2, d=2)
+    params = su_params
     loss = _make_loss_fn()
 
-    # Step 1: warm-up call populates _cached["prev_lam_leaves"] with
+    # Step 1: warm-up call populates the run's prev_lam_leaves with
     # leaves shaped like env_leaves for the current (D, chi) probe.
     jax.grad(loss)(params)
 
-    # Step 2: locate the live _cached dict via the f.bwd closure of
-    # the cached VJP entry, then inject a deliberately-wrong-shape
+    # Step 2: locate the run state of the cached VJP entry, then inject a deliberately-wrong-shape
     # prev_lam_leaves entry.  This mimics the D-sweep scenario where
     # the previous grad call ran at a different shape but the same
     # cache_key, so the stale lam_leaves carry over.
@@ -246,17 +235,9 @@ def test_adjoint_warm_start_invalidated_on_shape_mismatch():
         f"expected exactly one VJP entry after the warm-up call; "
         f"found {len(_VJP_CACHE)}"
     )
-    f_cached, _mutables = next(iter(_VJP_CACHE.values()))
-    cached_dict = None
-    for cell in f_cached.bwd.__closure__:
-        try:
-            v = cell.cell_contents
-        except ValueError:
-            continue
-        if isinstance(v, dict) and "prev_lam_leaves" in v:
-            cached_dict = v
-            break
-    assert cached_dict is not None, "could not locate _cached dict in f.bwd closure"
+    _f_cached, mutables = next(iter(_VJP_CACHE.values()))
+    # The seed lives in the entry's run state (#1049); one loss is one run.
+    (cached_dict,) = [state for _token, state, _objects in mutables["_runs"].values()]
     assert cached_dict["prev_lam_leaves"] is not None, (
         "warm-up call did not populate prev_lam_leaves; "
         "f_bwd may have hit the divergence/fallback path"
@@ -284,7 +265,7 @@ def test_adjoint_warm_start_invalidated_on_shape_mismatch():
 
 
 @pytest.mark.slow  # ~31s; API mechanics of the invalidation helper; the two invalidation *behaviours* stay in core (#933)
-def test_invalidate_implicit_ad_warm_start_clears_seed():
+def test_invalidate_implicit_ad_warm_start_clears_seed(su_params):
     """Public invalidation API drops the cached prev_lam_leaves seed (#501).
 
     After a stall-recovery rollback (``params = best_params``) the cached
@@ -301,26 +282,17 @@ def test_invalidate_implicit_ad_warm_start_clears_seed():
     # Empty cache: invalidation is a no-op and reports 0 entries cleared.
     assert invalidate_implicit_ad_warm_start() == 0
 
-    params = _make_su_tensor(D=2, d=2)
+    params = su_params
     loss = _make_loss_fn()
 
     # Populate cache and confirm the seed is cached.
     jax.grad(loss)(params)
     assert len(_VJP_CACHE) == 1
-    f_cached, mutables = next(iter(_VJP_CACHE.values()))
+    _f_cached, mutables = next(iter(_VJP_CACHE.values()))
     assert "_invalidate_warm_start" in mutables, (
         "make_implicit_vjp_fn must register the warm-start invalidator in mutables"
     )
-    cached_dict = None
-    for cell in f_cached.bwd.__closure__:
-        try:
-            v = cell.cell_contents
-        except ValueError:
-            continue
-        if isinstance(v, dict) and "prev_lam_leaves" in v:
-            cached_dict = v
-            break
-    assert cached_dict is not None
+    (cached_dict,) = [state for _token, state, _objects in mutables["_runs"].values()]
     assert cached_dict["prev_lam_leaves"] is not None, (
         "warm-up call must seed prev_lam_leaves"
     )
@@ -342,14 +314,16 @@ def test_invalidate_implicit_ad_warm_start_clears_seed():
 
 
 @pytest.mark.slow  # ~31s; asserts a log line, not a numerical result (#933)
-def test_gmres_logger_emits_at_eager_fallback(caplog):
+def test_gmres_logger_emits_at_eager_fallback(su_params, caplog):
     """When F3 diverges (gmres_maxiter=1 forces it), eager-GMRES log fires too.
 
     Task 10 (#499): both the F3 success log AND the eager-GMRES log
     must appear when the fused JIT loop fails to converge and the
-    eager-Krylov fallback runs.
+    eager-Krylov fallback runs.  The F3-only twin of this test was removed
+    in the slow-bucket prune (#1149): this one asserts the "F3 adjoint"
+    line as well.
     """
-    params = _make_su_tensor(D=2, d=2)
+    params = su_params
     # gmres_maxiter=1 forces F3 to bail without reaching gmres_tol, so
     # the eager fallback runs and emits its own log line.
     loss_capped = _make_loss_fn(gmres_maxiter=1)

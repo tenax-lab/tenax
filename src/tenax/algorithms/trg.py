@@ -334,7 +334,9 @@ def potts_critical_beta(q: int = 3, J: float = 1.0) -> float:
 def ising_free_energy_exact(beta: float, J: float = 1.0) -> float:
     """Compute the exact 2D Ising free energy per site via Onsager's formula.
 
-    The exact result for ln(Z)/N on the square lattice is:
+    Returns ``f = -ln(Z)/(N*beta)``, not ``ln(Z)/N``: compare it with
+    ``-trg(...) / beta``.  Onsager's exact result for ln(Z)/N on the square
+    lattice is:
 
       ln(Z)/N = ln(2) + (1/(2*pi^2)) * int_0^pi int_0^pi
                 ln(cosh^2(2K) - sinh(2K)*(cos t1 + cos t2)) dt1 dt2

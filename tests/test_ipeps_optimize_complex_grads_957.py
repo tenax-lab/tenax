@@ -29,20 +29,24 @@ from tenax import CTMConfig, iPEPSConfig, optimize_gs_ad
 # <psi|Z|psi> for psi = [1, 0.5j]/sqrt(1.25): (1 - 0.25)/1.25.
 _E_INITIAL = 0.6
 
-# (path, optimizer): the two paths the issue measured, plus the two other
-# optimizers of the explicit path.  The reference loop drives Optax directly,
-# so it is exercised with adam only, as in the issue.  The root-implicit loop
-# is a third, independent production site for raw cotangents — missed by the
-# first #957 pass and caught in review (the duplicate-implementation trap);
-# pre-fix, adam returned its untouched initial energy with a 9.8e-2 phase
-# gap and lbfgs landed 0.69 apart depending on the global phase.
+# (path, optimizer): one optimizer per production loop.  The conjugation
+# (``_euclidean_grads``) sits once per loop, right after ``value_and_grad`` and
+# before any optimizer branch, so a second optimizer on the same loop re-tests
+# the same line.  The explicit loop is run with lbfgs because lbfgs also takes
+# the line-search probe path (``_AcceptedProbeEval.probe`` conjugates the dphi
+# gradient separately), which adam -- no line search by default -- never
+# reaches; cg runs the same two sites as lbfgs.  The reference loop drives
+# Optax directly, so it is exercised with adam, as in the issue.  The
+# root-implicit loop is a third, independent production site for raw
+# cotangents -- missed by the first #957 pass and caught in review (the
+# duplicate-implementation trap); pre-fix, adam returned its untouched initial
+# energy with a 9.8e-2 phase gap.  (explicit/adam, explicit/cg and
+# root_implicit/lbfgs were dropped in the 2026-10-26 test-trim pass: ~26 s of
+# compile per cell, no line of the fix they alone reach.)
 _CASES = [
-    ("explicit", "adam"),
     ("explicit", "lbfgs"),
-    ("explicit", "cg"),
     ("reference", "adam"),
     ("root_implicit", "adam"),
-    ("root_implicit", "lbfgs"),
 ]
 
 

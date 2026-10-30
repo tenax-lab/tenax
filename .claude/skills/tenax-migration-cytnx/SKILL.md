@@ -25,7 +25,7 @@ DenseTensor/SymmetricTensor), and decomposition API.
 | `UniTensor` | `DenseTensor` / `SymmetricTensor` | No row/col rank in Tenax |
 | `Bond` | `TensorIndex` | Carries symmetry, charges, FlowDirection, label |
 | `Bond.BD_IN` / `BD_OUT` | `FlowDirection.IN` / `OUT` | Same concept |
-| `Bond(dim, BD_IN, [[charges]])` | `TensorIndex(sym, charges, flow, label)` | Label is part of the index |
+| `Bond(dim, BD_IN, [[charges]])` | `TensorIndex.from_charges(sym, charges, flow, label)` | Label is part of the index |
 | `Network` | `NetworkBlueprint` | Same `.net` file format |
 | `Contract(A, B)` | `contract(A, B)` | Both label-based |
 | `Svd(T)` | `truncated_svd(T, left_labels, right_labels)` | Explicit label partition |
@@ -80,7 +80,7 @@ T.set_labels({"left", "phys", "right"});
 **Tenax:** Labels are part of the index definition:
 
 ```python
-idx = TensorIndex(u1, charges, FlowDirection.IN, label="left")
+idx = TensorIndex.from_charges(u1, charges, FlowDirection.IN, label="left")
 A = SymmetricTensor.random_normal(indices=(idx_left, idx_phys, idx_right), key=key)
 # Labels are intrinsic — no separate set_labels step
 ```
@@ -152,9 +152,9 @@ import numpy as np, jax
 u1 = U1Symmetry()
 T = SymmetricTensor.random_normal(
     indices=(
-        TensorIndex(u1, np.array([-1, 1], dtype=np.int32), FlowDirection.IN,  label="p"),
-        TensorIndex(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN,  label="l"),
-        TensorIndex(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.OUT, label="r"),
+        TensorIndex.from_charges(u1, np.array([-1, 1], dtype=np.int32), FlowDirection.IN,  label="p"),
+        TensorIndex.from_charges(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN,  label="l"),
+        TensorIndex.from_charges(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.OUT, label="r"),
     ),
     key=jax.random.PRNGKey(0),
 )

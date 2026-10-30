@@ -38,12 +38,15 @@ in Tenax.
 ```python
 import jax
 import numpy as np
-from tenax import DenseTensor, TensorIndex, FlowDirection
+from tenax import DenseTensor, TensorIndex, FlowDirection, U1Symmetry
 
-# Define legs with labels
-idx_left  = TensorIndex(None, np.array([], dtype=np.int32), FlowDirection.IN,  label="left")
-idx_phys  = TensorIndex(None, np.array([], dtype=np.int32), FlowDirection.IN,  label="phys")
-idx_right = TensorIndex(None, np.array([], dtype=np.int32), FlowDirection.OUT, label="right")
+# Define legs with labels.  A dense leg still carries a symmetry; use
+# trivial (all-zero) charges, one per basis state.
+u1 = U1Symmetry()
+triv = lambda n: np.zeros(n, dtype=np.int32)
+idx_left  = TensorIndex.from_charges(u1, triv(4), FlowDirection.IN,  label="left")
+idx_phys  = TensorIndex.from_charges(u1, triv(2), FlowDirection.IN,  label="phys")
+idx_right = TensorIndex.from_charges(u1, triv(4), FlowDirection.OUT, label="right")
 
 # Create from a JAX array
 data = jax.random.normal(jax.random.PRNGKey(0), shape=(4, 2, 4))
@@ -51,19 +54,24 @@ A = DenseTensor(data, indices=(idx_left, idx_phys, idx_right))
 
 print(A.labels())  # ('left', 'phys', 'right')
 print(A.ndim)      # 3
+print(A.todense().shape)  # (4, 2, 4) -- tensors have no .shape; use todense()
 ```
 
-For dense tensors without symmetry, the `charges` array in `TensorIndex` is
-unused — pass an empty array. The `FlowDirection` still matters for
-contractions with `SymmetricTensor`.
+`TensorIndex.from_charges(symmetry, charges, flow, label)` is the constructor
+to use; the bare `TensorIndex(...)` dataclass takes sorted `sectors` and
+`multiplicities` instead of a per-state charge array. `TensorIndex(None, ...)`
+does not work: every leg needs a symmetry object. The `FlowDirection` still
+matters for contractions with `SymmetricTensor`.
 
-### DenseTensor.random_normal
+### Random DenseTensor
+
+There is no `DenseTensor.random_normal`; draw the array with JAX and wrap it:
 
 ```python
 key = jax.random.PRNGKey(42)
-A = DenseTensor.random_normal(
+A = DenseTensor(
+    jax.random.normal(key, (4, 2, 4)),
     indices=(idx_left, idx_phys, idx_right),
-    key=key,
 )
 ```
 
@@ -78,9 +86,9 @@ import numpy as np, jax
 u1 = U1Symmetry()
 A = SymmetricTensor.random_normal(
     indices=(
-        TensorIndex(u1, np.array([-1, 1], dtype=np.int32), FlowDirection.IN,  label="phys"),
-        TensorIndex(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN,  label="left"),
-        TensorIndex(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.OUT, label="right"),
+        TensorIndex.from_charges(u1, np.array([-1, 1], dtype=np.int32), FlowDirection.IN,  label="phys"),
+        TensorIndex.from_charges(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.IN,  label="left"),
+        TensorIndex.from_charges(u1, np.array([-1, 0, 1], dtype=np.int32), FlowDirection.OUT, label="right"),
     ),
     key=jax.random.PRNGKey(0),
 )
@@ -255,6 +263,14 @@ U, S, Vh, S_full = svd(
 This is useful for custom algorithms where you need full control over
 the decomposition — for example, computing entanglement entropy without
 truncation, or implementing a custom bond compression scheme.
+
+`bond_order` (default `"descending"`) sets the order of the new bond. On a
+`SymmetricTensor`, `bond_order="sector"` (new in v0.9.0) emits it
+charge-grouped — sectors ascending by charge, values descending within each —
+so `S` is not globally sorted. It is the only mode that runs under `jax.jit`
+the same way it runs eagerly (the descending ranking reads the spectrum on the
+host). It is untruncated only (`max_singular_values` / `max_truncation_err`
+raise) and is ignored on dense input.
 
 ---
 

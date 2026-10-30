@@ -213,9 +213,14 @@ class TestiDMRGRun:
             lanczos_tol=1e-14,
         )
         result = idmrg(W, cfg, dtype=jnp.float64)
-        assert abs(result.energy_per_site - e_exact) < 0.01, (
-            f"e/site = {result.energy_per_site:.6f} far from Bethe ansatz {e_exact:.6f}"
+        # 9.4e-6 at chi=32.  The default orthogonalize_interval used to
+        # re-solve the environments every 10 sweeps, which pinned the error at
+        # 3.46e-4 for every chi (a 0.01 tolerance let that through).
+        assert abs(result.energy_per_site - e_exact) < 5e-5, (
+            f"e/site = {result.energy_per_site:.8f} far from Bethe ansatz {e_exact:.8f}"
         )
+        # ... and made every tenth per-step estimate a +3.98 spike.
+        assert max(result.energies_per_step) < 0.0
 
     def test_energy_improves_with_bond_dim(self):
         """Larger bond dimension should give a lower (better) energy."""
@@ -405,12 +410,15 @@ class TestBuildBulkMPOSymmetric:
 
 class TestiDMRGSymmetric:
     @pytest.mark.slow
-    def test_symmetric_idmrg_energy_accuracy(self, numpy_blockwise):
-        """Symmetric iDMRG at chi=16 should match exact within 0.5%."""
+    def test_symmetric_idmrg_energy_accuracy(self):
+        """Symmetric iDMRG at chi=16 should match exact within 0.5%.
+
+        Default backend (``numpy_blockwise=True``) only: the jax backend's
+        agreement with it is pinned by ``test_symmetric_matches_dense_energy``,
+        which runs both (slow-bucket prune, #1149).
+        """
         W = build_bulk_mpo_heisenberg_symmetric()
-        cfg = iDMRGConfig(
-            max_bond_dim=16, max_iterations=50, numpy_blockwise=numpy_blockwise
-        )
+        cfg = iDMRGConfig(max_bond_dim=16, max_iterations=50)
         result = idmrg(W, cfg)
         exact_e = -0.4431471805
         rel_err = abs(result.energy_per_site - exact_e) / abs(exact_e)
@@ -551,8 +559,14 @@ class TestOrthogonalization:
             TL_I, np.eye(chi), atol=1e-6, err_msg="T_L(I) != I after orthogonalization"
         )
 
-    def test_orthogonalize_interval_applies_periodically_two_site(self, monkeypatch):
-        """orthogonalize_interval should trigger multiple in-loop calls."""
+    def test_orthogonalize_interval_orthogonalizes_once_after_the_loop_two_site(
+        self, monkeypatch
+    ):
+        """Any interval > 0 orthogonalizes once, after the sweeps, never in-loop.
+
+        An in-loop pass re-solved the environments and zeroed their energy, so
+        the energy estimate spiked and the run could not converge.
+        """
         idmrg_mod = importlib.import_module("tenax.algorithms.idmrg")
         W = build_bulk_mpo_heisenberg(dtype=jnp.float64)
         call_count = 0
@@ -573,7 +587,7 @@ class TestOrthogonalization:
         )
         result = idmrg(W, cfg, dtype=jnp.float64)
         assert np.isfinite(result.energy_per_site)
-        assert call_count >= 2
+        assert call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -676,8 +690,14 @@ class TestiDMRG1Site:
         assert seen_tols
         assert all(np.isclose(tol, cfg.lanczos_tol) for tol in seen_tols)
 
-    def test_orthogonalize_interval_applies_periodically_one_site(self, monkeypatch):
-        """1-site orthogonalize_interval should trigger in-loop orthogonalization."""
+    def test_orthogonalize_interval_orthogonalizes_once_after_the_loop_one_site(
+        self, monkeypatch
+    ):
+        """Any interval > 0 orthogonalizes once, after the sweeps, never in-loop.
+
+        An in-loop pass re-solved the environments and zeroed their energy, so
+        the energy estimate spiked and the run could not converge.
+        """
         idmrg_mod = importlib.import_module("tenax.algorithms.idmrg")
         W = build_bulk_mpo_heisenberg(dtype=jnp.float64)
         call_count = 0
@@ -699,7 +719,7 @@ class TestiDMRG1Site:
         )
         result = idmrg(W, cfg, dtype=jnp.float64)
         assert np.isfinite(result.energy_per_site)
-        assert call_count >= 2
+        assert call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -932,7 +952,9 @@ class TestFixedPointIntegration:
         )
         result = idmrg(W, cfg, dtype=jnp.float64)
         rel_err = abs(result.energy_per_site - e_exact) / abs(e_exact)
-        assert rel_err < 0.001, (
+        # 1.6e-4 relative (6.9e-5 absolute); 7.9e-4 before the in-loop
+        # environment reset was removed, which the old 1e-3 bound accepted.
+        assert rel_err < 3e-4, (
             f"e/site={result.energy_per_site:.10f} vs exact {e_exact:.10f} "
             f"(rel err={rel_err:.6f})"
         )

@@ -120,23 +120,27 @@ H_bond = (
 config = iPEPSConfig(
     max_bond_dim=2,
     num_imaginary_steps=200,
-    dt=0.01,
+    dt=0.05,  # dt=0.01 has not reached the ground state by 200 steps (E > 0)
     ctm=CTMConfig(chi=10, max_iter=50),
 )
 
-energy, peps, env = ipeps(H_bond, initial_peps=None, config=config)
-print(f"Energy per site: {energy:.6f}")
+energy, (A, B), (env_A, env_B) = ipeps(H_bond, initial_peps=None, config=config)
+print(f"Energy per site: {energy:.6f}")  # ~ -0.66
 ```
 
 ## Result
 
-`ipeps()` returns a 3-tuple:
+`ipeps()` always runs the 2-site checkerboard simple update and returns a
+3-tuple (it does not read `iPEPSConfig.unit_cell`, which only selects the
+`optimize_gs_ad` ansatz):
 
 | Element | Type | Description |
 |---------|------|-------------|
 | `energy` | `float` | Energy per site |
-| `peps` | `TensorNetwork` | Optimised PEPS (1x1 unit cell) |
-| `env` | `CTMEnvironment` | Converged CTM environment tensors |
+| `(A, B)` | `tuple[DenseTensor, DenseTensor]` | Site tensors of the two sublattices |
+| `(env_A, env_B)` | `tuple[CTMEnvironment, CTMEnvironment]` | Converged CTM environments |
+
+With `compute_energy=False` it returns `(None, (A, B), None)`.
 
 ## CTMEnvironment
 
@@ -159,9 +163,10 @@ env = ctm(A_tensor, CTMConfig(chi=20, max_iter=100))
 ## 2-site checkerboard unit cell
 
 A single-site unit cell cannot capture antiferromagnetic (Néel) order
-because both sublattices share the same tensor. Setting
-`unit_cell="2site"` in `iPEPSConfig` uses a 2-site checkerboard unit cell
-with independent tensors $A$ (sublattice 0) and $B$ (sublattice 1).
+because both sublattices share the same tensor. The 2-site checkerboard
+unit cell has independent tensors $A$ (sublattice 0) and $B$ (sublattice 1).
+Simple update (`ipeps()`) always uses it; for `optimize_gs_ad`, select it
+with `unit_cell="2site"` in `iPEPSConfig`.
 
 On the checkerboard every neighbour of $A$ is $B$ and vice versa, which
 is the minimal unit cell for Néel-ordered states.
@@ -186,9 +191,8 @@ config = iPEPSConfig(
     num_imaginary_steps=200,
     dt=0.05,
     ctm=CTMConfig(chi=10, max_iter=40),
-    unit_cell="2site",
 )
-energy, peps, (env_A, env_B) = ipeps(gate, None, config)
+energy, (A, B), (env_A, env_B) = ipeps(gate, None, config)
 print(f"Energy per site: {energy:.6f}")  # ~ -0.63
 ```
 
@@ -360,8 +364,8 @@ The outer loop stops when ``gs_conv_criterion`` is met, or after
 
 | Criterion | Stops when | Notes |
 |-----------|------------|-------|
-| ``"grad_norm"`` (default since v0.8.4) | ``‖∇E‖₂ < gs_grad_norm_tol`` (``1e-5``) | Stationarity test; variPEPS's outer criterion |
-| ``"dE"`` (default before v0.8.4, deprecated) | ``\|E_k − E_{k−1}\| < gs_conv_tol`` (``1e-8``) | Also fires when a line search barely moves or right after a stall rollback, with ``‖∇E‖`` still large |
+| ``"grad_norm"`` (default since v0.9.0) | ``‖∇E‖₂ < gs_grad_norm_tol`` (``1e-5``) | Stationarity test; variPEPS's outer criterion |
+| ``"dE"`` (default before v0.9.0, deprecated) | ``\|E_k − E_{k−1}\| < gs_conv_tol`` (``1e-8``) | Also fires when a line search barely moves or right after a stall rollback, with ``‖∇E‖`` still large |
 | ``"both"`` | both of the above | Most conservative |
 
 ``‖∇E‖₂`` is the L2 norm of the raw (unpreconditioned) Euclidean gradient
@@ -369,7 +373,7 @@ with respect to the optimizer's parameters — the C4v basis coefficients when
 ``gs_c4v=True``, the site tensors otherwise. A run that exhausts
 ``gs_num_steps`` returns its best state with ``converged=False`` in the
 history; a non-finite gradient never counts as convergence. To restore the
-pre-v0.8.4 behaviour, pass ``gs_conv_criterion="dE"`` (it emits a
+pre-v0.9.0 behaviour, pass ``gs_conv_criterion="dE"`` (it emits a
 ``DeprecationWarning``).
 
 #### Optimizer selection

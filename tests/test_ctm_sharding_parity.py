@@ -4,6 +4,11 @@ import sys
 
 import pytest
 
+# Dense multi-GPU CTM is deferred post-1.0 (#632) and ``device_mesh`` for CTM is
+# not in the guide, so these subprocess parity runs are opt-in: skipped unless
+# TENAX_RUN_DIAGNOSTIC=1.  ``slow`` comes from the conftest registry.
+pytestmark = pytest.mark.diagnostic
+
 # Importable when pytest runs this file directly (prepend import mode puts the
 # test dir on sys.path); guard the insert so it also works if invoked some other
 # way.  Same import the subprocess driver uses.

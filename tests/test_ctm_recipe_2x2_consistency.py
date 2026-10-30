@@ -3,10 +3,10 @@
 ``gs_recipe`` selects the CTM projector scheme: ``"2x2"`` (Fishman plaquette,
 the :class:`iPEPSConfig` default) or ``"1x1"`` (reduced-corner single-site).
 Both are production paths, but only ``"1x1"`` had coverage --
-``test_split_ctm_production_correctness`` pins ``"1x1"`` energies, the kagome
-multisite tests skip without a saved ``logs/d4_ad_optimum.npz``, and the
-bipartite ``E < -0.66`` checks in ``test_ipeps.py`` exercise simple update
-rather than the AD path.  So the config *default* recipe had no green test.
+the (since deleted) split production test pinned ``"1x1"`` energies, the
+(since deleted) kagome multisite tests skipped without a saved
+``logs/d4_ad_optimum.npz``, and the bipartite ``E < -0.66`` checks in
+``test_ipeps.py`` exercise simple update rather than the AD path.  So the config *default* recipe had no green test.
 
 This module is the cheap, forward-only half of closing that gap; the
 end-to-end physical anchor lives in
@@ -33,7 +33,12 @@ from tenax.algorithms.ipeps import heisenberg_gate
 from tests.test_split_ctm_fuse_flag import _make_site
 
 
-@pytest.mark.parametrize("recipe", ["2x2", "1x1"])
+# ``"2x2"`` only: the ``"1x1"`` cell was dropped in the 2026-10-26 test-trim
+# pass.  That recipe is deprecated (#911, ``test_recipe_1x1_deprecation.py``:
+# it collapses D>1 corners to rank 1 and is going away), so the cell pinned
+# the bond bookkeeping of a path users are told to leave; the default recipe
+# is the one this file exists to cover (see the module docstring).
+@pytest.mark.parametrize("recipe", ["2x2"])
 def test_uniform_tiling_consistency(recipe):
     """A uniform tiling must give the same per-site energy at every cell size.
 

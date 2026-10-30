@@ -69,17 +69,6 @@ def test_implicit_ad_no_longer_raises_with_bump():
     assert jnp.isfinite(energy)
 
 
-def _central_diff(f, x: jnp.ndarray, eps: float = 1e-4) -> jnp.ndarray:
-    """Central-difference gradient of scalar f at x (flat vector)."""
-    grad = jnp.zeros_like(x)
-    for i in range(x.shape[0]):
-        ei = jnp.zeros_like(x).at[i].set(eps)
-        f_plus = f(x + ei)
-        f_minus = f(x - ei)
-        grad = grad.at[i].set((f_plus - f_minus) / (2 * eps))
-    return grad
-
-
 @pytest.mark.slow
 def test_forward_fixed_point_trajectory_independent():
     """#702 regression gate: bump 4->8 == direct chi=8 forward fixed point.
@@ -118,85 +107,6 @@ def test_forward_fixed_point_trajectory_independent():
     assert abs(float(e_bump) - float(e_fixed)) < 1e-9, (
         f"trajectory-dependent fixed point: E_bump={float(e_bump):.10f} "
         f"E_fixed={float(e_fixed):.10f} |diff|={abs(float(e_bump) - float(e_fixed)):.3e}"
-    )
-
-
-@pytest.mark.slow
-def test_ad_gradient_matches_fd_with_bump():
-    """Numerical smoke at D=2 with forced bump: gradient is finite, FD-consistent.
-
-    Confirms ctm_energy_implicit returns a finite, FD-consistent gradient
-    (no NaNs, correct sign, correct order of magnitude) when the forward
-    CTM grows chi 4 -> 8.
-
-    The bulk-agreement check (90th-percentile relative error) is used
-    instead of strict allclose because individual FD probes can cross the
-    projector's truncation threshold — on macOS Accelerate this produced a
-    single-index ~0.3 outlier in 32 elements (#529) while the bulk
-    agreement was as tight as on Linux.  This used to also cite a "~25% FD
-    bias at D=2" from the 2x2 projector's stop_gradient (PR #447).  The
-    stop_gradient is still here -- #983 measured its cost (one sweep, ratios
-    -7.98..+14.95 frozen against 1.000000 flowing) and made unfreezing an
-    opt-in, because on this implicit path the flowing Jacobian makes the
-    adjoint solve unreliable.  So the projector IS a source of bias here;
-    "~25%" was simply never a measurement of it.
-
-    This test does NOT verify the chi-lock contract.  The strict
-    chi-lock check is test_ad_gradient_invariance_bump_vs_fixed_chi_max
-    below, which factors out the D=2 projector bias by comparing the
-    bump-path gradient against a fixed-chi=8 reference.
-    """
-    A = _build_site_tensor(D=2, d=2, seed=42)
-    gate = heisenberg_gate()
-    A_data = A.todense()
-    flat_init = A_data.flatten()
-
-    def loss(A_flat: jnp.ndarray) -> jnp.ndarray:
-        A_perturbed = DenseTensor(A_flat.reshape(A_data.shape), A.indices)
-        return ctm_energy_implicit(
-            {(0, 0): A_perturbed},
-            SINGLE_SITE_NEIGHBORS,
-            gate,
-            chi=4,
-            max_iter=200,
-            min_iter=2,
-            conv_tol=1e-12,
-            ctmrg_heuristic_increase_chi=True,
-            ctmrg_heuristic_increase_chi_threshold=1e-12,  # force bump on iter 1
-            ctmrg_heuristic_increase_chi_step_size=2,
-            chi_max=8,
-            gmres_tol=1e-8,
-        )
-
-    grad_ad = jax.grad(loss)(flat_init)
-    grad_fd = _central_diff(loss, flat_init, eps=1e-4)
-
-    assert jnp.all(jnp.isfinite(grad_ad)), "AD gradient contains non-finite values"
-    # NaN in grad_fd would silently evade the violation count below
-    # (NaN > x is False under IEEE 754), so it must be a hard failure.
-    assert jnp.all(jnp.isfinite(grad_fd)), "FD gradient contains non-finite values"
-
-    # Per-element allclose tolerance (the original strict check).
-    atol, rtol = 1e-2, 1e-1
-    abs_diff = jnp.abs(grad_ad - grad_fd)
-    elem_tol = atol + rtol * jnp.abs(grad_fd)
-    violations = abs_diff > elem_tol
-    n_viol = int(jnp.sum(violations))
-
-    # Allow up to 1 out of 32 indices to exceed the element-wise tolerance.
-    # An FD probe can occasionally cross the 2x2 plaquette projector's
-    # near-degenerate SVD threshold (PR #447) and produce a single-index
-    # discontinuity; macOS Accelerate hit this for 1 index per #529, while
-    # all other 31 indices agreed as tightly as on Linux.  A real AD
-    # regression would corrupt many indices simultaneously and fail this
-    # bound — single-outlier robustness does not cost regression sensitivity.
-    assert n_viol <= 1, (
-        f"AD/FD per-element disagreement: {n_viol} of {abs_diff.size} indices "
-        f"exceed atol={atol} + rtol={rtol}*|grad_fd|.\n"
-        f"per-index abs_diff = {abs_diff}\n"
-        f"per-index elem_tol = {elem_tol}\n"
-        f"grad_ad[:5] = {grad_ad[:5]}\n"
-        f"grad_fd[:5] = {grad_fd[:5]}"
     )
 
 
@@ -271,8 +181,11 @@ def test_ad_gradient_invariance_bump_vs_fixed_chi_max():
     # projector stop_gradient + degenerate-SV SVD backward feel that
     # rotation.  (#983 left that stop_gradient in place on this path by
     # default -- see its `_PROJECTOR_BACKWARD_FLOW` note.)
-    # Both gradients are individually FD-consistent
-    # (test_ad_gradient_matches_fd_with_bump).  The gates below sit above
+    # The fixed-chi gradient is FD-checked by
+    # test_projector_backward_default_1028.py::test_default_implicit_gradient_matches_finite_differences;
+    # with this invariance that pins the bump-path gradient too, so the
+    # 32-element central-FD-with-bump test (64 CTM convergences) was removed
+    # in the slow-bucket prune (#1149).  The gates below sit above
     # the floor with >10x margin while still failing catastrophically on
     # the chi-lock breakage signature (backward differentiating the chi=4
     # Jacobian shrinks |grad_bump| ~10x — norm ratio would drop to ~0.1).

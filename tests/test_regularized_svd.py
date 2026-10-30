@@ -56,56 +56,9 @@ class TestRegularizedSVD:
 
 
 class TestExplicitADWarmup:
-    def test_explicit_ad_warmup_forward_runs(self):
-        """Explicit AD with warmup should run without error in forward mode."""
-        from tenax.algorithms._ctm_tensor import (
-            _build_double_layer_tensor,
-            initialize_ctm_tensor_env,
-        )
-        from tenax.algorithms._ctm_tensor_convergence import SINGLE_SITE_NEIGHBORS
-        from tenax.algorithms.ad_utils import (
-            _config_to_tuple,
-            _flatten_envs,
-            ctm_tensor_converge_explicit,
-        )
-        from tenax.algorithms.ipeps_config import CTMConfig
-        from tenax.core.index import FlowDirection, TensorIndex
-        from tenax.core.symmetry import U1Symmetry
-        from tenax.core.tensor import DenseTensor
-
-        key = jax.random.PRNGKey(0)
-        sym = U1Symmetry()
-        D, d = 2, 2
-        A_data = jax.random.normal(key, (D, D, D, D, d))
-        charges = jnp.zeros(D, dtype=jnp.int32)
-        phys_charges = jnp.zeros(d, dtype=jnp.int32)
-        indices = tuple(
-            TensorIndex.from_charges(sym, charges, flow, label=lbl)
-            for lbl, flow in [
-                ("d", FlowDirection.IN),
-                ("u", FlowDirection.OUT),
-                ("r", FlowDirection.IN),
-                ("l", FlowDirection.OUT),
-            ]
-        ) + (
-            TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="phys"),
-        )
-        A = DenseTensor(A_data, indices)
-
-        config = CTMConfig(chi=4, max_iter=10)
-        config_tuple = _config_to_tuple(config)
-        site_tensors = {(0, 0): A}
-
-        env_leaves = ctm_tensor_converge_explicit(
-            site_tensors,
-            None,
-            SINGLE_SITE_NEIGHBORS,
-            config_tuple,
-            num_steps=3,
-            warmup_steps=2,
-        )
-        assert all(jnp.all(jnp.isfinite(x)) for x in env_leaves)
-
+    # The forward-only twin (``..._forward_runs``: finite env leaves) was
+    # dropped in the 2026-10-26 test-trim pass; the gradient test below runs
+    # the same forward and asserts a finite, non-zero energy gradient.
     def test_explicit_ad_warmup_gradient_finite(self):
         """Explicit AD with warmup should produce finite energy gradients."""
         from tenax.algorithms._ctm_tensor import (
@@ -175,106 +128,13 @@ class TestExplicitADWarmup:
 
 
 class TestSplitCTMExplicitAD:
-    def test_split_ctm_explicit_forward_runs(self):
-        """Split CTM explicit AD should run forward without error."""
-        from tenax.algorithms.ad_utils import ctm_split_tensor_converge_explicit
-        from tenax.core.index import FlowDirection, TensorIndex
-        from tenax.core.symmetry import U1Symmetry
-        from tenax.core.tensor import DenseTensor
-
-        key = jax.random.PRNGKey(0)
-        sym = U1Symmetry()
-        D, d = 2, 2
-        A_data = jax.random.normal(key, (D, D, D, D, d))
-        charges = jnp.zeros(D, dtype=jnp.int32)
-        phys_charges = jnp.zeros(d, dtype=jnp.int32)
-        indices = tuple(
-            TensorIndex.from_charges(sym, charges, flow, label=lbl)
-            for lbl, flow in [
-                ("d", FlowDirection.IN),
-                ("u", FlowDirection.OUT),
-                ("r", FlowDirection.IN),
-                ("l", FlowDirection.OUT),
-            ]
-        ) + (
-            TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="phys"),
-        )
-        A = DenseTensor(A_data, indices)
-
-        env = ctm_split_tensor_converge_explicit(
-            A,
-            chi=4,
-            num_steps=3,
-            warmup_steps=2,
-        )
-        leaves = jax.tree.leaves(env)
-        assert all(jnp.all(jnp.isfinite(x)) for x in leaves)
-
-    def test_split_ctm_explicit_gradient_finite(self):
-        """Split CTM explicit AD should produce finite gradients."""
-        from tenax.algorithms.ad_utils import ctm_split_tensor_converge_explicit
-        from tenax.core.index import FlowDirection, TensorIndex
-        from tenax.core.symmetry import U1Symmetry
-        from tenax.core.tensor import DenseTensor
-
-        key = jax.random.PRNGKey(0)
-        sym = U1Symmetry()
-        D, d = 2, 2
-        A_data = jax.random.normal(key, (D, D, D, D, d))
-        charges = jnp.zeros(D, dtype=jnp.int32)
-        phys_charges = jnp.zeros(d, dtype=jnp.int32)
-        indices = tuple(
-            TensorIndex.from_charges(sym, charges, flow, label=lbl)
-            for lbl, flow in [
-                ("d", FlowDirection.IN),
-                ("u", FlowDirection.OUT),
-                ("r", FlowDirection.IN),
-                ("l", FlowDirection.OUT),
-            ]
-        ) + (
-            TensorIndex.from_charges(sym, phys_charges, FlowDirection.IN, label="phys"),
-        )
-
-        def loss(A_data):
-            A_t = DenseTensor(A_data, indices)
-            env = ctm_split_tensor_converge_explicit(
-                A_t,
-                chi=4,
-                num_steps=3,
-                warmup_steps=2,
-            )
-            # Sums the whole environment, which is the broadest signal. The
-            # corner's own contribution is exercised separately by
-            # ``test_split_ctm_corner_gradient_is_not_zero`` below.
-            #
-            # This used to carry a NOTE saying ``sum(C1**2)`` must *not* be used
-            # because "the boundary corner of a uniform 1-site iPEPS is
-            # genuinely rank-1", so C1 is independent of A and its gradient is
-            # exactly zero. The observation was right and the diagnosis was
-            # wrong: that was the ``1x1`` collapse (#726/#746/#911), not
-            # physics. Measured on this exact fixture,
-            # ``|d sum(C1**2)/dA|_1`` is 0.0 at ``recipe="1x1"`` and **3.26**
-            # at the ``"2x2"`` default.
-            env_tensors = (
-                env.C1,
-                env.C2,
-                env.C3,
-                env.C4,
-                env.T1_ket,
-                env.T2_ket,
-                env.T3_ket,
-                env.T4_ket,
-                env.T1_bra,
-                env.T2_bra,
-                env.T3_bra,
-                env.T4_bra,
-            )
-            return sum(jnp.sum(t.todense() ** 2) for t in env_tensors)
-
-        grad = jax.grad(loss)(A_data)
-        assert jnp.all(jnp.isfinite(grad))
-        assert float(jnp.sum(jnp.abs(grad))) > 0
-
+    # ``..._forward_runs`` and ``..._gradient_finite`` (finite env / finite
+    # gradient of the summed environment) were dropped in the 2026-10-26
+    # test-trim pass: ``test_split_ctm_fuse_flag.py::test_split_explicit_grad_finite``
+    # asserts a finite, non-zero energy gradient through this same
+    # ``ctm_split_tensor_converge_explicit`` call (chi=4, 2 warm-up + 3
+    # backprop sweeps, default recipe), and the corner test below keeps the
+    # #726 corner contribution.
     def test_split_ctm_corner_gradient_is_not_zero(self):
         """The corner's contribution to the explicit-AD gradient (#726).
 

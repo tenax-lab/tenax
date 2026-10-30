@@ -176,7 +176,7 @@ from tenax import ctm_tensor, ctm_tensor_c4v, compute_energy_ctm_tensor
 
 # A is an iPEPS site tensor (DenseTensor or SymmetricTensor)
 # with 5 legs (u, d, l, r, phys)
-env = ctm_tensor(A, chi=32, max_iter=100, conv_tol=1e-10)
+env, _ = ctm_tensor(A, chi=32, max_iter=100, conv_tol=1e-10)  # (env, max truncation error)
 E = compute_energy_ctm_tensor(A, env, hamiltonian_gate, d=2)
 
 # Or with C4v symmetry (1-site, no sublattice)
@@ -334,12 +334,13 @@ fused χ²·D⁶ double layer.
   gradient to machine precision in the non-degenerate regime (~1e-15; the
   SU(2)-symmetric Heisenberg point carries a degenerate-SV SVD-backward floor
   on the explicit reference).
-- **Scope.** The split CTM is dense-bosonic and experimental (frozen by
-  design): `DenseTensor` and bosonic `SymmetricTensor` (U(1)/Z_n) both run on
-  the eager forward and on single-site (`unit_cell="1x1"`) AD, but a *traced*
-  2-site `SymmetricTensor` multisite sweep is refused rather than fixed — use
-  `fuse_virtual_legs=True` for symmetric multisite AD (#1048). Fermionic input
-  is refused outright (#1035).
+- **Scope.** The split CTM is dense-only and experimental (frozen by design):
+  `SymmetricTensor` input, U(1)/Z_n or fermionic, is refused with
+  `NotImplementedError`; symmetric iPEPS uses the fused CTM
+  (`fuse_virtual_legs=True`).  Its memory win is a large-D effect, where
+  symmetric iPEPS-AD in tenax already loses to dense, so the symmetric split
+  path was dropped rather than kept frozen (it had carried #907, #1024 and
+  #1048).
 - **Fixed χ.** The χ-changing knobs are rejected on this path.
 - **Memory.** The win over fused is a large-D effect (D≳16). Measured at
   `recipe="2x2"` on one A100-80GB it reaches χ=96/48/32 at D=8/10/12 against
@@ -347,6 +348,52 @@ fused χ²·D⁶ double layer.
   peak advantage shrinks from 2.66× at χ=16 to 1.02× at the ceiling (#825).
 
 References: Naumann et al., arXiv:2502.10298.
+
+## Chi sector layout and the layout seed
+
+With `SymmetricTensor` input, each chi leg of the environment splits into
+charge sectors.  The *layout* is the size of each sector on every leg.  Under
+AD the traced projector keeps the layout it is handed (#929), so a 2-site AD
+run seeded with `envs_init` optimizes on that layout.  `symmetric_layout_seed`
+builds that seed:
+
+```python
+from tenax import layout_of, same_layout, symmetric_layout_seed
+
+seed = symmetric_layout_seed(A, B, gate, ctm_cfg, forced_sweeps=300)
+envs_init = seed.envs_init
+```
+
+It converges an eager 2-site CTM from a cold start, so the layout can change
+between sweeps (#1098).  Then it runs `forced_sweeps` more sweeps with no
+convergence stop.  `stable` is False when those sweeps move the energy by
+`energy_tol` (default `1e-10`) or more, or change the layout: a cold CTM can
+certify convergence on a point it later leaves (#1096).
+
+The result fields:
+
+- `envs_init`, `layout` — the cold environment and its layout
+  (`layout_of(envs_init)`).
+- `energy_cold`, `energy_forced`, `stable` — the forced-sweep check.
+- `cold_converged`, `cold_iterations` — the cold solve's status.
+- `cut_gap` — the smallest relative gap `(s[chi-1] - s[chi]) / s[chi-1]` over
+  all corners, read from a second cold solve at `chi + gap_extra_chi`
+  (default 4).  A value near 0 means the cut at `chi` falls inside a
+  (near-)degenerate set, so the layout is not unique.  Example: for the D=2
+  U(1) XXZ Δ=0.3 state at chi=8, the cut splits a 3-fold degenerate triplet
+  (s/s0 = 9.36709e-3 in sectors -4, 0, +4) and `cut_gap` is roundoff.
+- `gap_converged` — whether that larger-chi solve converged.  If it is False,
+  do not trust `cut_gap`.
+
+`layout_of(envs)` returns the layout as a dict keyed by
+`(coord, field, leg label)`.  It includes the double-layer legs, whose sectors
+are fixed by the site tensors; filter on the chi legs if you need only those.
+`same_layout(a, b)` compares two layouts.
+
+Dense input is accepted; its chi legs carry one sector each.
+
+During the run, the optimizer re-checks the layout at every step boundary
+(`gs_layout_recheck`); see {doc}`ipeps_ad_paths`.
 
 ## API
 

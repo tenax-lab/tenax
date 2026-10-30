@@ -420,6 +420,37 @@ def test_resume_cg_1site_continues_from_saved_step(tmp_path):
     assert E is not None  # finished without error (don't over-assert convergence)
 
 
+def _write_bundle(tmp_path, saved_cfg, gate):
+    """A ``ckpt.last.pkl`` as the 1-site writer stores it, up to the keys the
+    resume checks read before restoring anything: config snapshot, gate and
+    cg_gates fingerprints.
+
+    The two reject tests below used to produce it with a real 2-step
+    ``optimize_gs_ad`` per bundle; the mismatch ``ValueError`` fires before
+    any CTM work on resume, so the run only paid for the bundle (slow-bucket
+    prune, #1149).  The real CG writer is exercised by
+    ``test_resume_cg_1site_continues_from_saved_step`` above, and the
+    fingerprint round trip by ``test_ipeps_checkpoint.py``.
+    """
+    from tenax.algorithms._checkpoint import (
+        _config_to_dict,
+        cg_gates_fingerprint,
+        gate_fingerprint,
+        save_checkpoint,
+    )
+
+    cg = saved_cfg.cg_gates
+    save_checkpoint(
+        {
+            "step": 1,
+            "config": _config_to_dict(saved_cfg),
+            "hamiltonian_fingerprint": gate_fingerprint(gate),
+            "cg_gates_fingerprint": None if cg is None else cg_gates_fingerprint(cg),
+        },
+        str(tmp_path),
+    )
+
+
 @pytest.mark.slow
 def test_resume_rejects_different_cg_gates(tmp_path):
     """Resuming a CG run against perturbed cg_gates is a fatal mismatch
@@ -427,7 +458,7 @@ def test_resume_rejects_different_cg_gates(tmp_path):
     from tenax.algorithms.coarse_grain import honeycomb_cg_gates
 
     dummy = jnp.zeros((4, 4, 4, 4))
-    optimize_gs_ad(dummy, None, _honeycomb_cg_cfg(tmp_path, nsteps=2, resume=False))
+    _write_bundle(tmp_path, _honeycomb_cg_cfg(tmp_path, nsteps=2, resume=False), dummy)
 
     # Identical config EXCEPT the coarse-grained gates (J=2.0 vs default J=1.0),
     # so the only thing that can trigger the mismatch is the cg_gates check.
@@ -456,8 +487,6 @@ def test_resume_rejects_plain_to_cg(tmp_path):
     plain_cfg = iPEPSConfig(
         unit_cell="1x1",
         max_bond_dim=2,
-        # 20 sweeps left the gradient forward unconverged (residual 1.2e-7 vs
-        # 1e-8); 100 converge, so phase A completes and checkpoints (#1059).
         ctm=CTMConfig(chi=4, max_iter=100, min_iter=5),
         gs_num_steps=2,
         gs_checkpoint_path=str(tmp_path),
@@ -466,10 +495,7 @@ def test_resume_rejects_plain_to_cg(tmp_path):
         su_init=False,
         gs_conv_criterion="grad_norm",
     )
-    optimize_gs_ad(shared, None, plain_cfg)
-
-    from tenax.algorithms._checkpoint import load_checkpoint
-
+    _write_bundle(tmp_path, plain_cfg, shared)
     assert load_checkpoint(str(tmp_path))["cg_gates_fingerprint"] is None
     # resume the SAME gate but now with cg_gates -> fatal CG-mismatch
     cg_cfg = _honeycomb_cg_cfg(tmp_path, nsteps=4, resume=True)

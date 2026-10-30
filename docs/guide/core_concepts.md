@@ -115,9 +115,9 @@ from tenax import DenseTensor
 data = jnp.ones((2, 3))
 tensor = DenseTensor(data, (phys, bond))
 
-print(tensor.shape)    # (2, 3)
+print(tensor.todense().shape)  # (2, 3)
 print(tensor.labels())  # ('phys', 'bond')
-print(tensor.dtype)    # float32
+print(tensor.dtype)    # float64 (tenax enables 64-bit floats)
 ```
 
 ### SymmetricTensor

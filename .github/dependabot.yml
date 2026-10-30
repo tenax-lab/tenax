@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # One weekly PR that bumps uv.lock.  The PR's CI then tests exactly the
+  # versions it would pin.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 1
+    groups:
+      all-dependencies:
+        patterns: ["*"]

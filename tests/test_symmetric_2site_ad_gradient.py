@@ -20,14 +20,19 @@ jax.config.update("jax_enable_x64", True)
 
 from tenax import CTMConfig, ipeps, iPEPSConfig
 from tenax.algorithms import _ctm_energy_ad
+from tenax.algorithms._ctm_python_loop import python_loop_ctm_converge
+from tenax.algorithms._ctm_tensor_convergence import CHECKERBOARD_NEIGHBORS
 from tenax.algorithms._symmetric_ad_validation import (
-    converged_energy,
     densify_pair,
     fd_directional,
     grad_dot,
     make_2site_loss,
 )
-from tenax.algorithms.ctm_layout import symmetric_layout_seed
+from tenax.algorithms.ctm_layout import (
+    energy_2site,
+    normalized_pair,
+    symmetric_layout_seed,
+)
 from tenax.algorithms.ipeps import (
     heisenberg_u1sz_init_pair,
     xxz_gate,
@@ -35,9 +40,15 @@ from tenax.algorithms.ipeps import (
     xxz_gate_z2,
     xxz_z2_init_pair,
 )
+from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
 from tenax.core.tensor import SymmetricTensor
 
 D, DELTA = 2, 0.3
+# 100 forced sweeps (200 before the slow-bucket prune, #1149): the sweeps vs
+# sweeps+1 stationarity check passes there too, and the energy equals the
+# 200-sweep one to 3e-16 for both cases (measured: u1 -0.4936972191654310,
+# z2 -0.5207609010927974).
+_DENSE_SWEEPS = 100
 # chi per case: a clean cut in the adapted (#1098) spectrum.  U(1) chi=8 cuts
 # inside a near-degenerate set; chi=6 has relative gap 0.62.  Z2 chi=8: 0.32.
 _CASES = {
@@ -52,6 +63,44 @@ def _ctm(chi):
     )
 
 
+def _corner_spectra(envs):
+    out = []
+    for coord in sorted(envs):
+        for f in ("C1", "C2", "C3", "C4"):
+            s = np.linalg.svd(np.asarray(getattr(envs[coord], f).todense()))[1]
+            out.append(s / s[0])
+    return np.concatenate(out)
+
+
+def _dense_reference(A, B, gate, chi, sweeps=_DENSE_SWEEPS):
+    """Dense CTM energy, certified by a gauge-invariant check.
+
+    Its ``converged`` flag cannot be used: the dense corner spectra hold
+    exact degenerate pairs (U(1): 0.292198 and 0.024647, each twice), the
+    singular vectors rotate freely inside each pair, and ``sv_diff`` stays at
+    0.4-0.7 after 1000 sweeps with every forward gauge (measured 2026-10-22),
+    while the spectra and the energy do not move.  So run ``sweeps`` and
+    ``sweeps + 1`` forced sweeps and require the corner spectra and the
+    energy to agree: one more sweep must not change them, which also rules
+    out a two-cycle (Codex on #1134).
+    """
+    A_n, B_n = normalized_pair(*densify_pair(A, B))
+    st = {(0, 0): A_n, (1, 0): B_n}
+    runs = []
+    for n in (sweeps, sweeps + 1):
+        cfg = dataclasses.replace(
+            _ctm(chi), conv_tol=0.0, max_iter=n, min_iter=n, on_unconverged="warn"
+        )
+        envs, _ = python_loop_ctm_converge(
+            st, CHECKERBOARD_NEIGHBORS, **ctm_converge_kwargs(cfg, env_init=None)
+        )
+        runs.append((energy_2site(A_n, B_n, envs, gate), _corner_spectra(envs)))
+    (e0, s0), (e1, s1) = runs
+    assert abs(e1 - e0) < 1e-12, ("dense energy moves", e0, e1)
+    assert np.max(np.abs(s1 - s0)) < 1e-8, ("dense spectra move", s0, s1)
+    return e1
+
+
 def _clear_diagnostics():
     """Drop the keys asserted below, so a stale value cannot pass."""
     for key in ("forward_iterations", "projector_backward_used"):
@@ -60,12 +109,18 @@ def _clear_diagnostics():
 
 def _regime(A, B, seed):
     """Refuse a fixture that would make the test vacuous."""
-    if not any(len(v) > 1 for v in seed.layout.values()):
+    # Corner legs only: every corner leg is a chi leg.  The layout also holds
+    # the T tensors' double-layer legs, whose sectors are fixed by the sites
+    # and can be charged when every chi leg is not (Codex on #1134).
+    chi_legs = [v for k, v in seed.layout.items() if k[1].startswith("C")]
+    if not any(len(v) > 1 for v in chi_legs):
         raise AssertionError("out of regime: no charged environment sector")
     if not (isinstance(A, SymmetricTensor) and len(A.blocks) > 1):
         raise AssertionError("out of regime: site tensor not blocked")
     if not seed.cold_converged or not seed.stable:
         raise AssertionError("out of regime: forward not converged/stable")
+    if not seed.gap_converged:
+        raise AssertionError("out of regime: the cut-gap solve did not converge")
     if not seed.cut_gap > 1e-2:
         raise AssertionError(f"out of regime: cut gap {seed.cut_gap:.2e} <= 1e-2")
 
@@ -90,7 +145,7 @@ def test_gradient_matches_a_converged_fd(point):
     chi, A, B, gate, seed = point
     # The symmetric energy is the CTM energy, not a restricted-layout one
     # (#1098): the dense eager CTM reaches it (measured <= 6e-15).
-    e_dense, _ = converged_energy(*densify_pair(A, B), gate, _ctm(chi), None)
+    e_dense = _dense_reference(A, B, gate, chi)
     assert abs(seed.energy_cold - e_dense) < 1e-10, (seed.energy_cold, e_dense)
     loss, _ = make_2site_loss(gate, _ctm(chi), seed.envs_init)
     _clear_diagnostics()
@@ -118,12 +173,34 @@ def test_gradient_matches_a_converged_fd(point):
         assert abs(gd - r["fd"]) < tol, (k, gd, r["fd"], r["fd_unc"], r["scan"])
 
 
+# ``test_the_dense_reference_refuses_a_moving_environment`` (a self-test of
+# the ``_dense_reference`` helper above, two cold sweeps per case) was removed
+# in the slow-bucket prune (#1149): it tested the test, not tenax.
+
+
 def test_fixture_rejects_trivial_charges():
     from tenax.algorithms.ctm_layout import SeedResult
 
     class _T:
         blocks = {0: None}
 
-    seed = SeedResult({}, {("x",): ((0, 4),)}, 0.0, 0.0, True, 1.0, True, 10)
+    # Every chi leg has one sector; a double-layer leg of T1 has two.
+    layout = {
+        ((0, 0), "C1", "chi_a"): ((0, 4),),
+        ((0, 0), "C1", "chi_b"): ((0, 4),),
+        ((0, 0), "T1", "u2"): ((-1, 1), (1, 1)),
+    }
+    seed = SeedResult({}, layout, 0.0, 0.0, True, 1.0, True, 10, True)
     with pytest.raises(AssertionError, match="no charged environment sector"):
         _regime(_T(), _T(), seed)
+
+
+def test_fixture_rejects_an_unconverged_cut_gap():
+    from tenax.algorithms.ctm_layout import SeedResult
+
+    A, B = heisenberg_u1sz_init_pair(D, jax.random.PRNGKey(0))
+    assert len(A.blocks) > 1  # regime: the site check passes
+    layout = {((0, 0), "C1", "chi_a"): ((-1, 2), (1, 2))}
+    seed = SeedResult({}, layout, 0.0, 0.0, True, 1.0, True, 10, False)
+    with pytest.raises(AssertionError, match="cut-gap solve did not converge"):
+        _regime(A, B, seed)

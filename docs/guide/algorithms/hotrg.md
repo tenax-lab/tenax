@@ -30,6 +30,8 @@ config = HOTRGConfig(
     num_steps=20,                  # RG iterations
     direction_order="alternating", # "alternating" or "horizontal_first"
     svd_trunc_err=None,            # optional truncation error threshold
+    isometry="svd",                # "svd" or "eigh" (see "Isometry" below)
+    side="auto",                   # isometry="eigh" only: "auto", "first" or "second"
 )
 ```
 
@@ -45,9 +47,10 @@ tensor = compute_ising_tensor(beta_c)
 config = HOTRGConfig(max_bond_dim=16, num_steps=20)
 log_Z_per_site = hotrg(tensor, config)
 
-exact = ising_free_energy_exact(beta_c)
-print(f"HOTRG log(Z)/N = {float(log_Z_per_site):.8f}")
-print(f"Exact          = {exact:.8f}")
+f_hotrg = float(-log_Z_per_site / beta_c)  # free energy per site, f = -ln(Z)/(N*beta)
+f_exact = ising_free_energy_exact(beta_c)
+print(f"HOTRG f = {f_hotrg:.8f}")
+print(f"Exact f = {f_exact:.8f}")
 ```
 
 ## TRG vs HOTRG
@@ -70,6 +73,32 @@ the environment tensor).
   steps. This preserves the square-lattice symmetry at each step.
 - `"horizontal_first"`: perform both horizontal and vertical coarse-graining
   within each step. May converge faster for anisotropic systems.
+
+(hotrg-isometry)=
+## Isometry
+
+`isometry` selects how each move finds the projector $W W^\dagger$ on the coarse
+bond:
+
+- `"svd"` (default): $W$ is the leading left singular vectors of the two-site
+  ring tensor $M$ above. This is the original Tenax choice.
+- `"eigh"`: the HOSVD of Xie et al. $W$ is the leading eigenvectors of the
+  density matrix $\rho = M M^\dagger$ of one fused pair of the open two-site
+  tensor. All other legs are traced against the conjugate copy.
+
+`side` applies only to `isometry="eigh"`. It selects which fused pair supplies
+$W$: `(up, U)` or `(down, D)` in a horizontal move, `(left, L)` or `(right, R)`
+in a vertical move.
+
+- `"first"`: use the first pair.
+- `"second"`: use the second pair.
+- `"auto"` (default): build both and keep the one with the smaller discarded
+  weight. On a tie, use the first pair.
+
+`svd_trunc_err` also applies to `"eigh"`. Trailing eigenvalues are dropped while
+the discarded fraction of $\operatorname{tr}\rho$ stays below it, and
+`max_bond_dim` always caps the bond. `GiltHOTRGConfig` takes the same `isometry`
+and `side` fields. An invalid value raises `ValueError`.
 
 (hotrg-multigpu)=
 ## Multi-GPU sharding
