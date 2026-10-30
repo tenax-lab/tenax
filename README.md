@@ -178,8 +178,8 @@ from tenax import idmrg, build_bulk_mpo_heisenberg, iDMRGConfig
 W = build_bulk_mpo_heisenberg(Jz=1.0, Jxy=1.0)
 config = iDMRGConfig(max_bond_dim=64, max_iterations=200, convergence_tol=1e-8)
 result = idmrg(W, config)
-print(f"Energy per site: {result.energy_per_site:.6f}")  # -0.443144 (exact 1/4 - ln 2 = -0.443147)
-print(f"Converged: {result.converged}")  # True, after 145 steps
+print(f"Energy per site: {result.energy_per_site:.6f}")  # ~ -0.4431
+print(f"Converged: {result.converged}")
 ```
 
 Infinite cylinders: see the [iDMRG guide](docs/guide/algorithms/idmrg.md).
