@@ -240,12 +240,33 @@ def test_rise_chi_reads_the_env_under_in_ctm_growth():
 
 
 @pytest.mark.core
+@pytest.mark.parametrize("method", METHODS)
 @pytest.mark.parametrize("unit_cell", UNIT_CELLS)
-def test_in_ctm_chi_growth_disarms_the_check(monkeypatch, unit_cell):
-    """The env chi grows between the accept and the check: no reject."""
+def test_in_ctm_chi_growth_disarms_the_check(monkeypatch, unit_cell, method):
+    """The env chi grows between the accept and the check: no reject.
+
+    The values start far above the nominal chi=4, so a site that still keys
+    on ``ctm_cfg.chi`` never matches one that reads ``_rise_chi``.
+    """
     calls = {"n": 0}
-    _patch_uphill_accept(monkeypatch, "hager_zhang", calls)
-    grown = iter(range(4, 10_000))
+    _patch_uphill_accept(monkeypatch, method, calls)
+    grown = iter(range(1000, 10_000))
     monkeypatch.setattr(_opt, "_rise_chi", lambda _cfg, _envs: next(grown))
-    _run(_config(unit_cell, "hager_zhang"))
-    assert calls["n"] == NUM_STEPS, (unit_cell, calls["n"])
+    _run(_config(unit_cell, method))
+    assert calls["n"] == NUM_STEPS, (unit_cell, method, calls["n"])
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("method", METHODS)
+@pytest.mark.parametrize("unit_cell", UNIT_CELLS)
+def test_a_steady_env_chi_off_nominal_still_rejects(monkeypatch, unit_cell, method):
+    """The env chi (1000) is not ``ctm_cfg.chi`` (4) but does not change.
+
+    Both the accept and the check must key on ``_rise_chi``; a site that
+    keys on the nominal chi would disarm every check.
+    """
+    calls = {"n": 0}
+    _patch_uphill_accept(monkeypatch, method, calls)
+    monkeypatch.setattr(_opt, "_rise_chi", lambda _cfg, _envs: 1000)
+    _run(_config(unit_cell, method))
+    assert calls["n"] == RETRIES + 1, (unit_cell, method, calls["n"])
