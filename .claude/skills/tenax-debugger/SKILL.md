@@ -327,7 +327,7 @@ result = idmrg(W, config)
 |-------|-------------|----------------|
 | 1D Heisenberg S=1/2 | ≈ −0.4431 | `build_bulk_mpo_heisenberg(Jz=1.0, Jxy=1.0)` |
 | 2D Ising at β_c ≈ 0.4407 | f ≈ −2.10961 | `compute_ising_tensor(beta)`, `ising_free_energy_exact(beta)` |
-| 2D Heisenberg iPEPS D=2 | ≈ −0.6593 (SU, re-measured with `ctm_tensor_2site`); ≈ −0.6625 (AD, χ=16) | `ipeps(gate, None, config)` / `optimize_gs_ad` |
+| 2D Heisenberg iPEPS D=2 | ≈ −0.6593 (SU, re-measured with `ctm_tensor_2site`); ≈ −0.6602 (AD, χ=16; −0.660231 measured) | `ipeps(gate, None, config)` / `optimize_gs_ad` |
 
 ---
 

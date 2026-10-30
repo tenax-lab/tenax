@@ -73,7 +73,7 @@ scales well to chi=64 (2.5x slower than chi=8), and never NaNs.
 | eigh + sigma (explicit AD) | -0.6601 | 1234s | Slower than phase |
 | svd + sigma (two-proj) | -0.6623 | 1124s | Slower than phase |
 | eigh + sigma (GMRES implicit) | -0.6601 | — | **Config no longer accepted** — see below |
-| Literature (chi=8) | -0.6625 | — | — |
+| Converged D=2 χ=16 (recommended config, 2026-10-30) | -0.660231 | — | — |
 | Exact (QMC, chi→∞) | -0.6694 | — | — |
 
 Historical: phase gauge measured **6-9x faster** than sigma gauge for
@@ -115,7 +115,7 @@ Backward: dE/dA via backprop through all N sweeps
 
 **Strengths** (historical, measured before #1074's routing, under which
 this path applies no forward gauge): best reported energy at chi=16
-(-0.6628 with qr+phase — below the converged D=2 χ=16 optimum −0.66251, so
+(-0.6628 with qr+phase — below the converged D=2 χ=16 optimum −0.660231, so
 not a converged variational value), scales cleanly to chi=64+, never NaNs,
 and was 6–9× faster than sigma gauge.
 
@@ -874,9 +874,9 @@ gate_1x1 = sublattice_rotate_gate(gate)
 # forward_gauge defaults to "auto"; on this explicit route it resolves to
 # "phase" but has no effect -- ctm_energy_explicit applies no forward gauge,
 # so the sweeps are ungauged (#1074).  (On implicit AD "auto" runs
-# "bond_phase", #841.)  Reaches E=-0.6628 at D=2, chi=16; the converged
-# D=2, chi=16 optimum is -0.66251 (Tenax implicit AD and variPEPS agree to
-# 4e-7, 2026-10-03).
+# "bond_phase", #841.)  Reaches E=-0.6628 at D=2, chi=16, below the
+# converged D=2, chi=16 optimum of -0.660231 (the recommended configuration
+# above, 2026-10-30), so not a converged variational energy.
 config = iPEPSConfig(
     max_bond_dim=2,
     ctm=CTMConfig(
@@ -964,8 +964,8 @@ result = compute_excitations(A_opt, env, gate_1x1, E_gs, momenta, exc_config)  #
 print(result.energies.shape)  # (20, 3)
 ```
 
-The explicit-AD configuration reaches E=-0.6628 at D=2, chi=16 (literature:
--0.6548 at D=2). The chi-ramping schedule runs internally as a single
+The explicit-AD configuration reaches E=-0.6628 at D=2, chi=16, below the
+converged D=2, chi=16 optimum of -0.660231. The chi-ramping schedule runs internally as a single
 `optimize_gs_ad` call with envs padded to `max(chi)` from step 1, so the
 JIT-compiled CTM / energy / backward kernels never see a shape change
 (issue #453). For excitations see {doc}`ad_excitations`.
