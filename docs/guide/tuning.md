@@ -224,6 +224,33 @@ Values: `None` (auto), `"noise"`, `"reset"`
   `"root_implicit_symmetric"`) have no stall recovery and ignore this
   setting.
 
+### `iPEPSConfig.gs_reject_energy_rise` (default `True`)
+
+The line search accepts a step on its φ probe, a forward-only CTM
+warm-started from the step's environment. A probe that stops on a CTM
+plateau can report a decrease that the converged fixed point does not
+have. In the symmetric S5 run (chi=8), the probe was below
+φ0 = -0.5729735284, but the next step's converged energy was
+-0.5728248944.
+
+With this flag on, each step compares its converged energy with the φ0
+of the line search that made the point. If the energy rose (by more than
+the stall noise floor), the optimizer rolls back to `best_params`,
+resets the environment, and clears the L-BFGS / CG / optax state.
+
+- The check is skipped after a rollback and after a chi change, because
+  the two energies are not comparable then. With
+  `ctmrg_heuristic_increase_chi=True`, the chi of the CTM environment is
+  compared (the CTM grows it without changing `CTMConfig.chi`).
+- `gs_stall_recovery_retries` limits the number of consecutive rejects.
+  After that many, the run stops. A step that keeps its decrease sets
+  the count back to zero.
+- The pending φ0 and the reject count are saved in checkpoints.
+- Applies to the 1-site, 2-site and multisite AD optimizers, with HZ
+  and Armijo line searches. The `ctm_ad_mode` engines do not use it.
+
+Set `gs_reject_energy_rise=False` to get the behaviour before #1166.
+
 ---
 
 ## Initialization
@@ -328,6 +355,35 @@ backward costs most of a compile (D=3 U(1): 870 s against 1048 s).  The
 first compile is not shortened, and the directory has no size limit by
 default.  See "Persistent compilation cache" in
 `docs/guide/algorithms/ipeps_ad_paths.md`.
+
+## Diagnostics knobs
+
+### `iPEPSConfig.gs_log_probes` (default `False`)
+
+Prints one line per line-search probe, so that a false accept can be
+traced and replayed.  The line search accepts α on its probes, and a
+probe whose CTM stopped early can report a decrease that the converged
+energy does not have (#1166).  Each line has the form:
+
+```
+[iPEPS-AD:2site-tensor] step 12 probe phi alpha=5.000e-03 E=-0.5729735284 sweeps=41 sv_diff=8.312e-09 conv=True seed=3fa2c1d0
+```
+
+- `phi` is the forward-only energy probe; `dphi` is the implicit-AD
+  `value_and_grad` probe.
+- `seed` is an md5 prefix of the env that the probe's CTM starts from
+  (`cold` if none).
+- `E=inf`: `on_unconverged="raise"` rejected the probe.
+- `sweeps=n/a sv_diff=n/a conv=n/a`: no forward wrote diagnostics (a
+  `dphi` probe under explicit AD, `gs_implicit_ad=False`).
+- `alpha=nan`: a backtracking (`armijo`) probe, which has no HZ alpha.
+
+With `return_history=True` the same data goes to `history["probes"]`, one
+dict per probe with the keys `step`, `kind`, `alpha`, `energy`, `sweeps`,
+`sv_diff`, `converged` and `seed` (`None` for `n/a`).  The flag does not
+change the optimization.  It costs one device-to-host copy of the seed
+env per probe, so keep it off outside debugging.  Used on the 1-site,
+2-site and multisite Tensor AD paths.
 
 ---
 

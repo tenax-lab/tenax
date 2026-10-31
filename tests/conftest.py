@@ -852,6 +852,10 @@ _FILE_MARKERS = {
     # L-BFGS + Hager-Zhang optimizer step evaluates.  Mechanism tests only
     # (spied evaluation counts, a scripted line search) at D=2, chi<=6.
     "test_ls_reuse_accepted_eval.py": "core",
+    # gs_reject_energy_rise: a line-search accept whose converged energy rose
+    # above φ0 is rolled back.  ``core``: it gates every AD optimizer step.
+    # Mechanism tests only (a mocked uphill accept), D=2 chi=4.
+    "test_ad_reject_energy_rise.py": "core",
     # The metric preconditioner normalises N by <A|N|A> so g' is invariant to
     # the CTM environment's arbitrary overall scale (phase vs bond_phase
     # differed by ~40%).  ``core``: it shapes every default (gs_metric_precond
@@ -862,6 +866,10 @@ _FILE_MARKERS = {
     # Mechanism tests only (spied env_init, a scripted line search), D=2 chi=4.
     "test_hz_probe_warm_start.py": "core",
     "test_metric_precond_1site_current_params.py": "core",
+    # gs_log_probes: one log line + history record per line-search probe.
+    # ``core``: diagnostics on the HZ probe path.  Mechanism tests only
+    # (scripted line search, D=2 chi=4), one optimizer step each.
+    "test_ipeps_probe_log.py": "core",
 }
 
 

@@ -116,7 +116,7 @@ This is the YASTN convention (arXiv:2311.11894).
 **Tenax cross-check.**
 
 - Works for **1-site** C4v iPEPS: D=2 χ=8 reaches E=−0.6601 with both
-  implicit (GMRES) and explicit AD; matches literature −0.6625.
+  implicit (GMRES) and explicit AD (converged D=2 χ=16: −0.660231).
 - **Breaks for 2-site non-C4v.** σ-gauge produces inconsistent A/B
   alignments because the per-site transfer matrix eigenvectors are no longer
   related by symmetry. Energy drifts non-variationally: best −1.04 at D=2

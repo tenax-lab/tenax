@@ -817,6 +817,18 @@ class iPEPSConfig:
                                matches variPEPS's
                                ``optimizer_random_noise_max_retries``.
                                (issue #454)
+        gs_reject_energy_rise:
+                               Roll back a line-search-accepted step whose
+                               converged energy (the next step's gradient
+                               forward) is above that line search's φ0.  The
+                               φ probe that accepted α is a forward-only CTM
+                               and can stop on a plateau below the fixed
+                               point.  A rejection rolls back to
+                               ``best_params`` and clears the optimizer
+                               history; ``gs_stall_recovery_retries + 1``
+                               consecutive rejections end the run with
+                               ``best_params``.  Default ``True``; ``False``
+                               restores the old behaviour.
         gs_energy_floor:       Optional variational sanity floor on in-loop
                                best-state tracking (issue #298).  Candidate
                                energies strictly below this value are
@@ -827,6 +839,19 @@ class iPEPSConfig:
                                restart the optimizer state when it changes.
         gs_layout_tie_rtol:    Hysteresis margin of that re-check (relative
                                to the cut's largest singular value).
+        gs_log_probes:         Diagnostics.  Print one line per line-search
+                               probe (``phi``: forward-only energy; ``dphi``:
+                               implicit-AD ``value_and_grad``) with alpha,
+                               energy, CTM sweeps, ``sv_diff``, the converged
+                               flag and an md5 prefix of the seed env
+                               (``cold`` if none).  With ``return_history``
+                               the same records go to ``history["probes"]``.
+                               A probe that ``on_unconverged="raise"`` rejects
+                               shows ``E=inf``; diagnostics that no forward
+                               wrote (explicit AD) show ``n/a`` (``None`` in
+                               the record); backtracking probes have alpha
+                               NaN.  Default ``False``; it costs one
+                               device-to-host copy of the seed env per probe.
     """
 
     max_bond_dim: int = 2
@@ -912,6 +937,15 @@ class iPEPSConfig:
     # ``converged=False`` line searches.  Honoured on the iPEPS 1-site /
     # 2-site / multisite Tensor AD paths.
     gs_hz_max_iter: int = 40
+    # Diagnostics: print one line per line-search probe (phi = forward-only
+    # energy, dphi = implicit-AD value_and_grad) regardless of ``gs_verbose``,
+    # with alpha, energy, CTM sweeps / sv_diff / converged flag and an md5
+    # prefix of the seed env (``cold`` if none), so a false accept can be
+    # replayed.  With ``return_history`` the same data lands in
+    # ``history["probes"]``.  Costs a device-to-host copy of the seed env per
+    # probe, so keep it off outside debugging.  Honoured on the iPEPS 1-site /
+    # 2-site / multisite Tensor AD paths.
+    gs_log_probes: bool = False
     # Chi-ceiling bail-out (variPEPS §2.8.2 mechanism).  When > 0 and the
     # CTM is at ``ctm.chi_max`` AND the bump indicator (``eps_T`` or
     # ``norm_smallest_S`` per ``chi_auto_bump_metric``) exceeds
@@ -924,6 +958,8 @@ class iPEPSConfig:
     gs_chi_ceiling_bailout: int = 0
     gs_noise_recovery_retries: int = 3  # max retries with noise injection on stall
     gs_stall_recovery_retries: int = 5  # max consecutive resets before giving up (#454)
+    # Roll back an accepted step whose converged energy rose above φ0.
+    gs_reject_energy_rise: bool = True
     gs_noise_amplitude: float = 0.1  # relative noise amplitude for recovery
     # Stall recovery mode for L-BFGS / CG line search failures.
     #   "noise"  -> inject gs_noise_amplitude Frobenius perturbation, no
