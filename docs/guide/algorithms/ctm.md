@@ -242,6 +242,17 @@ modes with λ near +1.
   two sweeps: near −1 is a flip cycle mixing cures, near +1 a slow
   contraction it slows further, NaN fewer than two comparable sweeps. A log
   therefore names which failure an unconverged forward hit.
+- When that multiplier is −0.9 or below, the `CTMNotConvergedError` /
+  `CTMNotConvergedWarning` message calls it a two-state cycle and suggests
+  `ctm_mixing` between 0.5 and 0.9. Mixing does not cure every cycle, and
+  it costs sweeps where the plain forward converges. Measured on warm starts
+  from the symmetric 2-site XXZ benchmark (D=3, χ=16, S5 checkpoints 40–49):
+  of 16 forwards that converge with and without mixing, β=0.5 needed 3.9×
+  the sweeps in total (1.6–8.3× per forward; same energy to 6e-10). Of the
+  two forwards that cycle without mixing, one (the step-51 forward)
+  converged in 10 sweeps for β from 0.4 to 0.9 but still cycled at β=0.3;
+  the other still cycled for every β from 0.5 to 0.9. So turn mixing on
+  where a cycle is reported, not as a default.
 - Mixing does not cure a forward that wanders without a sign pattern (the
   χ=14 case of #1060).
 

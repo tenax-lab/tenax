@@ -84,6 +84,30 @@ def test_message_shows_na_when_multiplier_missing_or_nan(value):
         check_ctm_converged(info, site="g", policy="raise")
 
 
+@pytest.mark.parametrize("mult", [-0.9, -1.0, -1.857])
+def test_message_suggests_mixing_for_a_two_state_cycle(mult):
+    """A step multiplier near or below -1 is a two-state cycle, which
+    ``ctm_mixing`` (#1060) can damp.  The message says so, under both
+    policies."""
+    info = _info(False, step_multiplier=mult)
+    with pytest.raises(CTMNotConvergedError) as ei:
+        check_ctm_converged(info, site="gradient", policy="raise")
+    msg = str(ei.value)
+    assert "two-state cycle" in msg and "CTMConfig(ctm_mixing=beta)" in msg, msg
+    with pytest.warns(CTMNotConvergedWarning, match=r"CTMConfig\(ctm_mixing=beta\)"):
+        check_ctm_converged(info, site="gradient", policy="warn")
+
+
+@pytest.mark.parametrize("mult", [None, float("nan"), -0.89, 0.0, 0.95])
+def test_message_does_not_suggest_mixing_otherwise(mult):
+    """A slow contraction (+), a damped oscillation (> -0.9) or no measurement
+    gets no mixing hint."""
+    info = _info(False) if mult is None else _info(False, step_multiplier=mult)
+    with pytest.raises(CTMNotConvergedError) as ei:
+        check_ctm_converged(info, site="gradient", policy="raise")
+    assert "ctm_mixing" not in str(ei.value)
+
+
 def test_message_reports_stationarity_separately():
     """Final-review I3: the #841 stationarity residual is printed under its own
     label and its own threshold, never as the loop's sv_diff."""
