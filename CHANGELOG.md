@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.9.1 (2026-10-30)
+## v0.9.1 (2026-11-01)
 
 A bug-fix release.  **Dense iDMRG never converged in v0.9.0 and earlier**:
 its energy was pinned 3.5e-4 above the truth at every bond dimension
