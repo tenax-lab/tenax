@@ -45,9 +45,9 @@ on by default and changes results only where a line-search accept was false.
   energies at the 1e-3 level only.
 - **The symmetric (block-sparse) CTM is not useful in practice for iPEPS AD
   at present: its compile time is too long.**  On the same benchmark at
-  chi=32, the first optimizer step took about 11 h on CPU, nearly all of it
-  JIT compilation, before one step of optimization ran.  Use the dense CTM
-  for AD runs until the compile cost is reduced.
+  chi=32, the first optimizer step took about 11 h on CPU from start to the
+  first checkpoint; single XLA compiles in it took up to 7 min each.  Use the
+  dense CTM for AD runs until the compile cost is reduced.
 
 ## v0.9.1 (2026-11-01)
 
