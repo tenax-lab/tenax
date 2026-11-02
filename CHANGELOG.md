@@ -43,6 +43,11 @@ on by default and changes results only where a line-search accept was false.
   the kept-sector layout changes from step to step, and energies at chi=16
   differ from chi=32 by about 1e-3 on either layout.  Use chi=16 symmetric
   energies at the 1e-3 level only.
+- **The symmetric (block-sparse) CTM is not useful in practice for iPEPS AD
+  at present: its compile time is too long.**  On the same benchmark at
+  chi=32, the first optimizer step took about 11 h on CPU, nearly all of it
+  JIT compilation, before one step of optimization ran.  Use the dense CTM
+  for AD runs until the compile cost is reduced.
 
 ## v0.9.1 (2026-11-01)
 
