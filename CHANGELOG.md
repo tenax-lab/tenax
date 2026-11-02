@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.9.2 (2026-11-02)
+
+A small release: one guard and two diagnostics for iPEPS AD.  The guard is
+on by default and changes results only where a line-search accept was false.
+
+### Behavior Changes
+
+- **An accepted line-search step whose converged energy rose is rolled back**
+  (`iPEPSConfig.gs_reject_energy_rise`, default `True`, #1166).  The line
+  search accepts on a forward-only CTM probe, and a probe that stops on a CTM
+  plateau can report a decrease that the converged fixed point does not have
+  (symmetric 2-site XXZ, chi=8: accepted below phi0 = -0.5729735284, converged
+  at -0.5728248944).  At the next step the optimizer compares the converged
+  energy with phi0; if it rose, it returns to `best_params`, resets the env
+  cache and clears the optimizer state.  `gs_stall_recovery_retries` limits
+  consecutive rollbacks.  Applies to the 1-site, 2-site and multisite AD
+  optimizers.  `gs_reject_energy_rise=False` restores v0.9.1 behaviour.
+
+### New Features
+
+- **`iPEPSConfig.gs_log_probes`** (default `False`, #1168) logs one line per
+  line-search probe (phi and dphi): step, alpha, E, CTM sweeps, sv_diff,
+  converged flag and the warm-start env.  With `return_history=True` the
+  records are in `history["probes"]`.  Off, the code does the same work as
+  before.
+- **The CTM not-converged message names a two-state cycle** (#1170).  When the
+  step multiplier is near -1, `CTMNotConvergedError` / `CTMNotConvergedWarning`
+  now suggest `CTMConfig(ctm_mixing=beta)` with beta in 0.5-0.9 (needs
+  `forward_gauge="bond_phase"`).  Mixing stays off by default: it cured one
+  measured cycle, not another, and costs 1.6x-8.3x the sweeps where it is not
+  needed.
+
+### Fixed
+
+- The 2-site split-CTM phi forward ran twice per probe (#1168).
+
+### Known issues
+
+- The symmetric 2-site XXZ benchmark (U(1), D=3) does not converge to
+  |g| < 1e-5 at chi=16.  The chi=16 corner spectrum is flat at the cut, so
+  the kept-sector layout changes from step to step, and energies at chi=16
+  differ from chi=32 by about 1e-3 on either layout.  Use chi=16 symmetric
+  energies at the 1e-3 level only.
+
 ## v0.9.1 (2026-11-01)
 
 A bug-fix release.  **Dense iDMRG never converged in v0.9.0 and earlier**:
