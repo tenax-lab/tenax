@@ -1085,7 +1085,9 @@ def _gauge_residual(N: np.ndarray, A: np.ndarray, a: int, b: int) -> float:
 
 def _spectrum_fingerprint(A, gate, gate_nnn, ab, config, basis) -> str:
     digest = hashlib.sha256()
-    for array in (A, gate, np.zeros(0) if gate_nnn is None else gate_nnn, basis):
+    # gate_nnn only when given: a nearest-neighbour run keeps its checkpoints.
+    arrays = (A, gate, basis) if gate_nnn is None else (A, gate, basis, gate_nnn)
+    for array in arrays:
         digest.update(str(array.shape).encode())
         # Rounded: rescaling A before the internal normalisation must still resume.
         digest.update(np.round(np.asarray(array, dtype=np.float64), 12).tobytes())
@@ -1161,7 +1163,10 @@ def compute_spectrum(
         momentum: One of ``(pi, 0)``, ``(0, pi)``, ``(pi, pi)``, modulo ``2 pi``.
         operators: Maps a name to a ``d x d`` matrix, for the spectral weights.
         config: See :class:`SpectrumConfig`.
-        gate_nnn: Optional next-nearest-neighbour gate, used on both diagonals.
+        gate_nnn: Optional next-nearest-neighbour gate, used on both diagonals of
+            every site. One gate serves both sublattices: in the rotated frame
+            ``J2 * S.S`` takes no rotation, and a gate that changes when both of
+            its sites rotate cannot be given here.
         basis: Optional orthonormal columns that restrict the tangent vectors.
 
     Returns:

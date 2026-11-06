@@ -30,6 +30,7 @@ from tenax.algorithms._ipeps_excitation_ctm import (
     unpack_env,
 )
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
+from tenax.algorithms.ipeps_excitations import _spectrum_fingerprint
 
 J2 = 0.3
 
@@ -260,6 +261,16 @@ def test_compute_spectrum_keeps_the_sum_rule_with_nnn(ctm, tmp_path):
             gate_nnn=0.5 * heisenberg_gate(),
             basis=basis,
         )
+
+
+def test_a_run_without_gate_nnn_keeps_its_fingerprint():
+    """Columns saved before gate_nnn existed still resume: the digest is 0acdc2a5's."""
+    A = np.arange(32.0).reshape((2,) * 5)
+    gate = np.arange(16.0).reshape((2,) * 4)
+    basis = np.eye(32)[:, :2]
+    config = SpectrumConfig(chi=10, ctm_sweeps=30, fd_step=1e-4)
+    digest = _spectrum_fingerprint(A, gate, None, (1, 0), config, basis)
+    assert digest == "449edce3ffb6d16679e220abc8e18342103750516a41ed6a1612a6ba858356e7"
 
 
 def test_bad_nnn_gate_shape_raises():

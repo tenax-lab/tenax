@@ -328,10 +328,13 @@ S = spectral_function(result, "Sy", grid, eta=0.1)  # Lorentzian half-width eta
 sublattice rotation keeps the momentum of `S^y`, and shifts `S^x` and `S^z` by
 `(pi, pi)`. So in the rotated frame, physical Gamma for `S^x` and `S^z` is `(pi, pi)`.
 
-For a J1-J2 model pass `gate_nnn`, used on both diagonals. Next-nearest neighbours
-share a sublattice, so in the rotated frame this is `J2 * S.S` without the rotation.
-The diagonal RDM is a larger contraction, so each column costs more than the figures
-under Limits.
+For a J1-J2 model pass `gate_nnn`, used on both diagonals of every site, and
+`result.energy_density` then includes it. Next-nearest neighbours share a sublattice,
+and `S.S` and XXZ do not change when both sites rotate. So in the rotated frame this
+is `J2 * S.S` without the rotation. A gate that does change, such as a field `S^z`
+term, differs between the two sublattices in that frame, and one `gate_nnn` cannot
+express it. The diagonal RDM is a larger contraction, so each column costs more than
+the figures under Limits.
 
 ### Limits
 
