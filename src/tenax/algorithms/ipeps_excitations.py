@@ -863,6 +863,10 @@ def compute_excitations(
 ) -> ExcitationResult:
     """Compute excitation spectrum at given momentum points.
 
+    .. deprecated:: 0.9.3
+        Use :func:`compute_spectrum`. This function truncates the momentum sum
+        to nearest neighbours (#1052).
+
     For each momentum point, constructs the effective Hamiltonian and norm
     matrices using AD (Ponsioen et al. 2022), then solves the generalized
     eigenvalue problem for the lowest excitation energies.
@@ -884,6 +888,13 @@ def compute_excitations(
     Returns:
         ExcitationResult with energies and momenta.
     """
+    warnings.warn(
+        "compute_excitations is deprecated: it truncates the momentum sum to "
+        "nearest neighbours (#1052). Use compute_spectrum at (pi,0), (0,pi) and "
+        "(pi,pi). Other momenta are not available yet.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # Accept the Tensor-protocol outputs of ``optimize_gs_ad`` directly by
     # coercing the site tensor, gate, and environment to raw arrays.
     A = _as_dense_array(A)

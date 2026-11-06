@@ -452,6 +452,9 @@ Once you have an optimized ground state, Tenax can compute quasiparticle
 excitation spectra at arbitrary Brillouin zone momenta, following
 Ponsioen et al. (SciPost Phys. 12, 006, 2022).
 
+`compute_excitations` is deprecated (#1052). Use it only for a rough scan at
+momenta `compute_spectrum` cannot reach.
+
 ```python
 from tenax import ExcitationConfig, compute_excitations, make_momentum_path
 

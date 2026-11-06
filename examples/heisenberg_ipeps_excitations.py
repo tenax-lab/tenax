@@ -17,6 +17,9 @@ The workflow is:
 Note: this example is slow (~minutes) due to the ground state optimization
 followed by the excitation calculation at each k-point.
 
+compute_excitations is deprecated (#1052). This example stays because it is the only
+route to a full Brillouin-zone path, and its low energies are not reliable.
+
 Usage::
 
     uv run python examples/heisenberg_ipeps_excitations.py
