@@ -292,6 +292,18 @@ iPEPS Excitations
 
 .. autofunction:: tenax.algorithms.ipeps_excitations.make_momentum_path
 
+.. autoclass:: tenax.algorithms.ipeps_excitations.SpectrumConfig
+   :members:
+   :no-index:
+
+.. autoclass:: tenax.algorithms.ipeps_excitations.SpectrumResult
+   :members:
+   :no-index:
+
+.. autofunction:: tenax.algorithms.ipeps_excitations.compute_spectrum
+
+.. autofunction:: tenax.algorithms.ipeps_excitations.spectral_function
+
 Fermionic iPEPS (fPEPS)
 -----------------------
 

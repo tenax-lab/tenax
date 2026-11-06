@@ -11,6 +11,9 @@ Key components:
 3. H_eff(k) and N(k) matrix construction via AD
 4. Generalized eigenvalue solver with null-space projection
 5. High-level ``compute_excitations()`` for the dispersion relation
+6. ``compute_spectrum()`` and ``spectral_function()``: the complete momentum sum
+   and spectral weights at (pi,0), (0,pi) and (pi,pi), following Ponsioen, Hasik
+   & Corboz, PRB 108, 195111 (2023)
 """
 
 from __future__ import annotations
