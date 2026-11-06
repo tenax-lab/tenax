@@ -268,12 +268,41 @@ requirement and the v1 limits.
 
 Issues: a new one for S(k,w), and a follow-up with the forward-mode findings.
 
+## Revisions from planning, 2026-11-06
+
+Measured while writing the plan, by running the code in it.
+
+- **Gauge residual at M is resolved.** It is 3e-12 at M and 4e-12 at X with log-norm
+  N, D=2, chi=10, so the 1e-3 threshold stands.
+- **H asymmetry warns at 1e-3, not 1e-4.** One noisy reverse-mode column gives 6.6e-4
+  at D=2, chi=10, M. It does not depend on sweeps (30, 60), it falls only to 1.4e-4
+  at `fd_step=1e-3`, and omega stays at 0.64873 in all three runs.
+- **`A` is normalised internally,** so `omega`, the weights and `s(k)` do not depend
+  on its scale.
+- **`A` must be float64.** A 1e-4 central difference is noise in float32.
+- **The N cut has an absolute floor:** `null_tol * max(largest eigenvalue, 1e-2)`. A
+  `basis` inside the null space gives rank 0 and a warning. A purely relative cut
+  would keep the noise as a mode.
+- **Benchmark 2 is answered, and the saving does not apply to Fig. 1.** Hasik's
+  states are fully dense, and no bond gauge gives a U(1). The residual of the most
+  general Lie test (an independent generator on each leg, physical axis scanned) is
+  below, where a synthetic U(1) tensor in a rotated gauge gives 1e-15 and a random
+  tensor 0.64. Fig. 1 therefore needs all 512 columns unless a different reduction
+  is added.
+
+  | State | Residual |
+  |---|---|
+  | J2=0, D=2 | 3.8e-4 |
+  | J2=0, D=3 | 0.66 |
+  | J2=0, D=4 | 0.052 |
+  | J2=0.3, D=4 | 0.71 |
+
 ## Risks
 
 - **Fig. 1 may be unaffordable.** About 9 days per k for H at chi=36 on 12 CPU
-  cores is an extrapolation, and N and J2 add to it. Benchmark 2 comes first. If
-  the sector saving and the A100 are not enough, Fig. 1 waits, and the J2=0
-  workflow still stands.
+  cores is an extrapolation, and N and J2 add to it. There is no sector saving (see
+  Revisions). If the A100 is not enough, Fig. 1 waits, and the J2=0 workflow still
+  stands.
 - **chi needed is unknown.** D=3 needs more than 18. The chi for D=4 is not
   measured.
 - **Reverse-mode noise in H.** Agreement with FD-FD is 3e-5 or better at D=2. It
