@@ -348,7 +348,7 @@ def test_non_finite_column_raises_and_is_not_saved(monkeypatch, tmp_path, basis,
     class NanInColumnOne:
         ctm_converged = True
 
-        def __init__(self, A, gate, chi, sweeps):
+        def __init__(self, A, gate, chi, sweeps, gate_nnn=None):
             self.A = jnp.asarray(A)
             self.calls = 0
 

@@ -1083,9 +1083,9 @@ def _gauge_residual(N: np.ndarray, A: np.ndarray, a: int, b: int) -> float:
     return float(np.linalg.norm(Q.T @ N @ Q, 2))
 
 
-def _spectrum_fingerprint(A, gate, ab, config, basis) -> str:
+def _spectrum_fingerprint(A, gate, gate_nnn, ab, config, basis) -> str:
     digest = hashlib.sha256()
-    for array in (A, gate, basis):
+    for array in (A, gate, np.zeros(0) if gate_nnn is None else gate_nnn, basis):
         digest.update(str(array.shape).encode())
         # Rounded: rescaling A before the internal normalisation must still resume.
         digest.update(np.round(np.asarray(array, dtype=np.float64), 12).tobytes())
@@ -1143,6 +1143,7 @@ def compute_spectrum(
     operators,
     config: SpectrumConfig,
     *,
+    gate_nnn=None,
     basis=None,
 ) -> SpectrumResult:
     """Excitation spectrum and spectral weights of a one-site iPEPS on a 2x2 cell.
@@ -1160,6 +1161,7 @@ def compute_spectrum(
         momentum: One of ``(pi, 0)``, ``(0, pi)``, ``(pi, pi)``, modulo ``2 pi``.
         operators: Maps a name to a ``d x d`` matrix, for the spectral weights.
         config: See :class:`SpectrumConfig`.
+        gate_nnn: Optional next-nearest-neighbour gate, used on both diagonals.
         basis: Optional orthonormal columns that restrict the tangent vectors.
 
     Returns:
@@ -1171,12 +1173,14 @@ def compute_spectrum(
     A = _spectrum_array(A)
     d = A.shape[-1]
     gate = _spectrum_gate(gate, d, "gate")
+    if gate_nnn is not None:
+        gate_nnn = _spectrum_gate(gate_nnn, d, "gate_nnn")
     operators = _spectrum_operators(operators, d)
     full_space = basis is None
     basis = _spectrum_basis(basis, A.size)
     n_columns = basis.shape[1]
     directory = None if config.checkpoint_dir is None else Path(config.checkpoint_dir)
-    fingerprint = _spectrum_fingerprint(A, gate, (a, b), config, basis)
+    fingerprint = _spectrum_fingerprint(A, gate, gate_nnn, (a, b), config, basis)
     columns = _load_columns(directory, fingerprint)
     if directory is None and n_columns > 100:
         warnings.warn(
@@ -1185,7 +1189,7 @@ def compute_spectrum(
             stacklevel=2,
         )
 
-    ctm = ExcitationCTM(A, gate, config.chi, config.ctm_sweeps)
+    ctm = ExcitationCTM(A, gate, config.chi, config.ctm_sweeps, gate_nnn=gate_nnn)
     if not ctm.ctm_converged:
         warnings.warn(
             f"compute_spectrum: the CTM did not converge at chi={config.chi}.",
