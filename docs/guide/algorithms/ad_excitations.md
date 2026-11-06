@@ -363,11 +363,14 @@ Negative modes stay in `omega`. The warning tells you to raise chi.
 | `energy_density` | energy per site | the CTM did not converge |
 | `n_asymmetry` | largest entry of N - N^T | above 1e-4 |
 | `h_asymmetry` | largest entry of H - H^T | above 1e-3 |
-| `n_min_eig` | lowest N eigenvalue over the largest | below -1e-4 |
+| `n_min_eig` | lowest N eigenvalue over `max(largest, 1e-2)` | below -1e-4 |
 | `n_negative_modes` | modes with omega < 0 | any |
 | `sum_rule_deficit` | per operator, 1 - sum(weights)/s(k) | above 1e-3 |
 | `gauge_residual` | largest singular value of N on A and the gauge vectors, `basis=None` only | above 1e-3 |
 | `null_dim` | eigenvalues of N below the cut | never |
+
+The cut is `null_tol * max(largest N eigenvalue, 1e-2)`. With the floor, a `basis`
+inside the null space gives rank 0 and a warning, not noise reported as modes.
 
 The H limit is looser because of one noisy reverse-mode column: at D=2, chi=10, M it
 gives 6.6e-4, while omega stays at 0.64873 across `fd_step` 1e-3, 1e-4 and 30, 60

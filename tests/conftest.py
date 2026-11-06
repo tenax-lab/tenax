@@ -30,7 +30,7 @@ _FILE_MARKERS = {
     "test_ctm_eager_jit.py": "core",
     "test_ctm_eager_sweep_jit.py": "algorithm",
     # compute_spectrum: raw-array contractions and second derivatives at D=2,
-    # chi=10, on a few columns (about 4 min for both files on 12 cores).
+    # chi=10, on a few columns (about 5 min for both files on 12 cores).
     "test_ipeps_spectrum_contractions.py": "core",
     "test_ipeps_spectrum.py": "core",
     # Full D=2 spectra; each test carries an explicit ``slow``.

@@ -1,4 +1,8 @@
-"""compute_spectrum and spectral_function: results, errors, warnings, checkpoints."""
+"""compute_spectrum and spectral_function: results, errors, warnings, checkpoints.
+
+Most tests share the checkpoint ``"x"``, so only the first ``_run`` computes columns
+and the others resume. A test that needs fresh columns takes its own ``name``.
+"""
 
 import warnings
 
@@ -15,12 +19,14 @@ from _ipeps_spectrum_fixtures import (
 )
 
 import tenax.algorithms._ipeps_excitation_ctm as ctm_module
+import tenax.algorithms.ipeps_excitations as spectrum_module
 from tenax import SpectrumConfig, SpectrumResult, compute_spectrum, spectral_function
 from tenax.algorithms._ipeps_excitation_ctm import ExcitationCTM
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
 from tenax.algorithms.ipeps_excitations import (
     _gauge_vectors,
     _reduce_spectrum,
+    _spectrum_gate,
     _spectrum_momentum,
     _warn_spectrum,
 )
@@ -30,6 +36,7 @@ from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 X_POINT = (np.pi, 0.0)
 M_POINT = (np.pi, np.pi)
+SCALE_TOL = 1e-6
 
 
 def _basis(*vectors):
@@ -123,6 +130,23 @@ def test_operator_outside_the_basis_warns(checkpoint, basis):
 
 
 def test_scaling_A_changes_nothing(checkpoint, basis):
+    """Fresh columns. H and N scale together, so only a large factor shows a fault."""
+    plain = _run(checkpoint, basis)
+    scaled = compute_spectrum(
+        1e-6 * hasik_d2(),
+        rotated_gate(),
+        X_POINT,
+        {"Sy": SY_REAL},
+        _config(checkpoint, "scaled"),
+        basis=basis,
+    )
+    np.testing.assert_allclose(scaled.omega, plain.omega, atol=SCALE_TOL)
+    np.testing.assert_allclose(
+        scaled.weights["Sy"], plain.weights["Sy"], atol=SCALE_TOL
+    )
+
+
+def test_rescaled_A_resumes_from_the_checkpoint(checkpoint, basis):
     plain = _run(checkpoint, basis)
     scaled = compute_spectrum(
         3.0 * hasik_d2(),
@@ -257,11 +281,16 @@ def test_momentum_outside_the_three_names_them(momentum):
         ({"A": hasik_d2().astype(np.float32)}, ValueError, "float64"),
         ({"A": hasik_d2()[0]}, ValueError, "shape"),
         ({"gate": np.eye(3)}, ValueError, "gate"),
+        ({"gate": 1j * rotated_gate()}, ValueError, "real"),
         ({"operators": {"bad": np.eye(3)}}, ValueError, "bad"),
         ({"basis": np.ones((5, 2))}, ValueError, "shape"),
         ({"basis": np.ones((32, 2))}, ValueError, "orthonormal"),
         ({"basis": 1j * np.eye(32)[:, :2]}, ValueError, "real"),
-        ({"momentum": (0.0, 0.0)}, ValueError, "Gamma"),
+        (
+            {"momentum": (0.0, 0.0)},
+            ValueError,
+            r"Gamma for S\^x and S\^z, not for S\^y",
+        ),
     ],
 )
 def test_bad_input_raises_before_ctm_work(no_ctm, change, error, message):
@@ -282,6 +311,67 @@ def test_bad_input_raises_before_ctm_work(no_ctm, change, error, message):
             SpectrumConfig(chi=10),
             basis=basis,
         )
+
+
+@pytest.mark.parametrize("fd_step", [0.0, -1e-4, float("nan")])
+def test_bad_fd_step_raises_before_ctm_work(no_ctm, fd_step):
+    with pytest.raises(ValueError, match="fd_step"):
+        compute_spectrum(
+            hasik_d2(),
+            rotated_gate(),
+            X_POINT,
+            {"Sy": SY_REAL},
+            SpectrumConfig(chi=10, fd_step=fd_step),
+        )
+
+
+@pytest.mark.parametrize(
+    "gate",
+    [
+        rotated_gate().astype(np.complex128),
+        rotated_gate() + 1e-16j,
+        rotated_gate().astype(np.float32),
+    ],
+    ids=["no imaginary part", "imaginary roundoff", "float32"],
+)
+def test_real_gate_in_another_dtype_becomes_float64(gate):
+    """S^y as a complex matrix gives a complex gate with no imaginary part."""
+    found = _spectrum_gate(gate, 2, "gate")
+    assert found.dtype == np.float64
+    np.testing.assert_allclose(found, rotated_gate(), atol=1e-7)
+
+
+@pytest.mark.parametrize("bad", ["h", "n"])
+def test_non_finite_column_raises_and_is_not_saved(monkeypatch, tmp_path, basis, bad):
+    """A saved NaN fails every rerun at eigh, with a message that names no file."""
+
+    class NanInColumnOne:
+        ctm_converged = True
+
+        def __init__(self, A, gate, chi, sweeps):
+            self.A = jnp.asarray(A)
+            self.calls = 0
+
+        def densities(self, phases, eps, X, Y):
+            return jnp.zeros(()), jnp.zeros(())
+
+        def ket_derivative(self, phases, X, h):
+            self.calls += 1
+            good = jnp.ones_like(self.A)
+            nan = jnp.nan * good if self.calls == 2 else good
+            return (nan, good) if bad == "h" else (good, nan)
+
+    monkeypatch.setattr(spectrum_module, "ExcitationCTM", NanInColumnOne)
+    with pytest.raises(RuntimeError, match="column 1 "):
+        compute_spectrum(
+            hasik_d2(),
+            rotated_gate(),
+            X_POINT,
+            {"Sy": SY_REAL},
+            SpectrumConfig(chi=10, checkpoint_dir=tmp_path),
+            basis=basis,
+        )
+    assert [path.name for path in tmp_path.glob("column_*.npz")] == ["column_00000.npz"]
 
 
 def test_symmetric_tensor_is_refused(no_ctm):

@@ -44,7 +44,13 @@ from tenax.algorithms._ipeps_excitation_ctm import (
     z10,
 )
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
-from tenax.algorithms.ipeps_excitations import _as_dense_env
+from tenax.algorithms.ipeps_config import CTMEnvironment
+from tenax.algorithms.ipeps_excitations import (
+    _as_dense_env,
+    _build_mixed_double_layer_open,
+    _rdm1x2_with_open_tensors,
+    _rdm2x1_with_open_tensors,
+)
 
 
 @pytest.fixture(scope="module")
@@ -87,6 +93,44 @@ def test_every_window_is_gauge_invariant_on_the_cell(ctm):
         ]
         for plain, gauged in pairs:
             np.testing.assert_allclose(gauged, plain, rtol=1e-8, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("mixed_rdm", "reference"),
+    [
+        (mixed_rdm_h, _rdm2x1_with_open_tensors),
+        (mixed_rdm_v, _rdm1x2_with_open_tensors),
+    ],
+    ids=["horizontal", "vertical"],
+)
+def test_mixed_rdm_matches_the_older_contraction_when_ket_is_not_bra(
+    mixed_rdm, reference
+):
+    """Unrelated tensors on a random environment: no wrong leg can cancel.
+
+    The energy tests have ket = bra, and the FD-FD test differentiates the same
+    function, so neither sees a ket and a bra exchanged on one site.
+    """
+    rng = np.random.default_rng(13)
+    chi, D, d = 3, 2, 2
+    E = {f"C{i}": jnp.asarray(rng.normal(size=(chi, chi))) for i in range(1, 5)}
+    E |= {f"T{i}": jnp.asarray(rng.normal(size=(chi, D, D, chi))) for i in range(1, 5)}
+    K1, Kb1, K2, Kb2 = (jnp.asarray(rng.normal(size=(D, D, D, D, d))) for _ in range(4))
+    env = CTMEnvironment(
+        *(E[f"C{i}"] for i in range(1, 5)),
+        *(E[f"T{i}"].reshape(chi, D * D, chi) for i in range(1, 5)),
+    )
+    # position="ket" takes the bra tensor first.
+    expected = reference(
+        _build_mixed_double_layer_open(Kb1, K1, "ket"),
+        _build_mixed_double_layer_open(Kb2, K2, "ket"),
+        env,
+        d,
+    )
+    found = mixed_rdm(E, E, K1, Kb1, K2, Kb2)
+    np.testing.assert_allclose(
+        found, expected, atol=1e-10 * float(jnp.abs(expected).max())
+    )
 
 
 def test_energy_density_matches_the_published_energy(ctm):

@@ -934,8 +934,9 @@ class SpectrumConfig:
             least two.
         ctm_sweeps: CTM sweeps differentiated, from the converged environment.
         fd_step: Central-difference step on the ket direction.
-        null_tol: Eigenvectors of N below ``null_tol`` times the largest
-            eigenvalue are dropped.
+        null_tol: Eigenvectors of N below ``null_tol * max(largest eigenvalue,
+            1e-2)`` are dropped. With the floor, a ``basis`` inside the null space
+            keeps nothing, not noise.
         checkpoint_dir: Write each finished column here, and resume from it.
     """
 
@@ -958,7 +959,7 @@ class SpectrumResult:
         energy_density: Energy per site at the base point.
         n_asymmetry: Largest ``|N - N^T|``.
         h_asymmetry: Largest ``|H - H^T|``.
-        n_min_eig: Lowest eigenvalue of N over the largest.
+        n_min_eig: Lowest eigenvalue of N over ``max(largest eigenvalue, 1e-2)``.
         n_negative_modes: Number of ``omega < 0``. These stay in ``omega``.
         sum_rule_deficit: Per operator, ``1 - sum(weights) / s(k)``.
         gauge_residual: Largest singular value of N on ``A`` and the gauge
@@ -992,7 +993,7 @@ def _spectrum_momentum(momentum) -> tuple[int, int]:
         raise ValueError(
             f"momentum must be one of {allowed}; got {momentum!r}. Gamma is "
             "refused: the method needs k != 0. In the sublattice-rotated frame "
-            "physical Gamma is (pi, pi)."
+            "(pi, pi) is physical Gamma for S^x and S^z, not for S^y."
         )
     return a, b
 
@@ -1035,7 +1036,11 @@ def _spectrum_gate(gate, d: int, name: str) -> np.ndarray:
             f"{name} must have shape ({d}, {d}, {d}, {d}) or ({d**2}, {d**2}); "
             f"got {gate.shape}."
         )
-    return gate.reshape((d,) * 4)
+    # S^y written as a complex matrix gives a complex dtype with no imaginary part.
+    gate = np.real_if_close(gate)
+    if np.iscomplexobj(gate):
+        raise ValueError(f"{name} must be real; got an imaginary part.")
+    return gate.reshape((d,) * 4).astype(np.float64)
 
 
 def _spectrum_operators(operators, d: int) -> dict[str, np.ndarray]:
@@ -1161,6 +1166,8 @@ def compute_spectrum(
         :class:`SpectrumResult`.
     """
     a, b = _spectrum_momentum(momentum)
+    if not config.fd_step > 0:
+        raise ValueError(f"fd_step must be positive; got {config.fd_step}.")
     A = _spectrum_array(A)
     d = A.shape[-1]
     gate = _spectrum_gate(gate, d, "gate")
@@ -1197,6 +1204,12 @@ def compute_spectrum(
                 basis.T @ np.asarray(g_h).ravel(),
                 basis.T @ np.asarray(g_n).ravel(),
             )
+            if not all(np.isfinite(part).all() for part in columns[i]):
+                raise RuntimeError(
+                    f"compute_spectrum: column {i} is not finite at chi={config.chi}, "
+                    f"fd_step={config.fd_step}; it was not saved. Try another chi or "
+                    "fd_step, with a new checkpoint_dir."
+                )
             if directory is not None:
                 _save_column(directory, i, fingerprint, *columns[i])
         H[:, i], N[:, i] = columns[i]
