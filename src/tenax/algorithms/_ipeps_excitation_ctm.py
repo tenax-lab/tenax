@@ -132,6 +132,94 @@ def mixed_rdm_v(ET, EB, K1, Kb1, K2, Kb2):
     return jnp.einsum(U, [0, 1, 2, 3, 4, 5], D_, [0, 1, 2, 3, 6, 7], [4, 6, 5, 7])
 
 
+def _phys(open_, a, b):
+    """Einsum labels of the ket and bra physical legs: traced, or left open."""
+    return (a, b) if open_ else (a, a)
+
+
+def mixed_rdm_diag(Es, kets, bras, *, main: bool):
+    """Diagonal pair on a plaquette: ``(s1, s2, s1_bra, s2_bra)``.
+
+    ``Es``, ``kets`` and ``bras`` are ordered ``(TL, TR, BL, BR)``.  ``main``
+    leaves TL and BR open (TL=s1, BR=s2); otherwise TR and BL are open
+    (TR=s1, BL=s2).
+    """
+    (E_tl, E_tr, E_bl, E_br), (k_tl, k_tr, k_bl, k_br), (b_tl, b_tr, b_bl, b_br) = (
+        Es, kets, bras,
+    )  # fmt: skip
+    s, t = _phys(main, 10, 13)
+    TL = jnp.einsum(
+        E_tl["C1"], [0, 1],
+        E_tl["T1"], [1, 2, 3, 4],
+        E_tl["T4"], [0, 5, 6, 7],
+        k_tl, [2, 8, 5, 9, s],
+        b_tl, [3, 11, 6, 12, t],
+        [4, 7, 8, 11, 9, 12] + ([s, t] if main else []),
+        optimize="greedy",
+    )  # fmt: skip
+    s, t = _phys(not main, 10, 13)
+    TR = jnp.einsum(
+        E_tr["T1"], [0, 1, 2, 3],
+        E_tr["C2"], [3, 4],
+        E_tr["T2"], [4, 5, 6, 7],
+        k_tr, [1, 8, 9, 5, s],
+        b_tr, [2, 11, 12, 6, t],
+        [0, 7, 8, 11, 9, 12] + ([s, t] if not main else []),
+        optimize="greedy",
+    )  # fmt: skip
+    s, t = _phys(not main, 10, 13)
+    BL = jnp.einsum(
+        E_bl["T4"], [0, 1, 2, 3],
+        E_bl["C4"], [3, 4],
+        E_bl["T3"], [4, 5, 6, 7],
+        k_bl, [8, 5, 1, 9, s],
+        b_bl, [11, 6, 2, 12, t],
+        [7, 0, 8, 11, 9, 12] + ([s, t] if not main else []),
+        optimize="greedy",
+    )  # fmt: skip
+    s, t = _phys(main, 10, 13)
+    BR = jnp.einsum(
+        E_br["T3"], [0, 1, 2, 3],
+        E_br["C3"], [4, 3],
+        E_br["T2"], [5, 6, 7, 4],
+        k_br, [8, 1, 9, 6, s],
+        b_br, [11, 2, 12, 7, t],
+        [0, 5, 8, 11, 9, 12] + ([s, t] if main else []),
+        optimize="greedy",
+    )  # fmt: skip
+    if main:
+        left = jnp.einsum(
+            TL,
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            BL,
+            [8, 1, 2, 3, 9, 10],
+            [0, 4, 5, 8, 9, 10, 6, 7],
+        )
+        right = jnp.einsum(
+            TR,
+            [0, 1, 2, 3, 4, 5],
+            BR,
+            [6, 1, 2, 3, 7, 8, 9, 10],
+            [0, 4, 5, 6, 7, 8, 9, 10],
+        )
+        return jnp.einsum(
+            left,
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            right,
+            [0, 1, 2, 3, 4, 5, 8, 9],
+            [6, 8, 7, 9],
+        )
+    left = jnp.einsum(
+        TL, [0, 1, 2, 3, 4, 5], BL, [6, 1, 2, 3, 7, 8, 9, 10], [0, 4, 5, 6, 7, 8, 9, 10]
+    )
+    right = jnp.einsum(
+        TR, [0, 1, 2, 3, 4, 5, 6, 7], BR, [8, 1, 2, 3, 9, 10], [0, 4, 5, 8, 9, 10, 6, 7]
+    )
+    return jnp.einsum(
+        left, [0, 1, 2, 3, 4, 5, 8, 9], right, [0, 1, 2, 3, 4, 5, 6, 7], [6, 8, 7, 9]
+    )
+
+
 def z00(c1, c2, c3, c4):
     return jnp.einsum(
         c1, [0, 1], c2, [1, 2], c3, [2, 3], c4, [0, 3], [], optimize="greedy"
@@ -169,10 +257,13 @@ def z01(left, right):
 class ExcitationCTM:
     """Energy and log-norm densities of a ket and bra that differ by cell phases."""
 
-    def __init__(self, A, gate, chi, sweeps):
+    def __init__(self, A, gate, chi, sweeps, gate_nnn=None):
         self.A = jnp.asarray(A)
         self.D, self.d = self.A.shape[0], self.A.shape[-1]
         self.gate = jnp.asarray(gate).reshape((self.d,) * 4)
+        self.gate_nnn = (
+            None if gate_nnn is None else jnp.asarray(gate_nnn).reshape((self.d,) * 4)
+        )
         self.chi, self.sweeps = chi, sweeps
         site = _wrap_as_dense_tensor(self.A)
         self._template = _build_double_layer_tensor(site).indices
@@ -203,6 +294,17 @@ class ExcitationCTM:
                 n = NEIGHBORS[c][direction]
                 rho = fn(E[c], E[n], kets[c], bras[c], kets[n], bras[n])
                 total = total + _bond_value(rho, self.gate)
+            if self.gate_nnn is not None:
+                cx, cy = NEIGHBORS[c]["right"], NEIGHBORS[c]["bottom"]
+                cxy = NEIGHBORS[cx]["bottom"]
+                sites = (c, cx, cy, cxy)
+                Es = tuple(E[x] for x in sites)
+                ks = tuple(kets[x] for x in sites)
+                bs = tuple(bras[x] for x in sites)
+                for main in (True, False):
+                    total = total + _bond_value(
+                        mixed_rdm_diag(Es, ks, bs, main=main), self.gate_nnn
+                    )
         return total / len(CELL)
 
     def log_norm_density(self, E, kets, bras):
