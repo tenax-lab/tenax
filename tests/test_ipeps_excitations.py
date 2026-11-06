@@ -382,6 +382,15 @@ class TestExcitationEnergies:
         # so we just check finiteness
         assert np.all(np.isfinite(result.energies))
 
+    def test_compute_excitations_is_deprecated(
+        self, small_peps_and_env, heisenberg_gate
+    ):
+        A, env, d = small_peps_and_env
+        E_gs = float(compute_energy_ctm(A, env, heisenberg_gate, d))
+        config = ExcitationConfig(num_excitations=1, null_space_tol=1e-2)
+        with pytest.warns(DeprecationWarning, match="compute_spectrum"):
+            compute_excitations(A, env, heisenberg_gate, E_gs, [(np.pi, 0.0)], config)
+
 
 # ---------------------------------------------------------------------------
 # Tensor-protocol input acceptance (issue #636)

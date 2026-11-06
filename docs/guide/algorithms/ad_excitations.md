@@ -247,6 +247,13 @@ large chi, which can be slow and prone to local minima
 
 ## Excitation Spectrum
 
+```{warning}
+`compute_excitations` is deprecated: it truncates the momentum sum (#1052), and its
+lowest energies on published Heisenberg states are negative (-0.10 at D=2 and -0.27
+at D=3 at (pi,0)). Use [`compute_spectrum`](#spectrum-and-spectral-function) where
+its momenta apply.
+```
+
 The excitation ansatz places a perturbation tensor $B$ (same shape as $A$)
 at one site with Bloch momentum phase $e^{i\mathbf{k}\cdot\mathbf{r}}$.
 
@@ -300,6 +307,7 @@ substituted at various sites. The module provides:
 Each RDM variant specifies which tensor appears in the ket and bra layers:
 `("A","A")` for ground state, `("B","A")` for $B$ in ket, etc.
 
+(spectrum-and-spectral-function)=
 ## Spectrum and Spectral Function
 
 `compute_spectrum` includes the complete momentum sum through the CTM, and gives
