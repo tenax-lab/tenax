@@ -384,6 +384,16 @@ Hasik's D=2 J2=0 state (`j1j2_ipeps_states`, CC BY 4.0), chi=10:
 | Top S^y weight | 0.1904 | 0.7744 | |
 | Sum rule deficit | 1e-13 | 2e-15 | |
 
+Projector derivatives matter for H, not for N. On the same state at X, the matrix
+element of `H - E0 N` in the direction `S^y A` is:
+
+| chi | 4 | 6 | 8 | 10 |
+|---|---|---|---|---|
+| `projector_backward="flow"` (used here) | 0.4976433 | 0.4976434 | 0.4976434 | 0.4976434 |
+| `projector_backward="frozen"` | 0.4958283 | 0.4976095 | 0.4976100 | 0.4976751 |
+
+`s(k)` agrees between the two to all 7 printed digits at each of these chi values.
+
 ## References
 
 - Ponsioen, Assaad & Corboz, *SciPost Phys.* **12**, 006 (2022) --

@@ -20,6 +20,7 @@ from tenax.algorithms._ipeps_excitation_ctm import ExcitationCTM
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
 from tenax.algorithms.ipeps_excitations import (
     _gauge_vectors,
+    _reduce_spectrum,
     _spectrum_momentum,
     _warn_spectrum,
 )
@@ -175,6 +176,25 @@ def test_basis_inside_the_null_space_keeps_nothing():
         0.0,
         0.0,
     ]
+
+
+@pytest.mark.parametrize(
+    ("eigenvalues", "rank", "null_dim"),
+    [
+        ([1e-9], 0, 1),  # noise: a purely relative cut would keep it as a mode
+        ([-1e-9], 0, 1),
+        ([5e-3], 1, 0),  # real weight in a small basis: above the floor
+        ([1.0, 2e-4, 5e-5], 2, 1),  # at full scale the cut is 1e-4 of the largest
+        ([1.0, -5e-5], 1, 1),
+        ([1.0, -1.0], 1, 0),  # a negative eigenvalue is dropped, not counted as null
+    ],
+)
+def test_n_cut_is_relative_with_an_absolute_floor(eigenvalues, rank, null_dim):
+    N = np.diag(eigenvalues)
+    omega, modes, _, found_null_dim, _ = _reduce_spectrum(N, np.zeros_like(N), 1e-4)
+    assert modes.shape[1] == rank
+    assert omega.shape == (rank,)
+    assert found_null_dim == null_dim
 
 
 @pytest.mark.parametrize(("a", "b"), [(1, 0), (0, 1), (1, 1)])

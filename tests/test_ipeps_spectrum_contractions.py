@@ -5,6 +5,7 @@ first version of these contractions matched the energy to 10 digits and S^y A to
 7 digits on a C4v state, and failed only on random vectors.
 """
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -23,7 +24,11 @@ from _window_oracle import (
     onsager_c10,
 )
 
-from tenax.algorithms._ctm_tensor_convergence import _ctm_tensor_multisite, ctm_tensor
+from tenax.algorithms._ctm_tensor_convergence import (
+    _ctm_tensor_multisite,
+    _ctm_tensor_sweep_multisite,
+    ctm_tensor,
+)
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_multisite
 from tenax.algorithms._ipeps_excitation_ctm import (
     CELL,
@@ -114,26 +119,49 @@ def _unit(rng, shape):
     return B / np.linalg.norm(B)
 
 
-@pytest.mark.parametrize("ab", [(1, 0), (1, 1)], ids=["X", "M"])
-def test_h_matches_a_double_finite_difference_on_random_pairs(ctm, ab):
-    rng = np.random.default_rng(7)
-    phases = cell_phases(*ab)
-    step = 1e-3
-    X, Y = _unit(rng, ctm.A.shape), _unit(rng, ctm.A.shape)
-    g_h, _ = ctm.ket_derivative(phases, jnp.asarray(X), 1e-4)
-
+def _double_finite_difference(ctm, phases, X, Y, step=1e-3):
     def energy(eps, delta):
         return float(
             ctm.densities(phases, eps, jnp.asarray(X), delta * jnp.asarray(Y))[0]
         )
 
-    reference = (
+    return (
         energy(step, step)
         - energy(step, -step)
         - energy(-step, step)
         + energy(-step, -step)
     ) / (4 * step**2)
+
+
+@pytest.mark.parametrize("ab", [(1, 0), (1, 1)], ids=["X", "M"])
+def test_h_matches_a_double_finite_difference_on_random_pairs(ctm, ab):
+    rng = np.random.default_rng(7)
+    phases = cell_phases(*ab)
+    X, Y = _unit(rng, ctm.A.shape), _unit(rng, ctm.A.shape)
+    g_h, _ = ctm.ket_derivative(phases, jnp.asarray(X), 1e-4)
+    reference = _double_finite_difference(ctm, phases, X, Y)
     assert float(np.vdot(Y, np.asarray(g_h))) == pytest.approx(reference, abs=1e-4)
+
+
+def test_h_at_small_chi_needs_the_projector_derivatives():
+    """Frozen projectors miss part of H: by 6e-4 at chi=4, and only 1e-5 at chi=10."""
+    chi = 4
+    ctm = ExcitationCTM(hasik_d2(), rotated_gate(), chi=chi, sweeps=30)
+    rng = np.random.default_rng(7)
+    phases = cell_phases(1, 0)
+    X, Y = _unit(rng, ctm.A.shape), _unit(rng, ctm.A.shape)
+    reference = _double_finite_difference(ctm, phases, X, Y)
+    flow, _ = ctm.ket_derivative(phases, jnp.asarray(X), 1e-4)
+    assert float(np.vdot(Y, np.asarray(flow))) == pytest.approx(reference, abs=1e-4)
+
+    # The regime: if this fails, chi=4 no longer tells flow from frozen.
+    ctm._sweep = jax.jit(
+        lambda e, dl: _ctm_tensor_sweep_multisite(
+            e, dl, NEIGHBORS, chi, True, "svd", "frozen", "2x2"
+        )[0]
+    )
+    frozen, _ = ctm.ket_derivative(phases, jnp.asarray(X), 1e-4)
+    assert abs(float(np.vdot(Y, np.asarray(frozen))) - reference) > 3e-4
 
 
 @pytest.mark.parametrize("ab", [(1, 0), (1, 1)], ids=["X", "M"])
