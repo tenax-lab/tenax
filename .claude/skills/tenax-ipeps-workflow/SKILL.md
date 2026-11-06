@@ -467,6 +467,23 @@ result = compute_excitations(A_opt, env, H_rot, E_gs, momenta, exc_config)
 print(result.energies.shape)  # (num_momenta, num_excitations) = (20, 3)
 ```
 
+### Spectrum with spectral weights
+
+`compute_excitations` truncates the momentum sum, so its low energies are not
+reliable (#1052). For (pi,0), (0,pi) and (pi,pi) use `compute_spectrum`, and compare
+at least two chi values:
+
+```python
+from tenax import SpectrumConfig, compute_spectrum, spectral_function
+
+config = SpectrumConfig(chi=16, checkpoint_dir="runs/x_chi16")
+result = compute_spectrum(A_opt, H_rot, (np.pi, 0.0), {"Sy": Sy_real}, config)
+S = spectral_function(result, "Sy", np.linspace(0, 5, 501), eta=0.1)
+```
+
+Negative modes mean chi is too small: raise it. See the
+[guide](../../../docs/guide/algorithms/ad_excitations.md) for cost and diagnostics.
+
 ### Interpreting results
 
 - **Gapped spectrum** → the lowest excitation energy is > 0 everywhere in

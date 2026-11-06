@@ -97,6 +97,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "HONEYCOMB_DIRECTIONS",
     ),
     "ExcitationConfig": ("tenax.algorithms.ipeps_excitations", "ExcitationConfig"),
+    "SpectrumConfig": ("tenax.algorithms.ipeps_excitations", "SpectrumConfig"),
+    "SpectrumResult": ("tenax.algorithms.ipeps_excitations", "SpectrumResult"),
+    "compute_spectrum": ("tenax.algorithms.ipeps_excitations", "compute_spectrum"),
+    "spectral_function": ("tenax.algorithms.ipeps_excitations", "spectral_function"),
     "ExcitationResult": ("tenax.algorithms.ipeps_excitations", "ExcitationResult"),
     "compute_excitations": (
         "tenax.algorithms.ipeps_excitations",
@@ -250,6 +254,10 @@ __all__ = [
     "ExcitationConfig",
     "ExcitationResult",
     "compute_excitations",
+    "SpectrumConfig",
+    "SpectrumResult",
+    "compute_spectrum",
+    "spectral_function",
     "make_momentum_path",
     # pess (kagome iPESS)
     "IPESSState",

@@ -300,6 +300,103 @@ substituted at various sites. The module provides:
 Each RDM variant specifies which tensor appears in the ket and bra layers:
 `("A","A")` for ground state, `("B","A")` for $B$ in ket, etc.
 
+## Spectrum and Spectral Function
+
+`compute_spectrum` includes the complete momentum sum through the CTM, and gives
+spectral weights. `compute_excitations` truncates that sum to nearest neighbours
+(#1052), and its lowest energies on published Heisenberg states are negative.
+
+### Example
+
+```python
+import numpy as np
+from tenax import SpectrumConfig, compute_spectrum, spectral_function
+
+Sy = np.array([[0.0, 0.5], [-0.5, 0.0]])  # i S^y: the real form
+config = SpectrumConfig(chi=16, checkpoint_dir="runs/x_chi16")
+result = compute_spectrum(A, gate, (np.pi, 0.0), {"Sy": Sy}, config)
+
+result.omega                  # excitation energies above the ground state
+result.weights["Sy"]          # |<lambda|S^y|0>|^2 for each omega
+result.structure_factor["Sy"] # s(k)
+
+grid = np.linspace(0.0, 5.0, 501)
+S = spectral_function(result, "Sy", grid, eta=0.1)  # Lorentzian half-width eta
+```
+
+`A`, the gates, the operators and the momentum must share one frame. The
+sublattice rotation keeps the momentum of `S^y`, and shifts `S^x` and `S^z` by
+`(pi, pi)`. So in the rotated frame, physical Gamma for `S^x` and `S^z` is `(pi, pi)`.
+
+### Limits
+
+- Dense real `A` only. A `SymmetricTensor` or a complex `A` raises.
+- Only `(pi, 0)`, `(0, pi)` and `(pi, pi)`, because the 2x2 cell reaches only
+  those. Gamma raises: the method needs k != 0.
+- The cost is one column for each entry of `A`. At D=3, chi=18 one H column takes
+  about 30 s on 12 CPU cores. At D=4, chi=16 it takes about 135 s, which is about
+  19 h per momentum for H alone. The norm adds up to the same again.
+- Use `checkpoint_dir` on any long run. A rerun resumes, and changing only
+  `operators` reuses all columns.
+- `basis` restricts the tangent space, for example to a charge sector. An operator
+  whose `O A` has weight outside `basis` warns, and its results cover only the
+  part inside.
+
+### chi convergence
+
+One run cannot show convergence, so compare at least two chi values. The diagnostics
+do not replace this. At D=3, chi=18 is too small: it gives negative modes (-4.42 and
+-0.30 at X), and their Rayleigh quotients are positive at chi=27 and about +6 at
+chi=54. Fixed chi=18 eigenvectors evaluated at larger chi give:
+
+| chi | 18 | 27 | 36 | 54 |
+|---|---|---|---|---|
+| omega(X) | 2.2641 | 2.2665 | 2.2676 | 2.2679 |
+| omega(M) | 0.2688 | | 0.3056 | 0.3083 |
+
+Negative modes stay in `omega`. The warning tells you to raise chi.
+
+### Diagnostics
+
+| Field | Meaning | Warns if |
+|---|---|---|
+| `energy_density` | energy per site | the CTM did not converge |
+| `n_asymmetry` | largest entry of N - N^T | above 1e-4 |
+| `h_asymmetry` | largest entry of H - H^T | above 1e-3 |
+| `n_min_eig` | lowest N eigenvalue over `max(largest, 1e-2)` | below -1e-4 |
+| `n_negative_modes` | modes with omega < 0 | any |
+| `sum_rule_deficit` | per operator, 1 - sum(weights)/s(k) | above 1e-3 |
+| `gauge_residual` | largest singular value of N on A and the gauge vectors, `basis=None` only | above 1e-3 |
+| `null_dim` | eigenvalues of N below the cut | never |
+
+The cut is `null_tol * max(largest N eigenvalue, 1e-2)`. With the floor, a `basis`
+inside the null space gives rank 0 and a warning, not noise reported as modes.
+
+The H limit is looser because of one noisy reverse-mode column: at D=2, chi=10, M it
+gives 6.6e-4, while omega stays at 0.64873 across `fd_step` 1e-3, 1e-4 and 30, 60
+sweeps.
+
+### Validation
+
+Hasik's D=2 J2=0 state (`j1j2_ipeps_states`, CC BY 4.0), chi=10:
+
+| | X = (pi, 0) | M = (pi, pi) | Reference |
+|---|---|---|---|
+| Lowest omega | 2.293 | 0.6487 | X: series ~2.18, QMC ~2.16; M: 0 as D grows |
+| s(k) for S^y | 0.20399 | 0.80857 | window oracle in random directions, within 1e-4 |
+| Top S^y weight | 0.1904 | 0.7744 | |
+| Sum rule deficit | 1e-13 | 2e-15 | |
+
+Projector derivatives matter for H, not for N. On the same state at X, the matrix
+element of `H - E0 N` in the direction `S^y A` is:
+
+| chi | 4 | 6 | 8 | 10 |
+|---|---|---|---|---|
+| `projector_backward="flow"` (used here) | 0.4976433 | 0.4976434 | 0.4976434 | 0.4976434 |
+| `projector_backward="frozen"` | 0.4958283 | 0.4976095 | 0.4976100 | 0.4976751 |
+
+`s(k)` agrees between the two to all 7 printed digits at each of these chi values.
+
 ## References
 
 - Ponsioen, Assaad & Corboz, *SciPost Phys.* **12**, 006 (2022) --
