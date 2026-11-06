@@ -29,6 +29,12 @@ _FILE_MARKERS = {
     # Eager-CTM jit helper: pure mechanism (jit only for concrete inputs), no CTM.
     "test_ctm_eager_jit.py": "core",
     "test_ctm_eager_sweep_jit.py": "algorithm",
+    # compute_spectrum: raw-array contractions and second derivatives at D=2,
+    # chi=10, on a few columns (about 4 min for both files on 12 cores).
+    "test_ipeps_spectrum_contractions.py": "core",
+    "test_ipeps_spectrum.py": "core",
+    # Full D=2 spectra; each test carries an explicit ``slow``.
+    "test_ipeps_spectrum_full.py": "algorithm",
     "test_tensor.py": "core",
     "test_dense_svd_gpu_algorithm.py": "core",
     # CPU gesdd -> gesvd fallback: faked failures + one 54x54 matrix.
