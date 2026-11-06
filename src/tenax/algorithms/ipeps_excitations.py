@@ -15,13 +15,20 @@ Key components:
 
 from __future__ import annotations
 
+import hashlib
+import os
+import tempfile
+import warnings
+import zipfile
 from dataclasses import dataclass
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms._einsum_compat import einsum_promoted
+from tenax.algorithms._ipeps_excitation_ctm import ExcitationCTM, cell_phases
 from tenax.algorithms.ipeps_config import CTMEnvironment
 from tenax.core.tensor import SymmetricTensor, Tensor
 
@@ -908,3 +915,379 @@ def compute_excitations(
         momenta=np.array(momenta),
         ground_state_energy=E_gs,
     )
+
+
+# ---------------------------------------------------------------------------
+# Excitation spectrum and spectral function (2x2 cell, summed momentum)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SpectrumConfig:
+    """Configuration for :func:`compute_spectrum`.
+
+    Attributes:
+        chi: CTM bond dimension. One value cannot show convergence: compare at
+            least two.
+        ctm_sweeps: CTM sweeps differentiated, from the converged environment.
+        fd_step: Central-difference step on the ket direction.
+        null_tol: Eigenvectors of N below ``null_tol`` times the largest
+            eigenvalue are dropped.
+        checkpoint_dir: Write each finished column here, and resume from it.
+    """
+
+    chi: int
+    ctm_sweeps: int = 30
+    fd_step: float = 1e-4
+    null_tol: float = 1e-4
+    checkpoint_dir: Path | None = None
+
+
+@dataclass
+class SpectrumResult:
+    """Result of :func:`compute_spectrum`.
+
+    Attributes:
+        omega: Excitation energies above the ground state, ascending.
+        weights: Per operator, ``|<lambda|O|0>|^2`` for each entry of ``omega``.
+        structure_factor: Per operator, the static ``s(k)``.
+        rank: Size of the subspace kept from N.
+        energy_density: Energy per site at the base point.
+        n_asymmetry: Largest ``|N - N^T|``.
+        h_asymmetry: Largest ``|H - H^T|``.
+        n_min_eig: Lowest eigenvalue of N over the largest.
+        n_negative_modes: Number of ``omega < 0``. These stay in ``omega``.
+        sum_rule_deficit: Per operator, ``1 - sum(weights) / s(k)``.
+        gauge_residual: Largest singular value of N on ``A`` and the gauge
+            vectors. ``None`` when ``basis`` is given.
+        null_dim: Number of eigenvalues of N below the cut.
+    """
+
+    omega: np.ndarray
+    weights: dict[str, np.ndarray]
+    structure_factor: dict[str, float]
+    rank: int
+    energy_density: float
+    n_asymmetry: float
+    h_asymmetry: float
+    n_min_eig: float
+    n_negative_modes: int
+    sum_rule_deficit: dict[str, float]
+    gauge_residual: float | None
+    null_dim: int
+
+
+def _spectrum_momentum(momentum) -> tuple[int, int]:
+    """Map a momentum to ``(a, b)`` with ``k = (a pi, b pi)``, modulo 2 pi."""
+    allowed = "(pi, 0), (0, pi), (pi, pi)"
+    k = np.asarray(momentum, dtype=float)
+    units = k / np.pi
+    if k.shape != (2,) or np.abs(units - np.round(units)).max() > 1e-8:
+        raise ValueError(f"momentum must be one of {allowed}; got {momentum!r}")
+    a, b = (int(x) % 2 for x in np.round(units))
+    if (a, b) == (0, 0):
+        raise ValueError(
+            f"momentum must be one of {allowed}; got {momentum!r}. Gamma is "
+            "refused: the method needs k != 0. In the sublattice-rotated frame "
+            "physical Gamma is (pi, pi)."
+        )
+    return a, b
+
+
+def _spectrum_array(A) -> np.ndarray:
+    if isinstance(A, SymmetricTensor):
+        raise NotImplementedError(
+            "compute_spectrum does not support SymmetricTensor: use a dense A, "
+            "and `basis` to restrict to a charge sector."
+        )
+    A = np.asarray(_as_dense_array(A))
+    if np.iscomplexobj(A):
+        raise ValueError("compute_spectrum needs a real A; got complex.")
+    if A.dtype != np.float64:
+        raise ValueError(f"compute_spectrum needs float64 A; got {A.dtype}.")
+    if A.ndim != 5 or len(set(A.shape[:4])) != 1:
+        raise ValueError(f"A must have shape (D, D, D, D, d); got {A.shape}.")
+    return A / np.linalg.norm(A)
+
+
+def _spectrum_basis(basis, size: int) -> np.ndarray:
+    if basis is None:
+        return np.eye(size)
+    basis = np.asarray(basis)
+    if np.iscomplexobj(basis):
+        raise ValueError("basis must be real.")
+    if basis.ndim != 2 or basis.shape[0] != size or basis.shape[1] > size:
+        raise ValueError(
+            f"basis must have shape ({size}, n) with n <= {size}; got {basis.shape}."
+        )
+    if np.abs(basis.T @ basis - np.eye(basis.shape[1])).max() > 1e-10:
+        raise ValueError("basis columns must be orthonormal.")
+    return basis
+
+
+def _spectrum_gate(gate, d: int, name: str) -> np.ndarray:
+    gate = np.asarray(_as_dense_array(gate))
+    if gate.size != d**4 or gate.ndim not in (2, 4):
+        raise ValueError(
+            f"{name} must have shape ({d}, {d}, {d}, {d}) or ({d**2}, {d**2}); "
+            f"got {gate.shape}."
+        )
+    return gate.reshape((d,) * 4)
+
+
+def _spectrum_operators(operators, d: int) -> dict[str, np.ndarray]:
+    checked = {}
+    for name, op in operators.items():
+        op = np.asarray(op)
+        if op.shape != (d, d):
+            raise ValueError(f"operator {name!r} must be {d}x{d}; got {op.shape}.")
+        checked[name] = op
+    return checked
+
+
+def _gauge_vectors(A: np.ndarray, a: int, b: int) -> np.ndarray:
+    """``A`` and the bond-gauge directions at ``k = (a pi, b pi)``, as columns."""
+    D = A.shape[0]
+    px, py = (-1.0) ** a, (-1.0) ** b
+    vectors = [A.ravel()]
+    for p in range(D):
+        for q in range(D):
+            X = np.zeros((D, D))
+            X[p, q] = 1.0
+            vectors.append(
+                (
+                    np.einsum("udlrs,rq->udlqs", A, X)
+                    - px * np.einsum("pl,udlrs->udprs", X, A)
+                ).ravel()
+            )
+            vectors.append(
+                (
+                    np.einsum("udlrs,dq->uqlrs", A, X)
+                    - py * np.einsum("pu,udlrs->pdlrs", X, A)
+                ).ravel()
+            )
+    return np.stack(vectors, axis=1)
+
+
+def _gauge_residual(N: np.ndarray, A: np.ndarray, a: int, b: int) -> float:
+    U, s, _ = np.linalg.svd(_gauge_vectors(A, a, b), full_matrices=False)
+    Q = U[:, s > 1e-10 * s[0]]
+    return float(np.linalg.norm(Q.T @ N @ Q, 2))
+
+
+def _spectrum_fingerprint(A, gate, ab, config, basis) -> str:
+    digest = hashlib.sha256()
+    for array in (A, gate, basis):
+        digest.update(str(array.shape).encode())
+        # Rounded: rescaling A before the internal normalisation must still resume.
+        digest.update(np.round(np.asarray(array, dtype=np.float64), 12).tobytes())
+    digest.update(repr((ab, config.chi, config.ctm_sweeps, config.fd_step)).encode())
+    return digest.hexdigest()
+
+
+def _load_columns(directory: Path | None, fingerprint: str) -> dict[int, tuple]:
+    """Finished columns in ``directory``. A mismatch or a damaged file raises."""
+    columns: dict[int, tuple] = {}
+    if directory is None or not directory.exists():
+        return columns
+    for path in sorted(directory.glob("column_*.npz")):
+        try:
+            with np.load(path) as data:
+                found = str(data["fingerprint"])
+                column = (data["h"], data["n"])
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+            raise ValueError(f"Checkpoint {path} is damaged: {exc}") from exc
+        if found != fingerprint:
+            raise ValueError(
+                f"Checkpoint {path} is from a different run: A, the gates, the "
+                "momentum, chi, ctm_sweeps, fd_step or basis changed. Use a new "
+                "checkpoint_dir."
+            )
+        columns[int(path.stem.removeprefix("column_"))] = column
+    return columns
+
+
+def _save_column(directory: Path, index: int, fingerprint: str, h, n) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    with os.fdopen(handle, "wb") as stream:
+        np.savez(stream, fingerprint=fingerprint, h=h, n=n)
+    os.replace(temporary, directory / f"column_{index:05d}.npz")
+
+
+def _reduce_spectrum(N, H, null_tol):
+    """Solve in the kept subspace: ``(omega, modes, cut, null_dim, n_min_eig)``."""
+    w, V = np.linalg.eigh(N)
+    # A floor, so a basis inside the null space keeps nothing instead of noise.
+    cut = null_tol * max(w[-1], 1e-2)
+    keep = w > cut
+    U = V[:, keep] / np.sqrt(w[keep])
+    reduced = U.T @ H @ U
+    omega, c = np.linalg.eigh(0.5 * (reduced + reduced.T))
+    null_dim = int((np.abs(w) <= cut).sum())
+    return omega, U @ c, cut, null_dim, float(w[0] / max(w[-1], 1e-2))
+
+
+def compute_spectrum(
+    A,
+    gate,
+    momentum,
+    operators,
+    config: SpectrumConfig,
+    *,
+    basis=None,
+) -> SpectrumResult:
+    """Excitation spectrum and spectral weights of a one-site iPEPS on a 2x2 cell.
+
+    Solves ``(H_k - E0 N_k) v = omega N_k v``, with both matrices as mixed second
+    derivatives of the energy and log-norm densities through the CTM. The
+    momentum sum is complete, unlike :func:`compute_excitations`.
+
+    ``A``, the gates, ``operators`` and ``momentum`` must share a frame. Failed
+    diagnostics warn: see :class:`SpectrumResult`.
+
+    Args:
+        A: Real site tensor, ``(u, d, l, r, s)``. It is normalised internally.
+        gate: Nearest-neighbour gate, used on the horizontal and vertical bonds.
+        momentum: One of ``(pi, 0)``, ``(0, pi)``, ``(pi, pi)``, modulo ``2 pi``.
+        operators: Maps a name to a ``d x d`` matrix, for the spectral weights.
+        config: See :class:`SpectrumConfig`.
+        basis: Optional orthonormal columns that restrict the tangent vectors.
+
+    Returns:
+        :class:`SpectrumResult`.
+    """
+    a, b = _spectrum_momentum(momentum)
+    A = _spectrum_array(A)
+    d = A.shape[-1]
+    gate = _spectrum_gate(gate, d, "gate")
+    operators = _spectrum_operators(operators, d)
+    full_space = basis is None
+    basis = _spectrum_basis(basis, A.size)
+    n_columns = basis.shape[1]
+    directory = None if config.checkpoint_dir is None else Path(config.checkpoint_dir)
+    fingerprint = _spectrum_fingerprint(A, gate, (a, b), config, basis)
+    columns = _load_columns(directory, fingerprint)
+    if directory is None and n_columns > 100:
+        warnings.warn(
+            f"compute_spectrum: {n_columns} columns and no checkpoint_dir. A "
+            "killed run loses them all.",
+            stacklevel=2,
+        )
+
+    ctm = ExcitationCTM(A, gate, config.chi, config.ctm_sweeps)
+    if not ctm.ctm_converged:
+        warnings.warn(
+            f"compute_spectrum: the CTM did not converge at chi={config.chi}.",
+            stacklevel=2,
+        )
+    phases = cell_phases(a, b)
+    zero = jnp.zeros_like(ctm.A)
+    energy, _ = ctm.densities(phases, 0.0, zero, zero)
+
+    H, N = np.zeros((n_columns,) * 2), np.zeros((n_columns,) * 2)
+    for i in range(n_columns):
+        if i not in columns:
+            X = jnp.asarray(basis[:, i].reshape(A.shape))
+            g_h, g_n = ctm.ket_derivative(phases, X, config.fd_step)
+            columns[i] = (
+                basis.T @ np.asarray(g_h).ravel(),
+                basis.T @ np.asarray(g_n).ravel(),
+            )
+            if directory is not None:
+                _save_column(directory, i, fingerprint, *columns[i])
+        H[:, i], N[:, i] = columns[i]
+
+    n_asymmetry = float(np.abs(N - N.T).max())
+    h_asymmetry = float(np.abs(H - H.T).max())
+    N = 0.5 * (N + N.T)
+    H = 0.5 * (H + H.T)
+    omega, modes, cut, null_dim, n_min_eig = _reduce_spectrum(N, H, config.null_tol)
+    rank = modes.shape[1]
+
+    weights: dict[str, np.ndarray] = {}
+    structure_factor: dict[str, float] = {}
+    deficit: dict[str, float] = {}
+    for name, op in operators.items():
+        B = np.tensordot(A, op, axes=([4], [1])).ravel()
+        parts = (B.real, B.imag) if np.iscomplexobj(B) else (B,)
+        w_total, s_total = np.zeros(rank), 0.0
+        for part in parts:
+            c = basis.T @ part
+            if np.linalg.norm(part - basis @ c) > 1e-8 * max(np.linalg.norm(B), 1e-300):
+                warnings.warn(
+                    f"compute_spectrum: operator {name!r} applied to A has weight "
+                    "outside basis; its s(k) and weights cover the part inside.",
+                    stacklevel=2,
+                )
+            w_total = w_total + (modes.T @ (N @ c)) ** 2
+            s_total = s_total + float(c @ N @ c)
+        weights[name], structure_factor[name] = w_total, s_total
+        deficit[name] = 0.0 if s_total <= cut else 1.0 - float(w_total.sum()) / s_total
+
+    gauge_residual = _gauge_residual(N, A, a, b) if full_space else None
+    result = SpectrumResult(
+        omega=omega,
+        weights=weights,
+        structure_factor=structure_factor,
+        rank=rank,
+        energy_density=float(energy),
+        n_asymmetry=n_asymmetry,
+        h_asymmetry=h_asymmetry,
+        n_min_eig=n_min_eig,
+        n_negative_modes=int((omega < 0).sum()),
+        sum_rule_deficit=deficit,
+        gauge_residual=gauge_residual,
+        null_dim=null_dim,
+    )
+    _warn_spectrum(result)
+    return result
+
+
+def _warn_spectrum(result: SpectrumResult) -> None:
+    problems = []
+    if result.rank == 0:
+        problems.append("no direction survives null_tol: basis lies in the null space")
+    if result.n_asymmetry > 1e-4:
+        problems.append(f"N asymmetry {result.n_asymmetry:.2e}")
+    # Looser than N: one noisy reverse-mode column gives 6.6e-4 at D=2 chi=10 M,
+    # with omega unchanged to 5 digits across fd_step and ctm_sweeps.
+    if result.h_asymmetry > 1e-3:
+        problems.append(f"H asymmetry {result.h_asymmetry:.2e}")
+    if result.n_min_eig < -1e-4:
+        problems.append(f"lowest N eigenvalue ratio {result.n_min_eig:.2e}")
+    if result.n_negative_modes:
+        problems.append(
+            f"{result.n_negative_modes} negative modes, kept in omega: raise chi"
+        )
+    for name, value in result.sum_rule_deficit.items():
+        if abs(value) > 1e-3:
+            problems.append(f"sum rule deficit {value:.2e} for {name!r}")
+    if result.gauge_residual is not None and result.gauge_residual > 1e-3:
+        problems.append(f"gauge residual {result.gauge_residual:.2e}")
+    for problem in problems:
+        warnings.warn(f"compute_spectrum: {problem}.", stacklevel=3)
+
+
+def spectral_function(result: SpectrumResult, name: str, omega, eta: float = 0.1):
+    """Lorentzian-broadened ``S(k, omega)`` of one operator.
+
+    Args:
+        result: From :func:`compute_spectrum`.
+        name: A key of ``result.weights``.
+        omega: Frequency grid.
+        eta: Half-width of the Lorentzian. Must be positive.
+
+    Returns:
+        ``S`` on the grid, with the shape of ``omega``. It integrates to the sum
+        of the weights over all frequencies.
+    """
+    if name not in result.weights:
+        raise KeyError(
+            f"No operator {name!r}; this result has {sorted(result.weights)}."
+        )
+    if eta <= 0:
+        raise ValueError(f"eta must be positive; got {eta}.")
+    grid = np.asarray(omega, dtype=float)[..., None]
+    lorentzian = (eta / np.pi) / ((grid - result.omega) ** 2 + eta**2)
+    return lorentzian @ result.weights[name]
