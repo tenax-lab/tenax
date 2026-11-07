@@ -429,8 +429,9 @@ A chi that cuts a multiplet of the environment spectrum (chi=8 here cuts a tripl
 gives the warning that the CTM did not converge. The columns stay clean: H asymmetry
 8.9e-6 at chi=8.
 
-A column with an entry above 1e3 raises and is not saved. Clean columns reach 3.3 at
-D=2 and 1 at D=3 and D=4.
+A column with an entry above 1e3, with H in units of the largest gate entry, raises and
+is not saved. Clean columns reach 7 at D=2 and 3 at D=3 and D=4. A smaller blow-up shows
+in `h_asymmetry`.
 
 ### Diagnostics
 
@@ -438,7 +439,7 @@ D=2 and 1 at D=3 and D=4.
 |---|---|---|
 | `energy_density` | energy per site | the CTM did not converge |
 | `n_asymmetry` | largest entry of N - N^T | above 1e-4 |
-| `h_asymmetry` | largest entry of H - H^T | above 1e-3 |
+| `h_asymmetry` | largest entry of H - H^T | above 2e-3 times the largest gate entry, so 1e-3 at J=1 |
 | `n_min_eig` | lowest N eigenvalue over `max(largest, 1e-2)` | below -1e-4 |
 | `n_negative_modes` | modes with omega < 0 | any |
 | `sum_rule_deficit` | per operator, 1 - sum(weights)/s(k) | above 1e-3 |

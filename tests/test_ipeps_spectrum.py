@@ -29,6 +29,7 @@ from tenax.algorithms._ctm_tensor_projector_2x2 import _SPLIT_BACKWARD_WIDTH
 from tenax.algorithms._ipeps_excitation_ctm import CELL, NEIGHBORS, ExcitationCTM
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
 from tenax.algorithms.ipeps_excitations import (
+    _gate_scale,
     _gauge_vectors,
     _reduce_spectrum,
     _spectrum_gate,
@@ -380,8 +381,14 @@ def test_non_finite_column_raises_and_is_not_saved(monkeypatch, tmp_path, basis,
 
 
 @pytest.mark.parametrize("bad", ["h", "n"])
-def test_oversized_column_raises_and_is_not_saved(monkeypatch, tmp_path, basis, bad):
-    """A finite blow-up reaches eigh and gives a wrong spectrum, with no error at all."""
+@pytest.mark.parametrize("units", [1.0, 1e6], ids=["J=1", "J=1e6"])
+def test_oversized_column_raises_and_is_not_saved(
+    monkeypatch, tmp_path, basis, bad, units
+):
+    """A finite blow-up reaches eigh and gives a wrong spectrum, with no error at all.
+
+    H is linear in the gate and N has no units, so the bound must follow only H.
+    """
 
     class HugeInColumnOne:
         ctm_converged = True
@@ -397,19 +404,46 @@ def test_oversized_column_raises_and_is_not_saved(monkeypatch, tmp_path, basis, 
             self.calls += 1
             good = jnp.ones_like(self.A)
             huge = 1e4 * good if self.calls == 2 else good
-            return (huge, good) if bad == "h" else (good, huge)
+            return (units * huge, good) if bad == "h" else (units * good, huge)
 
     monkeypatch.setattr(spectrum_module, "ExcitationCTM", HugeInColumnOne)
     with pytest.raises(RuntimeError, match="column 1 .*fd_step=1e-3"):
         compute_spectrum(
             hasik_d2(),
-            rotated_gate(),
+            units * rotated_gate(),
             X_POINT,
             {"Sy": SY_REAL},
             SpectrumConfig(chi=10, checkpoint_dir=tmp_path),
             basis=basis,
         )
     assert [path.name for path in tmp_path.glob("column_*.npz")] == ["column_00000.npz"]
+
+
+def test_a_zero_gate_passes_the_column_check(monkeypatch, basis):
+    """Only the norm is wanted; H = 0 in units of a zero gate must not read as 0 / 0."""
+
+    class NormOnly:
+        ctm_converged = True
+
+        def __init__(self, A, gate, chi, sweeps, gate_nnn=None):
+            self.A = jnp.asarray(A)
+
+        def densities(self, phases, eps, X, Y):
+            return jnp.zeros(()), jnp.zeros(())
+
+        def ket_derivative(self, phases, X, h):
+            return jnp.zeros_like(self.A), X
+
+    monkeypatch.setattr(spectrum_module, "ExcitationCTM", NormOnly)
+    result = compute_spectrum(
+        hasik_d2(),
+        np.zeros((2, 2, 2, 2)),
+        X_POINT,
+        {"Sy": SY_REAL},
+        SpectrumConfig(chi=10),
+        basis=basis,
+    )
+    np.testing.assert_allclose(result.omega, 0.0)
 
 
 def test_symmetric_tensor_is_refused(no_ctm):
@@ -538,7 +572,7 @@ def _clean_result(**changes):
 def test_clean_result_does_not_warn():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        _warn_spectrum(_clean_result())
+        _warn_spectrum(_clean_result(), 0.5)
 
 
 @pytest.mark.parametrize(
@@ -556,7 +590,56 @@ def test_clean_result_does_not_warn():
 )
 def test_each_diagnostic_warns_above_its_threshold(change, message):
     with pytest.warns(UserWarning, match=message):
-        _warn_spectrum(_clean_result(**change))
+        _warn_spectrum(_clean_result(**change), 0.5)
+
+
+def test_h_asymmetry_limit_follows_the_gate():
+    """H is linear in the gate, so the limit must move with it, in both directions."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _warn_spectrum(_clean_result(h_asymmetry=9e-4), 0.5)
+        _warn_spectrum(_clean_result(h_asymmetry=2e-3), 10.0)
+    for asymmetry, gate_scale in [(1.1e-3, 0.5), (2e-6, 1e-4)]:
+        with pytest.warns(UserWarning, match="H asymmetry"):
+            _warn_spectrum(_clean_result(h_asymmetry=asymmetry), gate_scale)
+
+
+@pytest.mark.filterwarnings("error:compute_spectrum")
+def test_the_driver_gives_the_h_limit_the_scale_of_its_gates(monkeypatch, basis):
+    """An asymmetry far above 1e-3, and small against a gate of 1e6."""
+
+    class SlightlyAsymmetric:
+        ctm_converged = True
+
+        def __init__(self, A, gate, chi, sweeps, gate_nnn=None):
+            self.A = jnp.asarray(A)
+            self.calls = 0
+
+        def densities(self, phases, eps, X, Y):
+            return jnp.zeros(()), jnp.zeros(())
+
+        def ket_derivative(self, phases, X, h):
+            self.calls += 1
+            return 1e3 * X + 10.0 * self.calls * jnp.ones_like(self.A), X
+
+    monkeypatch.setattr(spectrum_module, "ExcitationCTM", SlightlyAsymmetric)
+    result = compute_spectrum(
+        hasik_d2(),
+        1e6 * rotated_gate(),
+        X_POINT,
+        {"Sy": SY_REAL},
+        SpectrumConfig(chi=10),
+        basis=basis,
+    )
+    assert 1e-3 < result.h_asymmetry < 1e-3 * 1e6
+
+
+def test_gate_scale_is_the_largest_entry_of_both_gates():
+    assert _gate_scale(np.asarray(rotated_gate()), None) == 0.5
+    gate, gate_nnn = np.zeros((2, 2, 2, 2)), np.zeros((2, 2, 2, 2))
+    gate[0, 1, 1, 0], gate_nnn[0, 1, 1, 0] = -0.5, -3.0
+    assert _gate_scale(gate, None) == 0.5
+    assert _gate_scale(gate, gate_nnn) == 3.0
 
 
 def test_unconverged_ctm_warns(checkpoint, basis, monkeypatch):
