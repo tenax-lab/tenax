@@ -398,24 +398,30 @@ moves the problem to another column. At `fd_step=1e-4`:
 | U1B J2=0, D=3 | 27 | X | 4 (`O A`) | entries to 1e197 | 1.6e-8 |
 | U1B J2=0.25, D=3 | 12 | X | 72 (charge block, random) | 6 bad, to 1e18 | 3.9e-9 |
 | U1B J2=0.3, D=4 | 24 | X | 4 (`O A`, random) | entries to 4e6 | 1.5e-8 |
-| exact U(1), D=2 (`exact_u1_d2` in the tests) | 10 | X | 32 | 8e3; 6e29 at width 1e-10 | 1.8e-4 |
+| exact U(1), D=2 (`exact_u1_d2` in the tests) | 10 | X | 32 | 8e3; 6e29 at width 1e-10 | 1.8e-4 to 9.6e-4 |
 | A1 J2=0, D=2, no exact U(1) | 10 | M | 32 | asymmetry 6.6e-4 | 2.2e-8 |
 
 What is left in the fourth row is roundoff. The common rotation divides roundoff by a
 gap that goes as `fd_step**2`, and the finite difference divides again by `fd_step`.
-The result sits in entries that the charge rule forbids, and it changes with small
-changes of the step: one column at chi=6 has 4.3e-4 at 1e-4, 1.6e-4 at 1.01e-4,
-2.5e-5 at 3e-4 and 1.8e-6 at 1e-3, while the column's own entry stays at 0.04157658.
-`omega` and the weights do not move (rank 23, lowest 2.2937, 2.9606, 3.4618 in all of
-these runs).
+The result sits in entries with no weight for spin operators: those that the charge rule
+forbids, and the block at charge offset 4. It changes with small changes of the step: one
+column at chi=6 has 4.3e-4 at 1e-4, 1.6e-4 at 1.01e-4, 2.5e-5 at 3e-4 and 1.8e-6 at 1e-3,
+while the column's own entry stays at 0.04157658. `omega` and the weights do not move
+(rank 23, lowest 2.2937, 2.9606, 3.4618 in all of these runs).
 
-On a state with an exact symmetry, use a basis with no special column, or a larger step:
+It also changes with the roundoff itself, so with the machine. The ranges below are over
+changes of `A` by 3e-16. At the default step the H asymmetry is close to the warning at
+1e-3, so a clean run on such a state can warn. On a state with an exact symmetry, use a
+basis with no special column, or a larger step:
 
 | exact U(1), D=2, chi=10 | `fd_step` | H asymmetry | N asymmetry |
 |---|---|---|---|
-| Unit basis (default) | 1e-4 | 1.8e-4 | 1.6e-6 |
-| Unit basis (default) | 1e-3 | 5.0e-6 | 4.6e-7 |
-| Random orthogonal basis of the same span | 1e-4 | 8.3e-9 | 3.1e-9 |
+| Unit basis (default) | 1e-4 | 1.8e-4 to 9.6e-4 | 1.6e-6 to 9.0e-6 |
+| Unit basis (default) | 1e-3 | 2.7e-6 to 7.1e-6 | 4.6e-7 |
+| Random orthogonal basis of the same span | 1e-4 | 7.9e-9 to 8.3e-9 | 3.1e-9 to 3.3e-9 |
+
+In all 18 of these runs there is no blow-up, the rank is 23, and the three lowest modes
+and the top weight are the same to 6 digits. `s(k)` moves by 6e-8 between the two steps.
 
 ```python
 Q = np.linalg.qr(np.random.default_rng(0).normal(size=(A.size, A.size)))[0]
