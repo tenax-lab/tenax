@@ -5,7 +5,12 @@ import json
 import numpy as np
 import pytest
 
-from benchmarks.ipeps_spectrum_hasik import load_state, u1_residuals
+from benchmarks.ipeps_spectrum_hasik import (
+    OPERATORS,
+    load_state,
+    operator_basis,
+    u1_residuals,
+)
 
 
 def test_load_state_reads_the_leg_order_s_u_l_d_r(tmp_path):
@@ -48,3 +53,17 @@ def test_u1_scan_finds_it_in_another_bond_gauge():
 def test_u1_scan_rejects_a_random_tensor():
     A = np.random.default_rng(1).normal(size=(2, 2, 2, 2, 2))
     assert u1_residuals(A / np.linalg.norm(A))["best_xz"] > 0.1
+
+
+def test_operator_basis_holds_each_o_a_and_a():
+    A = np.random.default_rng(2).normal(size=(2, 2, 2, 2, 2))
+    A /= np.linalg.norm(A)
+    basis = operator_basis(A, OPERATORS)
+    assert basis.shape == (A.size, len(OPERATORS) + 1)
+    np.testing.assert_allclose(basis.T @ basis, np.eye(basis.shape[1]), atol=1e-12)
+    for vector in (
+        *(np.tensordot(A, op, axes=([4], [1])) for op in OPERATORS.values()),
+        A,
+    ):
+        v = vector.ravel()
+        np.testing.assert_allclose(basis @ (basis.T @ v), v, atol=1e-12)

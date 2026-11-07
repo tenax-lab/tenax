@@ -10,6 +10,8 @@ Example::
     uv run python benchmarks/ipeps_spectrum_hasik.py state.json u1
     uv run python benchmarks/ipeps_spectrum_hasik.py state.json spectrum --chi 36 \
         --momentum X --checkpoint-dir runs/d3_chi36_x --out d3_chi36_x.npz
+    uv run python benchmarks/ipeps_spectrum_hasik.py state.json spectrum --chi 36 \
+        --momentum X --basis sma
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import numpy as np
 SY_REAL = np.array([[0.0, 0.5], [-0.5, 0.0]])
 SX = np.array([[0.0, 0.5], [0.5, 0.0]])
 SZ = np.diag([0.5, -0.5])
+OPERATORS = {"Sy": SY_REAL, "Sx": SX, "Sz": SZ}
 MOMENTA = {"X": (np.pi, 0.0), "Y": (0.0, np.pi), "M": (np.pi, np.pi)}
 
 
@@ -90,6 +93,19 @@ def u1_residuals(A: np.ndarray, angles: int = 721) -> dict[str, float]:
     return {"best_xz": best, "best_angle": angle, "i_sy": residual(SY_REAL)}
 
 
+def operator_basis(A: np.ndarray, operators: dict[str, np.ndarray]) -> np.ndarray:
+    """Orthonormal columns that hold ``A`` and each ``O A``.
+
+    Four columns give the same ``s(k)`` and first moment as the full space, since
+    both need only ``N`` and ``H`` on ``O A``. ``A`` is a null vector of ``N`` at
+    ``k != 0``, which checks the run.
+    """
+    vectors = [
+        np.tensordot(A, op, axes=([4], [1])).ravel() for op in operators.values()
+    ]
+    return np.linalg.qr(np.stack([A.ravel(), *vectors], axis=1))[0]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("state", type=Path)
@@ -97,6 +113,7 @@ def main() -> None:
     parser.add_argument("--chi", type=int, default=36)
     parser.add_argument("--j2", type=float, default=0.0)
     parser.add_argument("--momentum", choices=sorted(MOMENTA), default="X")
+    parser.add_argument("--basis", choices=["full", "sma"], default="full")
     parser.add_argument("--checkpoint-dir", type=Path)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
@@ -115,7 +132,10 @@ def main() -> None:
         ctm = ExcitationCTM(A, rotated_gate(), args.chi, 1, gate_nnn=gate_nnn)
         zero = np.zeros_like(A)
         energy, _ = ctm.densities(cell_phases(1, 0), 0.0, zero, zero)
-        print(f"chi={args.chi} J2={args.j2} energy per site {float(energy):.10f}")
+        print(
+            f"chi={args.chi} J2={args.j2} energy per site {float(energy):.10f} "
+            f"converged {ctm.ctm_converged}"
+        )
         return
 
     start = time.time()
@@ -123,14 +143,18 @@ def main() -> None:
         A,
         rotated_gate(),
         MOMENTA[args.momentum],
-        {"Sy": SY_REAL, "Sx": SX, "Sz": SZ},
+        OPERATORS,
         SpectrumConfig(chi=args.chi, checkpoint_dir=args.checkpoint_dir),
         gate_nnn=gate_nnn,
+        basis=operator_basis(A, OPERATORS) if args.basis == "sma" else None,
     )
     print(f"{time.time() - start:.0f} s, rank {result.rank}")
     print("lowest omega", np.round(result.omega[:6], 4))
     print("s(k)", result.structure_factor)
     print("sum rule deficit", result.sum_rule_deficit)
+    print(
+        "first moment", {n: float(result.omega @ w) for n, w in result.weights.items()}
+    )
     print(
         f"energy {result.energy_density:.10f} negative modes "
         f"{result.n_negative_modes} n_min_eig {result.n_min_eig:.2e} "
