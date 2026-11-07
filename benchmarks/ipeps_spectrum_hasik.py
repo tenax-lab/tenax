@@ -1,8 +1,8 @@
 """Benchmark compute_spectrum on Hasik's J1-J2 states.
 
 States: github.com/jurajHasik/j1j2_ipeps_states (CC BY 4.0), the JSON files in
-single-site_pg-C4v-A1/. They are data: this script only parses them, and never
-runs code from that repository.
+single-site_pg-C4v-A1/ and single-site_pg-C4v-A1_internal-U1/. They are data: this
+script only parses them, and never runs code from that repository.
 
 Example::
 
@@ -31,14 +31,31 @@ MOMENTA = {"X": (np.pi, 0.0), "Y": (0.0, np.pi), "M": (np.pi, np.pi)}
 
 
 def load_state(path: Path) -> np.ndarray:
-    """Parse entries ``"s u l d r value"`` into ``A[u, d, l, r, s]``, normalised."""
-    site = json.loads(Path(path).read_text())["sites"][0]
-    D = site["auxDim"]
-    A = np.zeros((D, D, D, D, site["physDim"]))
-    for entry in site["entries"]:
-        s, u, left, d, r, value = entry.split()[:6]
-        A[int(u), int(d), int(left), int(r), int(s)] = float(value)
+    """Parse entries ``"s u l d r value"`` into ``A[u, d, l, r, s]``, normalised.
+
+    A U(1) state lists them per elementary tensor, and ``A`` is the sum of those
+    tensors weighted by ``coeffs``.
+    """
+    data = json.loads(Path(path).read_text())
+    if "elem_tensors" in data:
+        lines = (line.split() for line in data["coeffs"][0]["entries"])
+        parts = [(float(c), data["elem_tensors"][int(i)]) for i, c in lines]
+    else:
+        parts = [(1.0, data["sites"][0])]
+    D, d = parts[0][1]["auxDim"], parts[0][1]["physDim"]
+    A = np.zeros((D, D, D, D, d))
+    for weight, part in parts:
+        for entry in part["entries"]:
+            s, u, left, down, r, value = entry.split()[:6]
+            A[int(u), int(down), int(left), int(r), int(s)] += weight * float(value)
     return A / np.linalg.norm(A)
+
+
+def load_charges(path: Path) -> tuple[np.ndarray, np.ndarray, int]:
+    """``(physical charges, virtual charges, total charge)`` of a U(1) state."""
+    data = json.loads(Path(path).read_text())
+    charges = np.array(data["u1_charges"])
+    return charges[:2], charges[2:], data["total_u1_charge"]
 
 
 def heisenberg_gate() -> np.ndarray:
@@ -106,6 +123,30 @@ def operator_basis(A: np.ndarray, operators: dict[str, np.ndarray]) -> np.ndarra
     return np.linalg.qr(np.stack([A.ravel(), *vectors], axis=1))[0]
 
 
+def transverse_basis(
+    physical: np.ndarray, virtual: np.ndarray, total: int
+) -> np.ndarray:
+    """Orthonormal tangent vectors that ``S^x A`` and ``S^y A`` need on a U(1) state.
+
+    Both operators shift the charge of an element by +2 or -2. Both also stay even
+    under u<->d and l<->r, which keep the momenta X, Y and M, so their spectral
+    weight stays in the even block. Each column is one orbit of the two reflections.
+    """
+    D = len(virtual)
+    shape = (D, D, D, D, len(physical))
+    orbits: dict[tuple, list[int]] = {}
+    for index in np.ndindex(*shape):
+        u, d, left, r, s = index
+        charge = physical[s] + virtual[u] + virtual[d] + virtual[left] + virtual[r]
+        if abs(charge - total) == 2:
+            key = (min(u, d), max(u, d), min(left, r), max(left, r), s)
+            orbits.setdefault(key, []).append(np.ravel_multi_index(index, shape))
+    basis = np.zeros((int(np.prod(shape)), len(orbits)))
+    for column, rows in enumerate(orbits.values()):
+        basis[rows, column] = 1.0 / np.sqrt(len(rows))
+    return basis
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("state", type=Path)
@@ -113,7 +154,9 @@ def main() -> None:
     parser.add_argument("--chi", type=int, default=36)
     parser.add_argument("--j2", type=float, default=0.0)
     parser.add_argument("--momentum", choices=sorted(MOMENTA), default="X")
-    parser.add_argument("--basis", choices=["full", "sma"], default="full")
+    parser.add_argument(
+        "--basis", choices=["full", "sma", "transverse"], default="full"
+    )
     parser.add_argument("--checkpoint-dir", type=Path)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
@@ -138,15 +181,24 @@ def main() -> None:
         )
         return
 
+    operators, basis = OPERATORS, None
+    if args.basis == "sma":
+        basis = operator_basis(A, OPERATORS)
+    elif args.basis == "transverse":
+        basis = transverse_basis(*load_charges(args.state))
+        operators = {name: OPERATORS[name] for name in ("Sy", "Sx")}
+    if basis is not None:
+        print(f"basis {args.basis}: {basis.shape[1]} columns")
+
     start = time.time()
     result = compute_spectrum(
         A,
         rotated_gate(),
         MOMENTA[args.momentum],
-        OPERATORS,
+        operators,
         SpectrumConfig(chi=args.chi, checkpoint_dir=args.checkpoint_dir),
         gate_nnn=gate_nnn,
-        basis=operator_basis(A, OPERATORS) if args.basis == "sma" else None,
+        basis=basis,
     )
     print(f"{time.time() - start:.0f} s, rank {result.rank}")
     print("lowest omega", np.round(result.omega[:6], 4))

@@ -7,8 +7,10 @@ import pytest
 
 from benchmarks.ipeps_spectrum_hasik import (
     OPERATORS,
+    load_charges,
     load_state,
     operator_basis,
+    transverse_basis,
     u1_residuals,
 )
 
@@ -67,3 +69,100 @@ def test_operator_basis_holds_each_o_a_and_a():
     ):
         v = vector.ravel()
         np.testing.assert_allclose(basis @ (basis.T @ v), v, atol=1e-12)
+
+
+def _write_u1_state(path):
+    elem = [
+        {"physDim": 2, "auxDim": 2, "numEntries": 1, "entries": ["1 0 1 0 0 1.0"]},
+        {"physDim": 2, "auxDim": 2, "numEntries": 1, "entries": ["0 1 0 0 1 2.0"]},
+    ]
+    coeffs = [{"siteId": "A0", "numEntries": 2, "entries": ["0 3.0", "1 2.0"]}]
+    data = {
+        "total_u1_charge": 1,
+        "u1_charges": [1, -1, 0, 2],
+        "coeffs": coeffs,
+        "elem_tensors": elem,
+    }
+    path.write_text(json.dumps(data))
+
+
+def test_load_state_sums_the_elementary_tensors_of_a_u1_state(tmp_path):
+    path = tmp_path / "state.json"
+    _write_u1_state(path)
+    A = load_state(path)
+    assert A.shape == (2, 2, 2, 2, 2)
+    # 3 * 1 at s=1, u=0, l=1, d=0, r=0, and 2 * 2 at s=0, u=1, l=0, d=0, r=1: norm 5.
+    assert A[0, 0, 1, 0, 1] == pytest.approx(3.0 / 5.0)
+    assert A[1, 0, 0, 1, 0] == pytest.approx(4.0 / 5.0)
+    assert np.count_nonzero(A) == 2
+
+
+def test_load_charges_splits_physical_virtual_and_total(tmp_path):
+    path = tmp_path / "state.json"
+    _write_u1_state(path)
+    physical, virtual, total = load_charges(path)
+    np.testing.assert_array_equal(physical, [1, -1])
+    np.testing.assert_array_equal(virtual, [0, 2])
+    assert total == 1
+
+
+def _c2v_u1_tensor(physical, virtual, total):
+    """Random real tensor with the charge rule, even under u<->d and l<->r."""
+    rng = np.random.default_rng(3)
+    D = len(virtual)
+    A = np.zeros((D, D, D, D, 2))
+    for index in np.ndindex(*A.shape):
+        u, d, left, r, s = index
+        if physical[s] + virtual[u] + virtual[d] + virtual[left] + virtual[r] == total:
+            A[index] = rng.normal()
+    A = A + A.transpose(1, 0, 2, 3, 4)
+    A = A + A.transpose(0, 1, 3, 2, 4)
+    return A / np.linalg.norm(A)
+
+
+PHYSICAL, VIRTUAL, TOTAL = np.array([1, -1]), np.array([0, 2, 0]), 1
+
+
+def test_transverse_basis_is_orthonormal_and_even_under_the_little_group():
+    basis = transverse_basis(PHYSICAL, VIRTUAL, TOTAL)
+    np.testing.assert_allclose(basis.T @ basis, np.eye(basis.shape[1]), atol=1e-12)
+    tensors = basis.T.reshape(-1, 3, 3, 3, 3, 2)
+    np.testing.assert_allclose(tensors, tensors.transpose(0, 2, 1, 3, 4, 5), atol=1e-12)
+    np.testing.assert_allclose(tensors, tensors.transpose(0, 1, 2, 4, 3, 5), atol=1e-12)
+
+
+def test_transverse_basis_holds_only_charge_offsets_plus_and_minus_two():
+    basis = transverse_basis(PHYSICAL, VIRTUAL, TOTAL)
+    for index in np.ndindex(3, 3, 3, 3, 2):
+        u, d, left, r, s = index
+        offset = (
+            PHYSICAL[s] + VIRTUAL[u] + VIRTUAL[d] + VIRTUAL[left] + VIRTUAL[r] - TOTAL
+        )
+        row = np.ravel_multi_index(index, (3, 3, 3, 3, 2))
+        if abs(offset) != 2:
+            assert np.abs(basis[row]).max() == 0.0
+
+
+def test_transverse_basis_holds_sx_a_and_sy_a_but_not_sz_a():
+    A = _c2v_u1_tensor(PHYSICAL, VIRTUAL, TOTAL)
+    basis = transverse_basis(PHYSICAL, VIRTUAL, TOTAL)
+    for name in ("Sx", "Sy"):
+        v = np.tensordot(A, OPERATORS[name], axes=([4], [1])).ravel()
+        np.testing.assert_allclose(basis @ (basis.T @ v), v, atol=1e-12)
+    v = np.tensordot(A, OPERATORS["Sz"], axes=([4], [1])).ravel()
+    assert np.linalg.norm(basis.T @ v) < 1e-12
+
+
+def test_transverse_basis_spans_every_even_vector_in_the_two_sectors():
+    rng = np.random.default_rng(4)
+    v = np.zeros((3, 3, 3, 3, 2))
+    for index in np.ndindex(*v.shape):
+        u, d, left, r, s = index
+        charge = PHYSICAL[s] + VIRTUAL[u] + VIRTUAL[d] + VIRTUAL[left] + VIRTUAL[r]
+        if abs(charge - TOTAL) == 2:
+            v[index] = rng.normal()
+    v = v + v.transpose(1, 0, 2, 3, 4)
+    v = (v + v.transpose(0, 1, 3, 2, 4)).ravel()
+    basis = transverse_basis(PHYSICAL, VIRTUAL, TOTAL)
+    np.testing.assert_allclose(basis @ (basis.T @ v), v, atol=1e-12)
+    assert basis.shape[1] < 72 / 2
