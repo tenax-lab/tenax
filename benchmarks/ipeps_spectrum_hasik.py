@@ -7,6 +7,8 @@ script only parses them, and never runs code from that repository.
 Example::
 
     uv run python benchmarks/ipeps_spectrum_hasik.py state.json energy --chi 36 --j2 0.3
+    uv run python benchmarks/ipeps_spectrum_hasik.py state.json energy --chi 32 --j2 0.3 \
+        --window 2x2
     uv run python benchmarks/ipeps_spectrum_hasik.py state.json u1
     uv run python benchmarks/ipeps_spectrum_hasik.py state.json spectrum --chi 36 \
         --momentum X --checkpoint-dir runs/d3_chi36_x --out d3_chi36_x.npz
@@ -73,6 +75,75 @@ def rotated_gate() -> np.ndarray:
     W = np.kron(np.eye(2), np.array([[0.0, 1.0], [-1.0, 0.0]]))
     H = heisenberg_gate().reshape(4, 4)
     return (W @ H @ W.T).reshape(2, 2, 2, 2)
+
+
+def plaquette_energy(A: np.ndarray, chi: int, j2: float) -> tuple[float, float]:
+    """``(energy per site, the same on the two-site NN window)`` in a C4v environment.
+
+    The ``.dat`` files of the dataset evaluate the NN bond on a 2x2 window, as the
+    NNN bond is, and match this to every printed digit. The two windows reach the
+    same limit, and the two-site value's error is about twice as large at finite chi.
+    """
+    import jax.numpy as jnp
+
+    from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
+    from tenax.algorithms._ipeps_excitation_ctm import (
+        _bond_value,
+        _phys,
+        mixed_rdm_diag,
+        mixed_rdm_h,
+        unpack_env,
+    )
+    from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
+
+    K = jnp.asarray(A)
+    E = unpack_env(ctm_tensor_c4v(_wrap_as_dense_tensor(K), chi), A.shape[0])
+
+    def quarter(env_legs, ket_legs, bra_legs, out, opened):
+        s, t = _phys(opened, 10, 13)
+        return jnp.einsum(
+            *env_legs,
+            K, [*ket_legs, s],
+            K, [*bra_legs, t],
+            out + ([s, t] if opened else []),
+            optimize="greedy",
+        )  # fmt: skip
+
+    def nn_on_top_edge():
+        TL = quarter(
+            (E["C1"], [0, 1], E["T1"], [1, 2, 3, 4], E["T4"], [0, 5, 6, 7]),
+            [2, 8, 5, 9], [3, 11, 6, 12], [4, 7, 8, 11, 9, 12], True,
+        )  # fmt: skip
+        TR = quarter(
+            (E["T1"], [0, 1, 2, 3], E["C2"], [3, 4], E["T2"], [4, 5, 6, 7]),
+            [1, 8, 9, 5], [2, 11, 12, 6], [0, 7, 8, 11, 9, 12], True,
+        )  # fmt: skip
+        BL = quarter(
+            (E["T4"], [0, 1, 2, 3], E["C4"], [3, 4], E["T3"], [4, 5, 6, 7]),
+            [8, 5, 1, 9], [11, 6, 2, 12], [7, 0, 8, 11, 9, 12], False,
+        )  # fmt: skip
+        BR = quarter(
+            (E["T3"], [0, 1, 2, 3], E["C3"], [4, 3], E["T2"], [5, 6, 7, 4]),
+            [8, 1, 9, 6], [11, 2, 12, 7], [0, 5, 8, 11, 9, 12], False,
+        )  # fmt: skip
+        left = jnp.einsum(
+            TL, [0, 1, 2, 3, 4, 5, 6, 7], BL, [8, 1, 2, 3, 9, 10],
+            [0, 4, 5, 8, 9, 10, 6, 7],
+        )  # fmt: skip
+        right = jnp.einsum(
+            TR, [0, 1, 2, 3, 4, 5, 6, 7], BR, [8, 1, 2, 3, 9, 10],
+            [0, 4, 5, 8, 9, 10, 6, 7],
+        )  # fmt: skip
+        return jnp.einsum(
+            left, [0, 1, 2, 3, 4, 5, 6, 7], right, [0, 1, 2, 3, 4, 5, 8, 9],
+            [6, 8, 7, 9],
+        )  # fmt: skip
+
+    gate, gate_nnn = jnp.asarray(rotated_gate()), jnp.asarray(heisenberg_gate())
+    rho_nnn = mixed_rdm_diag((E,) * 4, (K,) * 4, (K,) * 4, main=True)
+    nnn = 2 * j2 * float(_bond_value(rho_nnn, gate_nnn))
+    two_site = float(_bond_value(mixed_rdm_h(E, E, K, K, K, K), gate))
+    return 2 * float(_bond_value(nn_on_top_edge(), gate)) + nnn, 2 * two_site + nnn
 
 
 def u1_residuals(A: np.ndarray, angles: int = 721) -> dict[str, float]:
@@ -191,6 +262,7 @@ def main() -> None:
         default="full",
     )
     parser.add_argument("--fd-step", type=float, default=1e-4)
+    parser.add_argument("--window", choices=["2x1", "2x2"], default="2x1")
     parser.add_argument("--checkpoint-dir", type=Path)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
@@ -205,6 +277,10 @@ def main() -> None:
     from tenax.algorithms._ipeps_excitation_ctm import ExcitationCTM, cell_phases
 
     gate_nnn = args.j2 * heisenberg_gate() if args.j2 else None
+    if args.task == "energy" and args.window == "2x2":
+        energy, two_site = plaquette_energy(A, args.chi, args.j2)
+        print(f"chi={args.chi} J2={args.j2} 2x2 {energy:.10f} 2x1 {two_site:.10f}")
+        return
     if args.task == "energy":
         ctm = ExcitationCTM(A, rotated_gate(), args.chi, 1, gate_nnn=gate_nnn)
         zero = np.zeros_like(A)

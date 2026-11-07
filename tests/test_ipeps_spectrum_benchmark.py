@@ -12,8 +12,10 @@ from benchmarks.ipeps_spectrum_hasik import (
     load_state,
     main,
     operator_basis,
+    plaquette_energy,
     reflection_basis,
     rotated_basis,
+    rotated_gate,
     transverse_basis,
     u1_residuals,
 )
@@ -228,3 +230,36 @@ def test_main_passes_the_fd_step_to_the_config(tmp_path, monkeypatch):
     with pytest.raises(InterruptedError):
         main()
     assert configs[0].fd_step == 1e-3
+
+
+def _c4v_tensor(seed, noise):
+    """A D=2 tensor with the lattice's full point group, close to a product state."""
+    rng = np.random.default_rng(seed)
+    A = np.zeros((2, 2, 2, 2, 2))
+    A[0, 0, 0, 0, :] = rng.normal(size=2)
+    A = A + noise * rng.normal(size=A.shape)
+    # (u, d, l, r): the two reflections and the diagonal one generate C4v.
+    A = A + A.transpose(1, 0, 2, 3, 4)
+    A = A + A.transpose(0, 1, 3, 2, 4)
+    A = A + A.transpose(2, 3, 0, 1, 4)
+    return A / np.linalg.norm(A)
+
+
+def test_plaquette_energy_matches_the_two_site_window_on_a_short_ranged_state():
+    # At small correlation length both windows reach the same limit, by a wide
+    # margin below the difference a wrong contraction would make.
+    A = _c4v_tensor(seed=2, noise=0.05)
+    energy, two_site = plaquette_energy(A, chi=8, j2=0.3)
+    assert energy == pytest.approx(two_site, abs=1e-8)
+    assert abs(energy) > 0.01
+
+
+def test_plaquette_energy_of_a_product_state_is_the_closed_form():
+    theta = 0.4
+    v = np.array([np.cos(theta), np.sin(theta)])
+    A = np.zeros((2, 2, 2, 2, 2))
+    A[0, 0, 0, 0, :] = v
+    energy, _ = plaquette_energy(A, chi=4, j2=0.0)
+    pair = np.kron(v, v)
+    expected = 2 * pair @ rotated_gate().reshape(4, 4) @ pair
+    assert energy == pytest.approx(expected, abs=1e-10)
