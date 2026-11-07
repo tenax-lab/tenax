@@ -430,17 +430,30 @@ def test_many_columns_without_checkpoints_warns(no_ctm):
 # ---------------------------------------------------------------------------
 
 
-def test_exact_u1_column_matches_finite_differences():
-    """A pair of the projector's matrices splits as ``h^2`` at the FD points here.
-
-    With the Lorentzian of the ground-state path, row 10 of this column is -3155 where
-    FD-FD gives -0.007; other chi and fd_step move the blow-up to other columns.
-    """
-    A = exact_u1_d2()
-    ctm = ExcitationCTM(A, rotated_gate(), 6, 30)
+@pytest.fixture(scope="module")
+def exact_u1_ctm():
+    ctm = ExcitationCTM(exact_u1_d2(), rotated_gate(), 6, 30)
     corner = np.linalg.svd(np.asarray(ctm.envs0[(0, 0)].C1.todense()), compute_uv=False)
     assert abs(corner[1] - corner[2]) < 1e-10 * corner[0], "no exact pair: vacuous"
     assert corner[1] > 1e-2 * corner[0], "no exact pair: vacuous"
+    return ctm
+
+
+@pytest.mark.parametrize(
+    ("column", "rows"),
+    [(23, (10, 23)), (0, (0, 5))],
+    ids=["the pair splits", "the pair stays exact"],
+)
+def test_exact_u1_column_matches_finite_differences(exact_u1_ctm, column, rows):
+    """Column 23: a pair of the projector's matrices splits as ``h^2`` at the FD points.
+    With the Lorentzian of the ground-state path, its row 10 is -3155 where FD-FD gives
+    -0.007, and other chi and fd_step move the blow-up to other columns.
+
+    Column 0 keeps the symmetry, so the pair stays exact. A diagonal that depends on the
+    numerical basis of the pair put 4.5e-3 into its row 5, where FD-FD gives 0.
+    """
+    ctm = exact_u1_ctm
+    A = ctm.A
 
     def unit(column):
         X = np.zeros(A.size)
@@ -449,19 +462,19 @@ def test_exact_u1_column_matches_finite_differences():
 
     phases = ctm_module.cell_phases(1, 0)
     g_h, g_n = (
-        np.asarray(g).ravel() for g in ctm.ket_derivative(phases, unit(23), 1e-4)
+        np.asarray(g).ravel() for g in ctm.ket_derivative(phases, unit(column), 1e-4)
     )
     h = 1e-3
-    for row in (10, 23):
+    for row in rows:
         fd_h, fd_n = 0.0, 0.0
         for sign_ket in (1.0, -1.0):
             for sign_bra in (1.0, -1.0):
                 e, n = ctm.densities(
-                    phases, sign_ket * h, unit(23), sign_bra * h * unit(row)
+                    phases, sign_ket * h, unit(column), sign_bra * h * unit(row)
                 )
                 fd_h += sign_ket * sign_bra * float(e) / (4 * h * h)
                 fd_n += sign_ket * sign_bra * float(n) / (4 * h * h)
-        assert g_h[row] == pytest.approx(fd_h, abs=1e-3)
+        assert g_h[row] == pytest.approx(fd_h, abs=1e-4)
         assert g_n[row] == pytest.approx(fd_n, abs=1e-5)
     assert np.abs(g_h).max() < 1.0
 

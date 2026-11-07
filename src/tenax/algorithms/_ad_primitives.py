@@ -272,14 +272,15 @@ def _truncated_svd_ad_fwd(
     return (U, s_trunc, Vh), residuals
 
 
-def _split_rotation(
+def _split_core(
     s_k: jax.Array,
     s_max: jax.Array,
+    ds: jax.Array,
     UtdU_anti: jax.Array,
     VtdV_anti: jax.Array,
     eps: float,
 ) -> jax.Array:
-    """Terms 2 and 3 of the SVD adjoint, with only the common rotation broadened.
+    """Terms 1, 2 and 3 of the SVD adjoint, with only the common rotation broadened.
 
     With ``F_ij = 1 / (s_j^2 - s_i^2)``, ``J = UtdU_anti`` and ``K = VtdV_anti``::
 
@@ -292,6 +293,13 @@ def _split_rotation(
     damps both, so a pair with its squared gap near the width loses part of a
     derivative that exists.  This form broadens each denominator apart, by ``eps``
     in units of ``s_max``; a pair of zero modes gives ``0 / eps^2 = 0`` in both.
+    The same split is in peps-torch (``SVDGESDD_legacy``).
+
+    At an exact pair the common rotation is 0 / 0, and the SVD picks the basis of the
+    pair from roundoff.  In the singular basis, the matrix gradient ``X`` has
+    ``X_ii - X_jj`` and ``X_ij + X_ji`` as two components of one traceless block, so
+    ``ds`` takes the same damping: a mean over the pair, by the complement of the
+    Lorentzian on the gap.  Otherwise the result depends on that basis.
     """
     s_max = jnp.maximum(s_max, jnp.finfo(s_k.dtype).tiny)
     minus = (s_k[None, :] - s_k[:, None]) / s_max
@@ -299,7 +307,10 @@ def _split_rotation(
     off_diagonal = 1.0 - jnp.eye(s_k.shape[0], dtype=s_k.dtype)
     common = off_diagonal * minus / (minus**2 + eps**2) / s_max
     relative = off_diagonal * plus / (plus**2 + eps**2) / s_max
-    return 0.5 * (common * (UtdU_anti + VtdV_anti) + relative * (UtdU_anti - VtdV_anti))
+    weight = eps**2 / (minus**2 + eps**2)
+    mean = (weight @ ds) / jnp.sum(weight, axis=1)
+    rotation = common * (UtdU_anti + VtdV_anti) + relative * (UtdU_anti - VtdV_anti)
+    return jnp.diag(mean) + 0.5 * rotation
 
 
 def _svd_sector_backward(
@@ -331,9 +342,9 @@ def _svd_sector_backward(
         dVh: Gradient w.r.t. truncated Vh, shape ``(k, n)``.
         eps: Lorentzian broadening width, RELATIVE to ``s[0]**2`` (the
              F-matrix is built from squared singular values).
-        split_eps: If given, terms 2 and 3 use :func:`_split_rotation` with this
-             width, RELATIVE to ``s[0]``, in place of the Lorentzian F-matrix.
-             ``None`` keeps the F-matrix.
+        split_eps: If given, terms 1 to 3 use :func:`_split_core` with this width,
+             RELATIVE to ``s[0]``, in place of the Lorentzian F-matrix.  ``None``
+             keeps the F-matrix.
 
     Returns:
         dM: Gradient w.r.t. the input matrix, shape ``(m, n)``.
@@ -471,10 +482,10 @@ def _svd_sector_backward(
     Vh_k = Vh[:k, :]
     dM = jnp.zeros((m, n), dtype=U.dtype)
 
-    # 1. Diagonal part from ds
-    dM = dM + U_k @ jnp.diag(ds) @ Vh_k
-
     if split_eps is None:
+        # 1. Diagonal part from ds
+        dM = dM + U_k @ jnp.diag(ds) @ Vh_k
+
         # 2. Off-diagonal from dU.  Spans the full spectrum, so this now carries
         #    the kept/discarded coupling exactly (it used to be approximated in
         #    term 4 -- see the padding note above, #752).
@@ -483,9 +494,9 @@ def _svd_sector_backward(
         # 3. Off-diagonal from dVh (same, for the right factors)
         dM = dM + U_k @ jnp.diag(s_k) @ (F * VtdV_anti) @ Vh_k
     else:
-        # 2. and 3. together, with the same kept/discarded coupling.
-        rotation = _split_rotation(s_k, s[0], UtdU_anti, VtdV_anti, split_eps)
-        dM = dM + U_k @ rotation @ Vh_k
+        # 1. to 3. together, with the same kept/discarded coupling.
+        core = _split_core(s_k, s[0], ds, UtdU_anti, VtdV_anti, split_eps)
+        dM = dM + U_k @ core @ Vh_k
 
     # 4. Null-space contribution from dU (non-square input only)
     dM = dM + proj_U_perp @ dU @ jnp.diag(s_inv) @ Vh_k

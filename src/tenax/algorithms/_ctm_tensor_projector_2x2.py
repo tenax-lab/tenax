@@ -152,7 +152,7 @@ _SPLIT_BACKWARD_WIDTH = 1e-12
 
 @jax.custom_vjp
 def _split_dense_svd(M: jax.Array):
-    """``_dense_svd`` forward, backward with the split of ``_split_rotation``.
+    """``_dense_svd`` forward, backward with the split of ``_split_core``.
 
     The backward of compute_spectrum's reverse sweeps.  The Lorentzian of
     :func:`_regularized_dense_svd` also damps the regular relative rotation of a

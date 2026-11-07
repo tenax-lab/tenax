@@ -52,6 +52,7 @@ jax.config.update("jax_enable_x64", True)
 
 from tenax.algorithms._ad_primitives import (
     _fix_svd_signs,
+    _svd_sector_backward,
     regularized_eigh,
     regularized_svd,
     truncated_svd_ad,
@@ -569,7 +570,9 @@ def test_svd_adjoint_is_finite_on_a_small_float32_sector(kernel):
 # entry by ``d^2 / (d^2 + eps^2)``, ``d = (s_j^2 - s_i^2) / s_0^2``.  The split form
 # scales the symmetric part ``X_ij + X_ji`` (common rotation of u and v) and the
 # antisymmetric part ``X_ij - X_ji`` (relative rotation) apart, by the same function
-# of ``(s_j - s_i) / s_0`` and of ``(s_j + s_i) / s_0``.
+# of ``(s_j - s_i) / s_0`` and of ``(s_j + s_i) / s_0``.  ``X_ii - X_jj`` and
+# ``X_ij + X_ji`` are two components of one traceless block, so the diagonal is
+# averaged over a pair with the complement of that function as the weight.
 
 
 def _pair_spectrum(gap):
@@ -625,8 +628,43 @@ def test_split_backward_damps_only_the_common_rotation(gap):
     common = _lorentzian((s[None, :] - s[:, None]) / s[0], 1e-12)
     relative = _lorentzian((s[None, :] + s[:, None]) / s[0], 1e-12)
     expected = 0.5 * (common * (X + X.T) + relative * (X - X.T))
-    np.fill_diagonal(expected, np.diag(X))
+    weight = 1.0 - common
+    np.fill_diagonal(expected, (weight @ np.diag(X)) / weight.sum(axis=1))
     assert np.abs(got - expected).max() < 1e-3
+
+
+@pytest.mark.parametrize("complex_", [False, True], ids=["real", "complex"])
+def test_split_backward_does_not_depend_on_the_basis_of_an_exact_pair(complex_):
+    """The SVD picks the basis of an exact pair from roundoff, and the matrix gradient
+    must not see it.  On the exact-U(1) D=2 state a basis-dependent diagonal put 1e-3
+    of noise into the columns whose direction keeps the pair exact.
+    """
+    rng = _rng(44)
+    n = 5
+    U, _ = np.linalg.qr(_mat(rng, (n, n), complex_))
+    V, _ = np.linalg.qr(_mat(rng, (n, n), complex_))
+    W = _mat(rng, (n, n), complex_)
+    s = _pair_spectrum(0.0)
+    angle = 0.7
+    rotation = np.eye(n)
+    rotation[np.ix_([1, 2], [1, 2])] = [
+        [np.cos(angle), -np.sin(angle)],
+        [np.sin(angle), np.cos(angle)],
+    ]
+
+    def gradient(U, V):
+        # The cotangents of ``sum(conj(W) * U diag(s) Vh)``, conjugated into JAX's
+        # convention for a complex input.
+        Vh = V.conj().T
+        dU = (W @ V * s).conj()
+        ds = np.real(np.diag(U.conj().T @ W @ V))
+        dVh = (s[:, None] * (U.conj().T @ W)).conj()
+        args = (jnp.asarray(x) for x in (U, s, Vh, dU, ds, dVh))
+        return np.asarray(_svd_sector_backward(*args, split_eps=1e-12))
+
+    np.testing.assert_allclose(
+        gradient(U @ rotation, V @ rotation), gradient(U, V), atol=1e-12
+    )
 
 
 @pytest.mark.parametrize("shape", [(6, 6), (7, 4), (4, 7)])
