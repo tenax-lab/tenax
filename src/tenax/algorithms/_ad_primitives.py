@@ -298,8 +298,9 @@ def _split_core(
     At an exact pair the common rotation is 0 / 0, and the SVD picks the basis of the
     pair from roundoff.  In the singular basis, the matrix gradient ``X`` has
     ``X_ii - X_jj`` and ``X_ij + X_ji`` as two components of one traceless block, so
-    ``ds`` takes the same damping: a mean over the pair, by the complement of the
-    Lorentzian on the gap.  Otherwise the result depends on that basis.
+    ``ds`` takes the same damping: a mean over the pair, with the weight that scales
+    the pair's difference by the Lorentzian on the gap.  A block scaled as a whole does
+    not depend on the basis of the pair, at any gap.
     """
     s_max = jnp.maximum(s_max, jnp.finfo(s_k.dtype).tiny)
     minus = (s_k[None, :] - s_k[:, None]) / s_max
@@ -307,7 +308,7 @@ def _split_core(
     off_diagonal = 1.0 - jnp.eye(s_k.shape[0], dtype=s_k.dtype)
     common = off_diagonal * minus / (minus**2 + eps**2) / s_max
     relative = off_diagonal * plus / (plus**2 + eps**2) / s_max
-    weight = eps**2 / (minus**2 + eps**2)
+    weight = eps**2 / (2.0 * minus**2 + eps**2)
     mean = (weight @ ds) / jnp.sum(weight, axis=1)
     rotation = common * (UtdU_anti + VtdV_anti) + relative * (UtdU_anti - VtdV_anti)
     return jnp.diag(mean) + 0.5 * rotation

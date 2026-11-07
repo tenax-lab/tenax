@@ -1237,9 +1237,8 @@ def compute_spectrum(
                 raise RuntimeError(
                     f"compute_spectrum: column {i} reaches {size:.1e} at "
                     f"chi={config.chi}, fd_step={config.fd_step}, against a bound of "
-                    f"{_COLUMN_BOUND:.0e}; it was not saved. Try fd_step=1e-3, and a "
-                    "chi that does not cut a multiplet of the environment spectrum, "
-                    "with a new checkpoint_dir."
+                    f"{_COLUMN_BOUND:.0e}; it was not saved. Try fd_step=1e-3, then a "
+                    "random orthogonal basis, with a new checkpoint_dir."
                 )
             if directory is not None:
                 _save_column(directory, i, fingerprint, *columns[i])

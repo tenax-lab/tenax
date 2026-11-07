@@ -628,23 +628,27 @@ def test_split_backward_damps_only_the_common_rotation(gap):
     common = _lorentzian((s[None, :] - s[:, None]) / s[0], 1e-12)
     relative = _lorentzian((s[None, :] + s[:, None]) / s[0], 1e-12)
     expected = 0.5 * (common * (X + X.T) + relative * (X - X.T))
-    weight = 1.0 - common
+    weight = (1.0 - common) / (1.0 + common)
     np.fill_diagonal(expected, (weight @ np.diag(X)) / weight.sum(axis=1))
     assert np.abs(got - expected).max() < 1e-3
 
 
+@pytest.mark.parametrize("gap", _PAIR_GAPS)
 @pytest.mark.parametrize("complex_", [False, True], ids=["real", "complex"])
-def test_split_backward_does_not_depend_on_the_basis_of_an_exact_pair(complex_):
+def test_split_backward_does_not_depend_on_the_basis_of_a_pair(gap, complex_):
     """The SVD picks the basis of an exact pair from roundoff, and the matrix gradient
     must not see it.  On the exact-U(1) D=2 state a basis-dependent diagonal put 1e-3
     of noise into the columns whose direction keeps the pair exact.
+
+    The kernel takes any rotated basis, so this holds at each gap: the pair's whole
+    traceless block takes one factor, and a block scaled as a whole is covariant.
     """
     rng = _rng(44)
     n = 5
     U, _ = np.linalg.qr(_mat(rng, (n, n), complex_))
     V, _ = np.linalg.qr(_mat(rng, (n, n), complex_))
     W = _mat(rng, (n, n), complex_)
-    s = _pair_spectrum(0.0)
+    s = _pair_spectrum(gap)
     angle = 0.7
     rotation = np.eye(n)
     rotation[np.ix_([1, 2], [1, 2])] = [
@@ -662,8 +666,10 @@ def test_split_backward_does_not_depend_on_the_basis_of_an_exact_pair(complex_):
         args = (jnp.asarray(x) for x in (U, s, Vh, dU, ds, dVh))
         return np.asarray(_svd_sector_backward(*args, split_eps=1e-12))
 
+    # At a gap, the common rotation divides roundoff by the gap: 4e-6 at most here.
+    atol = 1e-4 if gap else 1e-12
     np.testing.assert_allclose(
-        gradient(U @ rotation, V @ rotation), gradient(U, V), atol=1e-12
+        gradient(U @ rotation, V @ rotation), gradient(U, V), atol=atol
     )
 
 

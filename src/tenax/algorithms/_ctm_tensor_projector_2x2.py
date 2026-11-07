@@ -145,8 +145,9 @@ def _regularized_dense_svd_bwd(residuals, g):
 _regularized_dense_svd.defvjp(_regularized_dense_svd_fwd, _regularized_dense_svd_bwd)
 
 
-# Relative to ``s[0]``.  Measured on the exact-U(1) D=2 state against FD-FD: 1e-14
-# to 1e-10 keep every column within 1e-4, 1e-8 and above lose 7e-4.
+# Relative to ``s[0]``.  It stays below the gap of a pair that splits in a column,
+# which goes as ``h^2``: on the exact-U(1) D=2 state at fd_step=1e-4 the largest error
+# against FD-FD is 8e-5 at this width and 7e-4 from 1e-10 up.  No width blows up.
 _SPLIT_BACKWARD_WIDTH = 1e-12
 
 
@@ -160,7 +161,10 @@ def _split_dense_svd(M: jax.Array):
     splits as ``h^2`` at a finite-difference point of a column.  Whichever column
     brings the squared gap near the Lorentzian width then grows 3-7 decades per
     reverse sweep (1e84 at D=3), and moving the width or ``h`` only moves the bad
-    column.  With the split, those columns agree with FD-FD at D=2.
+    column.
+
+    With the split, those columns agree with FD-FD at D=2.  At D=3, a block of 72
+    columns with 6 bad under the Lorentzian (up to 1e18) gives an H asymmetry of 4e-9.
 
     The ground-state path keeps the Lorentzian.
     """
