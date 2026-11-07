@@ -197,9 +197,11 @@ def operator_basis(A: np.ndarray, operators: dict[str, np.ndarray]) -> np.ndarra
 def rotated_basis(basis: np.ndarray, seed: int = 0) -> np.ndarray:
     """``basis`` times a random orthogonal matrix: the same span, no special column.
 
-    On an exact U(1) state a column along ``A``, ``S^z A`` or one orbit can blow up
-    (1e195 at D=3, chi=27, and 1e98 at chi=12), and in this basis the same runs stay
-    clean. ``H`` and ``N`` are linear in the column, so the span sets the answer.
+    On an exact U(1) state a column along ``A``, ``S^z A`` or one orbit keeps a pair of
+    singular values exact or close to exact, and the derivative through that pair carries
+    the most roundoff. ``H`` and ``N`` are linear in the column, so the span sets the
+    answer. This does not stop the blow-up of the Lorentzian backward: at
+    ``fd_step=1e-4`` about 5% of the rotated columns still blew up.
     """
     n = basis.shape[1]
     return basis @ np.linalg.qr(np.random.default_rng(seed).normal(size=(n, n)))[0]
@@ -262,6 +264,7 @@ def main() -> None:
         default="full",
     )
     parser.add_argument("--fd-step", type=float, default=1e-4)
+    parser.add_argument("--null-tol", type=float, default=1e-4)
     parser.add_argument("--window", choices=["2x1", "2x2"], default="2x1")
     parser.add_argument("--checkpoint-dir", type=Path)
     parser.add_argument("--out", type=Path)
@@ -312,7 +315,10 @@ def main() -> None:
         MOMENTA[args.momentum],
         operators,
         SpectrumConfig(
-            chi=args.chi, fd_step=args.fd_step, checkpoint_dir=args.checkpoint_dir
+            chi=args.chi,
+            fd_step=args.fd_step,
+            null_tol=args.null_tol,
+            checkpoint_dir=args.checkpoint_dir,
         ),
         gate_nnn=gate_nnn,
         basis=basis,

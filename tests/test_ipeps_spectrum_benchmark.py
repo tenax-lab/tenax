@@ -214,7 +214,10 @@ def test_rotated_basis_keeps_the_span_and_mixes_every_column():
     assert np.abs(basis.T @ mixed).min() > 1e-6
 
 
-def test_main_passes_the_fd_step_to_the_config(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "option, field", [("--fd-step", "fd_step"), ("--null-tol", "null_tol")]
+)
+def test_main_passes_the_option_to_the_config(tmp_path, monkeypatch, option, field):
     path = tmp_path / "state.json"
     entries = ["1 0 1 0 0 3.0", "0 1 0 0 1 4.0"]
     site = {"siteId": "A", "physDim": 2, "auxDim": 2, "entries": entries}
@@ -226,11 +229,11 @@ def test_main_passes_the_fd_step_to_the_config(tmp_path, monkeypatch):
         raise InterruptedError
 
     monkeypatch.setattr("tenax.compute_spectrum", stop_at_the_call)
-    argv = ["bench", str(path), "spectrum", "--fd-step", "1e-3"]
+    argv = ["bench", str(path), "spectrum", option, "1e-3"]
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(InterruptedError):
         main()
-    assert configs[0].fd_step == 1e-3
+    assert getattr(configs[0], field) == 1e-3
 
 
 def _c4v_tensor(seed, noise):
