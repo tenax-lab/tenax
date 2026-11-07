@@ -1,6 +1,7 @@
 """The benchmark's state parser and U(1) scan."""
 
 import json
+import sys
 
 import numpy as np
 import pytest
@@ -9,6 +10,7 @@ from benchmarks.ipeps_spectrum_hasik import (
     OPERATORS,
     load_charges,
     load_state,
+    main,
     operator_basis,
     rotated_basis,
     transverse_basis,
@@ -182,3 +184,22 @@ def test_rotated_basis_keeps_the_span_and_mixes_every_column():
     np.testing.assert_allclose(mixed @ (mixed.T @ basis), basis, atol=1e-12)
     # Every column overlaps every orbit: no column is left along a special direction.
     assert np.abs(basis.T @ mixed).min() > 1e-6
+
+
+def test_main_passes_the_fd_step_to_the_config(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    entries = ["1 0 1 0 0 3.0", "0 1 0 0 1 4.0"]
+    site = {"siteId": "A", "physDim": 2, "auxDim": 2, "entries": entries}
+    path.write_text(json.dumps({"sites": [site]}))
+    configs = []
+
+    def stop_at_the_call(A, gate, momentum, operators, config, **kwargs):
+        configs.append(config)
+        raise InterruptedError
+
+    monkeypatch.setattr("tenax.compute_spectrum", stop_at_the_call)
+    argv = ["bench", str(path), "spectrum", "--fd-step", "1e-3"]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(InterruptedError):
+        main()
+    assert configs[0].fd_step == 1e-3

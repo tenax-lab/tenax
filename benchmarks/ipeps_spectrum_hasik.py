@@ -171,6 +171,7 @@ def main() -> None:
     parser.add_argument(
         "--basis", choices=["full", "sma", "charge", "even"], default="full"
     )
+    parser.add_argument("--fd-step", type=float, default=1e-4)
     parser.add_argument("--checkpoint-dir", type=Path)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
@@ -213,7 +214,9 @@ def main() -> None:
         rotated_gate(),
         MOMENTA[args.momentum],
         operators,
-        SpectrumConfig(chi=args.chi, checkpoint_dir=args.checkpoint_dir),
+        SpectrumConfig(
+            chi=args.chi, fd_step=args.fd_step, checkpoint_dir=args.checkpoint_dir
+        ),
         gate_nnn=gate_nnn,
         basis=basis,
     )
