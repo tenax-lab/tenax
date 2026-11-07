@@ -6,6 +6,7 @@ and the others resume. A test that needs fresh columns takes its own ``name``.
 
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -14,16 +15,21 @@ from _ipeps_spectrum_fixtures import (
     SY_REAL,
     SZ,
     apply_op,
+    exact_u1_d2,
     hasik_d2,
     rotated_gate,
 )
 
+import tenax.algorithms._ad_primitives as ad_module
 import tenax.algorithms._ipeps_excitation_ctm as ctm_module
 import tenax.algorithms.ipeps_excitations as spectrum_module
 from tenax import SpectrumConfig, SpectrumResult, compute_spectrum, spectral_function
-from tenax.algorithms._ipeps_excitation_ctm import ExcitationCTM
+from tenax.algorithms._ctm_tensor_convergence import _ctm_tensor_sweep_multisite
+from tenax.algorithms._ctm_tensor_projector_2x2 import _SPLIT_BACKWARD_WIDTH
+from tenax.algorithms._ipeps_excitation_ctm import CELL, NEIGHBORS, ExcitationCTM
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
 from tenax.algorithms.ipeps_excitations import (
+    _gate_scale,
     _gauge_vectors,
     _reduce_spectrum,
     _spectrum_gate,
@@ -374,6 +380,72 @@ def test_non_finite_column_raises_and_is_not_saved(monkeypatch, tmp_path, basis,
     assert [path.name for path in tmp_path.glob("column_*.npz")] == ["column_00000.npz"]
 
 
+@pytest.mark.parametrize("bad", ["h", "n"])
+@pytest.mark.parametrize("units", [1.0, 1e6], ids=["J=1", "J=1e6"])
+def test_oversized_column_raises_and_is_not_saved(
+    monkeypatch, tmp_path, basis, bad, units
+):
+    """A finite blow-up reaches eigh and gives a wrong spectrum, with no error at all.
+
+    H is linear in the gate and N has no units, so the bound must follow only H.
+    """
+
+    class HugeInColumnOne:
+        ctm_converged = True
+
+        def __init__(self, A, gate, chi, sweeps, gate_nnn=None):
+            self.A = jnp.asarray(A)
+            self.calls = 0
+
+        def densities(self, phases, eps, X, Y):
+            return jnp.zeros(()), jnp.zeros(())
+
+        def ket_derivative(self, phases, X, h):
+            self.calls += 1
+            good = jnp.ones_like(self.A)
+            huge = 1e4 * good if self.calls == 2 else good
+            return (units * huge, good) if bad == "h" else (units * good, huge)
+
+    monkeypatch.setattr(spectrum_module, "ExcitationCTM", HugeInColumnOne)
+    with pytest.raises(RuntimeError, match="column 1 .*fd_step=1e-3"):
+        compute_spectrum(
+            hasik_d2(),
+            units * rotated_gate(),
+            X_POINT,
+            {"Sy": SY_REAL},
+            SpectrumConfig(chi=10, checkpoint_dir=tmp_path),
+            basis=basis,
+        )
+    assert [path.name for path in tmp_path.glob("column_*.npz")] == ["column_00000.npz"]
+
+
+def test_a_zero_gate_passes_the_column_check(monkeypatch, basis):
+    """Only the norm is wanted; H = 0 in units of a zero gate must not read as 0 / 0."""
+
+    class NormOnly:
+        ctm_converged = True
+
+        def __init__(self, A, gate, chi, sweeps, gate_nnn=None):
+            self.A = jnp.asarray(A)
+
+        def densities(self, phases, eps, X, Y):
+            return jnp.zeros(()), jnp.zeros(())
+
+        def ket_derivative(self, phases, X, h):
+            return jnp.zeros_like(self.A), X
+
+    monkeypatch.setattr(spectrum_module, "ExcitationCTM", NormOnly)
+    result = compute_spectrum(
+        hasik_d2(),
+        np.zeros((2, 2, 2, 2)),
+        X_POINT,
+        {"Sy": SY_REAL},
+        SpectrumConfig(chi=10),
+        basis=basis,
+    )
+    np.testing.assert_allclose(result.omega, 0.0)
+
+
 def test_symmetric_tensor_is_refused(no_ctm):
     A = object.__new__(SymmetricTensor)  # the refusal must not touch its contents
     with pytest.raises(NotImplementedError, match="SymmetricTensor"):
@@ -385,6 +457,98 @@ def test_many_columns_without_checkpoints_warns(no_ctm):
     A = rng.normal(size=(3, 3, 3, 3, 2))
     with pytest.warns(UserWarning, match="162 columns"), pytest.raises(_Stop):
         compute_spectrum(A, rotated_gate(), X_POINT, {}, SpectrumConfig(chi=10))
+
+
+# ---------------------------------------------------------------------------
+# Exact U(1): the SVD backward of the sweep
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def exact_u1_ctm():
+    ctm = ExcitationCTM(exact_u1_d2(), rotated_gate(), 6, 30)
+    corner = np.linalg.svd(np.asarray(ctm.envs0[(0, 0)].C1.todense()), compute_uv=False)
+    assert abs(corner[1] - corner[2]) < 1e-10 * corner[0], "no exact pair: vacuous"
+    assert corner[1] > 1e-2 * corner[0], "no exact pair: vacuous"
+    return ctm
+
+
+@pytest.mark.parametrize(
+    ("column", "rows", "fd_step", "tolerance"),
+    [(23, (10, 23), 1e-4, 1e-3), (23, (10, 23), 1e-3, 2e-6), (0, (0, 5), 1e-4, 1e-5)],
+    ids=["the pair splits", "the pair splits, larger step", "the pair stays exact"],
+)
+def test_exact_u1_column_matches_finite_differences(
+    exact_u1_ctm, column, rows, fd_step, tolerance
+):
+    """Column 23: a pair of the projector's matrices splits as ``h^2`` at the FD points.
+    With the Lorentzian of the ground-state path, its row 10 is -3155 where FD-FD gives
+    -0.007, and other chi and fd_step move the blow-up to other columns.
+
+    Roundoff in the rotation of that pair goes as ``fd_step^-3``. Its row 10 is at charge
+    offset 4, with no weight. A change of ``A`` by 3e-16 moves that entry by up to 6e-5 at
+    fd_step=1e-4 and 1e-7 at 1e-3, and macOS is 1.3e-4 off at 1e-4. So 1e-4 tests for the
+    blow-up only, and 1e-3 tests the value.
+
+    Column 0 keeps the symmetry, so the pair stays exact. A diagonal that depends on the
+    numerical basis of the pair put 2e-4 to 5e-3 into its row 5, where FD-FD gives 0: the
+    size depends on the basis that roundoff picks.
+    """
+    ctm = exact_u1_ctm
+    A = ctm.A
+
+    def unit(column):
+        X = np.zeros(A.size)
+        X[column] = 1.0
+        return jnp.asarray(X.reshape(A.shape))
+
+    phases = ctm_module.cell_phases(1, 0)
+    g_h, g_n = (
+        np.asarray(g).ravel() for g in ctm.ket_derivative(phases, unit(column), fd_step)
+    )
+    h = 1e-3
+    for row in rows:
+        fd_h, fd_n = 0.0, 0.0
+        for sign_ket in (1.0, -1.0):
+            for sign_bra in (1.0, -1.0):
+                e, n = ctm.densities(
+                    phases, sign_ket * h, unit(column), sign_bra * h * unit(row)
+                )
+                fd_h += sign_ket * sign_bra * float(e) / (4 * h * h)
+                fd_n += sign_ket * sign_bra * float(n) / (4 * h * h)
+        assert g_h[row] == pytest.approx(fd_h, abs=tolerance)
+        assert g_n[row] == pytest.approx(fd_n, abs=1e-5)
+    assert np.abs(g_h).max() < 1.0
+
+
+def test_only_the_spectrum_sweep_takes_the_split_backward(monkeypatch):
+    seen = []
+    backward = ad_module._svd_sector_backward
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("split_eps"))
+        return backward(*args, **kwargs)
+
+    monkeypatch.setattr(ad_module, "_svd_sector_backward", spy)
+    ctm = ExcitationCTM(hasik_d2(), rotated_gate(), 4, 1)
+    phases = ctm_module.cell_phases(1, 0)
+    ctm.ket_derivative(phases, jnp.zeros_like(ctm.A), 1e-4)
+    assert seen, "the spectrum sweep reached no SVD backward"
+    assert set(seen) == {_SPLIT_BACKWARD_WIDTH}
+
+    # What the ground-state path passes: its gradients must not move.
+    seen.clear()
+
+    def ground_state_sweep(tensor):
+        dl = {c: ctm._double_layer(tensor, tensor) for c in CELL}
+        envs = _ctm_tensor_sweep_multisite(
+            ctm.envs0, dl, NEIGHBORS, 4, True, "svd", "flow", "2x2"
+        )[0]
+        return jnp.real(jnp.sum(envs[(0, 0)].C1.todense()))
+
+    jax.grad(ground_state_sweep)(ctm.A)
+    assert seen, "the ground-state sweep reached no SVD backward"
+    assert set(seen) == {None}
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +577,7 @@ def _clean_result(**changes):
 def test_clean_result_does_not_warn():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        _warn_spectrum(_clean_result())
+        _warn_spectrum(_clean_result(), 0.5)
 
 
 @pytest.mark.parametrize(
@@ -431,7 +595,56 @@ def test_clean_result_does_not_warn():
 )
 def test_each_diagnostic_warns_above_its_threshold(change, message):
     with pytest.warns(UserWarning, match=message):
-        _warn_spectrum(_clean_result(**change))
+        _warn_spectrum(_clean_result(**change), 0.5)
+
+
+def test_h_asymmetry_limit_follows_the_gate():
+    """H is linear in the gate, so the limit must move with it, in both directions."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _warn_spectrum(_clean_result(h_asymmetry=9e-4), 0.5)
+        _warn_spectrum(_clean_result(h_asymmetry=2e-3), 10.0)
+    for asymmetry, gate_scale in [(1.1e-3, 0.5), (2e-6, 1e-4)]:
+        with pytest.warns(UserWarning, match="H asymmetry"):
+            _warn_spectrum(_clean_result(h_asymmetry=asymmetry), gate_scale)
+
+
+@pytest.mark.filterwarnings("error:compute_spectrum")
+def test_the_driver_gives_the_h_limit_the_scale_of_its_gates(monkeypatch, basis):
+    """An asymmetry far above 1e-3, and small against a gate of 1e6."""
+
+    class SlightlyAsymmetric:
+        ctm_converged = True
+
+        def __init__(self, A, gate, chi, sweeps, gate_nnn=None):
+            self.A = jnp.asarray(A)
+            self.calls = 0
+
+        def densities(self, phases, eps, X, Y):
+            return jnp.zeros(()), jnp.zeros(())
+
+        def ket_derivative(self, phases, X, h):
+            self.calls += 1
+            return 1e3 * X + 10.0 * self.calls * jnp.ones_like(self.A), X
+
+    monkeypatch.setattr(spectrum_module, "ExcitationCTM", SlightlyAsymmetric)
+    result = compute_spectrum(
+        hasik_d2(),
+        1e6 * rotated_gate(),
+        X_POINT,
+        {"Sy": SY_REAL},
+        SpectrumConfig(chi=10),
+        basis=basis,
+    )
+    assert 1e-3 < result.h_asymmetry < 1e-3 * 1e6
+
+
+def test_gate_scale_is_the_largest_entry_of_both_gates():
+    assert _gate_scale(np.asarray(rotated_gate()), None) == 0.5
+    gate, gate_nnn = np.zeros((2, 2, 2, 2)), np.zeros((2, 2, 2, 2))
+    gate[0, 1, 1, 0], gate_nnn[0, 1, 1, 0] = -0.5, -3.0
+    assert _gate_scale(gate, None) == 0.5
+    assert _gate_scale(gate, gate_nnn) == 3.0
 
 
 def test_unconverged_ctm_warns(checkpoint, basis, monkeypatch):

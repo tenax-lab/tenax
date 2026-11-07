@@ -17,6 +17,7 @@ from tenax.algorithms._ctm_tensor_convergence import (
     _ctm_tensor_sweep_multisite,
 )
 from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+from tenax.algorithms._ctm_tensor_projector_2x2 import _PROJECTOR_BACKWARD_FLOW_SPLIT
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
 from tenax.core.tensor import DenseTensor
 
@@ -271,7 +272,14 @@ class ExcitationCTM:
         self.envs0 = jax.tree_util.tree_map(jax.lax.stop_gradient, envs)
         self._sweep = jax.jit(
             lambda e, dl: _ctm_tensor_sweep_multisite(
-                e, dl, NEIGHBORS, chi, True, "svd", "flow", "2x2"
+                e,
+                dl,
+                NEIGHBORS,
+                chi,
+                True,
+                "svd",
+                _PROJECTOR_BACKWARD_FLOW_SPLIT,
+                "2x2",
             )[0]
         )
 
