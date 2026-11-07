@@ -474,16 +474,21 @@ def exact_u1_ctm():
 
 
 @pytest.mark.parametrize(
-    ("column", "rows", "tolerance"),
-    [(23, (10, 23), 1e-4), (0, (0, 5), 1e-5)],
-    ids=["the pair splits", "the pair stays exact"],
+    ("column", "rows", "fd_step", "tolerance"),
+    [(23, (10, 23), 1e-4, 1e-3), (23, (10, 23), 1e-3, 2e-6), (0, (0, 5), 1e-4, 1e-5)],
+    ids=["the pair splits", "the pair splits, larger step", "the pair stays exact"],
 )
 def test_exact_u1_column_matches_finite_differences(
-    exact_u1_ctm, column, rows, tolerance
+    exact_u1_ctm, column, rows, fd_step, tolerance
 ):
     """Column 23: a pair of the projector's matrices splits as ``h^2`` at the FD points.
     With the Lorentzian of the ground-state path, its row 10 is -3155 where FD-FD gives
     -0.007, and other chi and fd_step move the blow-up to other columns.
+
+    Roundoff in the rotation of that pair goes as ``fd_step^-3``. Its row 10 is at charge
+    offset 4, with no weight. A change of ``A`` by 3e-16 moves that entry by up to 6e-5 at
+    fd_step=1e-4 and 1e-7 at 1e-3, and macOS is 1.3e-4 off at 1e-4. So 1e-4 tests for the
+    blow-up only, and 1e-3 tests the value.
 
     Column 0 keeps the symmetry, so the pair stays exact. A diagonal that depends on the
     numerical basis of the pair put 2e-4 to 5e-3 into its row 5, where FD-FD gives 0: the
@@ -499,7 +504,7 @@ def test_exact_u1_column_matches_finite_differences(
 
     phases = ctm_module.cell_phases(1, 0)
     g_h, g_n = (
-        np.asarray(g).ravel() for g in ctm.ket_derivative(phases, unit(column), 1e-4)
+        np.asarray(g).ravel() for g in ctm.ket_derivative(phases, unit(column), fd_step)
     )
     h = 1e-3
     for row in rows:
