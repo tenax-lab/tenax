@@ -8,6 +8,7 @@ import pytest
 
 from benchmarks.ipeps_spectrum_hasik import (
     OPERATORS,
+    heisenberg_gate,
     load_charges,
     load_state,
     main,
@@ -259,7 +260,8 @@ def test_plaquette_energy_of_a_product_state_is_the_closed_form():
     v = np.array([np.cos(theta), np.sin(theta)])
     A = np.zeros((2, 2, 2, 2, 2))
     A[0, 0, 0, 0, :] = v
-    energy, _ = plaquette_energy(A, chi=4, j2=0.0)
+    energy, _ = plaquette_energy(A, chi=4, j2=0.3)
     pair = np.kron(v, v)
-    expected = 2 * pair @ rotated_gate().reshape(4, 4) @ pair
-    assert energy == pytest.approx(expected, abs=1e-10)
+    nn = pair @ rotated_gate().reshape(4, 4) @ pair
+    nnn = pair @ heisenberg_gate().reshape(4, 4) @ pair
+    assert energy == pytest.approx(2 * nn + 2 * 0.3 * nnn, abs=1e-10)
