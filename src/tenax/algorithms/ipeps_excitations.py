@@ -1296,8 +1296,8 @@ def _warn_spectrum(result: SpectrumResult) -> None:
         problems.append("no direction survives null_tol: basis lies in the null space")
     if result.n_asymmetry > 1e-4:
         problems.append(f"N asymmetry {result.n_asymmetry:.2e}")
-    # Looser than N: one noisy reverse-mode column gives 6.6e-4 at D=2 chi=10 M,
-    # with omega unchanged to 5 digits across fd_step and ctm_sweeps.
+    # Looser than N: on a state with an exact U(1) at fd_step=1e-4, roundoff in the
+    # rotation of a pair leaves up to 1e-3 in entries with no weight (D=2, unit basis).
     if result.h_asymmetry > 1e-3:
         problems.append(f"H asymmetry {result.h_asymmetry:.2e}")
     if result.n_min_eig < -1e-4:

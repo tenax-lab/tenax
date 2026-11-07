@@ -440,17 +440,20 @@ def exact_u1_ctm():
 
 
 @pytest.mark.parametrize(
-    ("column", "rows"),
-    [(23, (10, 23)), (0, (0, 5))],
+    ("column", "rows", "tolerance"),
+    [(23, (10, 23), 1e-4), (0, (0, 5), 1e-5)],
     ids=["the pair splits", "the pair stays exact"],
 )
-def test_exact_u1_column_matches_finite_differences(exact_u1_ctm, column, rows):
+def test_exact_u1_column_matches_finite_differences(
+    exact_u1_ctm, column, rows, tolerance
+):
     """Column 23: a pair of the projector's matrices splits as ``h^2`` at the FD points.
     With the Lorentzian of the ground-state path, its row 10 is -3155 where FD-FD gives
     -0.007, and other chi and fd_step move the blow-up to other columns.
 
     Column 0 keeps the symmetry, so the pair stays exact. A diagonal that depends on the
-    numerical basis of the pair put 4.5e-3 into its row 5, where FD-FD gives 0.
+    numerical basis of the pair put 2e-4 to 5e-3 into its row 5, where FD-FD gives 0: the
+    size depends on the basis that roundoff picks.
     """
     ctm = exact_u1_ctm
     A = ctm.A
@@ -474,7 +477,7 @@ def test_exact_u1_column_matches_finite_differences(exact_u1_ctm, column, rows):
                 )
                 fd_h += sign_ket * sign_bra * float(e) / (4 * h * h)
                 fd_n += sign_ket * sign_bra * float(n) / (4 * h * h)
-        assert g_h[row] == pytest.approx(fd_h, abs=1e-4)
+        assert g_h[row] == pytest.approx(fd_h, abs=tolerance)
         assert g_n[row] == pytest.approx(fd_n, abs=1e-5)
     assert np.abs(g_h).max() < 1.0
 

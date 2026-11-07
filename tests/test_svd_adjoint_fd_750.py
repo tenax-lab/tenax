@@ -719,3 +719,16 @@ def test_split_backward_is_finite_on_a_pair_of_zero_modes():
     )
     assert np.all(np.isfinite(got))
     assert np.abs(got - X)[:3, :3].max() < 1e-10
+
+
+def test_split_backward_is_finite_on_an_all_zero_matrix():
+    """A CTM sector can vanish; ``s[0] = 0`` must not give 0 / 0."""
+    from tenax.algorithms._ctm_tensor_projector_2x2 import _split_dense_svd
+
+    W = _rng(46).standard_normal((4, 4))
+
+    def loss(A):
+        U, s, Vh = _split_dense_svd(A)
+        return jnp.sum(W * ((U * s) @ Vh))
+
+    assert np.all(np.isfinite(np.asarray(jax.grad(loss)(jnp.zeros((4, 4))))))

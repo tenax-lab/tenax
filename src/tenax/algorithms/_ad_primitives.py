@@ -306,7 +306,7 @@ def _split_core(
     minus = (s_k[None, :] - s_k[:, None]) / s_max
     plus = (s_k[None, :] + s_k[:, None]) / s_max
     off_diagonal = 1.0 - jnp.eye(s_k.shape[0], dtype=s_k.dtype)
-    common = off_diagonal * minus / (minus**2 + eps**2) / s_max
+    common = minus / (minus**2 + eps**2) / s_max
     relative = off_diagonal * plus / (plus**2 + eps**2) / s_max
     weight = eps**2 / (2.0 * minus**2 + eps**2)
     mean = (weight @ ds) / jnp.sum(weight, axis=1)
