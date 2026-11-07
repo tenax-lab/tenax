@@ -65,6 +65,9 @@ __all__ = ["_build_enlarged_corner", "_compute_2x2_projector"]
 # "flow" regardless -- measured AD/FD on ctm_energy_explicit at the chi=4
 # fixture before #841: 0.229..0.928 frozen against 0.944..0.994 flowing.
 _PROJECTOR_BACKWARD_FLOW = "flow"
+# compute_spectrum's sweep: "flow" with ``_split_dense_svd`` in place of
+# ``_regularized_dense_svd``.  Private and dense-only; not a config value.
+_PROJECTOR_BACKWARD_FLOW_SPLIT = "flow_split"
 
 # #1098 layout probe.  While ``_ctm_python_loop``'s jitted step traces with
 # ``probe=True`` this is a list, and every traced symmetric chi cut appends one
@@ -140,6 +143,41 @@ def _regularized_dense_svd_bwd(residuals, g):
 
 
 _regularized_dense_svd.defvjp(_regularized_dense_svd_fwd, _regularized_dense_svd_bwd)
+
+
+# Relative to ``s[0]``.  Measured on the exact-U(1) D=2 state against FD-FD: 1e-14
+# to 1e-10 keep every column within 1e-4, 1e-8 and above lose 7e-4.
+_SPLIT_BACKWARD_WIDTH = 1e-12
+
+
+@jax.custom_vjp
+def _split_dense_svd(M: jax.Array):
+    """``_dense_svd`` forward, backward with the split of ``_split_rotation``.
+
+    The backward of compute_spectrum's reverse sweeps.  The Lorentzian of
+    :func:`_regularized_dense_svd` also damps the regular relative rotation of a
+    pair.  On a state with an exact U(1), a pair of the 2x2 projector's matrices
+    splits as ``h^2`` at a finite-difference point of a column.  Whichever column
+    brings the squared gap near the Lorentzian width then grows 3-7 decades per
+    reverse sweep (1e84 at D=3), and moving the width or ``h`` only moves the bad
+    column.  With the split, those columns agree with FD-FD at D=2.
+
+    The ground-state path keeps the Lorentzian.
+    """
+    return _dense_svd(M, full_matrices=False)
+
+
+def _split_dense_svd_bwd(residuals, g):
+    from tenax.algorithms._ad_primitives import _svd_sector_backward
+
+    U, s, Vh = residuals
+    dU, ds, dVh = g
+    return (
+        _svd_sector_backward(U, s, Vh, dU, ds, dVh, split_eps=_SPLIT_BACKWARD_WIDTH),
+    )
+
+
+_split_dense_svd.defvjp(_regularized_dense_svd_fwd, _split_dense_svd_bwd)
 
 
 # Golden-ratio Weyl step of the gauge reference vector (#841).
@@ -240,6 +278,7 @@ def _gauge_fixed_svd(
     M: jax.Array,
     *,
     regularized: bool = False,
+    split: bool = False,
     swap_block: int | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Reconstruction-preserving gauge-fixed SVD for the 2x2 projector.
@@ -271,6 +310,7 @@ def _gauge_fixed_svd(
             either way; set this whenever the projectors are actually
             differentiated (#983), since the Fishman halves are routinely
             rank deficient.
+        split: Route the *backward* through :func:`_split_dense_svd` instead.
         swap_block: Rows of ``M`` are ``(chi, D^2)`` row-major with
             ``swap_block = D^2``: the ket<->bra swap permutes rows within each
             consecutive block of this many rows.  Pass it for the double
@@ -278,7 +318,9 @@ def _gauge_fixed_svd(
             largest-``|U|`` rule, right for ``M_prime``, whose rows are Fishman
             bonds on which the swap acts diagonally.
     """
-    if regularized:
+    if split:
+        U, s, Vh = _split_dense_svd(M)
+    elif regularized:
         U, s, Vh = _regularized_dense_svd(M)
     else:
         U, s, Vh = _dense_svd(M, full_matrices=False)
@@ -859,9 +901,14 @@ def _compute_2x2_projector(
     # #983: when the projectors are differentiated, the halves' SVD backward
     # must be regularized -- these matrices are routinely rank deficient.
     _reg = projector_backward == _PROJECTOR_BACKWARD_FLOW
-    M1_U, M1_S, M1_Vh = _gauge_fixed_svd(M1, regularized=_reg, swap_block=D2_M1_row)
+    _split = projector_backward == _PROJECTOR_BACKWARD_FLOW_SPLIT
+    M1_U, M1_S, M1_Vh = _gauge_fixed_svd(
+        M1, regularized=_reg, split=_split, swap_block=D2_M1_row
+    )
     M1_S = _fishman_truncate_S(M1_S, eps)
-    M2_U, M2_S, M2_Vh = _gauge_fixed_svd(M2, regularized=_reg, swap_block=D2_M2_row)
+    M2_U, M2_S, M2_Vh = _gauge_fixed_svd(
+        M2, regularized=_reg, split=_split, swap_block=D2_M2_row
+    )
     M2_S = _fishman_truncate_S(M2_S, eps)
 
     # ---- Step 3: pick which side of each Fishman SVD becomes the half. ----
@@ -923,7 +970,7 @@ def _compute_2x2_projector(
         # P_second ~ second @ V_M S^-1/2 (row side -> chi_new)
         M_prime = first_half @ second_half
 
-    U_M, S_M, V_M_h = _gauge_fixed_svd(M_prime, regularized=_reg)
+    U_M, S_M, V_M_h = _gauge_fixed_svd(M_prime, regularized=_reg, split=_split)
     k = min(chi, S_M.shape[0])
     # ε_T from the FULL spectrum (before truncation) — variPEPS §2.8.2
     # indicator that drives ``chi_auto_bump``.  Issue #474.
@@ -1074,7 +1121,7 @@ def _compute_2x2_projector(
     # ``eps_T`` and ``smallest_S`` stay frozen unconditionally -- both are
     # consumed only by the CTM convergence loop's chi-bump logic (#474 /
     # #492), which is non-AD.
-    if projector_backward != _PROJECTOR_BACKWARD_FLOW:
+    if not (_reg or _split):
         P_top = jax.tree.map(jax.lax.stop_gradient, P_top)
         P_bot = jax.tree.map(jax.lax.stop_gradient, P_bot)
     return (

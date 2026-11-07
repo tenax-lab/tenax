@@ -30,6 +30,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_tensor_projector_2x2 import _PROJECTOR_BACKWARD_FLOW_SPLIT
 from tenax.algorithms._einsum_compat import einsum_promoted
 from tenax.algorithms._ipeps_excitation_ctm import ExcitationCTM, cell_phases
 from tenax.algorithms.ipeps_config import CTMEnvironment
@@ -1094,6 +1095,11 @@ def _gauge_residual(N: np.ndarray, A: np.ndarray, a: int, b: int) -> float:
     return float(np.linalg.norm(Q.T @ N @ Q, 2))
 
 
+# Largest column entry at |A| = 1 with orthonormal directions. Clean columns reach
+# 3.3 at D=2 and 1 at D=3 and D=4; a column that blew up reaches 1e3 to 1e197.
+_COLUMN_BOUND = 1e3
+
+
 def _spectrum_fingerprint(A, gate, gate_nnn, ab, config, basis) -> str:
     digest = hashlib.sha256()
     # gate_nnn only when given: a nearest-neighbour run keeps its checkpoints.
@@ -1103,6 +1109,8 @@ def _spectrum_fingerprint(A, gate, gate_nnn, ab, config, basis) -> str:
         # Rounded: rescaling A before the internal normalisation must still resume.
         digest.update(np.round(np.asarray(array, dtype=np.float64), 12).tobytes())
     digest.update(repr((ab, config.chi, config.ctm_sweeps, config.fd_step)).encode())
+    # Columns from another SVD backward must not join this run.
+    digest.update(_PROJECTOR_BACKWARD_FLOW_SPLIT.encode())
     return digest.hexdigest()
 
 
@@ -1121,8 +1129,8 @@ def _load_columns(directory: Path | None, fingerprint: str) -> dict[int, tuple]:
         if found != fingerprint:
             raise ValueError(
                 f"Checkpoint {path} is from a different run: A, the gates, the "
-                "momentum, chi, ctm_sweeps, fd_step or basis changed. Use a new "
-                "checkpoint_dir."
+                "momentum, chi, ctm_sweeps, fd_step, basis or the tenax SVD backward "
+                "changed. Use a new checkpoint_dir."
             )
         columns[int(path.stem.removeprefix("column_"))] = column
     return columns
@@ -1224,11 +1232,14 @@ def compute_spectrum(
                 basis.T @ np.asarray(g_h).ravel(),
                 basis.T @ np.asarray(g_n).ravel(),
             )
-            if not all(np.isfinite(part).all() for part in columns[i]):
+            size = float(np.abs(np.concatenate(columns[i])).max())
+            if not size <= _COLUMN_BOUND:
                 raise RuntimeError(
-                    f"compute_spectrum: column {i} is not finite at chi={config.chi}, "
-                    f"fd_step={config.fd_step}; it was not saved. Try another chi or "
-                    "fd_step, with a new checkpoint_dir."
+                    f"compute_spectrum: column {i} reaches {size:.1e} at "
+                    f"chi={config.chi}, fd_step={config.fd_step}, against a bound of "
+                    f"{_COLUMN_BOUND:.0e}; it was not saved. Try fd_step=1e-3, and a "
+                    "chi that does not cut a multiplet of the environment spectrum, "
+                    "with a new checkpoint_dir."
                 )
             if directory is not None:
                 _save_column(directory, i, fingerprint, *columns[i])

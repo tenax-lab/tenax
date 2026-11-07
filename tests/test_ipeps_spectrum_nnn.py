@@ -264,13 +264,15 @@ def test_compute_spectrum_keeps_the_sum_rule_with_nnn(ctm, tmp_path):
 
 
 def test_a_run_without_gate_nnn_keeps_its_fingerprint():
-    """Columns saved before gate_nnn existed still resume: the digest is 0acdc2a5's."""
+    """A nearest-neighbour run hashes no gate_nnn, so this digest moves only with the
+    other inputs. It last moved with the split SVD backward of the sweep, on purpose:
+    columns from the Lorentzian must not resume into a run with the split."""
     A = np.arange(32.0).reshape((2,) * 5)
     gate = np.arange(16.0).reshape((2,) * 4)
     basis = np.eye(32)[:, :2]
     config = SpectrumConfig(chi=10, ctm_sweeps=30, fd_step=1e-4)
     digest = _spectrum_fingerprint(A, gate, None, (1, 0), config, basis)
-    assert digest == "449edce3ffb6d16679e220abc8e18342103750516a41ed6a1612a6ba858356e7"
+    assert digest == "3633f01a860f84fb85349d2a42c0caf363adaa37f098cf8c98d1e1a1673e7131"
 
 
 def test_bad_nnn_gate_shape_raises():

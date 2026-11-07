@@ -33,6 +33,21 @@ def hasik_d2() -> np.ndarray:
     return A / np.linalg.norm(A)
 
 
+def exact_u1_d2() -> np.ndarray:
+    """``hasik_d2`` cut to its two leading numbers: U(1) and C4v hold exactly.
+
+    Every kept entry has charge ``(1 - 2 s) + 2 (u + d + l + r) = 1``, so the
+    environment has exact pairs. E = -0.6602280177 at chi=10.
+    """
+    A = np.zeros((2,) * 5)
+    A[0, 0, 0, 0, 0] = 1.0
+    for leg in range(4):
+        index = [0, 0, 0, 0]
+        index[leg] = 1
+        A[(*index, 1)] = 0.41986
+    return A / np.linalg.norm(A)
+
+
 def heisenberg_gate() -> np.ndarray:
     """``S.S`` as ``(s1, s2, s1', s2')``: next-nearest neighbours, same sublattice."""
     return np.array(

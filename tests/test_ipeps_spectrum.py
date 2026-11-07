@@ -6,6 +6,7 @@ and the others resume. A test that needs fresh columns takes its own ``name``.
 
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -14,14 +15,18 @@ from _ipeps_spectrum_fixtures import (
     SY_REAL,
     SZ,
     apply_op,
+    exact_u1_d2,
     hasik_d2,
     rotated_gate,
 )
 
+import tenax.algorithms._ad_primitives as ad_module
 import tenax.algorithms._ipeps_excitation_ctm as ctm_module
 import tenax.algorithms.ipeps_excitations as spectrum_module
 from tenax import SpectrumConfig, SpectrumResult, compute_spectrum, spectral_function
-from tenax.algorithms._ipeps_excitation_ctm import ExcitationCTM
+from tenax.algorithms._ctm_tensor_convergence import _ctm_tensor_sweep_multisite
+from tenax.algorithms._ctm_tensor_projector_2x2 import _SPLIT_BACKWARD_WIDTH
+from tenax.algorithms._ipeps_excitation_ctm import CELL, NEIGHBORS, ExcitationCTM
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
 from tenax.algorithms.ipeps_excitations import (
     _gauge_vectors,
@@ -374,6 +379,39 @@ def test_non_finite_column_raises_and_is_not_saved(monkeypatch, tmp_path, basis,
     assert [path.name for path in tmp_path.glob("column_*.npz")] == ["column_00000.npz"]
 
 
+@pytest.mark.parametrize("bad", ["h", "n"])
+def test_oversized_column_raises_and_is_not_saved(monkeypatch, tmp_path, basis, bad):
+    """A finite blow-up reaches eigh and gives a wrong spectrum, with no error at all."""
+
+    class HugeInColumnOne:
+        ctm_converged = True
+
+        def __init__(self, A, gate, chi, sweeps, gate_nnn=None):
+            self.A = jnp.asarray(A)
+            self.calls = 0
+
+        def densities(self, phases, eps, X, Y):
+            return jnp.zeros(()), jnp.zeros(())
+
+        def ket_derivative(self, phases, X, h):
+            self.calls += 1
+            good = jnp.ones_like(self.A)
+            huge = 1e4 * good if self.calls == 2 else good
+            return (huge, good) if bad == "h" else (good, huge)
+
+    monkeypatch.setattr(spectrum_module, "ExcitationCTM", HugeInColumnOne)
+    with pytest.raises(RuntimeError, match="column 1 .*fd_step=1e-3"):
+        compute_spectrum(
+            hasik_d2(),
+            rotated_gate(),
+            X_POINT,
+            {"Sy": SY_REAL},
+            SpectrumConfig(chi=10, checkpoint_dir=tmp_path),
+            basis=basis,
+        )
+    assert [path.name for path in tmp_path.glob("column_*.npz")] == ["column_00000.npz"]
+
+
 def test_symmetric_tensor_is_refused(no_ctm):
     A = object.__new__(SymmetricTensor)  # the refusal must not touch its contents
     with pytest.raises(NotImplementedError, match="SymmetricTensor"):
@@ -385,6 +423,77 @@ def test_many_columns_without_checkpoints_warns(no_ctm):
     A = rng.normal(size=(3, 3, 3, 3, 2))
     with pytest.warns(UserWarning, match="162 columns"), pytest.raises(_Stop):
         compute_spectrum(A, rotated_gate(), X_POINT, {}, SpectrumConfig(chi=10))
+
+
+# ---------------------------------------------------------------------------
+# Exact U(1): the SVD backward of the sweep
+# ---------------------------------------------------------------------------
+
+
+def test_exact_u1_column_matches_finite_differences():
+    """A pair of the projector's matrices splits as ``h^2`` at the FD points here.
+
+    With the Lorentzian of the ground-state path, row 10 of this column is -3155 where
+    FD-FD gives -0.007; other chi and fd_step move the blow-up to other columns.
+    """
+    A = exact_u1_d2()
+    ctm = ExcitationCTM(A, rotated_gate(), 6, 30)
+    corner = np.linalg.svd(np.asarray(ctm.envs0[(0, 0)].C1.todense()), compute_uv=False)
+    assert abs(corner[1] - corner[2]) < 1e-10 * corner[0], "no exact pair: vacuous"
+    assert corner[1] > 1e-2 * corner[0], "no exact pair: vacuous"
+
+    def unit(column):
+        X = np.zeros(A.size)
+        X[column] = 1.0
+        return jnp.asarray(X.reshape(A.shape))
+
+    phases = ctm_module.cell_phases(1, 0)
+    g_h, g_n = (
+        np.asarray(g).ravel() for g in ctm.ket_derivative(phases, unit(23), 1e-4)
+    )
+    h = 1e-3
+    for row in (10, 23):
+        fd_h, fd_n = 0.0, 0.0
+        for sign_ket in (1.0, -1.0):
+            for sign_bra in (1.0, -1.0):
+                e, n = ctm.densities(
+                    phases, sign_ket * h, unit(23), sign_bra * h * unit(row)
+                )
+                fd_h += sign_ket * sign_bra * float(e) / (4 * h * h)
+                fd_n += sign_ket * sign_bra * float(n) / (4 * h * h)
+        assert g_h[row] == pytest.approx(fd_h, abs=1e-3)
+        assert g_n[row] == pytest.approx(fd_n, abs=1e-5)
+    assert np.abs(g_h).max() < 1.0
+
+
+def test_only_the_spectrum_sweep_takes_the_split_backward(monkeypatch):
+    seen = []
+    backward = ad_module._svd_sector_backward
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("split_eps"))
+        return backward(*args, **kwargs)
+
+    monkeypatch.setattr(ad_module, "_svd_sector_backward", spy)
+    ctm = ExcitationCTM(hasik_d2(), rotated_gate(), 4, 1)
+    phases = ctm_module.cell_phases(1, 0)
+    ctm.ket_derivative(phases, jnp.zeros_like(ctm.A), 1e-4)
+    assert seen, "the spectrum sweep reached no SVD backward"
+    assert set(seen) == {_SPLIT_BACKWARD_WIDTH}
+
+    # What the ground-state path passes: its gradients must not move.
+    seen.clear()
+
+    def ground_state_sweep(tensor):
+        dl = {c: ctm._double_layer(tensor, tensor) for c in CELL}
+        envs = _ctm_tensor_sweep_multisite(
+            ctm.envs0, dl, NEIGHBORS, 4, True, "svd", "flow", "2x2"
+        )[0]
+        return jnp.real(jnp.sum(envs[(0, 0)].C1.todense()))
+
+    jax.grad(ground_state_sweep)(ctm.A)
+    assert seen, "the ground-state sweep reached no SVD backward"
+    assert set(seen) == {None}
 
 
 # ---------------------------------------------------------------------------
