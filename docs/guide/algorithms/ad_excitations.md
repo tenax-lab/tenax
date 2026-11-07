@@ -459,6 +459,10 @@ and 251 GB. One column gives H and N together.
 | 5 | U1B J2=0.3 D=4, X | 24 | 78 | 217 s on 6 cores | peak within 0.05 of 1.05 at eta=0.1 | 1.040 | pass |
 | 5 | same run | | | | s within 1% of 0.182 | 0.18556 | miss, [Fig. 1](#spectrum-fig-1) |
 
+Benchmark 1 at M warns on the sum rule of `S^x` and `S^z`, with deficits 0.0108 and 0.0037.
+Both have a small `s` (0.0065 and 0.0138), so the absolute deficits are 7e-5 and 5e-5.
+`S^y` has 2.1e-5 on `s` = 1.60.
+
 The A1 runs use the full tensor and the default `fd_step`. The U1B runs use
 `--basis even`, in a random orthogonal basis of that block, and `fd_step=1e-3`. They ran
 with the Lorentzian backward, before #1178. On the same state at chi=24, in four columns,
@@ -496,8 +500,9 @@ tensor gives 0.64:
 
 The paper's states are U1B: they reproduce its Fig. 3, and A1 at D=3 does not (`2 s_y` =
 0.39306 at chi=36, against 0.406). In the rotated frame on a U(1) state, the physical
-`s_+(k)` is `2 s_y(k)`, and the "Energy" of Fig. 3 is `2 f_y`, with `f_y` the first moment
-of `S^y`. The Fig. 3 columns are read from the plot:
+`s_+(k)` is `2 s_y(k)`. The caption of Fig. 3 says only "Energies of SMA". These four rows
+match `2 f_y`, with `f_y` the first moment of `S^y`, so that is my reading of it. The Fig. 3
+columns are read from the plot:
 
 | U1B state, X | chi | `2 s_y` | Fig. 3(c, d) | `2 f_y` | Fig. 3(a, b) |
 |---|---|---|---|---|---|
@@ -510,8 +515,11 @@ of `S^y`. The Fig. 3 columns are read from the plot:
 
 On a U(1) state, `S^x A` and `S^y A` lie in one block: charge offset +-2, even under
 `u <-> d` and `l <-> r`. `--basis even` takes this block: 31, 78, 173 and 317 columns at
-D=3, 4, 5 and 6, against 162, 512, 1250 and 2592 for the full tensor. At D=3 its five top
-weighted modes equal those of the whole charge block (72 columns) to 4 decimals in omega.
+D=3, 4, 5 and 6, against 162, 512, 1250 and 2592 for the full tensor. At D=3, J2=0.25,
+chi=12, its five top weighted modes equal those of the whole charge block (72 columns) to
+4 decimals in omega, with the backward of #1178 in the charge run. With the Lorentzian in
+both they differ by up to 8e-4, and that charge run has one noisy column (H asymmetry
+1.6e-4).
 
 With no U(1), `--basis reflection` takes only the two reflections: 18, 72 and 200 columns
 at D=2, 3 and 4. A run at D=2, and a projection of the stored full run at D=3, give the
@@ -584,16 +592,26 @@ export MALLOC_MMAP_THRESHOLD_=1048576 MALLOC_TRIM_THRESHOLD_=1048576 MALLOC_AREN
 ```
 
 Without them glibc fragments the heap. At D=2, chi=10, over 80 columns, RSS goes to 3.5 GB
-and keeps rising. With them it stays at 2.54 GB, and a column takes the same time. RSS
-reaches its peak in the reverse pass of a column, and falls between columns:
+and keeps rising. With them it stays at 2.54 GB, and a column takes the same time.
 
-| D | chi | Peak RSS |
-|---|---|---|
-| 4 | 24 | 44 GB in 4 columns, 60 GB seen in 78 columns |
-| 4 | 36 | 105 GB |
-| 5 | 16 | 33 GB |
-| 5 | 25 | 141 GB |
-| 6 | 16 | 142 GB |
+With these settings, the largest RSS of each run, sampled every 20 s:
+
+| D | chi | Columns | Largest RSS |
+|---|---|---|---|
+| 3 | 36 | 162 | 54 GB |
+| 4 | 12 | 4 | 13 to 17 GB |
+| 4 | 24 | 4 | 42 to 45 GB |
+| 4 | 24 | 78 | 57 to 66 GB |
+| 4 | 36 | 4 | 99 GB |
+| 5 | 16 | 4 | 59 GB |
+| 5 | 25 | 4 | 141 GB |
+| 6 | 16 | 4 | 142 GB |
+
+RSS reaches its top during a column and falls between columns, but this floor rises with
+the column count. At D=3, chi=36, RSS levels off at 54 GB after about 60 columns. At D=4,
+chi=24, the floor goes from about 10 GB at column 6 to 34 to 47 GB at column 77, and it is
+still rising there. So 66 GB is not a limit for a longer run at that chi. A restart from
+the checkpoint starts RSS from the beginning again.
 
 ## References
 
