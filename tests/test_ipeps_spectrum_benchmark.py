@@ -10,6 +10,7 @@ from benchmarks.ipeps_spectrum_hasik import (
     load_charges,
     load_state,
     operator_basis,
+    rotated_basis,
     transverse_basis,
     u1_residuals,
 )
@@ -174,9 +175,10 @@ def test_transverse_basis_keeps_every_element_without_the_reflections():
     np.testing.assert_allclose(basis.T @ basis, np.eye(72), atol=1e-12)
 
 
-def test_operator_basis_can_leave_a_out():
-    A = _c2v_u1_tensor(PHYSICAL, VIRTUAL, TOTAL)
-    operators = {name: OPERATORS[name] for name in ("Sy", "Sx")}
-    basis = operator_basis(A, operators, include_a=False)
-    assert basis.shape == (A.size, 2)
-    assert np.linalg.norm(basis.T @ A.ravel()) < 1e-12
+def test_rotated_basis_keeps_the_span_and_mixes_every_column():
+    basis = transverse_basis(PHYSICAL, VIRTUAL, TOTAL)
+    mixed = rotated_basis(basis)
+    np.testing.assert_allclose(mixed.T @ mixed, np.eye(basis.shape[1]), atol=1e-12)
+    np.testing.assert_allclose(mixed @ (mixed.T @ basis), basis, atol=1e-12)
+    # Every column overlaps every orbit: no column is left along a special direction.
+    assert np.abs(basis.T @ mixed).min() > 1e-6

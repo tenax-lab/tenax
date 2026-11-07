@@ -110,21 +110,28 @@ def u1_residuals(A: np.ndarray, angles: int = 721) -> dict[str, float]:
     return {"best_xz": best, "best_angle": angle, "i_sy": residual(SY_REAL)}
 
 
-def operator_basis(
-    A: np.ndarray, operators: dict[str, np.ndarray], include_a: bool = True
-) -> np.ndarray:
-    """Orthonormal columns that hold each ``O A``, and ``A`` by default.
+def operator_basis(A: np.ndarray, operators: dict[str, np.ndarray]) -> np.ndarray:
+    """Orthonormal columns that hold ``A`` and each ``O A``.
 
-    These columns give the same ``s(k)`` and first moment as the full space, since
+    Four columns give the same ``s(k)`` and first moment as the full space, since
     both need only ``N`` and ``H`` on ``O A``. ``A`` is a null vector of ``N`` at
-    ``k != 0``, which checks the run. Leave it out on an exact U(1) state: charge
-    conserving columns blow up there (1e195 at D=3, chi=27).
+    ``k != 0``, which checks the run.
     """
     vectors = [
         np.tensordot(A, op, axes=([4], [1])).ravel() for op in operators.values()
     ]
-    vectors = [A.ravel(), *vectors] if include_a else vectors
-    return np.linalg.qr(np.stack(vectors, axis=1))[0]
+    return np.linalg.qr(np.stack([A.ravel(), *vectors], axis=1))[0]
+
+
+def rotated_basis(basis: np.ndarray, seed: int = 0) -> np.ndarray:
+    """``basis`` times a random orthogonal matrix: the same span, no special column.
+
+    On an exact U(1) state a column along ``A``, ``S^z A`` or one orbit can blow up
+    (1e195 at D=3, chi=27, and 1e98 at chi=12), and in this basis the same runs stay
+    clean. ``H`` and ``N`` are linear in the column, so the span sets the answer.
+    """
+    n = basis.shape[1]
+    return basis @ np.linalg.qr(np.random.default_rng(seed).normal(size=(n, n)))[0]
 
 
 def transverse_basis(
@@ -162,7 +169,7 @@ def main() -> None:
     parser.add_argument("--j2", type=float, default=0.0)
     parser.add_argument("--momentum", choices=sorted(MOMENTA), default="X")
     parser.add_argument(
-        "--basis", choices=["full", "sma", "sma-u1", "charge", "even"], default="full"
+        "--basis", choices=["full", "sma", "charge", "even"], default="full"
     )
     parser.add_argument("--checkpoint-dir", type=Path)
     parser.add_argument("--out", type=Path)
@@ -191,12 +198,12 @@ def main() -> None:
     transverse = {name: OPERATORS[name] for name in ("Sy", "Sx")}
     operators, basis = OPERATORS, None
     if args.basis == "sma":
-        basis = operator_basis(A, OPERATORS)
-    elif args.basis == "sma-u1":
-        operators, basis = transverse, operator_basis(A, transverse, include_a=False)
+        basis = rotated_basis(operator_basis(A, OPERATORS))
     elif args.basis in ("charge", "even"):
         operators = transverse
-        basis = transverse_basis(*load_charges(args.state), even=args.basis == "even")
+        basis = rotated_basis(
+            transverse_basis(*load_charges(args.state), even=args.basis == "even")
+        )
     if basis is not None:
         print(f"basis {args.basis}: {basis.shape[1]} columns")
 
