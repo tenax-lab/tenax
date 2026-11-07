@@ -166,3 +166,17 @@ def test_transverse_basis_spans_every_even_vector_in_the_two_sectors():
     basis = transverse_basis(PHYSICAL, VIRTUAL, TOTAL)
     np.testing.assert_allclose(basis @ (basis.T @ v), v, atol=1e-12)
     assert basis.shape[1] < 72 / 2
+
+
+def test_transverse_basis_keeps_every_element_without_the_reflections():
+    basis = transverse_basis(PHYSICAL, VIRTUAL, TOTAL, even=False)
+    assert basis.shape == (3**4 * 2, 72)
+    np.testing.assert_allclose(basis.T @ basis, np.eye(72), atol=1e-12)
+
+
+def test_operator_basis_can_leave_a_out():
+    A = _c2v_u1_tensor(PHYSICAL, VIRTUAL, TOTAL)
+    operators = {name: OPERATORS[name] for name in ("Sy", "Sx")}
+    basis = operator_basis(A, operators, include_a=False)
+    assert basis.shape == (A.size, 2)
+    assert np.linalg.norm(basis.T @ A.ravel()) < 1e-12

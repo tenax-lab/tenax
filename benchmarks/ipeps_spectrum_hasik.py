@@ -110,27 +110,32 @@ def u1_residuals(A: np.ndarray, angles: int = 721) -> dict[str, float]:
     return {"best_xz": best, "best_angle": angle, "i_sy": residual(SY_REAL)}
 
 
-def operator_basis(A: np.ndarray, operators: dict[str, np.ndarray]) -> np.ndarray:
-    """Orthonormal columns that hold ``A`` and each ``O A``.
+def operator_basis(
+    A: np.ndarray, operators: dict[str, np.ndarray], include_a: bool = True
+) -> np.ndarray:
+    """Orthonormal columns that hold each ``O A``, and ``A`` by default.
 
-    Four columns give the same ``s(k)`` and first moment as the full space, since
+    These columns give the same ``s(k)`` and first moment as the full space, since
     both need only ``N`` and ``H`` on ``O A``. ``A`` is a null vector of ``N`` at
-    ``k != 0``, which checks the run.
+    ``k != 0``, which checks the run. Leave it out on an exact U(1) state: charge
+    conserving columns blow up there (1e195 at D=3, chi=27).
     """
     vectors = [
         np.tensordot(A, op, axes=([4], [1])).ravel() for op in operators.values()
     ]
-    return np.linalg.qr(np.stack([A.ravel(), *vectors], axis=1))[0]
+    vectors = [A.ravel(), *vectors] if include_a else vectors
+    return np.linalg.qr(np.stack(vectors, axis=1))[0]
 
 
 def transverse_basis(
-    physical: np.ndarray, virtual: np.ndarray, total: int
+    physical: np.ndarray, virtual: np.ndarray, total: int, even: bool = True
 ) -> np.ndarray:
     """Orthonormal tangent vectors that ``S^x A`` and ``S^y A`` need on a U(1) state.
 
     Both operators shift the charge of an element by +2 or -2. Both also stay even
     under u<->d and l<->r, which keep the momenta X, Y and M, so their spectral
-    weight stays in the even block. Each column is one orbit of the two reflections.
+    weight stays in the even block. With ``even`` each column is one orbit of the
+    two reflections; without it, one element.
     """
     D = len(virtual)
     shape = (D, D, D, D, len(physical))
@@ -139,7 +144,9 @@ def transverse_basis(
         u, d, left, r, s = index
         charge = physical[s] + virtual[u] + virtual[d] + virtual[left] + virtual[r]
         if abs(charge - total) == 2:
-            key = (min(u, d), max(u, d), min(left, r), max(left, r), s)
+            key = (
+                (min(u, d), max(u, d), min(left, r), max(left, r), s) if even else index
+            )
             orbits.setdefault(key, []).append(np.ravel_multi_index(index, shape))
     basis = np.zeros((int(np.prod(shape)), len(orbits)))
     for column, rows in enumerate(orbits.values()):
@@ -155,7 +162,7 @@ def main() -> None:
     parser.add_argument("--j2", type=float, default=0.0)
     parser.add_argument("--momentum", choices=sorted(MOMENTA), default="X")
     parser.add_argument(
-        "--basis", choices=["full", "sma", "transverse"], default="full"
+        "--basis", choices=["full", "sma", "sma-u1", "charge", "even"], default="full"
     )
     parser.add_argument("--checkpoint-dir", type=Path)
     parser.add_argument("--out", type=Path)
@@ -181,12 +188,15 @@ def main() -> None:
         )
         return
 
+    transverse = {name: OPERATORS[name] for name in ("Sy", "Sx")}
     operators, basis = OPERATORS, None
     if args.basis == "sma":
         basis = operator_basis(A, OPERATORS)
-    elif args.basis == "transverse":
-        basis = transverse_basis(*load_charges(args.state))
-        operators = {name: OPERATORS[name] for name in ("Sy", "Sx")}
+    elif args.basis == "sma-u1":
+        operators, basis = transverse, operator_basis(A, transverse, include_a=False)
+    elif args.basis in ("charge", "even"):
+        operators = transverse
+        basis = transverse_basis(*load_charges(args.state), even=args.basis == "even")
     if basis is not None:
         print(f"basis {args.basis}: {basis.shape[1]} columns")
 
