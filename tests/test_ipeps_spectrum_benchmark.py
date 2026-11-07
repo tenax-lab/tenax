@@ -12,6 +12,7 @@ from benchmarks.ipeps_spectrum_hasik import (
     load_state,
     main,
     operator_basis,
+    reflection_basis,
     rotated_basis,
     transverse_basis,
     u1_residuals,
@@ -175,6 +176,30 @@ def test_transverse_basis_keeps_every_element_without_the_reflections():
     basis = transverse_basis(PHYSICAL, VIRTUAL, TOTAL, even=False)
     assert basis.shape == (3**4 * 2, 72)
     np.testing.assert_allclose(basis.T @ basis, np.eye(72), atol=1e-12)
+
+
+def test_reflection_basis_counts_the_orbits_of_both_reflections():
+    # D(D+1)/2 unordered pairs on each axis, times d.
+    for D, columns in ((2, 18), (3, 72), (4, 200)):
+        basis = reflection_basis(D, 2)
+        assert basis.shape == (2 * D**4, columns)
+        np.testing.assert_allclose(basis.T @ basis, np.eye(columns), atol=1e-12)
+
+
+def test_reflection_basis_holds_every_o_a_of_a_reflection_even_tensor():
+    A = np.random.default_rng(5).normal(size=(3, 3, 3, 3, 2))
+    A = A + A.transpose(1, 0, 2, 3, 4)
+    A = A + A.transpose(0, 1, 3, 2, 4)
+    basis = reflection_basis(3, 2)
+    for op in OPERATORS.values():
+        v = np.tensordot(A, op, axes=([4], [1])).ravel()
+        np.testing.assert_allclose(basis @ (basis.T @ v), v, atol=1e-12)
+
+
+def test_reflection_basis_leaves_out_a_vector_odd_under_one_reflection():
+    v = np.random.default_rng(6).normal(size=(3, 3, 3, 3, 2))
+    v = (v - v.transpose(1, 0, 2, 3, 4)).ravel()
+    assert np.linalg.norm(reflection_basis(3, 2).T @ v) < 1e-12
 
 
 def test_rotated_basis_keeps_the_span_and_mixes_every_column():

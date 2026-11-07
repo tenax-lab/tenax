@@ -134,6 +134,19 @@ def rotated_basis(basis: np.ndarray, seed: int = 0) -> np.ndarray:
     return basis @ np.linalg.qr(np.random.default_rng(seed).normal(size=(n, n)))[0]
 
 
+def _orbit_columns(shape: tuple, selected, even: bool) -> np.ndarray:
+    """Orthonormal columns over ``selected``: one orbit of u<->d, l<->r each, or one element."""
+    orbits: dict[tuple, list[int]] = {}
+    for index in selected:
+        u, d, left, r, s = index
+        key = (min(u, d), max(u, d), min(left, r), max(left, r), s) if even else index
+        orbits.setdefault(key, []).append(np.ravel_multi_index(index, shape))
+    basis = np.zeros((int(np.prod(shape)), len(orbits)))
+    for column, rows in enumerate(orbits.values()):
+        basis[rows, column] = 1.0 / np.sqrt(len(rows))
+    return basis
+
+
 def transverse_basis(
     physical: np.ndarray, virtual: np.ndarray, total: int, even: bool = True
 ) -> np.ndarray:
@@ -146,19 +159,23 @@ def transverse_basis(
     """
     D = len(virtual)
     shape = (D, D, D, D, len(physical))
-    orbits: dict[tuple, list[int]] = {}
-    for index in np.ndindex(*shape):
-        u, d, left, r, s = index
-        charge = physical[s] + virtual[u] + virtual[d] + virtual[left] + virtual[r]
-        if abs(charge - total) == 2:
-            key = (
-                (min(u, d), max(u, d), min(left, r), max(left, r), s) if even else index
-            )
-            orbits.setdefault(key, []).append(np.ravel_multi_index(index, shape))
-    basis = np.zeros((int(np.prod(shape)), len(orbits)))
-    for column, rows in enumerate(orbits.values()):
-        basis[rows, column] = 1.0 / np.sqrt(len(rows))
-    return basis
+    selected = [
+        index
+        for index in np.ndindex(*shape)
+        if abs(physical[index[4]] + virtual[list(index[:4])].sum() - total) == 2
+    ]
+    return _orbit_columns(shape, selected, even)
+
+
+def reflection_basis(D: int, d: int) -> np.ndarray:
+    """Orthonormal tangent vectors that any ``O A`` needs when ``A`` has no U(1).
+
+    A C4v-symmetric ``A`` is even under u<->d and l<->r, which keep the momenta X, Y
+    and M, and an on-site operator keeps that parity. So the weight stays in this
+    block: 200 columns at D=4, against 512.
+    """
+    shape = (D, D, D, D, d)
+    return _orbit_columns(shape, np.ndindex(*shape), even=True)
 
 
 def main() -> None:
@@ -169,7 +186,9 @@ def main() -> None:
     parser.add_argument("--j2", type=float, default=0.0)
     parser.add_argument("--momentum", choices=sorted(MOMENTA), default="X")
     parser.add_argument(
-        "--basis", choices=["full", "sma", "charge", "even"], default="full"
+        "--basis",
+        choices=["full", "sma", "charge", "even", "reflection"],
+        default="full",
     )
     parser.add_argument("--fd-step", type=float, default=1e-4)
     parser.add_argument("--checkpoint-dir", type=Path)
@@ -205,6 +224,8 @@ def main() -> None:
         basis = rotated_basis(
             transverse_basis(*load_charges(args.state), even=args.basis == "even")
         )
+    elif args.basis == "reflection":
+        basis = rotated_basis(reflection_basis(A.shape[0], A.shape[-1]))
     if basis is not None:
         print(f"basis {args.basis}: {basis.shape[1]} columns")
 
