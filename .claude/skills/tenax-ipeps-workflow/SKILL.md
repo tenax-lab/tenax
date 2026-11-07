@@ -484,8 +484,11 @@ result = compute_spectrum(A_opt, H_rot, (np.pi, 0.0), {"Sy": Sy_real}, config)
 S = spectral_function(result, "Sy", np.linspace(0, 5, 501), eta=0.1)
 ```
 
-Negative modes mean chi is too small: raise it. See the
-[guide](../../../docs/guide/algorithms/ad_excitations.md) for cost and diagnostics.
+Negative modes mean chi is too small: raise it. `null_tol` sets the size of the
+subspace and it moves the modes, so scan it: a rerun with the same `checkpoint_dir`
+reuses all columns. See the
+[guide](../../../docs/guide/algorithms/ad_excitations.md) for the workflow, cost,
+diagnostics and benchmarks.
 
 ### Interpreting results
 
