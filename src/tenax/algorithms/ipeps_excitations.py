@@ -1322,7 +1322,9 @@ def _warn_spectrum(result: SpectrumResult, gate_scale: float) -> None:
         problems.append(f"lowest N eigenvalue ratio {result.n_min_eig:.2e}")
     if result.n_negative_modes:
         problems.append(
-            f"{result.n_negative_modes} negative modes, kept in omega: raise chi"
+            f"{result.n_negative_modes} negative modes, kept in omega: raise chi. If "
+            "they stay at larger chi, a direction at this momentum lowers the energy, "
+            "so A is not a ground state of these gates"
         )
     for name, value in result.sum_rule_deficit.items():
         if abs(value) > 1e-3:
