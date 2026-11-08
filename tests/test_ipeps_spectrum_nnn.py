@@ -265,14 +265,15 @@ def test_compute_spectrum_keeps_the_sum_rule_with_nnn(ctm, tmp_path):
 
 def test_a_run_without_gate_nnn_keeps_its_fingerprint():
     """A nearest-neighbour run hashes no gate_nnn, so this digest moves only with the
-    other inputs. It last moved with the split SVD backward of the sweep, on purpose:
-    columns from the Lorentzian must not resume into a run with the split."""
+    other inputs. It last moved on purpose, when the width of the split SVD backward and
+    a checkpoint version joined the hash: columns from another width or version must
+    not resume into this run. Before that it moved with the split backward itself."""
     A = np.arange(32.0).reshape((2,) * 5)
     gate = np.arange(16.0).reshape((2,) * 4)
     basis = np.eye(32)[:, :2]
     config = SpectrumConfig(chi=10, ctm_sweeps=30, fd_step=1e-4)
     digest = _spectrum_fingerprint(A, gate, None, (1, 0), config, basis)
-    assert digest == "3633f01a860f84fb85349d2a42c0caf363adaa37f098cf8c98d1e1a1673e7131"
+    assert digest == "96f9a89005017539d6248aeb93ded6869173cb9d5828ec8e30202c1c20502ead"
 
 
 def test_bad_nnn_gate_shape_raises():

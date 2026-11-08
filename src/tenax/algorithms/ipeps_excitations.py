@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 import warnings
 import zipfile
@@ -30,7 +31,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms._ctm_tensor_projector_2x2 import _PROJECTOR_BACKWARD_FLOW_SPLIT
+from tenax.algorithms import _ctm_tensor_projector_2x2 as _p2x2
 from tenax.algorithms._einsum_compat import einsum_promoted
 from tenax.algorithms._ipeps_excitation_ctm import ExcitationCTM, cell_phases
 from tenax.algorithms.ipeps_config import CTMEnvironment
@@ -1110,6 +1111,11 @@ def _gate_scale(gate: np.ndarray, gate_nnn: np.ndarray | None) -> float:
     return float(np.maximum(largest, np.finfo(np.float64).tiny))
 
 
+# Bump when a change gives other column numbers for the same inputs: in the CTM sweep,
+# the derivative or the SVD backward. The backward and its width are hashed anyway.
+_CHECKPOINT_VERSION = 1
+
+
 def _spectrum_fingerprint(A, gate, gate_nnn, ab, config, basis) -> str:
     digest = hashlib.sha256()
     # gate_nnn only when given: a nearest-neighbour run keeps its checkpoints.
@@ -1119,8 +1125,14 @@ def _spectrum_fingerprint(A, gate, gate_nnn, ab, config, basis) -> str:
         # Rounded: rescaling A before the internal normalisation must still resume.
         digest.update(np.round(np.asarray(array, dtype=np.float64), 12).tobytes())
     digest.update(repr((ab, config.chi, config.ctm_sweeps, config.fd_step)).encode())
-    # Columns from another SVD backward must not join this run.
-    digest.update(_PROJECTOR_BACKWARD_FLOW_SPLIT.encode())
+    # Columns from another SVD backward, width or checkpoint version must not join.
+    # Read at call time, from the module the sweep reads them from.
+    recipe = (
+        _p2x2._PROJECTOR_BACKWARD_FLOW_SPLIT,
+        _p2x2._SPLIT_BACKWARD_WIDTH,
+        _CHECKPOINT_VERSION,
+    )
+    digest.update(repr(recipe).encode())
     return digest.hexdigest()
 
 
@@ -1130,6 +1142,11 @@ def _load_columns(directory: Path | None, fingerprint: str) -> dict[int, tuple]:
     if directory is None or not directory.exists():
         return columns
     for path in sorted(directory.glob("column_*.npz")):
+        if re.fullmatch(r"column_[0-9]+\.npz", path.name) is None:
+            raise ValueError(
+                f"Checkpoint {path} is not a column file: compute_spectrum writes "
+                "column_<number>.npz. Move it out of the checkpoint_dir."
+            )
         try:
             with np.load(path) as data:
                 found = str(data["fingerprint"])
@@ -1139,8 +1156,9 @@ def _load_columns(directory: Path | None, fingerprint: str) -> dict[int, tuple]:
         if found != fingerprint:
             raise ValueError(
                 f"Checkpoint {path} is from a different run: A, the gates, the "
-                "momentum, chi, ctm_sweeps, fd_step, basis or the tenax SVD backward "
-                "changed. Use a new checkpoint_dir."
+                "momentum, chi, ctm_sweeps, fd_step, basis, the tenax SVD backward or "
+                "its width, or the checkpoint version changed. Use a new "
+                "checkpoint_dir."
             )
         columns[int(path.stem.removeprefix("column_"))] = column
     return columns
@@ -1149,9 +1167,15 @@ def _load_columns(directory: Path | None, fingerprint: str) -> dict[int, tuple]:
 def _save_column(directory: Path, index: int, fingerprint: str, h, n) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
-    with os.fdopen(handle, "wb") as stream:
-        np.savez(stream, fingerprint=fingerprint, h=h, n=n)
-    os.replace(temporary, directory / f"column_{index:05d}.npz")
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            np.savez(stream, fingerprint=fingerprint, h=h, n=n)
+        os.replace(temporary, directory / f"column_{index:05d}.npz")
+    except BaseException:
+        # Also on Ctrl-C. A kill by a signal can still leave the file: a rerun
+        # ignores it, and it is safe to delete when no run is active.
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def _reduce_spectrum(N, H, null_tol):
