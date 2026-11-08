@@ -30,6 +30,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ctm_tensor_projector_2x2 import _PROJECTOR_BACKWARD_FLOW_SPLIT
 from tenax.algorithms._einsum_compat import einsum_promoted
 from tenax.algorithms._ipeps_excitation_ctm import ExcitationCTM, cell_phases
 from tenax.algorithms.ipeps_config import CTMEnvironment
@@ -1094,6 +1095,20 @@ def _gauge_residual(N: np.ndarray, A: np.ndarray, a: int, b: int) -> float:
     return float(np.linalg.norm(Q.T @ N @ Q, 2))
 
 
+# Largest column entry at |A| = 1 with orthonormal directions, with H in units of the
+# largest gate entry. Clean columns reach 7 at D=2 and 3 at D=3 and D=4. This stops a
+# large blow-up before it reaches eigh; a smaller one shows in h_asymmetry.
+_COLUMN_BOUND = 1e3
+
+
+def _gate_scale(gate: np.ndarray, gate_nnn: np.ndarray | None) -> float:
+    """Largest gate entry: the unit of H, which is linear in the gates. N has no units."""
+    largest = np.abs(gate).max()
+    if gate_nnn is not None:
+        largest = np.maximum(largest, np.abs(gate_nnn).max())
+    return float(np.maximum(largest, np.finfo(np.float64).tiny))
+
+
 def _spectrum_fingerprint(A, gate, gate_nnn, ab, config, basis) -> str:
     digest = hashlib.sha256()
     # gate_nnn only when given: a nearest-neighbour run keeps its checkpoints.
@@ -1103,6 +1118,8 @@ def _spectrum_fingerprint(A, gate, gate_nnn, ab, config, basis) -> str:
         # Rounded: rescaling A before the internal normalisation must still resume.
         digest.update(np.round(np.asarray(array, dtype=np.float64), 12).tobytes())
     digest.update(repr((ab, config.chi, config.ctm_sweeps, config.fd_step)).encode())
+    # Columns from another SVD backward must not join this run.
+    digest.update(_PROJECTOR_BACKWARD_FLOW_SPLIT.encode())
     return digest.hexdigest()
 
 
@@ -1121,8 +1138,8 @@ def _load_columns(directory: Path | None, fingerprint: str) -> dict[int, tuple]:
         if found != fingerprint:
             raise ValueError(
                 f"Checkpoint {path} is from a different run: A, the gates, the "
-                "momentum, chi, ctm_sweeps, fd_step or basis changed. Use a new "
-                "checkpoint_dir."
+                "momentum, chi, ctm_sweeps, fd_step, basis or the tenax SVD backward "
+                "changed. Use a new checkpoint_dir."
             )
         columns[int(path.stem.removeprefix("column_"))] = column
     return columns
@@ -1191,6 +1208,7 @@ def compute_spectrum(
     gate = _spectrum_gate(gate, d, "gate")
     if gate_nnn is not None:
         gate_nnn = _spectrum_gate(gate_nnn, d, "gate_nnn")
+    gate_scale = _gate_scale(gate, gate_nnn)
     operators = _spectrum_operators(operators, d)
     full_space = basis is None
     basis = _spectrum_basis(basis, A.size)
@@ -1224,11 +1242,19 @@ def compute_spectrum(
                 basis.T @ np.asarray(g_h).ravel(),
                 basis.T @ np.asarray(g_n).ravel(),
             )
-            if not all(np.isfinite(part).all() for part in columns[i]):
+            size = np.max(
+                [
+                    np.abs(columns[i][0]).max() / gate_scale,
+                    np.abs(columns[i][1]).max(),
+                ]
+            )
+            if not size <= _COLUMN_BOUND:
                 raise RuntimeError(
-                    f"compute_spectrum: column {i} is not finite at chi={config.chi}, "
-                    f"fd_step={config.fd_step}; it was not saved. Try another chi or "
-                    "fd_step, with a new checkpoint_dir."
+                    f"compute_spectrum: column {i} reaches {size:.1e} at "
+                    f"chi={config.chi}, fd_step={config.fd_step}, against a bound of "
+                    f"{_COLUMN_BOUND:.0e}, with H in units of the largest gate entry; "
+                    "it was not saved. Try fd_step=1e-3, then a random orthogonal "
+                    "basis, with a new checkpoint_dir."
                 )
             if directory is not None:
                 _save_column(directory, i, fingerprint, *columns[i])
@@ -1276,19 +1302,20 @@ def compute_spectrum(
         gauge_residual=gauge_residual,
         null_dim=null_dim,
     )
-    _warn_spectrum(result)
+    _warn_spectrum(result, gate_scale)
     return result
 
 
-def _warn_spectrum(result: SpectrumResult) -> None:
+def _warn_spectrum(result: SpectrumResult, gate_scale: float) -> None:
     problems = []
     if result.rank == 0:
         problems.append("no direction survives null_tol: basis lies in the null space")
     if result.n_asymmetry > 1e-4:
         problems.append(f"N asymmetry {result.n_asymmetry:.2e}")
-    # Looser than N: one noisy reverse-mode column gives 6.6e-4 at D=2 chi=10 M,
-    # with omega unchanged to 5 digits across fd_step and ctm_sweeps.
-    if result.h_asymmetry > 1e-3:
+    # 1e-3 at J=1, where the largest gate entry is 1/2. Looser than N: on a state with
+    # an exact U(1) at fd_step=1e-4, roundoff in the rotation of a pair leaves up to 1e-3
+    # in entries with no weight (D=2, unit basis).
+    if result.h_asymmetry > 2e-3 * gate_scale:
         problems.append(f"H asymmetry {result.h_asymmetry:.2e}")
     if result.n_min_eig < -1e-4:
         problems.append(f"lowest N eigenvalue ratio {result.n_min_eig:.2e}")

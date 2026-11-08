@@ -372,13 +372,80 @@ chi=54. Fixed chi=18 eigenvectors evaluated at larger chi give:
 
 Negative modes stay in `omega`. The warning tells you to raise chi.
 
+(states-with-an-exact-symmetry)=
+### States with an exact symmetry
+
+On a state with an exact U(1), such as the U1B states of `j1j2_ipeps_states`, the CTM
+environment has exact pairs of singular values. A direction that breaks the symmetry
+splits a pair as `fd_step**2` at its finite-difference point, so each column meets its
+own small gap in the backward of the SVD. `compute_spectrum` uses its own backward for
+these pairs:
+
+- When `u` and `v` of a pair rotate together, the backward has a pole. Only this part
+  is broadened, with a width of 1e-12 relative to the largest singular value.
+- When they rotate against each other, the backward is regular. This part is kept.
+- At an exact pair, roundoff picks the basis of the pair. The difference of the two
+  `ds` takes the same factor as the common rotation, so the result does not depend on
+  that basis.
+
+The ground-state path (`projector_backward="flow"`) keeps one Lorentzian on the squared
+gap, and that damps both rotations. In these sweeps a column with its squared gap near
+the width grows by 3 to 7 decades per reverse sweep, and another width or `fd_step`
+moves the problem to another column. At `fd_step=1e-4`:
+
+| State | chi | k | Columns | Lorentzian | This backward: H asymmetry |
+|---|---|---|---|---|---|
+| U1B J2=0, D=3 | 27 | X | 4 (`O A`) | entries to 1e197 | 1.6e-8 |
+| U1B J2=0.25, D=3 | 12 | X | 72 (charge block, random) | 6 bad, to 1e18 | 3.9e-9 |
+| U1B J2=0.3, D=4 | 24 | X | 4 (`O A`, random) | entries to 4e6 | 1.5e-8 |
+| exact U(1), D=2 (`exact_u1_d2` in the tests) | 10 | X | 32 | 8e3; 6e29 at width 1e-10 | 1.8e-4 to 9.6e-4 |
+| A1 J2=0, D=2, no exact U(1) | 10 | M | 32 | asymmetry 6.6e-4 | 2.2e-8 |
+
+What is left in the fourth row is roundoff. The common rotation divides roundoff by a
+gap that goes as `fd_step**2`, and the finite difference divides again by `fd_step`.
+The result sits in entries with no weight for spin operators: those that the charge rule
+forbids, and the block at charge offset 4. It changes with small changes of the step: one
+column at chi=6 has 4.3e-4 at 1e-4, 1.6e-4 at 1.01e-4, 2.5e-5 at 3e-4 and 1.8e-6 at 1e-3,
+while the column's own entry stays at 0.04157658. `omega` and the weights do not move
+(rank 23, lowest 2.2937, 2.9606, 3.4618 in all of these runs).
+
+It also changes with the roundoff itself, so with the machine. The ranges below are over
+changes of `A` by 3e-16. At the default step the H asymmetry is close to the warning at
+1e-3, so a clean run on such a state can warn. On a state with an exact symmetry, use a
+basis with no special column, or a larger step:
+
+| exact U(1), D=2, chi=10 | `fd_step` | H asymmetry | N asymmetry |
+|---|---|---|---|
+| Unit basis (default) | 1e-4 | 1.8e-4 to 9.6e-4 | 1.6e-6 to 9.0e-6 |
+| Unit basis (default) | 1e-3 | 2.7e-6 to 7.1e-6 | 4.6e-7 |
+| Random orthogonal basis of the same span | 1e-4 | 7.9e-9 to 8.3e-9 | 3.1e-9 to 3.3e-9 |
+
+In all 18 of these runs there is no blow-up, the rank is 23, and the three lowest modes
+and the top weight are the same to 6 digits. `s(k)` moves by 6e-8 between the two steps.
+
+```python
+Q = np.linalg.qr(np.random.default_rng(0).normal(size=(A.size, A.size)))[0]
+result = compute_spectrum(A, gate, momentum, operators, config, basis=Q)
+```
+
+On a state with no exact symmetry, keep the default: the A1 state at M gives 2.2e-8 at
+1e-4 and 1.3e-6 at 1e-3.
+
+A chi that cuts a multiplet of the environment spectrum (chi=8 here cuts a triplet)
+gives the warning that the CTM did not converge. The columns stay clean: H asymmetry
+8.9e-6 at chi=8.
+
+A column with an entry above 1e3, with H in units of the largest gate entry, raises and
+is not saved. Clean columns reach 7 at D=2 and 3 at D=3 and D=4. A smaller blow-up shows
+in `h_asymmetry`.
+
 ### Diagnostics
 
 | Field | Meaning | Warns if |
 |---|---|---|
 | `energy_density` | energy per site | the CTM did not converge |
 | `n_asymmetry` | largest entry of N - N^T | above 1e-4 |
-| `h_asymmetry` | largest entry of H - H^T | above 1e-3 |
+| `h_asymmetry` | largest entry of H - H^T | above 2e-3 times the largest gate entry, so 1e-3 at J=1 |
 | `n_min_eig` | lowest N eigenvalue over `max(largest, 1e-2)` | below -1e-4 |
 | `n_negative_modes` | modes with omega < 0 | any |
 | `sum_rule_deficit` | per operator, 1 - sum(weights)/s(k) | above 1e-3 |
@@ -388,9 +455,9 @@ Negative modes stay in `omega`. The warning tells you to raise chi.
 The cut is `null_tol * max(largest N eigenvalue, 1e-2)`. With the floor, a `basis`
 inside the null space gives rank 0 and a warning, not noise reported as modes.
 
-The H limit is looser because of one noisy reverse-mode column: at D=2, chi=10, M it
-gives 6.6e-4, while omega stays at 0.64873 across `fd_step` 1e-3, 1e-4 and 30, 60
-sweeps.
+The H limit is looser because of roundoff on a state with an exact symmetry, up to
+1e-3 in entries with no weight. See
+[States with an exact symmetry](#states-with-an-exact-symmetry).
 
 ### Validation
 
@@ -408,7 +475,8 @@ element of `H - E0 N` in the direction `S^y A` is:
 
 | chi | 4 | 6 | 8 | 10 |
 |---|---|---|---|---|
-| `projector_backward="flow"` (used here) | 0.4976433 | 0.4976434 | 0.4976434 | 0.4976434 |
+| `compute_spectrum` | 0.4976433 | 0.4976434 | 0.4976434 | 0.4976434 |
+| `projector_backward="flow"` | 0.4976433 | 0.4976434 | 0.4976434 | 0.4976434 |
 | `projector_backward="frozen"` | 0.4958283 | 0.4976095 | 0.4976100 | 0.4976751 |
 
 `s(k)` agrees between the two to all 7 printed digits at each of these chi values.
