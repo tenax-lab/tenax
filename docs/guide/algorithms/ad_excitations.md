@@ -380,7 +380,10 @@ D=3, chi=12, on 6 cores.
   block of 78 columns, and about 31 h for all 512. See
   [Benchmarks](#spectrum-benchmarks).
 - Use `checkpoint_dir` on any long run. A rerun resumes, and changing only
-  `operators` or `null_tol` reuses all columns.
+  `operators` or `null_tol` reuses all columns. Columns from another run raise,
+  also when only tenax changed how it computes a column: the SVD backward, its
+  width or the checkpoint version. A run killed by a signal while it writes can
+  leave a `.tmp` file. A rerun ignores it.
 - `basis` restricts the tangent space, for example to a charge sector. An operator
   whose `O A` has weight outside `basis` warns, and its results cover only the
   part inside.
