@@ -347,7 +347,8 @@ D=3, chi=12, on 6 cores.
 ### Workflow
 
 1. **Get the state in the rotated frame.** `A` is dense and real, and `gate` is the
-   rotated gate.
+   rotated gate. On a state with an exact symmetry, read
+   [States with an exact symmetry](#states-with-an-exact-symmetry) first.
 2. **Find chi on a small basis.** Use `A` and each `O A` as columns, so four columns for
    three spin operators (`--basis sma` in `benchmarks/ipeps_spectrum_hasik.py`). Compare
    `s(k)` and the first moment at two or three chi values. These two need only `O A`,
@@ -400,7 +401,9 @@ chi=54. Fixed chi=18 eigenvectors evaluated at larger chi give:
 | omega(X) | 2.2641 | 2.2665 | 2.2676 | 2.2679 |
 | omega(M) | 0.2688 | | 0.3056 | 0.3083 |
 
-Negative modes stay in `omega`. The warning tells you to raise chi.
+Negative modes stay in `omega`. The warning tells you to raise chi. If they stay at
+larger chi, a direction at this momentum lowers the energy, so the state is not a ground
+state of the gates given.
 
 (states-with-an-exact-symmetry)=
 ### States with an exact symmetry
@@ -420,8 +423,9 @@ these pairs:
 
 The ground-state path (`projector_backward="flow"`) keeps one Lorentzian on the squared
 gap, and that damps both rotations. In these sweeps a column with its squared gap near
-the width grows by 3 to 7 decades per reverse sweep, and another width or `fd_step`
-moves the problem to another column. At `fd_step=1e-4`:
+the width grows by 3 to 7 decades per reverse sweep (measured on one state: U1B J2=0.25,
+D=3, chi=12), and another width or `fd_step` moves the problem to another column. At
+`fd_step=1e-4`:
 
 | State | chi | k | Columns | Lorentzian | This backward: H asymmetry |
 |---|---|---|---|---|---|
@@ -448,7 +452,7 @@ basis with no special column, or a larger step:
 |---|---|---|---|
 | Unit basis (default) | 1e-4 | 1.8e-4 to 9.6e-4 | 1.6e-6 to 9.0e-6 |
 | Unit basis (default) | 1e-3 | 2.7e-6 to 7.1e-6 | 4.6e-7 |
-| Random orthogonal basis of the same span | 1e-4 | 7.9e-9 to 8.3e-9 | 3.1e-9 to 3.3e-9 |
+| Random orthogonal basis of the same span | 1e-4 | 7.9e-9 to 8.1e-9 | 3.1e-9 to 3.3e-9 |
 
 In all 18 of these runs there is no blow-up, the rank is 23, and the three lowest modes
 and the top weight are the same to 6 digits. `s(k)` moves by 6e-8 between the two steps.
@@ -475,7 +479,7 @@ in `h_asymmetry`.
 |---|---|---|
 | `energy_density` | energy per site | the CTM did not converge |
 | `n_asymmetry` | largest entry of N - N^T | above 1e-4 |
-| `h_asymmetry` | largest entry of H - H^T | above 2e-3 times the largest gate entry, so 1e-3 at J=1 |
+| `h_asymmetry` | largest entry of H - H^T | above 2e-3 times the largest gate entry: 1e-3 for the Heisenberg gate at J=1 |
 | `n_min_eig` | lowest N eigenvalue over `max(largest, 1e-2)` | below -1e-4 |
 | `n_negative_modes` | modes with omega < 0 | any |
 | `sum_rule_deficit` | per operator, 1 - sum(weights)/s(k) | above 1e-3 |
@@ -608,6 +612,12 @@ area-normalised, so multiply it by `pi * eta` to compare. To run it:
 python benchmarks/ipeps_spectrum_hasik.py <U1B J2=0.3 D=4 state> spectrum --chi 24 --j2 0.3 \
     --momentum X --basis even --fd-step 1e-3 --checkpoint-dir runs/fig1 --out fig1.npz
 ```
+
+The command keeps `--fd-step 1e-3`, the setting of the runs here, which used the
+Lorentzian backward before #1178. With the backward of #1178 the default step also works
+on this state: in the four columns of `--basis sma` at chi=24 it gives an H asymmetry of
+1.5e-8, against 1.5e-6 with these settings, and the same `s` to 6e-8. A full run at the
+default step has not been done.
 
 The paper sets the size of the subspace by hand, and `null_tol` is that setting here.
 On the same 78 columns:

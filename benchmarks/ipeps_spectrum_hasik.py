@@ -200,8 +200,10 @@ def rotated_basis(basis: np.ndarray, seed: int = 0) -> np.ndarray:
     On an exact U(1) state a column along ``A``, ``S^z A`` or one orbit keeps a pair of
     singular values exact or close to exact, and the derivative through that pair carries
     the most roundoff. ``H`` and ``N`` are linear in the column, so the span sets the
-    answer. This does not stop the blow-up of the Lorentzian backward: at
-    ``fd_step=1e-4`` about 5% of the rotated columns still blew up.
+    answer. Before #1178 this did not stop the blow-up of the Lorentzian backward: at
+    ``fd_step=1e-4`` about 5% of the rotated columns still blew up. With the backward
+    of #1178 it clears the roundoff of an exact pair: on the exact-U(1) D=2 state the
+    H asymmetry is 8e-9, against up to 1e-3 in the unit basis.
     """
     n = basis.shape[1]
     return basis @ np.linalg.qr(np.random.default_rng(seed).normal(size=(n, n)))[0]

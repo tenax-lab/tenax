@@ -591,6 +591,7 @@ def test_clean_result_does_not_warn():
         ({"h_asymmetry": 2e-3}, "H asymmetry"),
         ({"n_min_eig": -2e-4}, "lowest N eigenvalue"),
         ({"n_negative_modes": 2}, "raise chi"),
+        ({"n_negative_modes": 2}, "not a ground state of these gates"),
         ({"sum_rule_deficit": {"Sy": 2e-3}}, "sum rule deficit"),
         ({"sum_rule_deficit": {"Sy": -2e-3}}, "sum rule deficit"),
         ({"gauge_residual": 2e-3}, "gauge residual"),
