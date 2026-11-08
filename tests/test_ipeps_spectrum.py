@@ -4,6 +4,7 @@ Most tests share the checkpoint ``"x"``, so only the first ``_run`` computes col
 and the others resume. A test that needs fresh columns takes its own ``name``.
 """
 
+import shutil
 import warnings
 
 import jax
@@ -21,6 +22,7 @@ from _ipeps_spectrum_fixtures import (
 )
 
 import tenax.algorithms._ad_primitives as ad_module
+import tenax.algorithms._ctm_tensor_projector_2x2 as projector_module
 import tenax.algorithms._ipeps_excitation_ctm as ctm_module
 import tenax.algorithms.ipeps_excitations as spectrum_module
 from tenax import SpectrumConfig, SpectrumResult, compute_spectrum, spectral_function
@@ -32,6 +34,7 @@ from tenax.algorithms.ipeps_excitations import (
     _gate_scale,
     _gauge_vectors,
     _reduce_spectrum,
+    _save_column,
     _spectrum_gate,
     _spectrum_momentum,
     _warn_spectrum,
@@ -724,6 +727,53 @@ def test_damaged_checkpoint_names_the_file(tmp_path, basis):
     (directory / "column_00000.npz").write_bytes(b"not a zip")
     with pytest.raises(ValueError, match="column_00000.npz"):
         _run(tmp_path, basis)
+
+
+@pytest.mark.parametrize(
+    ("module", "name", "value"),
+    [
+        (projector_module, "_PROJECTOR_BACKWARD_FLOW_SPLIT", "another backward"),
+        (projector_module, "_SPLIT_BACKWARD_WIDTH", 1e-10),
+        (spectrum_module, "_CHECKPOINT_VERSION", 2),
+    ],
+    ids=["backward", "split width", "version"],
+)
+def test_checkpoint_from_another_column_recipe_raises(
+    checkpoint, basis, monkeypatch, module, name, value
+):
+    _run(checkpoint, basis)
+
+    def refuse(*args, **kwargs):
+        raise _Stop
+
+    monkeypatch.setattr(ctm_module, "_converged_env", refuse)
+    monkeypatch.setattr(module, name, value)
+    with pytest.raises(ValueError, match="different run"):
+        _run(checkpoint, basis)
+
+
+def test_foreign_file_name_in_the_checkpoint_names_the_file(
+    tmp_path, checkpoint, basis
+):
+    _run(checkpoint, basis)
+    directory = tmp_path / "x"
+    directory.mkdir()
+    # A copy of a real column: it loads and matches, so only its name is wrong.
+    column = sorted((checkpoint / "x").glob("column_*.npz"))[0]
+    shutil.copy(column, directory / "column_00000 (copy).npz")
+    with pytest.raises(ValueError, match=r"column_00000 \(copy\)\.npz"):
+        _run(tmp_path, basis)
+
+
+@pytest.mark.parametrize("error", [OSError, KeyboardInterrupt])
+def test_failed_save_leaves_no_temporary_file(tmp_path, monkeypatch, error):
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(np, "savez", fail)
+    with pytest.raises(error):
+        _save_column(tmp_path, 0, "fingerprint", np.zeros(2), np.zeros(2))
+    assert list(tmp_path.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------
