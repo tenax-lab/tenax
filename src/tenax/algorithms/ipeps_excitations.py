@@ -949,7 +949,8 @@ class SpectrumConfig:
         fd_step: Central-difference step on the ket direction.
         null_tol: Eigenvectors of N below ``null_tol * max(largest eigenvalue,
             1e-2)`` are dropped. With the floor, a ``basis`` inside the null space
-            keeps nothing, not noise.
+            keeps nothing, not noise. This sets the size of the subspace and it moves
+            the modes, so scan it: a rerun with another value reuses the checkpoint.
         checkpoint_dir: Write each finished column here, and resume from it.
     """
 

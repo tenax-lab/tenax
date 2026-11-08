@@ -673,6 +673,17 @@ def test_finished_run_resumes_without_derivatives(checkpoint, basis, monkeypatch
     np.testing.assert_array_equal(second.omega, first.omega)
 
 
+def test_another_null_tol_reuses_the_columns(checkpoint, basis, monkeypatch):
+    first = _run(checkpoint, basis)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a new null_tol recomputed a column")
+
+    monkeypatch.setattr(ExcitationCTM, "ket_derivative", refuse)
+    second = _run(checkpoint, basis, null_tol=0.99)
+    assert second.rank < first.rank
+
+
 def test_interrupted_run_equals_an_uninterrupted_run(
     tmp_path, checkpoint, basis, monkeypatch
 ):
