@@ -37,6 +37,8 @@ _FILE_MARKERS = {
     "test_ipeps_spectrum_full.py": "algorithm",
     # gate_nnn in compute_spectrum: the mixed diagonal RDM at D=2, chi=10.
     "test_ipeps_spectrum_nnn.py": "core",
+    # The benchmark's state parser and U(1) scan: no CTM.
+    "test_ipeps_spectrum_benchmark.py": "core",
     "test_tensor.py": "core",
     "test_dense_svd_gpu_algorithm.py": "core",
     # CPU gesdd -> gesvd fallback: faked failures + one 54x54 matrix.
