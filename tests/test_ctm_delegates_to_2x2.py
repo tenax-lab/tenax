@@ -357,14 +357,19 @@ def test_fermionic_ctm_raw_branch_keeps_ctmconfig_min_iter(monkeypatch):
 
 
 def test_ctm_warns_that_it_is_deprecated():
-    """Exactly one warning, naming the replacement and the lost ``jax.jit``."""
+    """Exactly one deprecation warning, naming the replacement and the lost
+    ``jax.jit``."""
     with pytest.warns(DeprecationWarning, match="^ctm is deprecated") as record:
         ctm(ONES, CTMConfig(chi=1, max_iter=5))
-    messages = [str(w.message) for w in record]
-    deprecations = [m for m in messages if m.startswith("ctm is deprecated")]
+    deprecations = [w for w in record if str(w.message).startswith("ctm is deprecated")]
     assert len(deprecations) == 1
-    assert "ctm_tensor" in deprecations[0]
-    assert "jax.jit" in deprecations[0]
+    message = str(deprecations[0].message)
+    assert "ctm_tensor" in message
+    assert "jax.jit" in message
+    # Python's default filters show a DeprecationWarning only when it is blamed
+    # on __main__ (PEP 565).  With stacklevel=1 it would be blamed on ctm()'s own
+    # module and hidden from every script, and the checks above would still pass.
+    assert deprecations[0].filename == __file__
 
 
 def test_ctm_rejects_initial_env():
