@@ -151,13 +151,35 @@ The `CTMEnvironment` named tuple contains the 8 environment tensors:
 
 ## Using CTM standalone
 
-The `ctm()` function can be called independently to compute the
-environment for an existing PEPS tensor:
+`ctm_tensor()` computes the environment of an existing site tensor `A`: a
+`DenseTensor` or `SymmetricTensor` with 5 legs `(u, d, l, r, phys)`, such as
+the tensors `ipeps()` and `optimize_gs_ad()` return. A raw `(D, D, D, D, d)`
+array becomes one with `DenseTensor(data, indices)`, where the five
+`TensorIndex` legs are labelled `u`, `d`, `l`, `r`, `phys` with flows `OUT`,
+`IN`, `OUT`, `IN`, `IN`.
 
 ```python
-from tenax import ctm, CTMConfig
+from tenax import compute_energy_ctm_tensor, ctm_tensor
 
-env = ctm(A_tensor, CTMConfig(chi=20, max_iter=100))
+env, _eps_T, info = ctm_tensor(A, chi=20, max_iter=100, return_meta=True)
+if not info.converged:
+    print(f"not converged after {info.n_iter} sweeps, diff {info.diff:.2e}")
+E = compute_energy_ctm_tensor(A, env, hamiltonian_gate, d=2)
+```
+
+```{warning}
+`ctm()` is deprecated since 0.9.3 and emits a `DeprecationWarning`. It now runs
+`ctm_tensor(recipe="2x2")` and returns the raw-array `CTMEnvironment` it always
+returned, so its environments changed in 0.9.3. The 1-site sweep it ran before
+reached no fixed point: on the Ising PEPS at beta=0.2, where C(1,0) has
+Onsager's exact value, it stopped at chi=12, 16 and 32 without converging, with
+C(1,0) errors of 7.6e-4, 4.3e-4 and 4.3e-4. The 2x2 recipe converges at the
+same chi with errors below 4e-16. Three behaviours differ from before:
+
+- `ctm()` does not run under `jax.jit`, because `ctm_tensor` is a Python loop.
+- `initial_env` raises `ValueError`, because `ctm_tensor` has no warm start.
+- A `CTMConfig.projector_method` other than `"svd"` is ignored with a
+  `UserWarning`, because the 2x2 recipe always uses Fishman SVD.
 ```
 
 ## 2-site checkerboard unit cell
