@@ -1,6 +1,6 @@
 # Delegate the public `ctm()` to the 2x2 recipe
 
-**Status:** design, awaiting review. **Branch:** `refactor/ctm-delegate-to-2x2`.
+**Status:** design, revised 2026-11-09 after review. **Branch:** `refactor/ctm-delegate-to-2x2`.
 
 ## Problem
 
@@ -52,24 +52,49 @@ warning only (callers keep receiving wrong energies until they migrate).
 
 ## Behaviour of `ctm(A, config, initial_env=None, *, return_meta=False)`
 
+`ctm()` emits the warnings, checks `initial_env`, and calls a private helper,
+`_ctm_via_2x2(A, config, *, return_meta=False)` in `ipeps_ctm_convergence.py`.
+The helper does the rest of this table: it checks and wraps `A`, maps the
+config, runs `ctm_tensor(recipe="2x2")` and converts the result. `fermionic_ctm`
+and the fixture-only tests call the helper directly, so neither the library nor
+those tests trigger the `DeprecationWarning`.
+
 | Input | Behaviour |
 |---|---|
-| Any call | `DeprecationWarning` naming `ctm_tensor` as the replacement |
-| `A` raw array | Wrapped with `_wrap_as_dense_tensor` (`_ipeps_optimize_shared.py`) |
+| Any call | `DeprecationWarning` naming `ctm_tensor` as the replacement (in `ctm()` only) |
+| `A` raw array with 5 legs `(u, d, l, r, s)` | Wrapped with `_wrap_as_dense_tensor` (`_ipeps_optimize_shared.py`) |
+| `A` raw array with another number of legs | `ValueError` that names the 5-leg layout (see Input shape, below) |
 | `A` `DenseTensor` | Passed through |
 | `A` `SymmetricTensor` | `TypeError` naming `ctm_tensor`. Today's `ctm()` also raises `TypeError` here (measured), and accepting it would force `todense()` to return a raw `CTMEnvironment` |
 | `config.chi`, `max_iter`, `conv_tol`, `renormalize` | Passed to `ctm_tensor` |
 | `config.min_iter` | Passed to the new `ctm_tensor(min_iter=)` keyword (below) |
-| `config.projector_method != "svd"` | `UserWarning` that it is ignored: the 2x2 recipe always uses Fishman SVD |
-| `config.qr_warmup_steps` | Ignored, because no QR sweep runs |
+| `config.projector_method != "svd"` | `UserWarning` (in `ctm()`) that it is ignored: the 2x2 recipe always uses Fishman SVD. The helper always passes `projector_method="svd"`, because on the 2x2 recipe `"qr"` still starts the QR warm-up loop of `ctm_tensor` |
+| `config.qr_warmup_steps` | Ignored: with `"svd"` passed, no warm-up runs |
 | `initial_env` not `None` | `ValueError` with a migration message |
 | `return_meta=True` | `(CTMEnvironment, CTMConvergenceInfo)`, as today |
 | Return value | Raw-array `CTMEnvironment`, as today |
 
-The `CTMTensorEnv` to `CTMEnvironment` conversion reuses the field-by-field
-logic of `_as_dense_env` in `ipeps_excitations.py`; that helper moves to a
-module both can import. Imports stay local to the function body, to avoid a
-cycle through `ipeps_rdm`.
+The conversion from `CTMTensorEnv` to `CTMEnvironment` is `_as_dense_env`. It
+moves from `ipeps_excitations.py` to a new module, `_ctm_env_dense.py`, together
+with `_as_dense_array`, which it calls. Behaviour and messages do not change.
+These files import them from the new module:
+
+- `ipeps_excitations.py`
+- `ipeps_ctm_convergence.py` (the helper)
+- `tests/test_ipeps_excitations.py:471,482`
+- `tests/test_ipeps_spectrum_contractions.py:49`
+
+The imports in `ipeps_ctm_convergence.py` stay local to the function body, to
+avoid a cycle through `ipeps_rdm`.
+
+### Input shape
+
+Today's `ctm()` also runs a 3-leg array. Its docstring says that a ready
+double-layer tensor works, but a 4-leg array is read as a site tensor whose last
+leg is physical. `_wrap_as_dense_tensor` reads `shape[4]` without a check. So the
+helper accepts only the 5-leg layout, raises `ValueError` for any other number of
+legs, and the docstring is corrected. The plan checks that no caller passes
+another shape.
 
 ### Why `initial_env` raises
 
@@ -94,7 +119,11 @@ sweeps.
 ## Other changes
 
 - `fermionic_ctm` (`fermionic_ipeps.py:655`), non-Tensor branch: call
-  `ctm_tensor` directly, so the library never triggers its own warning.
+  `_ctm_via_2x2`. It keeps returning the `CTMEnvironment` that its docstring
+  promises, keeps `CTMConfig.min_iter` (10), and does not trigger the warning. A
+  direct `ctm_tensor` call would return a `CTMTensorEnv` and use `min_iter=1`.
+  Nothing calls `fermionic_ctm` and it is not exported, so its new test is its
+  only test.
 - `examples/kagome_xxz_pess.py:606`, `examples/kagome_xxz_spin1_pess.py:344`,
   and `docs/guide/algorithms/ipeps.md:154-160`: move to `ctm_tensor`.
 - Delete code that only the legacy 1-site sweep reaches:
@@ -113,14 +142,20 @@ sweeps.
 
 ### New (`core`, exact oracles only)
 
-- Ising PEPS at beta=0.2 and 0.3, chi in {8, 12, 16, 32}: `ctm()` gives
-  `converged=True` and C(1,0) within 1e-12 of Onsager. The old code fails this
-  at beta=0.2, chi=12, 16 and 32.
+- Ising PEPS at beta=0.2, chi in {8, 12, 16, 32}: `ctm()` gives
+  `converged=True` and C(1,0) within 1e-12 of Onsager. The 2x2 error measured
+  1.9e-16 to 2.5e-16 (Evidence). The old code fails this at chi=12, 16 and 32.
+- Ising PEPS at beta=0.3: not measured yet. It is nearer beta_c (about 0.4407),
+  so chi=8 may miss 1e-12. The plan measures the 2x2 error at each chi first.
+  The test keeps the chi values whose error is at least ten times below 1e-12,
+  or it drops beta=0.3.
 - The `DeprecationWarning` fires; `projector_method="qr"` warns; `initial_env`
-  raises; `return_meta` has the right shape.
+  raises; a raw array with 4 legs raises `ValueError`; `return_meta` has the
+  right shape.
 - `ctm_tensor(min_iter=)`: `n_iter >= min(min_iter, max_iter)` when converged,
   and the default leaves existing behaviour unchanged.
-- `fermionic_ctm` on a raw array emits no `DeprecationWarning`.
+- `fermionic_ctm` on a raw array returns a `CTMEnvironment` and emits no
+  `DeprecationWarning`.
 
 Report a mutation count for the new tests in the PR.
 
@@ -132,12 +167,17 @@ with its reason. A changed numeric assertion gets examined, not re-frozen.
 - **Fixture only** (`ctm()` builds an environment for something else):
   `test_ipeps.py`, `test_ipeps_core.py`, `test_ipeps_excitations.py`,
   `test_ipeps_excitations_gauge.py`, `test_ipeps_rdm_gauge.py`,
-  `test_normalise_rdm_zero_grad.py`, `test_rdm_gate_transpose_966.py`. Move to
-  `ctm_tensor`.
-- **Pinned to QR or warm-up on `ctm()`**: `test_ipeps_core.py:368,382`, and the
-  `ctm`-specific cases in `test_ctm_min_iter_contract_925_976.py`. Retarget at
-  `ctm_2site` or `ctm_split` where they exercise the same contract; otherwise
-  remove.
+  `test_normalise_rdm_zero_grad.py`, `test_rdm_gate_transpose_966.py`. They
+  need a raw `CTMEnvironment`, so they move to `_ctm_via_2x2`: `ctm_tensor` plus
+  the conversion, with the arguments of `ctm()` and no warning.
+- **Pinned to QR or warm-up on `ctm()`**: `test_ipeps_core.py:368,382`, and
+  `test_ctm_counts_qr_warmup_in_n_iter` and
+  `test_ctm_warmup_counts_toward_min_iter` in
+  `test_ctm_min_iter_contract_925_976.py`. They are removed: `ctm_2site` and
+  `ctm_split` have no QR and no warm-up, so they cannot be retargeted. The new
+  `projector_method="qr"` test replaces them. The parametrized cases of that
+  file (`ctm`, `ctm_2site`, `ctm_split`) stay. On `ctm()` they then test
+  `ctm_tensor(min_iter=)`.
 - **Warm start**: the `initial_env` tests above. Replace with the
   `ValueError` test.
 - **Contract tests that still apply**: `test_ctm_complex_site_tensors.py`,
@@ -154,6 +194,9 @@ with its reason. A changed numeric assertion gets examined, not re-frozen.
 - The raw `CTMEnvironment` type and `ipeps_rdm`. They are a data layout, not a
   defect.
 - `compute_excitations` and its nearest-neighbour truncation (#1052).
+- `ctm_tensor(recipe="2x2", projector_method="qr")`, which still runs the QR
+  warm-up loop although the recipe ignores `projector_method`. `ctm()` avoids it
+  by passing `"svd"`. A change to `ctm_tensor` is a separate decision.
 
 ## Risks
 
@@ -163,8 +206,8 @@ with its reason. A changed numeric assertion gets examined, not re-frozen.
   so no gradient user is affected. A grep found no `jit` wrapper around `ctm()` in
   `src`, `tests`, `examples` or `benchmarks`, but it cannot see indirect use or
   downstream code. The `DeprecationWarning` text and the changelog state this.
-- **Environments change for every `ctm()` caller**, including results users have
-  already recorded. That is the purpose of the change. The changelog says so
+- **Environments change for every `ctm()` caller**, and for the raw branch of
+  `fermionic_ctm`, including results users have already recorded. That is the purpose of the change. The changelog says so
   plainly and cites the table above.
 - **Complex site tensors** must keep working (#842). The kept contract test
   covers this.
