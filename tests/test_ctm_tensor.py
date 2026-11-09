@@ -25,7 +25,6 @@ from tenax.algorithms._ctm_tensor import (
 from tenax.algorithms.ipeps_ctm import (
     _build_double_layer,
     _ctm_2site_sweep,
-    _ctm_sweep,
     _initialize_ctm_env,
 )
 from tenax.core.index import FlowDirection, TensorIndex

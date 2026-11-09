@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 __all__ = [
-    "_ctm_sweep",
     "_ctm_sv_diff",
     "CTMConvergenceInfo",
     "ctm",
@@ -46,36 +45,14 @@ from tenax.algorithms.ipeps_ctm_init import (
     _initialize_split_ctm_env,
 )
 from tenax.algorithms.ipeps_ctm_moves import (
-    _ctm_bottom_move,
     _ctm_bottom_move_2site,
-    _ctm_left_move,
     _ctm_left_move_2site,
-    _ctm_right_move,
     _ctm_right_move_2site,
-    _ctm_top_move,
     _ctm_top_move_2site,
     _split_ctm_move,
 )
 from tenax.core import EPS
 from tenax.linalg import _dense_svd
-
-
-def _ctm_sweep(
-    env: CTMEnvironment,
-    a: jax.Array,
-    chi: int,
-    renormalize: bool,
-    projector_method: str = "eigh",
-) -> CTMEnvironment:
-    """One full CTM sweep: left, right, top, bottom moves + optional renormalize."""
-    env = _ctm_left_move(env, a, chi, projector_method)
-    env = _ctm_right_move(env, a, chi, projector_method)
-    env = _ctm_top_move(env, a, chi, projector_method)
-    env = _ctm_bottom_move(env, a, chi, projector_method)
-    if renormalize:
-        env = _renormalize_env(env)
-    return env
-
 
 # ``_ctm_sv_diff`` is imported, not defined here.
 #
