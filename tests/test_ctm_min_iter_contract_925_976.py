@@ -2,7 +2,9 @@
 ``CTMConfig.min_iter`` and could declare convergence after 2 sweeps against a
 ``min_iter=30``.  #925: ``ctm`` excluded QR warm-up sweeps from ``n_iter``,
 violating ``CTMConvergenceInfo``'s own invariant (``n_iter == max_iter`` when
-not converged).
+not converged).  ``ctm_tensor`` takes the same gate as a keyword-only
+``min_iter`` (default 1, which keeps its plain early exit), so it runs the
+same cases.
 
 These are mechanism tests, not convergence tests: they run on a 1x1 product
 state whose corner spectrum is stationary after the first sweep, so ``diff`` is
@@ -16,7 +18,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 import pytest
 
-from tenax import CTMConfig, ctm, ctm_2site, ctm_split
+from tenax import CTMConfig, ctm, ctm_2site, ctm_split, ctm_tensor
+from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
 
 # A 1x1 product state: chi=1 corners are stationary from the second sweep, so
 # ``diff < conv_tol`` holds immediately and the stopping rule is all that moves.
@@ -35,10 +38,22 @@ def _info_ctm_split(cfg):
     return ctm_split(A, cfg, return_meta=True)[1]
 
 
+def _info_ctm_tensor(cfg):
+    return ctm_tensor(
+        _wrap_as_dense_tensor(A),
+        cfg.chi,
+        max_iter=cfg.max_iter,
+        conv_tol=cfg.conv_tol,
+        min_iter=cfg.min_iter,
+        return_meta=True,
+    )[2]
+
+
 _ENTRY_POINTS = [
     pytest.param(_info_ctm, id="ctm"),
     pytest.param(_info_ctm_2site, id="ctm_2site"),
     pytest.param(_info_ctm_split, id="ctm_split"),
+    pytest.param(_info_ctm_tensor, id="ctm_tensor"),
 ]
 
 
@@ -95,3 +110,33 @@ def test_ctm_warmup_counts_toward_min_iter():
     )
     assert bool(info.converged)
     assert int(info.n_iter) == 8
+
+
+def test_ctm_tensor_default_min_iter_keeps_the_early_exit():
+    """``min_iter`` defaults to 1, so a caller that does not pass it keeps the
+    plain early exit: the stationary state certifies at the first comparison,
+    sweep 2."""
+    _env, _eps, info = ctm_tensor(
+        _wrap_as_dense_tensor(A), 1, max_iter=40, conv_tol=1e-8, return_meta=True
+    )
+    assert info.converged
+    assert info.n_iter == 2
+
+
+def test_ctm_tensor_min_iter_counts_the_warmup_against_the_callers_budget():
+    """The cap is ``min(min_iter, max_iter)`` with the caller's ``max_iter``,
+    and the QR warm-up sweeps count toward it.  Six warm-up sweeps leave four
+    in the loop; a cap taken after the warm-up, ``min(10, 4) = 4``, would
+    certify at sweep 7."""
+    _env, _eps, info = ctm_tensor(
+        _wrap_as_dense_tensor(A),
+        1,
+        max_iter=10,
+        conv_tol=1e-8,
+        projector_method="qr",
+        qr_warmup_steps=6,
+        min_iter=10,
+        return_meta=True,
+    )
+    assert info.converged
+    assert info.n_iter == 10
