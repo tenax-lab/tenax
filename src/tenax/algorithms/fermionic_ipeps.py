@@ -624,7 +624,9 @@ def fermionic_ctm(A, config):
 
     When *A* is a ``Tensor`` (DenseTensor or SymmetricTensor), uses the
     Tensor-protocol CTM (``ctm_tensor``) which avoids densification.
-    Otherwise falls back to the dense bosonic CTM.
+    Otherwise the raw array runs the same 2x2 recipe through
+    ``_ctm_via_2x2`` (what ``ctm()`` runs, without its ``DeprecationWarning``)
+    and comes back as a raw-array ``CTMEnvironment``.
 
     Args:
         A:      fPEPS site tensor (SymmetricTensor with lambdas absorbed).
@@ -645,14 +647,14 @@ def fermionic_ctm(A, config):
         return env
 
     from tenax.algorithms.ipeps_config import CTMConfig
-    from tenax.algorithms.ipeps_ctm_convergence import ctm
+    from tenax.algorithms.ipeps_ctm_convergence import _ctm_via_2x2
 
     ctm_cfg = CTMConfig(
         chi=config.ctm_chi,
         max_iter=config.ctm_max_iter,
         conv_tol=config.ctm_conv_tol,
     )
-    return ctm(A, ctm_cfg)
+    return _ctm_via_2x2(A, ctm_cfg)
 
 
 def compute_energy_fermionic_ctm(A, env, hamiltonian_gate):

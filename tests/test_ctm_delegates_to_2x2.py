@@ -27,6 +27,7 @@ from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv, initialize_ctm_tensor_env
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
+from tenax.algorithms.fermionic_ipeps import FPEPSConfig, fermionic_ctm
 from tenax.algorithms.ipeps_config import CTMConfig, CTMEnvironment
 from tenax.algorithms.ipeps_ctm_convergence import CTMConvergenceInfo, _ctm_via_2x2
 from tenax.algorithms.ipeps_rdm import compute_energy_ctm
@@ -315,3 +316,38 @@ def test_helper_emits_no_deprecation_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
         _ctm_via_2x2(ONES, CTMConfig(chi=1, max_iter=5))
+
+
+@pytest.mark.parametrize("chi", [12, 16])
+def test_fermionic_ctm_raw_branch_reproduces_onsager(chi):
+    """The raw branch returns the 2x2 environment as a ``CTMEnvironment``,
+    without ``ctm()``'s ``DeprecationWarning``.  It ran the old 1-site sweep
+    before, which missed C(1,0) by 7.6e-4 at chi=12 and 4.3e-4 at chi=16."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        env = fermionic_ctm(
+            jnp.asarray(ising_peps(0.2)),
+            FPEPSConfig(ctm_chi=chi, ctm_max_iter=500, ctm_conv_tol=1e-12),
+        )
+    assert isinstance(env, CTMEnvironment)
+    assert _c10_error(env, 0.2) < 1e-12
+
+
+def test_fermionic_ctm_raw_branch_keeps_ctmconfig_min_iter(monkeypatch):
+    """The raw branch builds a ``CTMConfig``, so it keeps ``min_iter=10``; a
+    direct ``ctm_tensor`` call would use ``min_iter=1``."""
+    import tenax.algorithms.ipeps_ctm_convergence as conv
+
+    seen = []
+
+    def spy(A, config, *, return_meta=False):
+        seen.append(config)
+        return "env"
+
+    monkeypatch.setattr(conv, "_ctm_via_2x2", spy)
+    out = fermionic_ctm(
+        ONES, FPEPSConfig(ctm_chi=1, ctm_max_iter=40, ctm_conv_tol=1e-8)
+    )
+    (cfg,) = seen
+    assert out == "env"
+    assert (cfg.chi, cfg.max_iter, cfg.conv_tol, cfg.min_iter) == (1, 40, 1e-8, 10)
