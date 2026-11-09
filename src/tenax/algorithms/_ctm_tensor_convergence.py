@@ -1016,10 +1016,11 @@ class CTMConvergenceInfo(NamedTuple):
     return arity cannot change.
 
     ``converged`` and ``n_iter`` come straight out of a ``lax.while_loop``
-    carry for :func:`ctm` / :func:`ctm_2site`, so they are **JAX arrays**, not
-    Python scalars.  That keeps the entry points jittable; call ``bool(...)``
-    / ``int(...)`` at the point of use.  :func:`ctm_split` runs a Python loop
-    and returns Python scalars.
+    carry for :func:`ctm_2site`, so they are **JAX arrays**, not Python
+    scalars.  That keeps it jittable; call ``bool(...)`` / ``int(...)`` at the
+    point of use.  :func:`ctm_split` and :func:`ctm_tensor` run a Python loop
+    and return Python scalars, and so does :func:`ctm`, which runs
+    :func:`ctm_tensor` since 0.9.3.
 
     Attributes:
         converged: True when the sweep met ``conv_tol`` and stopped early.

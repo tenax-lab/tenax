@@ -29,7 +29,7 @@ from tenax.algorithms._ctm_tensor_init import CTMTensorEnv, initialize_ctm_tenso
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
 from tenax.algorithms.fermionic_ipeps import FPEPSConfig, fermionic_ctm
 from tenax.algorithms.ipeps_config import CTMConfig, CTMEnvironment
-from tenax.algorithms.ipeps_ctm_convergence import CTMConvergenceInfo, _ctm_via_2x2
+from tenax.algorithms.ipeps_ctm_convergence import CTMConvergenceInfo, _ctm_via_2x2, ctm
 from tenax.algorithms.ipeps_rdm import compute_energy_ctm
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -46,7 +46,10 @@ ISING_CASES = [
 ]
 
 # Every entry point that must return the environment of the 2x2 recipe.
-ENTRY_POINTS = [pytest.param(_ctm_via_2x2, id="helper")]
+ENTRY_POINTS = [
+    pytest.param(_ctm_via_2x2, id="helper"),
+    pytest.param(ctm, id="ctm"),
+]
 
 
 def _c10_error(env, beta):
@@ -351,3 +354,67 @@ def test_fermionic_ctm_raw_branch_keeps_ctmconfig_min_iter(monkeypatch):
     (cfg,) = seen
     assert out == "env"
     assert (cfg.chi, cfg.max_iter, cfg.conv_tol, cfg.min_iter) == (1, 40, 1e-8, 10)
+
+
+def test_ctm_warns_that_it_is_deprecated():
+    """Exactly one warning, naming the replacement and the lost ``jax.jit``."""
+    with pytest.warns(DeprecationWarning, match="^ctm is deprecated") as record:
+        ctm(ONES, CTMConfig(chi=1, max_iter=5))
+    messages = [str(w.message) for w in record]
+    deprecations = [m for m in messages if m.startswith("ctm is deprecated")]
+    assert len(deprecations) == 1
+    assert "ctm_tensor" in deprecations[0]
+    assert "jax.jit" in deprecations[0]
+
+
+def test_ctm_rejects_initial_env():
+    """``ctm_tensor`` has no warm start, and a silent cold start would look the
+    same to a caller who asked for one."""
+    env = _ctm_via_2x2(ONES, CTMConfig(chi=1, max_iter=5))
+    with pytest.raises(ValueError, match="initial_env"):
+        ctm(ONES, CTMConfig(chi=1, max_iter=5), initial_env=env)
+
+
+@pytest.mark.parametrize("method", ["qr", "eigh"])
+def test_ctm_warns_that_projector_method_is_ignored(method):
+    """The 2x2 recipe always uses Fishman SVD: the environment is the one
+    ``"svd"`` gives, and the caller is told."""
+    A = _random_site()
+    with pytest.warns(UserWarning, match="projector_method"):
+        env = ctm(A, CTMConfig(chi=4, max_iter=5, projector_method=method))
+    ref = _ctm_via_2x2(A, CTMConfig(chi=4, max_iter=5))
+    for name in CTMEnvironment._fields:
+        np.testing.assert_array_equal(getattr(env, name), getattr(ref, name))
+
+
+def test_ctm_default_config_gives_no_user_warning():
+    """The ``projector_method`` warning fires only when it applies."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ctm(_random_site(), CTMConfig(chi=4, max_iter=5))
+    assert not [w for w in caught if "projector_method" in str(w.message)]
+
+
+def test_ctm_keeps_the_imaginary_part_of_a_complex_state():
+    """#842: complex site tensors keep working.  The edges of this state have
+    imaginary parts up to 0.57 (measured); a ``.real`` on the way would zero
+    them."""
+    key = jax.random.PRNGKey(0)
+    real = jax.random.normal(key, (2, 2, 2, 2, 2))
+    imag = jax.random.normal(jax.random.fold_in(key, 1), (2, 2, 2, 2, 2))
+    A = (real + 1j * imag).astype(jnp.complex128)
+    env = ctm(A, CTMConfig(chi=4, max_iter=6, conv_tol=1e-10))
+    assert jnp.iscomplexobj(env.T1)
+    edges = (env.T1, env.T2, env.T3, env.T4)
+    assert max(float(jnp.max(jnp.abs(t.imag))) for t in edges) > 1e-3
+
+
+def test_ctm_return_meta_matches_the_helper():
+    """``ctm()`` is the helper plus the warnings: same environment, same info."""
+    A = jnp.asarray(ising_peps(0.2))
+    cfg = CTMConfig(chi=8, max_iter=500, conv_tol=1e-12)
+    env, info = ctm(A, cfg, return_meta=True)
+    ref_env, ref_info = _ctm_via_2x2(A, cfg, return_meta=True)
+    assert info == ref_info
+    for name in CTMEnvironment._fields:
+        np.testing.assert_array_equal(getattr(env, name), getattr(ref_env, name))

@@ -4,7 +4,11 @@
 violating ``CTMConvergenceInfo``'s own invariant (``n_iter == max_iter`` when
 not converged).  ``ctm_tensor`` takes the same gate as a keyword-only
 ``min_iter`` (default 1, which keeps its plain early exit), so it runs the
-same cases.
+same cases.  Since 0.9.3 ``ctm`` runs ``ctm_tensor(recipe="2x2")`` with
+``projector_method="svd"``, so it runs no QR warm-up: its two warm-up tests
+went with it, and
+``test_ctm_tensor_min_iter_counts_the_warmup_against_the_callers_budget``
+pins the warm-up rule on ``ctm_tensor``.
 
 These are mechanism tests, not convergence tests: they run on a 1x1 product
 state whose corner spectrum is stationary after the first sweep, so ``diff`` is
@@ -83,39 +87,6 @@ def test_min_iter_is_capped_at_max_iter(info_fn):
     info = info_fn(CTMConfig(chi=1, max_iter=5, min_iter=30))
     assert bool(info.converged)
     assert int(info.n_iter) == 5  # min(30, 5)
-
-
-def test_ctm_counts_qr_warmup_in_n_iter():
-    """#925: warm-up sweeps count toward ``n_iter``.  With ``qr_warmup_steps=3,
-    max_iter=3`` the post-warm-up loop runs zero sweeps, but three real sweeps
-    happened -- ``n_iter`` must be 3 (was 0), satisfying ``n_iter == max_iter``
-    when not converged.
-    """
-    info = _info_ctm(
-        CTMConfig(
-            chi=1, max_iter=3, min_iter=1, projector_method="qr", qr_warmup_steps=3
-        )
-    )
-    assert int(info.n_iter) == 3
-    assert not bool(info.converged)
-
-
-def test_ctm_warmup_counts_toward_min_iter():
-    """#925/#976 together: with a warm-up, ``min_iter`` is measured from the
-    first sweep (warm-up included), so ``qr_warmup_steps=6`` + 2 post-warm-up
-    sweeps reports ``n_iter=8`` and stops there rather than doing 10 more.
-    """
-    info = _info_ctm(
-        CTMConfig(
-            chi=1,
-            max_iter=40,
-            min_iter=8,
-            projector_method="qr",
-            qr_warmup_steps=6,
-        )
-    )
-    assert bool(info.converged)
-    assert int(info.n_iter) == 8
 
 
 def test_ctm_tensor_default_min_iter_keeps_the_early_exit():

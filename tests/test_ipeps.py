@@ -173,38 +173,11 @@ class TestCTM:
         env = ctm(small_peps_tensor, config)
         assert isinstance(env, CTMEnvironment)
 
-    def test_ctm_with_initial_env(self, small_peps_tensor):
-        """CTM should accept an initial environment and warm-start."""
-        config = CTMConfig(chi=4, max_iter=3)
-        env1 = ctm(small_peps_tensor, config)
-        # Warm-start from env1
-        env2 = ctm(small_peps_tensor, config, initial_env=env1)
-        assert isinstance(env2, CTMEnvironment)
-
     def test_ctm_no_renormalize(self, small_peps_tensor):
         """CTM without renormalization should still run."""
         config = CTMConfig(chi=4, max_iter=5, renormalize=False)
         env = ctm(small_peps_tensor, config)
         assert isinstance(env, CTMEnvironment)
-
-    def test_ctm_edge_tensors_change(self, small_peps_tensor):
-        """After a full CTM run, edge tensors should differ from initialization."""
-        config = CTMConfig(chi=4, max_iter=10)
-        from tenax.algorithms.ipeps_ctm import _build_double_layer, _initialize_ctm_env
-
-        a = _build_double_layer(small_peps_tensor)
-        D = small_peps_tensor.shape[0]
-        a = a.reshape(D**2, D**2, D**2, D**2)
-        env0 = _initialize_ctm_env(a, config.chi)
-        env = ctm(small_peps_tensor, config, initial_env=env0)
-        # At least one edge tensor should have changed
-        changed = not (
-            jnp.allclose(env0.T1, env.T1, atol=1e-10)
-            and jnp.allclose(env0.T2, env.T2, atol=1e-10)
-            and jnp.allclose(env0.T3, env.T3, atol=1e-10)
-            and jnp.allclose(env0.T4, env.T4, atol=1e-10)
-        )
-        assert changed, "Edge tensors did not change during CTM"
 
 
 class TestComputeEnergyCTM:
@@ -545,49 +518,19 @@ class TestIPEPS2Site:
 
 
 class TestQRProjectors:
-    """Tests for QR-based CTMRG projectors (Phase 1)."""
+    """``CTMConfig``'s QR projector option.
 
-    @pytest.fixture
-    def heisenberg_gate(self):
-        d = 2
-        Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
-        Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])
-        Sm = jnp.array([[0.0, 0.0], [1.0, 0.0]])
-        H = jnp.kron(Sz, Sz) + 0.5 * jnp.kron(Sp, Sm) + 0.5 * jnp.kron(Sm, Sp)
-        return H.reshape(d, d, d, d)
+    ``ctm()`` ran QR sweeps here until 0.9.3.  It now runs the 2x2 recipe,
+    which always uses Fishman SVD and ignores ``projector_method`` with a
+    ``UserWarning`` (``tests/test_ctm_delegates_to_2x2.py``), so only the
+    config default is left to pin here.
+    """
 
     def test_qr_backward_compat(self):
         """CTMConfig() defaults to svd (Fishman)."""
         cfg = CTMConfig()
         assert cfg.projector_method == "svd"
         assert cfg.qr_warmup_steps == 3
-
-    def test_qr_ctm_converges(self):
-        """QR CTM should produce finite environment tensors."""
-        key = jax.random.PRNGKey(42)
-        D, d = 2, 2
-        A = jax.random.normal(key, (D, D, D, D, d))
-        A = A / (jnp.linalg.norm(A) + 1e-10)
-        config = CTMConfig(chi=8, max_iter=20, projector_method="qr", qr_warmup_steps=3)
-        env = ctm(A, config)
-        assert isinstance(env, CTMEnvironment)
-        for t in env:
-            assert jnp.all(jnp.isfinite(t)), "QR CTM produced non-finite tensors"
-
-    def test_qr_energy_is_finite(self, heisenberg_gate):
-        """QR projector should produce a finite energy from CTM."""
-        key = jax.random.PRNGKey(7)
-        D, d = 2, 2
-        A = jax.random.normal(key, (D, D, D, D, d))
-        A = A / (jnp.linalg.norm(A) + 1e-10)
-
-        config_qr = CTMConfig(
-            chi=8, max_iter=100, projector_method="qr", qr_warmup_steps=5
-        )
-        env_qr = ctm(A, config_qr)
-        E_qr = compute_energy_ctm(A, env_qr, heisenberg_gate, d)
-
-        assert jnp.isfinite(E_qr), f"QR energy is not finite: {float(E_qr)}"
 
 
 class TestOptimizeGsAd2Site:

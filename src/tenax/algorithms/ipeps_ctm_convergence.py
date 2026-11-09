@@ -17,6 +17,8 @@ __all__ = [
 ]
 
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 
@@ -102,129 +104,65 @@ def ctm(
     *,
     return_meta: bool = False,
 ) -> CTMEnvironment | tuple[CTMEnvironment, CTMConvergenceInfo]:
-    """Compute CTM environment for a PEPS with 1x1 unit cell.
+    """Compute the CTM environment of a 1x1 PEPS with the 2x2 recipe.
 
-    Runs the CTM algorithm (Corboz/Orus scheme) until convergence.
-    The input A is the double-layer tensor A * A^* combined, or the
-    single-layer A from which the doubled tensor is computed.
-
-    The iteration loop uses ``jax.lax.while_loop`` so that the entire
-    convergence procedure can be JIT-compiled without host sync.
+    .. deprecated:: 0.9.3
+        Use :func:`ctm_tensor`.  ``ctm()`` now runs ``ctm_tensor(recipe="2x2")``
+        and returns its environment as the raw-array :class:`CTMEnvironment`
+        that ``ctm()`` always returned.  The 1-site sweep it ran before reached
+        no fixed point: on the Ising PEPS at beta=0.2 it stopped at chi=12, 16
+        and 32 without converging, with C(1,0) errors of 7.6e-4, 4.3e-4 and
+        4.3e-4, where the 2x2 recipe converges with errors below 4e-16.  So
+        environments from ``ctm()`` changed in 0.9.3, and ``ctm()`` no longer
+        runs under ``jax.jit``, because ``ctm_tensor`` is a Python loop.
 
     Args:
-        A:           Site tensor (single layer) of PEPS.
-        config:      CTMConfig.
-        initial_env: Optional starting environment for warm start.
+        A:           Raw site array with 5 legs ``(u, d, l, r, s)`` and four
+                     virtual legs of one dimension, or a ``DenseTensor``.  Any
+                     other shape raises ``ValueError``.  A ``SymmetricTensor``
+                     raises ``TypeError``: call :func:`ctm_tensor`, which keeps
+                     the blocks.
+        config:      ``chi``, ``max_iter``, ``conv_tol``, ``renormalize`` and
+                     ``min_iter`` apply.  A ``projector_method`` other than
+                     ``"svd"`` is ignored with a ``UserWarning``, because the
+                     2x2 recipe always uses Fishman SVD; ``qr_warmup_steps`` is
+                     ignored too.
+        initial_env: Must be ``None``.  ``ctm_tensor`` has no warm start, so
+                     anything else raises ``ValueError`` rather than start cold
+                     in silence.
         return_meta: When True, also return a :class:`CTMConvergenceInfo`
                      saying whether the loop converged or exhausted
-                     ``max_iter`` (#839).  Keyword-only and off by default so
-                     the return arity of this public entry point is unchanged.
+                     ``max_iter`` (#839).  Its fields are Python scalars.
+                     Keyword-only and off by default so the return arity of
+                     this public entry point is unchanged.
 
     Returns:
         The CTMEnvironment, or ``(env, info)`` when ``return_meta=True``.
         **The environment is not necessarily converged** -- that is what
         ``info`` is for.
     """
-    chi = config.chi
-
-    # Build the double-layer tensor a = sum_s A[s,...] * conj(A[s,...])
-    # For a simple 1x1 cell: a[u,d,l,r, U,D,L,R] = sum_s A[u,d,l,r,s]*A*[U,D,L,R,s]
-    # The physical index is traced over.
-    a = _build_double_layer(A)  # shape (D, D, D, D, D, D, D, D)
-    # Reshape to (D^2, D^2, D^2, D^2) for CTM
-    if a.ndim == 8:
-        D_phys = a.shape[0]
-        a = a.reshape(D_phys**2, D_phys**2, D_phys**2, D_phys**2)
-    elif a.ndim == 4:
-        pass  # already (D^2, D^2, D^2, D^2)
-
-    # Initialize environment tensors
-    if initial_env is not None:
-        env = initial_env
-    else:
-        env = _initialize_ctm_env(a, chi)
-
-    max_iter = config.max_iter
-    conv_tol = config.conv_tol
-    # Honor ``min_iter``, but never require more sweeps than the budget allows:
-    # ``min(min_iter, max_iter)`` keeps a small-``max_iter`` config convergeable
-    # rather than silently forcing ``converged=False`` (#976).
-    min_iter = min(config.min_iter, max_iter)
-    renormalize = config.renormalize
-    projector_method = config.projector_method
-
-    # QR warm-up: run a few eigh iterations before switching to QR.  These
-    # sweeps count toward both ``n_iter`` (#925) and ``min_iter`` (#976): they
-    # really run and really move the returned environment, so excluding them
-    # reported a budget the caller never passed and stopped short of the
-    # requested minimum.  ``ctm_tensor`` already counts them (#920); this is the
-    # third and last legacy producer to match the shared invariant.
-    warmup_steps = 0
-    if projector_method == "qr" and config.qr_warmup_steps > 0:
-        warmup_steps = min(config.qr_warmup_steps, max_iter)
-        for _ in range(warmup_steps):
-            env = _ctm_sweep(env, a, chi, renormalize, "eigh")
-        max_iter = max_iter - warmup_steps
-
-    # Initial singular values (zeros — first iteration never converges).
-    # Seeded with the REAL dtype, not ``env.C1.dtype``: ``body_fn`` assigns
-    # ``_dense_svd(..., compute_uv=False)``, which is always real, and
-    # ``lax.while_loop`` requires an invariant carry type.  On a complex site
-    # tensor the old seed made carry[1] complex128 going in and float64 coming
-    # out, so ``ctm()`` raised outright rather than returning a wrong answer.
-    # Real states are unaffected — there ``C1.dtype`` is already real — which
-    # is why this went unnoticed.
-    #
-    # The same seed exists in ``ctm_2site`` below, where it was *not* fixed
-    # here and had to be fixed separately (#842).  ``ctm_split`` is a Python
-    # loop seeded with ``prev_sv = None``, so it never had the constraint.
-    # Any new ``lax.while_loop`` entry point in this module needs the same
-    # care.
-    _sv_dtype = jnp.zeros((), dtype=env.C1.dtype).real.dtype
-    prev_sv = jnp.zeros(min(chi, env.C1.shape[0]), dtype=_sv_dtype)
-    # A rank-1 corner is a collapse only if a higher rank was on offer; at
-    # D=1 or chi=1 it is the exact fixed point (#903 review, P1).  Static, so
-    # it is fine to close over inside the traced body below.
-    max_rank = _forced_corner_rank(_max_virtual_bond_dim(a))
-
-    # Carry: (env, prev_sv, iteration, converged, diff)
-    # ``diff`` rides along purely so it can be reported (#839); ``converged``
-    # is still derived from it inside the body, so the loop's behaviour is
-    # unchanged.  Seeded at inf: before two sweeps have run there is no
-    # comparison to report, and inf never satisfies ``< conv_tol``.
-    init_carry = (
-        env,
-        prev_sv,
-        jnp.array(0, dtype=jnp.int32),
-        jnp.bool_(False),
-        jnp.array(jnp.inf, dtype=_sv_dtype),
+    warnings.warn(
+        "ctm is deprecated and will be removed in a later release: call "
+        "ctm_tensor(A, chi, ...) on a DenseTensor or SymmetricTensor site tensor "
+        "with legs (u, d, l, r, phys). ctm now runs ctm_tensor(recipe='2x2'), so "
+        "its environments changed in 0.9.3 (the old 1-site sweep reached no "
+        "fixed point), and it no longer runs under jax.jit.",
+        DeprecationWarning,
+        stacklevel=2,
     )
-
-    def cond_fn(carry):
-        _, _, iteration, converged, _ = carry
-        return ~converged & (iteration < max_iter)
-
-    def body_fn(carry):
-        env_i, prev_sv_i, iteration, _, _ = carry
-        env_i = _ctm_sweep(env_i, a, chi, renormalize, projector_method)
-        current_sv = _dense_svd(env_i.C1, compute_uv=False)
-        diff = _ctm_sv_diff(current_sv, prev_sv_i, max_rank=max_rank)
-        # Honor ``min_iter`` before certifying convergence (#976); the warm-up
-        # sweeps already run count toward it, matching the shared Tensor path.
-        # ``prev_sv`` keeps updating through the minimum window because the body
-        # always runs -- only ``converged`` is gated.
-        total_sweeps = iteration + 1 + warmup_steps
-        converged = (diff < conv_tol) & (total_sweeps >= min_iter)
-        return (env_i, current_sv, iteration + 1, converged, diff)
-
-    env, _, n_iter, converged, diff = jax.lax.while_loop(cond_fn, body_fn, init_carry)
-    if return_meta:
-        # ``n_iter`` counts the warm-up sweeps too, so the field's invariant
-        # (``n_iter == max_iter`` exactly when not converged) holds (#925).
-        return env, CTMConvergenceInfo(
-            converged=converged, n_iter=n_iter + warmup_steps, diff=diff
+    if initial_env is not None:
+        raise ValueError(
+            "ctm() no longer takes initial_env: it runs ctm_tensor(recipe='2x2'), "
+            "which has no warm start. Leave initial_env as None."
         )
-    return env
+    if config.projector_method != "svd":
+        warnings.warn(
+            f"ctm() ignores projector_method={config.projector_method!r}: the 2x2 "
+            "recipe always uses Fishman SVD projectors.",
+            UserWarning,
+            stacklevel=2,
+        )
+    return _ctm_via_2x2(A, config, return_meta=return_meta)
 
 
 def _ctm_via_2x2(
