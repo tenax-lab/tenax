@@ -1,8 +1,8 @@
 """Raw-array views of CTM environments for the dense-only code paths.
 
-``optimize_gs_ad`` and ``ctm_tensor`` return Tensor-protocol objects: a
-``DenseTensor`` site tensor and a ``CTMTensorEnv`` whose 8 fields are
-``DenseTensor``s.  The excitation contractions and the raw-array result of
+``optimize_gs_ad`` returns a ``DenseTensor`` site tensor and a ``CTMTensorEnv``
+whose 8 fields are ``DenseTensor``s, and ``ctm_tensor`` returns the
+``CTMTensorEnv``.  The excitation contractions and the raw-array result of
 ``ctm()`` use plain ``jax.Array``s and a raw-array ``CTMEnvironment``.  The
 fields of a ``CTMTensorEnv`` share the leg and flow convention of the raw
 ``CTMEnvironment`` when each stores its legs in the order ``CTMTensorEnv``

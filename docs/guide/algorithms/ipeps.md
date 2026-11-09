@@ -151,12 +151,35 @@ The `CTMEnvironment` named tuple contains the 8 environment tensors:
 
 ## Using CTM standalone
 
-`ctm_tensor()` computes the environment of an existing site tensor `A`: a
-`DenseTensor` or `SymmetricTensor` with 5 legs `(u, d, l, r, phys)`, such as
-the tensors `ipeps()` and `optimize_gs_ad()` return. A raw `(D, D, D, D, d)`
-array becomes one with `DenseTensor(data, indices)`, where the five
-`TensorIndex` legs are labelled `u`, `d`, `l`, `r`, `phys` with flows `OUT`,
-`IN`, `OUT`, `IN`, `IN`.
+`ctm_tensor()` computes the environment of one site tensor `A` repeated on
+every site: a `DenseTensor` or `SymmetricTensor` with 5 legs
+`(u, d, l, r, phys)`, such as the tensor that `optimize_gs_ad()` returns with
+`unit_cell="1x1"`. A checkerboard pair `(A, B)` needs
+`ctm_tensor_2site(A, B, chi, ...)` instead. `ipeps()` always returns such a
+pair, and so does `optimize_gs_ad()` with `unit_cell="2site"`. `ctm_tensor` on
+`A` alone measures the uniform state of `A`, and it raises no error. A raw
+`(D, D, D, D, d)` array becomes one with `DenseTensor(data, indices)`, where
+the five `TensorIndex` legs are labelled `u`, `d`, `l`, `r`, `phys` with flows
+`OUT`, `IN`, `OUT`, `IN`, `IN`.
+
+```python
+import numpy as np
+from tenax import DenseTensor, FlowDirection, TensorIndex, U1Symmetry
+
+D, d = data.shape[0], data.shape[4]
+sym = U1Symmetry()
+# A dense tensor carries no symmetry, so every charge is zero.
+charges = np.zeros(D, dtype=np.int32)
+phys_charges = np.zeros(d, dtype=np.int32)
+indices = (
+    TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="u"),
+    TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="d"),
+    TensorIndex.from_charges(sym, charges.copy(), FlowDirection.OUT, label="l"),
+    TensorIndex.from_charges(sym, charges.copy(), FlowDirection.IN, label="r"),
+    TensorIndex.from_charges(sym, phys_charges.copy(), FlowDirection.IN, label="phys"),
+)
+A = DenseTensor(data, indices)
+```
 
 ```python
 from tenax import compute_energy_ctm_tensor, ctm_tensor
@@ -171,10 +194,11 @@ E = compute_energy_ctm_tensor(A, env, hamiltonian_gate, d=2)
 `ctm()` is deprecated since 0.9.3 and emits a `DeprecationWarning`. It now runs
 `ctm_tensor(recipe="2x2")` and returns the raw-array `CTMEnvironment` it always
 returned, so its environments changed in 0.9.3. The 1-site sweep it ran before
-reached no fixed point: on the Ising PEPS at beta=0.2, where C(1,0) has
+often did not converge: on the Ising PEPS at beta=0.2, where C(1,0) has
 Onsager's exact value, it stopped at chi=12, 16 and 32 without converging, with
 C(1,0) errors of 7.6e-4, 4.3e-4 and 4.3e-4. The 2x2 recipe converges at the
-same chi with errors below 4e-16. Three behaviours differ from before:
+same chi and agrees with Onsager's exact value to roundoff (below 1e-15). Three
+behaviours differ from before:
 
 - `ctm()` does not run under `jax.jit`, because `ctm_tensor` is a Python loop.
 - `initial_env` raises `ValueError`, because `ctm_tensor` has no warm start.

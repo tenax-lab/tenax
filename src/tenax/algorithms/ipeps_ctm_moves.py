@@ -1,4 +1,4 @@
-"""CTM algorithm for iPEPS — projector dispatch and directional moves."""
+"""CTM algorithm for iPEPS — the eigh projector move and the 2-site and split directional moves."""
 
 from __future__ import annotations
 

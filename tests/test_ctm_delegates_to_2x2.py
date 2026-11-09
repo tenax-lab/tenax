@@ -1,6 +1,6 @@
 """``ctm()`` runs ``ctm_tensor(recipe="2x2")`` since 0.9.3.
 
-The 1-site sweep that ``ctm()`` ran before reached no fixed point.  The oracle
+The 1-site sweep that ``ctm()`` ran before often did not converge.  The oracle
 here is the Ising PEPS: its norm is the classical 2D Ising partition function,
 so C(1,0) has Onsager's exact value.  At beta=0.2 the old sweep stopped at
 chi=12, 16 and 32 without converging, with C(1,0) errors of 7.6e-4, 4.3e-4 and

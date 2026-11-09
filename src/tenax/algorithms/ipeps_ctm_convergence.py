@@ -86,12 +86,13 @@ def ctm(
     .. deprecated:: 0.9.3
         Use :func:`ctm_tensor`.  ``ctm()`` now runs ``ctm_tensor(recipe="2x2")``
         and returns its environment as the raw-array :class:`CTMEnvironment`
-        that ``ctm()`` always returned.  The 1-site sweep it ran before reached
-        no fixed point: on the Ising PEPS at beta=0.2 it stopped at chi=12, 16
-        and 32 without converging, with C(1,0) errors of 7.6e-4, 4.3e-4 and
-        4.3e-4, where the 2x2 recipe converges with errors below 4e-16.  So
-        environments from ``ctm()`` changed in 0.9.3, and ``ctm()`` no longer
-        runs under ``jax.jit``, because ``ctm_tensor`` is a Python loop.
+        that ``ctm()`` always returned.  The 1-site sweep it ran before often
+        did not converge: on the Ising PEPS at beta=0.2 it stopped at chi=12,
+        16 and 32 without converging, with C(1,0) errors of 7.6e-4, 4.3e-4 and
+        4.3e-4, where the 2x2 recipe converges and agrees with Onsager's exact
+        value to roundoff (below 1e-15).  So environments from ``ctm()``
+        changed in 0.9.3, and ``ctm()`` no longer runs under ``jax.jit``,
+        because ``ctm_tensor`` is a Python loop.
 
     Args:
         A:           Raw site array with 5 legs ``(u, d, l, r, s)`` and four
@@ -122,8 +123,8 @@ def ctm(
         "ctm is deprecated and will be removed in a later release: call "
         "ctm_tensor(A, chi, ...) on a DenseTensor or SymmetricTensor site tensor "
         "with legs (u, d, l, r, phys). ctm now runs ctm_tensor(recipe='2x2'), so "
-        "its environments changed in 0.9.3 (the old 1-site sweep reached no "
-        "fixed point), and it no longer runs under jax.jit.",
+        "its environments changed in 0.9.3 (the old 1-site sweep often did not "
+        "converge), and it no longer runs under jax.jit.",
         DeprecationWarning,
         stacklevel=2,
     )
