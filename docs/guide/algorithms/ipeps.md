@@ -158,9 +158,9 @@ every site: a `DenseTensor` or `SymmetricTensor` with 5 legs
 `ctm_tensor_2site(A, B, chi, ...)` instead. `ipeps()` always returns such a
 pair, and so does `optimize_gs_ad()` with `unit_cell="2site"`. `ctm_tensor` on
 `A` alone measures the uniform state of `A`, and it raises no error. A raw
-`(D, D, D, D, d)` array becomes one with `DenseTensor(data, indices)`, where
-the five `TensorIndex` legs are labelled `u`, `d`, `l`, `r`, `phys` with flows
-`OUT`, `IN`, `OUT`, `IN`, `IN`.
+`(D, D, D, D, d)` array `data` becomes a site tensor with
+`DenseTensor(data, indices)`, where the five `TensorIndex` legs are labelled
+`u`, `d`, `l`, `r`, `phys` with flows `OUT`, `IN`, `OUT`, `IN`, `IN`:
 
 ```python
 import numpy as np
