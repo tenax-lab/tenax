@@ -272,6 +272,48 @@ def _truncated_svd_ad_fwd(
     return (U, s_trunc, Vh), residuals
 
 
+def _split_core(
+    s_k: jax.Array,
+    s_max: jax.Array,
+    ds: jax.Array,
+    UtdU_anti: jax.Array,
+    VtdV_anti: jax.Array,
+    eps: float,
+) -> jax.Array:
+    """Terms 1, 2 and 3 of the SVD adjoint, with only the common rotation broadened.
+
+    With ``F_ij = 1 / (s_j^2 - s_i^2)``, ``J = UtdU_anti`` and ``K = VtdV_anti``::
+
+        F_ij (J_ij s_j + s_i K_ij) = (J + K)_ij / (2 (s_j - s_i))
+                                     + (J - K)_ij / (2 (s_j + s_i))
+
+    ``J + K`` rotates ``u`` and ``v`` together.  This is the gauge freedom of a
+    degenerate pair, and the only part with a pole.  ``J - K`` rotates them against
+    each other, and its denominator is regular.  A Lorentzian on ``s_j^2 - s_i^2``
+    damps both, so a pair with its squared gap near the width loses part of a
+    derivative that exists.  This form broadens each denominator apart, by ``eps``
+    in units of ``s_max``; a pair of zero modes gives ``0 / eps^2 = 0`` in both.
+    The same split is in peps-torch (``SVDGESDD_legacy``).
+
+    At an exact pair the common rotation is 0 / 0, and the SVD picks the basis of the
+    pair from roundoff.  In the singular basis, the matrix gradient ``X`` has
+    ``X_ii - X_jj`` and ``X_ij + X_ji`` as two components of one traceless block, so
+    ``ds`` takes the same damping: a mean over the pair, with the weight that scales
+    the pair's difference by the Lorentzian on the gap.  A block scaled as a whole does
+    not depend on the basis of the pair, at any gap.
+    """
+    s_max = jnp.maximum(s_max, jnp.finfo(s_k.dtype).tiny)
+    minus = (s_k[None, :] - s_k[:, None]) / s_max
+    plus = (s_k[None, :] + s_k[:, None]) / s_max
+    off_diagonal = 1.0 - jnp.eye(s_k.shape[0], dtype=s_k.dtype)
+    common = minus / (minus**2 + eps**2) / s_max
+    relative = off_diagonal * plus / (plus**2 + eps**2) / s_max
+    weight = eps**2 / (2.0 * minus**2 + eps**2)
+    mean = (weight @ ds) / jnp.sum(weight, axis=1)
+    rotation = common * (UtdU_anti + VtdV_anti) + relative * (UtdU_anti - VtdV_anti)
+    return jnp.diag(mean) + 0.5 * rotation
+
+
 def _svd_sector_backward(
     U: jax.Array,
     s: jax.Array,
@@ -280,6 +322,7 @@ def _svd_sector_backward(
     ds: jax.Array,
     dVh: jax.Array,
     eps: float = 1e-12,
+    split_eps: float | None = None,
 ) -> jax.Array:
     """Lorentzian-regularized SVD backward for one dense matrix sector.
 
@@ -300,6 +343,9 @@ def _svd_sector_backward(
         dVh: Gradient w.r.t. truncated Vh, shape ``(k, n)``.
         eps: Lorentzian broadening width, RELATIVE to ``s[0]**2`` (the
              F-matrix is built from squared singular values).
+        split_eps: If given, terms 1 to 3 use :func:`_split_core` with this width,
+             RELATIVE to ``s[0]``, in place of the Lorentzian F-matrix.  ``None``
+             keeps the F-matrix.
 
     Returns:
         dM: Gradient w.r.t. the input matrix, shape ``(m, n)``.
@@ -404,11 +450,12 @@ def _svd_sector_backward(
     # the zero-gap diagonal into 0/0 = NaN that ``diag`` subtraction cannot
     # remove.  ``scale`` is floored at the dtype's ``tiny`` so an all-zero
     # sector gives F = 0 rather than 0/0.
-    s2 = s_k**2
-    scale = jnp.maximum(s[0] ** 2, jnp.finfo(s2.dtype).tiny)
-    diff = (s2[None, :] - s2[:, None]) / scale
-    F = diff / (diff**2 + eps**2) / scale
-    F = F - jnp.diag(jnp.diag(F))
+    if split_eps is None:
+        s2 = s_k**2
+        scale = jnp.maximum(s[0] ** 2, jnp.finfo(s2.dtype).tiny)
+        diff = (s2[None, :] - s2[:, None]) / scale
+        F = diff / (diff**2 + eps**2) / scale
+        F = F - jnp.diag(jnp.diag(F))
 
     # Antisymmetric parts of projected cotangents.  These are the FULL
     # `J - J^H`, not `(J - J^H)/2`: the 1/2 belongs to the symmetric/
@@ -436,16 +483,21 @@ def _svd_sector_backward(
     Vh_k = Vh[:k, :]
     dM = jnp.zeros((m, n), dtype=U.dtype)
 
-    # 1. Diagonal part from ds
-    dM = dM + U_k @ jnp.diag(ds) @ Vh_k
+    if split_eps is None:
+        # 1. Diagonal part from ds
+        dM = dM + U_k @ jnp.diag(ds) @ Vh_k
 
-    # 2. Off-diagonal from dU.  Spans the full spectrum, so this now carries
-    #    the kept/discarded coupling exactly (it used to be approximated in
-    #    term 4 -- see the padding note above, #752).
-    dM = dM + U_k @ (F * UtdU_anti) @ jnp.diag(s_k) @ Vh_k
+        # 2. Off-diagonal from dU.  Spans the full spectrum, so this now carries
+        #    the kept/discarded coupling exactly (it used to be approximated in
+        #    term 4 -- see the padding note above, #752).
+        dM = dM + U_k @ (F * UtdU_anti) @ jnp.diag(s_k) @ Vh_k
 
-    # 3. Off-diagonal from dVh (same, for the right factors)
-    dM = dM + U_k @ jnp.diag(s_k) @ (F * VtdV_anti) @ Vh_k
+        # 3. Off-diagonal from dVh (same, for the right factors)
+        dM = dM + U_k @ jnp.diag(s_k) @ (F * VtdV_anti) @ Vh_k
+    else:
+        # 1. to 3. together, with the same kept/discarded coupling.
+        core = _split_core(s_k, s[0], ds, UtdU_anti, VtdV_anti, split_eps)
+        dM = dM + U_k @ core @ Vh_k
 
     # 4. Null-space contribution from dU (non-square input only)
     dM = dM + proj_U_perp @ dU @ jnp.diag(s_inv) @ Vh_k

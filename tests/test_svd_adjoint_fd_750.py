@@ -52,6 +52,7 @@ jax.config.update("jax_enable_x64", True)
 
 from tenax.algorithms._ad_primitives import (
     _fix_svd_signs,
+    _svd_sector_backward,
     regularized_eigh,
     regularized_svd,
     truncated_svd_ad,
@@ -433,7 +434,8 @@ def test_eigh_eigenvalue_gradient_matches_finite_differences(complex_):
 # ``W`` -- an analytic reference, no finite differences needed.  Both kernels
 # that ship this adjoint are checked: ``truncated_svd_ad`` (every traced
 # symmetric SVD, per charge sector) and ``_regularized_dense_svd`` (the dense
-# 2x2 projector under ``projector_backward="flow"``).
+# 2x2 projector under ``projector_backward="flow"``), and ``_split_dense_svd``,
+# the same projector in compute_spectrum's sweep (section 6).
 
 
 def _reconstruction_error(svd_fn, svals, rng, complex_=False):
@@ -456,15 +458,22 @@ def _reconstruction_error(svd_fn, svals, rng, complex_=False):
 
 
 def _svd_kernels():
-    from tenax.algorithms._ctm_tensor_projector_2x2 import _regularized_dense_svd
+    from tenax.algorithms._ctm_tensor_projector_2x2 import (
+        _regularized_dense_svd,
+        _split_dense_svd,
+    )
 
     return {
         "truncated_svd_ad": lambda A: truncated_svd_ad(A, A.shape[0]),
         "regularized_dense_svd": _regularized_dense_svd,
+        "split_dense_svd": _split_dense_svd,
     }
 
 
-@pytest.mark.parametrize("kernel", ["truncated_svd_ad", "regularized_dense_svd"])
+_KERNELS = ("truncated_svd_ad", "regularized_dense_svd", "split_dense_svd")
+
+
+@pytest.mark.parametrize("kernel", _KERNELS)
 @pytest.mark.parametrize("complex_", [False, True], ids=["real", "complex"])
 def test_svd_adjoint_is_independent_of_the_matrix_scale(kernel, complex_):
     """The Lorentzian width must be RELATIVE to the spectrum, not absolute.
@@ -497,7 +506,7 @@ def test_svd_adjoint_is_independent_of_the_matrix_scale(kernel, complex_):
         )
 
 
-@pytest.mark.parametrize("kernel", ["truncated_svd_ad", "regularized_dense_svd"])
+@pytest.mark.parametrize("kernel", _KERNELS)
 def test_svd_adjoint_keeps_the_live_to_null_coupling(kernel):
     """A kept-but-zero mode must not cut the live modes off from the null space.
 
@@ -518,7 +527,7 @@ def test_svd_adjoint_keeps_the_live_to_null_coupling(kernel):
     assert err < 1e-10, f"{kernel}: rank-(n-1) reconstruction gradient off by {err:.2e}"
 
 
-@pytest.mark.parametrize("kernel", ["truncated_svd_ad", "regularized_dense_svd"])
+@pytest.mark.parametrize("kernel", _KERNELS)
 def test_svd_adjoint_is_finite_on_a_small_float32_sector(kernel):
     """The relative width must not underflow in float32.
 
@@ -549,3 +558,177 @@ def test_svd_adjoint_is_finite_on_a_small_float32_sector(kernel):
     # The SVD round trip is the identity, so the gradient is W itself.
     err = float(np.linalg.norm(g - W) / np.linalg.norm(W))
     assert err < 1e-3, f"{kernel}: float32 reconstruction gradient off by {err:.2e}"
+
+
+# ---------------------------------------------------------------------------
+# 6. The split backward of compute_spectrum's sweep: a close pair keeps its
+#    relative rotation, and only the common rotation is broadened.
+# ---------------------------------------------------------------------------
+#
+# For the reconstruction loss the backward has a closed form.  With ``X = U^T W V``
+# the exact answer is ``U^T g V = X``.  The Lorentzian scales each off-diagonal
+# entry by ``d^2 / (d^2 + eps^2)``, ``d = (s_j^2 - s_i^2) / s_0^2``.  The split form
+# scales the symmetric part ``X_ij + X_ji`` (common rotation of u and v) and the
+# antisymmetric part ``X_ij - X_ji`` (relative rotation) apart, by the same function
+# of ``(s_j - s_i) / s_0`` and of ``(s_j + s_i) / s_0``.  ``X_ii - X_jj`` and
+# ``X_ij + X_ji`` are two components of one traceless block, so the diagonal is
+# averaged over a pair with the complement of that function as the weight.
+
+
+def _pair_spectrum(gap):
+    return np.array([1.0, 0.03 + gap / 2, 0.03 - gap / 2, 1e-3, 1e-4])
+
+
+def _gradient_in_the_singular_basis(svd_fn, svals):
+    """``(U^T g V, U^T W V, s)`` of the reconstruction gradient of ``svd_fn``."""
+    rng = _rng(41)
+    n = len(svals)
+    Ug, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    Vg, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    M = Ug @ np.diag(svals) @ Vg.T
+    W = rng.standard_normal((n, n))
+
+    def loss(A):
+        U, s, Vh = svd_fn(A)
+        return jnp.sum(W * ((U * s) @ Vh))
+
+    g = np.asarray(jax.grad(loss)(jnp.asarray(M)))
+    U, s, Vh = (np.asarray(factor) for factor in svd_fn(jnp.asarray(M)))
+    return U.T @ g @ Vh.T, U.T @ W @ Vh.T, s
+
+
+def _lorentzian(x, width):
+    return x**2 / (x**2 + width**2)
+
+
+# Squared gap at the Lorentzian width, then a gap at the split width, then an exact pair.
+_PAIR_GAPS = [1e-12 / 0.06, 1e-12, 0.0]
+
+
+@pytest.mark.parametrize("gap", _PAIR_GAPS)
+def test_flow_backward_scales_a_close_pair_by_the_lorentzian(gap):
+    """Ground-state gradients go through this form and must not move with the split."""
+    from tenax.algorithms._ctm_tensor_projector_2x2 import _regularized_dense_svd
+
+    got, X, s = _gradient_in_the_singular_basis(
+        _regularized_dense_svd, _pair_spectrum(gap)
+    )
+    d = (s[None, :] ** 2 - s[:, None] ** 2) / s[0] ** 2
+    expected = _lorentzian(d, 1e-12) * X
+    np.fill_diagonal(expected, np.diag(X))
+    assert np.abs(got - expected).max() < 1e-3
+
+
+@pytest.mark.parametrize("gap", _PAIR_GAPS)
+def test_split_backward_damps_only_the_common_rotation(gap):
+    """The relative rotation of a pair is regular; only the common one has a pole."""
+    from tenax.algorithms._ctm_tensor_projector_2x2 import _split_dense_svd
+
+    got, X, s = _gradient_in_the_singular_basis(_split_dense_svd, _pair_spectrum(gap))
+    common = _lorentzian((s[None, :] - s[:, None]) / s[0], 1e-12)
+    relative = _lorentzian((s[None, :] + s[:, None]) / s[0], 1e-12)
+    expected = 0.5 * (common * (X + X.T) + relative * (X - X.T))
+    weight = (1.0 - common) / (1.0 + common)
+    np.fill_diagonal(expected, (weight @ np.diag(X)) / weight.sum(axis=1))
+    assert np.abs(got - expected).max() < 1e-3
+
+
+@pytest.mark.parametrize("gap", _PAIR_GAPS)
+@pytest.mark.parametrize("complex_", [False, True], ids=["real", "complex"])
+def test_split_backward_does_not_depend_on_the_basis_of_a_pair(gap, complex_):
+    """The SVD picks the basis of an exact pair from roundoff, and the matrix gradient
+    must not see it.  On the exact-U(1) D=2 state a basis-dependent diagonal put 1e-3
+    of noise into the columns whose direction keeps the pair exact.
+
+    The kernel takes any rotated basis, so this holds at each gap: the pair's whole
+    traceless block takes one factor, and a block scaled as a whole is covariant.
+    """
+    rng = _rng(44)
+    n = 5
+    U, _ = np.linalg.qr(_mat(rng, (n, n), complex_))
+    V, _ = np.linalg.qr(_mat(rng, (n, n), complex_))
+    W = _mat(rng, (n, n), complex_)
+    s = _pair_spectrum(gap)
+    angle = 0.7
+    rotation = np.eye(n)
+    rotation[np.ix_([1, 2], [1, 2])] = [
+        [np.cos(angle), -np.sin(angle)],
+        [np.sin(angle), np.cos(angle)],
+    ]
+
+    def gradient(U, V):
+        # The cotangents of ``sum(conj(W) * U diag(s) Vh)``, conjugated into JAX's
+        # convention for a complex input.
+        Vh = V.conj().T
+        dU = (W @ V * s).conj()
+        ds = np.real(np.diag(U.conj().T @ W @ V))
+        dVh = (s[:, None] * (U.conj().T @ W)).conj()
+        args = (jnp.asarray(x) for x in (U, s, Vh, dU, ds, dVh))
+        return np.asarray(_svd_sector_backward(*args, split_eps=1e-12))
+
+    # At a gap, the common rotation divides roundoff by the gap: 4e-6 at most here.
+    atol = 1e-4 if gap else 1e-12
+    np.testing.assert_allclose(
+        gradient(U @ rotation, V @ rotation), gradient(U, V), atol=atol
+    )
+
+
+@pytest.mark.parametrize("shape", [(6, 6), (7, 4), (4, 7)])
+@pytest.mark.parametrize("complex_", [False, True], ids=["real", "complex"])
+def test_split_backward_matches_finite_differences(shape, complex_):
+    """Away from a pair the split is an identity, so this is the same adjoint."""
+    from tenax.algorithms._ctm_tensor_projector_2x2 import _split_dense_svd
+
+    rng = _rng(42)
+    M = _mat(rng, shape, complex_)
+    W = _mat(rng, shape, complex_)
+
+    def loss(A):
+        U, s, Vh = _split_dense_svd(A)
+        return jnp.real(jnp.sum(jnp.conj(W) * (U @ jnp.diag(s**2) @ Vh)))
+
+    rel, cos = _agreement(loss, M)
+    assert cos > 1 - 1e-9 and rel < 1e-6, f"rel={rel:.3e} cos={cos:.9f}"
+
+
+@pytest.mark.parametrize("complex_", [False, True], ids=["real", "complex"])
+def test_split_backward_is_exact_with_a_zero_cotangent_on_discarded_modes(complex_):
+    """The 2x2 projector slices after the SVD, so this cotangent is what it sees."""
+    from tenax.algorithms._ctm_tensor_projector_2x2 import _split_dense_svd
+
+    rng = _rng(43)
+    n, k = 6, 3
+    M = _mat(rng, (n, n), complex_)
+    W = _mat(rng, (n, n), complex_)
+
+    def loss(A):
+        U, s, Vh = _split_dense_svd(A)
+        kept = U[:, :k] @ jnp.diag(s[:k] ** 2) @ Vh[:k, :]
+        return jnp.real(jnp.sum(jnp.conj(W) * kept))
+
+    rel, cos = _agreement(loss, M)
+    assert cos > 1 - 1e-9 and rel < 1e-6, f"rel={rel:.3e} cos={cos:.9f}"
+
+
+def test_split_backward_is_finite_on_a_pair_of_zero_modes():
+    """Both denominators of a pair of zero modes vanish; so must their entry."""
+    from tenax.algorithms._ctm_tensor_projector_2x2 import _split_dense_svd
+
+    got, X, _ = _gradient_in_the_singular_basis(
+        _split_dense_svd, np.array([1.0, 0.5, 0.3, 0.0, 0.0])
+    )
+    assert np.all(np.isfinite(got))
+    assert np.abs(got - X)[:3, :3].max() < 1e-10
+
+
+def test_split_backward_is_finite_on_an_all_zero_matrix():
+    """A CTM sector can vanish; ``s[0] = 0`` must not give 0 / 0."""
+    from tenax.algorithms._ctm_tensor_projector_2x2 import _split_dense_svd
+
+    W = _rng(46).standard_normal((4, 4))
+
+    def loss(A):
+        U, s, Vh = _split_dense_svd(A)
+        return jnp.sum(W * ((U * s) @ Vh))
+
+    assert np.all(np.isfinite(np.asarray(jax.grad(loss)(jnp.zeros((4, 4))))))

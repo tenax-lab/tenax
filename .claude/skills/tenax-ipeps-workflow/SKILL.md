@@ -452,6 +452,9 @@ Once you have an optimized ground state, Tenax can compute quasiparticle
 excitation spectra at arbitrary Brillouin zone momenta, following
 Ponsioen et al. (SciPost Phys. 12, 006, 2022).
 
+`compute_excitations` is deprecated (#1052). Use it only for a rough scan at
+momenta `compute_spectrum` cannot reach.
+
 ```python
 from tenax import ExcitationConfig, compute_excitations, make_momentum_path
 
@@ -466,6 +469,36 @@ result = compute_excitations(A_opt, env, H_rot, E_gs, momenta, exc_config)
 
 print(result.energies.shape)  # (num_momenta, num_excitations) = (20, 3)
 ```
+
+### Spectrum with spectral weights
+
+`compute_excitations` truncates the momentum sum, so its low energies are not
+reliable (#1052). For (pi,0), (0,pi) and (pi,pi) use `compute_spectrum`, and compare
+at least two chi values:
+
+```python
+from tenax import SpectrumConfig, compute_spectrum, heisenberg_gate, spectral_function
+
+config = SpectrumConfig(chi=16, checkpoint_dir="runs/x_chi16")
+result = compute_spectrum(A_opt, H_rot, (np.pi, 0.0), {"Sy": Sy_real}, config)
+S = spectral_function(result, "Sy", np.linspace(0, 5, 501), eta=0.1)
+
+# J1-J2: pass gate_nnn, with a state optimised for the same couplings. Next-nearest
+# neighbours share a sublattice, so gate_nnn is the unrotated gate (this holds for
+# S.S and XXZ). Another gate_nnn is another run: give it its own checkpoint_dir.
+config_j2 = SpectrumConfig(chi=16, checkpoint_dir="runs/x_chi16_j2")
+result_j2 = compute_spectrum(
+    A_j2, H_rot, (np.pi, 0.0), {"Sy": Sy_real}, config_j2,
+    gate_nnn=J2 * heisenberg_gate(),
+)
+```
+
+Negative modes mean chi is too small: raise it. If they stay at larger chi, the state
+is not a ground state of the gates given. `null_tol` sets the size of the
+subspace and it moves the modes, so scan it: a rerun with the same `checkpoint_dir`
+reuses all columns. See the
+[guide](../../../docs/guide/algorithms/ad_excitations.md) for the workflow, cost,
+diagnostics and benchmarks.
 
 ### Interpreting results
 
