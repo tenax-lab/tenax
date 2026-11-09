@@ -35,7 +35,7 @@ from tenax.algorithms._ctm_tensor_energy import (
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
 from tenax.algorithms.ipeps_ad_policy import ctm_converge_kwargs
 from tenax.algorithms.ipeps_config import CTMConfig
-from tenax.algorithms.ipeps_ctm import ctm
+from tenax.algorithms.ipeps_ctm_convergence import _ctm_via_2x2
 from tenax.algorithms.ipeps_rdm import compute_energy_ctm
 
 pytestmark = pytest.mark.core
@@ -68,7 +68,7 @@ def test_tensor_single_site_energy():
 
 def test_rdm_single_site_energy():
     A = _plus_y_array()
-    env = ctm(A, CTMConfig(chi=4, max_iter=50, conv_tol=1e-12))
+    env = _ctm_via_2x2(A, CTMConfig(chi=4, max_iter=50, conv_tol=1e-12))
     e = complex(compute_energy_ctm(A, env, _gate(), 2))
     np.testing.assert_allclose(e, _TRUE_PER_SITE, atol=1e-12)
 

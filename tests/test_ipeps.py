@@ -23,6 +23,7 @@ from tenax.algorithms.ipeps_ctm import (
     ctm_2site,
     ctm_split,
 )
+from tenax.algorithms.ipeps_ctm_convergence import _ctm_via_2x2
 from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 from tenax.algorithms.ipeps_rdm import (
     _build_double_layer_open,
@@ -215,7 +216,7 @@ class TestComputeEnergyCTM:
         A = jax.random.normal(key, (D, D, D, D, d))
         A = A / (jnp.linalg.norm(A) + 1e-10)
         config = CTMConfig(chi=4, max_iter=5)
-        env = ctm(A, config)
+        env = _ctm_via_2x2(A, config)
         return A, env
 
     def test_energy_is_scalar(self, peps_and_env):
@@ -252,7 +253,7 @@ class TestRDM:
         A = jax.random.normal(key, (D, D, D, D, d))
         A = A / (jnp.linalg.norm(A) + 1e-10)
         config = CTMConfig(chi=8, max_iter=20)
-        env = ctm(A, config)
+        env = _ctm_via_2x2(A, config)
         return A, env, d
 
     @pytest.fixture
@@ -277,7 +278,7 @@ class TestRDM:
         pert = jax.random.normal(jax.random.PRNGKey(0), (D, D, D, D, d))
         A = A + 0.2 * pert / jnp.linalg.norm(pert)
         A = A / jnp.linalg.norm(A)
-        env = ctm(A, CTMConfig(chi=8, max_iter=100, conv_tol=1e-10))
+        env = _ctm_via_2x2(A, CTMConfig(chi=8, max_iter=100, conv_tol=1e-10))
         return A, env, d
 
     def test_rdm_hermitian(self, peps_env):
@@ -369,7 +370,7 @@ class TestProductStateEnergy:
         A = A.at[0, 0, 0, 0, 0].set(1.0)  # |up>
 
         config = CTMConfig(chi=4, max_iter=20)
-        env = ctm(A, config)
+        env = _ctm_via_2x2(A, config)
 
         # SzSz only
         Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])

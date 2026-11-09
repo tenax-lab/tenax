@@ -12,7 +12,7 @@ from tenax.algorithms.ipeps_config import (
     CTMEnvironment,
     iPEPSConfig,
 )
-from tenax.algorithms.ipeps_ctm import ctm
+from tenax.algorithms.ipeps_ctm_convergence import _ctm_via_2x2
 from tenax.algorithms.ipeps_excitations import (
     ExcitationConfig,
     ExcitationResult,
@@ -57,7 +57,7 @@ def small_peps_and_env():
     A = jax.random.normal(key, (D, D, D, D, d))
     A = A / (jnp.linalg.norm(A) + 1e-10)
     config = CTMConfig(chi=8, max_iter=40)
-    env = ctm(A, config)
+    env = _ctm_via_2x2(A, config)
     return A, env, d
 
 
@@ -955,7 +955,7 @@ class TestEnergyFunctionalOracle:
         key = jax.random.PRNGKey(42)
         A = jax.random.normal(key, (2, 2, 2, 2, 2))
         A = A / (jnp.linalg.norm(A) + 1e-10)
-        env = ctm(A, CTMConfig(chi=8, max_iter=40))
+        env = _ctm_via_2x2(A, CTMConfig(chi=8, max_iter=40))
         gate = self.Hzz + 0.5 * self.Hxx
         E_gs = float(compute_energy_ctm(A, env, gate, 2))
         k = jnp.array([0.0, 0.0])
