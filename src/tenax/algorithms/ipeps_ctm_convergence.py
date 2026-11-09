@@ -7,6 +7,7 @@ __all__ = [
     "_ctm_sv_diff",
     "CTMConvergenceInfo",
     "ctm",
+    "_ctm_via_2x2",
     "_renormalize_env",
     "_ctm_2site_sweep",
     "ctm_2site",
@@ -223,6 +224,74 @@ def ctm(
         return env, CTMConvergenceInfo(
             converged=converged, n_iter=n_iter + warmup_steps, diff=diff
         )
+    return env
+
+
+def _ctm_via_2x2(
+    A: jax.Array,
+    config: CTMConfig,
+    *,
+    return_meta: bool = False,
+) -> CTMEnvironment | tuple[CTMEnvironment, CTMConvergenceInfo]:
+    """``ctm()`` without its warnings: ``ctm_tensor(recipe="2x2")`` with the
+    ``CTMConfig`` fields mapped, returned as a raw-array ``CTMEnvironment``.
+
+    For callers that need ``ctm()``'s result and must not trigger its
+    ``DeprecationWarning``.
+
+    Args:
+        A:           Raw site array with 5 legs ``(u, d, l, r, s)`` and four
+                     virtual legs of one dimension, or a ``DenseTensor``, which
+                     is passed through.  ``_wrap_as_dense_tensor`` reads
+                     ``shape[0]`` for all four virtual legs without a check, so
+                     any other shape raises ``ValueError`` here.  A
+                     ``SymmetricTensor`` raises ``TypeError``: the raw result
+                     would need ``todense()``.
+        config:      ``chi``, ``max_iter``, ``conv_tol``, ``renormalize`` and
+                     ``min_iter`` are passed on.  ``projector_method`` is not:
+                     the 2x2 recipe always uses Fishman SVD, and ``"svd"`` is
+                     passed because ``"qr"`` would still start the QR warm-up
+                     loop of ``ctm_tensor``.  So ``qr_warmup_steps`` has no
+                     effect.
+        return_meta: When True, also return the :class:`CTMConvergenceInfo`
+                     of ``ctm_tensor``, whose fields are Python scalars.
+
+    Returns:
+        The raw-array ``CTMEnvironment``, or ``(env, info)``.
+    """
+    from tenax.algorithms._ctm_env_dense import _as_dense_env
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
+    from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
+    from tenax.core.tensor import SymmetricTensor, Tensor
+
+    if isinstance(A, SymmetricTensor):
+        raise TypeError(
+            "ctm() returns a raw-array CTMEnvironment, so a SymmetricTensor site "
+            "tensor would have to be densified. Call ctm_tensor(A, chi, ...) "
+            "instead: it keeps the blocks and returns a CTMTensorEnv."
+        )
+    if not isinstance(A, Tensor):
+        A = jnp.asarray(A)
+        if A.ndim != 5 or len(set(A.shape[:4])) != 1:
+            raise ValueError(
+                "Expected a raw site tensor with 5 legs (u, d, l, r, s) and four "
+                f"virtual legs of one dimension; got shape {A.shape}."
+            )
+        A = _wrap_as_dense_tensor(A)
+    env, _eps, info = ctm_tensor(
+        A,
+        config.chi,
+        max_iter=config.max_iter,
+        conv_tol=config.conv_tol,
+        renormalize=config.renormalize,
+        projector_method="svd",
+        recipe="2x2",
+        min_iter=config.min_iter,
+        return_meta=True,
+    )
+    env = _as_dense_env(env)
+    if return_meta:
+        return env, info
     return env
 
 

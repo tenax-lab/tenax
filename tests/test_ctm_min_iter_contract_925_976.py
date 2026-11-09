@@ -20,6 +20,7 @@ import pytest
 
 from tenax import CTMConfig, ctm, ctm_2site, ctm_split, ctm_tensor
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
+from tenax.algorithms.ipeps_ctm_convergence import _ctm_via_2x2
 
 # A 1x1 product state: chi=1 corners are stationary from the second sweep, so
 # ``diff < conv_tol`` holds immediately and the stopping rule is all that moves.
@@ -38,6 +39,10 @@ def _info_ctm_split(cfg):
     return ctm_split(A, cfg, return_meta=True)[1]
 
 
+def _info_ctm_via_2x2(cfg):
+    return _ctm_via_2x2(A, cfg, return_meta=True)[1]
+
+
 def _info_ctm_tensor(cfg):
     return ctm_tensor(
         _wrap_as_dense_tensor(A),
@@ -54,6 +59,7 @@ _ENTRY_POINTS = [
     pytest.param(_info_ctm_2site, id="ctm_2site"),
     pytest.param(_info_ctm_split, id="ctm_split"),
     pytest.param(_info_ctm_tensor, id="ctm_tensor"),
+    pytest.param(_info_ctm_via_2x2, id="ctm_via_2x2"),
 ]
 
 
