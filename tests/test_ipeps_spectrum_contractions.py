@@ -24,6 +24,7 @@ from _window_oracle import (
     onsager_c10,
 )
 
+from tenax.algorithms._ctm_env_dense import _as_dense_env
 from tenax.algorithms._ctm_tensor_convergence import (
     _ctm_tensor_multisite,
     _ctm_tensor_sweep_multisite,
@@ -46,7 +47,6 @@ from tenax.algorithms._ipeps_excitation_ctm import (
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
 from tenax.algorithms.ipeps_config import CTMEnvironment
 from tenax.algorithms.ipeps_excitations import (
-    _as_dense_env,
     _build_mixed_double_layer_open,
     _rdm1x2_with_open_tensors,
     _rdm2x1_with_open_tensors,

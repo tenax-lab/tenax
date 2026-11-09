@@ -468,7 +468,7 @@ class TestTensorInputAcceptance:
     ):
         """A non-8-tensor (e.g. split) environment must raise a clear error
         rather than fail deep in the contraction."""
-        from tenax.algorithms.ipeps_excitations import _as_dense_env
+        from tenax.algorithms._ctm_env_dense import _as_dense_env
 
         A, env, d = small_peps_and_env
         twelve_field_env = tuple(env) + tuple(env[:4])  # 12 fields, like split CTM
@@ -479,7 +479,7 @@ class TestTensorInputAcceptance:
         """SymmetricTensor inputs must raise (dense-only path) rather than
         silently densify a block-sparse tensor — project rule against
         ``todense()`` on the symmetric path."""
-        from tenax.algorithms.ipeps_excitations import _as_dense_array
+        from tenax.algorithms._ctm_env_dense import _as_dense_array
         from tenax.core.index import FlowDirection, TensorIndex
         from tenax.core.symmetry import U1Symmetry
         from tenax.core.tensor import SymmetricTensor
