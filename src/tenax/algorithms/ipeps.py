@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms.ipeps_config import CTMEnvironment, iPEPSConfig
-from tenax.algorithms.ipeps_ctm_convergence import ctm_2site
+from tenax.algorithms.ipeps_ctm_convergence import _ctm_2site_via_2x2
 from tenax.algorithms.ipeps_rdm import compute_energy_ctm_2site
 from tenax.algorithms.ipeps_simple_update import (
     _make_trotter_gate_tensor,
@@ -489,9 +489,14 @@ def ipeps(
 
     1. Simple update (imaginary time evolution) -- apply ``exp(-dt * H_bond)``
        on each bond, SVD-truncate to D, update lambda matrices.
-    2. CTM environment computation -- initialise and iteratively absorb
-       rows/columns until convergence.
-    3. Compute energy per site using the CTM environment.
+    2. CTM environments of the pair -- the 2x2 recipe of
+       :func:`ctm_tensor_2site`, with ``config.ctm``'s ``chi``, ``max_iter``,
+       ``conv_tol``, ``renormalize`` and ``min_iter``.
+    3. Energy per site -- half the sum of the four bond energies of the cell.
+
+    Until 0.9.3 steps 2-3 used a legacy 2-site CTM whose two environments did
+    not share a basis, so the energy moved with the bond gauge of the pair,
+    and summed only the two bonds that start on ``A``.
 
     Args:
         hamiltonian_gate: The 2-site Hamiltonian as a 4-leg tensor of shape
@@ -510,7 +515,9 @@ def ipeps(
 
     Returns:
         ``(energy_per_site, (A, B), (env_A, env_B))``, or
-        ``(None, (A, B), None)`` with ``compute_energy=False``.
+        ``(None, (A, B), None)`` with ``compute_energy=False``.  ``env_A`` and
+        ``env_B`` are raw-array ``CTMEnvironment`` named tuples, each field with
+        its legs in the order ``CTMTensorEnv`` documents.
     """
     if initial_peps is not None and not isinstance(initial_peps, tuple):
         raise TypeError(
@@ -585,10 +592,15 @@ def ipeps(
     if not compute_energy:
         return None, (A, B), None
 
-    # CTM environment (uses dense arrays)
+    # CTM environments (uses dense arrays): the 2x2 recipe of ctm_tensor_2site,
+    # as raw CTMEnvironments in the leg order compute_energy_ctm_2site
+    # contracts.  The legacy 2-site sweep it replaced in 0.9.3 gave energies
+    # that moved with the bond gauge (tests/test_ipeps_2site_energy.py).
     A_dense = A.todense()
     B_dense = B.todense()
-    env_A, env_B, ctm_info = ctm_2site(A_dense, B_dense, config.ctm, return_meta=True)
+    env_A, env_B, ctm_info = _ctm_2site_via_2x2(
+        A_dense, B_dense, config.ctm, return_meta=True
+    )
 
     # #839: this return signature has no slot for convergence status, and the
     # energy below is computed from the environment either way -- so an
@@ -604,9 +616,9 @@ def ipeps(
             f"without reaching conv_tol={config.ctm.conv_tol:g} (final "
             f"criterion {float(ctm_info.diff):.3g}). The returned energy is "
             f"computed from that environment and may not be a converged "
-            f"value -- it can move with max_iter. Raise max_iter, or call "
-            f"ctm_2site(..., return_meta=True) to inspect convergence "
-            f"directly.",
+            f"value -- it can move with max_iter. Raise max_iter, or measure "
+            f"the returned pair with ctm_tensor_2site(A, B, chi, ...), which "
+            f"warns with the loop's own diagnosis (strict=True raises instead).",
             UserWarning,
             stacklevel=2,
         )

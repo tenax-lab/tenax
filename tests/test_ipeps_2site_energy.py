@@ -161,8 +161,9 @@ def test_ipeps_counts_every_bond_of_the_cell():
     cannot certify convergence on this rank-1 state, and says so; the energy
     is exact anyway, since every bond's RDM is a product or a singlet.
     """
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*[Cc]onverge", category=UserWarning)
+    # The corners of this state have rank 1, so the criterion refuses to
+    # certify them (#898), and ipeps() must say so.
+    with pytest.warns(UserWarning, match=r"CTM did not converge in ipeps\(\)"):
         E = _measure(heisenberg_gate(), _dimer_pair(), CTMConfig(chi=4, max_iter=50))
 
     assert E == pytest.approx(DIMER_ENERGY, abs=1e-10)

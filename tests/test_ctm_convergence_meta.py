@@ -196,7 +196,11 @@ def test_ipeps_warns_when_its_ctm_did_not_converge():
     """``ipeps()`` has no return slot for status, so it must warn (#747 policy).
 
     This is the actual user-facing harm in #839: a public entry point handing
-    back an energy derived from a non-converged environment, silently.
+    back an energy derived from a non-converged environment, silently.  The
+    2x2 recipe converges on this state at sweep 13 (``conv_tol=1e-12``,
+    measured at d6730510); after 10 sweeps its criterion is 2.0e-10, so the
+    budget runs out.  Exactly one warning, from ``ipeps()``: the loop inside it
+    must not tell the caller a second time.
     """
     gate = sublattice_rotate_gate(heisenberg_gate())
     config = iPEPSConfig(
@@ -204,10 +208,15 @@ def test_ipeps_warns_when_its_ctm_did_not_converge():
         num_imaginary_steps=40,
         dt=0.05,
         unit_cell="1x1",
-        ctm=CTMConfig(chi=6, max_iter=100, conv_tol=1e-10),
+        ctm=CTMConfig(chi=6, max_iter=10, conv_tol=1e-12),
     )
-    with pytest.warns(UserWarning, match="CTM did not converge"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         ipeps(gate, None, config)
+    ctm_warnings = [w for w in caught if "did not converge" in str(w.message)]
+    assert len(ctm_warnings) == 1, [str(w.message)[:80] for w in ctm_warnings]
+    assert issubclass(ctm_warnings[0].category, UserWarning)
+    assert "CTM did not converge in ipeps()" in str(ctm_warnings[0].message)
 
 
 def test_ipeps_is_silent_when_the_ctm_converges():
@@ -234,14 +243,16 @@ def test_ipeps_is_silent_when_the_ctm_converges():
 def test_ipeps_energy_is_unchanged_by_the_warning_path(su_state):
     """The reported energy must be exactly what it was before #839.
 
-    ``ipeps()`` now calls ``ctm_2site(..., return_meta=True)``; that must be a
-    pure addition, since every benchmark number in the repo comes through here.
+    ``ipeps()`` reads the status from ``_ctm_2site_via_2x2(...,
+    return_meta=True)``; that must be a pure addition, since every benchmark
+    number in the repo comes through here.
     """
     A, B, gate_dense = su_state
+    from tenax.algorithms.ipeps_ctm_convergence import _ctm_2site_via_2x2
     from tenax.algorithms.ipeps_rdm import compute_energy_ctm_2site
 
     cfg = CTMConfig(chi=6, max_iter=100, conv_tol=1e-10)
-    eA, eB = ctm_2site(A, B, cfg)
+    eA, eB = _ctm_2site_via_2x2(A, B, cfg)
     expected = float(compute_energy_ctm_2site(A, B, eA, eB, gate_dense, 2))
 
     gate = sublattice_rotate_gate(heisenberg_gate())
@@ -314,18 +325,16 @@ def test_compute_energy_false_skips_the_measurement_and_its_warning():
 @pytest.mark.parametrize("cell", ["1x1", "2site"])
 def test_su_warm_start_never_runs_the_measurement_ctm(monkeypatch, cell):
     """#937 review P2: optimize_gs_ad's su_init warm start wants only the
-    state, so it must not pay for (or be warned about) ipeps()'s legacy
-    measurement CTM.  The bomb below makes any measurement attempt loud;
-    reverting every warm-start call site fires it on both unit cells."""
+    state, so it must not pay for (or be warned about) ipeps()'s measurement
+    CTM.  The bomb below makes any measurement attempt loud; reverting every
+    warm-start call site fires it on both unit cells."""
     import tenax.algorithms.ipeps as ipeps_mod
     from tenax.algorithms.ipeps_optimize import optimize_gs_ad
 
     def _bomb(*a, **k):
-        raise AssertionError(
-            "su_init warm start invoked the legacy measurement CTM (#937)"
-        )
+        raise AssertionError("su_init warm start invoked the measurement CTM (#937)")
 
-    monkeypatch.setattr(ipeps_mod, "ctm_2site", _bomb)
+    monkeypatch.setattr(ipeps_mod, "_ctm_2site_via_2x2", _bomb)
     gate = sublattice_rotate_gate(heisenberg_gate())
     cfg = iPEPSConfig(
         max_bond_dim=2,
