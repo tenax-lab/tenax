@@ -83,6 +83,23 @@ def _asymmetric_hamiltonian(seed=7):
     return jnp.asarray((M + M.T) / 2)
 
 
+def _complex_asymmetric_site(seed, eps=0.3):
+    """``_asymmetric_site`` with complex noise: independent Gaussian real and
+    imaginary parts."""
+    rng = np.random.default_rng(seed)
+    A = np.zeros((2, 2, 2, 2, 2), dtype=complex)
+    A[0, 0, 0, 0, 0] = 1.0
+    A += eps * (rng.standard_normal(A.shape) + 1j * rng.standard_normal(A.shape))
+    return jnp.asarray(A)
+
+
+def _complex_hamiltonian(seed=7):
+    """A random complex-Hermitian two-site operator."""
+    rng = np.random.default_rng(seed)
+    M = rng.standard_normal((4, 4)) + 1j * rng.standard_normal((4, 4))
+    return jnp.asarray((M + M.conj().T) / 2)
+
+
 def _raw_energy(A, B, env_A, env_B, H):
     """Half the sum of the four bond energies, from the raw 2-site RDMs.
 
@@ -140,6 +157,46 @@ def test_raw_energy_matches_the_tensor_energy_without_lattice_symmetry(entry):
     )
     E_raw = _raw_energy(A, B, env_A, env_B, H)
     E_tensor = float(compute_energy_ctm_tensor_2site(At, Bt, tensor_A, tensor_B, H, 2))
+    assert abs(E_raw - E_tensor) < 1e-9, (E_raw, E_tensor)
+
+
+@pytest.mark.parametrize("entry", ENTRY_POINTS)
+def test_raw_energy_matches_the_tensor_energy_on_a_complex_pair(entry):
+    """The raw environments pair the ket and the bra as the raw 2-site RDMs do.
+
+    The environments come from the Tensor double layer, and the raw RDMs build
+    their own open double layer.  If the two fused the ket and the bra in
+    opposite orders, the raw RDMs of a complex state would join its environment
+    to the double layer of its conjugate.  A real state cannot show that:
+    environments conjugated on purpose move the raw energy of the real pair
+    above by 2e-16, and of this pair by 4.2e-2.  Measured on this pair at
+    0c59e4ee: the criterion reaches 7.5e-13 at sweep 32, ``max|env_A.T1.imag|``
+    is 0.34, the raw energy equals the Tensor energy to 2.8e-16, and
+    ``E(H) - E(H*)`` is -0.22.
+    """
+    A, B = _complex_asymmetric_site(5), _complex_asymmetric_site(6)
+    H = _complex_hamiltonian()
+    cfg = CTMConfig(chi=8, max_iter=500, conv_tol=1e-12)
+    env_A, env_B, info = entry(A, B, cfg, return_meta=True)
+    assert info.converged
+
+    At, Bt = _wrap_as_dense_tensor(A), _wrap_as_dense_tensor(B)
+    tensor_A, tensor_B = ctm_tensor_2site(
+        At, Bt, cfg.chi, max_iter=cfg.max_iter, conv_tol=cfg.conv_tol
+    )
+
+    def tensor_energy(op):
+        return float(compute_energy_ctm_tensor_2site(At, Bt, tensor_A, tensor_B, op, 2))
+
+    # The regime, so the test cannot go vacuous: the environments are complex,
+    # and the energy tells H from its conjugate, so the state is not a real
+    # state in disguise.
+    imag = max(float(jnp.max(jnp.abs(f.imag))) for env in (env_A, env_B) for f in env)
+    assert imag > 0.1, imag
+    E_tensor = tensor_energy(H)
+    assert abs(E_tensor - tensor_energy(H.conj())) > 1e-2
+
+    E_raw = _raw_energy(A, B, env_A, env_B, H)
     assert abs(E_raw - E_tensor) < 1e-9, (E_raw, E_tensor)
 
 
