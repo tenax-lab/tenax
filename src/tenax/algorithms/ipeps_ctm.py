@@ -19,9 +19,6 @@ from tenax.algorithms.ipeps_ctm_convergence import (
     _ctm_sv_diff as _ctm_sv_diff,
 )
 from tenax.algorithms.ipeps_ctm_convergence import (
-    _ctm_sweep as _ctm_sweep,
-)
-from tenax.algorithms.ipeps_ctm_convergence import (
     _renormalize_env as _renormalize_env,
 )
 from tenax.algorithms.ipeps_ctm_convergence import (
@@ -49,13 +46,7 @@ from tenax.algorithms.ipeps_ctm_init import (
     _initialize_split_ctm_env as _initialize_split_ctm_env,
 )
 from tenax.algorithms.ipeps_ctm_moves import (  # noqa: F401
-    _ctm_bottom_move as _ctm_bottom_move,
-)
-from tenax.algorithms.ipeps_ctm_moves import (
     _ctm_bottom_move_2site as _ctm_bottom_move_2site,
-)
-from tenax.algorithms.ipeps_ctm_moves import (
-    _ctm_left_move as _ctm_left_move,
 )
 from tenax.algorithms.ipeps_ctm_moves import (
     _ctm_left_move_2site as _ctm_left_move_2site,
@@ -67,16 +58,7 @@ from tenax.algorithms.ipeps_ctm_moves import (
     _ctm_move_eigh as _ctm_move_eigh,
 )
 from tenax.algorithms.ipeps_ctm_moves import (
-    _ctm_move_qr as _ctm_move_qr,
-)
-from tenax.algorithms.ipeps_ctm_moves import (
-    _ctm_right_move as _ctm_right_move,
-)
-from tenax.algorithms.ipeps_ctm_moves import (
     _ctm_right_move_2site as _ctm_right_move_2site,
-)
-from tenax.algorithms.ipeps_ctm_moves import (
-    _ctm_top_move as _ctm_top_move,
 )
 from tenax.algorithms.ipeps_ctm_moves import (
     _ctm_top_move_2site as _ctm_top_move_2site,

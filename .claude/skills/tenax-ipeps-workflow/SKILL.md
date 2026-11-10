@@ -566,7 +566,8 @@ my_lattice = Lattice(
 
 ### Multi-site CTM with ctm_multisite()
 
-For 3+ site unit cells, use `ctm_multisite()` instead of `ctm()`.
+For 3+ site unit cells, use `ctm_multisite()`. The single-site entry point
+is `ctm_tensor()`; `ctm()` is deprecated since 0.9.3.
 Note: `ctm_2site()` is the legacy dense CTM used by simple update only;
 for AD optimization with 2-site cells, use `optimize_gs_ad()` with
 `unit_cell="2site"` which uses the Tensor-protocol multisite CTM.

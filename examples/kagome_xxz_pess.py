@@ -29,11 +29,12 @@ jax.config.update("jax_enable_x64", True)
 
 from tenax import (  # noqa: E402
     CTMConfig,
+    compute_energy_ctm_tensor,
+    ctm_tensor,
     iPEPSConfig,
     optimize_gs_ad,
 )
-from tenax.algorithms.ipeps_ctm import ctm  # noqa: E402
-from tenax.algorithms.ipeps_rdm import compute_energy_ctm  # noqa: E402
+from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Kagome triangle Hamiltonian
@@ -596,16 +597,16 @@ def compute_pess_energy(
 
     # Build an effective 2-site gate: H_tri (x) I measures the triangle
     # Hamiltonian on the first super-site of each bond pair only.
-    # compute_energy_ctm returns E_h + E_v = 2*<H_tri>, correctly
+    # compute_energy_ctm_tensor returns E_h + E_v = 2*<H_tri>, correctly
     # accounting for the 2 triangles (up + down) per unit cell.
     # Dividing by 3 gives E/site = 2<H_tri>/3.
     H_eff = np.kron(H_tri, np.eye(d_eff))
     H_eff_4leg = H_eff.reshape(d_eff, d_eff, d_eff, d_eff)
 
-    config = CTMConfig(chi=chi, max_iter=100)
-    env = ctm(A, config)
+    A_t = _wrap_as_dense_tensor(A)
+    env, _ = ctm_tensor(A_t, chi, max_iter=100)
 
-    E = compute_energy_ctm(A, env, jnp.array(H_eff_4leg), d_eff)
+    E = compute_energy_ctm_tensor(A_t, env, jnp.array(H_eff_4leg), d_eff)
     E_per_site = float(E) / 3.0
 
     return E_per_site

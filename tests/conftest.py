@@ -187,6 +187,14 @@ _FILE_MARKERS = {
     # violation on public entry points, so they belong in the required gate.
     # Cheap (~8s): a 1x1 product state, no real convergence run.
     "test_ctm_min_iter_contract_925_976.py": "core",
+    # ``ctm()`` runs ``ctm_tensor(recipe="2x2")`` since 0.9.3.  Onsager's C(1,0)
+    # pins the environment it returns only on lattice-symmetric states, whose
+    # corners are symmetric matrices and so hide a transposed corner;
+    # ``test_corner_orientation_without_lattice_symmetry`` is the orientation
+    # pin.  Both sit next to the input checks and the warnings: a silent wrong
+    # environment on a public entry point, so they belong in the required gate.
+    # The 16 Onsager cases set its run time.
+    "test_ctm_delegates_to_2x2.py": "core",
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",

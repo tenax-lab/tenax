@@ -105,13 +105,13 @@ def test_excitation_norm_gradient_at_zero_B_is_finite():
     this out of the required CI gate.
     """
     from tenax.algorithms.ipeps_config import CTMConfig
-    from tenax.algorithms.ipeps_ctm import ctm
+    from tenax.algorithms.ipeps_ctm_convergence import _ctm_via_2x2
     from tenax.algorithms.ipeps_excitations import _compute_norm
 
     d = 2
     A = jax.random.normal(jax.random.PRNGKey(42), (2, 2, 2, 2, d))
     A = A / (jnp.linalg.norm(A) + 1e-10)
-    env = ctm(A, CTMConfig(chi=8, max_iter=40))
+    env = _ctm_via_2x2(A, CTMConfig(chi=8, max_iter=40))
     k = jnp.array([0.0, 0.0])
 
     g = jax.grad(lambda B: _compute_norm(A, B, env, k, d).real)(jnp.zeros_like(A))

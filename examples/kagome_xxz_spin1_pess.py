@@ -25,9 +25,8 @@ from scipy.linalg import expm
 
 jax.config.update("jax_enable_x64", True)
 
-from tenax import CTMConfig, spin_one_ops  # noqa: E402
-from tenax.algorithms.ipeps_ctm import ctm  # noqa: E402
-from tenax.algorithms.ipeps_rdm import compute_energy_ctm  # noqa: E402
+from tenax import compute_energy_ctm_tensor, ctm_tensor, spin_one_ops  # noqa: E402
+from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor  # noqa: E402
 
 # Physical dimension for spin-1
 D_PHYS = 3
@@ -326,7 +325,7 @@ def compute_pess_energy(site_tensors, simplex_tensors, lambdas, H_tri, chi, d=D_
     """Compute energy per site via PESS -> iPEPS -> CTM.
 
     Each super-site encodes one up-triangle (3 Kagome sites).
-    ``compute_energy_ctm`` returns E_h + E_v from horizontal and vertical
+    ``compute_energy_ctm_tensor`` returns E_h + E_v from horizontal and vertical
     2-site RDMs.  Using ``H_eff = H_tri ⊗ I`` measures the triangle
     Hamiltonian only on the first super-site of each bond pair, so
     E_h + E_v = 2 * <H_tri>.  This correctly accounts for the 2 triangles
@@ -340,10 +339,10 @@ def compute_pess_energy(site_tensors, simplex_tensors, lambdas, H_tri, chi, d=D_
     H_eff = np.kron(H_tri, np.eye(d_eff))
     H_eff_4leg = H_eff.reshape(d_eff, d_eff, d_eff, d_eff)
 
-    config = CTMConfig(chi=chi, max_iter=100)
-    env = ctm(A, config)
+    A_t = _wrap_as_dense_tensor(A)
+    env, _ = ctm_tensor(A_t, chi, max_iter=100)
 
-    E = compute_energy_ctm(A, env, jnp.array(H_eff_4leg), d_eff)
+    E = compute_energy_ctm_tensor(A_t, env, jnp.array(H_eff_4leg), d_eff)
     E_per_site = float(E) / 3.0
 
     return E_per_site
