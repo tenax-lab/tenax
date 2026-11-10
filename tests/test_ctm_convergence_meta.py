@@ -39,9 +39,11 @@ def su_state():
 
     Deliberately the *unconverged* tau=2 simple-update state (40 steps at
     dt=0.05): its CTM provably does not converge at chi=6 (#838), which is what
-    makes it a usable negative case here.  Do not "improve" it to a longer
-    imaginary time -- a state whose CTM converges cannot exercise the
-    ``converged=False`` branch.
+    makes it a usable negative case here.  That holds for ``ctm_2site``; the
+    2x2 recipe that ``ctm()`` runs since 0.9.3 converges on it in 16 sweeps at
+    chi=6, so ``test_ctm_reports_status`` starves its budget instead.  Do not
+    "improve" the state to a longer imaginary time -- a state whose CTM
+    converges cannot exercise the ``converged=False`` branch.
     """
     gate = sublattice_rotate_gate(heisenberg_gate())
     with warnings.catch_warnings():
@@ -109,9 +111,12 @@ def test_ctm_2site_reports_genuine_convergence(su_state):
 def test_ctm_reports_status(su_state):
     """Same contract on the 1x1 entry point."""
     A, _B, _ = su_state
-    starved = ctm(A, CTMConfig(chi=6, max_iter=20, conv_tol=1e-12), return_meta=True)[1]
+    # 10 sweeps, not 20: since 0.9.3 ``ctm()`` runs the 2x2 recipe, which
+    # converges on this state at sweep 16 (diff 2.2e-13).  At sweep 10 the diff
+    # is 7.7e-9, so the budget still runs out.
+    starved = ctm(A, CTMConfig(chi=6, max_iter=10, conv_tol=1e-12), return_meta=True)[1]
     assert not bool(starved.converged)
-    assert int(starved.n_iter) == 20
+    assert int(starved.n_iter) == 10
 
     loose = ctm(A, CTMConfig(chi=6, max_iter=100, conv_tol=1e-2), return_meta=True)[1]
     assert bool(loose.converged)
@@ -257,10 +262,11 @@ def test_ipeps_energy_is_unchanged_by_the_warning_path(su_state):
 
 
 def test_info_fields_survive_jit(su_state):
-    """``ctm`` / ``ctm_2site`` keep the flag as JAX arrays to stay jittable.
+    """``ctm_2site`` keeps the flag as JAX arrays to stay jittable.
 
-    Pins the documented contract: the entry points must remain usable under
+    Pins the documented contract: the entry point must remain usable under
     ``jit``, which forbids converting the carry to Python scalars internally.
+    ``ctm()`` lost this in 0.9.3: it runs ``ctm_tensor``, a Python loop.
     """
     A, B, _ = su_state
     cfg = CTMConfig(chi=6, max_iter=10, conv_tol=1e-12)

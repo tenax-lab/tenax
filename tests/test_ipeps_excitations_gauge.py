@@ -35,7 +35,7 @@ jax.config.update("jax_enable_x64", True)
 
 from tenax.algorithms.ipeps import heisenberg_gate, ipeps, sublattice_rotate_gate
 from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
-from tenax.algorithms.ipeps_ctm_convergence import ctm
+from tenax.algorithms.ipeps_ctm_convergence import _ctm_via_2x2
 from tenax.algorithms.ipeps_excitations import (
     _rdm1x2_mixed,
     _rdm1x2_with_open_tensors,
@@ -78,7 +78,7 @@ def _state():
     _E, tensors, _envs = ipeps(gate_t, None, cfg, compute_energy=False)
     A_t = tensors[0] if isinstance(tensors, (list, tuple)) else tensors
     A = jnp.asarray(np.asarray(A_t.todense()))
-    env = ctm(A, CTMConfig(chi=8, max_iter=200, conv_tol=1e-12))
+    env = _ctm_via_2x2(A, CTMConfig(chi=8, max_iter=200, conv_tol=1e-12))
     k1, k2 = jax.random.split(jax.random.PRNGKey(7))
     B = jax.random.normal(k1, A.shape) + 1j * jax.random.normal(k2, A.shape)
     return A, B, env

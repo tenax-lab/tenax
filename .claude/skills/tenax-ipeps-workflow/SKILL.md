@@ -4,7 +4,9 @@ description: >
   Guide graduate students through iPEPS calculations for 2D quantum lattice
   models using Tenax. Covers the full pipeline: simple update (imaginary time
   evolution), AD-based ground-state optimization via optimize_gs_ad with CTM
-  environments, and quasiparticle excitation spectra via compute_excitations.
+  environments, and quasiparticle excitation spectra and spectral functions
+  via compute_spectrum and spectral_function (compute_excitations is
+  deprecated).
   Supports 1-site and 2-site unit cells. Use this skill when the user mentions
   iPEPS, PEPS, 2D tensor networks, projected entangled pair states, corner
   transfer matrix (CTM), simple update, imaginary time evolution for 2D,
@@ -564,7 +566,8 @@ my_lattice = Lattice(
 
 ### Multi-site CTM with ctm_multisite()
 
-For 3+ site unit cells, use `ctm_multisite()` instead of `ctm()`.
+For 3+ site unit cells, use `ctm_multisite()`. The single-site entry point
+is `ctm_tensor()`; `ctm()` is deprecated since 0.9.3.
 Note: `ctm_2site()` is the legacy dense CTM used by simple update only;
 for AD optimization with 2-site cells, use `optimize_gs_ad()` with
 `unit_cell="2site"` which uses the Tensor-protocol multisite CTM.

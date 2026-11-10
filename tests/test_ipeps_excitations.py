@@ -12,7 +12,7 @@ from tenax.algorithms.ipeps_config import (
     CTMEnvironment,
     iPEPSConfig,
 )
-from tenax.algorithms.ipeps_ctm import ctm
+from tenax.algorithms.ipeps_ctm_convergence import _ctm_via_2x2
 from tenax.algorithms.ipeps_excitations import (
     ExcitationConfig,
     ExcitationResult,
@@ -57,7 +57,7 @@ def small_peps_and_env():
     A = jax.random.normal(key, (D, D, D, D, d))
     A = A / (jnp.linalg.norm(A) + 1e-10)
     config = CTMConfig(chi=8, max_iter=40)
-    env = ctm(A, config)
+    env = _ctm_via_2x2(A, config)
     return A, env, d
 
 
@@ -468,7 +468,7 @@ class TestTensorInputAcceptance:
     ):
         """A non-8-tensor (e.g. split) environment must raise a clear error
         rather than fail deep in the contraction."""
-        from tenax.algorithms.ipeps_excitations import _as_dense_env
+        from tenax.algorithms._ctm_env_dense import _as_dense_env
 
         A, env, d = small_peps_and_env
         twelve_field_env = tuple(env) + tuple(env[:4])  # 12 fields, like split CTM
@@ -479,7 +479,7 @@ class TestTensorInputAcceptance:
         """SymmetricTensor inputs must raise (dense-only path) rather than
         silently densify a block-sparse tensor — project rule against
         ``todense()`` on the symmetric path."""
-        from tenax.algorithms.ipeps_excitations import _as_dense_array
+        from tenax.algorithms._ctm_env_dense import _as_dense_array
         from tenax.core.index import FlowDirection, TensorIndex
         from tenax.core.symmetry import U1Symmetry
         from tenax.core.tensor import SymmetricTensor
@@ -955,7 +955,7 @@ class TestEnergyFunctionalOracle:
         key = jax.random.PRNGKey(42)
         A = jax.random.normal(key, (2, 2, 2, 2, 2))
         A = A / (jnp.linalg.norm(A) + 1e-10)
-        env = ctm(A, CTMConfig(chi=8, max_iter=40))
+        env = _ctm_via_2x2(A, CTMConfig(chi=8, max_iter=40))
         gate = self.Hzz + 0.5 * self.Hxx
         E_gs = float(compute_energy_ctm(A, env, gate, 2))
         k = jnp.array([0.0, 0.0])

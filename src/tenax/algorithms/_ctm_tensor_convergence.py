@@ -1016,10 +1016,11 @@ class CTMConvergenceInfo(NamedTuple):
     return arity cannot change.
 
     ``converged`` and ``n_iter`` come straight out of a ``lax.while_loop``
-    carry for :func:`ctm` / :func:`ctm_2site`, so they are **JAX arrays**, not
-    Python scalars.  That keeps the entry points jittable; call ``bool(...)``
-    / ``int(...)`` at the point of use.  :func:`ctm_split` runs a Python loop
-    and returns Python scalars.
+    carry for :func:`ctm_2site`, so they are **JAX arrays**, not Python
+    scalars.  That keeps it jittable; call ``bool(...)`` / ``int(...)`` at the
+    point of use.  :func:`ctm_split` and :func:`ctm_tensor` run a Python loop
+    and return Python scalars, and so does :func:`ctm`, which runs
+    :func:`ctm_tensor` since 0.9.3.
 
     Attributes:
         converged: True when the sweep met ``conv_tol`` and stopped early.
@@ -1030,15 +1031,15 @@ class CTMConvergenceInfo(NamedTuple):
                    is False.  Every producer -- :func:`ctm_tensor` (#920),
                    :func:`ctm`, :func:`ctm_2site` and :func:`ctm_split` (#925)
                    -- counts the warm-up, so the invariant holds regardless of
-                   which one built the info.  The three ``CTMConfig``-based
+                   which one built the info.  All four also gate convergence
+                   on ``min(min_iter, max_iter)`` -- the warm-up counts toward
+                   it and the cap keeps a small ``max_iter`` convergeable, so
+                   ``n_iter >= min(min_iter, max_iter)`` whenever
+                   ``converged`` is True (#976).  The three ``CTMConfig``-based
                    entry points (:func:`ctm`, :func:`ctm_2site`,
-                   :func:`ctm_split`) additionally gate convergence on
-                   ``min(min_iter, max_iter)`` -- the warm-up counts toward it
-                   and the cap keeps a small ``max_iter`` convergeable, so for
-                   those three ``n_iter >= min(min_iter, max_iter)`` whenever
-                   ``converged`` is True (#976).  :func:`ctm_tensor` takes no
-                   ``min_iter``: it early-exits on ``conv_tol`` alone, so this
-                   lower bound does not apply to an info it produced.
+                   :func:`ctm_split`) read ``CTMConfig.min_iter`` (default
+                   10); :func:`ctm_tensor` takes a keyword-only ``min_iter``
+                   whose default, 1, keeps its plain early exit.
         diff:      Final value of the convergence criterion -- the max
                    absolute difference between successive normalized corner
                    singular-value vectors.  ``inf`` if no comparison was ever
@@ -1062,6 +1063,7 @@ def ctm_tensor(
     projector_backward: str = "auto",
     recipe: str = "2x2",
     *,
+    min_iter: int = 1,
     return_meta: bool = False,
 ) -> tuple[CTMTensorEnv, float] | tuple[CTMTensorEnv, float, CTMConvergenceInfo]:
     """Run standard CTM to convergence using the Tensor protocol.
@@ -1112,6 +1114,12 @@ def ctm_tensor(
                            chi.  Switching ``projector_method`` does not help:
                            ``eigh``/``qr`` escape the rank collapse but are
                            wildly non-convergent on the same recipe.
+        min_iter:          Minimum sweeps before ``converged`` can be set,
+                           capped at ``max_iter`` so that a small budget stays
+                           convergeable (#976).  QR warm-up sweeps count toward
+                           it.  The default, 1, keeps the plain early exit on
+                           ``conv_tol``.  The ``CTMConfig``-based entry points
+                           apply the same rule with ``CTMConfig.min_iter``.
         return_meta:       When ``True``, return a third element, a
                            :class:`CTMConvergenceInfo`,
                            saying whether the loop converged or exhausted
@@ -1302,6 +1310,12 @@ def ctm_tensor(
     # the same breath as ``converged=False``.  Matches :func:`ctm` (#839).
     diff = float("inf")
     n_iter = 0
+    # ``converged`` needs ``min(min_iter, max_iter)`` sweeps, warm-up included,
+    # as in the ``CTMConfig`` entry points (#976).  The cap uses the caller's
+    # ``max_iter``, before the warm-up below shortens the loop's budget.  The
+    # warm-up's own ``converged`` needs no gate: it survives only when the
+    # warm-up spends the whole budget, and then ``n_iter == max_iter``.
+    min_sweeps = min(min_iter, max_iter)
 
     # QR warm-up: run a few eigh iterations before switching to QR.
     #
@@ -1364,7 +1378,7 @@ def ctm_tensor(
             diff = float(_ctm_sv_diff(current_sv, prev_sv, max_rank=max_rank))
             # ``_ctm_sv_diff`` returns ``inf`` on a rank-collapsed spectrum
             # (#898), so this fails closed: a collapsed corner cannot certify.
-            if diff < conv_tol:
+            if diff < conv_tol and n_iter >= min_sweeps:
                 converged = True
                 break
         prev_sv = current_sv

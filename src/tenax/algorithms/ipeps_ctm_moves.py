@@ -1,15 +1,10 @@
-"""CTM algorithm for iPEPS — projector dispatch and directional moves."""
+"""CTM algorithm for iPEPS — the eigh projector move and the 2-site and split directional moves."""
 
 from __future__ import annotations
 
 __all__ = [
     "_ctm_move_eigh",
-    "_ctm_move_qr",
     "_ctm_move",
-    "_ctm_left_move",
-    "_ctm_right_move",
-    "_ctm_top_move",
-    "_ctm_bottom_move",
     "_ctm_left_move_2site",
     "_ctm_right_move_2site",
     "_ctm_top_move_2site",
@@ -76,172 +71,14 @@ def _ctm_move_eigh(
     return C1_new, C2_new, T_new
 
 
-def _ctm_move_qr(
-    C1g: jax.Array,
-    C2g: jax.Array,
-    Tg: jax.Array,
-    chi: int,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Projector-based CTM truncation using QR + small eigh.
-
-    Instead of forming the full density matrix rho of size (chi*D^2)^2 and
-    diagonalizing at O((chi*D^2)^3), QR-factor the concatenated corners
-    [C1g, C2g] to reduce to a small (2*chi, 2*chi) problem, then eigh
-    the small matrix (arXiv:2505.00494).
-
-    Total cost: O(chi^2 * D^2 * chi) for QR + O(chi^3) for small eigh,
-    vs O(chi^3 * D^6) for direct eigh of rho.
-
-    Returns ``(C1_new, C2_new, T_new)`` with shapes ``(chi', col1)``,
-    ``(chi', col2)``, ``(chi', D2, chi')`` where ``chi' <= chi``.
-    """
-    M = jnp.concatenate([C1g, C2g], axis=1)  # (n, 2*m)
-    Q, R = jnp.linalg.qr(M)  # Q: (n, 2m), R: (2m, 2m)
-
-    # Small eigh on R @ R^H (size 2*chi x 2*chi)
-    rho_small = R @ R.conj().T
-    rho_small = 0.5 * (rho_small + rho_small.conj().T)
-    eigvals, eigvecs = jnp.linalg.eigh(rho_small)
-
-    k = min(chi, len(eigvals))
-    V = eigvecs[:, -k:][:, ::-1]  # leading eigenvectors
-    P = Q @ V  # (n, k)
-
-    P_sg = jax.lax.stop_gradient(P)
-    C1_new = P_sg.conj().T @ C1g
-    C2_new = P_sg.conj().T @ C2g
-    T_new = jnp.einsum("ia,idj,jb->adb", P_sg, Tg, P_sg)
-    return C1_new, C2_new, T_new
-
-
 def _ctm_move(
     C1g: jax.Array,
     C2g: jax.Array,
     Tg: jax.Array,
     chi: int,
-    projector_method: str = "eigh",
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Dispatch CTM truncation to eigh or QR projector method."""
-    if projector_method == "qr":
-        return _ctm_move_qr(C1g, C2g, Tg, chi)
+    """CTM truncation with the eigh projector; the 2-site moves call this."""
     return _ctm_move_eigh(C1g, C2g, Tg, chi)
-
-
-def _ctm_left_move(
-    env: CTMEnvironment,
-    a: jax.Array,
-    chi: int,
-    projector_method: str = "eigh",
-) -> CTMEnvironment:
-    """Projector-based CTM left move: updates C1, T4, C4.
-
-    Grows C1 with T1, C4 with T3, T4 with ``a``, then truncates with
-    consistent projectors derived from the grown corners.
-    """
-    D2 = a.shape[0]
-    # Grow corners
-    C1g = jnp.einsum("ab,buc->auc", env.C1, env.T1).reshape(-1, env.T1.shape[2])
-    C4g = jnp.einsum("gh,hdi->gdi", env.C4, env.T3).reshape(-1, env.T3.shape[2])
-    # Grow edge: T4[a,l,g] * a[u,d,l,r] -> (a,u,g,d,r)
-    T4g = jnp.einsum("alg,udlr->augdr", env.T4, a)
-    T4g = T4g.transpose(0, 1, 4, 2, 3).reshape(C1g.shape[0], D2, C4g.shape[0])
-
-    C1_new, C4_new, T4_new = _ctm_move(C1g, C4g, T4g, chi, projector_method)
-    return CTMEnvironment(
-        C1=C1_new,
-        C2=env.C2,
-        C3=env.C3,
-        C4=C4_new,
-        T1=env.T1,
-        T2=env.T2,
-        T3=env.T3,
-        T4=T4_new,
-    )
-
-
-def _ctm_right_move(
-    env: CTMEnvironment,
-    a: jax.Array,
-    chi: int,
-    projector_method: str = "eigh",
-) -> CTMEnvironment:
-    """Projector-based CTM right move: updates C2, T2, C3."""
-    D2 = a.shape[0]
-    # Grow corners
-    C2g = jnp.einsum("ce,buc->eub", env.C2, env.T1).reshape(-1, env.T1.shape[0])
-    C3g = jnp.einsum("im,hdi->mdh", env.C3, env.T3).reshape(-1, env.T3.shape[0])
-    # Grow edge: T2[e,r,m] * a[u,d,l,r] -> (e,u,m,d,l)
-    T2g = jnp.einsum("erm,udlr->eumdl", env.T2, a)
-    T2g = T2g.transpose(0, 1, 4, 2, 3).reshape(C2g.shape[0], D2, C3g.shape[0])
-
-    C2_new, C3_new, T2_new = _ctm_move(C2g, C3g, T2g, chi, projector_method)
-    return CTMEnvironment(
-        C1=env.C1,
-        C2=C2_new,
-        C3=C3_new,
-        C4=env.C4,
-        T1=env.T1,
-        T2=T2_new,
-        T3=env.T3,
-        T4=env.T4,
-    )
-
-
-def _ctm_top_move(
-    env: CTMEnvironment,
-    a: jax.Array,
-    chi: int,
-    projector_method: str = "eigh",
-) -> CTMEnvironment:
-    """Projector-based CTM top move: updates C1, T1, C2."""
-    D2 = a.shape[0]
-    # Grow corners
-    C1g = jnp.einsum("ab,alg->blg", env.C1, env.T4).reshape(-1, env.T4.shape[2])
-    C2g = jnp.einsum("ce,erm->crm", env.C2, env.T2).reshape(-1, env.T2.shape[2])
-    # Grow edge: T1[b,u,c] * a[u,d,l,r] -> (b,c,d,l,r)
-    T1g = jnp.einsum("buc,udlr->bcdlr", env.T1, a)
-    T1g = T1g.transpose(0, 3, 2, 1, 4).reshape(C1g.shape[0], D2, C2g.shape[0])
-
-    C1_new, C2_new, T1_new = _ctm_move(C1g, C2g, T1g, chi, projector_method)
-    return CTMEnvironment(
-        C1=C1_new,
-        C2=C2_new,
-        C3=env.C3,
-        C4=env.C4,
-        T1=T1_new,
-        T2=env.T2,
-        T3=env.T3,
-        T4=env.T4,
-    )
-
-
-def _ctm_bottom_move(
-    env: CTMEnvironment,
-    a: jax.Array,
-    chi: int,
-    projector_method: str = "eigh",
-) -> CTMEnvironment:
-    """Projector-based CTM bottom move: updates C4, T3, C3."""
-    D2 = a.shape[0]
-    # Grow corners
-    C4g = jnp.einsum("gh,alg->hal", env.C4, env.T4)
-    C4g = C4g.transpose(0, 2, 1).reshape(-1, env.T4.shape[0])
-    C3g = jnp.einsum("im,erm->ire", env.C3, env.T2).reshape(-1, env.T2.shape[0])
-    # Grow edge: T3[h,d,i] * a[u,d,l,r] -> (h,i,u,l,r)
-    T3g = jnp.einsum("hdi,udlr->hiulr", env.T3, a)
-    T3g = T3g.transpose(0, 3, 2, 1, 4).reshape(C4g.shape[0], D2, C3g.shape[0])
-
-    C4_new, C3_new, T3_new = _ctm_move(C4g, C3g, T3g, chi, projector_method)
-    return CTMEnvironment(
-        C1=env.C1,
-        C2=env.C2,
-        C3=C3_new,
-        C4=C4_new,
-        T1=env.T1,
-        T2=env.T2,
-        T3=T3_new,
-        T4=env.T4,
-    )
 
 
 def _ctm_left_move_2site(
