@@ -880,7 +880,7 @@ def compute_energy_ctm_tensor_2site(
     NN bonds: 2 A-B and 2 B-A.  Sums all four (swapped (A,B) → (B,A) for
     the B-starting bonds) and divides by the 2 unique tensors per site.
     Issue #493: counting only A-B bonds drove unphysical drift on
-    \\\`gs_c4v=False\\\` bipartite when A↔B symmetry was broken.
+    ``gs_c4v=False`` bipartite when A↔B symmetry was broken.
 
     Uses native Tensor contractions for the RDM computation, avoiding
     densification of the chi-dimensional environment.
