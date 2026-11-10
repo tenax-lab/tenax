@@ -125,7 +125,7 @@ config = iPEPSConfig(
 )
 
 energy, (A, B), (env_A, env_B) = ipeps(H_bond, initial_peps=None, config=config)
-print(f"Energy per site: {energy:.6f}")  # ~ -0.66
+print(f"Energy per site: {energy:.6f}")  # -0.656790
 ```
 
 ## Result
@@ -239,7 +239,7 @@ config = iPEPSConfig(
     ctm=CTMConfig(chi=10, max_iter=40),
 )
 energy, (A, B), (env_A, env_B) = ipeps(gate, None, config)
-print(f"Energy per site: {energy:.6f}")  # ~ -0.63
+print(f"Energy per site: {energy:.6f}")  # -0.656790
 ```
 
 The checkerboard has **four** inequivalent bonds — `A.r<->B.l`, `B.r<->A.l`,
@@ -266,10 +266,16 @@ anisotropic model (`Jx != Jy`) cannot be expressed today regardless of this
 flag — setting it would silently evolve the uniform model. Per-bond
 gates are #883.
 
-The energy `ipeps()` reports comes from the legacy 2-site CTM, which does not
-converge on a genuinely entangled state — it sits ~0.02 above the truth. For an
-accurate number, measure the returned state with `ctm_tensor(recipe="2x2")`
-(D=2 gives −0.65933, χ-converged).
+`ipeps()` measures the returned pair with the 2x2 recipe of `ctm_tensor_2site`
+at `config.ctm.chi`, and reports half the sum of the four bond energies of the
+cell. The example above prints −0.656790, and the energy is −0.6567903814 at
+χ = 10, 16, 24 and 32 (`conv_tol=1e-10`). Before 0.9.3 the same example printed
+−0.630276, with the warning "CTM did not converge in ipeps()": `ipeps()`
+measured with a legacy 2-site CTM whose two environments did not share a basis,
+so its energy moved with the bond gauge of the pair, and it summed only the two
+bonds that start on `A`. The −0.65933 that this guide gave as the accurate
+number came from `ctm_tensor` on `A` alone, which measures the uniform state of
+`A`, a different state (#900).
 
 When you want only the simple-update state — as a warm start or fixture — skip
 that measurement entirely:
@@ -320,29 +326,38 @@ gauge handed to a CTM.
 This corrects the *weights*, not simple update's dynamics; it does not change
 the state `ipeps()` converges to.
 
-### `ctm_2site()` -- standalone 2-site CTM
+### `ctm_tensor_2site()` -- standalone 2-site CTM
 
-Compute CTM environments for an existing 2-site iPEPS:
+`ctm_tensor_2site(A, B, chi, ...)` computes the environments of a checkerboard
+pair `(A, B)` of `DenseTensor` or `SymmetricTensor` site tensors, such as the
+pair `ipeps()` returns:
 
 ```python
-from tenax import ctm_2site, CTMConfig
+from tenax import compute_energy_ctm_tensor_2site, ctm_tensor_2site
 
-env_A, env_B = ctm_2site(A, B, CTMConfig(chi=20, max_iter=100))
+env_A, env_B = ctm_tensor_2site(A, B, chi=20, max_iter=100)
+E = compute_energy_ctm_tensor_2site(A, B, env_A, env_B, H_bond, d=2)
 ```
 
-> **Note:** ``ctm_2site()`` is the legacy dense CTM used internally by
-> simple update (``ipeps()``).  For AD-based optimization, use
-> ``optimize_gs_ad()`` with ``unit_cell="2site"`` — it routes through
-> the Tensor-protocol multisite CTM which supports both ``DenseTensor``
-> and ``SymmetricTensor``.
+It warns when the environments are not converged; `strict=True` raises
+`CTMNotConvergedError` instead (see the CTM guide).
 
-| Argument | Type | Description |
-|----------|------|-------------|
-| `A` | `jax.Array` | Site tensor for sublattice A, shape `(D, D, D, D, d)` |
-| `B` | `jax.Array` | Site tensor for sublattice B, shape `(D, D, D, D, d)` |
-| `config` | `CTMConfig` | CTM configuration |
+```{warning}
+`ctm_2site()` is deprecated since 0.9.3 and emits a `DeprecationWarning`. It now
+runs the 2x2 recipe of `ctm_tensor_2site` and returns the raw-array
+`CTMEnvironment` pair it always returned, so its environments changed in 0.9.3.
+The sweep it ran before built each sublattice's new boundary from that
+sublattice's own corners and edges, with a projector of its own, so the two
+environments did not share a basis at the A|B seams: on three D=2 simple-update
+states, each in two bond gauges at χ = 6 and 8, the energy of `ipeps()` ranged
+from −0.7815 to +0.8171, while `ctm_tensor_2site` agreed with the 1-site CTM of
+each state to 4e-11. Three behaviours differ from before:
 
-Returns a tuple `(env_A, env_B)` of `CTMEnvironment` named tuples.
+- `ctm_2site()` does not run under `jax.jit`, because the 2x2 recipe is a Python loop.
+- A `CTMConfig.projector_method` other than `"svd"` is ignored with a
+  `UserWarning`, because the 2x2 recipe always uses Fishman SVD.
+- With `return_meta=True`, the fields of `info` are Python scalars, not JAX arrays.
+```
 
 ### `compute_energy_ctm_2site()` -- 2-site energy
 
@@ -355,8 +370,13 @@ from tenax import compute_energy_ctm_2site
 energy = compute_energy_ctm_2site(A, B, env_A, env_B, H_bond, d=2)
 ```
 
-The energy includes one horizontal and one vertical bond per site:
-$E/\text{site} = E_h + E_v$.
+The cell has four bonds, `A.r–B.l`, `B.r–A.l`, `A.d–B.u` and `B.d–A.u`, and two
+sites, so $E/\text{site} = \tfrac{1}{2}\,(E_h^{AB} + E_h^{BA} + E_v^{AB} + E_v^{BA})$.
+Before 0.9.3 this function summed only the two bonds that start on `A` (#493
+fixed the same count in `compute_energy_ctm_tensor_2site`): singlets on every
+`A.r–B.l` bond then read −0.75 per site instead of −0.375. `A` and `B` are raw
+arrays (`A.todense()` for the tensors `ipeps()` returns); `env_A` and `env_B`
+are raw-array `CTMEnvironment`s, as `ipeps()` returns them.
 
 ### AD ground-state optimization
 

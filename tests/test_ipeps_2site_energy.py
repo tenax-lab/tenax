@@ -15,7 +15,7 @@ them, because the 2-site RDM networks join ``env_A`` to ``env_B`` across those
 bonds.  Neither holds, so the energy depends on the gauge of the site tensors.
 Measured at ``2cb7c575`` on three D=2 simple-update states, each in two bond
 gauges at chi=6 and 8 (12 runs): ``ipeps()`` reported energies from ``-0.7815``
-to ``+0.8171``, several below the exact ground state ``-0.6694``, while
+to ``+0.8171``, several below the ground-state energy ``-0.6694`` (QMC), while
 ``ctm_tensor_2site`` agreed with the 1-site CTM of each state to 4e-11 in every
 run.
 
@@ -28,7 +28,7 @@ whose two kinds of bond differ, the result is not the energy: singlets on every
 ``-0.750``.  On the D=2 simple-update state of the plain Heisenberg gate the
 bonds that start on ``A`` give ``-0.6393`` and those that start on ``B``
 ``-0.6743``; that difference, not a dropped bond, is most of the "~0.02 above
-the truth" that the guide reports.
+the truth" that the guide reported before 0.9.3.
 
 Every state here is measured with ``num_imaginary_steps=0``: simple update then
 leaves the pair unchanged (all bond weights stay 1), so ``ipeps()`` measures

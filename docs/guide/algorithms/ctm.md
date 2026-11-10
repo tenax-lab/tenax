@@ -186,25 +186,16 @@ env_c4v = ctm_tensor_c4v(A, chi=32, max_iter=100, conv_tol=1e-10)
 (ctm-convergence-check)=
 ## Checking whether the CTM actually converged
 
-`ctm`, `ctm_2site`, `ctm_split` and `ctm_tensor` return an environment whether
-or not the sweep met `conv_tol` — running out of `max_iter` is not an error.
-Pass `return_meta=True` for a `CTMConvergenceInfo` saying which happened, rather
-than inferring it from an energy that silently moves with `max_iter` (#839):
+`ctm_tensor`, `ctm_split` and the deprecated `ctm` and `ctm_2site` return an
+environment whether or not the sweep met `conv_tol` — running out of `max_iter`
+is not an error. Pass `return_meta=True` for a `CTMConvergenceInfo` saying which
+happened, rather than inferring it from an energy that silently moves with
+`max_iter` (#839). `info.diff` is the convergence criterion — the change in the
+corner singular values, not in the energy. `ipeps()` performs this check itself
+and warns.
 
-```python
-from tenax import CTMConfig, ctm_2site
-
-env_A, env_B, info = ctm_2site(A, B, CTMConfig(chi=16), return_meta=True)
-if not bool(info.converged):
-    print(f"stopped at max_iter after {int(info.n_iter)} sweeps, "
-          f"criterion still {float(info.diff):.2e}")
-```
-
-`info.diff` is the convergence criterion — the change in the corner singular
-values, not in the energy. `ipeps()` performs this check itself and warns.
-
-`ctm_tensor` takes the same flag, and returns the info as a *third* element
-after `(env, max_truncation_error)`:
+`ctm_tensor` returns the info as a *third* element after
+`(env, max_truncation_error)`:
 
 ```python
 from tenax import ctm_tensor
@@ -222,7 +213,8 @@ if not info.converged:
 `ctm_tensor` also takes a keyword-only `min_iter` (default 1). With it,
 `converged` is set only after `min(min_iter, max_iter)` sweeps, QR warm-up
 sweeps included. The `CTMConfig`-based entry points apply the same rule with
-`CTMConfig.min_iter` (default 10), and `ctm()` passes that value on.
+`CTMConfig.min_iter` (default 10), and `ctm()` and `ctm_2site()` pass that
+value on.
 
 `ctm_tensor_2site` warns instead when the environment is not converged (or
 the hold test left it unverified). Pass `strict=True` to raise
