@@ -34,7 +34,8 @@ Tenax is a JAX-based tensor network library with these core abstractions:
 - **`AutoMPO`** — symbolic Hamiltonian builder; `auto.to_mpo()` or
   `auto.to_mpo(symmetric=True)` for U(1) block-sparse MPOs.
 - **Algorithms** — `dmrg`, `idmrg`, `trg`, `hotrg`, `ipeps`,
-  `optimize_gs_ad`, `compute_excitations`.
+  `optimize_gs_ad`, `compute_spectrum` / `spectral_function`
+  (`compute_excitations` is deprecated).
 
 **Key import pattern:**
 ```python
