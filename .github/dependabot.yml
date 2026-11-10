@@ -11,3 +11,17 @@ updates:
     groups:
       all-dependencies:
         patterns: ["*"]
+    ignore:
+      # cython is also a [build-system] requirement.  When a new cython is
+      # released, Dependabot's uv updater tries to bump that entry, finds no
+      # file to change (the range already admits it and build requirements
+      # are not in uv.lock), raises "No files have changed!", and the error
+      # aborts the whole all-dependencies group: no PR at all that week
+      # (2026-11-09, cython 3.3.1).  Bump it by hand:
+      # `uv lock --upgrade-package cython`.
+      - dependency-name: "cython"
+      # cuSOLVER decides whether GPU SVDs are correct: 12.2.6.9 returned NaN
+      # on ill-conditioned matrices (#691), and the polar GPU SVD (v0.9.0)
+      # was validated on 12.3.5.3.  Move it only after the GPU SVD suites
+      # pass on the new version.  Covers nvidia-cusolver and -cu12.
+      - dependency-name: "nvidia-cusolver*"
