@@ -1015,12 +1015,12 @@ class CTMConvergenceInfo(NamedTuple):
     or :func:`ctm_split`.  Opt-in because all three are public API and their
     return arity cannot change.
 
-    ``converged`` and ``n_iter`` come straight out of a ``lax.while_loop``
-    carry for :func:`ctm_2site`, so they are **JAX arrays**, not Python
-    scalars.  That keeps it jittable; call ``bool(...)`` / ``int(...)`` at the
-    point of use.  :func:`ctm_split` and :func:`ctm_tensor` run a Python loop
-    and return Python scalars, and so does :func:`ctm`, which runs
-    :func:`ctm_tensor` since 0.9.3.
+    Every producer runs a Python loop and fills the fields with Python
+    scalars: :func:`ctm_tensor`, :func:`ctm_split`, and, since 0.9.3,
+    :func:`ctm` and :func:`ctm_2site`, which run the 2x2 recipe.  Before 0.9.3
+    those two filled them with JAX arrays out of a ``lax.while_loop`` carry, so
+    code that calls ``bool(...)`` / ``int(...)`` at the point of use works with
+    both.
 
     Attributes:
         converged: True when the sweep met ``conv_tol`` and stopped early.

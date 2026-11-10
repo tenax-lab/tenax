@@ -28,6 +28,7 @@ from tenax.algorithms.ipeps_config import CTMConfig, CTMEnvironment
 from tenax.algorithms.ipeps_ctm_convergence import (
     CTMConvergenceInfo,
     _ctm_2site_via_2x2,
+    ctm_2site,
 )
 from tenax.algorithms.ipeps_rdm import _rdm1x2_2site, _rdm2x1_2site
 from tenax.core.index import FlowDirection, TensorIndex
@@ -41,6 +42,7 @@ ONES = jnp.ones((1, 1, 1, 1, 2))
 # Every entry point that must return the environments of the 2x2 recipe.
 ENTRY_POINTS = [
     pytest.param(_ctm_2site_via_2x2, id="helper"),
+    pytest.param(ctm_2site, id="ctm_2site"),
 ]
 
 
@@ -243,3 +245,50 @@ def test_helper_emits_no_deprecation_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
         _ctm_2site_via_2x2(ONES, ONES, CTMConfig(chi=1, max_iter=5))
+
+
+def test_ctm_2site_warns_that_it_is_deprecated():
+    """Exactly one deprecation warning, naming the replacement and the lost
+    ``jax.jit``."""
+    with pytest.warns(DeprecationWarning, match="^ctm_2site is deprecated") as record:
+        ctm_2site(ONES, ONES, CTMConfig(chi=1, max_iter=5))
+    deprecations = [
+        w for w in record if str(w.message).startswith("ctm_2site is deprecated")
+    ]
+    assert len(deprecations) == 1
+    message = str(deprecations[0].message)
+    assert "ctm_tensor_2site" in message
+    assert "jax.jit" in message
+    # Python's default filters show a DeprecationWarning only when it is blamed
+    # on __main__ (PEP 565).  With stacklevel=1 it would be blamed on
+    # ctm_2site()'s own module and hidden from every script.
+    assert deprecations[0].filename == __file__
+
+
+@pytest.mark.parametrize("method", ["qr", "eigh"])
+def test_ctm_2site_warns_that_projector_method_is_ignored(method):
+    """The 2x2 recipe always uses Fishman SVD: the environments are the ones
+    ``"svd"`` gives, and the caller is told."""
+    A, B = _random_site(0), _random_site(7)
+    with pytest.warns(UserWarning, match="projector_method"):
+        envs = ctm_2site(A, B, CTMConfig(chi=4, max_iter=5, projector_method=method))
+    _assert_same_envs(envs, _ctm_2site_via_2x2(A, B, CTMConfig(chi=4, max_iter=5)))
+
+
+def test_ctm_2site_default_config_gives_no_user_warning():
+    """The ``projector_method`` warning fires only when it applies."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ctm_2site(_random_site(0), _random_site(7), CTMConfig(chi=4, max_iter=5))
+    assert not [w for w in caught if "projector_method" in str(w.message)]
+
+
+def test_ctm_2site_return_meta_matches_the_helper():
+    """``ctm_2site()`` is the helper plus the warnings: same environments, same
+    info."""
+    A = jnp.asarray(ising_peps(0.2))
+    cfg = CTMConfig(chi=8, max_iter=500, conv_tol=1e-12)
+    env_A, env_B, info = ctm_2site(A, A, cfg, return_meta=True)
+    ref_A, ref_B, ref_info = _ctm_2site_via_2x2(A, A, cfg, return_meta=True)
+    assert info == ref_info
+    _assert_same_envs((env_A, env_B), (ref_A, ref_B))

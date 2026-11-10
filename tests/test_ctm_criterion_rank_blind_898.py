@@ -335,8 +335,8 @@ def test_the_public_ipeps_loop_uses_the_guarded_criterion():
 
     It did.  ``ipeps_ctm_convergence`` carried its **own** ``_ctm_sv_diff`` --
     the same sum-normalised comparison without the rank test -- and that is the
-    copy the public path ran: ``ipeps.py`` imports ``ctm_2site`` from there and
-    calls it, so every ``ipeps()`` call kept comparing ``[1, 0, ..., 0]``
+    copy the public path ran: ``ipeps.py`` imported ``ctm_2site`` from there
+    and called it, so every ``ipeps()`` call kept comparing ``[1, 0, ..., 0]``
     against ``[1, 0, ..., 0]`` and exiting early, while the tests above passed
     against the guarded module.  A fix that leaves the production path broken
     is worse than no fix, because the closed issue stops anyone looking.
@@ -347,18 +347,18 @@ def test_the_public_ipeps_loop_uses_the_guarded_criterion():
     value assertion would not, since a fresh unguarded copy returns the same
     number as the guarded one on every input except the collapsed ones.
 
-    The three loops in that module (``ctm``, ``ctm_2site``, ``ctm_split``) all
-    call the name bound at module scope, so binding it once is what routes all
-    three.  ``ctm_2site`` is the one ``ipeps()`` reaches.
+    Since 0.9.3 ``ctm`` and ``ctm_2site`` delegate to the 2x2 recipe, and
+    ``ctm_split`` is the one loop left in that module; it calls the name bound
+    at module scope.  ``ipeps()`` reaches the multisite loop of
+    ``_ctm_tensor_convergence`` instead (pinned by the next test).
     """
     from tenax.algorithms import ipeps_ctm_convergence
 
     assert ipeps_ctm_convergence._ctm_sv_diff is _ctm_sv_diff, (
         "ipeps_ctm_convergence._ctm_sv_diff is not the guarded implementation "
-        "from _ctm_tensor_convergence -- the public ipeps() path compares "
-        "corner spectra with an unguarded copy again (#898), so a rank-1 "
-        "corner will certify as converged there no matter what this file's "
-        "other tests say"
+        "from _ctm_tensor_convergence -- ctm_split compares corner spectra "
+        "with an unguarded copy again (#898), so a rank-1 corner will certify "
+        "as converged there no matter what this file's other tests say"
     )
 
 

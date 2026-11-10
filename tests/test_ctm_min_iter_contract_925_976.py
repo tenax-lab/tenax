@@ -8,7 +8,12 @@ same cases.  Since 0.9.3 ``ctm`` runs ``ctm_tensor(recipe="2x2")`` with
 ``projector_method="svd"``, so it runs no QR warm-up: its two warm-up tests
 went with it, and
 ``test_ctm_tensor_min_iter_counts_the_warmup_against_the_callers_budget``
-pins the warm-up rule on ``ctm_tensor``.
+pins the warm-up rule on ``ctm_tensor``.  Since 0.9.3 ``ctm_2site`` runs the
+multisite loop of ``ctm_tensor_2site``, which takes the same gate as a
+keyword-only ``min_iter`` (default 1): the loop and the helper behind
+``ctm_2site`` run the same cases, and
+``test_multisite_min_iter_counts_the_warmup_against_the_callers_budget``
+pins the warm-up rule on the loop.
 
 These are mechanism tests, not convergence tests: they run on a 1x1 product
 state whose corner spectrum is stationary after the first sweep, so ``diff`` is
