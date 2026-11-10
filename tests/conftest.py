@@ -195,6 +195,12 @@ _FILE_MARKERS = {
     # environment on a public entry point, so they belong in the required gate.
     # The 16 Onsager cases set its run time.
     "test_ctm_delegates_to_2x2.py": "core",
+    # ``ctm_2site()`` and ``ipeps()`` run the 2x2 recipe of ``ctm_tensor_2site``
+    # since 0.9.3.  The orientation pin compares the raw four-bond energy with
+    # the Tensor energy on a pair without lattice symmetry, where a transposed
+    # corner or swapped environments move it by 4.5e-4 or more.  A silent wrong
+    # environment on a public entry point, so it belongs in the required gate.
+    "test_ctm_2site_delegates_to_2x2.py": "core",
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",

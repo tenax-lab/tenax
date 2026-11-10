@@ -7,6 +7,7 @@ __all__ = [
     "CTMConvergenceInfo",
     "ctm",
     "_ctm_via_2x2",
+    "_ctm_2site_via_2x2",
     "_renormalize_env",
     "_ctm_2site_sweep",
     "ctm_2site",
@@ -213,6 +214,99 @@ def _ctm_via_2x2(
     if return_meta:
         return env, info
     return env
+
+
+def _ctm_2site_via_2x2(
+    A: jax.Array,
+    B: jax.Array,
+    config: CTMConfig,
+    *,
+    return_meta: bool = False,
+) -> (
+    tuple[CTMEnvironment, CTMEnvironment]
+    | tuple[CTMEnvironment, CTMEnvironment, CTMConvergenceInfo]
+):
+    """``ctm_2site()`` without its warnings: the 2x2 recipe of
+    ``ctm_tensor_2site`` with the ``CTMConfig`` fields mapped, returned as two
+    raw-array ``CTMEnvironment`` named tuples.
+
+    For callers that need ``ctm_2site()``'s result and must not trigger its
+    ``DeprecationWarning``: ``ipeps()`` and the fixture-only tests.
+
+    Args:
+        A:           Site tensor of sublattice A: a raw array with 5 legs
+                     ``(u, d, l, r, s)`` and four virtual legs of one dimension,
+                     or a ``DenseTensor``, which is passed through.
+                     ``_wrap_as_dense_tensor`` reads ``shape[0]`` for all four
+                     virtual legs without a check, so any other shape raises
+                     ``ValueError`` here.  A ``SymmetricTensor`` raises
+                     ``TypeError``: the raw result would need ``todense()``.
+        B:           Site tensor of sublattice B, checked the same way.
+        config:      ``chi``, ``max_iter``, ``conv_tol``, ``renormalize`` and
+                     ``min_iter`` are passed on.  ``projector_method`` is not:
+                     the 2x2 recipe always uses Fishman SVD, and ``"svd"`` is
+                     passed because ``"qr"`` would still start the QR warm-up
+                     loop.  So ``qr_warmup_steps`` has no effect.
+        return_meta: When True, also return a :class:`CTMConvergenceInfo`,
+                     whose fields are Python scalars.
+
+    Returns:
+        ``(env_A, env_B)``, or ``(env_A, env_B, info)``.  Every field has its
+        legs in the order ``CTMTensorEnv`` documents, which is the order the raw
+        2-site RDMs of ``ipeps_rdm`` contract.  The loop's own not-converged
+        warning is off: ``ipeps()`` warns itself, and ``ctm_2site()`` reports
+        through ``info`` as it always did.
+    """
+    from tenax.algorithms._ctm_env_dense import _as_dense_env, _in_documented_leg_order
+    from tenax.algorithms._ctm_tensor_convergence import (
+        CHECKERBOARD_NEIGHBORS,
+        _ctm_tensor_multisite,
+    )
+    from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
+    from tenax.core.tensor import SymmetricTensor, Tensor
+
+    sites = {}
+    for name, coord, X in (("A", (0, 0), A), ("B", (1, 0), B)):
+        if isinstance(X, SymmetricTensor):
+            raise TypeError(
+                f"ctm_2site() returns raw-array CTMEnvironments, so the "
+                f"SymmetricTensor site tensor {name} would have to be densified. "
+                "Call ctm_tensor_2site(A, B, chi, ...) instead: it keeps the "
+                "blocks and returns two CTMTensorEnvs."
+            )
+        if not isinstance(X, Tensor):
+            X = jnp.asarray(X)
+            if X.ndim != 5 or len(set(X.shape[:4])) != 1:
+                raise ValueError(
+                    "Expected raw site tensors with 5 legs (u, d, l, r, s) and "
+                    f"four virtual legs of one dimension; got shape {X.shape} "
+                    f"for {name}."
+                )
+            X = _wrap_as_dense_tensor(X)
+        sites[coord] = X
+    envs, status, _detail = _ctm_tensor_multisite(
+        sites,
+        CHECKERBOARD_NEIGHBORS,
+        config.chi,
+        max_iter=config.max_iter,
+        conv_tol=config.conv_tol,
+        renormalize=config.renormalize,
+        projector_method="svd",
+        recipe="2x2",
+        min_iter=config.min_iter,
+        _return_status=True,
+        _warn_unconverged=False,
+    )
+    # The 2x2 sweep stores each corner with its two legs reversed, and the raw
+    # consumers contract by position: put every field in the documented order.
+    env_A = _as_dense_env(_in_documented_leg_order(envs[(0, 0)]))
+    env_B = _as_dense_env(_in_documented_leg_order(envs[(1, 0)]))
+    if return_meta:
+        info = CTMConvergenceInfo(
+            converged=status.converged, n_iter=status.iterations, diff=status.sv_diff
+        )
+        return env_A, env_B, info
+    return env_A, env_B
 
 
 def _renormalize_env(env: CTMEnvironment) -> CTMEnvironment:
