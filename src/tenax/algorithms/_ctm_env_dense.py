@@ -8,10 +8,10 @@ fields of a ``CTMTensorEnv`` share the leg and flow convention of the raw
 ``CTMEnvironment`` when each stores its legs in the order ``CTMTensorEnv``
 documents, so ``.todense()`` on each field is then correct and keeps the
 converged environment.  ``.todense()`` goes by axis position, and the 2x2 sweep
-of ``ctm_tensor`` stores each corner with its two legs in the reverse order:
-pass such an environment through ``_in_documented_leg_order`` first.  A
-transposed corner is invisible on a state with lattice symmetry, whose corners
-are symmetric matrices, and moves the energy on any other.
+of ``ctm_tensor`` stores each corner with its two legs in the reverse order, so
+``_as_dense_env`` passes a ``CTMTensorEnv`` through ``_in_documented_leg_order``
+first.  A transposed corner is invisible on a state with lattice symmetry, whose
+corners are symmetric matrices, and moves the energy on any other.
 
 For a ``DenseTensor``, ``.todense()`` returns the stored buffer, so it is free.
 A ``SymmetricTensor`` would be densified here, against the project rule on
@@ -58,8 +58,10 @@ def _as_dense_env(env) -> CTMEnvironment:
     """Coerce a CTM environment to a raw-array ``CTMEnvironment``.
 
     Accepts the legacy raw-array ``CTMEnvironment`` (returned unchanged) or the
-    Tensor-protocol ``CTMTensorEnv`` produced by ``optimize_gs_ad`` (each of the
-    8 corner/edge fields is converted via ``.todense()``).
+    Tensor-protocol ``CTMTensorEnv`` produced by ``optimize_gs_ad`` and
+    ``ctm_tensor``.  A ``CTMTensorEnv`` is put in the leg order it documents, by
+    label (``_in_documented_leg_order``), before each of the 8 corner/edge fields
+    is converted via ``.todense()``.  A ``CTMEnvironment`` is read by position.
     """
     fields = tuple(env)
     if len(fields) != 8:
@@ -68,6 +70,10 @@ def _as_dense_env(env) -> CTMEnvironment:
             f"(4 corners + 4 edges); got {len(fields)} fields. Split-CTM "
             "environments are not supported by the excitation path."
         )
+    if isinstance(env, CTMTensorEnv):
+        # ``.todense()`` goes by position, and the 2x2 sweep stores each corner
+        # with its two legs reversed.
+        fields = tuple(_in_documented_leg_order(env))
     if any(isinstance(f, Tensor) for f in fields):
         return CTMEnvironment(*(_as_dense_array(f) for f in fields))
     return env if isinstance(env, CTMEnvironment) else CTMEnvironment(*fields)
@@ -84,16 +90,17 @@ _DOCUMENTED_LEGS = {
 def _in_documented_leg_order(env: CTMTensorEnv) -> CTMTensorEnv:
     """Return ``env`` with every field's legs in the order ``CTMTensorEnv`` documents.
 
-    ``_as_dense_env`` converts each field by axis position, and the raw consumers
-    (``ipeps_rdm``) contract by position in the documented order: ``C1`` is
-    ``(c1_d, c1_r)``, ``T1`` is ``(t1_l, u2, t1_r)``, and so on (the leading
-    labels of ``_STD_CORNER_SPECS`` and ``_STD_EDGE_SPECS``).  The 2x2 sweep of
-    ``ctm_tensor`` returns the edges in that order but each corner with its two
-    legs reversed, ``C1`` as ``(c1_r, c1_d)``.  The labels and flows are right, and
-    ``compute_energy_ctm_tensor``, which goes by label, is unaffected; but a raw
-    environment made by position holds every corner transposed.  That is invisible
-    on a state with lattice symmetry, whose corners are symmetric matrices, and
-    wrong on any other.
+    ``.todense()`` converts each field by axis position, and the raw consumers
+    (``ipeps_rdm``, ``ipeps_excitations``) contract by position in the documented
+    order: ``C1`` is ``(c1_d, c1_r)``, ``T1`` is ``(t1_l, u2, t1_r)``, and so on
+    (the leading labels of ``_STD_CORNER_SPECS`` and ``_STD_EDGE_SPECS``).  The
+    2x2 sweep of ``ctm_tensor`` returns the edges in that order but each corner
+    with its two legs reversed, ``C1`` as ``(c1_r, c1_d)``.  The labels and flows
+    are right, and ``compute_energy_ctm_tensor``, which goes by label, is
+    unaffected; but a raw environment made by position holds every corner
+    transposed.  That is invisible on a state with lattice symmetry, whose
+    corners are symmetric matrices, and wrong on any other.  ``_as_dense_env``
+    calls this on every ``CTMTensorEnv``.
 
     Fields are permuted by label, never by position.  A field already in order
     comes back unchanged (the same object).
