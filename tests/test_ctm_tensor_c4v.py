@@ -291,6 +291,17 @@ def small_peps_fermionic():
     return SymmetricTensor.random_normal(indices, key)
 
 
+class _EnergyGap762(Exception):
+    """The #762 symptom, raised only by the energy comparison below.
+
+    The xfail on ``test_u1_energy_matches_dense`` matches this class alone
+    (#797), so a crash in either path, a non-finite energy or a failed fixture
+    guard is a real failure.  The comparison does not use ``assert``: an
+    ``AssertionError`` also comes from the fixture guards and from bare
+    ``assert`` statements in the library.
+    """
+
+
 class TestC4vCTMSymmetric:
     def test_u1_converges(self, small_peps_u1):
         """C4v CTM converges with U(1) SymmetricTensor."""
@@ -303,6 +314,7 @@ class TestC4vCTMSymmetric:
 
     @pytest.mark.xfail(
         strict=True,
+        raises=_EnergyGap762,
         reason=(
             "#762: C4v CTM energy is wrong for a charged U(1) state. The two "
             "paths converge to the SAME environment — corner spectra agree to "
@@ -338,7 +350,11 @@ class TestC4vCTMSymmetric:
             compute_energy_ctm_tensor(A_dense, env_dense, heisenberg_gate, d=2)
         )
 
-        np.testing.assert_allclose(E_sym, E_dense, atol=1e-4)
+        # Both paths must complete with a finite energy; only the gap between
+        # them is the expected #762 failure.
+        assert np.isfinite(E_sym) and np.isfinite(E_dense), (E_sym, E_dense)
+        if abs(E_sym - E_dense) > 1e-4:
+            raise _EnergyGap762(f"E_sym={E_sym!r}, E_dense={E_dense!r}")
 
 
 class TestC4vCTMFermionic:
