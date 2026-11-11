@@ -22,7 +22,7 @@ import pytest
 from _ipeps_spectrum_fixtures import apply_op
 from _window_oracle import closed_double_layer, correlators, ising_peps, onsager_c10
 
-from tenax.algorithms._ctm_env_dense import _in_documented_leg_order
+from tenax.algorithms._ctm_env_dense import _as_dense_env, _in_documented_leg_order
 from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv, initialize_ctm_tensor_env
@@ -30,6 +30,7 @@ from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
 from tenax.algorithms.fermionic_ipeps import FPEPSConfig, fermionic_ctm
 from tenax.algorithms.ipeps_config import CTMConfig, CTMEnvironment
 from tenax.algorithms.ipeps_ctm_convergence import CTMConvergenceInfo, _ctm_via_2x2, ctm
+from tenax.algorithms.ipeps_excitations import ExcitationConfig, compute_excitations
 from tenax.algorithms.ipeps_rdm import compute_energy_ctm
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
@@ -174,6 +175,19 @@ DOCUMENTED_LEGS = {
     "T4": ("t4_d", "l2", "t4_u"),
 }
 
+# An axis order to store each field in: the sweep's reversed corners; the edges
+# reversed, rotated, with two legs swapped, and one left as it is.
+STORED_ORDER = {
+    "C1": (1, 0),
+    "C2": (1, 0),
+    "C3": (1, 0),
+    "C4": (1, 0),
+    "T1": (2, 1, 0),
+    "T2": (1, 2, 0),
+    "T3": (0, 2, 1),
+    "T4": (0, 1, 2),
+}
+
 
 def _documented_env():
     """A ``CTMTensorEnv`` in the documented order with random entries, so that no
@@ -188,28 +202,34 @@ def _documented_env():
     )
 
 
+def _stored(env):
+    """``env`` with each field stored in the axis order of ``STORED_ORDER``."""
+    return CTMTensorEnv(
+        *(getattr(env, name).permute_legs(axes) for name, axes in STORED_ORDER.items())
+    )
+
+
+def _raw_in_documented_order(env):
+    """The raw environment of a ``CTMTensorEnv``, each field transposed by label
+    into the order of ``DOCUMENTED_LEGS``."""
+    return CTMEnvironment(
+        *(
+            jnp.transpose(
+                field.todense(),
+                [field.labels().index(label) for label in DOCUMENTED_LEGS[name]],
+            )
+            for name, field in env._asdict().items()
+        )
+    )
+
+
 def test_in_documented_leg_order_permutes_by_label():
     """Whatever order a field is stored in, it comes back in the documented order
     with its entries in the right place; a field already in order comes back as
     the same object."""
     env = _documented_env()
     assert {name: t.labels() for name, t in env._asdict().items()} == DOCUMENTED_LEGS
-    # The sweep's reversed corners; the edges reversed, rotated, with two legs
-    # swapped, and one left as it is.
-    stored = {
-        "C1": (1, 0),
-        "C2": (1, 0),
-        "C3": (1, 0),
-        "C4": (1, 0),
-        "T1": (2, 1, 0),
-        "T2": (1, 2, 0),
-        "T3": (0, 2, 1),
-        "T4": (0, 1, 2),
-    }
-    shuffled = CTMTensorEnv(
-        *(getattr(env, name).permute_legs(axes) for name, axes in stored.items())
-    )
-    fixed = _in_documented_leg_order(shuffled)
+    fixed = _in_documented_leg_order(_stored(env))
     for name, legs in DOCUMENTED_LEGS.items():
         assert getattr(fixed, name).labels() == legs
         np.testing.assert_array_equal(
@@ -228,6 +248,51 @@ def test_in_documented_leg_order_refuses_wrong_labels():
     for bad, name in ((wrong_label, "C2"), (wrong_count, "C1")):
         with pytest.raises(ValueError, match=f"CTMTensorEnv.{name}"):
             _in_documented_leg_order(bad)
+
+
+def test_as_dense_env_reads_a_tensor_env_by_label():
+    """``_as_dense_env`` drops the labels, so it puts each field of a
+    ``CTMTensorEnv`` in the documented order first, whatever order the field is
+    stored in."""
+    env = _documented_env()
+    raw = _as_dense_env(_stored(env))
+    assert isinstance(raw, CTMEnvironment)
+    for name in DOCUMENTED_LEGS:
+        np.testing.assert_array_equal(getattr(raw, name), getattr(env, name).todense())
+
+
+def test_compute_excitations_reads_a_tensor_env_by_label():
+    """A ``CTMTensorEnv`` gives ``compute_excitations`` the spectrum of the raw
+    environment in the documented order.
+
+    ``ctm_tensor`` and ``optimize_gs_ad`` return the environment of the 2x2 sweep,
+    which stores each corner with its two legs reversed, and the excitation
+    contractions go by position.  The state has no lattice symmetry, and ``H`` no
+    site-exchange symmetry, as in ``test_corner_orientation_without_lattice_symmetry``.
+    Measured on this state: with the corners read by position, the spectrum is
+    up to 0.29 off.
+    """
+    A, H = _asymmetric_site(), _asymmetric_hamiltonian()
+    A_tensor = _wrap_as_dense_tensor(A)
+    env, _eps, info = ctm_tensor(
+        A_tensor, 8, max_iter=500, conv_tol=1e-12, return_meta=True
+    )
+    assert info.converged
+    raw = _raw_in_documented_order(env)
+    # The regime, so the test cannot go vacuous: a corner that is a symmetric
+    # matrix is blind to a transposition.
+    asymmetry = [
+        float(jnp.max(jnp.abs(C - C.T)) / jnp.max(jnp.abs(C)))
+        for C in (raw.C1, raw.C2, raw.C3, raw.C4)
+    ]
+    assert min(asymmetry) > 5e-3, asymmetry
+
+    E_gs = float(compute_energy_ctm_tensor(A_tensor, env, H, 2))
+    momenta = [(0.0, 0.0), (np.pi, 0.0), (np.pi / 2, np.pi / 3)]
+    config = ExcitationConfig(num_excitations=3, null_space_tol=1e-2)
+    expected = compute_excitations(A, raw, H, E_gs, momenta, config).energies
+    got = compute_excitations(A_tensor, env, H, E_gs, momenta, config).energies
+    np.testing.assert_allclose(got, expected, atol=1e-10, rtol=0)
 
 
 @pytest.mark.parametrize("entry", ENTRY_POINTS)
