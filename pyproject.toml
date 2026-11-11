@@ -173,7 +173,10 @@ line-length = 88
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP"]
+# W605: an invalid escape such as "\`" in a non-raw string.  In a docstring
+# it emits a DeprecationWarning (a SyntaxWarning from Python 3.12) each time
+# the module is compiled, and nothing else reports it.
+select = ["E", "F", "I", "UP", "W605"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
