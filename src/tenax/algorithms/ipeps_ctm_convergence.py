@@ -177,7 +177,7 @@ def _ctm_via_2x2(
         its legs in the order ``CTMTensorEnv`` documents, which is the order the
         raw consumers contract.
     """
-    from tenax.algorithms._ctm_env_dense import _as_dense_env, _in_documented_leg_order
+    from tenax.algorithms._ctm_env_dense import _as_dense_env
     from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
     from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
     from tenax.core.tensor import SymmetricTensor, Tensor
@@ -208,8 +208,9 @@ def _ctm_via_2x2(
         return_meta=True,
     )
     # The 2x2 sweep stores each corner with its two legs reversed, and the raw
-    # consumers contract by position: put every field in the documented order.
-    env = _as_dense_env(_in_documented_leg_order(env))
+    # consumers contract by position: _as_dense_env puts every field in the
+    # documented order, by label.
+    env = _as_dense_env(env)
     if return_meta:
         return env, info
     return env

@@ -436,8 +436,10 @@ class TestTensorInputAcceptance:
 
         ref = compute_excitations(A, env, heisenberg_gate, E_gs, momenta, config)
 
-        # Mimic optimize_gs_ad's return types: DenseTensor A + gate, and a
-        # CTM environment whose 8 fields are DenseTensors.
+        # DenseTensor A + gate, as optimize_gs_ad returns them, and a raw
+        # CTMEnvironment whose 8 fields are DenseTensors, which is read by
+        # position.  optimize_gs_ad's own CTMTensorEnv is read by label
+        # (test_ctm_delegates_to_2x2.py).
         A_t = _wrap_array_as_dense_tensor(A)
         gate_t = _wrap_array_as_dense_tensor(heisenberg_gate)
         env_t = CTMEnvironment(*(_wrap_array_as_dense_tensor(f) for f in env))
