@@ -642,6 +642,10 @@ _FILE_MARKERS = {
     "test_showcase_scaling.py": "algorithm",
     "test_heisenberg_d4_chi_scaling.py": "algorithm",
     "test_heisenberg_d8_chi_scaling.py": "algorithm",
+    # The CTM certificate of the kagome PESS examples (#1183 follow-up 3).
+    # Also examples/, not the library, so it stays out of the gate for the
+    # same reason.  Real CTM runs (D<=2, chi=4, at most 40 sweeps): ~40 s.
+    "test_kagome_examples_ctm_certificate.py": "algorithm",
     # Multi-GPU dense CTM parity on fake CPU devices.  Dense multi-GPU CTM is
     # deferred post-1.0 (#632), so the file is ``diagnostic`` (module-level
     # ``pytestmark``): ``slow`` here, skipped unless TENAX_RUN_DIAGNOSTIC=1.

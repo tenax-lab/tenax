@@ -34,6 +34,7 @@ from tenax import (  # noqa: E402
     iPEPSConfig,
     optimize_gs_ad,
 )
+from tenax.algorithms._ctm_diagnostics import env_is_collapsed  # noqa: E402
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -572,15 +573,29 @@ def compute_pess_energy(
     lambdas: list,
     H_tri: np.ndarray,
     chi: int,
-) -> float:
-    """Compute energy per site via PESS -> iPEPS -> CTM.
+    *,
+    max_iter: int = 100,
+    energy_tol: float = 1e-8,
+) -> tuple[float, bool, str]:
+    """Compute energy per site via PESS -> iPEPS -> CTM, and certify the CTM.
 
     1. Map PESS to effective square-lattice iPEPS.
     2. Run CTM to get the environment.
     3. Compute energy using 2-site RDM with an effective 2-site gate.
+    4. Certify the CTM.
 
     For the Kagome lattice with 3 sites per triangle, the energy per site
     is E_triangle / 3.
+
+    ``pess_to_ipeps`` fills only ``r = 0``, so every horizontal bond carries
+    only index 0 and every CTM corner is rank 1 at any ``chi``.  For ``D > 1``
+    the corner criterion of ``ctm_tensor`` cannot certify a rank-1 corner
+    (#898): it reports ``converged=False`` at every budget.  The energy is
+    certified instead: the CTM runs again with ``max_iter + 1`` and with
+    ``2 * max_iter`` sweeps, and neither run may move the energy per site by
+    more than ``energy_tol``.  The first rerun sees a CTM cycle whose period
+    divides ``max_iter``, which the second misses; the second sees a slow
+    convergence, which a one-sweep change underestimates.
 
     Args:
         site_tensors: [S_a, S_b, S_c].
@@ -588,10 +603,21 @@ def compute_pess_energy(
         lambdas: 6 lambda vectors.
         H_tri: (8, 8) triangle Hamiltonian.
         chi: CTM bond dimension.
+        max_iter: CTM sweeps, at least 1.
+        energy_tol: Largest change of the energy per site, from ``max_iter``
+            to ``max_iter + 1`` and to ``2 * max_iter`` sweeps, that
+            certifies a CTM with a rank-1 corner.
 
     Returns:
-        Energy per site (float).
+        ``(E/site, certified, notice)``: the energy per site after
+        ``max_iter`` sweeps, whether the CTM is certified, and a one-line
+        report.
+
+    Raises:
+        ValueError: If ``max_iter`` is less than 1.
     """
+    if max_iter < 1:
+        raise ValueError(f"max_iter must be at least 1, got {max_iter}")
     A = pess_to_ipeps(site_tensors, simplex_tensors, lambdas)
     d_eff = A.shape[4]
 
@@ -601,15 +627,37 @@ def compute_pess_energy(
     # accounting for the 2 triangles (up + down) per unit cell.
     # Dividing by 3 gives E/site = 2<H_tri>/3.
     H_eff = np.kron(H_tri, np.eye(d_eff))
-    H_eff_4leg = H_eff.reshape(d_eff, d_eff, d_eff, d_eff)
+    H_eff_4leg = jnp.array(H_eff.reshape(d_eff, d_eff, d_eff, d_eff))
 
     A_t = _wrap_as_dense_tensor(A)
-    env, _ = ctm_tensor(A_t, chi, max_iter=100)
 
-    E = compute_energy_ctm_tensor(A_t, env, jnp.array(H_eff_4leg), d_eff)
-    E_per_site = float(E) / 3.0
+    def energy_after(sweeps):
+        env, _, info = ctm_tensor(A_t, chi, max_iter=sweeps, return_meta=True)
+        E = compute_energy_ctm_tensor(A_t, env, H_eff_4leg, d_eff)
+        return float(E) / 3.0, env, info
 
-    return E_per_site
+    E_per_site, env, info = energy_after(max_iter)
+    if info.converged:
+        return E_per_site, True, f"converged in {info.n_iter} sweeps."
+    if not env_is_collapsed(env):
+        notice = (
+            f"NOT converged in {info.n_iter} sweeps (corner diff "
+            f"{info.diff:.1e}); raise --ctm-iter."
+        )
+        return E_per_site, False, notice
+
+    E_next, _, _ = energy_after(max_iter + 1)
+    E_more, _, _ = energy_after(2 * max_iter)
+    change = max(abs(E_next - E_per_site), abs(E_more - E_per_site))
+    certified = change <= energy_tol
+    verdict = "certified" if certified else "NOT certified; raise --ctm-iter"
+    notice = (
+        f"every corner is rank 1 (pess_to_ipeps fills only r = 0), which the "
+        f"corner criterion cannot certify (#898). E/site moves by at most "
+        f"{change:.1e} from {max_iter} to {max_iter + 1} and to {2 * max_iter} "
+        f"sweeps: {verdict} (tol {energy_tol:.0e})."
+    )
+    return E_per_site, certified, notice
 
 
 # ---------------------------------------------------------------------------
@@ -623,6 +671,9 @@ def main():
     )
     parser.add_argument("--D", type=int, default=2, help="Bond dimension")
     parser.add_argument("--chi", type=int, default=20, help="CTM bond dimension")
+    parser.add_argument(
+        "--ctm-iter", type=int, default=100, help="CTM sweeps for the E/site readout"
+    )
     parser.add_argument(
         "--delta", type=float, default=1.0, help="XXZ anisotropy parameter"
     )
@@ -677,11 +728,12 @@ def main():
     # Compute energy via CTM
     print("\n--- CTM Energy ---")
     t0 = time.perf_counter()
-    energy = compute_pess_energy(
-        site_tensors, simplex_tensors, lambdas, H_tri, args.chi
+    energy, _, notice = compute_pess_energy(
+        site_tensors, simplex_tensors, lambdas, H_tri, args.chi, max_iter=args.ctm_iter
     )
     ctm_time = time.perf_counter() - t0
     print(f"  E/site = {energy:.6f}")
+    print(f"  CTM: {notice}")
     print(f"  CTM time = {ctm_time:.1f}s")
 
     # Optionally run AD optimization on the mapped iPEPS
