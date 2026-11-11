@@ -38,18 +38,25 @@ def _double(x):
     return x * 2.0
 
 
-def _scale(x, *, k):
-    return x * k
+# The two tests below count runs of the Python body, which under the jit run
+# only at trace time.  They do not read ``PjitFunction._cache_size()``: that
+# private C++ count read 0 after a correct jitted call in some full core runs
+# (#1167).
 
 
 def test_concrete_call_runs_through_one_cached_jit():
     ej._jitted.cache_clear()
-    t = _sym()
-    assert _close(ej.call(_double, t), t, 2.0)
-    jitted = ej._jitted(_double, (), ej._env_flags())
-    assert jitted._cache_size() == 1
-    ej.call(_double, _sym(1))  # same structure: no new trace
-    assert jitted._cache_size() == 1
+    runs = []
+
+    def body(x):
+        runs.append(None)
+        return x * 2.0
+
+    t, u = _sym(), _sym(1)
+    assert _close(ej.call(body, t), t, 2.0)
+    assert _close(ej.call(body, u), u, 2.0)  # same structure: no new trace
+    assert len(runs) == 1, "the second call traced again"
+    assert ej._jitted.cache_info().currsize == 1
 
 
 def test_traced_call_bypasses_the_jit():
@@ -68,11 +75,20 @@ def test_disabled_calls_the_raw_function(monkeypatch):
 
 def test_static_argnames_are_static():
     ej._jitted.cache_clear()
+    runs = []
+
+    def scale(x, *, k):
+        runs.append(k)
+        return x * k
+
     t = _sym()
-    a = ej.call(_scale, t, k=3.0, static_argnames=("k",))
-    b = ej.call(_scale, t, k=5.0, static_argnames=("k",))
+    a = ej.call(scale, t, k=3.0, static_argnames=("k",))
+    b = ej.call(scale, t, k=5.0, static_argnames=("k",))
+    ej.call(scale, t, k=3.0, static_argnames=("k",))
     assert _close(a, t, 3.0) and _close(b, t, 5.0)
-    assert ej._jitted(_scale, ("k",), ej._env_flags())._cache_size() == 2
+    # One trace per value, each seeing k as a Python float; k=3.0 again reuses
+    # its trace.  A traced k would give one trace that sees a tracer.
+    assert runs == [3.0, 5.0]
 
 
 def test_a_patched_function_gets_its_own_jit():
