@@ -335,8 +335,8 @@ def test_the_public_ipeps_loop_uses_the_guarded_criterion():
 
     It did.  ``ipeps_ctm_convergence`` carried its **own** ``_ctm_sv_diff`` --
     the same sum-normalised comparison without the rank test -- and that is the
-    copy the public path ran: ``ipeps.py`` imports ``ctm_2site`` from there and
-    calls it, so every ``ipeps()`` call kept comparing ``[1, 0, ..., 0]``
+    copy the public path ran: ``ipeps.py`` imported ``ctm_2site`` from there
+    and called it, so every ``ipeps()`` call kept comparing ``[1, 0, ..., 0]``
     against ``[1, 0, ..., 0]`` and exiting early, while the tests above passed
     against the guarded module.  A fix that leaves the production path broken
     is worse than no fix, because the closed issue stops anyone looking.
@@ -347,41 +347,62 @@ def test_the_public_ipeps_loop_uses_the_guarded_criterion():
     value assertion would not, since a fresh unguarded copy returns the same
     number as the guarded one on every input except the collapsed ones.
 
-    The three loops in that module (``ctm``, ``ctm_2site``, ``ctm_split``) all
-    call the name bound at module scope, so binding it once is what routes all
-    three.  ``ctm_2site`` is the one ``ipeps()`` reaches.
+    Since 0.9.3 ``ctm`` and ``ctm_2site`` delegate to the 2x2 recipe, and
+    ``ctm_split`` is the one loop left in that module; it calls the name bound
+    at module scope.  ``ipeps()`` reaches the multisite loop of
+    ``_ctm_tensor_convergence`` instead (pinned by the next test).
     """
     from tenax.algorithms import ipeps_ctm_convergence
 
     assert ipeps_ctm_convergence._ctm_sv_diff is _ctm_sv_diff, (
         "ipeps_ctm_convergence._ctm_sv_diff is not the guarded implementation "
-        "from _ctm_tensor_convergence -- the public ipeps() path compares "
-        "corner spectra with an unguarded copy again (#898), so a rank-1 "
-        "corner will certify as converged there no matter what this file's "
-        "other tests say"
+        "from _ctm_tensor_convergence -- ctm_split compares corner spectra "
+        "with an unguarded copy again (#898), so a rank-1 corner will certify "
+        "as converged there no matter what this file's other tests say"
     )
 
 
-def test_the_public_loop_is_the_one_ipeps_calls():
-    """Pin the routing the test above depends on.
+def test_the_public_loop_is_the_one_ipeps_calls(monkeypatch):
+    """Pin the routing the guard tests depend on.
 
-    ``test_the_public_ipeps_loop_uses_the_guarded_criterion`` is only
-    load-bearing while ``ipeps()`` actually reaches this module.  If the import
-    moves, that test keeps passing and stops meaning anything -- so the routing
-    is asserted rather than assumed.
+    Since 0.9.3 ``ipeps()`` measures with the multisite loop of
+    ``_ctm_tensor_convergence`` (through ``_ctm_2site_via_2x2``), which
+    compares corner spectra with the guarded ``_ctm_sv_diff`` defined there.
+    If the routing moves, the tests above keep passing and stop meaning
+    anything -- so a spy on the guarded function asserts that ``ipeps()``
+    reaches it.  The source check keeps ``ipeps_ctm_convergence``, whose
+    ``ctm_split`` loop compares spectra too, on the imported copy (#898).
     """
     import inspect
 
-    # The MODULE, not the re-exported ``ipeps`` function of the same name --
-    # ``from tenax.algorithms import ipeps`` binds the callable, and asking it
-    # for ``ctm_2site`` raises AttributeError rather than failing the claim.
-    import tenax.algorithms.ipeps as ipeps_module
+    import tenax.algorithms._ctm_tensor_convergence as tensor_convergence
     from tenax.algorithms import ipeps_ctm_convergence
+    from tenax.algorithms.ipeps import heisenberg_gate, ipeps
+    from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 
-    assert ipeps_module.ctm_2site is ipeps_ctm_convergence.ctm_2site, (
-        "ipeps no longer calls ipeps_ctm_convergence.ctm_2site, so the guard "
-        "assertion in the test above is no longer about the public path -- "
-        "re-point it at whatever ipeps() reaches now"
+    guarded = tensor_convergence._ctm_sv_diff
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return guarded(*args, **kwargs)
+
+    monkeypatch.setattr(tensor_convergence, "_ctm_sv_diff", spy)
+    config = iPEPSConfig(
+        max_bond_dim=2,
+        num_imaginary_steps=1,
+        dt=0.1,
+        ctm=CTMConfig(chi=4, max_iter=3),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ipeps(heisenberg_gate(), None, config)
+
+    assert calls, (
+        "ipeps() no longer compares corner spectra with the guarded "
+        "_ctm_sv_diff of _ctm_tensor_convergence, so the guard tests above are "
+        "no longer about the public path -- re-point them at whatever ipeps() "
+        "reaches now"
     )
     source = inspect.getsource(ipeps_ctm_convergence)
     assert "def _ctm_sv_diff" not in source, (

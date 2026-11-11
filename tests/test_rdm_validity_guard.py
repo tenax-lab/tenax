@@ -18,6 +18,12 @@ The degenerate case is real but not a stable CI hook -- which corner basis the
 sweep lands on shifted with the JAX/LAPACK build -- whereas zeroing a corner
 reproduces the same *mechanism* (one bond's network contracts to zero, the
 other survives) deterministically.
+
+Both measurements above came from the legacy ``ctm_2site`` sweep, whose two
+environments did not share a basis at the A|B seams (removed in 0.9.3; see
+``tests/test_ipeps_2site_energy.py``).  The guard stays: any other route to a
+dead bond reaches the same normaliser.  The fixture now uses the 2x2 recipe,
+and ``compute_energy_ctm_2site`` sums all four bonds of the cell.
 """
 
 from __future__ import annotations
@@ -47,7 +53,7 @@ from tenax.algorithms._ctm_tensor_energy import (
 )
 from tenax.algorithms.ipeps import heisenberg_gate, sublattice_rotate_gate
 from tenax.algorithms.ipeps_config import CTMConfig
-from tenax.algorithms.ipeps_ctm_convergence import ctm_2site
+from tenax.algorithms.ipeps_ctm_convergence import _ctm_2site_via_2x2
 from tenax.algorithms.ipeps_rdm import (
     _rdm1x2_2site,
     _rdm2x1_2site,
@@ -56,19 +62,11 @@ from tenax.algorithms.ipeps_rdm import (
 
 D = 2
 DPHYS = 2
-# ``min_iter=1`` pins the environment to the converged early-stop point.  At
-# ``chi = D**2 = 4`` the corner spectrum is exactly flat (see the module
-# docstring), so the SV-diff criterion reads "converged" immediately while the
-# corner *basis* keeps rotating sweep to sweep -- there is no unique fixed
-# point.  This fixture's "healthy environment" premise therefore holds only at
-# a pinned sweep count: with the default ``min_iter=10`` (capped to ``max_iter``
-# by #925/#976) the loop is forced to 5 sweeps and lands on a rotated basis
-# whose horizontal RDM is numerically near-invalid, so the guard fires on the
-# nominally-healthy env.  Pinning ``min_iter=1`` lets the loop stop as soon as
-# the SV criterion is met (~2 sweeps), reproducing the deterministic healthy
-# basis these tests were written against.  This is the same gauge-dependent
-# degeneracy documented in #780/#781, not a guard defect.
-CFG = CTMConfig(chi=4, chi_I=4, max_iter=5, min_iter=1, conv_tol=1e-10)
+# The 2x2 recipe does not converge on these random tensors in 5 sweeps
+# (criterion 0.111, measured at d6730510), and these tests do not need it to:
+# all four bond RDMs of the fixture are density matrices (trace 1, smallest
+# eigenvalue 0.141).
+CFG = CTMConfig(chi=4, max_iter=5, conv_tol=1e-10)
 MATCH = "not a density matrix"
 
 #: Common prefix of all three guard messages -- "reduced density matrix is not
@@ -91,7 +89,7 @@ def _site(seed: int) -> jax.Array:
 def env():
     """A healthy 2-site environment plus its state and gate."""
     A, B = _site(0), _site(7)
-    env_A, env_B = ctm_2site(A, B, CFG)
+    env_A, env_B = _ctm_2site_via_2x2(A, B, CFG)
     gate = sublattice_rotate_gate(heisenberg_gate()).todense()
     return A, B, env_A, env_B, gate
 
@@ -121,7 +119,7 @@ def _rdm_warnings(fn):
 def test_a_dead_bond_warns_and_names_itself(env, corner, expected):
     """One bond dies, the other survives -- the #845 shape exactly.
 
-    The context label matters: with two bonds in the sum, "an RDM collapsed"
+    The context label matters: with four bonds in the sum, "an RDM collapsed"
     does not tell you whether the horizontal or the vertical contribution went
     missing, which is the first thing you need in order to chase it.
     """
@@ -172,22 +170,27 @@ def test_a_healthy_environment_is_silent(env):
 
 
 def test_a_mutilated_environment_with_valid_rdms_is_silent(env):
-    """Zeroing ``C1`` leaves **both** RDMs with trace 1 -- so: no warning.
+    """Zeroing ``C1`` of ``env_B`` leaves the two bonds that start on ``A`` --
+    which never contract it -- with trace 1, so: no warning.
 
     This is the sharp negative control.  The guard keys on the RDM actually
     being a density matrix, not on the environment looking damaged, and this
     distinguishes those two.  A check that fired here would fire on healthy
-    physics too.
+    physics too.  (The energy sums all four bonds, and the two that start on
+    ``B`` do contract this corner, so the control is run on the RDMs.)
     """
-    A, B, env_A, env_B, gate = env
+    A, B, env_A, env_B, _gate = env
     dead = _kill(env_B, "C1")
 
-    E, caught = _rdm_warnings(
-        lambda: compute_energy_ctm_2site(A, B, env_A, dead, gate, DPHYS)
+    rdms, caught = _rdm_warnings(
+        lambda: (
+            _rdm2x1_2site(A, B, env_A, dead, DPHYS),
+            _rdm1x2_2site(A, B, env_A, dead, DPHYS),
+        )
     )
 
     assert not caught, f"warned although both RDMs were valid: {caught}"
-    assert jnp.isfinite(E)
+    assert all(jnp.isfinite(r).all() for r in rdms)
 
 
 # ---------------------------------------------------------------------------
@@ -195,25 +198,32 @@ def test_a_mutilated_environment_with_valid_rdms_is_silent(env):
 # ---------------------------------------------------------------------------
 
 
-def test_the_energy_is_silently_short_by_exactly_the_dead_bond(env):
-    """Pins the defect: the total is the surviving bond alone, not an error.
+def test_the_energy_is_silently_short_by_exactly_the_dead_bonds(env):
+    """Pins the defect: the total is the surviving bonds alone, not an error.
 
-    Without the guard this number is indistinguishable from a real energy --
-    which is how it survived as a plausible-looking value ~2x off.
+    Zeroing ``C2`` of ``env_B`` kills the horizontal bond that starts on ``A``
+    and the vertical bond that starts on ``B``; the other two survive.  Without
+    the guard this number is indistinguishable from a real energy -- which is
+    how it survived as a plausible-looking value ~2x off.
     """
     A, B, env_A, env_B, gate = env
-    dead = _kill(env_B, "C2")  # horizontal only
+    dead = _kill(env_B, "C2")
     H = gate.reshape(DPHYS, DPHYS, DPHYS, DPHYS)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         E_full = float(compute_energy_ctm_2site(A, B, env_A, env_B, gate, DPHYS))
         E_dead = float(compute_energy_ctm_2site(A, B, env_A, dead, gate, DPHYS))
-        rdm_v = _rdm1x2_2site(A, B, env_A, dead, DPHYS)
-    E_v_only = float(jnp.real(jnp.einsum("ijkl,ijkl->", rdm_v, H)))
+        alive = (
+            _rdm2x1_2site(B, A, dead, env_A, DPHYS),
+            _rdm1x2_2site(A, B, env_A, dead, DPHYS),
+        )
+    E_alive = 0.5 * sum(
+        float(jnp.real(jnp.einsum("ijkl,klij->", rdm, H))) for rdm in alive
+    )
 
-    # The horizontal contribution is not wrong, it is *absent*.
-    assert E_dead == pytest.approx(E_v_only, abs=1e-12)
+    # The dead contributions are not wrong, they are *absent*.
+    assert E_dead == pytest.approx(E_alive, abs=1e-12)
     assert E_dead != pytest.approx(E_full, abs=1e-6)
 
 

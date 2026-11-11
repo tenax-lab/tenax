@@ -24,7 +24,6 @@ from tenax.algorithms._ctm_tensor import (
 )
 from tenax.algorithms.ipeps_ctm import (
     _build_double_layer,
-    _ctm_2site_sweep,
     _initialize_ctm_env,
 )
 from tenax.core.index import FlowDirection, TensorIndex
@@ -259,15 +258,6 @@ class TestConvergence:
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
 
-    @pytest.mark.skip(
-        reason="Tensor CTM path diverged from legacy _ctm_sweep in PR #291 "
-        "(differentiable Fishman SVD projector + per-absorption normalization). "
-        "The legacy path is retained only for 2-site SU and is not expected "
-        "to match the tensor path sweep-for-sweep."
-    )
-    def test_ctm_tensor_dense_matches_ctm(self, small_peps_dense):
-        """Obsolete: legacy CTM sweep no longer matches tensor path."""
-
     def test_ctm_tensor_symmetric_converges(self, small_peps_symmetric):
         """SymmetricTensor CTM converges (trivial charges)."""
         env, _ = ctm_tensor(small_peps_symmetric, chi=4, max_iter=20, conv_tol=1e-6)
@@ -406,15 +396,6 @@ class TestTwoSiteCTM:
             assert jnp.all(jnp.isfinite(field.todense()))
         for field in env_B:
             assert jnp.all(jnp.isfinite(field.todense()))
-
-    @pytest.mark.skip(
-        reason="Tensor CTM path diverged from legacy _ctm_2site_sweep in "
-        "PR #291 (differentiable Fishman SVD projector + per-absorption "
-        "normalization). Each path is exercised in its own tests; cross-path "
-        "equivalence after a single sweep is no longer a design goal."
-    )
-    def test_2site_dense_matches_legacy(self, small_peps_pair_dense):
-        """Obsolete: legacy 2-site CTM sweep no longer matches tensor path."""
 
     def test_2site_symmetric_converges(self, small_peps_pair_symmetric):
         """2-site SymmetricTensor CTM converges.

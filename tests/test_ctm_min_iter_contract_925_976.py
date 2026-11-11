@@ -8,7 +8,12 @@ same cases.  Since 0.9.3 ``ctm`` runs ``ctm_tensor(recipe="2x2")`` with
 ``projector_method="svd"``, so it runs no QR warm-up: its two warm-up tests
 went with it, and
 ``test_ctm_tensor_min_iter_counts_the_warmup_against_the_callers_budget``
-pins the warm-up rule on ``ctm_tensor``.
+pins the warm-up rule on ``ctm_tensor``.  Since 0.9.3 ``ctm_2site`` runs the
+multisite loop of ``ctm_tensor_2site``, which takes the same gate as a
+keyword-only ``min_iter`` (default 1): the loop and the helper behind
+``ctm_2site`` run the same cases, and
+``test_multisite_min_iter_counts_the_warmup_against_the_callers_budget``
+pins the warm-up rule on the loop.
 
 These are mechanism tests, not convergence tests: they run on a 1x1 product
 state whose corner spectrum is stationary after the first sweep, so ``diff`` is
@@ -19,12 +24,18 @@ counted.  No physical convergence is asserted (that is for benchmarks).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import jax.numpy as jnp
 import pytest
 
 from tenax import CTMConfig, ctm, ctm_2site, ctm_split, ctm_tensor
+from tenax.algorithms._ctm_tensor_convergence import (
+    CHECKERBOARD_NEIGHBORS,
+    _ctm_tensor_multisite,
+)
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
-from tenax.algorithms.ipeps_ctm_convergence import _ctm_via_2x2
+from tenax.algorithms.ipeps_ctm_convergence import _ctm_2site_via_2x2, _ctm_via_2x2
 
 # A 1x1 product state: chi=1 corners are stationary from the second sweep, so
 # ``diff < conv_tol`` holds immediately and the stopping rule is all that moves.
@@ -47,6 +58,10 @@ def _info_ctm_via_2x2(cfg):
     return _ctm_via_2x2(A, cfg, return_meta=True)[1]
 
 
+def _info_ctm_2site_via_2x2(cfg):
+    return _ctm_2site_via_2x2(A, A, cfg, return_meta=True)[2]
+
+
 def _info_ctm_tensor(cfg):
     return ctm_tensor(
         _wrap_as_dense_tensor(A),
@@ -58,12 +73,35 @@ def _info_ctm_tensor(cfg):
     )[2]
 
 
+def _multisite_status(cfg, **kwargs):
+    """The status of the multisite loop on the checkerboard ``(A, A)``, with
+    ``n_iter`` named as in ``CTMConvergenceInfo`` (the loop's own type calls it
+    ``iterations``)."""
+    site = _wrap_as_dense_tensor(A)
+    _envs, info, _detail = _ctm_tensor_multisite(
+        {(0, 0): site, (1, 0): site},
+        CHECKERBOARD_NEIGHBORS,
+        cfg.chi,
+        max_iter=cfg.max_iter,
+        conv_tol=cfg.conv_tol,
+        _return_status=True,
+        **kwargs,
+    )
+    return SimpleNamespace(converged=info.converged, n_iter=info.iterations)
+
+
+def _info_ctm_tensor_multisite(cfg):
+    return _multisite_status(cfg, min_iter=cfg.min_iter)
+
+
 _ENTRY_POINTS = [
     pytest.param(_info_ctm, id="ctm"),
     pytest.param(_info_ctm_2site, id="ctm_2site"),
     pytest.param(_info_ctm_split, id="ctm_split"),
     pytest.param(_info_ctm_tensor, id="ctm_tensor"),
     pytest.param(_info_ctm_via_2x2, id="ctm_via_2x2"),
+    pytest.param(_info_ctm_2site_via_2x2, id="ctm_2site_via_2x2"),
+    pytest.param(_info_ctm_tensor_multisite, id="ctm_tensor_multisite"),
 ]
 
 
@@ -114,6 +152,31 @@ def test_ctm_tensor_min_iter_counts_the_warmup_against_the_callers_budget():
         qr_warmup_steps=6,
         min_iter=10,
         return_meta=True,
+    )
+    assert info.converged
+    assert info.n_iter == 10
+
+
+def test_multisite_default_min_iter_keeps_the_early_exit():
+    """``min_iter`` defaults to 1, so ``ctm_tensor_2site`` and ``ctm_multisite``,
+    which do not pass it, keep the plain early exit: the stationary state
+    certifies at the first comparison, sweep 2.  The count is reported on a
+    converged run too; it was ``-1`` before."""
+    info = _multisite_status(CTMConfig(chi=1, max_iter=40, conv_tol=1e-8))
+    assert info.converged
+    assert info.n_iter == 2
+
+
+def test_multisite_min_iter_counts_the_warmup_against_the_callers_budget():
+    """The cap is ``min(min_iter, max_iter)`` with the caller's ``max_iter``, and
+    the QR warm-up sweeps count toward it.  Six warm-up sweeps leave four in the
+    loop, and the loop's first sweep has nothing to compare with; a cap taken
+    after the warm-up, ``min(10, 4) = 4``, would certify at sweep 8."""
+    info = _multisite_status(
+        CTMConfig(chi=1, max_iter=10, conv_tol=1e-8),
+        projector_method="qr",
+        qr_warmup_steps=6,
+        min_iter=10,
     )
     assert info.converged
     assert info.n_iter == 10

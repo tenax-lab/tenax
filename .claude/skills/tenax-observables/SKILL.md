@@ -200,13 +200,14 @@ density matrices.
 from tenax import ctm_tensor_2site, compute_energy_ctm_tensor_2site
 
 # Re-measure a 2-site state with the Tensor CTM (default recipe "2x2").
-# ipeps()'s own energy uses the legacy CTM, which reads ~0.02 high.
+# ipeps() measures the same way at config.ctm.chi (since 0.9.3).
 env_A, env_B = ctm_tensor_2site(A, B, chi=16)
 energy = compute_energy_ctm_tensor_2site(A, B, env_A, env_B, gate, d=2)
 ```
 
-The legacy `compute_energy_ctm_2site(A, B, env_A, env_B, gate, d)` takes raw
-arrays and the `CTMEnvironment`s from `ctm_2site`.
+`compute_energy_ctm_2site(A, B, env_A, env_B, gate, d)` takes raw arrays and
+the `CTMEnvironment`s from the deprecated `ctm_2site`, and sums the same four
+bonds.
 
 ### Custom observables from RDMs
 

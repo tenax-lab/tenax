@@ -157,6 +157,12 @@ filterwarnings = [
     # test_ctm_warns_that_it_is_deprecated (tests/test_ctm_delegates_to_2x2.py)
     # un-suppresses it via ``pytest.warns``.
     "ignore:ctm is deprecated:DeprecationWarning",
+    # ``ctm_2site()`` is deprecated in favour of ``ctm_tensor_2site`` (0.9.3):
+    # it now runs the 2x2 recipe.  Its contract tests still call it on purpose;
+    # test_ctm_2site_warns_that_it_is_deprecated
+    # (tests/test_ctm_2site_delegates_to_2x2.py) un-suppresses it via
+    # ``pytest.warns``.
+    "ignore:ctm_2site is deprecated:DeprecationWarning",
     # Phase-1 deprecation (issue #911): ``recipe='1x1'`` / ``gs_recipe='1x1'``
     # reaches no fixed point in any reachable configuration.  A dozen tests
     # pass it *deliberately* — they exist to assert the collapse and the limit

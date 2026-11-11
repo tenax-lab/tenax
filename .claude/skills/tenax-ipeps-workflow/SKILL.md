@@ -103,16 +103,17 @@ from tenax import iPEPSConfig, CTMConfig, ipeps
 config = iPEPSConfig(
     max_bond_dim=2,              # iPEPS bond dimension D
     num_imaginary_steps=200,     # Number of Trotter steps
-    dt=0.05,                     # Imaginary time step δτ (0.3 gives E ≈ -0.53)
+    dt=0.05,                     # Imaginary time step δτ (0.3 gives E ≈ -0.645)
     ctm=CTMConfig(chi=10, max_iter=40),  # CTM used to measure the energy
 )
 energy, (A, B), (env_A, env_B) = ipeps(gate, None, config)
-print(f"Energy per site: {energy:.6f}")  # ≈ -0.63 for Heisenberg
+print(f"Energy per site: {energy:.6f}")  # -0.656790 for Heisenberg
 ```
 
-The energy `ipeps()` reports comes from the legacy 2-site CTM, which sits ~0.02
-above the truth on an entangled state. For an accurate number, measure the
-returned pair with the Tensor CTM (`ctm_tensor_2site`, default `recipe="2x2"`):
+`ipeps()` measures the returned pair with the 2x2 recipe of `ctm_tensor_2site`
+at `config.ctm.chi`, and sums the four bonds of the cell (since 0.9.3; before
+it, a legacy 2-site CTM printed −0.630276 here). To measure at another chi, or
+a symmetric pair, call the Tensor CTM yourself:
 
 ```python
 from tenax import ctm_tensor_2site, compute_energy_ctm_tensor_2site
@@ -121,8 +122,8 @@ env_A, env_B = ctm_tensor_2site(A, B, chi=16)
 E = compute_energy_ctm_tensor_2site(A, B, env_A, env_B, gate, d=2)
 ```
 
-The config above gives −0.6568 this way (vs −0.6328 from `ipeps()` itself); a
-converged D=2 simple-update state reaches −0.65933, χ-converged. Use
+The config above gives −0.656790 both ways. `ctm_tensor` on `A` alone measures
+the uniform state of `A`, a different state (#900). Use
 `ipeps(..., compute_energy=False)` to get just `(None, (A, B), None)` as a warm
 start.
 
@@ -568,9 +569,9 @@ my_lattice = Lattice(
 
 For 3+ site unit cells, use `ctm_multisite()`. The single-site entry point
 is `ctm_tensor()`; `ctm()` is deprecated since 0.9.3.
-Note: `ctm_2site()` is the legacy dense CTM used by simple update only;
-for AD optimization with 2-site cells, use `optimize_gs_ad()` with
-`unit_cell="2site"` which uses the Tensor-protocol multisite CTM.
+Note: `ctm_2site()` is deprecated since 0.9.3 and runs the 2x2 recipe of
+`ctm_tensor_2site`; call `ctm_tensor_2site()` for 2-site cells, and
+`optimize_gs_ad()` with `unit_cell="2site"` for AD optimization.
 
 `ctm_multisite()` accepts string-keyed site tensors and a `Lattice`:
 

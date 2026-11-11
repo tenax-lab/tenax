@@ -17,6 +17,10 @@ These tests cover all three entry points rather than only the one that was
 broken: the defect is a property of the seed pattern, not of ``ctm_2site``,
 and fixing one of two identical loops is how it survived the first time.
 Real states are unaffected either way -- which is why nothing caught it.
+
+Since 0.9.3 ``ctm`` and ``ctm_2site`` run the 2x2 recipe, a Python loop, so the
+carry constraint is gone.  The tests stay: the contract -- a complex state in, a
+complex environment out, a real criterion -- does not depend on the loop.
 """
 
 from __future__ import annotations
@@ -134,8 +138,8 @@ def test_reported_convergence_info_is_real_on_complex_input():
 def test_ipeps_accepts_a_complex_initial_state():
     """Reachability: #842 is hit through public API, not just the internal call.
 
-    ``num_imaginary_steps=0`` goes straight from the supplied state to
-    ``ctm_2site``, which is the shortest path from user input to the raise.
+    ``num_imaginary_steps=0`` goes straight from the supplied state to the
+    measurement CTM, which is the shortest path from user input to the raise.
     """
     gate = sublattice_rotate_gate(heisenberg_gate())
     config = iPEPSConfig(

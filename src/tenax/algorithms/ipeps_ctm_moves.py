@@ -1,14 +1,8 @@
-"""CTM algorithm for iPEPS — the eigh projector move and the 2-site and split directional moves."""
+"""CTM algorithm for iPEPS — the split-CTM projector and directional moves."""
 
 from __future__ import annotations
 
 __all__ = [
-    "_ctm_move_eigh",
-    "_ctm_move",
-    "_ctm_left_move_2site",
-    "_ctm_right_move_2site",
-    "_ctm_top_move_2site",
-    "_ctm_bottom_move_2site",
     "_split_ctm_projector",
     "_svd_split_edge",
     "_split_ctm_move",
@@ -18,182 +12,10 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms.ipeps_config import (
-    CTMEnvironment,
     SplitCTMEnvironment,
 )
 from tenax.algorithms.ipeps_ctm_init import _build_double_layer
 from tenax.linalg import _dense_svd
-
-
-def _ctm_move_eigh(
-    C1g: jax.Array,
-    C2g: jax.Array,
-    Tg: jax.Array,
-    chi: int,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Projector-based CTM truncation using eigh (standard method).
-
-    Given two grown corners ``C1g`` and ``C2g`` (each a 2-D matrix whose row
-    dimension is ``chi * D2``) and a grown edge tensor ``Tg`` of shape
-    ``(chi*D2, D2, chi*D2)``, compute a single isometric projector from the
-    combined half-system density matrix (Corboz et al., PRB 90, 165127, 2014),
-    then truncate both corners and the edge to bond dimension ``chi``.
-
-    The projector ``P`` is obtained from the eigendecomposition of the
-    half-system density matrix ``rho = C1g @ C1g^H + C2g @ C2g^H``.
-    Using ``eigh`` (symmetric eigendecomposition) is more numerically
-    stable than SVD of the concatenated corners when ``chi * D2 == 2 * chi``
-    (square matrix case), avoiding spurious sign oscillations in the
-    projector that prevent convergence.
-
-    Returns ``(C1_new, C2_new, T_new)`` with shapes ``(chi', col1)``,
-    ``(chi', col2)``, ``(chi', D2, chi')`` where ``chi' <= chi``.
-    """
-    # Half-system density matrix (Corboz et al. 2014).
-    # rho = C1g @ C1g^T + C2g @ C2g^T is positive semi-definite.
-    # Its leading eigenvectors form the optimal isometric projector.
-    rho = C1g @ C1g.conj().T + C2g @ C2g.conj().T
-    rho = 0.5 * (rho + rho.conj().T)  # enforce exact Hermiticity
-
-    eigvals, eigvecs = jnp.linalg.eigh(rho)
-    # eigh returns eigenvalues in ascending order; take the top chi.
-    k = min(chi, len(eigvals))
-    P = eigvecs[:, -k:][:, ::-1]  # (n, chi'), largest first
-
-    # Project corners — stop gradient through P for AD stability.
-    # The implicit fixed-point differentiation (ctm_converge) handles
-    # the overall response; differentiating through the projector
-    # eigenvectors causes gradient blowup from degenerate eigenvalues.
-    P_sg = jax.lax.stop_gradient(P)
-    C1_new = P_sg.conj().T @ C1g  # (chi', col1)
-    C2_new = P_sg.conj().T @ C2g  # (chi', col2)
-    T_new = jnp.einsum("ia,idj,jb->adb", P_sg, Tg, P_sg)
-    return C1_new, C2_new, T_new
-
-
-def _ctm_move(
-    C1g: jax.Array,
-    C2g: jax.Array,
-    Tg: jax.Array,
-    chi: int,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """CTM truncation with the eigh projector; the 2-site moves call this."""
-    return _ctm_move_eigh(C1g, C2g, Tg, chi)
-
-
-def _ctm_left_move_2site(
-    env_self: CTMEnvironment,
-    env_neighbor: CTMEnvironment,
-    a_neighbor: jax.Array,
-    chi: int,
-) -> CTMEnvironment:
-    """Projector-based 2-site CTM left move."""
-    D2 = a_neighbor.shape[0]
-    C1g = jnp.einsum("ab,buc->auc", env_self.C1, env_neighbor.T1).reshape(
-        -1, env_neighbor.T1.shape[2]
-    )
-    C4g = jnp.einsum("gh,hdi->gdi", env_self.C4, env_neighbor.T3).reshape(
-        -1, env_neighbor.T3.shape[2]
-    )
-    T4g = jnp.einsum("alg,udlr->augdr", env_self.T4, a_neighbor)
-    T4g = T4g.transpose(0, 1, 4, 2, 3).reshape(C1g.shape[0], D2, C4g.shape[0])
-    C1_new, C4_new, T4_new = _ctm_move(C1g, C4g, T4g, chi)
-    return CTMEnvironment(
-        C1=C1_new,
-        C2=env_self.C2,
-        C3=env_self.C3,
-        C4=C4_new,
-        T1=env_self.T1,
-        T2=env_self.T2,
-        T3=env_self.T3,
-        T4=T4_new,
-    )
-
-
-def _ctm_right_move_2site(
-    env_self: CTMEnvironment,
-    env_neighbor: CTMEnvironment,
-    a_neighbor: jax.Array,
-    chi: int,
-) -> CTMEnvironment:
-    """Projector-based 2-site CTM right move."""
-    D2 = a_neighbor.shape[0]
-    C2g = jnp.einsum("ce,buc->eub", env_self.C2, env_neighbor.T1).reshape(
-        -1, env_neighbor.T1.shape[0]
-    )
-    C3g = jnp.einsum("im,hdi->mdh", env_self.C3, env_neighbor.T3).reshape(
-        -1, env_neighbor.T3.shape[0]
-    )
-    T2g = jnp.einsum("erm,udlr->eumdl", env_self.T2, a_neighbor)
-    T2g = T2g.transpose(0, 1, 4, 2, 3).reshape(C2g.shape[0], D2, C3g.shape[0])
-    C2_new, C3_new, T2_new = _ctm_move(C2g, C3g, T2g, chi)
-    return CTMEnvironment(
-        C1=env_self.C1,
-        C2=C2_new,
-        C3=C3_new,
-        C4=env_self.C4,
-        T1=env_self.T1,
-        T2=T2_new,
-        T3=env_self.T3,
-        T4=env_self.T4,
-    )
-
-
-def _ctm_top_move_2site(
-    env_self: CTMEnvironment,
-    env_neighbor: CTMEnvironment,
-    a_neighbor: jax.Array,
-    chi: int,
-) -> CTMEnvironment:
-    """Projector-based 2-site CTM top move."""
-    D2 = a_neighbor.shape[0]
-    C1g = jnp.einsum("ab,alg->blg", env_self.C1, env_neighbor.T4).reshape(
-        -1, env_neighbor.T4.shape[2]
-    )
-    C2g = jnp.einsum("ce,erm->crm", env_self.C2, env_neighbor.T2).reshape(
-        -1, env_neighbor.T2.shape[2]
-    )
-    T1g = jnp.einsum("buc,udlr->bcdlr", env_self.T1, a_neighbor)
-    T1g = T1g.transpose(0, 3, 2, 1, 4).reshape(C1g.shape[0], D2, C2g.shape[0])
-    C1_new, C2_new, T1_new = _ctm_move(C1g, C2g, T1g, chi)
-    return CTMEnvironment(
-        C1=C1_new,
-        C2=C2_new,
-        C3=env_self.C3,
-        C4=env_self.C4,
-        T1=T1_new,
-        T2=env_self.T2,
-        T3=env_self.T3,
-        T4=env_self.T4,
-    )
-
-
-def _ctm_bottom_move_2site(
-    env_self: CTMEnvironment,
-    env_neighbor: CTMEnvironment,
-    a_neighbor: jax.Array,
-    chi: int,
-) -> CTMEnvironment:
-    """Projector-based 2-site CTM bottom move."""
-    D2 = a_neighbor.shape[0]
-    C4g = jnp.einsum("gh,alg->hal", env_self.C4, env_neighbor.T4)
-    C4g = C4g.transpose(0, 2, 1).reshape(-1, env_neighbor.T4.shape[0])
-    C3g = jnp.einsum("im,erm->ire", env_self.C3, env_neighbor.T2).reshape(
-        -1, env_neighbor.T2.shape[0]
-    )
-    T3g = jnp.einsum("hdi,udlr->hiulr", env_self.T3, a_neighbor)
-    T3g = T3g.transpose(0, 3, 2, 1, 4).reshape(C4g.shape[0], D2, C3g.shape[0])
-    C4_new, C3_new, T3_new = _ctm_move(C4g, C3g, T3g, chi)
-    return CTMEnvironment(
-        C1=env_self.C1,
-        C2=env_self.C2,
-        C3=C3_new,
-        C4=C4_new,
-        T1=env_self.T1,
-        T2=env_self.T2,
-        T3=T3_new,
-        T4=env_self.T4,
-    )
 
 
 def _split_ctm_projector(

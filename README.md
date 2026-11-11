@@ -236,11 +236,11 @@ config = iPEPSConfig(
     unit_cell="2site",
 )
 energy, peps, (env_A, env_B) = ipeps(heisenberg_gate(), None, config)
-print(f"Energy per site: {energy:.6f}")  # ~ -0.63
+print(f"Energy per site: {energy:.6f}")  # -0.656790
 ```
 
-The energy `ipeps()` reports is a quick estimate; for an accurate number, and
-for the bond-weight options, see the [iPEPS guide](docs/guide/algorithms/ipeps.md).
+`ipeps()` measures the state with the 2x2 CTM at the `chi` you pass; for chi
+convergence and the bond-weight options, see the [iPEPS guide](docs/guide/algorithms/ipeps.md).
 
 ### iPEPS AD optimization
 

@@ -195,6 +195,12 @@ _FILE_MARKERS = {
     # environment on a public entry point, so they belong in the required gate.
     # The 16 Onsager cases set its run time.
     "test_ctm_delegates_to_2x2.py": "core",
+    # ``ctm_2site()`` and ``ipeps()`` run the 2x2 recipe of ``ctm_tensor_2site``
+    # since 0.9.3.  The orientation pin compares the raw four-bond energy with
+    # the Tensor energy on a pair without lattice symmetry, where a transposed
+    # corner or swapped environments move it by 4.5e-4 or more.  A silent wrong
+    # environment on a public entry point, so it belongs in the required gate.
+    "test_ctm_2site_delegates_to_2x2.py": "core",
     # The #747 collapse detectors themselves. Cheap (D=2, chi=8) and they guard
     # the guard: if these rot, nothing else notices a collapsed environment.
     "test_ctm_collapse_detector.py": "core",
@@ -389,6 +395,12 @@ _FILE_MARKERS = {
     # scan showed conv_tol having no effect on the answer.
     "test_ctm_complex_site_tensors.py": "core",
     "test_rdm_validity_guard.py": "core",
+    # The 2-site energy of ipeps() is a function of the state: the same
+    # physical state in another bond gauge, or with A and B swapped, must give
+    # the same energy, and a dimer state its exact -0.375. D=2, chi<=6, ~10 s.
+    # ``core`` because the old path failed silently -- a plausible energy
+    # 0.02 off, or one bond's RDM dead -- and passed every smoke test.
+    "test_ipeps_2site_energy.py": "core",
     # #799: the symmetry core disagreeing with itself about charges. ``core``
     # because both defects are silent and fail *open* -- one admits a
     # nonconserving block, the other drops a block's data on ``todense()``

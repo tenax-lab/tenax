@@ -15,10 +15,12 @@ Symptom: lam_2 proportional to dt, lam_3 proportional to dt**2, and E -> -0.5
 exactly (the product-state energy) as dt -> 0, i.e. *smaller dt was worse*.
 
 **These tests deliberately do not assert on the energy ``ipeps()`` returns.**
-That number comes from the legacy 2-site ``ctm_2site``, which does not converge
-here (measured ``diff`` 1.6e-3 to 6.5e-2 after 600 sweeps at conv_tol=1e-10),
-so freezing it would freeze noise -- the same trap #836 removed elsewhere.  The
-state itself is well defined, so the assertions below measure the state with a
+Until 0.9.3 that number came from the legacy 2-site ``ctm_2site``, which did not
+converge here (measured ``diff`` 1.6e-3 to 6.5e-2 after 600 sweeps at
+conv_tol=1e-10), so freezing it would have frozen noise -- the same trap #836
+removed elsewhere.  ``ipeps()`` now measures with the 2x2 recipe, but at the
+caller's chi and budget.  The state itself is well defined, so the assertions
+below measure the state with a
 converged 1x1 CTM (``recipe="2x2"``; E is flat to 1e-12 from chi=16, corner rank
 = chi, so it is neither unconverged nor #747-collapsed).
 """
@@ -67,8 +69,8 @@ def _run_su(D: int, *, steps: int = 200, dt: float = 0.05):
         # result away.  chi is unchanged; only the sweep count is cut (#933).
         ctm=CTMConfig(chi=8, max_iter=2, conv_tol=1e-8),
     )
-    # ipeps() may warn that its own (legacy) 2-site CTM did not converge (#839)
-    # at the small chi used here.  That is a property of ctm_2site, not of the
+    # ipeps() may warn that its measurement CTM did not converge (#839): two
+    # sweeps rarely certify.  That is a property of this budget, not of the
     # state under test, and whether it fires depends on D -- so it is ignored
     # rather than asserted either way.
     with warnings.catch_warnings():

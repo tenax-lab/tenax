@@ -1015,12 +1015,12 @@ class CTMConvergenceInfo(NamedTuple):
     or :func:`ctm_split`.  Opt-in because all three are public API and their
     return arity cannot change.
 
-    ``converged`` and ``n_iter`` come straight out of a ``lax.while_loop``
-    carry for :func:`ctm_2site`, so they are **JAX arrays**, not Python
-    scalars.  That keeps it jittable; call ``bool(...)`` / ``int(...)`` at the
-    point of use.  :func:`ctm_split` and :func:`ctm_tensor` run a Python loop
-    and return Python scalars, and so does :func:`ctm`, which runs
-    :func:`ctm_tensor` since 0.9.3.
+    Every producer runs a Python loop and fills the fields with Python
+    scalars: :func:`ctm_tensor`, :func:`ctm_split`, and, since 0.9.3,
+    :func:`ctm` and :func:`ctm_2site`, which run the 2x2 recipe.  Before 0.9.3
+    those two filled them with JAX arrays out of a ``lax.while_loop`` carry, so
+    code that calls ``bool(...)`` / ``int(...)`` at the point of use works with
+    both.
 
     Attributes:
         converged: True when the sweep met ``conv_tol`` and stopped early.
@@ -1405,6 +1405,7 @@ def _ctm_tensor_multisite(
     hold_sweeps: int = 0,
     hold_perturbation: float = DEFAULT_HOLD_PERTURBATION,
     *,
+    min_iter: int = 1,
     _return_status: bool = False,
     _warn_unconverged: bool = True,
 ) -> dict[Coord, CTMTensorEnv]:
@@ -1428,10 +1429,15 @@ def _ctm_tensor_multisite(
                       both and there is no fixed point to converge to.
         hold_sweeps:  See :func:`ctm_tensor_2site`.  Default ``0`` (off).
         hold_perturbation: See :func:`ctm_tensor_2site`.
+        min_iter:     Minimum sweeps before ``converged`` can be set, capped at
+                      ``max_iter`` so that a small budget stays convergeable
+                      (#976).  QR warm-up sweeps count toward it.  The default,
+                      1, keeps the plain early exit; ``ctm_2site`` passes
+                      ``CTMConfig.min_iter``.
         _return_status: Private.  When true, return ``(envs, info, detail)``
                       with ``info`` a :class:`CTMConvergeInfo` (``iterations``
-                      is the sweeps actually run when not converged, ``-1``
-                      otherwise) and ``detail`` the not-converged diagnostic
+                      is the number of sweeps that ran, QR warm-up included,
+                      converged or not) and ``detail`` the not-converged diagnostic
                       text (``None`` when converged), so a wrapper can act on
                       the verdict (#1059 site 5).
         _warn_unconverged: Private.  ``False`` suppresses the not-converged
@@ -1467,6 +1473,10 @@ def _ctm_tensor_multisite(
     # is unactionable against a value that is not the parameter.  The warm-up
     # sweeps do run, so the caller's total is also the honest sweep count.
     budget = max_iter
+    # ``converged`` needs ``min(min_iter, max_iter)`` sweeps, warm-up included,
+    # as in ``ctm_tensor`` (#976).  The cap uses the caller's budget, before the
+    # warm-up below shortens ``max_iter``.
+    min_sweeps = min(min_iter, budget)
 
     # QR warm-up: run a few eigh iterations before switching to QR
     if projector_method == "qr" and qr_warmup_steps > 0:
@@ -1615,6 +1625,10 @@ def _ctm_tensor_multisite(
         # the zero-measured-sweep case already reports.
         if ever_measured:
             final_diff = sweep_diff
+        # ``budget - max_iter`` is the QR warm-up.  The last sweep of the budget
+        # always passes this gate, because ``min_sweeps <= budget``.
+        if converged and budget - max_iter + used < min_sweeps:
+            converged = False
         if converged and hold_sweeps:
             per = 1 + DEFAULT_HOLD_DIRECTIONS  # CTM steps per hold sweep
             if used + per * hold_sweeps > max_iter:
@@ -1769,10 +1783,11 @@ def _ctm_tensor_multisite(
 
         # Codex P2 on #1070: count the sweeps that ran, not the budget -- the
         # hold's budget and non-finite exits stop early.  ``budget - max_iter``
-        # is the QR warm-up.
+        # is the QR warm-up.  A converged run reports its count too:
+        # ``ctm_2site(return_meta=True)`` reads it as ``n_iter``.
         info = CTMConvergeInfo(
             converged=bool(converged),
-            iterations=(budget - max_iter + used) if not converged else -1,
+            iterations=budget - max_iter + used,
             sv_diff=float(final_diff),
         )
         return envs, info, (unconv[0] if unconv is not None else None)

@@ -466,13 +466,14 @@ class TestIPEPS2Site:
         dt-stable (E_1x1 = -0.6570 / -0.6593 / -0.6591 at dt = 0.3 / 0.05 /
         0.01), so a physical dt is used here.
 
-        The bound is loose because ``ipeps()``'s own energy comes from the
-        legacy 2-site ``ctm_2site``, which does **not** converge on a genuinely
-        entangled state -- measured -0.6294 to -0.6366 across chi=10..32 and
-        max_iter=40..400, against the -0.6593 a converged 1x1 CTM gives for the
-        same state.  Pinning it tightly would pin that non-convergence.  The
-        physics assertion lives in ``test_su_667_product_state.py``, which
-        measures the state rather than this environment.
+        Since 0.9.3 ``ipeps()`` measures with the 2x2 recipe and sums the four
+        bonds of the cell: -0.65679 here, the same to 10 digits at chi = 10,
+        16, 24 and 32 (measured at d6730510 through the same recipe).  The
+        bound sits above that and below every old reading, so it catches
+        each defect on its own: the legacy environment with four bonds reads
+        -0.6507, the 2x2 environment with the two bonds that start on ``A``
+        -0.6393, and the old ``ipeps()`` -0.6303.  The physics assertion
+        lives in ``test_su_667_product_state.py``.
         """
         config = iPEPSConfig(
             max_bond_dim=2,
@@ -482,9 +483,9 @@ class TestIPEPS2Site:
             unit_cell="2site",
         )
         energy, _, _ = ipeps(heisenberg_gate, None, config)
-        assert float(energy) < -0.60, (
-            f"Energy {float(energy)} not low enough — D=2 iPEPS should give "
-            f"E < -0.60 even through the unconverged 2-site CTM"
+        assert float(energy) < -0.655, (
+            f"Energy {float(energy)} not low enough — the 2x2 measurement of "
+            f"this D=2 state gives -0.65679"
         )
 
     def test_2site_with_initial_peps(self, heisenberg_gate):

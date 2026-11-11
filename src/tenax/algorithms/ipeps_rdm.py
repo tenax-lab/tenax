@@ -307,14 +307,28 @@ def compute_energy_ctm_2site(
 ) -> jax.Array:
     """Compute energy per site for a 2-site checkerboard iPEPS.
 
-    E/site = E_horizontal + E_vertical (one bond of each type per site).
+    The cell has four bonds: ``A.r-B.l`` and ``A.d-B.u`` (the bonds that start
+    on ``A``) and ``B.r-A.l`` and ``B.d-A.u`` (the bonds that start on ``B``),
+    and two sites, so E/site is half the sum of the four.  The same count as
+    :func:`compute_energy_ctm_tensor_2site` (#493).  Until 0.9.3 this function
+    summed only the two bonds that start on ``A``: singlets on every
+    ``A.r-B.l`` bond then read -0.75 per site instead of -0.375, and the D=2
+    simple-update state of the plain Heisenberg gate -0.6393 instead of
+    -0.6568.
+
+    ``env_A`` and ``env_B`` are the environments :func:`ctm_2site` returns:
+    each field has its legs in the order ``CTMTensorEnv`` documents.
     """
     H = hamiltonian_gate.reshape(d, d, d, d)
-    rdm_h = _rdm2x1_2site(A, B, env_A, env_B, d)
-    rdm_v = _rdm1x2_2site(A, B, env_A, env_B, d)
-    E_h = jnp.einsum("ijkl,klij->", rdm_h, H)
-    E_v = jnp.einsum("ijkl,klij->", rdm_v, H)
-    return (E_h + E_v).real
+    rdms = (
+        _rdm2x1_2site(A, B, env_A, env_B, d),
+        _rdm2x1_2site(B, A, env_B, env_A, d),
+        _rdm1x2_2site(A, B, env_A, env_B, d),
+        _rdm1x2_2site(B, A, env_B, env_A, d),
+    )
+    E = sum(jnp.einsum("ijkl,klij->", rdm, H) for rdm in rdms)
+    # 4 bonds (2 that start on A + 2 that start on B) / 2 sites per cell.
+    return 0.5 * E.real
 
 
 def compute_energy_split_ctm(

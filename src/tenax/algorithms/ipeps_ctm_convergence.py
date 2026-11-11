@@ -7,8 +7,7 @@ __all__ = [
     "CTMConvergenceInfo",
     "ctm",
     "_ctm_via_2x2",
-    "_renormalize_env",
-    "_ctm_2site_sweep",
+    "_ctm_2site_via_2x2",
     "ctm_2site",
     "_split_ctm_sweep",
     "_split_env_to_standard",
@@ -40,38 +39,31 @@ from tenax.algorithms.ipeps_config import (
     SplitCTMEnvironment,
 )
 from tenax.algorithms.ipeps_ctm_init import (
-    _build_double_layer,
-    _initialize_ctm_env,
     _initialize_split_ctm_env,
 )
-from tenax.algorithms.ipeps_ctm_moves import (
-    _ctm_bottom_move_2site,
-    _ctm_left_move_2site,
-    _ctm_right_move_2site,
-    _ctm_top_move_2site,
-    _split_ctm_move,
-)
+from tenax.algorithms.ipeps_ctm_moves import _split_ctm_move
 from tenax.core import EPS
 from tenax.linalg import _dense_svd
 
 # ``_ctm_sv_diff`` is imported, not defined here.
 #
 # This module used to carry its own copy, and the copy is what the **public**
-# path ran: ``ipeps()`` imports ``ctm_2site`` from here (``ipeps.py:30``, called
-# at ``:462``), so #898's guard in ``_ctm_tensor_convergence`` protected the
-# tensor loops while every ``ipeps()`` call kept the unguarded comparison --
-# the rank-1 corner still normalised to ``[1, 0, ..., 0]``, still compared
-# equal to an unrelated environment, and still reported convergence early.
-# A fix that leaves the production path broken is worse than no fix, because
-# the closed issue stops anyone looking.
+# path ran: until 0.9.3 ``ipeps()`` measured with ``ctm_2site`` from here, so
+# #898's guard in ``_ctm_tensor_convergence`` protected the tensor loops while
+# every ``ipeps()`` call kept the unguarded comparison -- the rank-1 corner
+# still normalised to ``[1, 0, ..., 0]``, still compared equal to an unrelated
+# environment, and still reported convergence early.  A fix that leaves the
+# production path broken is worse than no fix, because the closed issue stops
+# anyone looking.
 #
 # The guarded implementation is written to be shared: it uses ``jnp.where``
-# rather than a Python ``if`` precisely so it can run inside the
-# ``jax.lax.while_loop`` in this module, and its own docstring says the guard
-# belongs in one place so "a future tenth loop inherits the guard instead of
-# re-acquiring the bug".  This is that inheritance, and it also picks up the
-# #670 zero-padding, which is a no-op on the dense path where the spectrum
-# length is fixed by ``chi``.
+# rather than a Python ``if`` precisely so it could run inside the
+# ``jax.lax.while_loop`` that ``ctm`` and ``ctm_2site`` ran before 0.9.3, and
+# its own docstring says the guard belongs in one place so "a future tenth
+# loop inherits the guard instead of re-acquiring the bug".  ``ctm_split``,
+# the one loop left here, is that inheritance, and it also picks up the #670
+# zero-padding, which is a no-op on the dense path where the spectrum length
+# is fixed by ``chi``.
 
 
 def ctm(
@@ -215,51 +207,96 @@ def _ctm_via_2x2(
     return env
 
 
-def _renormalize_env(env: CTMEnvironment) -> CTMEnvironment:
-    """Normalize environment tensors to prevent exponential growth."""
+def _ctm_2site_via_2x2(
+    A: jax.Array,
+    B: jax.Array,
+    config: CTMConfig,
+    *,
+    return_meta: bool = False,
+) -> (
+    tuple[CTMEnvironment, CTMEnvironment]
+    | tuple[CTMEnvironment, CTMEnvironment, CTMConvergenceInfo]
+):
+    """``ctm_2site()`` without its warnings: the 2x2 recipe of
+    ``ctm_tensor_2site`` with the ``CTMConfig`` fields mapped, returned as two
+    raw-array ``CTMEnvironment`` named tuples.
 
-    def normalize(x: jax.Array) -> jax.Array:
-        norm = jnp.max(jnp.abs(x))
-        return x / (norm + EPS)
+    For callers that need ``ctm_2site()``'s result and must not trigger its
+    ``DeprecationWarning``: ``ipeps()`` and the fixture-only tests.
 
-    return CTMEnvironment(
-        C1=normalize(env.C1),
-        C2=normalize(env.C2),
-        C3=normalize(env.C3),
-        C4=normalize(env.C4),
-        T1=normalize(env.T1),
-        T2=normalize(env.T2),
-        T3=normalize(env.T3),
-        T4=normalize(env.T4),
+    Args:
+        A:           Site tensor of sublattice A: a raw array with 5 legs
+                     ``(u, d, l, r, s)`` and four virtual legs of one dimension,
+                     or a ``DenseTensor``, which is passed through.
+                     ``_wrap_as_dense_tensor`` reads ``shape[0]`` for all four
+                     virtual legs without a check, so any other shape raises
+                     ``ValueError`` here.  A ``SymmetricTensor`` raises
+                     ``TypeError``: the raw result would need ``todense()``.
+        B:           Site tensor of sublattice B, checked the same way.
+        config:      ``chi``, ``max_iter``, ``conv_tol``, ``renormalize`` and
+                     ``min_iter`` are passed on.  ``projector_method`` is not:
+                     the 2x2 recipe always uses Fishman SVD, and ``"svd"`` is
+                     passed because ``"qr"`` would still start the QR warm-up
+                     loop.  So ``qr_warmup_steps`` has no effect.
+        return_meta: When True, also return a :class:`CTMConvergenceInfo`,
+                     whose fields are Python scalars.
+
+    Returns:
+        ``(env_A, env_B)``, or ``(env_A, env_B, info)``.  Every field has its
+        legs in the order ``CTMTensorEnv`` documents, which is the order the raw
+        2-site RDMs of ``ipeps_rdm`` contract.  The loop's own not-converged
+        warning is off: ``ipeps()`` warns itself, and ``ctm_2site()`` reports
+        through ``info`` as it always did.
+    """
+    from tenax.algorithms._ctm_env_dense import _as_dense_env, _in_documented_leg_order
+    from tenax.algorithms._ctm_tensor_convergence import (
+        CHECKERBOARD_NEIGHBORS,
+        _ctm_tensor_multisite,
     )
+    from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
+    from tenax.core.tensor import SymmetricTensor, Tensor
 
-
-def _ctm_2site_sweep(
-    env_A: CTMEnvironment,
-    env_B: CTMEnvironment,
-    a_A: jax.Array,
-    a_B: jax.Array,
-    chi: int,
-    # NOTE: Legacy dense 2-site sweep, used by simple update only.
-    # AD optimization uses _ctm_tensor_sweep_multisite instead.
-    renormalize: bool,
-) -> tuple[CTMEnvironment, CTMEnvironment]:
-    """One full 2-site CTM sweep: L/R/T/B moves for both sublattices + renormalize."""
-    # Left moves
-    env_A = _ctm_left_move_2site(env_A, env_B, a_B, chi)
-    env_B = _ctm_left_move_2site(env_B, env_A, a_A, chi)
-    # Right moves
-    env_A = _ctm_right_move_2site(env_A, env_B, a_B, chi)
-    env_B = _ctm_right_move_2site(env_B, env_A, a_A, chi)
-    # Top moves
-    env_A = _ctm_top_move_2site(env_A, env_B, a_B, chi)
-    env_B = _ctm_top_move_2site(env_B, env_A, a_A, chi)
-    # Bottom moves
-    env_A = _ctm_bottom_move_2site(env_A, env_B, a_B, chi)
-    env_B = _ctm_bottom_move_2site(env_B, env_A, a_A, chi)
-    if renormalize:
-        env_A = _renormalize_env(env_A)
-        env_B = _renormalize_env(env_B)
+    sites = {}
+    for name, coord, X in (("A", (0, 0), A), ("B", (1, 0), B)):
+        if isinstance(X, SymmetricTensor):
+            raise TypeError(
+                f"ctm_2site() returns raw-array CTMEnvironments, so the "
+                f"SymmetricTensor site tensor {name} would have to be densified. "
+                "Call ctm_tensor_2site(A, B, chi, ...) instead: it keeps the "
+                "blocks and returns two CTMTensorEnvs."
+            )
+        if not isinstance(X, Tensor):
+            X = jnp.asarray(X)
+            if X.ndim != 5 or len(set(X.shape[:4])) != 1:
+                raise ValueError(
+                    "Expected raw site tensors with 5 legs (u, d, l, r, s) and "
+                    f"four virtual legs of one dimension; got shape {X.shape} "
+                    f"for {name}."
+                )
+            X = _wrap_as_dense_tensor(X)
+        sites[coord] = X
+    envs, status, _detail = _ctm_tensor_multisite(
+        sites,
+        CHECKERBOARD_NEIGHBORS,
+        config.chi,
+        max_iter=config.max_iter,
+        conv_tol=config.conv_tol,
+        renormalize=config.renormalize,
+        projector_method="svd",
+        recipe="2x2",
+        min_iter=config.min_iter,
+        _return_status=True,
+        _warn_unconverged=False,
+    )
+    # The 2x2 sweep stores each corner with its two legs reversed, and the raw
+    # consumers contract by position: put every field in the documented order.
+    env_A = _as_dense_env(_in_documented_leg_order(envs[(0, 0)]))
+    env_B = _as_dense_env(_in_documented_leg_order(envs[(1, 0)]))
+    if return_meta:
+        info = CTMConvergenceInfo(
+            converged=status.converged, n_iter=status.iterations, diff=status.sv_diff
+        )
+        return env_A, env_B, info
     return env_A, env_B
 
 
@@ -273,122 +310,68 @@ def ctm_2site(
     tuple[CTMEnvironment, CTMEnvironment]
     | tuple[CTMEnvironment, CTMEnvironment, CTMConvergenceInfo]
 ):
-    """Compute CTM environments for a 2-site checkerboard unit cell.
+    """Compute the CTM environments of a 2-site checkerboard pair with the 2x2 recipe.
 
-    .. note::
-        This is the **legacy dense** 2-site CTM used by simple update
-        (``ipeps()``).  For AD-based optimization, use
-        ``optimize_gs_ad()`` with ``unit_cell="2site"``, which routes
-        through the Tensor-protocol multisite CTM
-        (``ctm_tensor_converge_2site``).
-
-    On a checkerboard, all neighbors of A are B and vice versa. Each
-    absorption move for env_A uses B's double-layer tensor and T's from
-    env_B, and vice versa.
-
-    The iteration loop uses ``jax.lax.while_loop`` so that the entire
-    convergence procedure can be JIT-compiled without host sync.
+    .. deprecated:: 0.9.3
+        Use :func:`ctm_tensor_2site`.  ``ctm_2site()`` now runs its 2x2 recipe
+        and returns the two environments as the raw-array
+        :class:`CTMEnvironment` named tuples that ``ctm_2site()`` always
+        returned.  The sweep it ran before built each sublattice's new boundary
+        from that sublattice's own corners and edges, with a projector of its
+        own, so the two environments did not share a basis at the A|B seams and
+        the energy moved with the bond gauge of the pair: on three D=2
+        simple-update states, each in two bond gauges at chi=6 and 8, the
+        energy of ``ipeps()``, which measured with it, ranged from -0.7815 to
+        +0.8171, while ``ctm_tensor_2site`` agreed with the 1-site CTM of each
+        state to 4e-11.  So environments from ``ctm_2site()`` changed in 0.9.3,
+        and ``ctm_2site()`` no longer runs under ``jax.jit``, because the 2x2
+        recipe is a Python loop.
 
     Args:
-        A: Site tensor for sublattice A, shape (D, D, D, D, d).
-        B: Site tensor for sublattice B, shape (D, D, D, D, d).
-        config: CTMConfig.
+        A:           Site tensor of sublattice A: a raw array with 5 legs
+                     ``(u, d, l, r, s)`` and four virtual legs of one
+                     dimension, or a ``DenseTensor``.  Any other shape raises
+                     ``ValueError``.  A ``SymmetricTensor`` raises
+                     ``TypeError``: call :func:`ctm_tensor_2site`, which keeps
+                     the blocks.
+        B:           Site tensor of sublattice B, the same way.
+        config:      ``chi``, ``max_iter``, ``conv_tol``, ``renormalize`` and
+                     ``min_iter`` apply.  A ``projector_method`` other than
+                     ``"svd"`` is ignored with a ``UserWarning``, because the
+                     2x2 recipe always uses Fishman SVD; ``qr_warmup_steps`` is
+                     ignored too.
         return_meta: When True, also return a :class:`CTMConvergenceInfo`
                      saying whether the loop converged or exhausted
-                     ``max_iter`` (#839).  Keyword-only and off by default so
-                     the return arity of this public entry point is unchanged.
+                     ``max_iter`` (#839).  Its fields are Python scalars.
+                     Keyword-only and off by default so the return arity of
+                     this public entry point is unchanged.
 
     Returns:
         ``(env_A, env_B)``, or ``(env_A, env_B, info)`` when
-        ``return_meta=True``.  **The environments are not necessarily
-        converged** -- that is what ``info`` is for.  A single ``info``
-        covers both sublattices because the loop's criterion is their
-        maximum, so they converge or fail together.
+        ``return_meta=True``.  Each field has its legs in the order
+        ``CTMTensorEnv`` documents, which is the order
+        :func:`compute_energy_ctm_2site` contracts.  **The environments are not
+        necessarily converged** -- that is what ``info`` is for.  One ``info``
+        covers both sublattices: the loop converges when every corner does.
     """
-    chi = config.chi
-
-    a_A = _build_double_layer(A)
-    a_B = _build_double_layer(B)
-    D_A = A.shape[0]
-    D_B = B.shape[0]
-    if a_A.ndim == 8:
-        a_A = a_A.reshape(D_A**2, D_A**2, D_A**2, D_A**2)
-    if a_B.ndim == 8:
-        a_B = a_B.reshape(D_B**2, D_B**2, D_B**2, D_B**2)
-
-    env_A = _initialize_ctm_env(a_A, chi)
-    env_B = _initialize_ctm_env(a_B, chi)
-
-    max_iter = config.max_iter
-    conv_tol = config.conv_tol
-    # See ``ctm`` above: cap ``min_iter`` at the budget so a small ``max_iter``
-    # stays convergeable (#976).
-    min_iter = min(config.min_iter, max_iter)
-    renormalize = config.renormalize
-
-    # Initial singular values (zeros — first iteration never converges).
-    # Seeded with the REAL dtype, not ``C1.dtype``, for the same reason as in
-    # ``ctm`` above: ``body_fn`` assigns ``_dense_svd(..., compute_uv=False)``,
-    # which is always real, and ``lax.while_loop`` requires an invariant carry
-    # type.  ``ctm`` was fixed for this; ``ctm_2site`` was not, so it raised
-    # ``TypeError`` on any complex site tensor -- including through public
-    # ``ipeps()`` with a complex ``initial_peps`` (#842).
-    _sv_dtype_A = jnp.zeros((), dtype=env_A.C1.dtype).real.dtype
-    _sv_dtype_B = jnp.zeros((), dtype=env_B.C1.dtype).real.dtype
-    prev_sv_A = jnp.zeros(min(chi, env_A.C1.shape[0]), dtype=_sv_dtype_A)
-    prev_sv_B = jnp.zeros(min(chi, env_B.C1.shape[0]), dtype=_sv_dtype_B)
-    # See ``ctm`` above (#903 review, P1).  Both sublattices share one bound:
-    # the smaller, so neither is certified on the other's headroom.
-    # Per sublattice, not aggregated (#903 review): each corner is judged by
-    # the reachable rank of the site sitting under it.
-    max_rank_A = _forced_corner_rank(_max_virtual_bond_dim(a_A))
-    max_rank_B = _forced_corner_rank(_max_virtual_bond_dim(a_B))
-
-    # Carry: (env_A, env_B, prev_sv_A, prev_sv_B, iteration, converged, diff)
-    # ``diff`` rides along only so it can be reported (#839); ``converged`` is
-    # still derived from it in the body, so loop behaviour is unchanged.
-    # Seeded at inf -- no comparison exists before two sweeps, and inf never
-    # satisfies ``< conv_tol``.  Its dtype is the promotion of the two
-    # sublattice singular-value dtypes because the body reports
-    # ``max(diff_A, diff_B)``, which promotes.
-    _diff_dtype = jnp.result_type(_sv_dtype_A, _sv_dtype_B)
-    init_carry = (
-        env_A,
-        env_B,
-        prev_sv_A,
-        prev_sv_B,
-        jnp.array(0, dtype=jnp.int32),
-        jnp.bool_(False),
-        jnp.array(jnp.inf, dtype=_diff_dtype),
+    warnings.warn(
+        "ctm_2site is deprecated and will be removed in a later release: call "
+        "ctm_tensor_2site(A, B, chi, ...) on DenseTensor or SymmetricTensor site "
+        "tensors with legs (u, d, l, r, phys). ctm_2site now runs the 2x2 recipe "
+        "of ctm_tensor_2site, so its environments changed in 0.9.3 (the old "
+        "sweep gave energies that moved with the bond gauge), and it no longer "
+        "runs under jax.jit.",
+        DeprecationWarning,
+        stacklevel=2,
     )
-
-    def cond_fn(carry):
-        _, _, _, _, iteration, converged, _ = carry
-        return ~converged & (iteration < max_iter)
-
-    def body_fn(carry):
-        eA, eB, psA, psB, iteration, _, _ = carry
-        eA, eB = _ctm_2site_sweep(eA, eB, a_A, a_B, chi, renormalize)
-        sv_A = _dense_svd(eA.C1, compute_uv=False)
-        sv_B = _dense_svd(eB.C1, compute_uv=False)
-        diff_A = _ctm_sv_diff(sv_A, psA, max_rank=max_rank_A)
-        diff_B = _ctm_sv_diff(sv_B, psB, max_rank=max_rank_B)
-        diff = jnp.maximum(diff_A, diff_B)
-        # Honor ``min_iter`` before certifying convergence (#976).  No warm-up
-        # on this path, so the loop count is the total sweep count.
-        converged = (diff < conv_tol) & ((iteration + 1) >= min_iter)
-        return (eA, eB, sv_A, sv_B, iteration + 1, converged, diff)
-
-    env_A, env_B, _, _, n_iter, converged, diff = jax.lax.while_loop(
-        cond_fn, body_fn, init_carry
-    )
-    if return_meta:
-        return (
-            env_A,
-            env_B,
-            CTMConvergenceInfo(converged=converged, n_iter=n_iter, diff=diff),
+    if config.projector_method != "svd":
+        warnings.warn(
+            f"ctm_2site() ignores projector_method={config.projector_method!r}: "
+            "the 2x2 recipe always uses Fishman SVD projectors.",
+            UserWarning,
+            stacklevel=2,
         )
-    return env_A, env_B
+    return _ctm_2site_via_2x2(A, B, config, return_meta=return_meta)
 
 
 # ---------------------------------------------------------------------------
@@ -500,12 +483,12 @@ def ctm_split(
     Returns:
         The SplitCTMEnvironment, or ``(env, info)`` when ``return_meta=True``.
         **The environment is not necessarily converged** -- that is what
-        ``info`` is for.  Unlike :func:`ctm` / :func:`ctm_2site` this is a
-        Python loop, so ``info``'s fields are Python scalars.
+        ``info`` is for.  Its fields are Python scalars.
     """
     chi = config.chi
     chi_I = config.chi_I if config.chi_I is not None else chi
-    # See ``ctm`` above: cap ``min_iter`` at the budget (#976).
+    # Cap ``min_iter`` at the budget so a small ``max_iter`` stays convergeable
+    # (#976).
     min_iter = min(config.min_iter, config.max_iter)
 
     env = _initialize_split_ctm_env(A, chi, chi_I)
