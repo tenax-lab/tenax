@@ -21,7 +21,13 @@ updates:
       # `uv lock --upgrade-package cython`.
       - dependency-name: "cython"
       # cuSOLVER decides whether GPU SVDs are correct: 12.2.6.9 returned NaN
-      # on ill-conditioned matrices (#691), and the polar GPU SVD (v0.9.0)
-      # was validated on 12.3.5.3.  Move it only after the GPU SVD suites
-      # pass on the new version.  Covers nvidia-cusolver and -cu12.
-      - dependency-name: "nvidia-cusolver*"
+      # on ill-conditioned matrices (#691), and PR CI is CPU-only, so it
+      # cannot catch that.  Allow a version only after it passes on an A100:
+      # the GPU SVD suites plus the ill-conditioned NaN probe.  12.4.1.2
+      # passed on 2026-11-11 (0 NaN on 90 matrices, bit-identical to 12.3.5.3;
+      # the same probe finds 33 NaN on 12.2.6.9), so the ceiling is 12.4.1.2.
+      # Raise it the same way.
+      - dependency-name: "nvidia-cusolver"
+        versions: [">12.4.1.2"]
+      # The CUDA 12 build (11.x versions) has not been re-tested.
+      - dependency-name: "nvidia-cusolver-cu12"
