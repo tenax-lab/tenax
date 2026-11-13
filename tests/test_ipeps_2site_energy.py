@@ -162,11 +162,66 @@ def test_ipeps_counts_every_bond_of_the_cell():
     is exact anyway, since every bond's RDM is a product or a singlet.
     """
     # The corners of this state have rank 1, so the criterion refuses to
-    # certify them (#898), and ipeps() must say so.
-    with pytest.warns(UserWarning, match=r"CTM did not converge in ipeps\(\)"):
+    # certify them (#898), and ipeps() must say so -- once: the loop inside it
+    # must not warn a second time.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         E = _measure(heisenberg_gate(), _dimer_pair(), CTMConfig(chi=4, max_iter=50))
+    ctm_warnings = [w for w in caught if "CTM" in str(w.message)]
+    assert len(ctm_warnings) == 1, [str(w.message)[:80] for w in ctm_warnings]
+    assert issubclass(ctm_warnings[0].category, UserWarning)
+    assert str(ctm_warnings[0].message).startswith("CTM did not converge in ipeps()")
 
     assert E == pytest.approx(DIMER_ENERGY, abs=1e-10)
+
+
+def _ipeps_ctm_warning(gate, pair, ctm):
+    """The text of the one "CTM did not converge in ipeps()" warning."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _measure(gate, pair, ctm)
+    texts = [
+        str(w.message)
+        for w in caught
+        if str(w.message).startswith("CTM did not converge in ipeps()")
+    ]
+    assert len(texts) == 1, texts
+    return texts[0]
+
+
+def test_ipeps_quotes_the_loop_when_a_rank_1_corner_blinds_the_criterion():
+    """More sweeps never certify a corner that stays at rank 1.
+
+    The criterion is ``inf`` whenever a compared corner spectrum has rank <= 1
+    (#898).  The loop knows which corners are still at rank 1 and which have
+    recovered, and its diagnosis says what each needs; ``ipeps()`` dropped it
+    and advised raising ``max_iter`` whatever the cause.  Both corners of the
+    dimer stay at rank 1: the loop's verdict is the blind one at ``max_iter``
+    1, 2 and 50, with both coordinates still at rank 1 (measured on 1aee49a5).
+    """
+    text = _ipeps_ctm_warning(
+        heisenberg_gate(), _dimer_pair(), CTMConfig(chi=4, max_iter=50)
+    )
+
+    assert "STILL rank <= 1" in text, text
+    assert "Raise max_iter" not in text, text
+
+
+def test_ipeps_keeps_its_own_advice_when_one_sweep_compares_nothing(uniform_state):
+    """With one sweep the criterion is ``inf`` too, and "Raise max_iter" is right.
+
+    The criterion compares successive sweeps, so one sweep gives it nothing to
+    compare, whatever the rank of the corners.  The loop's own text for that
+    case names ``ctm_tensor_multisite()``, which the caller never called, and
+    suggests another recipe, which ``ipeps()`` does not offer.
+    """
+    gate, A0, _ = uniform_state
+    text = _ipeps_ctm_warning(gate, (A0, A0), CTMConfig(chi=CHI, max_iter=1))
+
+    # Regime: the infinite criterion of a run with no comparison.
+    assert "max_iter=1 sweeps" in text and "(final criterion inf)" in text, text
+    assert "Raise max_iter" in text, text
+    assert "ctm_tensor_multisite" not in text, text
 
 
 def test_ipeps_energy_does_not_depend_on_which_sublattice_is_called_A():

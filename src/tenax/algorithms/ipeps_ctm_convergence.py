@@ -214,9 +214,11 @@ def _ctm_2site_via_2x2(
     config: CTMConfig,
     *,
     return_meta: bool = False,
+    _return_detail: bool = False,
 ) -> (
     tuple[CTMEnvironment, CTMEnvironment]
     | tuple[CTMEnvironment, CTMEnvironment, CTMConvergenceInfo]
+    | tuple[CTMEnvironment, CTMEnvironment, CTMConvergenceInfo, str | None]
 ):
     """``ctm_2site()`` without its warnings: the 2x2 recipe of
     ``ctm_tensor_2site`` with the ``CTMConfig`` fields mapped, returned as two
@@ -241,13 +243,18 @@ def _ctm_2site_via_2x2(
                      loop.  So ``qr_warmup_steps`` has no effect.
         return_meta: When True, also return a :class:`CTMConvergenceInfo`,
                      whose fields are Python scalars.
+        _return_detail: Private.  With ``return_meta``, also return the loop's
+                     not-converged diagnosis (``None`` when converged), which
+                     ``ipeps()`` quotes when a rank-1 corner blinds the
+                     criterion (#898).
 
     Returns:
-        ``(env_A, env_B)``, or ``(env_A, env_B, info)``.  Every field has its
-        legs in the order ``CTMTensorEnv`` documents, which is the order the raw
-        2-site RDMs of ``ipeps_rdm`` contract.  The loop's own not-converged
-        warning is off: ``ipeps()`` warns itself, and ``ctm_2site()`` reports
-        through ``info`` as it always did.
+        ``(env_A, env_B)``, ``(env_A, env_B, info)``, or ``(env_A, env_B,
+        info, detail)``.  Every field has its legs in the order
+        ``CTMTensorEnv`` documents, which is the order the raw 2-site RDMs of
+        ``ipeps_rdm`` contract.  The loop's own not-converged warning is off:
+        ``ipeps()`` warns itself, and ``ctm_2site()`` reports through ``info``
+        as it always did.
     """
     from tenax.algorithms._ctm_env_dense import _as_dense_env, _in_documented_leg_order
     from tenax.algorithms._ctm_tensor_convergence import (
@@ -276,7 +283,7 @@ def _ctm_2site_via_2x2(
                 )
             X = _wrap_as_dense_tensor(X)
         sites[coord] = X
-    envs, status, _detail = _ctm_tensor_multisite(
+    envs, status, detail = _ctm_tensor_multisite(
         sites,
         CHECKERBOARD_NEIGHBORS,
         config.chi,
@@ -297,6 +304,8 @@ def _ctm_2site_via_2x2(
         info = CTMConvergenceInfo(
             converged=status.converged, n_iter=status.iterations, diff=status.sv_diff
         )
+        if _return_detail:
+            return env_A, env_B, info, detail
         return env_A, env_B, info
     return env_A, env_B
 
