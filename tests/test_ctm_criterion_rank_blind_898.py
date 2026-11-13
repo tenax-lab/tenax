@@ -330,10 +330,10 @@ def test_a_healthy_state_still_converges_early_and_silently():
 # --------------------------------------------------------------------- #
 
 
-def test_the_public_ipeps_loop_uses_the_guarded_criterion():
-    """The guard is worth nothing if ``ipeps()`` runs a different comparison.
+def test_ctm_split_compares_spectra_with_the_guarded_criterion():
+    """The guard is worth nothing if a loop runs its own, unguarded comparison.
 
-    It did.  ``ipeps_ctm_convergence`` carried its **own** ``_ctm_sv_diff`` --
+    One did.  ``ipeps_ctm_convergence`` carried its **own** ``_ctm_sv_diff`` --
     the same sum-normalised comparison without the rank test -- and that is the
     copy the public path ran: ``ipeps.py`` imported ``ctm_2site`` from there
     and called it, so every ``ipeps()`` call kept comparing ``[1, 0, ..., 0]``

@@ -14,6 +14,7 @@ the raw 2-site RDMs contract.
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -318,8 +319,10 @@ def test_ctm_2site_warns_that_it_is_deprecated():
     assert "jax.jit" in message
     # Python's default filters show a DeprecationWarning only when it is blamed
     # on __main__ (PEP 565).  With stacklevel=1 it would be blamed on
-    # ctm_2site()'s own module and hidden from every script.
-    assert deprecations[0].filename == __file__
+    # ctm_2site()'s own module and hidden from every script.  By name, not by
+    # full path: a checkout moved with a stale __pycache__ keeps the old path
+    # in co_filename.
+    assert Path(deprecations[0].filename).name == Path(__file__).name
 
 
 @pytest.mark.parametrize("method", ["qr", "eigh"])

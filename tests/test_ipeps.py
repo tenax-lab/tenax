@@ -472,8 +472,10 @@ class TestIPEPS2Site:
         bound sits above that and below every old reading, so it catches
         each defect on its own: the legacy environment with four bonds reads
         -0.6507, the 2x2 environment with the two bonds that start on ``A``
-        -0.6393, and the old ``ipeps()`` -0.6303.  The physics assertion
-        lives in ``test_su_667_product_state.py``.
+        -0.6393, and the old ``ipeps()`` -0.6303.  The floor is the
+        ground-state energy -0.6694 (QMC): the four bonds summed without the
+        factor 1/2 read about -1.31.  The physics assertion lives in
+        ``test_su_667_product_state.py``.
         """
         config = iPEPSConfig(
             max_bond_dim=2,
@@ -483,9 +485,9 @@ class TestIPEPS2Site:
             unit_cell="2site",
         )
         energy, _, _ = ipeps(heisenberg_gate, None, config)
-        assert float(energy) < -0.655, (
-            f"Energy {float(energy)} not low enough — the 2x2 measurement of "
-            f"this D=2 state gives -0.65679"
+        assert -0.6694 < float(energy) < -0.655, (
+            f"Energy {float(energy)} not in (-0.6694, -0.655) — the 2x2 "
+            f"measurement of this D=2 state gives -0.65679"
         )
 
     def test_2site_with_initial_peps(self, heisenberg_gate):

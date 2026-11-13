@@ -14,6 +14,7 @@ chi below in 14 to 57 sweeps, with errors of at most 1.6e-14 (measured
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -434,7 +435,9 @@ def test_ctm_warns_that_it_is_deprecated():
     # Python's default filters show a DeprecationWarning only when it is blamed
     # on __main__ (PEP 565).  With stacklevel=1 it would be blamed on ctm()'s own
     # module and hidden from every script, and the checks above would still pass.
-    assert deprecations[0].filename == __file__
+    # By name, not by full path: a checkout moved with a stale __pycache__ keeps
+    # the old path in co_filename.
+    assert Path(deprecations[0].filename).name == Path(__file__).name
 
 
 def test_ctm_rejects_initial_env():
