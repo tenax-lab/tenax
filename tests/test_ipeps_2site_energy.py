@@ -193,11 +193,18 @@ def test_ipeps_quotes_the_loop_when_a_rank_1_corner_blinds_the_criterion():
     """More sweeps never certify a corner that stays at rank 1.
 
     The criterion is ``inf`` whenever a compared corner spectrum has rank <= 1
-    (#898).  The loop knows which corners are still at rank 1 and which have
-    recovered, and its diagnosis says what each needs; ``ipeps()`` dropped it
-    and advised raising ``max_iter`` whatever the cause.  Both corners of the
-    dimer stay at rank 1: the loop's verdict is the blind one at ``max_iter``
-    1, 2 and 50, with both coordinates still at rank 1 (measured on 1aee49a5).
+    below what the state can reach (#898).  The loop knows which corners are
+    still at rank 1 and which have recovered, and its diagnosis says, per
+    corner, whether more sweeps can help; ``ipeps()`` dropped it and advised
+    raising ``max_iter`` whatever the cause.  Both corners of the dimer stay at
+    rank 1: the loop's verdict is the blind one at ``max_iter`` 1, 2 and 50,
+    with both coordinates still at rank 1 (measured on 1aee49a5).
+
+    The loop's text for a corner still at rank 1 also says the environment is
+    not a converged fixed point.  That overstates this case: the dimer's own
+    fixed point has rank-1 corners, and its energy is exact
+    (``test_ipeps_counts_every_bond_of_the_cell``).  This test pins only that
+    ``ipeps()`` passes the diagnosis on.
     """
     text = _ipeps_ctm_warning(
         heisenberg_gate(), _dimer_pair(), CTMConfig(chi=4, max_iter=50)
@@ -222,6 +229,25 @@ def test_ipeps_keeps_its_own_advice_when_one_sweep_compares_nothing(uniform_stat
     assert "max_iter=1 sweeps" in text and "(final criterion inf)" in text, text
     assert "Raise max_iter" in text, text
     assert "ctm_tensor_multisite" not in text, text
+
+
+def test_ipeps_advises_raising_chi_when_chi_1_blinds_the_criterion(uniform_state):
+    """At ``chi=1`` the criterion is blind whatever the state does: raise chi.
+
+    Every corner is a 1x1 matrix there, so its sum-normalised spectrum is
+    ``[1]`` however the environment moves, and the loop reads each corner as
+    still rank <= 1 (``_forced_corner_rank``, #903).  The loop's text for that
+    case says the energy will not respond to ``chi``.  At ``chi=1`` it does:
+    this state gives ``-0.64987`` at chi 1, then ``-0.65431`` and ``-0.65864``
+    at chi 2 and 4, where the CTM converges (measured on eba0622d).
+    """
+    gate, A0, _ = uniform_state
+    text = _ipeps_ctm_warning(gate, (A0, A0), CTMConfig(chi=1, max_iter=3))
+
+    # Regime: an infinite criterion after sweeps that did compare spectra.
+    assert "max_iter=3 sweeps" in text and "(final criterion inf)" in text, text
+    assert "Raise chi" in text, text
+    assert "will not respond to chi" not in text, text
 
 
 def test_ipeps_energy_does_not_depend_on_which_sublattice_is_called_A():
