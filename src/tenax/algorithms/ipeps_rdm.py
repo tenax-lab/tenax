@@ -316,8 +316,9 @@ def compute_energy_ctm_2site(
     simple-update state of the plain Heisenberg gate -0.6393 instead of
     -0.6568.
 
-    ``env_A`` and ``env_B`` are the environments :func:`ctm_2site` returns:
-    each field has its legs in the order ``CTMTensorEnv`` documents.
+    ``env_A`` and ``env_B`` are raw environments whose fields have their legs
+    in the order ``CTMTensorEnv`` documents: the pair :func:`ipeps` returns,
+    or the pair the deprecated :func:`ctm_2site` returns.
     """
     H = hamiltonian_gate.reshape(d, d, d, d)
     rdms = (

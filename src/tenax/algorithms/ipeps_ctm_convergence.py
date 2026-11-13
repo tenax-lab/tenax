@@ -362,7 +362,8 @@ def ctm_2site(
         ``CTMTensorEnv`` documents, which is the order
         :func:`compute_energy_ctm_2site` contracts.  **The environments are not
         necessarily converged** -- that is what ``info`` is for.  One ``info``
-        covers both sublattices: the loop converges when every corner does.
+        covers both sublattices: the loop converges when the C1 spectrum of
+        each sublattice stops changing (the criterion reads only C1).
     """
     warnings.warn(
         "ctm_2site is deprecated and will be removed in a later release: call "

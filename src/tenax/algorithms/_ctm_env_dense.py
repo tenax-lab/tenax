@@ -2,16 +2,17 @@
 
 ``optimize_gs_ad`` returns a ``DenseTensor`` site tensor and a ``CTMTensorEnv``
 whose 8 fields are ``DenseTensor``s, and ``ctm_tensor`` returns the
-``CTMTensorEnv``.  The excitation contractions and the raw-array result of
-``ctm()`` use plain ``jax.Array``s and a raw-array ``CTMEnvironment``.  The
-fields of a ``CTMTensorEnv`` share the leg and flow convention of the raw
-``CTMEnvironment`` when each stores its legs in the order ``CTMTensorEnv``
-documents, so ``.todense()`` on each field is then correct and keeps the
-converged environment.  ``.todense()`` goes by axis position, and the 2x2 sweep
-of ``ctm_tensor`` stores each corner with its two legs in the reverse order, so
-``_as_dense_env`` passes a ``CTMTensorEnv`` through ``_in_documented_leg_order``
-first.  A transposed corner is invisible on a state with lattice symmetry, whose
-corners are symmetric matrices, and moves the energy on any other.
+``CTMTensorEnv``.  The excitation contractions and the raw-array results of
+``ctm()``, ``ctm_2site()`` and ``ipeps()`` use plain ``jax.Array``s and a
+raw-array ``CTMEnvironment``.  The fields of a ``CTMTensorEnv`` share the leg
+and flow convention of the raw ``CTMEnvironment`` when each stores its legs in
+the order ``CTMTensorEnv`` documents, so ``.todense()`` on each field is then
+correct and keeps the converged environment.  ``.todense()`` goes by axis
+position, and the 2x2 sweep of ``ctm_tensor`` stores each corner with its two
+legs in the reverse order, so ``_as_dense_env`` passes a ``CTMTensorEnv``
+through ``_in_documented_leg_order`` first.  A transposed corner is invisible on
+a state with lattice symmetry, whose corners are symmetric matrices, and moves
+the energy on any other.
 
 For a ``DenseTensor``, ``.todense()`` returns the stored buffer, so it is free.
 A ``SymmetricTensor`` would be densified here, against the project rule on
@@ -37,17 +38,15 @@ from tenax.core.tensor import SymmetricTensor, Tensor
 def _as_dense_array(x: jax.Array | Tensor) -> jax.Array:
     """Return a raw ``jax.Array`` from an array or ``DenseTensor``.
 
-    Raises ``NotImplementedError`` for ``SymmetricTensor`` — the excitation
-    path is dense-only and must not silently densify a block-sparse tensor.
+    Raises ``NotImplementedError`` for ``SymmetricTensor``: the raw-array paths
+    are dense-only and must not silently densify a block-sparse tensor.
     """
     if isinstance(x, SymmetricTensor):
         raise NotImplementedError(
-            "compute_excitations does not support SymmetricTensor inputs: the "
-            "excitation contraction path is dense-only and densifying a "
-            "block-sparse tensor would defeat the symmetry machinery (and can "
-            "OOM at large chi/D). Convert the ground state to a dense iPEPS "
-            "before computing excitations, or track symmetric-aware "
-            "excitations as a follow-up."
+            "A SymmetricTensor cannot be converted to a raw array here: this "
+            "path is dense-only, and densifying a block-sparse tensor would "
+            "defeat the symmetry machinery (and can OOM at large chi/D). "
+            "Convert the state to a dense iPEPS first."
         )
     if isinstance(x, Tensor):  # DenseTensor: todense() returns the stored buffer
         return x.todense()
@@ -66,9 +65,9 @@ def _as_dense_env(env) -> CTMEnvironment:
     fields = tuple(env)
     if len(fields) != 8:
         raise ValueError(
-            "compute_excitations expects an 8-tensor CTM environment "
-            f"(4 corners + 4 edges); got {len(fields)} fields. Split-CTM "
-            "environments are not supported by the excitation path."
+            "Expected an 8-tensor CTM environment (4 corners + 4 edges); got "
+            f"{len(fields)} fields. Split-CTM environments are not supported "
+            "on this raw-array path."
         )
     if isinstance(env, CTMTensorEnv):
         # ``.todense()`` goes by position, and the 2x2 sweep stores each corner

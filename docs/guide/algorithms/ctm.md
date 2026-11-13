@@ -210,11 +210,15 @@ if not info.converged:
     print(f"not a fixed point ({reason}): {info.n_iter} sweeps, diff {info.diff:.2e}")
 ```
 
-`ctm_tensor` also takes a keyword-only `min_iter` (default 1). With it,
+`ctm_tensor` also takes a keyword-only `min_iter` (default 1; #976). With it,
 `converged` is set only after `min(min_iter, max_iter)` sweeps, QR warm-up
-sweeps included. The `CTMConfig`-based entry points apply the same rule with
-`CTMConfig.min_iter` (default 10), and `ctm()` and `ctm_2site()` pass that
-value on.
+sweeps included: until then the loop keeps sweeping, even when the criterion
+is already below `conv_tol`. The cap at `max_iter` keeps a small budget
+convergeable, and `0` sets no minimum. A value that is not an int raises
+`TypeError`, and a negative one `ValueError`, before any work. The
+`CTMConfig`-based entry points apply the same rule with `CTMConfig.min_iter`
+(default 10): `ctm()` passes it to `ctm_tensor(min_iter=...)`, and
+`ctm_2site()` to the multisite loop of `ctm_tensor_2site`.
 
 `ctm_tensor_2site` warns instead when the environment is not converged (or
 the hold test left it unverified). Pass `strict=True` to raise

@@ -78,10 +78,11 @@ def _wallclock_deadline(seconds: float | None):
 def _heisenberg_gate():
     """Real-dtype Heisenberg gate (matches ``tests/test_ipeps_ad_history.py``).
 
-    The complex128 variant trips a legacy ``ctm_2site`` while-loop dtype
-    mismatch on the 2-site SU init path that is orthogonal to #520; real-
-    dtype sidesteps it.  Stall-recovery semantics are dtype-independent so
-    the verdict carries over to the production complex path.
+    Real dtype once sidestepped a ``ctm_2site`` while-loop dtype mismatch on
+    the 2-site SU init path, orthogonal to #520 (#842, fixed in #843; the
+    loop was removed in 0.9.3).  Stall-recovery semantics are
+    dtype-independent, so the verdict carries over to the production complex
+    path.
     """
     Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]])
     Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]])

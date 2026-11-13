@@ -665,10 +665,11 @@ def _ctm_sv_diff(
     compares against ``conv_tol``, so they all fail closed with no change, and
     a future tenth loop inherits the guard instead of re-acquiring the bug.
     """
-    # ``jnp.where``, not a Python ``if``: one of the nine loops runs inside
-    # ``jax.lax.while_loop`` (``ipeps_ctm_convergence``), where the predicate
-    # is a tracer and branching on it raises TracerBoolConversionError.  Both
-    # arms are cheap, so evaluating them unconditionally costs nothing.
+    # ``jnp.where``, not a Python ``if``, so the criterion stays traceable:
+    # until 0.9.3 ``ctm`` and ``ctm_2site`` ran it inside ``jax.lax.while_loop``
+    # (``ipeps_ctm_convergence``), where the predicate is a tracer and
+    # branching on it raises TracerBoolConversionError.  Both arms are cheap,
+    # so evaluating them unconditionally costs nothing.
     blind = _spectrum_is_uninformative(
         sv_new, max_rank=max_rank
     ) | _spectrum_is_uninformative(sv_old, max_rank=max_rank)
@@ -790,9 +791,10 @@ def _spectrum_is_uninformative(
     Omitting ``max_rank`` keeps the conservative reading -- a caller that has
     not said what was reachable gets the fail-closed answer.
 
-    Written in ``jnp`` and returning an array so it survives tracing; one of
-    the nine convergence loops runs inside ``jax.lax.while_loop``.  ``max_rank``
-    comes from tensor shapes, so it is static and safe to branch on in Python.
+    Written in ``jnp`` and returning an array so it survives tracing; until
+    0.9.3 ``ctm`` and ``ctm_2site`` ran it inside ``jax.lax.while_loop``.
+    ``max_rank`` comes from tensor shapes, so it is static and safe to branch
+    on in Python.
     """
     if sv.shape[0] == 0:
         return jnp.asarray(True)
