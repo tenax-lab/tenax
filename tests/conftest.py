@@ -193,7 +193,7 @@ _FILE_MARKERS = {
     # ``test_corner_orientation_without_lattice_symmetry`` is the orientation
     # pin.  Both sit next to the input checks and the warnings: a silent wrong
     # environment on a public entry point, so they belong in the required gate.
-    # The 16 Onsager cases set its run time.
+    # The 16 Onsager cases set its run time, ~70 s on 12 CPU cores.
     "test_ctm_delegates_to_2x2.py": "core",
     # ``ctm_2site()`` and ``ipeps()`` run the 2x2 recipe of ``ctm_tensor_2site``
     # since 0.9.3.  The orientation pin compares the raw four-bond energy with
@@ -397,7 +397,8 @@ _FILE_MARKERS = {
     "test_rdm_validity_guard.py": "core",
     # The 2-site energy of ipeps() is a function of the state: the same
     # physical state in another bond gauge, or with A and B swapped, must give
-    # the same energy, and a dimer state its exact -0.375. D=2, chi<=6, ~10 s.
+    # the same energy, and a dimer state its exact -0.375. D=2, chi<=6, ~25 s
+    # on 12 CPU cores.
     # ``core`` because the old path failed silently -- a plausible energy
     # 0.02 off, or one bond's RDM dead -- and passed every smoke test.
     "test_ipeps_2site_energy.py": "core",
