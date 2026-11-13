@@ -1138,11 +1138,13 @@ def ctm_tensor(
                            capped at ``max_iter`` so that a small budget stays
                            convergeable (#976).  QR warm-up sweeps count toward
                            it.  The default, 1, keeps the plain early exit on
-                           ``conv_tol``, and 0 sets no minimum.  A value that is
-                           not an int raises ``TypeError``, and a negative one
-                           ``ValueError``, before any work.  The
+                           ``conv_tol``, and 0 sets no minimum.  The
                            ``CTMConfig``-based entry points apply the same rule
-                           with ``CTMConfig.min_iter``.
+                           with ``CTMConfig.min_iter``.  A value that is not an
+                           int raises ``TypeError``, and a negative one
+                           ``ValueError``, before any work; :func:`ctm` passes
+                           its value here and so gets the same check, but
+                           :func:`ctm_split` does not check yet.
         return_meta:       When ``True``, return a third element, a
                            :class:`CTMConvergenceInfo`,
                            saying whether the loop converged or exhausted
@@ -1456,8 +1458,9 @@ def _ctm_tensor_multisite(
         min_iter:     Minimum sweeps before ``converged`` can be set, capped at
                       ``max_iter`` so that a small budget stays convergeable
                       (#976).  QR warm-up sweeps count toward it.  The default,
-                      1, keeps the plain early exit; ``ctm_2site`` passes
-                      ``CTMConfig.min_iter``.  Checked as in :func:`ctm_tensor`.
+                      1, keeps the plain early exit; ``ctm_2site`` and
+                      ``ipeps`` pass ``CTMConfig.min_iter``.  Checked as in
+                      :func:`ctm_tensor`.
         _return_status: Private.  When true, return ``(envs, info, detail)``
                       with ``info`` a :class:`CTMConvergeInfo` (``iterations``
                       is the number of sweeps that ran, QR warm-up included,
