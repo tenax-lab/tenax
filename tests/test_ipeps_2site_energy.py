@@ -189,7 +189,8 @@ def _ipeps_ctm_warning(gate, pair, ctm):
     return texts[0]
 
 
-def test_ipeps_quotes_the_loop_when_a_rank_1_corner_blinds_the_criterion():
+@pytest.mark.parametrize("max_iter", [2, 50])
+def test_ipeps_quotes_the_loop_when_a_rank_1_corner_blinds_the_criterion(max_iter):
     """More sweeps never certify a corner that stays at rank 1.
 
     The criterion is ``inf`` whenever a compared corner spectrum has rank <= 1
@@ -198,7 +199,8 @@ def test_ipeps_quotes_the_loop_when_a_rank_1_corner_blinds_the_criterion():
     corner, whether more sweeps can help; ``ipeps()`` dropped it and advised
     raising ``max_iter`` whatever the cause.  Both corners of the dimer stay at
     rank 1: the loop's verdict is the blind one at ``max_iter`` 1, 2 and 50,
-    with both coordinates still at rank 1 (measured on 1aee49a5).
+    with both coordinates still at rank 1 (measured on 1aee49a5).  2 is the
+    first budget with a comparison, so the quote must start there.
 
     The loop's text for a corner still at rank 1 also says the environment is
     not a converged fixed point.  That overstates this case: the dimer's own
@@ -207,7 +209,7 @@ def test_ipeps_quotes_the_loop_when_a_rank_1_corner_blinds_the_criterion():
     ``ipeps()`` passes the diagnosis on.
     """
     text = _ipeps_ctm_warning(
-        heisenberg_gate(), _dimer_pair(), CTMConfig(chi=4, max_iter=50)
+        heisenberg_gate(), _dimer_pair(), CTMConfig(chi=4, max_iter=max_iter)
     )
 
     assert "STILL rank <= 1" in text, text

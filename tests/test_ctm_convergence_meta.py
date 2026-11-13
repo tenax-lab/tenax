@@ -220,7 +220,11 @@ def test_ipeps_warns_when_its_ctm_did_not_converge():
     ctm_warnings = [w for w in caught if "did not converge" in str(w.message)]
     assert len(ctm_warnings) == 1, [str(w.message)[:80] for w in ctm_warnings]
     assert issubclass(ctm_warnings[0].category, UserWarning)
-    assert "CTM did not converge in ipeps()" in str(ctm_warnings[0].message)
+    msg = str(ctm_warnings[0].message)
+    assert "CTM did not converge in ipeps()" in msg
+    # The criterion is finite here, so ipeps() keeps its own advice: the loop's
+    # text names ctm_tensor_multisite(), which the caller never called.
+    assert "Raise max_iter" in msg and "ctm_tensor_multisite" not in msg, msg
 
 
 def test_ipeps_is_silent_when_the_ctm_converges():
