@@ -395,6 +395,12 @@ _FILE_MARKERS = {
     # scan showed conv_tol having no effect on the answer.
     "test_ctm_complex_site_tensors.py": "core",
     "test_rdm_validity_guard.py": "core",
+    # The raw RDM builders hold no array past their network's bound: the old
+    # vertical order held chi^2 D^4 d^4 entries, 2.2e9 for the kagome spin-1
+    # state at chi = 16, and XLA on CPU returns zeros when it transposes an
+    # array above about 2**31 entries.  Jaxpr inspection on tiny shapes, about
+    # a second.
+    "test_raw_rdm_peak_array.py": "core",
     # The 2-site energy of ipeps() is a function of the state: the same
     # physical state in another bond gauge, or with A and B swapped, must give
     # the same energy, and a dimer state its exact -0.375. D=2, chi<=6, ~10 s.

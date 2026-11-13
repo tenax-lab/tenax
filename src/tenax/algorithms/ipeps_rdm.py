@@ -125,6 +125,13 @@ def _rdm1x2(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
     C1, C2, C3, C4, T1, T2, T3, T4 = env
     a_open = _build_double_layer_open(A)
 
+    # Each half absorbs its own site before the halves meet, as in _rdm2x1, so
+    # no array holds both sites' physical legs next to chi legs.  Joining the
+    # sites first held chi^2 D^4 d^4 entries: 2.2e9 for the kagome spin-1 state
+    # (d = 27, D = 2) at chi = 16.  On CPU (jax 0.10.2) XLA returns zeros when it
+    # transposes an array above about 2**31 entries, as it did for the einsum
+    # that took this one (tests/test_raw_rdm_peak_array.py).
+
     # Top row: C1·T1·C2 → (chi, D2, chi)  indices: (a, u, e)
     top_row = einsum_promoted("ab,buc,ce->aue", C1, T1, C2)
 
@@ -138,28 +145,21 @@ def _rdm1x2(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
     site1 = jnp.einsum("ulfrg,udlrst->dfgst", env_row1, a_open)
     # (D2, chi, chi, d, d) → (d1, f, g, s1, s1')
 
-    # Step A: contract T4[f,l2,h] with ao2[d1, d2, l2, r2, t, tp]  match l2
-    # Use unique index letters: a_open → (p, q, m, n, w, x)
-    #   p=d1_ao2=u, q=d2, m=l2, n=r2, w=s2, x=s2'
-    T4_ao2 = jnp.einsum("fmh,pqmnwx->fhpqnwx", T4, a_open)
-    # (chi, chi, D2, D2, D2, d, d) → (f, h, p=d1, q=d2, n=r2, w, x)
-
-    # Step B: contract site1[d1, f, g, s, t] with T4_ao2[f, h, d1, d2, r2, w, x]
-    # Match: d1 and f  (use a=d1, b=f)
-    # site1:  a(D2) b(chi) c(chi) s(d) t(d)
-    # T4_ao2: b(chi) h(chi) a(D2) q(D2) n(D2) w(d) x(d)
-    site12 = jnp.einsum("abcst,bhaqnwx->chqnstwx", site1, T4_ao2)
-    # (chi, chi, D2, D2, d, d, d, d) → (c=g, h, q=d2, n=r2, s1, s1', s2, s2')
-
-    # Contract T2[g, r2, i]: match g=c, r2=n
-    site12_r = jnp.einsum("chqnstwx,cni->hqistwx", site12, T2)
-    # (chi, D2, chi, d, d, d, d) → (h, q=d2, i, s1, s1', s2, s2')
-
     # Bottom row: C4·T3·C3 → (chi, D2, chi)  indices: (h, d2, i)
     bot_row = einsum_promoted("hj,jqk,ik->hqi", C4, T3, C3)
 
-    # Final: contract site12_r with bot_row  match h, q=d2, i
-    rdm = jnp.einsum("hqistwx,hqi->stwx", site12_r, bot_row)
+    # Contract bot_row with T4 (site-2 left) and T2 (site-2 right):
+    # bot_row[h, d2, i]  T4[f, l2, h]  T2[g, r2, i]
+    # Contract h, i → env_row2[d2, f, l2, g, r2]
+    env_row2 = einsum_promoted("hqi,fmh,gni->qfmgn", bot_row, T4, T2)
+    # (D2, chi, D2, chi, D2) → (d2, f, l2, g, r2)
+
+    # Contract with ao2[u2, d2, l2, r2, w, x]:  match d2, l2, r2
+    site2 = jnp.einsum("qfmgn,pqmnwx->pfgwx", env_row2, a_open)
+    # (D2, chi, chi, d, d) → (u2, f, g, s2, s2')
+
+    # Final: join the halves  match d1=u2, f (T4-T4), g (T2-T2)
+    rdm = jnp.einsum("dfgst,dfgwx->stwx", site1, site2)
     # rdm has convention (s1_ket, s1_bra, s2_ket, s2_bra).
     # Transpose to (s1_ket, s2_ket, s1_bra, s2_bra) so that
     # reshape(d*d, d*d) yields a proper density matrix.
@@ -271,6 +271,7 @@ def _rdm1x2_2site(
     ao_A = _build_double_layer_open(A)
     ao_B = _build_double_layer_open(B)
 
+    # Each half absorbs its own site before the halves meet (see _rdm1x2).
     # Top row from env_A
     top_row = einsum_promoted("ab,buc,ce->aue", env_A.C1, env_A.T1, env_A.C2)
     # Env row 1: contract with T4_A (left) and T2_A (right)
@@ -278,16 +279,14 @@ def _rdm1x2_2site(
     # Contract with ao_A
     site1 = jnp.einsum("ulfrg,udlrst->dfgst", env_row1, ao_A)
 
-    # Step A: T4_B with ao_B
-    T4_ao2 = jnp.einsum("fmh,pqmnwx->fhpqnwx", env_B.T4, ao_B)
-    # Step B: contract site1 with T4_ao2
-    site12 = jnp.einsum("abcst,bhaqnwx->chqnstwx", site1, T4_ao2)
-    # Contract T2_B
-    site12_r = jnp.einsum("chqnstwx,cni->hqistwx", site12, env_B.T2)
     # Bottom row from env_B
     bot_row = einsum_promoted("hj,jqk,ik->hqi", env_B.C4, env_B.T3, env_B.C3)
-    # Final
-    rdm = jnp.einsum("hqistwx,hqi->stwx", site12_r, bot_row)
+    # Env row 2: contract with T4_B (left) and T2_B (right)
+    env_row2 = einsum_promoted("hqi,fmh,gni->qfmgn", bot_row, env_B.T4, env_B.T2)
+    # Contract with ao_B
+    site2 = jnp.einsum("qfmgn,pqmnwx->pfgwx", env_row2, ao_B)
+    # Final: join the halves
+    rdm = jnp.einsum("dfgst,dfgwx->stwx", site1, site2)
     # Transpose from (s1_ket, s1_bra, s2_ket, s2_bra) to
     # (s1_ket, s2_ket, s1_bra, s2_bra) for proper density matrix convention.
     rdm = rdm.transpose(0, 2, 1, 3)

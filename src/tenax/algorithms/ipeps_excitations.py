@@ -236,16 +236,18 @@ def _rdm1x2_with_open_tensors(
     """
     C1, C2, C3, C4, T1, T2, T3, T4 = env
 
+    # Each half absorbs its own site before the halves meet, as
+    # ``ipeps_rdm._rdm1x2`` does: joining the sites first held chi^2 D^4 d^4
+    # entries.
     top_row = einsum_promoted("ab,buc,ce->aue", C1, T1, C2)
     env_row1 = einsum_promoted("aue,alf,erg->ulfrg", top_row, T4, T2)
     site1 = jnp.einsum("ulfrg,udlrst->dfgst", env_row1, ao1)
 
-    T4_ao2 = jnp.einsum("fmh,pqmnwx->fhpqnwx", T4, ao2)
-    site12 = jnp.einsum("abcst,bhaqnwx->chqnstwx", site1, T4_ao2)
-    site12_r = jnp.einsum("chqnstwx,cni->hqistwx", site12, T2)
-
     bot_row = einsum_promoted("hj,jqk,ik->hqi", C4, T3, C3)
-    rdm = jnp.einsum("hqistwx,hqi->stwx", site12_r, bot_row)
+    env_row2 = einsum_promoted("hqi,fmh,gni->qfmgn", bot_row, T4, T2)
+    site2 = jnp.einsum("qfmgn,pqmnwx->pfgwx", env_row2, ao2)
+
+    rdm = jnp.einsum("dfgst,dfgwx->stwx", site1, site2)
 
     # (ket1, bra1, ket2, bra2) -> (ket1, ket2, bra1, bra2), as in the
     # horizontal helper (#955).
