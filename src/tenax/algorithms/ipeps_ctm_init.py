@@ -4,17 +4,13 @@ from __future__ import annotations
 
 __all__ = [
     "_build_double_layer",
-    "_initialize_ctm_env",
     "_initialize_split_ctm_env",
 ]
 
 import jax
 import jax.numpy as jnp
 
-from tenax.algorithms.ipeps_config import (
-    CTMEnvironment,
-    SplitCTMEnvironment,
-)
+from tenax.algorithms.ipeps_config import SplitCTMEnvironment
 
 
 def _build_double_layer(A: jax.Array) -> jax.Array:
@@ -40,46 +36,6 @@ def _build_double_layer(A: jax.Array) -> jax.Array:
         virt1 = s_idx[:-1]
         virt2 = virt1.upper()
         return jnp.einsum(f"{s_idx},{virt2}{phys}->{virt1}{virt2}", A, jnp.conj(A))
-
-
-def _initialize_ctm_env(a: jax.Array, chi: int) -> CTMEnvironment:
-    """Initialize CTM environment tensors from the PEPS double-layer tensor.
-
-    Uses a simple initialization: corners and edges built from partial traces
-    of the double-layer tensor.
-
-    Args:
-        a:   Double-layer tensor of shape (D2, D2, D2, D2).
-        chi: Environment bond dimension.
-    """
-    D2 = a.shape[0]
-    dtype = a.dtype
-
-    # Initialize corners as identity matrices (chi x chi)
-    C = jnp.eye(min(chi, D2), dtype=dtype)
-    C_small = jnp.zeros((chi, chi), dtype=dtype)
-    C_small = C_small.at[: C.shape[0], : C.shape[1]].set(
-        C[: min(chi, C.shape[0]), : min(chi, C.shape[1])]
-    )
-
-    # Initialize edges as a slice of the double-layer tensor
-    # T[chi, D2, chi] — use first chi values
-    T_chi = min(chi, D2)
-    T_init = jnp.zeros((chi, D2, chi), dtype=dtype)
-    # Fill with identity-like structure
-    for i in range(min(T_chi, chi)):
-        T_init = T_init.at[i, :, i].add(jnp.ones(D2))
-
-    return CTMEnvironment(
-        C1=C_small,
-        C2=C_small,
-        C3=C_small,
-        C4=C_small,
-        T1=T_init,
-        T2=T_init,
-        T3=T_init,
-        T4=T_init,
-    )
 
 
 def _initialize_split_ctm_env(

@@ -43,6 +43,7 @@ from tenax.algorithms.ipeps_ctm_init import (
 )
 from tenax.algorithms.ipeps_ctm_moves import _split_ctm_move
 from tenax.core import EPS
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 from tenax.linalg import _dense_svd
 
 # ``_ctm_sv_diff`` is imported, not defined here.
@@ -67,7 +68,7 @@ from tenax.linalg import _dense_svd
 
 
 def ctm(
-    A: jax.Array,
+    A: jax.Array | DenseTensor,
     config: CTMConfig,
     initial_env: CTMEnvironment | None = None,
     *,
@@ -136,7 +137,7 @@ def ctm(
 
 
 def _ctm_via_2x2(
-    A: jax.Array,
+    A: jax.Array | DenseTensor,
     config: CTMConfig,
     *,
     return_meta: bool = False,
@@ -172,7 +173,6 @@ def _ctm_via_2x2(
     from tenax.algorithms._ctm_env_dense import _as_dense_env
     from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
     from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
-    from tenax.core.tensor import SymmetricTensor, Tensor
 
     if isinstance(A, SymmetricTensor):
         raise TypeError(
@@ -209,8 +209,8 @@ def _ctm_via_2x2(
 
 
 def _ctm_2site_via_2x2(
-    A: jax.Array,
-    B: jax.Array,
+    A: jax.Array | DenseTensor,
+    B: jax.Array | DenseTensor,
     config: CTMConfig,
     *,
     return_meta: bool = False,
@@ -256,13 +256,12 @@ def _ctm_2site_via_2x2(
         ``ipeps()`` warns itself, and ``ctm_2site()`` reports through ``info``
         as it always did.
     """
-    from tenax.algorithms._ctm_env_dense import _as_dense_env, _in_documented_leg_order
+    from tenax.algorithms._ctm_env_dense import _as_dense_env
     from tenax.algorithms._ctm_tensor_convergence import (
         CHECKERBOARD_NEIGHBORS,
         _ctm_tensor_multisite,
     )
     from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
-    from tenax.core.tensor import SymmetricTensor, Tensor
 
     sites = {}
     for name, coord, X in (("A", (0, 0), A), ("B", (1, 0), B)):
@@ -297,9 +296,10 @@ def _ctm_2site_via_2x2(
         _warn_unconverged=False,
     )
     # The 2x2 sweep stores each corner with its two legs reversed, and the raw
-    # consumers contract by position: put every field in the documented order.
-    env_A = _as_dense_env(_in_documented_leg_order(envs[(0, 0)]))
-    env_B = _as_dense_env(_in_documented_leg_order(envs[(1, 0)]))
+    # consumers contract by position: _as_dense_env puts every field in the
+    # documented order, by label.
+    env_A = _as_dense_env(envs[(0, 0)])
+    env_B = _as_dense_env(envs[(1, 0)])
     if return_meta:
         info = CTMConvergenceInfo(
             converged=status.converged, n_iter=status.iterations, diff=status.sv_diff
@@ -311,8 +311,8 @@ def _ctm_2site_via_2x2(
 
 
 def ctm_2site(
-    A: jax.Array,
-    B: jax.Array,
+    A: jax.Array | DenseTensor,
+    B: jax.Array | DenseTensor,
     config: CTMConfig,
     *,
     return_meta: bool = False,

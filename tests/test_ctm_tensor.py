@@ -22,10 +22,7 @@ from tenax.algorithms._ctm_tensor import (
     ctm_tensor_2site,
     initialize_ctm_tensor_env,
 )
-from tenax.algorithms.ipeps_ctm import (
-    _build_double_layer,
-    _initialize_ctm_env,
-)
+from tenax.algorithms.ipeps_ctm import _build_double_layer
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity, U1Symmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
