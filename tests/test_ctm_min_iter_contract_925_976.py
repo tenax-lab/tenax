@@ -16,7 +16,8 @@ keyword-only ``min_iter`` (default 1): the loop and the helper behind
 pins the warm-up rule on the loop.  Both loops refuse a ``min_iter`` that is
 not a non-negative integer before they build anything (#1183 review): a string
 or ``None`` used to raise a late ``TypeError``, and a float or a negative count
-ran with no error.
+ran with no error.  ``CTMConfig`` refuses one when it is built, because other
+loops (``ctm_split()``) read the value and do not check it.
 
 These are mechanism tests, not convergence tests: they run on a 1x1 product
 state whose corner spectrum is stationary after the first sweep, so ``diff`` is
@@ -27,6 +28,7 @@ counted.  No physical convergence is asserted (that is for benchmarks).
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 
 import jax.numpy as jnp
@@ -34,6 +36,7 @@ import numpy as np
 import pytest
 
 import tenax.algorithms._ctm_tensor_convergence as tensor_convergence
+import tenax.algorithms.ctm_layout as ctm_layout
 from tenax import CTMConfig, ctm, ctm_2site, ctm_split, ctm_tensor
 from tenax.algorithms._ctm_tensor_convergence import (
     CHECKERBOARD_NEIGHBORS,
@@ -209,18 +212,17 @@ _KEYWORD_ENTRY_POINTS = [
     pytest.param(_multisite_with, id="ctm_tensor_multisite"),
 ]
 
+_BAD_MIN_ITER = [
+    pytest.param(-1, ValueError, id="negative"),
+    pytest.param(1.5, TypeError, id="float"),
+    pytest.param(True, TypeError, id="bool"),
+    pytest.param("3", TypeError, id="str"),
+    pytest.param(None, TypeError, id="None"),
+]
+
 
 @pytest.mark.parametrize("run", _KEYWORD_ENTRY_POINTS)
-@pytest.mark.parametrize(
-    "min_iter, error",
-    [
-        pytest.param(-1, ValueError, id="negative"),
-        pytest.param(1.5, TypeError, id="float"),
-        pytest.param(True, TypeError, id="bool"),
-        pytest.param("3", TypeError, id="str"),
-        pytest.param(None, TypeError, id="None"),
-    ],
-)
+@pytest.mark.parametrize("min_iter, error", _BAD_MIN_ITER)
 def test_a_bad_min_iter_is_refused_before_anything_is_built(
     monkeypatch, run, min_iter, error
 ):
@@ -249,9 +251,59 @@ def test_a_bad_min_iter_is_refused_before_anything_is_built(
 )
 def test_a_bad_config_min_iter_reaches_the_check(run_with_config):
     """``ctm()`` and ``ctm_2site()`` pass ``CTMConfig.min_iter`` on to the
-    checked loops, so a bad value in the config is refused too."""
+    checked loops, so a bad value set on the config after it was built is
+    refused too.  (``CTMConfig`` refuses one given when it is built.)"""
+    cfg = CTMConfig(chi=1, max_iter=4)
+    cfg.min_iter = -1
     with pytest.raises(ValueError, match="min_iter"):
-        run_with_config(CTMConfig(chi=1, max_iter=4, min_iter=-1))
+        run_with_config(cfg)
+
+
+@pytest.mark.parametrize("min_iter, error", _BAD_MIN_ITER)
+def test_ctmconfig_refuses_a_bad_min_iter(min_iter, error):
+    """Only two loops check ``min_iter``, and more read it from the config:
+    ``ctm_split()`` ran ``min_iter=-1`` and ``1.5`` with no error.  So the
+    config refuses a bad value when it is built, for every entry point that
+    takes one.  ``dataclasses.replace`` builds a new config, so it is checked
+    too."""
+    with pytest.raises(error, match="min_iter"):
+        CTMConfig(min_iter=min_iter)
+    with pytest.raises(error, match="min_iter"):
+        dataclasses.replace(CTMConfig(), min_iter=min_iter)
+
+
+@pytest.mark.parametrize("min_iter", [0, np.int64(3)])
+def test_ctmconfig_accepts_zero_and_numpy_integers(min_iter):
+    assert CTMConfig(min_iter=min_iter).min_iter == min_iter
+
+
+@pytest.mark.parametrize("forced_sweeps", [0, -1])
+def test_layout_seed_skips_the_forced_sweeps_below_one(monkeypatch, forced_sweeps):
+    """``symmetric_layout_seed`` builds its forced-sweep config with
+    ``min_iter=forced_sweeps``.  It built that config before it tested
+    ``forced_sweeps > 0``, so once ``CTMConfig`` checked ``min_iter``, a
+    negative count raised the ``min_iter`` error after the cold solve.  A count
+    below 1 skips the forced sweeps, as it did before.  The CTM is stubbed:
+    only the seed's own control flow runs."""
+    solves = []
+
+    def converge(st, cfg, env_init):
+        solves.append(cfg.chi)
+        return {}, SimpleNamespace(converged=True, iterations=1)
+
+    monkeypatch.setattr(ctm_layout, "_converge", converge)
+    monkeypatch.setattr(ctm_layout, "normalized_pair", lambda a, b: (a, b))
+    monkeypatch.setattr(ctm_layout, "energy_2site", lambda *args: 0.0)
+    monkeypatch.setattr(ctm_layout, "layout_of", lambda envs: ())
+    monkeypatch.setattr(ctm_layout, "same_layout", lambda a, b: True)
+    monkeypatch.setattr(ctm_layout, "_cut_gap", lambda envs, chi: 1.0)
+
+    seed = ctm_layout.symmetric_layout_seed(
+        None, None, None, CTMConfig(chi=2), forced_sweeps=forced_sweeps
+    )
+
+    assert solves == [2, 6]  # the cold solve and the chi + 4 solve; no forced one
+    assert seed.stable
 
 
 @pytest.mark.parametrize("run", _KEYWORD_ENTRY_POINTS)

@@ -217,11 +217,17 @@ is already below `conv_tol`. The cap at `max_iter` keeps a small budget
 convergeable, and `0` sets no minimum. The `CTMConfig`-based entry points
 apply the same rule with `CTMConfig.min_iter` (default 10): `ctm()` passes it
 to `ctm_tensor(min_iter=...)`, and `ctm_2site()` and `ipeps()` to the
-multisite loop of `ctm_tensor_2site`. These two loops raise `TypeError` on a
-`min_iter` that is not an int, and `ValueError` on a negative one, before
-they build anything; `ipeps()` reaches its loop only after the simple
-update. Other loops that read `CTMConfig.min_iter`, such as the one in
-`ctm_split()`, do not check it yet.
+multisite loop of `ctm_tensor_2site`. `CTMConfig` raises `TypeError` on a
+`min_iter` that is not an integer, or is a bool, and `ValueError` on a
+negative one, when it is built, by its constructor or by
+`dataclasses.replace`. So a bad value given to a config is refused at every
+entry point that takes one, `ctm_split()` included. Setting `min_iter` on a
+config after it was built runs no check. The two loops check the value that
+they receive, before they build anything, so `ctm()`, `ctm_2site()` and
+`ipeps()` refuse such a value; `ipeps()` reaches its loop only after the
+simple update. `ctm_split()` does not check such a value, and the AD
+optimizers check it only when they rebuild the config, at a step of a
+schedule or when chi grows.
 
 `ctm_tensor_2site` warns instead when the environment is not converged (or
 the hold test left it unverified). Pass `strict=True` to raise
