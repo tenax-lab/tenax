@@ -18,6 +18,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 
 import jax
@@ -34,7 +35,6 @@ from tenax import (  # noqa: E402
     iPEPSConfig,
     optimize_gs_ad,
 )
-from tenax.algorithms._ctm_diagnostics import env_is_collapsed  # noqa: E402
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -597,6 +597,13 @@ def compute_pess_energy(
     divides ``max_iter``, which the second misses; the second sees a slow
     convergence, which a one-sweep change underestimates.
 
+    The energy check runs only when ``_r_leg_is_dummy`` finds the dummy leg
+    in the tensor.  Any other CTM that the corner criterion does not
+    certify is reported as not converged.  The check cannot see two cases.
+    An error can decay so slowly that ``2 * max_iter`` sweeps move the energy
+    by less than ``energy_tol``, while it is still wrong by more.  A cycle can
+    give the same energy, to ``energy_tol``, at all three budgets.
+
     Args:
         site_tensors: [S_a, S_b, S_c].
         simplex_tensors: [T_up, T_down].
@@ -606,7 +613,7 @@ def compute_pess_energy(
         max_iter: CTM sweeps, at least 1.
         energy_tol: Largest change of the energy per site, from ``max_iter``
             to ``max_iter + 1`` and to ``2 * max_iter`` sweeps, that
-            certifies a CTM with a rank-1 corner.
+            certifies a CTM whose ``r`` leg is a dummy.
 
     Returns:
         ``(E/site, certified, notice)``: the energy per site after
@@ -634,30 +641,42 @@ def compute_pess_energy(
     def energy_after(sweeps):
         env, _, info = ctm_tensor(A_t, chi, max_iter=sweeps, return_meta=True)
         E = compute_energy_ctm_tensor(A_t, env, H_eff_4leg, d_eff)
-        return float(E) / 3.0, env, info
+        return float(E) / 3.0, info
 
-    E_per_site, env, info = energy_after(max_iter)
+    E_per_site, info = energy_after(max_iter)
     if info.converged:
         return E_per_site, True, f"converged in {info.n_iter} sweeps."
-    if not env_is_collapsed(env):
+    if not _r_leg_is_dummy(A):
         notice = (
             f"NOT converged in {info.n_iter} sweeps (corner diff "
             f"{info.diff:.1e}); raise --ctm-iter."
         )
         return E_per_site, False, notice
 
-    E_next, _, _ = energy_after(max_iter + 1)
-    E_more, _, _ = energy_after(2 * max_iter)
-    change = max(abs(E_next - E_per_site), abs(E_more - E_per_site))
+    E_next, _ = energy_after(max_iter + 1)
+    E_more, _ = energy_after(2 * max_iter)
+    # np.max, not max: max(x, nan) returns x and drops a NaN energy.
+    change = float(np.max([abs(E_next - E_per_site), abs(E_more - E_per_site)]))
     certified = change <= energy_tol
     verdict = "certified" if certified else "NOT certified; raise --ctm-iter"
     notice = (
-        f"every corner is rank 1 (pess_to_ipeps fills only r = 0), which the "
-        f"corner criterion cannot certify (#898). E/site moves by at most "
-        f"{change:.1e} from {max_iter} to {max_iter + 1} and to {2 * max_iter} "
-        f"sweeps: {verdict} (tol {energy_tol:.0e})."
+        f"the r leg is a dummy (pess_to_ipeps fills only r = 0), so every "
+        f"corner is rank 1 and the corner criterion cannot certify the CTM "
+        f"(#898). E/site moves by at most {change:.1e} from {max_iter} to "
+        f"{max_iter + 1} and to {2 * max_iter} sweeps: {verdict} "
+        f"(tol {energy_tol:.0e})."
     )
     return E_per_site, certified, notice
+
+
+def _r_leg_is_dummy(A) -> bool:
+    """True when the iPEPS tensor has entries only at ``r = 0``.
+
+    ``pess_to_ipeps`` fills only ``r = 0``, so every horizontal bond carries
+    only index 0 and every CTM corner is rank 1.  At ``D = 1``, ``r = 0`` is
+    the only index.
+    """
+    return not np.any(np.asarray(A)[:, :, :, 1:, :])
 
 
 # ---------------------------------------------------------------------------
@@ -665,14 +684,26 @@ def compute_pess_energy(
 # ---------------------------------------------------------------------------
 
 
-def main():
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Kagome XXZ ground state via PESS simple update"
+        description="Kagome XXZ ground state via PESS simple update",
+        epilog=(
+            "Exit status: 0 if the E/site readout is certified, 1 if not. "
+            "The --ad energy is not certified and does not change the status."
+        ),
     )
     parser.add_argument("--D", type=int, default=2, help="Bond dimension")
     parser.add_argument("--chi", type=int, default=20, help="CTM bond dimension")
     parser.add_argument(
-        "--ctm-iter", type=int, default=100, help="CTM sweeps for the E/site readout"
+        "--ctm-iter",
+        type=int,
+        default=100,
+        metavar="N",
+        help=(
+            "CTM sweeps for the E/site readout. For D > 1 the corner "
+            "criterion cannot certify the CTM, so the readout runs it again "
+            "with N + 1 and 2N sweeps: 4N + 1 sweeps in all."
+        ),
     )
     parser.add_argument(
         "--delta", type=float, default=1.0, help="XXZ anisotropy parameter"
@@ -690,7 +721,7 @@ def main():
         "--ad-steps", type=int, default=100, help="Number of AD optimization steps"
     )
     parser.add_argument("--lr", type=float, default=1e-3, help="AD learning rate")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     print("Kagome XXZ via PESS simple update")
     print(f"  delta={args.delta}, D={args.D}, chi={args.chi}")
@@ -728,7 +759,7 @@ def main():
     # Compute energy via CTM
     print("\n--- CTM Energy ---")
     t0 = time.perf_counter()
-    energy, _, notice = compute_pess_energy(
+    energy, certified, notice = compute_pess_energy(
         site_tensors, simplex_tensors, lambdas, H_tri, args.chi, max_iter=args.ctm_iter
     )
     ctm_time = time.perf_counter() - t0
@@ -762,7 +793,8 @@ def main():
         print(f"  AD time = {ad_time:.1f}s")
 
     print("\nDone.")
+    return 0 if certified else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
