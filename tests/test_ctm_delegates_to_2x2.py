@@ -27,6 +27,7 @@ from tenax.algorithms._ctm_env_dense import _as_dense_env, _in_documented_leg_or
 from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv, initialize_ctm_tensor_env
+from tenax.algorithms._ipeps_excitation_ctm import unpack_env
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
 from tenax.algorithms.fermionic_ipeps import FPEPSConfig, fermionic_ctm
 from tenax.algorithms.ipeps_config import CTMConfig, CTMEnvironment
@@ -260,6 +261,30 @@ def test_as_dense_env_reads_a_tensor_env_by_label():
     assert isinstance(raw, CTMEnvironment)
     for name in DOCUMENTED_LEGS:
         np.testing.assert_array_equal(getattr(raw, name), getattr(env, name).todense())
+
+
+def test_unpack_env_reads_a_tensor_env_by_label():
+    """``unpack_env`` gives the excitation contractions the raw arrays of a
+    ``CTMTensorEnv`` in the documented order, whatever order each field is
+    stored in, with each edge's double-layer leg split into (ket, bra)."""
+    env = _documented_env()
+    D = _random_site().shape[0]
+    raw = unpack_env(_stored(env), D)
+    assert set(raw) == set(DOCUMENTED_LEGS)
+    for name in DOCUMENTED_LEGS:
+        want = getattr(env, name).todense()
+        if name.startswith("T"):
+            want = want.reshape(want.shape[0], D, D, want.shape[2])
+        np.testing.assert_array_equal(raw[name], want)
+
+
+def test_unpack_env_refuses_wrong_labels():
+    """A field that lacks an expected label is refused with the message of
+    ``_in_documented_leg_order``, which names the field."""
+    env = _documented_env()
+    bad = env._replace(C2=env.C2.relabel("c2_d", "c2_x"))
+    with pytest.raises(ValueError, match="CTMTensorEnv.C2"):
+        unpack_env(bad, _random_site().shape[0])
 
 
 def test_compute_excitations_reads_a_tensor_env_by_label():
