@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import numbers
 
 __all__ = [
     "CHECKERBOARD_NEIGHBORS",
@@ -664,10 +665,11 @@ def _ctm_sv_diff(
     compares against ``conv_tol``, so they all fail closed with no change, and
     a future tenth loop inherits the guard instead of re-acquiring the bug.
     """
-    # ``jnp.where``, not a Python ``if``: one of the nine loops runs inside
-    # ``jax.lax.while_loop`` (``ipeps_ctm_convergence``), where the predicate
-    # is a tracer and branching on it raises TracerBoolConversionError.  Both
-    # arms are cheap, so evaluating them unconditionally costs nothing.
+    # ``jnp.where``, not a Python ``if``, so the criterion stays traceable:
+    # until 0.9.3 ``ctm`` and ``ctm_2site`` ran it inside ``jax.lax.while_loop``
+    # (``ipeps_ctm_convergence``), where the predicate is a tracer and
+    # branching on it raises TracerBoolConversionError.  Both arms are cheap,
+    # so evaluating them unconditionally costs nothing.
     blind = _spectrum_is_uninformative(
         sv_new, max_rank=max_rank
     ) | _spectrum_is_uninformative(sv_old, max_rank=max_rank)
@@ -789,9 +791,10 @@ def _spectrum_is_uninformative(
     Omitting ``max_rank`` keeps the conservative reading -- a caller that has
     not said what was reachable gets the fail-closed answer.
 
-    Written in ``jnp`` and returning an array so it survives tracing; one of
-    the nine convergence loops runs inside ``jax.lax.while_loop``.  ``max_rank``
-    comes from tensor shapes, so it is static and safe to branch on in Python.
+    Written in ``jnp`` and returning an array so it survives tracing; until
+    0.9.3 ``ctm`` and ``ctm_2site`` ran it inside ``jax.lax.while_loop``.
+    ``max_rank`` comes from tensor shapes, so it is static and safe to branch
+    on in Python.
     """
     if sv.shape[0] == 0:
         return jnp.asarray(True)
@@ -1052,6 +1055,23 @@ class CTMConvergenceInfo(NamedTuple):
     diff: jax.Array | float
 
 
+def _check_min_iter(min_iter) -> None:
+    """Refuse a ``min_iter`` that is not a non-negative integer.
+
+    Called first by both loops: ``min(min_iter, max_iter)`` runs only after the
+    double layer and the environment are built, so a string or ``None`` raised a
+    late ``TypeError`` there, and a float or a negative count ran with no error.
+    ``0`` is valid and sets no minimum.
+    """
+    if not isinstance(min_iter, numbers.Integral) or isinstance(min_iter, bool):
+        raise TypeError(
+            f"min_iter must be an int; got {type(min_iter).__name__} "
+            f"({min_iter!r}).  It counts CTM sweeps."
+        )
+    if min_iter < 0:
+        raise ValueError(f"min_iter must be non-negative; got {min_iter}.")
+
+
 def ctm_tensor(
     A: Tensor,
     chi: int,
@@ -1118,8 +1138,13 @@ def ctm_tensor(
                            capped at ``max_iter`` so that a small budget stays
                            convergeable (#976).  QR warm-up sweeps count toward
                            it.  The default, 1, keeps the plain early exit on
-                           ``conv_tol``.  The ``CTMConfig``-based entry points
-                           apply the same rule with ``CTMConfig.min_iter``.
+                           ``conv_tol``, and 0 sets no minimum.  The
+                           ``CTMConfig``-based entry points apply the same rule
+                           with ``CTMConfig.min_iter``.  A value that is not an
+                           int raises ``TypeError``, and a negative one
+                           ``ValueError``, before any work; :func:`ctm` passes
+                           its value here and so gets the same check, but
+                           :func:`ctm_split` does not check yet.
         return_meta:       When ``True``, return a third element, a
                            :class:`CTMConvergenceInfo`,
                            saying whether the loop converged or exhausted
@@ -1226,6 +1251,7 @@ def ctm_tensor(
         blind on ``"1x1"`` and ``"eigh"`` is the method that works there.
         ``test_eps_t_blindness_727.py`` pins the table.
     """
+    _check_min_iter(min_iter)
     # Determine sweep function: use paired moves for SymmetricTensors
     # with non-trivial virtual charges (fixes charge-sector mismatch
     # from independent projectors in standard 4-move CTM).  When virtual
@@ -1432,8 +1458,9 @@ def _ctm_tensor_multisite(
         min_iter:     Minimum sweeps before ``converged`` can be set, capped at
                       ``max_iter`` so that a small budget stays convergeable
                       (#976).  QR warm-up sweeps count toward it.  The default,
-                      1, keeps the plain early exit; ``ctm_2site`` passes
-                      ``CTMConfig.min_iter``.
+                      1, keeps the plain early exit; ``ctm_2site`` and
+                      ``ipeps`` pass ``CTMConfig.min_iter``.  Checked as in
+                      :func:`ctm_tensor`.
         _return_status: Private.  When true, return ``(envs, info, detail)``
                       with ``info`` a :class:`CTMConvergeInfo` (``iterations``
                       is the number of sweeps that ran, QR warm-up included,
@@ -1446,6 +1473,7 @@ def _ctm_tensor_multisite(
     Returns:
         Dict mapping coordinates to converged CTMTensorEnv.
     """
+    _check_min_iter(min_iter)
     # Raised here rather than in ``ctm_tensor_2site`` / ``ctm_multisite``, which
     # both delegate to this function: one warning per call, from the one place
     # every multisite caller passes through.

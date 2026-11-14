@@ -629,11 +629,17 @@ def fermionic_ctm(A, config):
     and comes back as a raw-array ``CTMEnvironment``.
 
     Args:
-        A:      fPEPS site tensor (SymmetricTensor with lambdas absorbed).
+        A:      fPEPS site tensor with lambdas absorbed: a ``Tensor`` (usually a
+                ``SymmetricTensor``), or a raw array with 5 legs
+                ``(u, d, l, r, s)`` and four virtual legs of one dimension.  A
+                raw array of any other shape raises ``ValueError``.
         config: FPEPSConfig.
 
     Returns:
-        Converged ``CTMTensorEnv`` (if Tensor input) or ``CTMEnvironment``.
+        A ``CTMTensorEnv`` for a ``Tensor``, a ``CTMEnvironment`` for a raw
+        array.  Not necessarily converged, and nothing warns: the convergence
+        information is dropped.  To check it, call
+        ``ctm_tensor(..., return_meta=True)`` on a ``Tensor`` site.
     """
     if isinstance(A, Tensor):
         from tenax.algorithms._ctm_tensor_convergence import ctm_tensor

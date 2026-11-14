@@ -24,9 +24,9 @@ def build_heisenberg_gate(dtype=jnp.complex128) -> np.ndarray:
     Equivalent to Sx⊗Sx + Sy⊗Sy + Sz⊗Sz but written in raising/lowering
     form so the matrix is real-valued in the standard basis (the imaginary
     parts of Sy⊗Sy cancel exactly).  This lets us build the gate in real
-    dtype when needed — e.g. ``dtype=jnp.float64`` for SU bootstrap, where
-    Tenax's legacy ``ctm_2site`` has a complex-dtype carry bug
-    (``ipeps_ctm_convergence.py:268``).
+    dtype when needed — e.g. ``dtype=jnp.float64`` for SU bootstrap.  That
+    path once dodged a complex-dtype carry bug in Tenax's ``ctm_2site``
+    (#842, fixed in #843; the loop itself was removed in 0.9.3).
     """
     Sz = 0.5 * jnp.array([[1.0, 0.0], [0.0, -1.0]], dtype=dtype)
     Sp = jnp.array([[0.0, 1.0], [0.0, 0.0]], dtype=dtype)
@@ -74,9 +74,10 @@ def make_init(
     if path == "single_site":
         return _random_complex((D, D, D, D, d), seed=seed)
     elif path == "bipartite_2site":
-        # SU runs in float64 to dodge the legacy ctm_2site complex-carry bug
-        # (ipeps_ctm_convergence.py:268).  Init is cast to complex128 below
-        # so the AD optimizers in both libs see complex tensors.
+        # SU runs in float64.  That once dodged a complex-carry bug in
+        # ctm_2site (#842, fixed in #843; the loop was removed in 0.9.3).
+        # Init is cast to complex128 below so the AD optimizers in both libs
+        # see complex tensors.
         gate = jnp.asarray(build_heisenberg_gate(dtype=jnp.float64))
         config = iPEPSConfig(
             max_bond_dim=D,

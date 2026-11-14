@@ -2,7 +2,7 @@
 
 Internal code should import directly from the concrete modules:
   - ``ipeps_ctm_convergence`` (ctm, ctm_2site, ctm_split, sweeps, ...)
-  - ``ipeps_ctm_init``        (_build_double_layer, _initialize_ctm_env, ...)
+  - ``ipeps_ctm_init``        (_build_double_layer, _initialize_split_ctm_env, ...)
   - ``ipeps_ctm_moves``       (directional moves, projectors, ...)
 
 This module re-exports public names so that ``from tenax.algorithms.ipeps_ctm
@@ -32,9 +32,6 @@ from tenax.algorithms.ipeps_ctm_convergence import (
 )
 from tenax.algorithms.ipeps_ctm_init import (  # noqa: F401
     _build_double_layer as _build_double_layer,
-)
-from tenax.algorithms.ipeps_ctm_init import (
-    _initialize_ctm_env as _initialize_ctm_env,
 )
 from tenax.algorithms.ipeps_ctm_init import (
     _initialize_split_ctm_env as _initialize_split_ctm_env,

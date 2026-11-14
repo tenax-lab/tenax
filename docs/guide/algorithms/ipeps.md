@@ -138,7 +138,7 @@ print(f"Energy per site: {energy:.6f}")  # -0.656790
 |---------|------|-------------|
 | `energy` | `float` | Energy per site |
 | `(A, B)` | `tuple[DenseTensor, DenseTensor]` | Site tensors of the two sublattices |
-| `(env_A, env_B)` | `tuple[CTMEnvironment, CTMEnvironment]` | Converged CTM environments |
+| `(env_A, env_B)` | `tuple[CTMEnvironment, CTMEnvironment]` | CTM environments, not necessarily converged: `ipeps()` warns when its CTM did not converge |
 
 With `compute_energy=False` it returns `(None, (A, B), None)`.
 

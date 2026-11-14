@@ -13,7 +13,10 @@ multisite loop of ``ctm_tensor_2site``, which takes the same gate as a
 keyword-only ``min_iter`` (default 1): the loop and the helper behind
 ``ctm_2site`` run the same cases, and
 ``test_multisite_min_iter_counts_the_warmup_against_the_callers_budget``
-pins the warm-up rule on the loop.
+pins the warm-up rule on the loop.  Both loops refuse a ``min_iter`` that is
+not a non-negative integer before they build anything (#1183 review): a string
+or ``None`` used to raise a late ``TypeError``, and a float or a negative count
+ran with no error.
 
 These are mechanism tests, not convergence tests: they run on a 1x1 product
 state whose corner spectrum is stationary after the first sweep, so ``diff`` is
@@ -27,8 +30,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
+import tenax.algorithms._ctm_tensor_convergence as tensor_convergence
 from tenax import CTMConfig, ctm, ctm_2site, ctm_split, ctm_tensor
 from tenax.algorithms._ctm_tensor_convergence import (
     CHECKERBOARD_NEIGHBORS,
@@ -180,3 +185,86 @@ def test_multisite_min_iter_counts_the_warmup_against_the_callers_budget():
     )
     assert info.converged
     assert info.n_iter == 10
+
+
+def _ctm_tensor_with(min_iter):
+    return ctm_tensor(
+        _wrap_as_dense_tensor(A),
+        1,
+        max_iter=4,
+        conv_tol=1e-8,
+        min_iter=min_iter,
+        return_meta=True,
+    )[2]
+
+
+def _multisite_with(min_iter):
+    return _multisite_status(
+        CTMConfig(chi=1, max_iter=4, conv_tol=1e-8), min_iter=min_iter
+    )
+
+
+_KEYWORD_ENTRY_POINTS = [
+    pytest.param(_ctm_tensor_with, id="ctm_tensor"),
+    pytest.param(_multisite_with, id="ctm_tensor_multisite"),
+]
+
+
+@pytest.mark.parametrize("run", _KEYWORD_ENTRY_POINTS)
+@pytest.mark.parametrize(
+    "min_iter, error",
+    [
+        pytest.param(-1, ValueError, id="negative"),
+        pytest.param(1.5, TypeError, id="float"),
+        pytest.param(True, TypeError, id="bool"),
+        pytest.param("3", TypeError, id="str"),
+        pytest.param(None, TypeError, id="None"),
+    ],
+)
+def test_a_bad_min_iter_is_refused_before_anything_is_built(
+    monkeypatch, run, min_iter, error
+):
+    """``min(min_iter, max_iter)`` ran only after the double layer and the
+    environment were built.  A string or ``None`` then raised a late
+    ``TypeError`` from that comparison, and a float or a negative count ran
+    with no error at all.  The check comes first now: the spy fails the test if
+    the double layer is built before it."""
+
+    def _built_too_early(*args, **kwargs):
+        raise AssertionError("the double layer was built before min_iter was checked")
+
+    monkeypatch.setattr(
+        tensor_convergence, "_build_double_layer_tensor", _built_too_early
+    )
+    with pytest.raises(error, match="min_iter"):
+        run(min_iter)
+
+
+@pytest.mark.parametrize(
+    "run_with_config",
+    [
+        pytest.param(lambda cfg: ctm(A, cfg), id="ctm"),
+        pytest.param(lambda cfg: ctm_2site(A, A, cfg), id="ctm_2site"),
+    ],
+)
+def test_a_bad_config_min_iter_reaches_the_check(run_with_config):
+    """``ctm()`` and ``ctm_2site()`` pass ``CTMConfig.min_iter`` on to the
+    checked loops, so a bad value in the config is refused too."""
+    with pytest.raises(ValueError, match="min_iter"):
+        run_with_config(CTMConfig(chi=1, max_iter=4, min_iter=-1))
+
+
+@pytest.mark.parametrize("run", _KEYWORD_ENTRY_POINTS)
+@pytest.mark.parametrize(
+    "min_iter, n_iter",
+    [
+        pytest.param(0, 2, id="zero"),
+        pytest.param(np.int64(3), 3, id="numpy-int"),
+    ],
+)
+def test_zero_and_numpy_integers_are_valid_min_iter(run, min_iter, n_iter):
+    """``min_iter=0`` sets no minimum: the stationary state certifies at the
+    first comparison, sweep 2.  A NumPy integer counts like an ``int``."""
+    info = run(min_iter)
+    assert info.converged
+    assert info.n_iter == n_iter

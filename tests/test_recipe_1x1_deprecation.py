@@ -30,6 +30,7 @@ established for the ``chi_ramp`` and ``gs_conv_criterion`` deprecations.
 """
 
 import warnings
+from pathlib import Path
 
 import jax
 import numpy as np
@@ -213,7 +214,9 @@ def test_warning_points_at_the_caller_not_inside_the_library(call):
         call()
     dep = [w for w in rec if issubclass(w.category, DeprecationWarning)]
     assert dep, "no deprecation warning raised"
-    assert all(w.filename == __file__ for w in dep), (
+    # By name, not by full path: a checkout moved with a stale __pycache__
+    # keeps the old path in co_filename.
+    assert all(Path(w.filename).name == Path(__file__).name for w in dep), (
         "warning points inside the library instead of at the caller: "
         + ", ".join(f"{w.filename}:{w.lineno}" for w in dep)
     )

@@ -20,6 +20,7 @@ Reference:
 
 from __future__ import annotations
 
+import math
 import warnings
 
 import jax
@@ -598,8 +599,8 @@ def ipeps(
     # that moved with the bond gauge (tests/test_ipeps_2site_energy.py).
     A_dense = A.todense()
     B_dense = B.todense()
-    env_A, env_B, ctm_info = _ctm_2site_via_2x2(
-        A_dense, B_dense, config.ctm, return_meta=True
+    env_A, env_B, ctm_info, ctm_detail = _ctm_2site_via_2x2(
+        A_dense, B_dense, config.ctm, return_meta=True, _return_detail=True
     )
 
     # #839: this return signature has no slot for convergence status, and the
@@ -610,15 +611,42 @@ def ipeps(
     # deliberately small max_iter), and raising would break every such caller.
     # Same policy as ``check_ctm_env`` for a collapsed environment (#747).
     if not bool(ctm_info.converged):
+        diff = float(ctm_info.diff)
+        if math.isinf(diff) and ctm_info.n_iter >= 2:
+            # #898: every sweep after the first compares the corner spectra,
+            # and the helper runs no hold test and no QR warm-up, so an
+            # infinite criterion here means a compared spectrum could not show
+            # change: rank <= 1 below what the state can reach, or zero or
+            # non-finite.  Whether more sweeps can help differs per corner,
+            # and only the loop knows which corners recovered: quote its
+            # diagnosis.  Not at chi=1: every corner is 1x1 there, so rank 1
+            # whatever the state does (``_forced_corner_rank``), and the
+            # loop's "will not respond to chi" is false.
+            if config.ctm.chi == 1:
+                advice = (
+                    ". At chi=1 every corner is a 1x1 matrix, whose "
+                    "sum-normalised spectrum is [1] however the environment "
+                    "moves, so no number of sweeps can certify it (#898). "
+                    "Raise chi."
+                )
+            else:
+                advice = (
+                    f". The CTM loop reports (A is site (0, 0), B is site "
+                    f"(1, 0)): {ctm_detail}"
+                )
+        else:
+            advice = (
+                " and may not be a converged value -- it can move with "
+                "max_iter. Raise max_iter, or measure the returned pair with "
+                "ctm_tensor_2site(A, B, chi, ...), which warns with the loop's "
+                "own diagnosis (strict=True raises instead)."
+            )
         warnings.warn(
             f"CTM did not converge in ipeps(): ran the full "
             f"max_iter={config.ctm.max_iter} sweeps at chi={config.ctm.chi} "
             f"without reaching conv_tol={config.ctm.conv_tol:g} (final "
-            f"criterion {float(ctm_info.diff):.3g}). The returned energy is "
-            f"computed from that environment and may not be a converged "
-            f"value -- it can move with max_iter. Raise max_iter, or measure "
-            f"the returned pair with ctm_tensor_2site(A, B, chi, ...), which "
-            f"warns with the loop's own diagnosis (strict=True raises instead).",
+            f"criterion {diff:.3g}). The returned energy is computed from that "
+            f"environment{advice}",
             UserWarning,
             stacklevel=2,
         )

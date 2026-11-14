@@ -43,6 +43,7 @@ from tenax.algorithms.ipeps_ctm_init import (
 )
 from tenax.algorithms.ipeps_ctm_moves import _split_ctm_move
 from tenax.core import EPS
+from tenax.core.tensor import DenseTensor, SymmetricTensor, Tensor
 from tenax.linalg import _dense_svd
 
 # ``_ctm_sv_diff`` is imported, not defined here.
@@ -67,7 +68,7 @@ from tenax.linalg import _dense_svd
 
 
 def ctm(
-    A: jax.Array,
+    A: jax.Array | DenseTensor,
     config: CTMConfig,
     initial_env: CTMEnvironment | None = None,
     *,
@@ -136,7 +137,7 @@ def ctm(
 
 
 def _ctm_via_2x2(
-    A: jax.Array,
+    A: jax.Array | DenseTensor,
     config: CTMConfig,
     *,
     return_meta: bool = False,
@@ -172,7 +173,6 @@ def _ctm_via_2x2(
     from tenax.algorithms._ctm_env_dense import _as_dense_env
     from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
     from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
-    from tenax.core.tensor import SymmetricTensor, Tensor
 
     if isinstance(A, SymmetricTensor):
         raise TypeError(
@@ -209,14 +209,16 @@ def _ctm_via_2x2(
 
 
 def _ctm_2site_via_2x2(
-    A: jax.Array,
-    B: jax.Array,
+    A: jax.Array | DenseTensor,
+    B: jax.Array | DenseTensor,
     config: CTMConfig,
     *,
     return_meta: bool = False,
+    _return_detail: bool = False,
 ) -> (
     tuple[CTMEnvironment, CTMEnvironment]
     | tuple[CTMEnvironment, CTMEnvironment, CTMConvergenceInfo]
+    | tuple[CTMEnvironment, CTMEnvironment, CTMConvergenceInfo, str | None]
 ):
     """``ctm_2site()`` without its warnings: the 2x2 recipe of
     ``ctm_tensor_2site`` with the ``CTMConfig`` fields mapped, returned as two
@@ -241,21 +243,25 @@ def _ctm_2site_via_2x2(
                      loop.  So ``qr_warmup_steps`` has no effect.
         return_meta: When True, also return a :class:`CTMConvergenceInfo`,
                      whose fields are Python scalars.
+        _return_detail: Private.  With ``return_meta``, also return the loop's
+                     not-converged diagnosis (``None`` when converged), which
+                     ``ipeps()`` quotes when a rank-1 corner blinds the
+                     criterion (#898).
 
     Returns:
-        ``(env_A, env_B)``, or ``(env_A, env_B, info)``.  Every field has its
-        legs in the order ``CTMTensorEnv`` documents, which is the order the raw
-        2-site RDMs of ``ipeps_rdm`` contract.  The loop's own not-converged
-        warning is off: ``ipeps()`` warns itself, and ``ctm_2site()`` reports
-        through ``info`` as it always did.
+        ``(env_A, env_B)``, ``(env_A, env_B, info)``, or ``(env_A, env_B,
+        info, detail)``.  Every field has its legs in the order
+        ``CTMTensorEnv`` documents, which is the order the raw 2-site RDMs of
+        ``ipeps_rdm`` contract.  The loop's own not-converged warning is off:
+        ``ipeps()`` warns itself, and ``ctm_2site()`` reports through ``info``
+        as it always did.
     """
-    from tenax.algorithms._ctm_env_dense import _as_dense_env, _in_documented_leg_order
+    from tenax.algorithms._ctm_env_dense import _as_dense_env
     from tenax.algorithms._ctm_tensor_convergence import (
         CHECKERBOARD_NEIGHBORS,
         _ctm_tensor_multisite,
     )
     from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor
-    from tenax.core.tensor import SymmetricTensor, Tensor
 
     sites = {}
     for name, coord, X in (("A", (0, 0), A), ("B", (1, 0), B)):
@@ -276,7 +282,7 @@ def _ctm_2site_via_2x2(
                 )
             X = _wrap_as_dense_tensor(X)
         sites[coord] = X
-    envs, status, _detail = _ctm_tensor_multisite(
+    envs, status, detail = _ctm_tensor_multisite(
         sites,
         CHECKERBOARD_NEIGHBORS,
         config.chi,
@@ -290,20 +296,23 @@ def _ctm_2site_via_2x2(
         _warn_unconverged=False,
     )
     # The 2x2 sweep stores each corner with its two legs reversed, and the raw
-    # consumers contract by position: put every field in the documented order.
-    env_A = _as_dense_env(_in_documented_leg_order(envs[(0, 0)]))
-    env_B = _as_dense_env(_in_documented_leg_order(envs[(1, 0)]))
+    # consumers contract by position: _as_dense_env puts every field in the
+    # documented order, by label.
+    env_A = _as_dense_env(envs[(0, 0)])
+    env_B = _as_dense_env(envs[(1, 0)])
     if return_meta:
         info = CTMConvergenceInfo(
             converged=status.converged, n_iter=status.iterations, diff=status.sv_diff
         )
+        if _return_detail:
+            return env_A, env_B, info, detail
         return env_A, env_B, info
     return env_A, env_B
 
 
 def ctm_2site(
-    A: jax.Array,
-    B: jax.Array,
+    A: jax.Array | DenseTensor,
+    B: jax.Array | DenseTensor,
     config: CTMConfig,
     *,
     return_meta: bool = False,
@@ -353,7 +362,8 @@ def ctm_2site(
         ``CTMTensorEnv`` documents, which is the order
         :func:`compute_energy_ctm_2site` contracts.  **The environments are not
         necessarily converged** -- that is what ``info`` is for.  One ``info``
-        covers both sublattices: the loop converges when every corner does.
+        covers both sublattices: the loop converges when the C1 spectrum of
+        each sublattice stops changing (the criterion reads only C1).
     """
     warnings.warn(
         "ctm_2site is deprecated and will be removed in a later release: call "
