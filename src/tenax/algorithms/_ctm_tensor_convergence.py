@@ -764,6 +764,39 @@ def _forced_corner_rank(bond_dim: int) -> int:
     return max(1, int(bond_dim))
 
 
+def _spectrum_is_healthy(sv: jax.Array) -> jax.Array:
+    """Whether ``sv`` is a spectrum at all: non-empty, finite, top value > 0.
+
+    ``sv`` is sorted in descending order, so ``sv[0] > 0`` excludes the zero
+    corner.  A corner that fails this is *broken*, which is a different fault
+    from a low rank: it has no normalised spectrum to compare.
+
+    EVERY element, not just the leading one (#903 review, P1).  A block-sparse
+    corner can go non-finite in one block while others stay healthy, giving
+    e.g. ``[1, 0.5, nan]``.  Checking ``sv[0]`` alone calls that informative,
+    ``_ctm_sv_diff`` then returns NaN, and the Python loops compare
+    ``diff >= conv_tol`` -- which is **False** for NaN -- so the corrupted
+    environment is silently certified.  Failing closed requires the whole
+    spectrum to be finite.
+
+    Written in ``jnp``, like :func:`_spectrum_is_uninformative`, which calls it.
+    """
+    if sv.shape[0] == 0:
+        return jnp.asarray(False)
+    return jnp.all(jnp.isfinite(sv)) & (sv[0] > 0.0)
+
+
+def _spectrum_is_broken(sv: jax.Array) -> bool:
+    """Eager ``bool``: ``sv`` is empty, zero or non-finite (#903).
+
+    The negation of :func:`_spectrum_is_healthy`, for the loop that names the
+    cause in its warning.  :func:`_spectrum_is_uninformative` refuses such a
+    spectrum too, but the rank texts of :func:`_blind_corner_message` do not
+    fit it: it has no rank to speak of.
+    """
+    return not bool(_spectrum_is_healthy(sv))
+
+
 def _spectrum_is_uninformative(
     sv: jax.Array, tol: float = _RANK_TOL, max_rank: int | None = None
 ) -> jax.Array:
@@ -771,25 +804,29 @@ def _spectrum_is_uninformative(
 
     True when the corner has numerical rank <= 1 -- one non-zero singular value
     normalises to ``1.0`` and the rest to ``0.0`` regardless of the environment
-    -- or when the spectrum is empty or non-finite.  This is deliberately
+    -- or when the spectrum is empty, zero or non-finite
+    (:func:`_spectrum_is_healthy`).  This is deliberately
     ``env_is_collapsed``'s predicate: a corner the collapse detector calls dead
     is exactly one the convergence detector cannot see.
 
     **Unless rank 1 was all the corner could carry** (#903 review, P1).  A
     ``D=1`` PEPS is an exact product state, and this project supports and tests
-    one (``TestProductStateEnergy``); a ``chi=1`` environment is legitimate
-    too.  Every corner there is rank 1 *at the exact fixed point*, so equating
-    rank 1 with collapse made those states unable to converge at all: measured,
-    ``ctm(D=1, chi=4, max_iter=20)`` returned ``converged=False`` with
-    ``diff=inf`` after burning the whole budget, ``ipeps()`` warned that a
-    state which had converged exactly had not, and ``_ctm_sv_diff(sv, sv)`` --
-    a spectrum against *itself* -- returned ``inf``.
+    one (``TestProductStateEnergy``).  Every corner there is rank 1 *at the
+    exact fixed point*, so equating rank 1 with collapse made those states
+    unable to converge at all: measured, ``ctm(D=1, chi=4, max_iter=20)``
+    returned ``converged=False`` with ``diff=inf`` after burning the whole
+    budget, ``ipeps()`` warned that a state which had converged exactly had
+    not, and ``_ctm_sv_diff(sv, sv)`` -- a spectrum against *itself* --
+    returned ``inf``.
 
     Rank is therefore not the discriminator; **reachable** rank is.  Pass
-    ``max_rank = min(chi, D_doublelayer)`` and a corner sitting at its ceiling
-    is read as informative, because there is nothing further for it to show.
-    Omitting ``max_rank`` keeps the conservative reading -- a caller that has
-    not said what was reachable gets the fail-closed answer.
+    ``max_rank = _forced_corner_rank(D_doublelayer)`` and a corner sitting at
+    its ceiling is read as informative, because there is nothing further for
+    it to show.  ``chi`` is not part of the ceiling (#903 review, P1 round 2):
+    at ``chi=1`` with ``D > 1`` every corner is 1x1, so it reads ``[1]``
+    however the environment moves, and the comparison stays blind.  Omitting
+    ``max_rank`` keeps the conservative reading -- a caller that has not said
+    what was reachable gets the fail-closed answer.
 
     Written in ``jnp`` and returning an array so it survives tracing; until
     0.9.3 ``ctm`` and ``ctm_2site`` ran it inside ``jax.lax.while_loop``.
@@ -799,14 +836,7 @@ def _spectrum_is_uninformative(
     if sv.shape[0] == 0:
         return jnp.asarray(True)
     top = sv[0]
-    # EVERY element, not just the leading one (#903 review, P1).  A block-sparse
-    # corner can go non-finite in one block while others stay healthy, giving
-    # e.g. ``[1, 0.5, nan]``.  Checking ``sv[0]`` alone calls that informative,
-    # ``_ctm_sv_diff`` then returns NaN, and the Python loops compare
-    # ``diff >= conv_tol`` -- which is **False** for NaN -- so the corrupted
-    # environment is silently certified.  Failing closed requires the whole
-    # spectrum to be finite.
-    healthy = jnp.all(jnp.isfinite(sv)) & (top > 0.0)
+    healthy = _spectrum_is_healthy(sv)
     rank = jnp.sum(sv > tol * top)
     informative = healthy & (rank > 1)
     if max_rank is not None:
@@ -817,50 +847,96 @@ def _spectrum_is_uninformative(
     return jnp.logical_not(informative)
 
 
-def _blind_corner_message(blind: set[Coord], collapsed: set[Coord]) -> str:
+def _blind_corner_message(
+    blind: set[Coord],
+    collapsed: set[Coord],
+    *,
+    chi: int,
+    broken: set[Coord] | frozenset[Coord] = frozenset(),
+) -> str:
     """Text for the uncertified-environment warning (#898).
 
     Pure, and separate from the loop, because the interesting cases are
-    combinations of two coordinate sets and driving a real CTM into each of
-    them is far harder than the message logic deserves.  Every combination is
-    unit-tested directly.
+    combinations of coordinate sets and driving a real CTM into each of them
+    is far harder than the message logic deserves.  The tests call it
+    directly with chosen sets.
 
-    Two claims of very different strength are on offer here, and which one is
-    licensed is **per coordinate**:
+    Which claim is licensed is decided **per coordinate**, and there are four:
 
-    * A corner that is *still* rank <= 1 licenses the strong statement -- that
-      environment is not a converged fixed point and its energy is a mean-field
-      number that will not respond to ``chi``.
+    * A corner that is zero or non-finite is broken.  It has no normalised
+      spectrum, so neither rank text below fits it.
+    * At ``chi=1`` every corner is a 1x1 matrix, so rank 1 is forced
+      (:func:`_forced_corner_rank`) and no number of sweeps can certify it:
+      only a larger ``chi`` can give a corner that shows change.  The edge
+      tensors still move with ``max_iter``, so the text asks for a second
+      budget as well.
+    * Above ``chi=1``, a corner *still* rank <= 1 is exact when no correlation
+      crosses it -- a product state, a dimer state, decoupled chains -- and it
+      is also what the rank-1 collapse of #726/#747 leaves.  One spectrum
+      cannot tell the two apart, so the text gives both.  Neither reading
+      says the environment converged: the criterion cannot see the edge
+      tensors, and for decoupled chains the energy still moves by 8e-3
+      between 2 and 10 sweeps
+      (``test_a_rank_1_corner_does_not_mean_a_converged_energy``).  So the
+      text asks for the energy at two budgets and two ``chi``.
     * A corner that was rank <= 1 on an earlier sweep and has since recovered
-      licenses only the weak one: the comparison could not be certified, but
+      licenses only the weak claim: the comparison could not be certified, but
       the environment returned has a full-rank corner and is **not** known to
       be bad.
 
-    Applying the strong text to a recovered coordinate invites the caller to
-    discard a healthy environment, which is the opposite of this warning's
+    A text stronger than the coordinate licenses invites the caller to
+    discard a healthy environment, or to raise ``max_iter`` where only ``chi``
+    can make the corner readable, which is the opposite of this warning's
     purpose -- so a mixed sweep must name each group separately rather than
     picking one diagnosis for all of them.
 
     Args:
-        blind:     Coordinates whose comparison had a rank <= 1 spectrum on
-                   either side.  Non-empty whenever this is called.
-        collapsed: The subset of ``blind`` still rank <= 1 on the final sweep.
+        blind:     Coordinates whose comparison had an uninformative spectrum
+                   on either side.  Non-empty whenever this is called.
+        collapsed: The subset of ``blind`` still uninformative on the final
+                   sweep.
+        chi:       The loop's ``chi``.
+        broken:    The subset of ``collapsed`` whose final spectrum is zero or
+                   non-finite (:func:`_spectrum_is_broken`).
 
     Returns:
         The warning text.
     """
     parts = [
         "CTM convergence could not be certified: the corner-spectrum "
-        "criterion compares spectra normalised by their sum, which a rank-1 "
-        "corner forces to [1, 0, ..., 0], so it is structurally blind there. "
-        "The full max_iter budget was run instead of exiting early."
+        "criterion compares spectra normalised by their sum, and a rank-1 "
+        "corner normalises to [1, 0, ..., 0] however the environment moves, "
+        "while a zero or non-finite corner does not normalise at all. The "
+        "full max_iter budget was run instead of exiting early."
     ]
-    if collapsed:
-        where = ", ".join(str(c) for c in sorted(collapsed))
+    if broken:
+        where = ", ".join(str(c) for c in sorted(broken))
         parts.append(
-            f" The corner at {where} is STILL rank <= 1: that environment is "
-            "NOT a converged fixed point, and its energy is a mean-field "
-            "number that will not respond to chi."
+            f" The corner at {where} is zero or non-finite: that environment "
+            "is broken, and nothing computed from it is meaningful."
+        )
+    low_rank = collapsed - broken
+    if low_rank and chi == 1:
+        where = ", ".join(str(c) for c in sorted(low_rank))
+        parts.append(
+            f" The corner at {where} is a 1x1 matrix, as every corner is at "
+            "chi=1, so its normalised spectrum is [1] however the environment "
+            "moves, and no number of sweeps can certify it. Raise chi: only a "
+            "corner of rank 2 or more can show change. More sweeps can still "
+            "change the energy, so compare it at two values of max_iter as "
+            "well."
+        )
+    elif low_rank:
+        where = ", ".join(str(c) for c in sorted(low_rank))
+        parts.append(
+            f" The corner at {where} is STILL rank <= 1, so the criterion "
+            "cannot see whether this environment converged. Rank 1 is exact "
+            "when no correlation crosses that corner, as in a product state, a "
+            "dimer state or decoupled chains. It is also what the rank-1 "
+            "collapse of #726/#747 leaves: a mean-field boundary whose energy "
+            "does not respond to chi. The edge tensors can still be changing "
+            "in either case, so compare the energy at two values of max_iter "
+            "and of chi."
         )
     recovered = blind - collapsed
     if recovered:
@@ -1618,6 +1694,7 @@ def _ctm_tensor_multisite(
         # which is a property of the pair.
         blind_coords = set()
         collapsed_coords = set()
+        broken_coords = set()
         for c in sorted(envs):
             sv = _corner_singular_values(envs[c].C1)
             prev = prev_svs.get(c)
@@ -1632,9 +1709,12 @@ def _ctm_tensor_multisite(
             _mr_c = max_rank
             sv_blind = not _spectrum_can_show_change(sv, max_rank=_mr_c)
             if sv_blind:
-                # Still blind *now*: the environment being returned is the
-                # collapsed one, so the strong diagnosis below applies.
+                # Still blind *now*: the environment being returned has this
+                # corner, so a diagnosis of the returned corner applies --
+                # broken if it is zero or non-finite, else a rank-1 one.
                 collapsed_coords.add(c)
+                if _spectrum_is_broken(sv):
+                    broken_coords.add(c)
             if sv_blind or (
                 prev is not None and not _spectrum_can_show_change(prev, max_rank=_mr_c)
             ):
@@ -1724,7 +1804,9 @@ def _ctm_tensor_multisite(
         # returned here is the best this budget reached.  What the caller must
         # not do is read it as converged.
         unconv = (
-            _blind_corner_message(blind_coords, collapsed_coords),
+            _blind_corner_message(
+                blind_coords, collapsed_coords, chi=chi, broken=broken_coords
+            ),
             RuntimeWarning,
         )
     elif hold_log and hold_log[-1][0] == "nonfinite":

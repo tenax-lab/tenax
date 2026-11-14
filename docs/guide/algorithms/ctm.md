@@ -204,10 +204,15 @@ from tenax.algorithms._ctm_diagnostics import env_is_collapsed
 env, eps_T, info = ctm_tensor(A, chi=16, max_iter=100, return_meta=True)
 if not info.converged:
     # inf means the criterion never produced a value: either fewer than two
-    # sweeps ran, or the corner collapsed to rank 1 and the criterion refused
-    # to certify it (#898).  Only the second is unfixable by more sweeps.
-    reason = "collapsed" if env_is_collapsed(env) else "budget"
-    print(f"not a fixed point ({reason}): {info.n_iter} sweeps, diff {info.diff:.2e}")
+    # sweeps ran, or a compared corner could not show change and the
+    # criterion refused to certify it (#898).  More sweeps fix the first, and
+    # a corner that recovers to rank > 1; they do not fix one that stays at
+    # rank 1.  A rank-1 corner is exact when no correlation crosses it, as in a
+    # product or a dimer state, and it is also what the collapse of #747
+    # leaves.  In both cases the edge tensors can still move: compare the
+    # energy at two values of max_iter.  A zero or non-finite corner is broken.
+    reason = "rank <= 1" if env_is_collapsed(env) else "budget"
+    print(f"not certified ({reason}): {info.n_iter} sweeps, diff {info.diff:.2e}")
 ```
 
 `ctm_tensor` also takes a keyword-only `min_iter` (default 1; #976). With it,
