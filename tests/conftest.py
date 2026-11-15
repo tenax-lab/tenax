@@ -188,12 +188,12 @@ _FILE_MARKERS = {
     # Cheap (~8s): a 1x1 product state, no real convergence run.
     "test_ctm_min_iter_contract_925_976.py": "core",
     # ``ctm()`` runs ``ctm_tensor(recipe="2x2")`` since 0.9.3.  Onsager's C(1,0)
-    # pins the environment it returns only on lattice-symmetric states, whose
-    # corners are symmetric matrices and so hide a transposed corner;
-    # ``test_corner_orientation_without_lattice_symmetry`` is the orientation
-    # pin.  Both sit next to the input checks and the warnings: a silent wrong
-    # environment on a public entry point, so they belong in the required gate.
-    # The 16 Onsager cases set its run time, ~70 s on 12 CPU cores.
+    # pins the environment of the helper behind it only on lattice-symmetric
+    # states, whose corners are symmetric matrices and so hide a transposed
+    # corner; ``test_corner_orientation_without_lattice_symmetry`` is the
+    # orientation pin.  Both sit next to the input checks and the warnings: a
+    # silent wrong environment on a public entry point, so they belong in the
+    # required gate.  The 8 Onsager cases set its run time.
     "test_ctm_delegates_to_2x2.py": "core",
     # ``ctm_2site()`` and ``ipeps()`` run the 2x2 recipe of ``ctm_tensor_2site``
     # since 0.9.3.  The orientation pin compares the raw four-bond energy with

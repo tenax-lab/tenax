@@ -106,11 +106,14 @@ def _asymmetric_hamiltonian(seed=7):
     return jnp.asarray((M + M.T) / 2)
 
 
-@pytest.mark.parametrize("entry", ENTRY_POINTS)
 @pytest.mark.parametrize("beta,chi", ISING_CASES)
-def test_ising_c10_matches_onsager(entry, beta, chi):
-    """Converged, and C(1,0) within 1e-12 of Onsager, at every chi."""
-    env, info = entry(
+def test_ising_c10_matches_onsager(beta, chi):
+    """Converged, and C(1,0) within 1e-12 of Onsager, at every chi.
+
+    On the helper only: ``ctm()`` is the helper plus its warnings, and
+    ``test_ctm_return_meta_matches_the_helper`` pins the two bit for bit.
+    """
+    env, info = _ctm_via_2x2(
         jnp.asarray(ising_peps(beta)),
         CTMConfig(chi=chi, max_iter=500, conv_tol=1e-12),
         return_meta=True,
