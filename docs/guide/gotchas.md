@@ -67,6 +67,40 @@ ground states.
 platform. On macOS/headless runs, force the CPU backend with
 `JAX_PLATFORMS=cpu uv run pytest ...`.
 
+## Contractions of `2**31` entries or more on CPU
+
+On the CPU backend (jax 0.10.2), XLA returns zeros, and raises no error, when
+it transposes some arrays of more than `2**31` entries (#1193). `jnp.einsum`
+makes such a transpose of an operand before a dot. The raw vertical RDM builder
+met it on the spin-1 kagome PESS state (d = 27, D = 2) at chi = 16, before
+#1193 made its largest array smaller: the vertical bond gave 0, and
+`compute_energy_ctm` gave -0.1771777483 per site instead of -0.3543554967.
+Measured on that transpose, `2**31` entries are correct and `2**31 + 4096`
+entries are zeros.
+
+So on CPU, the raw RDM builders of `compute_energy_ctm` and
+`compute_energy_ctm_2site`, and of the deprecated `compute_excitations`, raise
+`ValueError` when an operand, an intermediate or the output of one of their
+contractions has `2**31` entries or more. The largest array of a builder has
+$\max(D^8 d^2, \chi^2 D^6, \chi^2 D^2 d^2, d^4)$ entries: the double-layer
+site, a boundary row with its three $D^2$ legs open, a half network with one
+site absorbed, and the RDM. So for d = 27 and D = 2 the builders refuse from
+chi = 859 (the half network), and for d = 2 and D = 6 from chi = 215 (the
+boundary row). `ipeps()` computes its energy with `compute_energy_ctm_2site`
+as its last step, so a run past the limit raises after the simple update and
+the CTM have run, and its state is lost. Check the bound before a long run: use
+a smaller chi or D, or a GPU.
+
+The check does not cover:
+
+- other contractions: the CTM moves, `compute_energy_ctm_tensor` (the energy
+  of the AD optimizers), `compute_spectrum` and `tenax.contraction`;
+- the batched arrays under `jax.vmap`, because the check sees the per-example
+  shapes. `compute_excitations` vmaps its builders over the $D^4 d$ basis
+  vectors;
+- under `jax.jit`, the device of the arguments: the check takes the default
+  device.
+
 ## Symmetric tensors
 
 Which legs may be contracted, the opt-in `TENAX_STRICT_CONTRACT=1` audit mode,

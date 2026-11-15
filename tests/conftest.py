@@ -401,6 +401,10 @@ _FILE_MARKERS = {
     # array above about 2**31 entries.  Jaxpr inspection on tiny shapes, about
     # a second.
     "test_raw_rdm_peak_array.py": "core",
+    # On CPU, einsum_promoted refuses a contraction that holds an array of
+    # 2**31 entries or more, and every einsum of the raw RDM builders goes
+    # through it (#1193).  jax.eval_shape and small operands only, seconds.
+    "test_einsum_cpu_size_check.py": "core",
     # The 2-site energy of ipeps() is a function of the state: the same
     # physical state in another bond gauge, or with A and B swapped, must give
     # the same energy, and a dimer state its exact -0.375. D=2, chi<=6, ~25 s
