@@ -56,6 +56,11 @@ class CTMConfig:
         max_iter:           Maximum CTM iterations before declaring convergence.
         conv_tol:           Convergence tolerance (based on singular value change
                             between CTM iterations).
+        min_iter:           Minimum CTM sweeps before the loop can stop on
+                            ``conv_tol`` (default 10; ``0`` sets no minimum).
+                            A ``min_iter`` that is not an integer, or is a
+                            bool, raises ``TypeError``, and a negative one
+                            ``ValueError``, when the config is built.
         renormalize:        Whether to renormalize environment tensors at each step
                             to prevent exponential growth (always recommended).
         ad_regularize_svd:  Use Lorentzian-regularized SVD backward pass in AD
@@ -522,6 +527,11 @@ class CTMConfig:
         return self.projector_backward
 
     def __post_init__(self):
+        # Many CTM loops read ``min_iter`` from the config and only two check
+        # it, so check it here, for every entry point that takes a config.
+        from tenax.algorithms._ctm_tensor_convergence import _check_min_iter
+
+        _check_min_iter(self.min_iter)
         if self.on_unconverged not in ("raise", "warn"):
             raise ValueError(
                 f"CTMConfig.on_unconverged must be 'raise' or 'warn', "

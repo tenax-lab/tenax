@@ -1137,7 +1137,8 @@ def _check_min_iter(min_iter) -> None:
     Called first by both loops: ``min(min_iter, max_iter)`` runs only after the
     double layer and the environment are built, so a string or ``None`` raised a
     late ``TypeError`` there, and a float or a negative count ran with no error.
-    ``0`` is valid and sets no minimum.
+    ``0`` is valid and sets no minimum.  ``CTMConfig`` calls it too, when it is
+    built, because more loops read ``CTMConfig.min_iter`` than these two.
     """
     if not isinstance(min_iter, numbers.Integral) or isinstance(min_iter, bool):
         raise TypeError(
@@ -1217,10 +1218,12 @@ def ctm_tensor(
                            ``conv_tol``, and 0 sets no minimum.  The
                            ``CTMConfig``-based entry points apply the same rule
                            with ``CTMConfig.min_iter``.  A value that is not an
-                           int raises ``TypeError``, and a negative one
-                           ``ValueError``, before any work; :func:`ctm` passes
-                           its value here and so gets the same check, but
-                           :func:`ctm_split` does not check yet.
+                           integer, or is a bool, raises ``TypeError``, and a
+                           negative one ``ValueError``, before any work;
+                           :func:`ctm` passes its value here and so gets the
+                           same check.  ``CTMConfig`` refuses a bad value when
+                           it is built; :func:`ctm_split` does not check a
+                           value set on the config after that.
         return_meta:       When ``True``, return a third element, a
                            :class:`CTMConvergenceInfo`,
                            saying whether the loop converged or exhausted

@@ -141,15 +141,19 @@ def symmetric_layout_seed(
     st = {(0, 0): A_n, (1, 0): B_n}
     cold, info = _converge(st, ctm_cfg, None)
     e_cold = energy_2site(A_n, B_n, cold, gate)
-    forced_cfg = dataclasses.replace(
-        ctm_cfg,
-        conv_tol=0.0,
-        max_iter=forced_sweeps,
-        min_iter=forced_sweeps,
-        plateau_patience=None,
-        on_unconverged="warn",
-    )
-    forced, _ = _converge(st, forced_cfg, cold) if forced_sweeps > 0 else (cold, None)
+    forced = cold
+    if forced_sweeps > 0:
+        # Built only here: CTMConfig refuses a negative min_iter, and a count
+        # below 1 runs no forced sweep.
+        forced_cfg = dataclasses.replace(
+            ctm_cfg,
+            conv_tol=0.0,
+            max_iter=forced_sweeps,
+            min_iter=forced_sweeps,
+            plateau_patience=None,
+            on_unconverged="warn",
+        )
+        forced, _ = _converge(st, forced_cfg, cold)
     e_forced = energy_2site(A_n, B_n, forced, gate)
     lay = layout_of(cold)
     stable = abs(e_forced - e_cold) < energy_tol and same_layout(lay, layout_of(forced))
