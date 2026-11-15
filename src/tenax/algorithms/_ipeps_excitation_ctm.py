@@ -12,6 +12,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from tenax.algorithms._ctm_env_dense import _as_dense_env
 from tenax.algorithms._ctm_tensor_convergence import (
     _ctm_tensor_multisite,
     _ctm_tensor_sweep_multisite,
@@ -38,27 +39,17 @@ def cell_phases(a: int, b: int) -> dict:
     return {c: (-1.0) ** (a * c[0] + b * c[1]) for c in CELL}
 
 
-def _ordered(t, labels):
-    have = [str(i.label) for i in t.indices]
-    return jnp.transpose(t.todense(), [have.index(label) for label in labels])
-
-
 def unpack_env(env, D: int) -> dict:
-    """Raw arrays with each double-layer edge leg split into (ket, bra)."""
+    """Raw arrays with each double-layer edge leg split into (ket, bra).
 
-    def edge(T):
-        return T.reshape(T.shape[0], D, D, T.shape[2])
-
-    return {
-        "C1": _ordered(env.C1, ["c1_d", "c1_r"]),
-        "C2": _ordered(env.C2, ["c2_l", "c2_d"]),
-        "C3": _ordered(env.C3, ["c3_u", "c3_l"]),
-        "C4": _ordered(env.C4, ["c4_r", "c4_u"]),
-        "T1": edge(_ordered(env.T1, ["t1_l", "u2", "t1_r"])),
-        "T2": edge(_ordered(env.T2, ["t2_u", "r2", "t2_d"])),
-        "T3": edge(_ordered(env.T3, ["t3_r", "d2", "t3_l"])),
-        "T4": edge(_ordered(env.T4, ["t4_d", "l2", "t4_u"])),
-    }
+    ``_as_dense_env`` puts every field in the leg order that ``CTMTensorEnv``
+    documents, by label, before it drops the labels.
+    """
+    raw = _as_dense_env(env)._asdict()
+    for name in ("T1", "T2", "T3", "T4"):
+        T = raw[name]
+        raw[name] = T.reshape(T.shape[0], D, D, T.shape[2])
+    return raw
 
 
 def window_1x1(E, K, Kb):
