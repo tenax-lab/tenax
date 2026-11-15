@@ -11,11 +11,13 @@ budget (#898).  The examples dropped that report and printed the energy
 without a word.
 
 ``compute_pess_energy`` now returns ``(E/site, certified, notice)``.  When the
-corner criterion is blind, it reruns the CTM with ``max_iter + 1`` and with
-``2 * max_iter`` sweeps, and certifies the energy only if neither rerun moves
-it by more than ``energy_tol``.  The first rerun catches a CTM cycle, whose
-period can divide ``max_iter`` and hide it from the second; the second catches
-a slow convergence, which a one-sweep change underestimates.
+dummy ``r`` leg blinds the corner criterion, it reruns the CTM with
+``max_iter + 1`` and with ``2 * max_iter`` sweeps, and certifies the energy
+only if neither rerun moves it by more than ``energy_tol``.  The first rerun
+catches a CTM cycle, whose period can divide ``max_iter`` and hide it from the
+second; the second catches a slow convergence, which a one-sweep change
+underestimates.  The scripts exit with status 0 only when the energy is
+certified.
 
 The oracle shares no code with the CTM.  With only index 0 on every
 horizontal bond, each column is an independent infinite chain of
@@ -25,7 +27,11 @@ E/site = 2 tr(rho H_tri) / 3: the examples measure ``H_tri (x) I`` on the
 horizontal and on the vertical bond.
 """
 
+import importlib.util
 import inspect
+import pathlib
+import runpy
+import sys
 
 import jax
 import jax.numpy as jnp
@@ -34,11 +40,22 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-import examples.kagome_xxz_pess as spin_half  # noqa: E402
-import examples.kagome_xxz_spin1_pess as spin_one  # noqa: E402
 from tenax import compute_energy_ctm_tensor, ctm_tensor  # noqa: E402
-from tenax.algorithms._ctm_diagnostics import env_is_collapsed  # noqa: E402
 from tenax.algorithms._ipeps_optimize_shared import _wrap_as_dense_tensor  # noqa: E402
+
+_EXAMPLES_DIR = pathlib.Path(__file__).resolve().parent.parent / "examples"
+
+
+def _load_example(name):
+    """Load an example script by its path, as the other example tests do."""
+    spec = importlib.util.spec_from_file_location(name, _EXAMPLES_DIR / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+spin_half = _load_example("kagome_xxz_pess")
+spin_one = _load_example("kagome_xxz_spin1_pess")
 
 CHI = 4
 
@@ -121,15 +138,21 @@ def states():
 
     The random spin-1/2 start has |lambda2/lambda1| = 0.78 and needs ~100
     sweeps; 20 simple-update steps bring it to 0.10.  The random spin-1 start
-    already has 0.035.
+    already has 0.035.  The gap is asserted here, for every test that takes
+    these states.
     """
     H_half = EXAMPLES["spin-1/2"][1]
-    return {
+    out = {
         "spin-1/2": spin_half.pess_simple_update(
             *spin_half.init_pess(2), H_half, 0.01, 2, 20
         ),
         "spin-1": spin_one.init_pess(2),
     }
+    for name, state in out.items():
+        module, H_tri, _ = EXAMPLES[name]
+        _, gap_ratio = _exact(module.pess_to_ipeps(*state), H_tri)
+        assert gap_ratio < 0.2, (name, gap_ratio)
+    return out
 
 
 @pytest.fixture
@@ -154,12 +177,16 @@ def ctm_budgets(monkeypatch):
 
 
 def _blind_corner_regime(A, max_iter):
-    """The dummy ``r`` leg makes the corner criterion unable to certify."""
+    """The dummy ``r`` leg makes every corner rank 1, as the notice says, and
+    the corner criterion cannot certify a rank-1 corner."""
     assert np.all(np.asarray(A)[:, :, :, 1:, :] == 0), "r leg is not a dummy"
     env, _, info = ctm_tensor(
         _wrap_as_dense_tensor(A), CHI, max_iter=max_iter, return_meta=True
     )
-    assert env_is_collapsed(env)
+    for corner in ("C1", "C2", "C3", "C4"):
+        M = np.asarray(getattr(env, corner).todense())
+        s = np.linalg.svd(M, compute_uv=False)
+        assert s[1] <= 1e-10 * s[0], (corner, s)
     assert not info.converged and info.diff == float("inf"), info
 
 
@@ -168,8 +195,7 @@ def test_blind_corner_criterion_certified_by_energy(name, states, ctm_budgets):
     module, H_tri, _ = EXAMPLES[name]
     state = states[name]
     A = module.pess_to_ipeps(*state)
-    E_exact, gap_ratio = _exact(A, H_tri)
-    assert gap_ratio < 0.2, gap_ratio
+    E_exact, _ = _exact(A, H_tri)
     _blind_corner_regime(A, max_iter=20)
 
     budgets = ctm_budgets(module)
@@ -177,6 +203,7 @@ def test_blind_corner_criterion_certified_by_energy(name, states, ctm_budgets):
 
     assert certified, notice
     assert "NOT" not in notice, notice
+    assert "r leg is a dummy" in notice, notice
     assert budgets == [20, 21, 40]
     assert abs(E - E_exact) < 1e-10, (E, E_exact)
 
@@ -249,6 +276,37 @@ def test_slow_convergence_is_not_certified(name, ctm_budgets):
 
 
 @pytest.mark.parametrize("name", EXAMPLES)
+@pytest.mark.parametrize("nan_at", [20, 21, 40])
+def test_nan_energy_is_not_certified(name, nan_at, states, ctm_budgets, monkeypatch):
+    """A NaN energy after any of the three budgets is not certified.
+
+    ``max(x, nan)`` returns ``x``, so a NaN after ``2 * max_iter`` sweeps was
+    dropped, and the other two budgets certified the CTM.
+    """
+    module, H_tri, _ = EXAMPLES[name]
+    tol = 1e-8
+    budgets = ctm_budgets(module)
+    real = module.compute_energy_ctm_tensor
+    energies = []
+
+    def energy(*args, **kwargs):
+        E = real(*args, **kwargs)
+        energies.append(float(E) / 3.0)
+        return float("nan") if budgets[-1] == nan_at else E
+
+    monkeypatch.setattr(module, "compute_energy_ctm_tensor", energy)
+    E, certified, notice = module.compute_pess_energy(
+        *states[name], H_tri, CHI, max_iter=20, energy_tol=tol
+    )
+
+    # The regime: without the NaN, the energy check certifies this readout.
+    assert budgets == [20, 21, 40]
+    assert max(abs(e - energies[0]) for e in energies[1:]) <= tol, energies
+    assert not certified, notice
+    assert "NOT" in notice, notice
+
+
+@pytest.mark.parametrize("name", EXAMPLES)
 @pytest.mark.parametrize("max_iter", [0, -1])
 def test_budget_below_one_is_rejected(name, max_iter, states, ctm_budgets):
     """No sweep runs, so nothing can be certified; ``ctm_tensor`` accepts it."""
@@ -283,16 +341,20 @@ def test_corner_criterion_certifies_d1(name, ctm_budgets):
 
 
 @pytest.mark.parametrize("name", EXAMPLES)
-def test_informative_unconverged_corner_is_not_certified(
+def test_no_energy_check_without_the_dummy_r_leg(
     name, states, ctm_budgets, monkeypatch
 ):
-    """A corner of rank > 1 that did not converge gets no energy check.
+    """The energy check stands in for the corner criterion only where the
+    dummy ``r`` leg blinds it.  Any other CTM that fails the criterion is
+    reported as not converged, with no rerun.
 
-    ``pess_to_ipeps`` always gives a rank-1 corner, so the test makes
-    ``env_is_collapsed`` say otherwise.
+    ``pess_to_ipeps`` always fills only ``r = 0``, so the test makes
+    ``_r_leg_is_dummy`` say otherwise.  The energy check certifies these
+    states at 20 sweeps (the first test), so a branch that ignores
+    ``_r_leg_is_dummy`` fails here.
     """
     module, H_tri, _ = EXAMPLES[name]
-    monkeypatch.setattr(module, "env_is_collapsed", lambda env, *a, **k: False)
+    monkeypatch.setattr(module, "_r_leg_is_dummy", lambda A: False)
 
     budgets = ctm_budgets(module)
     E, certified, notice = module.compute_pess_energy(
@@ -300,5 +362,73 @@ def test_informative_unconverged_corner_is_not_certified(
     )
 
     assert not certified, notice
-    assert "NOT" in notice, notice
+    assert "NOT converged" in notice, notice
     assert budgets == [20]
+
+
+@pytest.mark.parametrize("name", EXAMPLES)
+def test_r_leg_is_dummy_reads_the_tensor(name):
+    """One nonzero ``r >= 1`` entry makes the ``r`` leg real; at D=1 the only
+    ``r`` index is 0, so the leg is a dummy."""
+    module = EXAMPLES[name][0]
+    A = module.pess_to_ipeps(*module.init_pess(2))
+    assert module._r_leg_is_dummy(A)
+    assert not module._r_leg_is_dummy(A.at[0, 0, 0, 1, 0].set(1e-3))
+    assert module._r_leg_is_dummy(module.pess_to_ipeps(*module.init_pess(1)))
+
+
+@pytest.mark.parametrize("name", EXAMPLES)
+def test_default_energy_tol(name):
+    """The default ``energy_tol`` is 1e-8, well below the 6 printed decimals.
+
+    The other tests pass with any default below the smallest energy change
+    that they measure, so they do not pin it.
+    """
+    module = EXAMPLES[name][0]
+    parameters = inspect.signature(module.compute_pess_energy).parameters
+    assert parameters["energy_tol"].default == 1e-8
+
+
+@pytest.mark.parametrize("name", EXAMPLES)
+def test_help_states_the_cost_and_the_exit_status(name, capsys):
+    """``--ctm-iter N`` can cost 4N + 1 sweeps, and the exit status says
+    whether the readout is certified; ``--help`` says both."""
+    module = EXAMPLES[name][0]
+    with pytest.raises(SystemExit) as exit_info:
+        module.main(["--help"])
+    assert exit_info.value.code == 0
+    text = " ".join(capsys.readouterr().out.split())
+    assert "4N + 1 sweeps in all" in text, text
+    assert "Exit status: 0 if the E/site readout is certified, 1 if not." in text
+
+
+def _run_script(module, argv, monkeypatch):
+    """Run an example as ``python <script> <argv>``; return its exit status.
+
+    ``runpy`` runs the ``__main__`` guard, so the status is the one a shell
+    sees.
+    """
+    monkeypatch.setattr(sys, "argv", [module.__file__, *argv])
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_path(module.__file__, run_name="__main__")
+    return exit_info.value.code
+
+
+@pytest.mark.parametrize("name", EXAMPLES)
+def test_exit_status_is_0_when_the_readout_is_certified(name, monkeypatch, capsys):
+    """At D=1 the corner criterion certifies the readout (see the D=1 test)."""
+    module = EXAMPLES[name][0]
+    argv = ["--D", "1", "--steps", "0", "--chi", str(CHI), "--ctm-iter", "10"]
+    status = _run_script(module, argv, monkeypatch)
+    assert "CTM: converged in" in capsys.readouterr().out
+    assert status == 0
+
+
+@pytest.mark.parametrize("name", EXAMPLES)
+def test_exit_status_is_1_when_the_readout_is_not_certified(name, monkeypatch, capsys):
+    """``few`` sweeps leave the random D=2 start uncertified."""
+    module, _, few = EXAMPLES[name]
+    argv = ["--D", "2", "--steps", "0", "--chi", str(CHI), "--ctm-iter", str(few)]
+    status = _run_script(module, argv, monkeypatch)
+    assert "NOT certified" in capsys.readouterr().out
+    assert status == 1
