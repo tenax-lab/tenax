@@ -109,10 +109,10 @@ def _build_mixed_double_layer(
     D = A.shape[0]
     if position == "ket":
         # B in ket layer, A* in bra layer
-        ao = jnp.einsum("udlrs,UDLRs->uUdDlLrR", B, jnp.conj(A))
+        ao = einsum_promoted("udlrs,UDLRs->uUdDlLrR", B, jnp.conj(A))
     elif position == "bra":
         # A in ket layer, B* in bra layer
-        ao = jnp.einsum("udlrs,UDLRs->uUdDlLrR", A, jnp.conj(B))
+        ao = einsum_promoted("udlrs,UDLRs->uUdDlLrR", A, jnp.conj(B))
     else:
         raise ValueError(f"position must be 'ket' or 'bra', got {position!r}")
     return ao.reshape(D**2, D**2, D**2, D**2)
@@ -137,9 +137,9 @@ def _build_mixed_double_layer_open(
     D = A.shape[0]
     d = A.shape[4]
     if position == "ket":
-        ao = jnp.einsum("udlrs,UDLRt->uUdDlLrRst", B, jnp.conj(A))
+        ao = einsum_promoted("udlrs,UDLRt->uUdDlLrRst", B, jnp.conj(A))
     elif position == "bra":
-        ao = jnp.einsum("udlrs,UDLRt->uUdDlLrRst", A, jnp.conj(B))
+        ao = einsum_promoted("udlrs,UDLRt->uUdDlLrRst", A, jnp.conj(B))
     else:
         raise ValueError(f"position must be 'ket' or 'bra', got {position!r}")
     return ao.reshape(D**2, D**2, D**2, D**2, d, d)
@@ -154,7 +154,7 @@ def _build_double_layer_BB_open(
     """
     D = B.shape[0]
     d = B.shape[4]
-    ao = jnp.einsum("udlrs,UDLRt->uUdDlLrRst", B, jnp.conj(B))
+    ao = einsum_promoted("udlrs,UDLRt->uUdDlLrRst", B, jnp.conj(B))
     return ao.reshape(D**2, D**2, D**2, D**2, d, d)
 
 
@@ -194,18 +194,18 @@ def _rdm2x1_with_open_tensors(
     """
     C1, C2, C3, C4, T1, T2, T3, T4 = env
 
-    UL = jnp.einsum("ab,buc->auc", C1, T1)
-    UR = jnp.einsum("cuf,fg->cug", T1, C2)
-    LL = jnp.einsum("gi,idj->gdj", C4, T3)
-    LR = jnp.einsum("jdk,mk->jdm", T3, C3)
+    UL = einsum_promoted("ab,buc->auc", C1, T1)
+    UR = einsum_promoted("cuf,fg->cug", T1, C2)
+    LL = einsum_promoted("gi,idj->gdj", C4, T3)
+    LR = einsum_promoted("jdk,mk->jdm", T3, C3)
 
     Lenv = einsum_promoted("auc,axg,gdj->ucxdj", UL, T4, LL)
     Renv = einsum_promoted("cuf,frm,jdm->curjd", UR, T2, LR)
 
-    Lenv_ao1 = jnp.einsum("ucxdj,udxrst->crjst", Lenv, ao1)
-    Renv_ao2 = jnp.einsum("curjd,udlrtv->cjltv", Renv, ao2)
+    Lenv_ao1 = einsum_promoted("ucxdj,udxrst->crjst", Lenv, ao1)
+    Renv_ao2 = einsum_promoted("curjd,udlrtv->cjltv", Renv, ao2)
 
-    rdm = jnp.einsum("crjst,cjruv->stuv", Lenv_ao1, Renv_ao2)
+    rdm = einsum_promoted("crjst,cjruv->stuv", Lenv_ao1, Renv_ao2)
 
     # (ket1, bra1, ket2, bra2) -> (ket1, ket2, bra1, bra2): the same transpose
     # ``ipeps_rdm._rdm2x1`` applies.  Reshaping the interleaved layout straight
@@ -241,13 +241,13 @@ def _rdm1x2_with_open_tensors(
     # entries.
     top_row = einsum_promoted("ab,buc,ce->aue", C1, T1, C2)
     env_row1 = einsum_promoted("aue,alf,erg->ulfrg", top_row, T4, T2)
-    site1 = jnp.einsum("ulfrg,udlrst->dfgst", env_row1, ao1)
+    site1 = einsum_promoted("ulfrg,udlrst->dfgst", env_row1, ao1)
 
     bot_row = einsum_promoted("hj,jqk,ik->hqi", C4, T3, C3)
     env_row2 = einsum_promoted("hqi,fmh,gni->qfmgn", bot_row, T4, T2)
-    site2 = jnp.einsum("qfmgn,pqmnwx->pfgwx", env_row2, ao2)
+    site2 = einsum_promoted("qfmgn,pqmnwx->pfgwx", env_row2, ao2)
 
-    rdm = jnp.einsum("dfgst,dfgwx->stwx", site1, site2)
+    rdm = einsum_promoted("dfgst,dfgwx->stwx", site1, site2)
 
     # (ket1, bra1, ket2, bra2) -> (ket1, ket2, bra1, bra2), as in the
     # horizontal helper (#955).
@@ -256,7 +256,7 @@ def _rdm1x2_with_open_tensors(
 
 def _transition_trace(rdm: jax.Array) -> jax.Array:
     """Trace of a grouped ``(ket1, ket2, bra1, bra2)`` transition RDM."""
-    return jnp.einsum("ijij->", rdm)
+    return einsum_promoted("ijij->", rdm)
 
 
 def _rdm2x1_mixed(
@@ -477,11 +477,11 @@ def _compute_excitation_energy(
     # +0.5 (review P2 on #961).
     def _e_h(ao1, ao2):
         rdm = _rdm2x1_with_open_tensors(ao1, ao2, env, d)
-        return jnp.einsum("ijkl,klij->", rdm, H_shifted) / n0_h
+        return einsum_promoted("ijkl,klij->", rdm, H_shifted) / n0_h
 
     def _e_v(ao1, ao2):
         rdm = _rdm1x2_with_open_tensors(ao1, ao2, env, d)
-        return jnp.einsum("ijkl,klij->", rdm, H_shifted) / n0_v
+        return einsum_promoted("ijkl,klij->", rdm, H_shifted) / n0_v
 
     phase_x = jnp.exp(1j * k[0])
     phase_y = jnp.exp(1j * k[1])

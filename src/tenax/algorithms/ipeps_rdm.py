@@ -31,7 +31,7 @@ def _build_double_layer_open(A: jax.Array) -> jax.Array:
     if A.ndim == 5:
         # A[u,d,l,r,s], conj(A)[U,D,L,R,t]
         # -> a_open[uU, dD, lL, rR, s, t]
-        ao = jnp.einsum("udlrs,UDLRt->uUdDlLrRst", A, jnp.conj(A))
+        ao = einsum_promoted("udlrs,UDLRt->uUdDlLrRst", A, jnp.conj(A))
         D = A.shape[0]
         d = A.shape[4]
         return ao.reshape(D**2, D**2, D**2, D**2, d, d)
@@ -60,13 +60,13 @@ def _rdm2x1(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
 
     # Step-by-step contraction (small intermediates):
     # UL = C1 · T1  →  (chi, D2, chi)
-    UL = jnp.einsum("ab,buc->auc", C1, T1)
+    UL = einsum_promoted("ab,buc->auc", C1, T1)
     # UR = T1 · C2  →  (chi, D2, chi)
-    UR = jnp.einsum("cuf,fg->cug", T1, C2)
+    UR = einsum_promoted("cuf,fg->cug", T1, C2)
     # LL = C4 · T3  →  (chi, D2, chi)
-    LL = jnp.einsum("gi,idj->gdj", C4, T3)
+    LL = einsum_promoted("gi,idj->gdj", C4, T3)
     # LR = T3 · C3  →  (chi, D2, chi)
-    LR = jnp.einsum("jdk,mk->jdm", T3, C3)
+    LR = einsum_promoted("jdk,mk->jdm", T3, C3)
 
     # Left env: UL[a,u1,c] · T4[a,l1,g] · LL[g,d1,j]
     # Contract a between UL and T4, g between T4 and LL
@@ -80,17 +80,17 @@ def _rdm2x1(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
 
     # Contract Lenv with ao1[u1, d1, l1, r1, s, sp]:
     # Match: u1=u, d1=d, l1=x  → free: c, r1, j, s, sp
-    Lenv_ao1 = jnp.einsum("ucxdj,udxrst->crjst", Lenv, a_open)
+    Lenv_ao1 = einsum_promoted("ucxdj,udxrst->crjst", Lenv, a_open)
     # shape: (chi, D2, chi, d, d) → (c, r1, j, s1, s1')
 
     # Contract Renv with ao2[u2, d2, l2, r2, t, tp]:
     # Match: u2=u, d2=d, r2=r  → free: c, l2, j, t, tp
-    Renv_ao2 = jnp.einsum("curjd,udlrtv->cjltv", Renv, a_open)
+    Renv_ao2 = einsum_promoted("curjd,udlrtv->cjltv", Renv, a_open)
     # shape: (chi, chi, D2, d, d) → (c, j, l2, s2, s2')
 
     # Final: contract Lenv_ao1 with Renv_ao2
     # Match: c=c, j=j, r1=l2  → free: s1, s1', s2, s2'
-    rdm = jnp.einsum("crjst,cjruv->stuv", Lenv_ao1, Renv_ao2)
+    rdm = einsum_promoted("crjst,cjruv->stuv", Lenv_ao1, Renv_ao2)
     # rdm has convention (s1_ket, s1_bra, s2_ket, s2_bra).
     # Transpose to (s1_ket, s2_ket, s1_bra, s2_bra) so that
     # reshape(d*d, d*d) yields a proper density matrix with rows =
@@ -130,7 +130,8 @@ def _rdm1x2(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
     # sites first held chi^2 D^4 d^4 entries: 2.2e9 for the kagome spin-1 state
     # (d = 27, D = 2) at chi = 16.  On CPU (jax 0.10.2) XLA returns zeros when it
     # transposes an array above about 2**31 entries, as it did for the einsum
-    # that took this one (tests/test_raw_rdm_peak_array.py).
+    # that took this one (tests/test_raw_rdm_peak_array.py).  On CPU,
+    # einsum_promoted refuses such a contraction (_einsum_compat).
 
     # Top row: C1·T1·C2 → (chi, D2, chi)  indices: (a, u, e)
     top_row = einsum_promoted("ab,buc,ce->aue", C1, T1, C2)
@@ -142,7 +143,7 @@ def _rdm1x2(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
     # (D2, D2, chi, D2, chi) → (u1, l1, f, r1, g)
 
     # Contract with ao1[u1, d1, l1, r1, s, sp]:  match u1, l1, r1
-    site1 = jnp.einsum("ulfrg,udlrst->dfgst", env_row1, a_open)
+    site1 = einsum_promoted("ulfrg,udlrst->dfgst", env_row1, a_open)
     # (D2, chi, chi, d, d) → (d1, f, g, s1, s1')
 
     # Bottom row: C4·T3·C3 → (chi, D2, chi)  indices: (h, d2, i)
@@ -155,11 +156,11 @@ def _rdm1x2(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
     # (D2, chi, D2, chi, D2) → (d2, f, l2, g, r2)
 
     # Contract with ao2[u2, d2, l2, r2, w, x]:  match d2, l2, r2
-    site2 = jnp.einsum("qfmgn,pqmnwx->pfgwx", env_row2, a_open)
+    site2 = einsum_promoted("qfmgn,pqmnwx->pfgwx", env_row2, a_open)
     # (D2, chi, chi, d, d) → (u2, f, g, s2, s2')
 
     # Final: join the halves  match d1=u2, f (T4-T4), g (T2-T2)
-    rdm = jnp.einsum("dfgst,dfgwx->stwx", site1, site2)
+    rdm = einsum_promoted("dfgst,dfgwx->stwx", site1, site2)
     # rdm has convention (s1_ket, s1_bra, s2_ket, s2_bra).
     # Transpose to (s1_ket, s2_ket, s1_bra, s2_bra) so that
     # reshape(d*d, d*d) yields a proper density matrix.
@@ -201,8 +202,8 @@ def compute_energy_ctm(
     rdm_h = _rdm2x1(A, env, d)
     rdm_v = _rdm1x2(A, env, d)
     H = hamiltonian_gate.reshape(d, d, d, d)
-    E_h = jnp.einsum("ijkl,klij->", rdm_h, H)
-    E_v = jnp.einsum("ijkl,klij->", rdm_v, H)
+    E_h = einsum_promoted("ijkl,klij->", rdm_h, H)
+    E_v = einsum_promoted("ijkl,klij->", rdm_v, H)
     return (E_h + E_v).real
 
 
@@ -226,21 +227,21 @@ def _rdm2x1_2site(
     ao_B = _build_double_layer_open(B)
 
     # Left boundary from env_A
-    UL = jnp.einsum("ab,buc->auc", env_A.C1, env_A.T1)
-    LL = jnp.einsum("gi,idj->gdj", env_A.C4, env_A.T3)
+    UL = einsum_promoted("ab,buc->auc", env_A.C1, env_A.T1)
+    LL = einsum_promoted("gi,idj->gdj", env_A.C4, env_A.T3)
     Lenv = einsum_promoted("auc,axg,gdj->ucxdj", UL, env_A.T4, LL)
 
     # Right boundary from env_B
-    UR = jnp.einsum("cuf,fg->cug", env_B.T1, env_B.C2)
-    LR = jnp.einsum("jdk,mk->jdm", env_B.T3, env_B.C3)
+    UR = einsum_promoted("cuf,fg->cug", env_B.T1, env_B.C2)
+    LR = einsum_promoted("jdk,mk->jdm", env_B.T3, env_B.C3)
     Renv = einsum_promoted("cuf,frm,jdm->curjd", UR, env_B.T2, LR)
 
     # Contract left env with ao_A
-    Lenv_ao = jnp.einsum("ucxdj,udxrst->crjst", Lenv, ao_A)
+    Lenv_ao = einsum_promoted("ucxdj,udxrst->crjst", Lenv, ao_A)
     # Contract right env with ao_B
-    Renv_ao = jnp.einsum("curjd,udlrtv->cjltv", Renv, ao_B)
+    Renv_ao = einsum_promoted("curjd,udlrtv->cjltv", Renv, ao_B)
     # Final contraction
-    rdm = jnp.einsum("crjst,cjruv->stuv", Lenv_ao, Renv_ao)
+    rdm = einsum_promoted("crjst,cjruv->stuv", Lenv_ao, Renv_ao)
     # Transpose from (s1_ket, s1_bra, s2_ket, s2_bra) to
     # (s1_ket, s2_ket, s1_bra, s2_bra) for proper density matrix convention.
     rdm = rdm.transpose(0, 2, 1, 3)
@@ -277,16 +278,16 @@ def _rdm1x2_2site(
     # Env row 1: contract with T4_A (left) and T2_A (right)
     env_row1 = einsum_promoted("aue,alf,erg->ulfrg", top_row, env_A.T4, env_A.T2)
     # Contract with ao_A
-    site1 = jnp.einsum("ulfrg,udlrst->dfgst", env_row1, ao_A)
+    site1 = einsum_promoted("ulfrg,udlrst->dfgst", env_row1, ao_A)
 
     # Bottom row from env_B
     bot_row = einsum_promoted("hj,jqk,ik->hqi", env_B.C4, env_B.T3, env_B.C3)
     # Env row 2: contract with T4_B (left) and T2_B (right)
     env_row2 = einsum_promoted("hqi,fmh,gni->qfmgn", bot_row, env_B.T4, env_B.T2)
     # Contract with ao_B
-    site2 = jnp.einsum("qfmgn,pqmnwx->pfgwx", env_row2, ao_B)
+    site2 = einsum_promoted("qfmgn,pqmnwx->pfgwx", env_row2, ao_B)
     # Final: join the halves
-    rdm = jnp.einsum("dfgst,dfgwx->stwx", site1, site2)
+    rdm = einsum_promoted("dfgst,dfgwx->stwx", site1, site2)
     # Transpose from (s1_ket, s1_bra, s2_ket, s2_bra) to
     # (s1_ket, s2_ket, s1_bra, s2_bra) for proper density matrix convention.
     rdm = rdm.transpose(0, 2, 1, 3)
@@ -326,7 +327,7 @@ def compute_energy_ctm_2site(
         _rdm1x2_2site(A, B, env_A, env_B, d),
         _rdm1x2_2site(B, A, env_B, env_A, d),
     )
-    E = sum(jnp.einsum("ijkl,klij->", rdm, H) for rdm in rdms)
+    E = sum(einsum_promoted("ijkl,klij->", rdm, H) for rdm in rdms)
     # 4 bonds (2 that start on A + 2 that start on B) / 2 sites per cell.
     return 0.5 * E.real
 
