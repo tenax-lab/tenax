@@ -291,8 +291,8 @@ def test_a_collapsed_corner_says_so_out_loud(collapsed_runs):
     assert certified, [str(m) for m in runtime]
 
     # The strong diagnosis, and it must be reserved for this case: the corner
-    # is *still* rank-1, so "mean-field, will not respond to chi" is a claim
-    # about the environment being returned rather than about the comparison.
+    # is *still* rank-1, so the mean-field reading is a claim about the
+    # environment being returned rather than about the comparison.
     # Its twin
     # (``test_a_corner_blind_on_the_penultimate_sweep_still_warns``) asserts
     # the same phrase is absent when the corner recovered -- together they pin
@@ -527,7 +527,7 @@ def test_a_corner_blind_on_the_penultimate_sweep_still_warns(monkeypatch):
 
     # It must warn -- and it must not overclaim.  The returned corner is rank
     # > 1, so this environment is *uncertified*, not established to be bad.
-    # Calling it a mean-field number that will not respond to chi would invite
+    # Calling it a mean-field boundary that does not respond to chi would invite
     # callers to discard a healthy environment, which is the opposite of what
     # the warning is for (#903 review, P2 round 3).
     text = str(rec[0].message)
@@ -578,7 +578,8 @@ def test_each_coordinate_gets_only_the_diagnosis_it_licenses(
     """
     from tenax.algorithms._ctm_tensor_convergence import _blind_corner_message
 
-    text = _blind_corner_message(blind, collapsed)
+    # chi=4: at chi=1 a corner still at rank 1 has its own text (tested below).
+    text = _blind_corner_message(blind, collapsed, chi=4)
 
     # Each clause opens with "The corner at <coords>", so splitting on that
     # lead-in puts every coordinate in the same segment as its own diagnosis.
@@ -624,6 +625,294 @@ def test_each_coordinate_gets_only_the_diagnosis_it_licenses(
 
 
 # --------------------------------------------------------------------- #
+# Why a corner is blind: chi=1, a broken corner, or rank 1 above chi=1  #
+# --------------------------------------------------------------------- #
+
+
+def _clause_with(text, marker):
+    """The one per-corner clause of the blind message that contains ``marker``.
+
+    Every per-corner clause opens with "The corner at <coords>", so a split on
+    that lead-in gives one segment per clause after the header.  The tests
+    assert on the segment, not on the whole text, because the header names
+    every cause in general terms: only the segment ties a corner to its cause.
+    """
+    segments = [s for s in text.split("The corner at ")[1:] if marker in s]
+    assert len(segments) == 1, f"expected one clause with {marker!r}: {text}"
+    return segments[0]
+
+
+@pytest.mark.core
+def test_at_chi_1_the_message_says_raise_chi_not_collapse():
+    """At ``chi=1`` rank 1 is forced, so the collapse text is false there.
+
+    Every corner is a 1x1 matrix at ``chi=1``, so its sum-normalised spectrum
+    is ``[1]`` however the environment moves, and the criterion is blind for
+    any state with ``D > 1`` (``_forced_corner_rank``, #903 review P1 round
+    2).  The text for a corner still at rank 1 above ``chi=1`` describes a
+    collapse whose energy does not respond to chi.  At ``chi=1`` the energy can
+    respond: the uniform state of ``test_ipeps_2site_energy.py`` gives
+    -0.64987 at chi 1 and -0.65431 at chi 2.  It can also move with
+    ``max_iter`` alone: decoupled chains give the same energy at chi 1 and 4,
+    0.17812 after 2 sweeps and 0.18623 after 10
+    (``test_a_rank_1_corner_does_not_mean_a_converged_energy``).  So the text
+    advises a larger chi, the only way to a corner the criterion can read, and
+    a second budget.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import _blind_corner_message
+
+    coords = {(0, 0), (1, 0)}
+    text = _blind_corner_message(coords, coords, chi=1)
+
+    clause = _clause_with(text, "1x1")
+    for c in coords:
+        assert str(c) in clause, text
+    assert "Raise chi" in clause, text
+    assert "two values of max_iter" in clause, text
+    for claim in ("STILL rank", "mean-field", "respond to chi"):
+        assert claim not in text, f"{claim!r} is false at chi=1: {text}"
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("chi", [1, 4])
+def test_a_zero_or_non_finite_corner_is_called_broken_not_rank_1(chi):
+    """A corner with no spectrum to read gets its own text (#903).
+
+    ``_spectrum_is_uninformative`` refuses a zero or non-finite spectrum as
+    well as a rank-1 one, and the loop put all of them in the "STILL rank <= 1
+    ... mean-field number" clause.  A NaN environment gives no mean-field
+    number, and at ``chi=1`` a larger chi is not the known cure.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import _blind_corner_message
+
+    coords = {(0, 0), (1, 0)}
+    text = _blind_corner_message(coords, coords, broken=coords, chi=chi)
+
+    clause = _clause_with(text, "zero or non-finite")
+    for c in coords:
+        assert str(c) in clause, text
+    for claim in ("STILL rank", "mean-field", "Raise chi", "1x1"):
+        assert claim not in text, f"{claim!r} does not fit a broken corner: {text}"
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "chi,blind,collapsed,broken,cause_of",
+    [
+        (
+            4,
+            {(0, 0), (1, 0), (0, 1)},
+            {(0, 0), (1, 0)},
+            {(0, 0)},
+            {
+                (0, 0): "zero or non-finite",
+                (1, 0): "STILL rank",
+                (0, 1): "earlier sweep",
+            },
+        ),
+        (
+            1,
+            {(0, 0), (1, 0)},
+            {(0, 0), (1, 0)},
+            {(1, 0)},
+            {(1, 0): "zero or non-finite", (0, 0): "1x1"},
+        ),
+    ],
+)
+def test_each_corner_is_named_only_with_its_own_cause(
+    chi, blind, collapsed, broken, cause_of
+):
+    """One sweep can hold several causes, and each corner gets only its own.
+
+    The per-coordinate rule of
+    ``test_each_coordinate_gets_only_the_diagnosis_it_licenses``, with the two
+    new causes: a broken corner and the forced rank of ``chi=1``.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import _blind_corner_message
+
+    text = _blind_corner_message(blind, collapsed, broken=broken, chi=chi)
+
+    for c, cause in cause_of.items():
+        clause = _clause_with(text, cause)
+        assert str(c) in clause, f"{c} must be named with {cause!r}: {text}"
+        for other, other_cause in cause_of.items():
+            if other_cause != cause:
+                assert str(other) not in clause, (
+                    f"{other} must not be named with {cause!r}: {text}"
+                )
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("chi", [2, 12])
+def test_rank_1_above_chi_1_names_the_exact_case_and_the_collapse(chi):
+    """Above ``chi=1`` a rank-1 corner is exact or collapsed: the text gives both.
+
+    The criterion can decide neither, and neither is a fact about the energy:
+
+    * the dimer state of ``test_ipeps_2site_energy.py`` keeps rank-1 corners at
+      every budget, and its energy is exact;
+    * decoupled chains keep exact rank-1 corners while their edge tensors
+      still converge, so the energy moves with ``max_iter``
+      (``test_a_rank_1_corner_does_not_mean_a_converged_energy``);
+    * the pair of this file's ``_collapsing_pair`` keeps rank-1 corners, and
+      its energy reaches one value, the same at every ``max_iter`` from 60 to
+      240 and every ``chi`` from 8 to 24 (``_E_DENSE_2X2`` in
+      ``test_ctm_670_symmetric_2x2.py``) -- so "NOT a converged fixed point"
+      is false there, whatever the state is.
+
+    So the clause names both readings as possibilities, and the check that
+    tells a moving energy from a settled one.
+    """
+    from tenax.algorithms._ctm_tensor_convergence import _blind_corner_message
+
+    text = _blind_corner_message({(0, 0)}, {(0, 0)}, chi=chi)
+
+    clause = _clause_with(text, "STILL rank <= 1")
+    assert "(0, 0)" in clause, text
+    assert "no correlation crosses that corner" in clause, text
+    assert "collapse" in clause and "mean-field" in clause, text
+    assert "two values of max_iter" in clause, text
+    for claim in ("NOT a converged fixed point", "energy is then exact"):
+        assert claim not in clause, f"{claim!r} is not known here: {text}"
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "sv,broken",
+    [
+        ([1.0, 0.5], False),
+        ([1.0, 0.0, 0.0], False),  # rank 1 is a low rank, not a broken corner
+        ([0.0, 0.0], True),
+        ([float("nan"), 1.0], True),
+        ([1.0, 0.5, float("nan")], True),  # non-finite in the tail only (#903)
+        ([float("inf"), 1.0], True),
+        ([], True),
+    ],
+)
+def test_a_broken_spectrum_is_one_with_nothing_to_read(sv, broken):
+    """Zero, empty or non-finite: the spectra the healthy test refuses (#903)."""
+    from tenax.algorithms._ctm_tensor_convergence import _spectrum_is_broken
+
+    assert _spectrum_is_broken(jnp.asarray(sv, dtype=jnp.float64)) is broken
+
+
+def _blind_warning_text(rec):
+    """The text of the one "could not be certified" warning in ``rec``."""
+    texts = [str(w.message) for w in rec if "could not be certified" in str(w.message)]
+    assert len(texts) == 1, [str(w.message)[:80] for w in rec]
+    return texts[0]
+
+
+@pytest.mark.core
+def test_the_loop_gives_the_chi_1_text_at_chi_1():
+    """End to end: the multisite loop passes its ``chi`` to the message.
+
+    On eb30e700 this run gave the text for a corner still at rank 1, with
+    "will not respond to chi".
+    """
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+    from tests._su_fixtures import physical_su_d2
+
+    A = physical_su_d2()
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        ctm_tensor_2site(A, A, chi=1, max_iter=3, conv_tol=1e-9, recipe="2x2")
+
+    text = _blind_warning_text(rec)
+    clause = _clause_with(text, "1x1")
+    assert "(0, 0)" in clause and "(1, 0)" in clause, text
+    assert "STILL rank" not in text and "respond to chi" not in text, text
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("kind", ["zero", "nan"])
+def test_the_loop_calls_a_zero_or_nan_corner_broken(kind):
+    """End to end: the multisite loop finds a broken corner and says so.
+
+    An all-zero site tensor gives all-zero corners, and one NaN entry gives
+    non-finite ones.  On eb30e700 both runs gave the text for a corner still at
+    rank 1, with "mean-field number".
+    """
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+    from tenax.core.tensor import DenseTensor
+    from tests._su_fixtures import physical_su_d2
+
+    A = physical_su_d2()
+    data = np.array(A.todense())
+    if kind == "zero":
+        data[...] = 0.0
+    else:
+        data[0, 0, 0, 0, 0] = np.nan
+    bad = DenseTensor(jnp.asarray(data), A.indices)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        ctm_tensor_2site(bad, bad, chi=4, max_iter=3, conv_tol=1e-9, recipe="2x2")
+
+    text = _blind_warning_text(rec)
+    clause = _clause_with(text, "zero or non-finite")
+    assert "(0, 0)" in clause and "(1, 0)" in clause, text
+    assert "STILL rank" not in text and "mean-field" not in text, text
+
+
+def _decoupled_chain_pair(seed=7):
+    """Decoupled horizontal chains, D=2: the u and d legs carry only index 0.
+
+    No correlation crosses a corner of this state, so its corners are exactly
+    rank 1 at any chi.  Its edge tensors are the chains' boundary vectors,
+    which a CTM sweep reaches only by power iteration.
+    """
+    from tenax.core.tensor import DenseTensor
+    from tests._su_fixtures import physical_su_d2
+
+    # (u, d, l, r, phys), D=2 and d=2, trivial charges.
+    indices = physical_su_d2().indices
+    pair = []
+    for key in jax.random.split(jax.random.PRNGKey(seed)):
+        data = (
+            jnp.zeros((2, 2, 2, 2, 2)).at[0, 0].set(jax.random.normal(key, (2, 2, 2)))
+        )
+        pair.append(DenseTensor(data / jnp.linalg.norm(data), indices))
+    return pair
+
+
+@pytest.mark.core
+def test_a_rank_1_corner_does_not_mean_a_converged_energy():
+    """Exact rank-1 corners, and an energy that still moves with ``max_iter``.
+
+    The corners of decoupled chains are exactly rank 1, so every comparison is
+    blind.  The edge tensors still converge: at chi=4 the energy is 0.17812
+    after 2 sweeps and 0.18623 after 10 (chi=1 gives the same numbers).  A text
+    that called this energy exact would be wrong by 8e-3 after 2 sweeps, so the
+    clause must point to a second budget.
+    """
+    import tenax
+    from tenax.algorithms._ctm_diagnostics import ctm_corner_rank
+    from tenax.algorithms._ctm_tensor_convergence import ctm_tensor_2site
+    from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor_2site
+
+    A, B = _decoupled_chain_pair()
+    energy, text = {}, {}
+    for max_iter in (2, 10):
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            eA, eB = ctm_tensor_2site(
+                A, B, chi=4, max_iter=max_iter, conv_tol=1e-10, recipe="2x2"
+            )
+        # Regime: the corners are rank 1 at both budgets.
+        assert (ctm_corner_rank(eA), ctm_corner_rank(eB)) == (1, 1), max_iter
+        energy[max_iter] = float(
+            compute_energy_ctm_tensor_2site(A, B, eA, eB, tenax.heisenberg_gate(), 2)
+        )
+        text[max_iter] = _blind_warning_text(rec)
+
+    # Regime: the energy still moves between the two budgets.
+    assert abs(energy[10] - energy[2]) > 1e-3, energy
+    clause = _clause_with(text[2], "STILL rank <= 1")
+    assert "(0, 0)" in clause and "(1, 0)" in clause, text[2]
+    assert "two values of max_iter" in clause, text[2]
+
+
+# --------------------------------------------------------------------- #
 # A genuinely rank-1 fixed point is not a collapse                      #
 # --------------------------------------------------------------------- #
 
@@ -636,7 +925,7 @@ def test_each_coordinate_gets_only_the_diagnosis_it_licenses(
         # singular value, so rank 1 IS full rank -- there is nothing the
         # criterion is failing to see.
         ([1.0, 0.0, 0.0, 0.0], 1, False, "D=1 padded to chi=4: full rank"),
-        ([1.0], 1, False, "chi=1: full rank"),
+        ([1.0], 1, False, "D=1 at chi=1: full rank"),
         # The defect #898 targets: the corner COULD have carried 4, and does
         # not.  That is a collapse and must still fail closed.
         ([1.0, 0.0, 0.0, 0.0], 4, True, "rank 1 of an attainable 4: collapsed"),
@@ -653,15 +942,17 @@ def test_full_attainable_rank_is_not_a_collapse(sv, max_rank, uninformative, why
 
     The guard equated rank-1 with collapse.  For ``D=1`` -- an exact product
     state, which this project supports and tests -- every corner is
-    legitimately rank 1 *at the exact fixed point*, and so is any ``chi=1``
-    environment.  Those states could therefore never converge: measured before
-    this fix, ``ctm(D=1, chi=4, max_iter=20)`` returned ``converged=False``
-    with ``diff=inf`` after burning the full budget, and ``_ctm_sv_diff(sv, sv)``
+    legitimately rank 1 *at the exact fixed point*.  Those states could
+    therefore never converge: measured before this fix,
+    ``ctm(D=1, chi=4, max_iter=20)`` returned ``converged=False`` with
+    ``diff=inf`` after burning the full budget, and ``_ctm_sv_diff(sv, sv)``
     -- a spectrum against *itself* -- returned ``inf``.
 
     What distinguishes the two is not the rank but whether a higher rank was
-    available: ``min(chi, D_doublelayer)``.  The comparison is blind only when
-    the corner could have carried more and does not.
+    available: ``_forced_corner_rank(D_doublelayer)``.  The comparison is blind
+    only when the corner could have carried more and does not.  ``chi`` is not
+    part of the bound (round 2 of the review): at ``chi=1`` with ``D > 1`` the
+    comparison stays blind (``test_the_rank_ceiling_comes_from_the_state_not_from_chi``).
     """
     from tenax.algorithms._ctm_tensor_convergence import _spectrum_is_uninformative
 

@@ -618,22 +618,12 @@ def ipeps(
             # infinite criterion here means a compared spectrum could not show
             # change: rank <= 1 below what the state can reach, or zero or
             # non-finite.  Whether more sweeps can help differs per corner,
-            # and only the loop knows which corners recovered: quote its
-            # diagnosis.  Not at chi=1: every corner is 1x1 there, so rank 1
-            # whatever the state does (``_forced_corner_rank``), and the
-            # loop's "will not respond to chi" is false.
-            if config.ctm.chi == 1:
-                advice = (
-                    ". At chi=1 every corner is a 1x1 matrix, whose "
-                    "sum-normalised spectrum is [1] however the environment "
-                    "moves, so no number of sweeps can certify it (#898). "
-                    "Raise chi."
-                )
-            else:
-                advice = (
-                    f". The CTM loop reports (A is site (0, 0), B is site "
-                    f"(1, 0)): {ctm_detail}"
-                )
+            # and only the loop knows which corners recovered, which are
+            # broken, and whether chi=1 forces rank 1: quote its diagnosis.
+            advice = (
+                f". The CTM loop reports (A is site (0, 0), B is site "
+                f"(1, 0)): {ctm_detail}"
+            )
         else:
             advice = (
                 " and may not be a converged value -- it can move with "
