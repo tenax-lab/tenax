@@ -10,14 +10,20 @@ then gave 0 (``test_raw_rdm_peak_array.py``).  Measured on that transpose
 (float32, a one-hot input): 2**31 entries are correct and 2**31 + 4096 entries
 are zeros, so the check refuses 2**31 entries and more.
 
+``ipeps()`` knows the largest array of its energy step from chi, D and d, so
+on CPU it compares that bound with the limit before its simple update, and
+raises at once rather than after the run.
+
 No test makes an array of 2**31 entries.  The tests trace with
-``jax.eval_shape``, or call on small operands.  The refusals pin the CPU
-device, so they hold on a machine whose default device is a GPU.
+``jax.eval_shape``, or call on small operands, or lower the limit.  The
+refusals pin the CPU device, so they hold on a machine whose default device is
+a GPU.
 """
 
 from __future__ import annotations
 
 import ast
+import importlib
 import math
 from pathlib import Path
 
@@ -28,9 +34,10 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from tenax.algorithms import _einsum_compat
+from tenax.algorithms import _einsum_compat, ipeps_rdm
 from tenax.algorithms._einsum_compat import einsum_promoted
-from tenax.algorithms.ipeps_config import CTMEnvironment
+from tenax.algorithms.ipeps import ipeps
+from tenax.algorithms.ipeps_config import CTMConfig, CTMEnvironment, iPEPSConfig
 from tenax.algorithms.ipeps_excitations import (
     _rdm1x2_with_open_tensors,
     _rdm2x1_with_open_tensors,
@@ -41,6 +48,11 @@ from tenax.algorithms.ipeps_rdm import (
     _rdm2x1,
     _rdm2x1_2site,
 )
+
+# The module, not the function: ``tenax.algorithms`` caches its lazy names, so
+# after ``from tenax.algorithms import ipeps`` has run before the submodule
+# loaded, ``import tenax.algorithms.ipeps as m`` gives the function ``ipeps``.
+ipeps_module = importlib.import_module("tenax.algorithms.ipeps")
 
 LIMIT = 2**31
 SD = jax.ShapeDtypeStruct
@@ -224,14 +236,6 @@ def _traced_builder(builder, chi, D, d):
     return jax.eval_shape(lambda *a: builder(*a, d), *args).shape
 
 
-def _network_bound(chi, D, d):
-    """Entries in the largest array of a raw RDM builder, as
-    ``_network_bound`` of ``test_raw_rdm_peak_array.py``: the double-layer
-    site, D^8 d^2; a boundary row with three D^2 legs open, chi^2 D^6; a half
-    network with one site absorbed, chi^2 D^2 d^2; and the RDM, d^4."""
-    return max(D**8 * d**2, chi**2 * D**6, chi**2 * D**2 * d**2, d**4)
-
-
 @pytest.mark.parametrize(
     "D,d,first",
     [
@@ -246,13 +250,172 @@ def test_rdm_builders_refuse_from_the_first_chi_past_the_limit(
     on_cpu, builder, D, d, first
 ):
     """Every raw builder passes at ``first - 1`` and is refused at ``first``,
-    the first chi whose network bound has 2**31 entries.  The guide quotes
-    both values of ``first``."""
-    assert _network_bound(first - 1, D, d) < LIMIT <= _network_bound(first, D, d)
+    the first chi whose bound, ``_raw_rdm_peak_entries``, has 2**31 entries.
+    The guide quotes both values of ``first``."""
+    bound = ipeps_rdm._raw_rdm_peak_entries
+    assert bound(first - 1, D, d) < LIMIT <= bound(first, D, d)
     assert _traced_builder(builder, first - 1, D, d) == (d,) * 4
-    size = _network_bound(first, D, d)
+    size = bound(first, D, d)
     with pytest.raises(ValueError, match=rf"{size:,d} entries.*#1193"):
         _traced_builder(builder, first, D, d)
+
+
+# One shape for each term of the bound, (chi, D, d), with the index of the
+# term that is the largest there: the double-layer site D^8 d^2, a boundary
+# row chi^2 D^6, a half network chi^2 D^2 d^2, and the RDM d^4.
+_REGIMES = [
+    pytest.param(2, 3, 2, 0, id="site"),  # 26244, 2916, 144, 16
+    pytest.param(8, 2, 2, 1, id="boundary-row"),  # 1024, 4096, 1024, 16
+    pytest.param(8, 1, 5, 2, id="half-network"),  # 25, 64, 1600, 625
+    pytest.param(2, 1, 6, 3, id="rdm"),  # 36, 4, 144, 1296
+]
+
+
+@pytest.mark.parametrize("chi,D,d,term", _REGIMES)
+@pytest.mark.parametrize("builder", BUILDERS, ids=lambda b: b.__name__)
+def test_the_bound_is_the_largest_array_of_every_builder(
+    on_cpu, monkeypatch, builder, chi, D, d, term
+):
+    """With the limit lowered to the bound, every builder is refused and the
+    message gives the bound; with one entry more, it passes.  So the bound is
+    the largest array of each builder, at a shape where each term in turn is
+    the largest."""
+    terms = [D**8 * d**2, chi**2 * D**6, chi**2 * D**2 * d**2, d**4]
+    assert sorted(terms)[-2] < terms[term] == max(terms)
+    bound = ipeps_rdm._raw_rdm_peak_entries(chi, D, d)
+    monkeypatch.setattr(_einsum_compat, "_CPU_SIZE_LIMIT", bound)
+    with pytest.raises(ValueError, match=rf"{bound:,d} entries.*#1193"):
+        _traced_builder(builder, chi, D, d)
+    monkeypatch.setattr(_einsum_compat, "_CPU_SIZE_LIMIT", bound + 1)
+    assert _traced_builder(builder, chi, D, d) == (d,) * 4
+
+
+class _SweepRan(Exception):
+    """The stub simple update ran: ``ipeps()`` got past its size check."""
+
+
+def _stub_sweep(monkeypatch):
+    """Replace the simple update of ``ipeps()`` with a stub that raises
+    ``_SweepRan``."""
+
+    def sweep(*args, **kw):
+        raise _SweepRan
+
+    monkeypatch.setattr(ipeps_module, "_simple_update_checkerboard_sweep", sweep)
+
+
+def _small_ipeps(monkeypatch, limit, gate=None, **kwargs):
+    """``ipeps()`` at chi = 9, D = 2 and d = 5, with the CPU limit lowered to
+    ``limit`` and the simple update replaced by a stub that raises
+    ``_SweepRan``.  The gate is zero by default: the run stops before the
+    gate acts.  The energy step of this run holds 8100 entries at most, in
+    the half network, chi^2 D^2 d^2."""
+    monkeypatch.setattr(_einsum_compat, "_CPU_SIZE_LIMIT", limit)
+    _stub_sweep(monkeypatch)
+    config = iPEPSConfig(max_bond_dim=2, num_imaginary_steps=1, ctm=CTMConfig(chi=9))
+    gate = jnp.zeros((5,) * 4) if gate is None else gate
+    return ipeps(gate, None, config, **kwargs)
+
+
+def test_ipeps_refuses_before_the_simple_update(on_cpu, monkeypatch):
+    """On CPU, ``ipeps()`` compares the bound of its energy step with the
+    limit before the simple update runs, and the message names the ways out.
+    With ``below-the-limit`` below, it pins the bound of this run at 8100."""
+    bound = ipeps_rdm._raw_rdm_peak_entries
+    # chi, D and d each change the bound at this shape, so the message shows
+    # which values ipeps() gives to the bound.
+    assert bound(9, 2, 5) == 8100
+    assert 8100 not in (bound(2, 2, 5), bound(9, 5, 2), bound(9, 2, 2))
+    with pytest.raises(
+        ValueError,
+        match=r"chi=9, D=2 and d=5.* 8,100 entries.*#1193.*compute_energy=False",
+    ):
+        _small_ipeps(monkeypatch, 8100)
+
+
+@pytest.mark.parametrize(
+    "limit,kwargs,platform",
+    [
+        pytest.param(8101, {}, "cpu", id="below-the-limit"),
+        pytest.param(8100, {"compute_energy": False}, "cpu", id="no-energy-step"),
+        pytest.param(8100, {}, "gpu", id="off-cpu"),
+    ],
+)
+def test_ipeps_runs_when_its_energy_step_is_allowed(
+    on_cpu, monkeypatch, limit, kwargs, platform
+):
+    """Below the limit, with ``compute_energy=False`` (no CTM and no energy
+    step), or off CPU, ``ipeps()`` goes on to its simple update."""
+    monkeypatch.setattr(_einsum_compat, "_call_platform", lambda *args: platform)
+    with pytest.raises(_SweepRan):
+        _small_ipeps(monkeypatch, limit, **kwargs)
+
+
+def _platform_by_commitment(committed, default):
+    """A ``_call_platform`` with its own rule, the platform of a committed
+    leaf and else that of the default device, but with the two platforms
+    named by the test: this host has a CPU only."""
+
+    def platform(args, kwargs, pinned):
+        leaves = jax.tree.leaves((args, kwargs))
+        if any(getattr(x, "committed", False) for x in leaves):
+            return committed
+        return default
+
+    return platform
+
+
+@pytest.mark.parametrize(
+    "committed,default,expected",
+    [
+        pytest.param("cpu", "gpu", ValueError, id="gate-on-cpu"),
+        pytest.param("gpu", "cpu", _SweepRan, id="gate-on-other-platform"),
+    ],
+)
+def test_ipeps_reads_the_platform_of_the_gate_too(
+    on_cpu, monkeypatch, committed, default, expected
+):
+    """The sites of a random start are not committed, so the simple update
+    runs where a committed gate is.  The check reads that platform: a gate
+    on CPU is checked when the default device is not a CPU, and a gate on
+    another platform is not checked when it is."""
+    monkeypatch.setattr(
+        _einsum_compat, "_call_platform", _platform_by_commitment(committed, default)
+    )
+    gate = jax.device_put(jnp.zeros((5,) * 4), jax.devices("cpu")[0])
+    assert gate.committed
+    with pytest.raises(expected):
+        _small_ipeps(monkeypatch, 8100, gate=gate)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param((np.int32(215), np.int32(6), np.int32(2)), id="int32"),
+        pytest.param((215.0, 6.0, 2.0), id="float"),
+    ],
+)
+def test_the_bound_is_a_python_int(args):
+    """An ``int32`` chi, D or d does not overflow, and the bound is an
+    ``int``, which the message formats with ``:,d``.  At chi = 215, D = 6
+    and d = 2 the boundary row has 2,156,673,600 entries, past the int32
+    range."""
+    size = ipeps_rdm._raw_rdm_peak_entries(*args)
+    assert type(size) is int
+    assert size == 2_156_673_600
+
+
+def test_ipeps_refuses_at_the_real_limit_with_an_int32_chi(on_cpu, monkeypatch):
+    """At the real limit, ``ipeps()`` refuses chi = 215 at D = 6 and d = 2,
+    the first refused chi of the guide, also when chi is an ``np.int32``."""
+    _stub_sweep(monkeypatch)
+    config = iPEPSConfig(
+        max_bond_dim=6, num_imaginary_steps=1, ctm=CTMConfig(chi=np.int32(215))
+    )
+    with pytest.raises(
+        ValueError, match=r"chi=215, D=6 and d=2.* 2,156,673,600 entries"
+    ):
+        ipeps(jnp.zeros((2,) * 4), None, config)
 
 
 def _einsum_calls(path: Path, base: str | None, name: str) -> list[int]:

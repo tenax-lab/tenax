@@ -38,6 +38,21 @@ def _build_double_layer_open(A: jax.Array) -> jax.Array:
     raise ValueError("_build_double_layer_open requires a 5-leg tensor")
 
 
+def _raw_rdm_peak_entries(chi: int, D: int, d: int) -> int:
+    """Entries in the largest array of a raw RDM builder.
+
+    The largest of four: the double-layer site with its physical legs open,
+    D^8 d^2; a boundary row with its three D^2 legs open, chi^2 D^6; a half
+    network with one site absorbed, chi^2 D^2 d^2; and the RDM, d^4.  On CPU,
+    ``einsum_promoted`` refuses a contraction that holds 2**31 entries or more
+    (#1193), and ``ipeps()`` compares this bound with that limit before its
+    simple update.  The arguments become ``int`` first, so an ``np.int32``
+    chi does not overflow and the bound is an ``int``.
+    """
+    chi, D, d = int(chi), int(D), int(d)
+    return max(D**8 * d**2, chi**2 * D**6, chi**2 * D**2 * d**2, d**4)
+
+
 def _rdm2x1(A: jax.Array, env: CTMEnvironment, d: int) -> jax.Array:
     """Horizontal 2-site reduced density matrix from CTM environment.
 

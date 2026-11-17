@@ -86,15 +86,21 @@ $\max(D^8 d^2, \chi^2 D^6, \chi^2 D^2 d^2, d^4)$ entries: the double-layer
 site, a boundary row with its three $D^2$ legs open, a half network with one
 site absorbed, and the RDM. So for d = 27 and D = 2 the builders refuse from
 chi = 859 (the half network), and for d = 2 and D = 6 from chi = 215 (the
-boundary row). `ipeps()` computes its energy with `compute_energy_ctm_2site`
-as its last step, so a run past the limit raises after the simple update and
-the CTM have run, and its state is lost. Check the bound before a long run: use
-a smaller chi or D, or a GPU.
+boundary row).
+
+`ipeps()` computes its energy with `compute_energy_ctm_2site` as its last
+step. So on CPU, with `compute_energy=True`, it computes this bound before its
+simple update, from `config.ctm.chi`, `config.max_bond_dim` and the d of the
+gate. If the bound is `2**31` or more, it raises `ValueError` at once, and no
+time goes into a run that cannot give an energy. Use a smaller chi or D, or a
+GPU. Or pass `compute_energy=False`: then `ipeps()` returns the simple-update
+state, with no CTM, no energy and no size check.
 
 The check does not cover:
 
-- other contractions: the CTM moves, `compute_energy_ctm_tensor` (the energy
-  of the AD optimizers), `compute_spectrum` and `tenax.contraction`;
+- other contractions: the simple update (with `compute_energy=False` too), the
+  CTM moves, `compute_energy_ctm_tensor` (the energy of the AD optimizers),
+  `compute_spectrum` and `tenax.contraction`;
 - the batched arrays under `jax.vmap`, because the check sees the per-example
   shapes. `compute_excitations` vmaps its builders over the $D^4 d$ basis
   vectors;

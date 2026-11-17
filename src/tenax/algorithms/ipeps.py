@@ -27,9 +27,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms import _einsum_compat
 from tenax.algorithms.ipeps_config import CTMEnvironment, iPEPSConfig
 from tenax.algorithms.ipeps_ctm_convergence import _ctm_2site_via_2x2
-from tenax.algorithms.ipeps_rdm import compute_energy_ctm_2site
+from tenax.algorithms.ipeps_rdm import _raw_rdm_peak_entries, compute_energy_ctm_2site
 from tenax.algorithms.ipeps_simple_update import (
     _make_trotter_gate_tensor,
     _simple_update_checkerboard_sweep,
@@ -519,6 +520,18 @@ def ipeps(
         ``(None, (A, B), None)`` with ``compute_energy=False``.  ``env_A`` and
         ``env_B`` are raw-array ``CTMEnvironment`` named tuples, each field with
         its legs in the order ``CTMTensorEnv`` documents.
+
+    Raises:
+        TypeError: If ``initial_peps`` is neither a tuple nor ``None``.
+        ValueError: If a site of ``initial_peps`` has virtual bonds other than
+            ``config.max_bond_dim`` on the default simple-update path (#890).
+            Also on CPU with ``compute_energy=True``, before the simple
+            update, if the largest array of the energy step,
+            max(D^8 d^2, chi^2 D^6, chi^2 D^2 d^2, d^4) entries for
+            ``chi = config.ctm.chi`` and ``D = config.max_bond_dim``, has
+            2**31 entries or more (#1193).  Use a smaller chi or D, or a GPU;
+            or pass ``compute_energy=False``, which returns the simple-update
+            state with no CTM, no energy and no size check.
     """
     if initial_peps is not None and not isinstance(initial_peps, tuple):
         raise TypeError(
@@ -551,6 +564,23 @@ def ipeps(
         B_data = jax.random.normal(key_B, (D, D, D, D, d))
         A = _wrap_as_dense_tensor(A_data)
         B = _wrap_as_dense_tensor(B_data)
+
+    # On CPU the energy step refuses a contraction of 2**31 entries or more
+    # (#1193).  Its largest array follows from chi, D and d, so refuse here,
+    # before the simple update, and not after the whole run.  The run goes
+    # where a committed site or gate is, so the platform test reads all three.
+    if compute_energy and _einsum_compat._on_cpu((A, B, hamiltonian_gate)):
+        chi = config.ctm.chi
+        size = _raw_rdm_peak_entries(chi, D, d)
+        if size >= _einsum_compat._CPU_SIZE_LIMIT:
+            raise ValueError(
+                f"ipeps(): at chi={chi}, D={D} and d={d}, the largest array of "
+                f"the energy step has {size:,d} entries, 2**31 or more.  XLA on "
+                "CPU returns zeros, and raises no error, when it transposes "
+                "some arrays this large (#1193), so the energy step refuses "
+                "it.  Use a smaller chi or D, or a GPU; or pass "
+                "compute_energy=False to get the simple-update state alone."
+            )
 
     # Normalize
     norm_A = float(A.norm())
