@@ -841,9 +841,10 @@ higher by 7.6e-4 at step 17 and by 1.0e-2 at step 27.
 The configurations below, one per path, in one script. Each runs on the
 square-lattice Heisenberg gate; `examples/heisenberg_ipeps_ad.py` compares
 random vs simple-update initialization, and
-`examples/heisenberg_ipeps_excitations.py` computes the full excitation
-spectrum along Gamma-X-M-Gamma. The root-implicit configuration is under
-{ref}`root-implicit-ad`.
+`examples/heisenberg_ipeps_excitations.py` optimizes the D=2 state with the
+recommended configuration and computes its spectrum and spectral weights at
+X, (0, pi) and M with `compute_spectrum`. The root-implicit configuration is
+under {ref}`root-implicit-ad`.
 
 ```python
 import jax.numpy as jnp
