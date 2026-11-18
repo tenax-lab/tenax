@@ -379,7 +379,9 @@ prefer `ctmrg_heuristic_increase_chi`.
 
 ### 2-site C4v shared-tensor configuration
 
-For Heisenberg-like AFMs, the shared-tensor C4v path is recommended:
+For Heisenberg-like AFMs, the shared-tensor C4v path is recommended. It
+needs the same simple-update start as the 1x1 block: with the defaults it
+raised `CTMNotConvergedError` at step 33 (2026-11-18).
 
 ```python
 config = iPEPSConfig(
@@ -394,6 +396,8 @@ config = iPEPSConfig(
     gs_optimizer="lbfgs",
     gs_num_steps=50,
     su_init=True,
+    num_imaginary_steps=200,
+    dt=0.05,
 )
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
 ```
