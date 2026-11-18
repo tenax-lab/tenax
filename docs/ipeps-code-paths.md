@@ -169,13 +169,13 @@ otherwise.  Explicit AD with QR projectors remains supported as a
 secondary path (see below).
 
 The trifecta describes the **fused fixed-point** implicit backward, so
-that is the only path it gates.  ``ctm_ad_mode="c4v_reference"`` and
-``ctm_ad_mode="root_implicit"`` select different engines with different
+that is the only path it gates.  ``ctm_ad_mode="c4v_reference"``,
+``"root_implicit"`` and ``"root_implicit_symmetric"`` select different engines with different
 requirements — the C4v sweep's own projector default is the isometric
 ``"eigh"``, and the root-implicit entry points read none of the three
-knobs — so ``optimize_gs_ad`` skips the check for those two modes and
+knobs — so ``optimize_gs_ad`` skips the check for those three modes and
 lets each engine validate itself (``validate_root_implicit_config`` for
-the latter).  Until this was scoped, a C4v-reference run with the
+the two root-implicit modes).  Until this was scoped, a C4v-reference run with the
 projector C4v actually wants was refused at config time.  Note that the
 PESS multisite path calls ``validate_ctm_for_implicit_ad`` directly and
 is unaffected: it runs the fused backward and keeps all three rules.
@@ -445,9 +445,10 @@ gradient) is above that line search's φ0, the optimizer rolls back to
 ``best_params`` and clears its history.  ``gs_stall_recovery_retries + 1``
 consecutive rejections end the run with ``best_params``.
 
-The 2-site L-BFGS path still has a separate convergence gap at
-χ=8 (reaches only ``E ≈ -0.558`` vs literature ``-0.6548``) that is
-**not** a stall-recovery problem — tracked by issue #299.
+Issue #299 tracked a separate 2-site L-BFGS gap at χ=8 (``E ≈ -0.558``
+against the literature ``-0.6548``) that was **not** a stall-recovery
+problem.  PR #301 (adaptive Lorentzian broadening in the
+``regularized_eigh`` backward) closed it on 2026-04-12.
 
 ## Status Summary
 
