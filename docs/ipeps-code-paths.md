@@ -7,7 +7,9 @@ recommendations** (what config to use for a production AD run) see
 [`docs/guide/algorithms/ipeps_ad_paths.md`](guide/algorithms/ipeps_ad_paths.md).
 
 Paths marked **BROKEN** are known non-functional. Paths marked
-**EXPERIMENTAL** have not been validated at production scale.
+**EXPERIMENTAL** have not been validated at production scale. Paths marked
+**DEPRECATED** still run, but emit a ``DeprecationWarning`` that names the
+replacement.
 
 ## Pipeline Graph
 
@@ -141,6 +143,19 @@ Legend:
   x BROKEN    x  known broken / incomplete (issue #292)
   xxxxxxxxxxxxxx
 ```
+
+## Other Entry Points
+
+The graph above is the AD ground-state path.  These entry points sit beside
+it:
+
+| Entry point | What it runs | Files |
+|---|---|---|
+| ``ipeps()`` | The checkerboard simple update, then the CTM environments of the pair with the 2x2 recipe of ``ctm_tensor_2site`` (#1186), then the energy per site from the raw RDM builders of ``compute_energy_ctm_2site``: half the sum of the four bond energies of the cell.  ``compute_energy=False`` returns after the simple update.  On CPU, with ``compute_energy=True``, it raises before the simple update if the largest array of the energy step would hold ``2**31`` entries or more (#1201). | ``ipeps.py``, ``ipeps_simple_update.py``, ``ipeps_rdm.py`` |
+| ``ctm()``, ``ctm_2site()`` | **DEPRECATED** in 0.9.3 (#1183, #1186).  ``ctm()`` runs ``ctm_tensor(recipe="2x2")``, and ``ctm_2site()`` runs the 2x2 recipe of ``ctm_tensor_2site``.  ``ctm()`` returns one raw-array ``CTMEnvironment`` named tuple, and ``ctm_2site()`` returns a pair. | ``ipeps_ctm_convergence.py``, re-exported by ``ipeps_ctm.py`` |
+| ``ctm_split()`` | The raw-array split CTM (arXiv:2502.10298) of a 1x1 cell, with ``CTMConfig.chi_I``.  No library code calls it: the split AD path uses the Tensor-protocol split CTM, ``_split_ctm_tensor*.py``. | ``ipeps_ctm_convergence.py``, ``ipeps_ctm_moves.py`` |
+| ``compute_spectrum()``, ``spectral_function()`` | **EXPERIMENTAL.**  The excitation spectrum and spectral weights of a 1-site iPEPS on a 2x2 cell, from ``(H_k - E0 N_k) v = omega N_k v``.  Both matrices are mixed second derivatives of the energy and log-norm densities through the CTM, with the complete momentum sum (#1174).  Dense real ``float64`` ``A`` only, at ``k = (pi, 0)``, ``(0, pi)`` or ``(pi, pi)``; Gamma raises.  An optional ``gate_nnn`` adds a next-nearest-neighbour gate (#1175).  ``spectral_function`` gives the Lorentzian-broadened ``S(k, omega)`` of one operator.  Validation, cost and limits: [the excitations guide](guide/algorithms/ad_excitations.md). | ``ipeps_excitations.py``, ``_ipeps_excitation_ctm.py`` |
+| ``compute_excitations()`` | **DEPRECATED** (#1176): it truncates the momentum sum to nearest neighbours (#1052).  Use ``compute_spectrum``. | ``ipeps_excitations.py`` |
 
 ## Recommended Path (post-PR-#341)
 
@@ -422,6 +437,14 @@ a value below the expected variational minimum — any in-loop candidate
 energy at or below the floor is rejected as a non-variational CTM
 artifact. Both knobs are off / auto by default.
 
+Since #1166 the standard 1-site, 2-site and multisite dispatchers also check
+each line-search accept (``gs_reject_energy_rise``, default ``True``).  The φ probe that accepts a
+step is a forward-only CTM, and it can stop on a plateau below the fixed
+point.  If the converged energy of the step (the forward of the next
+gradient) is above that line search's φ0, the optimizer rolls back to
+``best_params`` and clears its history.  ``gs_stall_recovery_retries + 1``
+consecutive rejections end the run with ``best_params``.
+
 The 2-site L-BFGS path still has a separate convergence gap at
 χ=8 (reaches only ``E ≈ -0.558`` vs literature ``-0.6548``) that is
 **not** a stall-recovery problem — tracked by issue #299.
@@ -438,7 +461,7 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | 2-site shared-tensor C4v          | **Working**      | ``unit_cell="2site"`` + ``gs_c4v=True``; spin-1/2 only (PR #304).  |
 | 2-site independent A/B            | **EXPERIMENTAL** | Unconstrained 2-site AD; needs ``complex128`` site tensors to stay variational (real ``float64`` drifts non-variationally — see ``project_complex_tensors_variational`` notes / PR #341). |
 | Reference-mode C4v AD             | **Working**      | ``ctm_ad_mode="c4v_reference"``; dense 1-site C4v only (PR #304).  |
-| Root-implicit AD                  | **Working**      | ``ctm_ad_mode="root_implicit"`` (arXiv:2607.15030); dense 1x1 asymmetric engine only (PR #773) -- ``unit_cell`` other than ``"1x1"`` raises ``NotImplementedError`` (the multisite engine is built and tested but not yet wired, see ``ipeps_optimize_root_implicit.py:197``). |
+| Root-implicit AD                  | **Working**      | ``ctm_ad_mode="root_implicit"`` (arXiv:2607.15030): the dense 1x1 engine (PR #773), or with ``unit_cell="2site"`` the dense checkerboard cell engine (#894, PR #1005); a general ``Lattice`` raises ``NotImplementedError``. ``ctm_ad_mode="root_implicit_symmetric"``: the 1x1 symmetric (bosonic abelian) engine. No engine takes fermionic tensors (#1059). |
 | QR-CTMRG (C4v)                    | **Working**      | Best-scaling projector at D=2 for explicit AD; recommended for ``chi ≥ 16`` on the explicit path. Implicit AD requires ``"svd"``. |
 | Phase gauge (``forward_gauge``)   | **Working**      | variPEPS-style Frobenius + first-above-threshold phase fix per absorption. What the ``"auto"`` default runs with ``chi_ramp``; what it resolves to on explicit AD, split CTM and ``ctm_ad_mode``, though the explicit and split energies apply no forward gauge (#1074); explicit opt-out on implicit AD. |
 | Bond-phase gauge (``forward_gauge``) | **Working**   | Phase fix + per-chi-index sign/phase aligned to the previous env (#841). What the ``"auto"`` default runs on the fused implicit-AD path; refused (when set explicitly) elsewhere. |
@@ -455,9 +478,14 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | Adjoint Arnoldi precheck          | **Working**      | ``adjoint_arnoldi_precheck=True`` (default) probes ``J^T``'s spectral radius before the Krylov solve; falls back to a regularized solve when ``> adjoint_arnoldi_threshold`` (default 5.0). |
 | Adjoint Tikhonov damping          | **Working**      | ``adjoint_tikhonov`` (default ``1e-6``) adds ``+τI`` to ``(I − J^T)`` to prevent Krylov stalls near a well-converged GS. |
 | Auto-χ_E bump (variPEPS §2.8.2)  | **Working**      | ``CTMConfig(chi_auto_bump=True, chi_auto_bump_eps=1e-5, chi_auto_bump_step=2, chi_max=N)``. Dense single-site path only; SymmetricTensor + multisite are follow-up issues. |
-| Split CTM forward (SU)            | **Working**      | Used by simple update.                                             |
+| Split CTM forward (raw arrays)    | **Working**      | ``ctm_split()``; no library code calls it (see Other Entry Points). |
 | Split CTM + implicit diff         | **Working** (single-site, dense) | ``CTMConfig(fuse_virtual_legs=False)`` + ``unit_cell="1x1"`` routes the whole 1-site ``optimize_gs_ad`` through the split χ²·D⁴ forward, on either ``gs_recipe`` (the default ``"2x2"`` since #746, or ``"1x1"`` -- which collapses the environment to rank-1 corners and is bisection-only, see #726) (warm-start, line-search probe, final env all split-aware; returns a ``SplitCTMTensorEnv``). Γ-gauge-fixed fixed-point ``custom_vjp`` with Neumann backward (``ctm_energy_split_implicit``); env_init warm-start carries zero cotangent. Implicit grad matches the trusted explicit grad to ~1e-12. Dense ``DenseTensor`` only (``SymmetricTensor`` input refused; symmetric iPEPS uses the fused CTM); fixed χ (``chi_ramp`` / ``chi_auto_bump`` / ``ctmrg_heuristic_increase_chi`` rejected via ``validate_split_ctm_config``); memory win is large-D (D≳16). PR #648/#651/#652. |
 | Split CTM + explicit diff         | **Working** (single-site, dense) | ``ctm_energy_split_explicit`` (unrolled warmup+backprop). Also dispatched through ``optimize_gs_ad`` via ``fuse_virtual_legs=False`` + ``gs_implicit_ad=False``; the unrolled forward re-initializes each eval (no env_init warm-start yet). No ``jax.checkpoint``, higher memory than implicit. |
+| ``ipeps()`` (SU + CTM + energy)   | **Working**      | The 2x2 recipe of ``ctm_tensor_2site``, all four bonds (#1186). On CPU, refuses a ``2**31``-entry energy step before the simple update (#1201). |
+| ``ctm()`` / ``ctm_2site()``       | **DEPRECATED**   | Since 0.9.3 they run the 2x2 recipe of ``ctm_tensor`` / ``ctm_tensor_2site`` (#1183, #1186). |
+| Raw RDM builders on CPU           | **Working**      | The builders of ``compute_energy_ctm``, ``compute_energy_ctm_2site`` and ``compute_excitations`` refuse a contraction of ``2**31`` entries or more, because XLA on CPU can return zeros past that size (#1193, #1200). See the [gotchas](guide/gotchas.md). |
+| Excitation spectrum (``compute_spectrum``) | **EXPERIMENTAL** | Complete momentum sum (#1174); dense real 1-site ``A``; ``(pi, 0)``, ``(0, pi)`` and ``(pi, pi)`` only. Validation and cost: the [excitations guide](guide/algorithms/ad_excitations.md). |
+| ``compute_excitations``           | **DEPRECATED**   | Truncates the momentum sum to nearest neighbours (#1052, #1176). |
 | Fermionic iPEPS AD                | **EXPERIMENTAL** | Wraps ``SymmetricTensor`` as ``DenseTensor``. Fermionic Koszul twist (`bar_super()`) added in PR #361 fixes super-algebra sign issues that previously broke fermionic AD with non-trivial parity sectors. |
 | Coarse-grained iPEPS (honeycomb)  | **Working**      | ``cg_gates=honeycomb_cg_gates()`` + ``unit_cell="1x1"``; reuses square 1-site AD pipeline at ``d_eff=4`` (PR #352 / #353). |
 | Coarse-grained iPEPS (kagome)     | **Working**      | ``cg_gates=kagome_cg_gates()`` + ``unit_cell="1x1"``; reuses square 1-site AD pipeline at ``d_eff=8`` (PR #352 / #353). |
@@ -472,14 +500,14 @@ The 2-site L-BFGS path still has a separate convergence gap at
 | 2 | 8   | qr + phase + explicit AD (1-site C4v)       | -0.6610    | —                  |
 | 2 | 8   | svd + phase + implicit AD (2-site C4v)      | -0.6602    | —                  |
 | 3 | 16  | svd + phase + implicit AD (2-site C4v)      | -0.6521    | (50 steps, monotonic, 7.9 s/step) |
+| 2 | 16  | svd + phase + implicit AD (2-site, complex128, non-C4v) | -0.6406 | variational; ≈1 min/step on GPU |
+| — | —   | QMC exact                                   | -0.66944   | Sandvik, PRB 56, 11678 (1997) |
 
 Historical numbers.  The converged D=2, χ=16 optimum is −0.660231 (the
 recommended implicit-AD configuration, every route measured 2026-10-30), not
 the "−0.6548" or "−0.66251" formerly quoted.  The explicit-AD rows predate #1074 (the explicit energy
 now applies no forward gauge), and −0.6628 lies *below* that optimum, so it
 is not a converged variational energy.
-| 2 | 16  | svd + phase + implicit AD (2-site, complex128, non-C4v) | -0.6406 | variational; ≈1 min/step on GPU |
-| — | —   | QMC exact                                   | -0.66944   | Sandvik, PRB 56, 11678 (1997) |
 
 The 2-site non-C4v entry requires ``complex128`` site tensors —
 ``float64`` drifts non-variationally because the implicit-diff linear
@@ -498,7 +526,7 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | Line search           | ``gs_line_search_method``   | ``"hager_zhang"``| ``"armijo"``                         |
 | C4v symmetry          | ``gs_c4v``                  | ``False``        | ``True`` = enforce C4v               |
 | AD method             | ``gs_implicit_ad``          | ``True``         | ``False`` = explicit AD              |
-| Implicit AD mode      | ``ctm_ad_mode``             | ``None``         | ``"c4v_reference"`` (Francuz et al., 1-site C4v) / ``"root_implicit"`` (dense 1x1 asymmetric root-implicit AD, arXiv:2607.15030; ``unit_cell`` other than ``"1x1"`` raises ``NotImplementedError``) |
+| Implicit AD mode      | ``ctm_ad_mode``             | ``None``         | ``"c4v_reference"`` (Francuz et al., 1-site C4v) / ``"root_implicit"`` (dense root-implicit AD, arXiv:2607.15030; ``unit_cell="1x1"`` or ``"2site"``) / ``"root_implicit_symmetric"`` (1x1 symmetric) |
 | Implicit adjoint      | ``adjoint_solver``          | ``"bicgstab"``   | ``"gmres"`` (reference-mode only)    |
 | Adjoint chain rule    | ``adjoint_chain_rule``      | ``"auto"``       | ``"auto"`` = ``"joint"`` on the fused CTM (indirect term from a joint GMRES solve; same gradient, D=3 first-step compile −23%) and the split CTM's own chain rule there; ``"separate"`` = pre-flip behaviour; explicit ``"joint"`` refused on split CTM |
 | Adjoint max iters     | ``adjoint_maxiter``         | ``50``           | reference-mode only                  |
@@ -518,6 +546,8 @@ for the full benchmark table and the projector × gauge comparison matrix.
 | Metric precond        | ``gs_metric_precond``       | ``True``         | ``False`` = standard grad            |
 | Stall recovery        | ``gs_stall_recovery``       | ``None``         | ``"noise"`` / ``"reset"`` (auto)     |
 | Energy floor          | ``gs_energy_floor``         | ``None``         | ``float`` = reject below as non-variational |
+| Reject energy rise    | ``gs_reject_energy_rise``   | ``True``         | ``False`` = keep a line-search step whose converged energy rose (#1166) |
+| Log line-search probes | ``gs_log_probes``          | ``False``        | ``True`` = one line per probe; with ``return_history``, also in ``history["probes"]`` (#1168) |
 | CG iPEPS gates        | ``cg_gates``                | ``None``         | ``honeycomb_cg_gates()`` / ``kagome_cg_gates()`` / custom ``CGGates`` (requires ``unit_cell="1x1"``, rejects ``su_init=True``) |
 | Auto-χ_E bump         | ``chi_auto_bump``           | ``False``        | ``True`` = opt-in (§2.8.2)          |
 | Bump threshold        | ``chi_auto_bump_eps``       | ``1e-5``         | variPEPS §2.8.2 default             |
@@ -538,10 +568,12 @@ set) overrides ``ctm.projector_method``, and the ``forward_gauge="auto"``
 default is resolved per path (``"bond_phase"`` on fused implicit AD with
 no ``chi_ramp`` / ``ctm_ad_mode``, ``"phase"`` otherwise).
 
-The root-implicit path additionally reads ``CTMConfig.rel_floor``, the
-relative clamp on the retained CTM spectrum (``None`` uses the derived
-``eps**(1/3)``), and gates on a ``root_residual_warn`` that now defaults
-to ``None`` and is resolved from that same clamp rather than a fixed
+The dense 1x1 root-implicit engine additionally reads ``CTMConfig.rel_floor``,
+the relative clamp on the retained CTM spectrum (``None`` uses the derived
+``eps**(1/3)``).  The symmetric and cell engines derive the clamp from the
+dtype, so setting ``rel_floor`` with them raises.  The root-implicit path
+gates on a ``root_residual_warn`` that now defaults to ``None`` and is
+resolved from that same clamp rather than a fixed
 constant (#772/#778). Two conditions bound that relaxation, because it is
 licensed only by the O(``rel_floor``) inconsistency clamping introduces:
 it applies only when the clamp actually bound (``usable_rank < chi``) —
@@ -563,15 +595,25 @@ gradients.
 | Config dataclasses                      | ``src/tenax/algorithms/ipeps_config.py``      |
 | Sublattice rotation, C4v symmetrization | ``src/tenax/algorithms/ipeps.py``             |
 | CTM fixed-point AD (implicit/explicit)  | ``src/tenax/algorithms/ad_utils.py``          |
+| CTM-to-energy AD entry points (Python-loop forward, configurable backward), standard and split CTM | ``src/tenax/algorithms/_ctm_energy_ad.py``, ``_split_ctm_energy_ad.py`` |
+| AD dispatch policy (``resolve_projector_backward``, ``validate_ctm_for_implicit_ad``) | ``src/tenax/algorithms/ipeps_ad_policy.py`` |
+| Root-implicit AD (dense 1x1, checkerboard cell, symmetric 1x1) | ``src/tenax/algorithms/ipeps_optimize_root_implicit.py``, ``_ctm_root_implicit_*.py``, ``_ctm_c4v_root_implicit.py`` (Phase 0, dense C4v; holds the adjoint solve that the other engines call) |
+| CTM convergence policy (``on_unconverged``, ``CTMNotConvergedError``) | ``src/tenax/algorithms/_ctm_convergence_policy.py`` |
 | Standard CTM (Tensor protocol)          | ``src/tenax/algorithms/_ctm_tensor*.py``      |
 | C4v CTM + QR-CTMRG                     | ``src/tenax/algorithms/_ctm_tensor_c4v.py``   |
 | Reference-mode C4v AD (Francuz et al.)  | ``src/tenax/algorithms/_ctm_tensor_c4v_reference_ad.py`` |
 | Split CTM (Tensor protocol)             | ``src/tenax/algorithms/_split_ctm_tensor*.py``|
 | CTM projectors (eigh/QR/SVD)            | ``src/tenax/algorithms/_ctm_projector.py``    |
 | Metric preconditioning                  | ``src/tenax/algorithms/_metric_precond.py``   |
-| Legacy CTM (dense arrays, SU only)      | ``src/tenax/algorithms/ipeps_ctm*.py``        |
+| Raw-array CTM API: deprecated ``ctm()`` / ``ctm_2site()``, ``ctm_split()`` | ``src/tenax/algorithms/ipeps_ctm*.py`` |
+| Raw-array views of CTM environments     | ``src/tenax/algorithms/_ctm_env_dense.py``    |
+| Multi-GPU dense CTM (GSPMD sharding)    | ``src/tenax/algorithms/ctm_sharding.py``      |
 | Simple update                           | ``src/tenax/algorithms/ipeps_simple_update.py``, ``ipeps.py`` |
+| Simple update with no stored bond spectrum (#882 Phase 2; not wired into ``ipeps()``) | ``src/tenax/algorithms/ipeps_su.py`` |
+| Belief-propagation gauge                | ``src/tenax/algorithms/ipeps_bp_gauge.py``, ``ipeps_gauge.py`` |
 | Energy computation                      | ``src/tenax/algorithms/_ctm_tensor_energy.py``, ``_split_ctm_tensor_energy.py`` |
+| Raw RDM builders (the energy of ``ipeps()``, ``compute_energy_ctm*``) and the CPU size check | ``src/tenax/algorithms/ipeps_rdm.py``, ``_einsum_compat.py`` |
+| Excitation spectrum (``compute_spectrum``, ``spectral_function``, deprecated ``compute_excitations``) | ``src/tenax/algorithms/ipeps_excitations.py``, ``_ipeps_excitation_ctm.py`` |
 | Fermionic variant                       | ``src/tenax/algorithms/fermionic_ipeps.py``   |
 | Coarse-grained iPEPS (honeycomb/kagome) | ``src/tenax/algorithms/coarse_grain.py``      |
 | Kagome iPESS AD                         | ``src/tenax/algorithms/pess.py``, ``pess_optimize.py`` |
@@ -587,3 +629,8 @@ gradients.
 - [`docs/guide/algorithms/ipeps_ad_paths.md`](guide/algorithms/ipeps_ad_paths.md)
   — benchmarked recommendation for iPEPS AD (config, gauge mode matrix,
   critical components, known limitations).
+- [`docs/guide/algorithms/ad_excitations.md`](guide/algorithms/ad_excitations.md)
+  — the excitation spectrum and spectral function (``compute_spectrum``),
+  with validation, cost and limits.
+- [`docs/guide/gotchas.md`](guide/gotchas.md) — contractions of ``2**31``
+  entries or more on CPU.
