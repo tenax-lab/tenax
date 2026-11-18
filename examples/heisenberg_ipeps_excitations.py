@@ -19,14 +19,16 @@ The workflow is:
 4. ``spectral_function`` broadens the weights to S(k, omega).
 
 The sublattice rotation leaves S^y unchanged, so its momenta are the lattice
-momenta.  ``compute_spectrum`` takes real operators, so the example passes
-i S^y, which has the same weights.
+momenta.  The example passes i S^y, the real form of S^y, which has the same
+weights.
 
 ``compute_excitations`` (deprecated, #1052) is not used: it truncates the
 momentum sum, so its low energies are not reliable.
 
-Measured on 12 CPU cores (2026-11-18): the ground state takes about 20 s and
-reaches E/site = -0.6602310935.  Each momentum takes about 5 min at chi=16.
+Measured on 12 CPU cores (2026-11-18): the ground state takes 17 s and
+reaches E/site = -0.6602310935.  Each momentum takes about 280 s at chi=16.
+At X and (0, pi), the lowest omega is 2.2930 and carries 93% of
+s(k) = 0.20399; at M, it is 0.6487 and carries 96% of s(k) = 0.80858.
 One chi cannot show convergence: run again with another ``SPECTRUM_CHI`` and
 compare.
 
