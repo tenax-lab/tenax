@@ -32,9 +32,11 @@ from tenax import SpectrumResult, heisenberg_gate, sublattice_rotate_gate  # noq
 
 _EXAMPLES_DIR = pathlib.Path(__file__).resolve().parent.parent / "examples"
 
-# E_D2 is the energy of Hasik's D=2 state.  The example's configuration reached
-# -0.6602310935 on main at ab820d20 (2026-11-18), 2e-11 from it.
-ENERGY_TOL = 1e-6
+# E_D2 is the energy of Hasik's D=2 state.  On main at ab820d20 (2026-11-18)
+# the example's configuration reached it to 2e-11.  Two L-BFGS steps at chi=16
+# stop 2.1e-6 above it.  chi=8 alone, without the chi=16 stage, reaches it to
+# 7e-11: at D=2 that is the same state.
+ENERGY_TOL = 1e-7
 MOMENTA = [(np.pi, 0.0), (0.0, np.pi), (np.pi, np.pi)]
 
 
