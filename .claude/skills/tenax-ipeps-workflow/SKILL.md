@@ -281,7 +281,10 @@ large chi (Zhang, Yang & Corboz, arXiv:2505.00494):
 ```python
 from tenax import optimize_gs_ad_chi_schedule
 
-chi_schedule = [(8, 30), (16, 20), (32, 15)]
+# D=2: stop at chi=16, as the guide's "Recommended Configuration" does
+# (docs/guide/algorithms/ipeps_ad_paths.md).  With the config above, a
+# (32, 15) stage raised CTMNotConvergedError (2026-11-18).
+chi_schedule = [(8, 30), (16, 20)]
 A_opt, env, E_gs = optimize_gs_ad_chi_schedule(H_rot, None, config, chi_schedule)
 ```
 
