@@ -853,9 +853,6 @@ from tenax import (
     CTMConfig,
     optimize_gs_ad,
     optimize_gs_ad_chi_schedule,
-    ExcitationConfig,
-    compute_excitations,
-    make_momentum_path,
     sublattice_rotate_gate,
 )
 
@@ -957,19 +954,14 @@ config_reference = iPEPSConfig(
     gs_optimizer="adam",
 )
 A_opt, env, E_gs = optimize_gs_ad(gate_1x1, None, config_reference)
-
-# Quasiparticle excitations (Ponsioen et al. 2022)
-momenta = make_momentum_path("brillouin", num_points=20)
-exc_config = ExcitationConfig(num_excitations=3)
-result = compute_excitations(A_opt, env, gate_1x1, E_gs, momenta, exc_config)  # the gate A_opt was optimized with
-print(result.energies.shape)  # (20, 3)
 ```
 
 The explicit-AD configuration reaches E=-0.6628 at D=2, chi=16, below the
 converged D=2, chi=16 optimum of -0.660231. The chi-ramping schedule runs internally as a single
 `optimize_gs_ad` call with envs padded to `max(chi)` from step 1, so the
 JIT-compiled CTM / energy / backward kernels never see a shape change
-(issue #453). For excitations see {doc}`ad_excitations`.
+(issue #453). For excitations, run `compute_spectrum` on a converged ground
+state; see {doc}`ad_excitations`.
 
 ## Forward Gauge Mode Matrix
 
