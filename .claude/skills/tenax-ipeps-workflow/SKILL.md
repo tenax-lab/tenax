@@ -212,6 +212,13 @@ sublattices, so an antiferromagnet needs the **sublattice-rotated** gate;
 with the plain Heisenberg gate the 1x1 optimizer starts from a ferromagnet
 (E ≈ +0.5).
 
+The simple-update start needs enough imaginary time. With the `iPEPSConfig`
+defaults (100 steps of `dt=0.01`) this block raises `CTMNotConvergedError` at
+step 1, because the first CTM at chi=16 does not converge; with 200 steps of
+`dt=0.05` it reaches E = −0.660231 (measured 2026-11-18). The "Recommended
+Configuration" of `docs/guide/algorithms/ipeps_ad_paths.md` uses the same
+start, with QR projectors and a chi schedule of 8 then 16.
+
 ```python
 from tenax import (iPEPSConfig, CTMConfig, optimize_gs_ad,
                    heisenberg_gate, sublattice_rotate_gate)
@@ -220,6 +227,8 @@ H_rot = sublattice_rotate_gate(heisenberg_gate())  # 1x1 AFM needs this
 
 config = iPEPSConfig(
     max_bond_dim=2,
+    num_imaginary_steps=200,  # the simple-update start: the defaults
+    dt=0.05,                  # (100 x 0.01) fail at step 1, see above
     ctm=CTMConfig(
         chi=16,
         max_iter=60,
@@ -272,7 +281,10 @@ large chi (Zhang, Yang & Corboz, arXiv:2505.00494):
 ```python
 from tenax import optimize_gs_ad_chi_schedule
 
-chi_schedule = [(8, 30), (16, 20), (32, 15)]
+# D=2: stop at chi=16, as the guide's "Recommended Configuration" does
+# (docs/guide/algorithms/ipeps_ad_paths.md).  With the config above, a
+# (32, 15) stage raised CTMNotConvergedError (2026-11-18).
+chi_schedule = [(8, 30), (16, 20)]
 A_opt, env, E_gs = optimize_gs_ad_chi_schedule(H_rot, None, config, chi_schedule)
 ```
 
@@ -320,7 +332,9 @@ prefer `ctmrg_heuristic_increase_chi`.
   Use `projector_method="qr"` for best performance with explicit AD.
 - **Start with SU init (`su_init=True`).** The simple update provides a good
   starting tensor that avoids bad local minima. Without it, random
-  initialization often converges to excited states.
+  initialization often converges to excited states. Give it enough
+  imaginary time: the defaults (100 steps of `dt=0.01`) are too short for
+  the recommended configuration above, which starts at chi=16.
 - **Use L-BFGS with Hager-Zhang line search** (`gs_optimizer="lbfgs"`,
   `gs_line_search_method="hager_zhang"`) for best convergence. CG also
   works but requires more steps.
@@ -365,7 +379,9 @@ prefer `ctmrg_heuristic_increase_chi`.
 
 ### 2-site C4v shared-tensor configuration
 
-For Heisenberg-like AFMs, the shared-tensor C4v path is recommended:
+For Heisenberg-like AFMs, the shared-tensor C4v path is recommended. It
+needs the same simple-update start as the 1x1 block: with the defaults it
+raised `CTMNotConvergedError` at step 33 (2026-11-18).
 
 ```python
 config = iPEPSConfig(
@@ -380,6 +396,8 @@ config = iPEPSConfig(
     gs_optimizer="lbfgs",
     gs_num_steps=50,
     su_init=True,
+    num_imaginary_steps=200,
+    dt=0.05,
 )
 A_opt, env, E_gs = optimize_gs_ad(gate, None, config)
 ```
