@@ -260,30 +260,31 @@ jobs:
           - os: ubuntu-latest
             python-version: "3.12"
             bucket: "fast-ipeps"
-          - os: macos-latest
+          # macOS: the image that ``core-shard-macos`` names (see the comment there).
+          - os: macos-26
             python-version: "3.12"
             bucket: "fast-ipeps"
-          - os: macos-latest
+          - os: macos-26
             python-version: "3.12"
             bucket: "fast-other"
             shard: "1"
-          - os: macos-latest
+          - os: macos-26
             python-version: "3.12"
             bucket: "fast-other"
             shard: "2"
-          - os: macos-latest
+          - os: macos-26
             python-version: "3.12"
             bucket: "fast-other"
             shard: "3"
-          - os: macos-latest
+          - os: macos-26
             python-version: "3.12"
             bucket: "slow"
             shard: "1"
-          - os: macos-latest
+          - os: macos-26
             python-version: "3.12"
             bucket: "slow"
             shard: "2"
-          - os: macos-latest
+          - os: macos-26
             python-version: "3.12"
             bucket: "slow"
             shard: "3"
@@ -475,7 +476,12 @@ jobs:
   # have set the floor.
   core-shard-macos:
     name: Core shard ${{ matrix.shard }} (macOS, Python 3.12)
-    runs-on: macos-latest
+    # A named image, not ``macos-latest``: GitHub moves that label to each new
+    # macOS (15 to 26 from 2026-06-15), and this required gate would then run
+    # on a new platform with no commit here.  #1144 (fixed by #1148) and #1153
+    # failed only on the macos-26-arm64 runner.  Bump the image in its own PR,
+    # together with the macOS entries of ``test-full``.
+    runs-on: macos-26
     strategy:
       fail-fast: false
       matrix:
