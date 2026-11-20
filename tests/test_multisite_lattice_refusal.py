@@ -137,9 +137,10 @@ def test_a_lattice_whose_bonds_are_not_summed_is_refused(name, reached):
 def test_the_refusal_comes_before_anything_else(reached):
     """kagome() hears its own reason first, with no warning before it.
 
-    The root-implicit engine refuses every Lattice too, after a line-search
-    warning, and its reason (no rectangular-grid objective) sends the user back
-    to the default path, which refuses kagome() as well.
+    The root-implicit dispatch refuses every Lattice too, but only after two
+    warnings (metric preconditioning, line search), and its reason (no
+    rectangular-grid objective) does not say that the default path has no
+    kagome() objective either.
     """
     gate = heisenberg_gate()
     config = iPEPSConfig(unit_cell=kagome(), ctm=CTMConfig(ctm_ad_mode="root_implicit"))
