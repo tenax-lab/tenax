@@ -914,6 +914,55 @@ def _lattice_to_neighbors(
     return neighbors, name_to_coord, coord_to_name
 
 
+def _refuse_non_square_lattice(lattice: Lattice) -> None:
+    """Refuse a Lattice whose declared bonds are not the bonds its energy sums.
+
+    ``compute_energy_ctm_tensor_multisite`` sums each site's ``right`` and
+    ``bottom`` neighbour in ``neighbor_map`` -- the nearest-neighbour model of
+    a square lattice coloured by that map -- and has no term for any other
+    bond.  So a non-empty ``bonds`` must name exactly those pairs, as
+    ``"horizontal"`` and ``"vertical"`` bonds; ``bonds=()`` declares them, as
+    ``square()`` does.  Pairs are compared unordered, because the builders do
+    not orient them alike (``kagome()``'s vertical u-w has w above u).
+    ``kagome()``, ``honeycomb()`` and ``triangular()`` declare bonds off that
+    grid, and were optimised as the square lattice (#1004).  The comparison
+    is of bond types: it cannot see a lattice that wants fewer copies of a
+    summed bond per cell.
+    """
+    if not lattice.bonds:
+        return
+    summed = {
+        (frozenset((site, lattice.neighbor_map[site][side])), direction)
+        for site in lattice.sites
+        for side, direction in (("right", "horizontal"), ("bottom", "vertical"))
+    }
+    declared = {
+        (frozenset((bond.site_i, bond.site_j)), bond.direction)
+        for bond in lattice.bonds
+    }
+    if declared == summed:
+        return
+
+    def _shown(bonds):
+        rows = sorted((min(pair), max(pair), direction) for pair, direction in bonds)
+        return ", ".join(map(str, rows)) or "none"
+
+    raise NotImplementedError(
+        "optimize_gs_ad cannot optimise this Lattice: its multisite energy sums "
+        "each site's 'right' and 'bottom' neighbour in neighbor_map -- the "
+        "nearest-neighbour model of a square lattice coloured by that map -- "
+        "and has no term for any other bond, so it would minimise a different "
+        "model than Lattice.bonds declares.\n"
+        f"  declared, never summed: {_shown(declared - summed)}\n"
+        f"  summed, never declared: {_shown(summed - declared)}\n"
+        "kagome(), honeycomb() and triangular() are refused for this reason; "
+        "for honeycomb use honeycomb_ctm_energy_implicit, for kagome the iPESS "
+        "path (optimize_pess_ad). A square-lattice colouring is accepted with "
+        "bonds=() or with exactly its right/bottom pairs as 'horizontal' and "
+        "'vertical' bonds."
+    )
+
+
 def _resolve_projector_backward(config: iPEPSConfig) -> iPEPSConfig:
     """Compatibility wrapper around the shared AD policy helper."""
     return resolve_projector_backward(config, logger=_logger)
@@ -1559,6 +1608,9 @@ def optimize_gs_ad(
         return optimize_gs_ad_root_implicit(hamiltonian_gate, A_init, config)
 
     if isinstance(config.unit_cell, Lattice):
+        # Before any tensor work: the multisite energy sums the square-lattice
+        # bonds of neighbor_map only (#1004).
+        _refuse_non_square_lattice(config.unit_cell)
         return _optimize_gs_ad_multisite(hamiltonian_gate, A_init, config)
 
     if config.unit_cell == "2site":

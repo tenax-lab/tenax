@@ -75,6 +75,8 @@ _FILE_MARKERS = {
     "test_gilt_hotrg.py": "algorithm",
     "test_hotrg.py": "algorithm",
     "test_ipeps.py": "algorithm",
+    # ~1 s: every case stops at the multisite hand-off, before any tensor work.
+    "test_multisite_lattice_refusal.py": "core",
     "test_ipeps_bp_gauge.py": "algorithm",
     "test_bp_gauge_rank_collapse.py": "core",
     # The ``symmetric D=3`` BP-solve cells and the fermionic planar witness

@@ -2330,15 +2330,29 @@ class TestOptimizeGsAdMultisite:
 
         return heisenberg_gate()
 
-    def test_multisite_ad_runs_kagome(self, heisenberg_gate):
-        """Multisite AD with kagome lattice should run without crashing."""
-        from tenax import kagome
+    def test_multisite_ad_runs_three_colour_square(self, heisenberg_gate):
+        """Multisite AD runs on a 3-site cell.
 
+        The cell is kagome()'s neighbour map, a square lattice coloured
+        (x + y) mod 3, declared with the six bonds the multisite energy sums.
+        kagome() itself is refused (#1004, test_multisite_lattice_refusal.py).
+        """
+        from tenax import Bond, Lattice, kagome
+
+        lattice = Lattice(
+            sites=("u", "v", "w"),
+            bonds=tuple(
+                Bond(a, b, direction)
+                for direction in ("horizontal", "vertical")
+                for a, b in (("u", "v"), ("v", "w"), ("w", "u"))
+            ),
+            neighbor_map={k: dict(v) for k, v in kagome().neighbor_map.items()},
+        )
         config = iPEPSConfig(
             max_bond_dim=2,
             ctm=CTMConfig(chi=4, max_iter=10),
             gs_num_steps=2,
-            unit_cell=kagome(),
+            unit_cell=lattice,
             gs_metric_precond=False,
         )
         site_tensors, envs, E_gs = optimize_gs_ad(heisenberg_gate, None, config)
