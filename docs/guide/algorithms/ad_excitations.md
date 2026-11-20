@@ -620,7 +620,11 @@ on this state: in the four columns of `--basis sma` at chi=24 it gives an H asym
 default step has not been done.
 
 The paper sets the size of the subspace by hand, and `null_tol` is that setting here.
-On the same 78 columns:
+It keeps the eigenvectors of N with the largest eigenvalues. It reads the size from the
+plateaus of the eigenvalues against the basis size and from the norms of the eigenstates
+(its Sec. III B), as Appendix B of Ponsioen, Assaad & Corboz (2022) does. Neither paper
+gives a threshold, and the paper gives neither the size nor chi for Fig. 1. So its cut is
+not known, and a scan finds the cut that matches its curve. On the same 78 columns:
 
 | `null_tol` | Rank | First peak | Second peak | rms against the paper's curve |
 |---|---|---|---|---|
@@ -651,8 +655,18 @@ chi:
 | U1B J2=0.3, D=6 | 16 | 0.18281 | -0.5527211 |
 
 D=5 is 0.25% above the caption at chi=25. That is a lead, not a finding: the caption says
-D=4, `s` at D=5 still moves with chi, and these D=5 and D=6 runs use four columns, so they
-do not test the curve. D=6 at chi=16 is far from its energy at large chi (-0.5555266).
+D=4, and `s` at D=5 still moves with chi. A full run at D=5, chi=16 (173 columns,
+`fd_step=1e-3`, the backward of #1178) tests the curve, and no cut gives the paper's
+shape. From rank 56 to rank 18, the first peak is at 0.957 to 0.972 with height 0.078 to
+0.083, a second peak is at 1.515 to 1.691, and the rms against the paper's curve is 0.022
+to 0.024. The best rms is 0.0113, at rank 9, against 0.0014 at D=4. This chi is below
+D^2 = 25, and the lowest eigenvalue of N is -1.5e-4 of the largest (-1.3e-14 at D=4), so
+the run does not test D=5 at large chi. The D=6 run uses four columns, so it does not test
+the curve, and at chi=16 it is far from its energy at large chi (-0.5555266).
+
+The comparison stops here, and the current `compute_spectrum` is the working version. The
+shape of Fig. 1 depends on a cut that the paper does not give. The 2% in `s` does not
+depend on the cut, and its cause stays open.
 
 (spectrum-energy-window)=
 #### The energy window
