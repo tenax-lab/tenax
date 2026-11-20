@@ -927,7 +927,9 @@ def _refuse_non_square_lattice(lattice: Lattice) -> None:
     ``kagome()``, ``honeycomb()`` and ``triangular()`` declare bonds off that
     grid, and were optimised as the square lattice (#1004).  The comparison
     is of bond types: it cannot see a lattice that wants fewer copies of a
-    summed bond per cell.
+    summed bond per cell (a brick wall on a 2x2 cell declares the same types
+    as the 2x2 square lattice), and no check on ``Bond`` can, since a Bond
+    carries no count or cell offset.
     """
     if not lattice.bonds:
         return
@@ -955,11 +957,15 @@ def _refuse_non_square_lattice(lattice: Lattice) -> None:
         "model than Lattice.bonds declares.\n"
         f"  declared, never summed: {_shown(declared - summed)}\n"
         f"  summed, never declared: {_shown(summed - declared)}\n"
-        "kagome(), honeycomb() and triangular() are refused for this reason; "
-        "for honeycomb use honeycomb_ctm_energy_implicit, for kagome the iPESS "
-        "path (optimize_pess_ad). A square-lattice colouring is accepted with "
-        "bonds=() or with exactly its right/bottom pairs as 'horizontal' and "
-        "'vertical' bonds."
+        "kagome(), honeycomb() and triangular() are refused for this reason. "
+        "For honeycomb, differentiate the native honeycomb CTM energy "
+        "(honeycomb_ctm_energy_implicit); for kagome, use the iPESS optimizer "
+        "optimize_pess_ad with loss_builder='exact' and "
+        "kagome_xxz_pess_cg_gates_exact gates. This path optimises square-"
+        "lattice colourings only: it sums every site's right and bottom bond, "
+        "whatever bonds lists. Such a colouring is accepted with bonds=() or "
+        "with exactly its right/bottom pairs as 'horizontal' and 'vertical' "
+        "bonds."
     )
 
 
@@ -1426,7 +1432,10 @@ def optimize_gs_ad(
     cell is a square lattice coloured by ``Lattice.neighbor_map``: the energy
     sums each site's right and bottom bonds, so a ``Lattice`` whose non-empty
     ``bonds`` are not exactly those pairs -- ``kagome()``, ``honeycomb()``,
-    ``triangular()`` -- raises ``NotImplementedError`` (#1004).  Accepts dense
+    ``triangular()`` -- raises ``NotImplementedError`` (#1004).  The check
+    compares bond types, so a cell that drops some copies of a bond (a brick
+    wall on a 2x2 cell) passes and is optimised as the full square lattice.
+    Accepts dense
     ``jax.Array`` or Tensor-protocol objects (``DenseTensor``,
     ``SymmetricTensor``).
 
@@ -1509,6 +1518,11 @@ def optimize_gs_ad(
         how many repeated unconverged-CTM warnings ``on_unconverged="warn"``
         swallowed (one warning is kept per site and step, #1083).
     """
+    # First, ahead of the root-implicit dispatch (which refuses every Lattice
+    # for its own reason) and of every warning: the multisite energy sums the
+    # square-lattice bonds of neighbor_map only (#1004).
+    if isinstance(config.unit_cell, Lattice):
+        _refuse_non_square_lattice(config.unit_cell)
     if envs_init is not None:
         if config.unit_cell != "2site":
             raise ValueError("envs_init is supported on unit_cell='2site' only")
@@ -1612,9 +1626,6 @@ def optimize_gs_ad(
         return optimize_gs_ad_root_implicit(hamiltonian_gate, A_init, config)
 
     if isinstance(config.unit_cell, Lattice):
-        # Before any tensor work: the multisite energy sums the square-lattice
-        # bonds of neighbor_map only (#1004).
-        _refuse_non_square_lattice(config.unit_cell)
         return _optimize_gs_ad_multisite(hamiltonian_gate, A_init, config)
 
     if config.unit_cell == "2site":
@@ -6090,8 +6101,9 @@ def _optimize_gs_ad_multisite(
     """AD-based ground state optimization for multi-site iPEPS (Lattice unit cell).
 
     Uses implicit differentiation through the multisite CTM fixed point.
-    Generalizes the 2-site Tensor-protocol optimizer to N sites on an
-    arbitrary ``Lattice``.
+    Generalizes the 2-site Tensor-protocol optimizer to N sites on a ``Lattice``
+    that colours the square lattice; ``optimize_gs_ad`` refuses any other
+    first (``_refuse_non_square_lattice``).
 
     Returns ``(site_tensors_dict, envs_dict, E_gs)`` where the dicts are
     keyed by site name (e.g. ``"u"``, ``"v"``, ``"w"``).

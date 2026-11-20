@@ -11,7 +11,9 @@ no term for their other bonds. On `kagome()` a uniform D=2 state gave the
 square-lattice energy to 6e-17, so a "kagome" run optimised the square-lattice
 model (#1004). Since 0.9.3 `optimize_gs_ad` raises `NotImplementedError` for a
 `Lattice` whose non-empty `bonds` are not exactly those right/bottom pairs; use
-the paths on this page instead. `ctm_multisite` still takes any `Lattice`.
+the paths on this page instead. The check compares bond types, so a cell that
+drops some copies of a bond, such as a brick wall on a 2x2 cell, passes and is
+optimised as the full square lattice. `ctm_multisite` still takes any `Lattice`.
 
 ## Honeycomb iPEPS CTM (native rank-4)
 

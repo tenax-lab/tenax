@@ -16,11 +16,12 @@ refusal must come before it, and an accepted lattice must reach it.
 from __future__ import annotations
 
 import re
+import warnings
 
 import pytest
 
 import tenax.algorithms.ipeps_optimize as ipeps_optimize
-from tenax import heisenberg_gate, iPEPSConfig, optimize_gs_ad
+from tenax import CTMConfig, heisenberg_gate, iPEPSConfig, optimize_gs_ad
 from tenax.core.lattice import (
     Bond,
     Lattice,
@@ -52,15 +53,40 @@ _THREE_COLOUR_SQUARE = _with_bonds(
     ),
 )
 
-# name -> (lattice, a bond the refusal must name)
+
+def _columns(horizontal: str, vertical: str) -> Lattice:
+    """Two-column stripes, declaring a-b as ``horizontal`` and a-a, b-b as ``vertical``.
+
+    a's right neighbour is b and its bottom neighbour is a.  Every other
+    fixture has the same right and bottom neighbour, so only this one tells a
+    horizontal bond from a vertical one.
+    """
+    return Lattice(
+        sites=("a", "b"),
+        bonds=(
+            Bond("a", "b", horizontal),
+            Bond("a", "a", vertical),
+            Bond("b", "b", vertical),
+        ),
+        neighbor_map={
+            "a": {"left": "b", "right": "b", "top": "a", "bottom": "a"},
+            "b": {"left": "a", "right": "a", "top": "b", "bottom": "b"},
+        },
+    )
+
+
+NEVER_SUMMED, NEVER_DECLARED = "declared, never summed", "summed, never declared"
+
+# name -> (lattice, the refusal's line, a bond that line must name)
 REFUSED = {
     # A declared bond the energy never sums.
-    "kagome": (kagome(), "('v', 'w', 'diagonal')"),
-    "triangular": (triangular(), "('a', 'a', 'diagonal')"),
-    "honeycomb": (honeycomb(), "('a', 'b', 'vertical_top')"),
+    "kagome": (kagome(), NEVER_SUMMED, "('v', 'w', 'diagonal')"),
+    "triangular": (triangular(), NEVER_SUMMED, "('a', 'a', 'diagonal')"),
+    "honeycomb": (honeycomb(), NEVER_SUMMED, "('a', 'b', 'vertical_top')"),
     # A summed bond the lattice never declares: decoupled chains.
     "chains": (
         _with_bonds(square(), Bond("a", "a", "horizontal")),
+        NEVER_DECLARED,
         "('a', 'a', 'vertical')",
     ),
     # The summed directions, on pairs the neighbour map does not join.
@@ -68,7 +94,14 @@ REFUSED = {
         _with_bonds(
             checkerboard(), Bond("a", "a", "horizontal"), Bond("b", "b", "vertical")
         ),
+        NEVER_SUMMED,
         "('a', 'a', 'horizontal')",
+    ),
+    # The right pairs, with horizontal and vertical exchanged.
+    "transposed_columns": (
+        _columns("vertical", "horizontal"),
+        NEVER_SUMMED,
+        "('a', 'b', 'vertical')",
     ),
 }
 
@@ -76,6 +109,7 @@ ACCEPTED = {
     "square": square(),  # bonds=() declares the neighbour map's bonds
     "checkerboard": checkerboard(),
     "three_colour_square": _THREE_COLOUR_SQUARE,
+    "columns": _columns("horizontal", "vertical"),
 }
 
 
@@ -94,9 +128,27 @@ def reached(monkeypatch):
 
 @pytest.mark.parametrize("name", REFUSED)
 def test_a_lattice_whose_bonds_are_not_summed_is_refused(name, reached):
-    lattice, bond = REFUSED[name]
-    with pytest.raises(NotImplementedError, match=re.escape(bond)):
+    lattice, line, bond = REFUSED[name]
+    match = re.escape(line) + r": [^\n]*" + re.escape(bond)
+    with pytest.raises(NotImplementedError, match=match):
         optimize_gs_ad(heisenberg_gate(), None, iPEPSConfig(unit_cell=lattice))
+
+
+def test_the_refusal_comes_before_anything_else(reached):
+    """kagome() hears its own reason first, with no warning before it.
+
+    The root-implicit engine refuses every Lattice too, after a line-search
+    warning, and its reason (no rectangular-grid objective) sends the user back
+    to the default path, which refuses kagome() as well.
+    """
+    gate = heisenberg_gate()
+    config = iPEPSConfig(unit_cell=kagome(), ctm=CTMConfig(ctm_ad_mode="root_implicit"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(
+            NotImplementedError, match=re.escape("('v', 'w', 'diagonal')")
+        ):
+            optimize_gs_ad(gate, None, config)
 
 
 @pytest.mark.parametrize("name", ACCEPTED)

@@ -43,7 +43,9 @@ class Lattice:
         ``optimize_gs_ad`` sums each site's right and bottom neighbour in
         ``neighbor_map`` as ``"horizontal"`` and ``"vertical"`` bonds, and
         refuses a non-empty ``bonds`` that is not exactly those pairs
-        (unordered); ``bonds=()`` declares them.
+        (unordered); ``bonds=()`` declares them.  The check compares bond
+        types, so a cell that drops some copies of a bond (a brick wall on a
+        2x2 cell) passes, and is optimised as the full square lattice.
     neighbor_map : dict[str, dict[str, str]]
         For each site, a mapping from direction ("left", "right", "top",
         "bottom") to the neighboring site label.  Frozen on construction
@@ -93,8 +95,8 @@ def honeycomb() -> Lattice:
 
     ``optimize_gs_ad`` refuses it (#1004): its neighbour map is the
     checkerboard, so the multisite energy would sum the square lattice's
-    bonds, not the declared ``vertical_top``/``vertical_bottom`` pair.  Use
-    ``honeycomb_ctm_energy_implicit`` for honeycomb iPEPS.
+    bonds, not the declared ``vertical_top``/``vertical_bottom`` pair.  For
+    honeycomb iPEPS, differentiate ``honeycomb_ctm_energy_implicit``.
     """
     return Lattice(
         sites=("a", "b"),
@@ -132,8 +134,8 @@ def kagome() -> Lattice:
 
     ``optimize_gs_ad`` refuses it (#1004): its neighbour map is a square
     lattice coloured (x + y) mod 3, so the multisite energy would sum the
-    square lattice's bonds and not the v-w diagonal.  Use the iPESS path
-    (``optimize_pess_ad``) for kagome.
+    square lattice's bonds and not the v-w diagonal.  For kagome, use the
+    iPESS optimizer ``optimize_pess_ad`` with ``loss_builder="exact"``.
     """
     return Lattice(
         sites=("u", "v", "w"),

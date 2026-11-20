@@ -476,8 +476,9 @@ def optimize_gs_ad_root_implicit(
                 f"{config.unit_cell!r}. The cell engine's neighbour map is a "
                 "rectangular periodic grid (cell_neighbors), so lattices whose "
                 "topology is not that grid -- kagome, honeycomb, triangular -- "
-                "have no root-implicit objective here. Use the default "
-                "(fixed-point implicit) AD path for those."
+                "have no root-implicit objective here, and optimize_gs_ad has "
+                "none for them either (#1004). For a Lattice that colours the "
+                "square lattice, use the default (fixed-point implicit) AD path."
             )
 
         A0, B0 = _initial_cell_tensors(hamiltonian_gate, A_init, config, gate, d_phys)
