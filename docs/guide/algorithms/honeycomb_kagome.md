@@ -4,6 +4,15 @@ Tenax has a native CTM for honeycomb iPEPS and a differentiable iPESS pipeline
 for the kagome lattice. Both build on the square-lattice machinery described in
 {doc}`ipeps`, {doc}`ctm` and {doc}`ipeps_ad_paths`.
 
+`optimize_gs_ad` does not take `honeycomb()`, `kagome()` or `triangular()` as a
+`unit_cell`. Its multisite energy sums each site's right and bottom neighbour in
+`Lattice.neighbor_map`, which is the square lattice coloured by that map, and has
+no term for their other bonds. On `kagome()` a uniform D=2 state gave the
+square-lattice energy to 6e-17, so a "kagome" run optimised the square-lattice
+model (#1004). Since 0.9.3 `optimize_gs_ad` raises `NotImplementedError` for a
+`Lattice` whose non-empty `bonds` are not exactly those right/bottom pairs; use
+the paths on this page instead. `ctm_multisite` still takes any `Lattice`.
+
 ## Honeycomb iPEPS CTM (native rank-4)
 
 Native rank-4 CTMRG for honeycomb iPEPS — six corners, three edge

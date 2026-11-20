@@ -1422,7 +1422,11 @@ def optimize_gs_ad(
     energy with respect to the site tensor(s), then optimizes with optax.
 
     Supports 1-site (``unit_cell="1x1"``), 2-site (``unit_cell="2site"``),
-    and multi-site (``unit_cell=Lattice(...)``) unit cells.  Accepts dense
+    and multi-site (``unit_cell=Lattice(...)``) unit cells.  A multi-site
+    cell is a square lattice coloured by ``Lattice.neighbor_map``: the energy
+    sums each site's right and bottom bonds, so a ``Lattice`` whose non-empty
+    ``bonds`` are not exactly those pairs -- ``kagome()``, ``honeycomb()``,
+    ``triangular()`` -- raises ``NotImplementedError`` (#1004).  Accepts dense
     ``jax.Array`` or Tensor-protocol objects (``DenseTensor``,
     ``SymmetricTensor``).
 
