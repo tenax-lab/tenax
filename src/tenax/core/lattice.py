@@ -40,6 +40,12 @@ class Lattice:
         Labels for the inequivalent sites in the unit cell.
     bonds : tuple[Bond, ...]
         Bonds connecting sites (may include self-bonds for single-site cells).
+        ``optimize_gs_ad`` sums each site's right and bottom neighbour in
+        ``neighbor_map`` as ``"horizontal"`` and ``"vertical"`` bonds, and
+        refuses a non-empty ``bonds`` that is not exactly those pairs
+        (unordered); ``bonds=()`` declares them.  The check compares bond
+        types, so a cell that drops some copies of a bond (a brick wall on a
+        2x2 cell) passes, and is optimised as the full square lattice.
     neighbor_map : dict[str, dict[str, str]]
         For each site, a mapping from direction ("left", "right", "top",
         "bottom") to the neighboring site label.  Frozen on construction
@@ -85,7 +91,13 @@ def checkerboard() -> Lattice:
 
 
 def honeycomb() -> Lattice:
-    """Two-site honeycomb lattice mapped onto a brick-wall square grid."""
+    """Two-site honeycomb lattice mapped onto a brick-wall square grid.
+
+    ``optimize_gs_ad`` refuses it (#1004): its neighbour map is the
+    checkerboard, so the multisite energy would sum the square lattice's
+    bonds, not the declared ``vertical_top``/``vertical_bottom`` pair.  For
+    honeycomb iPEPS, differentiate ``honeycomb_ctm_energy_implicit``.
+    """
     return Lattice(
         sites=("a", "b"),
         bonds=(
@@ -101,7 +113,11 @@ def honeycomb() -> Lattice:
 
 
 def triangular() -> Lattice:
-    """Single-site triangular lattice (includes a diagonal bond)."""
+    """Single-site triangular lattice (includes a diagonal bond).
+
+    ``optimize_gs_ad`` refuses it (#1004): the multisite energy has no
+    diagonal term, so it would optimise the square lattice.
+    """
     return Lattice(
         sites=("a",),
         bonds=(
@@ -114,7 +130,13 @@ def triangular() -> Lattice:
 
 
 def kagome() -> Lattice:
-    """Three-site kagome lattice."""
+    """Three-site kagome lattice.
+
+    ``optimize_gs_ad`` refuses it (#1004): its neighbour map is a square
+    lattice coloured (x + y) mod 3, so the multisite energy would sum the
+    square lattice's bonds and not the v-w diagonal.  For kagome, use the
+    iPESS optimizer ``optimize_pess_ad`` with ``loss_builder="exact"``.
+    """
     return Lattice(
         sites=("u", "v", "w"),
         bonds=(

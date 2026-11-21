@@ -914,6 +914,61 @@ def _lattice_to_neighbors(
     return neighbors, name_to_coord, coord_to_name
 
 
+def _refuse_non_square_lattice(lattice: Lattice) -> None:
+    """Refuse a Lattice whose declared bonds are not the bonds its energy sums.
+
+    ``compute_energy_ctm_tensor_multisite`` sums each site's ``right`` and
+    ``bottom`` neighbour in ``neighbor_map`` -- the nearest-neighbour model of
+    a square lattice coloured by that map -- and has no term for any other
+    bond.  So a non-empty ``bonds`` must name exactly those pairs, as
+    ``"horizontal"`` and ``"vertical"`` bonds; ``bonds=()`` declares them, as
+    ``square()`` does.  Pairs are compared unordered, because the builders do
+    not orient them alike (``kagome()``'s vertical u-w has w above u).
+    ``kagome()``, ``honeycomb()`` and ``triangular()`` declare bonds off that
+    grid, and were optimised as the square lattice (#1004).  The comparison
+    is of bond types: it cannot see a lattice that wants fewer copies of a
+    summed bond per cell (a brick wall on a 2x2 cell declares the same types
+    as the 2x2 square lattice), and no check on ``Bond`` can, since a Bond
+    carries no count or cell offset.
+    """
+    if not lattice.bonds:
+        return
+    summed = {
+        (frozenset((site, lattice.neighbor_map[site][side])), direction)
+        for site in lattice.sites
+        for side, direction in (("right", "horizontal"), ("bottom", "vertical"))
+    }
+    declared = {
+        (frozenset((bond.site_i, bond.site_j)), bond.direction)
+        for bond in lattice.bonds
+    }
+    if declared == summed:
+        return
+
+    def _shown(bonds):
+        rows = sorted((min(pair), max(pair), direction) for pair, direction in bonds)
+        return ", ".join(map(str, rows)) or "none"
+
+    raise NotImplementedError(
+        "optimize_gs_ad cannot optimise this Lattice: its multisite energy sums "
+        "each site's 'right' and 'bottom' neighbour in neighbor_map -- the "
+        "nearest-neighbour model of a square lattice coloured by that map -- "
+        "and has no term for any other bond, so it would minimise a different "
+        "model than Lattice.bonds declares.\n"
+        f"  declared, never summed: {_shown(declared - summed)}\n"
+        f"  summed, never declared: {_shown(summed - declared)}\n"
+        "kagome(), honeycomb() and triangular() are refused for this reason. "
+        "For honeycomb, differentiate the native honeycomb CTM energy "
+        "(honeycomb_ctm_energy_implicit); for kagome, use the iPESS optimizer "
+        "optimize_pess_ad with loss_builder='exact' and "
+        "kagome_xxz_pess_cg_gates_exact gates. This path optimises square-"
+        "lattice colourings only: it sums every site's right and bottom bond, "
+        "whatever bonds lists. Such a colouring is accepted with bonds=() or "
+        "with exactly its right/bottom pairs as 'horizontal' and 'vertical' "
+        "bonds."
+    )
+
+
 def _resolve_projector_backward(config: iPEPSConfig) -> iPEPSConfig:
     """Compatibility wrapper around the shared AD policy helper."""
     return resolve_projector_backward(config, logger=_logger)
@@ -1373,7 +1428,14 @@ def optimize_gs_ad(
     energy with respect to the site tensor(s), then optimizes with optax.
 
     Supports 1-site (``unit_cell="1x1"``), 2-site (``unit_cell="2site"``),
-    and multi-site (``unit_cell=Lattice(...)``) unit cells.  Accepts dense
+    and multi-site (``unit_cell=Lattice(...)``) unit cells.  A multi-site
+    cell is a square lattice coloured by ``Lattice.neighbor_map``: the energy
+    sums each site's right and bottom bonds, so a ``Lattice`` whose non-empty
+    ``bonds`` are not exactly those pairs -- ``kagome()``, ``honeycomb()``,
+    ``triangular()`` -- raises ``NotImplementedError`` (#1004).  The check
+    compares bond types, so a cell that drops some copies of a bond (a brick
+    wall on a 2x2 cell) passes and is optimised as the full square lattice.
+    Accepts dense
     ``jax.Array`` or Tensor-protocol objects (``DenseTensor``,
     ``SymmetricTensor``).
 
@@ -1456,6 +1518,11 @@ def optimize_gs_ad(
         how many repeated unconverged-CTM warnings ``on_unconverged="warn"``
         swallowed (one warning is kept per site and step, #1083).
     """
+    # First, ahead of the root-implicit dispatch (which refuses every Lattice
+    # for its own reason) and of every warning: the multisite energy sums the
+    # square-lattice bonds of neighbor_map only (#1004).
+    if isinstance(config.unit_cell, Lattice):
+        _refuse_non_square_lattice(config.unit_cell)
     if envs_init is not None:
         if config.unit_cell != "2site":
             raise ValueError("envs_init is supported on unit_cell='2site' only")
@@ -6034,8 +6101,9 @@ def _optimize_gs_ad_multisite(
     """AD-based ground state optimization for multi-site iPEPS (Lattice unit cell).
 
     Uses implicit differentiation through the multisite CTM fixed point.
-    Generalizes the 2-site Tensor-protocol optimizer to N sites on an
-    arbitrary ``Lattice``.
+    Generalizes the 2-site Tensor-protocol optimizer to N sites on a ``Lattice``
+    that colours the square lattice; ``optimize_gs_ad`` refuses any other
+    first (``_refuse_non_square_lattice``).
 
     Returns ``(site_tensors_dict, envs_dict, E_gs)`` where the dicts are
     keyed by site name (e.g. ``"u"``, ``"v"``, ``"w"``).

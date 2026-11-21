@@ -567,6 +567,16 @@ Available factories: `square()` (1-site), `checkerboard()` (2-site),
 `honeycomb()` (2-site), `triangular()` (1-site with diagonal bonds),
 `kagome()` (3-site).
 
+`optimize_gs_ad(unit_cell=lat)` sums each site's right and bottom neighbour in
+`neighbor_map` (the square lattice coloured by that map) and, since 0.9.3,
+refuses a `Lattice` whose non-empty `bonds` are not exactly those pairs (#1004).
+So `honeycomb()`, `triangular()` and `kagome()` raise there. For honeycomb,
+differentiate `honeycomb_ctm_energy_implicit`; for kagome, use
+`optimize_pess_ad(..., loss_builder="exact")` with `kagome_xxz_pess_cg_gates_exact`
+gates (the `"convc"` default is not the kagome energy, #1002). A cell that drops
+some copies of a bond (a brick wall on a 2x2 cell) still passes and runs as the
+full square lattice. `ctm_multisite()` takes any `Lattice`.
+
 ### Custom lattices
 
 ```python
@@ -574,7 +584,12 @@ from tenax import Lattice, Bond
 
 my_lattice = Lattice(
     sites=("a", "b", "c"),
-    bonds=(Bond("a", "b", "horizontal"), Bond("b", "c", "vertical")),
+    # The six right/bottom bonds of neighbor_map; optimize_gs_ad refuses others.
+    bonds=tuple(
+        Bond(i, j, direction)
+        for direction in ("horizontal", "vertical")
+        for i, j in (("a", "b"), ("b", "c"), ("c", "a"))
+    ),
     neighbor_map={
         "a": {"left": "c", "right": "b", "top": "c", "bottom": "b"},
         "b": {"left": "a", "right": "c", "top": "a", "bottom": "c"},
