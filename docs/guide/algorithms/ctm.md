@@ -28,8 +28,48 @@ Exploits C4v point-group symmetry for 1-site unit cells. Stores only one
 corner and one edge, performing a **single move per sweep**. This eliminates
 the charge-distribution divergence entirely.
 
-- Only valid for models without sublattice structure.
+- Only valid for models without sublattice structure. A charged
+  ``SymmetricTensor`` is the exception: it describes a 2-sublattice state (see
+  below).
 - Returns a full ``CTMTensorEnv`` by expanding via C4v symmetry relations.
+- Measure the env with ``compute_energy_ctm_tensor(A, env, H, d)`` and the same
+  ``A``.
+
+**Charged input.** A bosonic ``SymmetricTensor`` is C4v input only when its
+four faces carry the same flow-weighted charge at each position: ``u``, ``l``
+OUT with charges ``q``, and ``d``, ``r`` IN with ``sym.dual(q)``. Any other
+layout raises ``ValueError``. A tensor that conserves the uniform U(1) (``d``
+IN with the charges of ``u``) is not C4v input; use ``ctm_tensor``. If a
+virtual charge is not self-dual (U(1) ``[-1, 1]``, or Z3 charge 1), the bonds
+conserve the staggered U(1), and ``A`` describes the 2-sublattice state
+``(A, negate(A))``. ``negate`` replaces each charge ``q`` with
+``sym.dual(q)`` and keeps the data, so this is the uniform state of
+``todense(A)``. peps-torch builds its U(1) C4v state the same way (Hasik,
+Poilblanc and Becca, SciPost Phys. 10, 012 (2021)). ``ctm_tensor_c4v`` runs a
+2-sublattice sweep on such input (#762, #763), and
+``compute_energy_ctm_tensor`` measures the 2-sublattice state.
+
+| Input | Sweep |
+|---|---|
+| ``DenseTensor`` | C4v sweep |
+| fermionic ``SymmetricTensor`` | densified, then the C4v sweep |
+| bosonic ``SymmetricTensor``, self-dual charges (Z2, all-zero U(1), Z4 charge 2) | C4v sweep |
+| bosonic ``SymmetricTensor``, a charge that is not self-dual | 2-sublattice sweep |
+
+- On charged input, ``projector_method`` must be ``"eigh"`` and the data must
+  be real; otherwise ``NotImplementedError``.
+- ``compute_energy_ctm_tensor`` raises ``ValueError`` for a charged ``A`` with
+  an env that was not built for it. An example is an env from the general
+  ``ctm_tensor``, which does not support charged C4v input yet (#1210).
+- Cost, on a charged D=2 U(1) state (the #762 fixture, CPU,
+  ``conv_tol=1e-10``): the 2-sublattice sweep took 12 s at chi=8 (54 sweeps)
+  and 30 s at chi=16 (164 sweeps). ``ctm_tensor_c4v`` on ``todense(A)`` took
+  1.6 s and 1.8 s, and the energies agree to 4e-10. At D=2, the block
+  bookkeeping costs more than the blocks save.
+- A dense CTM is not always a reference for a charged state: its truncation
+  does not keep the (q, ``sym.dual(q)``) pairs exact. On a monomer-dimer U(1)
+  state (``vc = [0, 1]``) at chi=8, the energies of the dense ``ctm_tensor`` and
+  of the block-sparse ``ctm_tensor_2site(A, negate(A))`` differ by 5.1e-2.
 
 ### 2-site CTM (``ctm_tensor_2site``)
 
@@ -175,12 +215,15 @@ See {doc}`ipeps_ad_paths` for the complete recommended configuration.
 from tenax import ctm_tensor, ctm_tensor_c4v, compute_energy_ctm_tensor
 
 # A is an iPEPS site tensor (DenseTensor or SymmetricTensor)
-# with 5 legs (u, d, l, r, phys)
+# with 5 legs (u, d, l, r, phys).  ctm_tensor does not support a charged C4v
+# SymmetricTensor yet (#1210); ctm_tensor_c4v does.
 env, _ = ctm_tensor(A, chi=32, max_iter=100, conv_tol=1e-10)  # (env, max truncation error)
 E = compute_energy_ctm_tensor(A, env, hamiltonian_gate, d=2)
 
-# Or with C4v symmetry (1-site, no sublattice)
+# Or with C4v symmetry (1-site, no sublattice; a charged SymmetricTensor A
+# describes the 2-sublattice state (A, negate(A)), see "Charged input" above)
 env_c4v = ctm_tensor_c4v(A, chi=32, max_iter=100, conv_tol=1e-10)
+E_c4v = compute_energy_ctm_tensor(A, env_c4v, hamiltonian_gate, d=2)
 ```
 
 (ctm-convergence-check)=
@@ -426,7 +469,7 @@ During the run, the optimizer re-checks the layout at every step boundary
 **1-site:**
 
 - ``ctm_tensor(A, chi, ...)`` — general 4-move CTM.
-- ``ctm_tensor_c4v(A, chi, ...)`` — C4v single-move CTM.
+- ``ctm_tensor_c4v(A, chi, ...)`` — C4v single-move CTM (a 2-sublattice sweep on charged input).
 - ``compute_energy_ctm_tensor(A, env, H, d)`` — energy from CTM environment.
 
 **2-site:**
