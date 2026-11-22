@@ -9,12 +9,13 @@ from __future__ import annotations
 import functools
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from _c4v_staggered_fixtures import c4v_fixture
+from _c4v_staggered_fixtures import c4v_fixture, leg
 
 from tenax.algorithms._ctm_c4v_charges import (
     _first_unequal_c4v_face,
@@ -22,6 +23,8 @@ from tenax.algorithms._ctm_c4v_charges import (
     _negate_charges,
     _pairs,
 )
+from tenax.algorithms._ctm_tensor_c4v_staggered import _c4v_staggered_projectors
+from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity, U1Symmetry, ZnSymmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
@@ -165,3 +168,81 @@ def test_is_charged_c4v(name, charged):
 
 def test_is_charged_c4v_needs_the_five_labels():
     assert _is_charged_c4v(_site("762").relabel("phys", "p")) is False
+
+
+# ------------------------------------------------------------------ #
+# The block projector (spec test 4)                                    #
+# ------------------------------------------------------------------ #
+
+
+def _synthetic_q(sym, fused_charges, blocks):
+    """An enlarged corner with the block structure of the 2-sublattice sweep.
+
+    ``fused`` (IN) carries ``fused_charges`` and ``col`` (OUT) their duals, so
+    the block (q, q) joins the fused states of charge q with those of charge
+    ``dual(q)``.  ``blocks`` maps q to that block.
+    """
+    fc = np.asarray(fused_charges, dtype=np.int32)
+    indices = (
+        TensorIndex.from_charges(sym, fc, IN, label="fused"),
+        TensorIndex.from_charges(sym, sym.dual(fc), OUT, label="col"),
+    )
+    data = {(q, q): jnp.asarray(m, dtype=jnp.float64) for q, m in blocks.items()}
+    return SymmetricTensor(data, indices)
+
+
+# U(1): the mirror pair (-1, 1) with values 3 and 1, and the self-partner
+# charge 0 with value 2.  Each block is the transpose of its mirror image.
+_U1_Q = {
+    "fused_charges": [1, 1, 0, -1, -1],
+    "blocks": {1: np.diag([3.0, 1.0]), -1: np.diag([3.0, 1.0]), 0: [[2.0]]},
+}
+
+
+@pytest.mark.parametrize(("chi", "dim"), [(5, 5), (4, 3), (3, 3), (2, 2)])
+def test_projector_keeps_mirror_pairs_whole(chi, dim):
+    sym = U1Symmetry()
+    P_left, P_right = _c4v_staggered_projectors(_synthetic_q(sym, **_U1_Q), chi)
+    assert [(i.label, i.flow) for i in P_left.indices] == [
+        ("fused", OUT),
+        ("chi_new", IN),
+    ]
+    assert [(i.label, i.flow) for i in P_right.indices] == [
+        ("col", IN),
+        ("chi_new_r", OUT),
+    ]
+    charges = np.asarray(leg(P_left, "chi_new").charges)
+    assert charges.size == dim
+    assert np.sum(charges == 1) == np.sum(charges == -1)  # no pair is split
+    np.testing.assert_array_equal(leg(P_right, "chi_new_r").charges, sym.dual(charges))
+    if chi == 3:
+        assert 0 in charges.tolist()  # the self-partner value 2 is kept
+
+
+def test_projector_refuses_a_chi_that_splits_the_top_pair():
+    with pytest.raises(ValueError, match="chi=1"):
+        _c4v_staggered_projectors(_synthetic_q(U1Symmetry(), **_U1_Q), 1)
+
+
+def test_projected_corner_is_block_diagonal():
+    Qf = _synthetic_q(U1Symmetry(), **_U1_Q)
+    P_left, P_right = _c4v_staggered_projectors(Qf, 3)
+    C = contract(contract(P_left, Qf), P_right)
+    values = []
+    for block in C.blocks.values():
+        b = np.asarray(block)
+        np.testing.assert_allclose(b, np.diag(np.diag(b)), atol=1e-12)
+        values += np.abs(np.diag(b)).tolist()
+    assert sorted(values, reverse=True) == pytest.approx([3.0, 3.0, 2.0])
+
+
+@pytest.mark.parametrize(("chi", "charges"), [(1, [2]), (2, [2]), (3, [1, 2, 3])])
+def test_projector_self_partner_block_needs_no_partner(chi, charges):
+    # Z4: the pair (1, 3) has value 4; the self-partner charge 2 has value -5.
+    blocks = {1: [[4.0]], 3: [[4.0]], 2: [[-5.0]]}
+    Qf = _synthetic_q(ZnSymmetry(4), [1, 2, 3], blocks)
+    P_left, P_right = _c4v_staggered_projectors(Qf, chi)
+    assert np.asarray(leg(P_left, "chi_new").charges).tolist() == charges
+    if chi == 1:  # the eigenvalue keeps its sign
+        C = contract(contract(P_left, Qf), P_right)
+        assert np.asarray(C.todense()).tolist() == [[-5.0]]
