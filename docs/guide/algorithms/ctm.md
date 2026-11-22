@@ -29,8 +29,9 @@ corner and one edge, performing a **single move per sweep**. This eliminates
 the charge-distribution divergence entirely.
 
 - Only valid for models without sublattice structure. A charged
-  ``SymmetricTensor`` is the exception: it describes a 2-sublattice state (see
-  below).
+  ``SymmetricTensor`` does not change this: its charges alternate between the
+  two sublattices, but its state is the uniform state of ``todense(A)`` (see
+  below), so an antiferromagnet still needs ``sublattice_rotate_gate``.
 - Returns a full ``CTMTensorEnv`` by expanding via C4v symmetry relations.
 - Measure the env with ``compute_energy_ctm_tensor(A, env, H, d)`` and the same
   ``A``.
@@ -58,6 +59,11 @@ Poilblanc and Becca, SciPost Phys. 10, 012 (2021)). ``ctm_tensor_c4v`` runs a
 
 - On charged input, ``projector_method`` must be ``"eigh"`` and the data must
   be real; otherwise ``NotImplementedError``.
+- The chi legs can carry fewer than ``chi`` states. The sweep keeps each
+  mirror pair (``q``, ``sym.dual(q)``) whole, so a cut that falls inside a
+  pair drops that pair. On the #762 fixture, chi=3, 7 and 9 keep 2, 6 and 8
+  states and give the energies of chi=2, 6 and 8. Read the kept dimension
+  from ``env.C1`` when you scan chi.
 - ``compute_energy_ctm_tensor`` raises ``ValueError`` for a charged ``A`` with
   an env that was not built for it. An example is an env from the general
   ``ctm_tensor``, which does not support charged C4v input yet (#1210).

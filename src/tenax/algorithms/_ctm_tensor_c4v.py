@@ -290,7 +290,12 @@ def ctm_tensor_c4v(
                            ``"eigh"`` only (the 2-sublattice block projector).
 
     Returns:
-        Converged CTMTensorEnv (full 8-tensor environment).
+        Converged CTMTensorEnv (full 8-tensor environment).  On charged
+        input the chi legs can carry fewer than ``chi`` states: the block
+        projector keeps each mirror pair (q, ``sym.dual(q)``) whole, so a
+        cut that falls inside a pair drops that pair, and the env is the env
+        of the smaller chi.  Read the kept dimension from ``env.C1`` when
+        you scan chi.
 
     Raises:
         ValueError: ``A`` is a bosonic ``SymmetricTensor`` without the labels
