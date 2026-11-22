@@ -15,7 +15,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from _c4v_staggered_fixtures import c4v_fixture, leg
+from _c4v_staggered_fixtures import c4v_fixture, leg, pairs
 
 from tenax.algorithms._ctm_c4v_charges import (
     _first_unequal_c4v_face,
@@ -28,9 +28,15 @@ from tenax.algorithms._ctm_tensor_c4v_staggered import (
     _c4v_staggered_initial_state,
     _c4v_staggered_projectors,
     _c4v_staggered_sweep,
+    _c4v_staggered_to_full_env,
     _check_c4v_staggered_invariants,
+    _ctm_tensor_c4v_staggered,
 )
-from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+from tenax.algorithms._ctm_tensor_init import (
+    CTMTensorEnv,
+    _build_double_layer_tensor,
+    initialize_ctm_tensor_env,
+)
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity, U1Symmetry, ZnSymmetry
@@ -297,3 +303,80 @@ def test_enlarged_corner_faces_carry_dual_charges():
     fused, col = leg(Qf, "fused"), leg(Qf, "col")
     assert (fused.flow, col.flow) == (IN, OUT)
     np.testing.assert_array_equal(col.charges, fused.symmetry.dual(fused.charges))
+
+
+# ------------------------------------------------------------------ #
+# Env expansion and the loop (spec test 5, second half)               #
+# ------------------------------------------------------------------ #
+
+# The 16 joins of spec section 3.
+_JOINS = (  # 8 chi bonds
+    ("C1", "c1_r", "T1", "t1_l"),
+    ("T1", "t1_r", "C2", "c2_l"),
+    ("C2", "c2_d", "T2", "t2_u"),
+    ("T2", "t2_d", "C3", "c3_u"),
+    ("C3", "c3_l", "T3", "t3_l"),
+    ("T3", "t3_r", "C4", "c4_u"),
+    ("C4", "c4_r", "T4", "t4_u"),
+    ("T4", "t4_d", "C1", "c1_d"),
+)
+_D2_JOINS = (("T1", "u2"), ("T2", "r2"), ("T3", "d2"), ("T4", "l2"))
+_NEG_JOINS = (  # env to negate(env)
+    ("T1", "t1_r", "t1_l"),
+    ("T3", "t3_l", "t3_r"),
+    ("T4", "t4_u", "t4_d"),
+    ("T2", "t2_d", "t2_u"),
+)
+# The #905 layout: labels in the documented order, with their flows.
+_ENV_LAYOUT = {
+    "C1": [("c1_d", IN), ("c1_r", OUT)],
+    "C2": [("c2_l", IN), ("c2_d", OUT)],
+    "C3": [("c3_u", IN), ("c3_l", OUT)],
+    "C4": [("c4_r", OUT), ("c4_u", IN)],
+    "T1": [("t1_l", IN), ("u2", OUT), ("t1_r", OUT)],
+    "T2": [("t2_u", IN), ("r2", IN), ("t2_d", OUT)],
+    "T3": [("t3_r", OUT), ("d2", IN), ("t3_l", IN)],
+    "T4": [("t4_d", OUT), ("l2", OUT), ("t4_u", IN)],
+}
+
+
+def _layout_of(env):
+    return {
+        name: [(i.label, i.flow) for i in field.indices]
+        for name, field in env._asdict().items()
+    }
+
+
+def test_layout_table_is_the_init_env_layout():
+    assert _layout_of(initialize_ctm_tensor_env(_site("762"), 4)) == _ENV_LAYOUT
+
+
+@pytest.mark.parametrize("name", ["762", "z3"])
+def test_full_env_joins_and_layout(name):
+    A, a, a_B, states = _swept(name)
+    env = _c4v_staggered_to_full_env(*states[-1])
+    env_B = CTMTensorEnv(*(_negate_charges(t) for t in env))
+    for n1, l1, n2, l2 in _JOINS:
+        assert pairs(leg(getattr(env, n1), l1), leg(getattr(env, n2), l2)), (
+            n1,
+            l1,
+            n2,
+            l2,
+        )
+    for n, lab in _D2_JOINS:
+        assert pairs(leg(getattr(env, n), lab), leg(a, lab)), (n, lab)
+    for n, l1, l2 in _NEG_JOINS:
+        assert pairs(leg(getattr(env, n), l1), leg(getattr(env_B, n), l2)), (
+            n,
+            l1,
+            l2,
+        )
+    assert _layout_of(env) == _ENV_LAYOUT
+
+
+def test_staggered_loop_returns_a_symmetric_env():
+    env = _ctm_tensor_c4v_staggered(_site("762"), chi=4, max_iter=2, conv_tol=1e-10)
+    assert isinstance(env, CTMTensorEnv)
+    for field in env:
+        assert isinstance(field, SymmetricTensor)
+        assert np.all(np.isfinite(np.asarray(field.todense())))

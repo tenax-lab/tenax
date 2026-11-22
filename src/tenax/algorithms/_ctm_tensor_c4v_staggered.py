@@ -27,7 +27,9 @@ __all__ = [
     "_c4v_staggered_initial_state",
     "_c4v_staggered_projectors",
     "_c4v_staggered_sweep",
+    "_c4v_staggered_to_full_env",
     "_check_c4v_staggered_invariants",
+    "_ctm_tensor_c4v_staggered",
 ]
 
 import jax.numpy as jnp
@@ -39,7 +41,20 @@ from tenax.algorithms._ctm_c4v_charges import (
     _negate_charges,
     _pairs,
 )
-from tenax.algorithms._ctm_tensor_init import IN, OUT, _fuse_pair_by_label
+from tenax.algorithms._ctm_env_dense import _in_documented_leg_order
+from tenax.algorithms._ctm_tensor_convergence import (
+    _ctm_sv_diff,
+    _forced_corner_rank,
+    _max_virtual_bond_dim,
+)
+from tenax.algorithms._ctm_tensor_init import (
+    IN,
+    OUT,
+    CTMTensorEnv,
+    _build_double_layer_tensor,
+    _fuse_pair_by_label,
+)
+from tenax.algorithms._ctm_tensor_moves import _flip_leg_flow
 from tenax.contraction.contractor import contract
 from tenax.core.index import TensorIndex
 from tenax.core.tensor import SymmetricTensor, Tensor
@@ -324,3 +339,60 @@ def _c4v_staggered_sweep(
     C_new = C_new * (1.0 / (C_new.max_abs() + 1e-15))
     T_new = T_new * (1.0 / (T_new.max_abs() + 1e-15))
     return C_new, T_new
+
+
+def _c4v_staggered_to_full_env(C: SymmetricTensor, T: SymmetricTensor) -> CTMTensorEnv:
+    """The eight env tensors around an A-site, with the #905 flows.
+
+    Relabels and single-leg duals only.  A dual keeps the flow-weighted
+    charges, and I2 makes the two legs of C, and the two chi legs of T, carry
+    the same ones, so every bond pairs once the flows are set:
+
+    - C1..C4 are C, with ``c_a`` on the IN leg and ``c_b`` on the OUT leg.
+    - T1 and T4 are T; T2 and T3 are T with the D2 leg dualled (``r2`` and
+      ``d2`` are IN in the #905 table).
+    - The chi joins follow the 2-site RDM code (``_rdm2x1_tensor_2site``,
+      ``_rdm1x2_tensor_2site``): C1.c1_d joins T4.t4_d.
+
+    Unlike ``_c4v_to_full_env``, every chi bond pairs opposite flows, and so
+    do the bonds from env to ``negate(env)`` in the 2-site energy.  The
+    fields come out in the documented leg order.
+    """
+    env = CTMTensorEnv(
+        C1=C.relabels({"c_a": "c1_d", "c_b": "c1_r"}),
+        C2=C.relabels({"c_a": "c2_l", "c_b": "c2_d"}),
+        C3=C.relabels({"c_a": "c3_u", "c_b": "c3_l"}),
+        C4=C.relabels({"c_a": "c4_u", "c_b": "c4_r"}),
+        T1=T.relabels({"t_l": "t1_l", "D2": "u2", "t_r": "t1_r"}),
+        T2=_flip_leg_flow(T.relabels({"t_l": "t2_u", "D2": "r2", "t_r": "t2_d"}), "r2"),
+        T3=_flip_leg_flow(T.relabels({"t_l": "t3_l", "D2": "d2", "t_r": "t3_r"}), "d2"),
+        T4=T.relabels({"t_l": "t4_u", "D2": "l2", "t_r": "t4_d"}),
+    )
+    return _in_documented_leg_order(env)
+
+
+def _ctm_tensor_c4v_staggered(
+    A: SymmetricTensor, chi: int, max_iter: int, conv_tol: float
+) -> CTMTensorEnv:
+    """Run the 2-sublattice C4v CTM; return the env of an A-site.
+
+    The loop of ``ctm_tensor_c4v``: start from the trace boundary, check
+    I1-I3 on it, and sweep until the corner singular values change by less
+    than ``conv_tol`` (``_ctm_sv_diff`` with the forced-rank floor of #903),
+    or for ``max_iter`` sweeps.  ``ctm_tensor_c4v`` validates ``A`` first.
+    """
+    a = _build_double_layer_tensor(A)
+    a_B = _build_double_layer_tensor(_negate_charges(A))
+    C, T = _c4v_staggered_initial_state(a)
+    _check_c4v_staggered_invariants(C, T, a, a_B)
+    max_rank = _forced_corner_rank(_max_virtual_bond_dim(a))
+    prev_sv = None
+    for _ in range(max_iter):
+        C, T = _c4v_staggered_sweep(C, T, a, chi)
+        current_sv = _dense_svd(C.todense(), compute_uv=False)  # chi x chi
+        if prev_sv is not None:
+            diff = _ctm_sv_diff(current_sv, prev_sv, max_rank=max_rank)
+            if float(diff) < conv_tol:
+                break
+        prev_sv = current_sv
+    return _c4v_staggered_to_full_env(C, T)
