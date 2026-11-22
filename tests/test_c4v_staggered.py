@@ -17,6 +17,8 @@ jax.config.update("jax_enable_x64", True)
 
 from _c4v_staggered_fixtures import c4v_fixture, leg, pairs
 
+from tenax.algorithms import _ctm_tensor_c4v as c4v
+from tenax.algorithms import _ctm_tensor_energy as energy
 from tenax.algorithms._ctm_c4v_charges import (
     _first_unequal_c4v_face,
     _is_charged_c4v,
@@ -37,6 +39,7 @@ from tenax.algorithms._ctm_tensor_init import (
     _build_double_layer_tensor,
     initialize_ctm_tensor_env,
 )
+from tenax.algorithms._ctm_tensor_moves import _flip_leg_flow
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity, U1Symmetry, ZnSymmetry
@@ -380,3 +383,81 @@ def test_staggered_loop_returns_a_symmetric_env():
     for field in env:
         assert isinstance(field, SymmetricTensor)
         assert np.all(np.isfinite(np.asarray(field.todense())))
+
+
+# ------------------------------------------------------------------ #
+# Energy routing and the env guard (spec test 6; Review Focus 3)      #
+# ------------------------------------------------------------------ #
+
+GATE = jnp.zeros((2, 2, 2, 2))  # the routing tests mock what consumes it
+
+
+def _staggered_init_env(A):
+    """The 2-sublattice env of the trace boundary: cheap, and built for A."""
+    a = _build_double_layer_tensor(A)
+    return _c4v_staggered_to_full_env(*_c4v_staggered_initial_state(a))
+
+
+def _same_metadata(X, Y):
+    """Same labels, flows and charges per index, and the same block keys."""
+    return (
+        [(i.label, i.flow) for i in X.indices] == [(i.label, i.flow) for i in Y.indices]
+        and all(
+            np.array_equal(i.charges, j.charges) for i, j in zip(X.indices, Y.indices)
+        )
+        and set(X.blocks) == set(Y.blocks)
+    )
+
+
+def test_charged_energy_takes_the_2site_branch(monkeypatch):
+    A = _site("762")
+    env = _staggered_init_env(A)
+    seen = {}
+
+    def two_site(A_, B_, env_A, env_B, gate, d=None, **kwargs):
+        seen.update(A=A_, B=B_, env_A=env_A, env_B=env_B, d=d)
+        return jnp.asarray(0.25)
+
+    monkeypatch.setattr(energy, "compute_energy_ctm_tensor_2site", two_site)
+    assert float(energy.compute_energy_ctm_tensor(A, env, GATE, d=2)) == 0.25
+    assert seen["A"] is A and seen["env_A"] is env and seen["d"] == 2
+    assert _same_metadata(seen["B"], _negate_charges(A))
+    for got, field in zip(seen["env_B"], env):
+        assert _same_metadata(got, _negate_charges(field))
+
+
+@pytest.mark.parametrize("name", ["uniform_u1", "dense_762", "z2"])
+def test_other_input_keeps_the_1site_path(monkeypatch, name):
+    A = _site(name)
+    env = initialize_ctm_tensor_env(A, 2)
+    calls = []
+
+    def two_site(*args, **kwargs):
+        raise AssertionError("the 2-site branch was taken")
+
+    def fake_rdm(tag):
+        def rdm(A_, env_):
+            calls.append(tag)
+            return jnp.zeros((2, 2, 2, 2))
+
+        return rdm
+
+    monkeypatch.setattr(energy, "compute_energy_ctm_tensor_2site", two_site)
+    monkeypatch.setattr(energy, "_rdm2x1_tensor", fake_rdm("h"))
+    monkeypatch.setattr(energy, "_rdm1x2_tensor", fake_rdm("v"))
+    assert float(energy.compute_energy_ctm_tensor(A, env, GATE, d=2)) == 0.0
+    assert calls == ["h", "v"]
+
+
+def test_guard_refuses_a_dense_env():
+    env = c4v.ctm_tensor_c4v(_site("dense_762"), chi=2, max_iter=1)
+    with pytest.raises(ValueError, match="not built for this A"):
+        energy.compute_energy_ctm_tensor(_site("762"), env, GATE, d=2)
+
+
+def test_guard_refuses_a_mispaired_d2_leg():
+    A = _site("762")
+    env = _staggered_init_env(A)
+    bad = env._replace(T1=_flip_leg_flow(env.T1, "u2"))
+    with pytest.raises(ValueError, match="T1.u2 does not pair"):
+        energy.compute_energy_ctm_tensor(A, bad, GATE, d=2)

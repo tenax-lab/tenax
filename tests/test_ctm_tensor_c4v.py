@@ -9,6 +9,8 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
+from _c4v_staggered_fixtures import c4v_fixture
+
 from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
@@ -190,16 +192,21 @@ class TestC4vCTM:
 
 @pytest.fixture
 def small_peps_u1():
-    """C4v-symmetric U(1) SymmetricTensor iPEPS with D=2, d=2.
+    """C4v-symmetric charged U(1) SymmetricTensor iPEPS with D=2, d=2.
 
-    Two independent constraints make this fixture fiddly; the previous version
-    satisfied neither, and each failure was silent.
+    The test fixture of the charged-C4v design (#762): its virtual charges
+    ``[0, 1]`` are not self-dual, so it describes the 2-sublattice state
+    ``(A, negate(A))``, and ``ctm_tensor_c4v`` runs the 2-sublattice sweep on
+    it.  It is a monomer-dimer state that converges slowly in chi.
+
+    Three constraints make this fixture fiddly; earlier versions violated
+    them, and each violation was silent.
 
     **1. It must be non-zero.**  It used ``vc = [-1, 1]`` with ``pc = [-1, 1]``,
     which admits no charge-conserving block at all: the four virtual legs
     contribute an even total (four odd charges, signed by flow) and the single
     odd physical charge cannot cancel it.  ``random_normal`` therefore returned
-    0 blocks and ``‖A‖ = 0``, so ``test_u1_energy_matches_dense`` compared
+    0 blocks and ``‖A‖ = 0``, so the energy test of that time compared
     ``0`` against ``0`` at ``atol=1e-4`` and passed no matter what the code did.
     ``vc`` must span BOTH parities; ``[0, 1]`` does, and keeps the physical
     spin-1/2 leg.
@@ -291,17 +298,6 @@ def small_peps_fermionic():
     return SymmetricTensor.random_normal(indices, key)
 
 
-class _EnergyGap762(Exception):
-    """The #762 symptom, raised only by the energy comparison below.
-
-    The xfail on ``test_u1_energy_matches_dense`` matches this class alone
-    (#797), so a crash in either path, a non-finite energy or a failed fixture
-    guard is a real failure.  The comparison does not use ``assert``: an
-    ``AssertionError`` also comes from the fixture guards and from bare
-    ``assert`` statements in the library.
-    """
-
-
 class TestC4vCTMSymmetric:
     def test_u1_converges(self, small_peps_u1):
         """C4v CTM converges with U(1) SymmetricTensor."""
@@ -311,50 +307,6 @@ class TestC4vCTMSymmetric:
         assert isinstance(env, CTMTensorEnv)
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
-
-    @pytest.mark.xfail(
-        strict=True,
-        raises=_EnergyGap762,
-        reason=(
-            "#762: C4v CTM energy is wrong for a charged U(1) state. The two "
-            "paths converge to the SAME environment — corner spectra agree to "
-            "1e-15 — yet the energies differ by ~2.7e-1, and the gap is FLAT "
-            "across chi=6/8/12/16, so it is not the charge-sector-allocated vs "
-            "unconstrained truncation difference. Localised to the block-sparse "
-            "RDM contraction: _c4v_to_full_env is byte-exact, but _rdm2x1_tensor "
-            "diverges from its dense equivalent on the same inputs, first at "
-            "UL_T4 where c1_d is contracted IN against IN. Invisible until the "
-            "fixture stopped being zero / non-C4v / a product state."
-        ),
-    )
-    def test_u1_energy_matches_dense(self, small_peps_u1, heisenberg_gate):
-        """U(1) C4v CTM energy matches DenseTensor path.
-
-        Only meaningful on a fixture that is C4v-symmetric *and* not a product
-        state.  On a non-C4v state the two paths converge to different
-        environments; on a product state they agree trivially.  Neither says
-        anything about the code.
-        """
-        from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
-
-        chi = 8
-        A_dense = DenseTensor(small_peps_u1.todense(), small_peps_u1.indices)
-
-        env_sym = ctm_tensor_c4v(small_peps_u1, chi=chi, max_iter=50, conv_tol=1e-10)
-        E_sym = float(
-            compute_energy_ctm_tensor(small_peps_u1, env_sym, heisenberg_gate, d=2)
-        )
-
-        env_dense = ctm_tensor_c4v(A_dense, chi=chi, max_iter=50, conv_tol=1e-10)
-        E_dense = float(
-            compute_energy_ctm_tensor(A_dense, env_dense, heisenberg_gate, d=2)
-        )
-
-        # Both paths must complete with a finite energy; only the gap between
-        # them is the expected #762 failure.
-        assert np.isfinite(E_sym) and np.isfinite(E_dense), (E_sym, E_dense)
-        if abs(E_sym - E_dense) > 1e-4:
-            raise _EnergyGap762(f"E_sym={E_sym!r}, E_dense={E_dense!r}")
 
 
 class TestC4vCTMFermionic:
@@ -391,3 +343,19 @@ class TestC4vCTMFermionic:
         env = ctm_tensor_c4v(small_peps_fermionic, chi=4, max_iter=50, conv_tol=1e-14)
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
+
+
+# ------------------------------------------------------------------ #
+# Charged C4v input (#762, #763)                                       #
+# ------------------------------------------------------------------ #
+
+
+class TestChargedC4v:
+    """Charged C4v input: the 2-sublattice sweep and its energy (#762, #763)."""
+
+    def test_guard_refuses_a_general_ctm_env(self, heisenberg_gate):
+        """An env from the general ctm_tensor was not built for charged C4v A (#1210)."""
+        A = c4v_fixture(U1Symmetry(), [-1, 1], [-2, 0])
+        env, _ = ctm_tensor(A, chi=4, max_iter=1)
+        with pytest.raises(ValueError, match="not built for this A"):
+            compute_energy_ctm_tensor(A, env, heisenberg_gate, d=2)
