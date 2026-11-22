@@ -18,6 +18,7 @@ jax.config.update("jax_enable_x64", True)
 from _c4v_staggered_fixtures import c4v_fixture, leg, pairs
 
 from tenax.algorithms import _ctm_tensor_c4v as c4v
+from tenax.algorithms import _ctm_tensor_c4v_staggered as stag
 from tenax.algorithms import _ctm_tensor_energy as energy
 from tenax.algorithms._ctm_c4v_charges import (
     _first_unequal_c4v_face,
@@ -461,3 +462,67 @@ def test_guard_refuses_a_mispaired_d2_leg():
     bad = env._replace(T1=_flip_leg_flow(env.T1, "u2"))
     with pytest.raises(ValueError, match="T1.u2 does not pair"):
         energy.compute_energy_ctm_tensor(A, bad, GATE, d=2)
+
+
+# ------------------------------------------------------------------ #
+# Routing and validation of ctm_tensor_c4v (spec tests 2 and 3)       #
+# ------------------------------------------------------------------ #
+
+
+class _Took(Exception):
+    """Raised by the routing spies: the sweep that ctm_tensor_c4v entered."""
+
+
+@pytest.mark.parametrize(
+    ("name", "path"),
+    [
+        ("762", "staggered"),
+        ("z3", "staggered"),
+        ("dense_762", "old"),
+        ("z2", "old"),
+        ("zero_u1", "old"),
+        ("z4_self_dual", "old"),
+        ("fermionic", "old"),
+    ],
+)
+def test_routing_takes_the_staggered_sweep_only_for_charged_input(
+    monkeypatch, name, path
+):
+    def spy(which):
+        def sweep(*args, **kwargs):
+            raise _Took(which)
+
+        return sweep
+
+    monkeypatch.setattr(stag, "_c4v_staggered_sweep", spy("staggered"))
+    monkeypatch.setattr(c4v, "_c4v_sweep", spy("old"))
+    with pytest.raises(_Took) as took:
+        c4v.ctm_tensor_c4v(_site(name), chi=4, max_iter=1)
+    assert str(took.value) == path
+
+
+@pytest.mark.parametrize(
+    ("name", "face"),
+    [("uniform_u1", "d"), ("multiset_equal", "d"), ("l_flow", "l")],
+)
+def test_unequal_faces_are_refused_by_name(name, face):
+    with pytest.raises(ValueError, match=f"face '{face}' of A"):
+        c4v.ctm_tensor_c4v(_site(name), chi=4, max_iter=1)
+
+
+def test_missing_label_is_refused():
+    with pytest.raises(ValueError, match="has no leg labelled 'phys'"):
+        c4v.ctm_tensor_c4v(_site("762").relabel("phys", "p"), chi=4, max_iter=1)
+
+
+@pytest.mark.parametrize("method", ["qr", "svd"])
+def test_charged_input_refuses_other_projectors(method):
+    with pytest.raises(NotImplementedError, match=f"projector_method='{method}'"):
+        c4v.ctm_tensor_c4v(_site("762"), chi=4, max_iter=1, projector_method=method)
+
+
+def test_charged_input_refuses_complex_data():
+    A = _site("762")
+    blocks = {key: block.astype(jnp.complex128) for key, block in A.blocks.items()}
+    with pytest.raises(NotImplementedError, match="complex"):
+        c4v.ctm_tensor_c4v(SymmetricTensor(blocks, A.indices), chi=4, max_iter=1)
