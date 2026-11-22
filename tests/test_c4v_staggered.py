@@ -23,7 +23,14 @@ from tenax.algorithms._ctm_c4v_charges import (
     _negate_charges,
     _pairs,
 )
-from tenax.algorithms._ctm_tensor_c4v_staggered import _c4v_staggered_projectors
+from tenax.algorithms._ctm_tensor_c4v_staggered import (
+    _c4v_staggered_enlarged_corner,
+    _c4v_staggered_initial_state,
+    _c4v_staggered_projectors,
+    _c4v_staggered_sweep,
+    _check_c4v_staggered_invariants,
+)
+from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity, U1Symmetry, ZnSymmetry
@@ -246,3 +253,47 @@ def test_projector_self_partner_block_needs_no_partner(chi, charges):
     if chi == 1:  # the eigenvalue keeps its sign
         C = contract(contract(P_left, Qf), P_right)
         assert np.asarray(C.todense()).tolist() == [[-5.0]]
+
+
+# ------------------------------------------------------------------ #
+# One step and its invariants (spec test 5, first half)               #
+# ------------------------------------------------------------------ #
+
+
+@functools.cache
+def _swept(name, chi=4, steps=3):
+    """``(A, a, a_B, states)``: the initial state and the state after each step."""
+    A = _site(name)
+    a = _build_double_layer_tensor(A)
+    a_B = _build_double_layer_tensor(_negate_charges(A))
+    states = [_c4v_staggered_initial_state(a)]
+    for _ in range(steps):
+        states.append(_c4v_staggered_sweep(*states[-1], a, chi))
+    return A, a, a_B, states
+
+
+@pytest.mark.parametrize("name", ["762", "z3", "z4"])
+def test_invariants_hold_after_each_step(name):
+    A, a, a_B, states = _swept(name)
+    for C, T in states:
+        _check_c4v_staggered_invariants(C, T, a, a_B)
+    ca = leg(states[-1][0], "c_a")
+    sym = ca.symmetry
+    s = np.asarray(sym.flow_charge(ca.flow, ca.charges))
+    # The regime: the corner holds charges that are not self-dual.
+    assert np.any(s != sym.dual(s)), f"vacuous: corner charges {s.tolist()}"
+
+
+def test_invariant_check_catches_an_unnegated_edge():
+    A, a, a_B, states = _swept("762")
+    C, T = states[0]
+    with pytest.raises(RuntimeError, match="I1"):
+        _check_c4v_staggered_invariants(C, _negate_charges(T), a, a_B)
+
+
+def test_enlarged_corner_faces_carry_dual_charges():
+    A, a, a_B, states = _swept("762")
+    Qf = _c4v_staggered_enlarged_corner(*states[1], a)
+    fused, col = leg(Qf, "fused"), leg(Qf, "col")
+    assert (fused.flow, col.flow) == (IN, OUT)
+    np.testing.assert_array_equal(col.charges, fused.symmetry.dual(fused.charges))

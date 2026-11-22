@@ -23,16 +23,26 @@ A-site.  Design: ``docs/superpowers/specs/2026-11-22-c4v-charged-u1-design.md``.
 from __future__ import annotations
 
 __all__ = [
+    "_c4v_staggered_enlarged_corner",
+    "_c4v_staggered_initial_state",
     "_c4v_staggered_projectors",
+    "_c4v_staggered_sweep",
+    "_check_c4v_staggered_invariants",
 ]
 
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms._ctm_c4v_charges import _dual, _dual_charge
-from tenax.algorithms._ctm_tensor_init import IN, OUT
+from tenax.algorithms._ctm_c4v_charges import (
+    _dual,
+    _dual_charge,
+    _negate_charges,
+    _pairs,
+)
+from tenax.algorithms._ctm_tensor_init import IN, OUT, _fuse_pair_by_label
+from tenax.contraction.contractor import contract
 from tenax.core.index import TensorIndex
-from tenax.core.tensor import SymmetricTensor
+from tenax.core.tensor import SymmetricTensor, Tensor
 from tenax.linalg import _dense_svd
 
 # Values below this fraction of the largest are dropped: the cutoff of the SVD
@@ -174,3 +184,143 @@ def _c4v_staggered_projectors(
         ),
     )
     return P_left, P_right
+
+
+def _leg(T: Tensor, label: str) -> TensorIndex:
+    """The index of ``T`` with this label."""
+    return T.indices[T.labels().index(label)]
+
+
+def _c4v_staggered_enlarged_corner(C: Tensor, T: Tensor, a: Tensor) -> Tensor:
+    """Q = C · T_top · T_left · a, with its two open faces fused.
+
+    The contraction of step 1 of ``_c4v_sweep``, which stays unchanged:
+    C.c_b joins the top edge's t_l and C.c_a the left edge's t_r; the top
+    edge's D2 is a.u2, the left edge's is a.l2.  The bottom face (the open
+    chi leg of T_left, a.d2) is fused into ``fused`` (IN); the right face
+    (the open chi leg of T_top, a.r2) into ``col`` (OUT).
+    """
+    Q = contract(C.relabel("c_b", "t_l"), T)  # (c_a, D2, t_r)
+    Q = Q.relabels({"D2": "u2", "t_r": "o_r"})
+    T_left = T.relabels({"t_r": "c_a", "D2": "l2", "t_l": "o_d"})
+    Q = contract(Q, T_left)  # (u2, o_r, o_d, l2)
+    Q = contract(Q, a)  # (o_r, o_d, d2, r2)
+    Qf = _fuse_pair_by_label(Q, "o_d", "d2", "fused", IN)
+    return _fuse_pair_by_label(Qf, "o_r", "r2", "col", OUT)  # (fused, col)
+
+
+def _c4v_staggered_initial_state(
+    a: SymmetricTensor,
+) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """The trace boundary: C = [1], and T the ket-bra identity on D2.
+
+    C is 1 x 1 with the identity charge.  T has chi legs of dimension 1 with
+    the identity charge and the full D2 index that pairs with ``a.u2``; its
+    data is the ket-bra identity delta_kk', whose nonzero entries all carry
+    the identity charge.  The state satisfies I1-I3.
+    """
+    u2 = _leg(a, "u2")
+    sym = u2.symmetry
+    e = np.asarray([sym.identity()], dtype=np.int32)
+    C = SymmetricTensor(
+        {(int(e[0]), int(e[0])): jnp.ones((1, 1), dtype=a.dtype)},
+        (
+            TensorIndex.from_charges(sym, e, IN, label="c_a"),
+            TensorIndex.from_charges(sym, e, OUT, label="c_b"),
+        ),
+    )
+    D = int(round(np.sqrt(u2.dim)))
+    data = np.zeros((1, D * D, 1))
+    data[0, np.arange(D) * (D + 1), 0] = 1.0  # delta_kk'; u2 is fused ket-major
+    T = SymmetricTensor.from_dense(
+        jnp.asarray(data, dtype=a.dtype),
+        (
+            TensorIndex.from_charges(sym, e, IN, label="t_l"),
+            u2.flip_flow().relabel("D2"),
+            TensorIndex.from_charges(sym, e, OUT, label="t_r"),
+        ),
+    )
+    return C, T
+
+
+def _check_c4v_staggered_invariants(
+    C: SymmetricTensor,
+    T: SymmetricTensor,
+    a: SymmetricTensor,
+    a_B: SymmetricTensor,
+) -> None:
+    """Check the charge invariants of the 2-sublattice state.
+
+    - I1: the C-T chi bonds and the T.D2-a.u2 bond pair opposite flows with
+      identical charges.
+    - I2: the two legs of C carry the same flow-weighted charges at each
+      position, and so do the two chi legs of T; each chi leg holds as many
+      states of charge q as of ``sym.dual(q)``.
+    - I3: ``negate(T)``, the edge above a B-site, pairs with ``a_B``, the
+      double layer of the B-site tensor.
+
+    Index metadata only.
+
+    Raises:
+        RuntimeError: the message starts with the invariant that fails.
+    """
+    sym = _leg(C, "c_a").symmetry
+
+    def s(X, label):
+        idx = _leg(X, label)
+        return sym.flow_charge(idx.flow, idx.charges)
+
+    if not (
+        _pairs(_leg(C, "c_b"), _leg(T, "t_l"))
+        and _pairs(_leg(C, "c_a"), _leg(T, "t_r"))
+    ):
+        raise RuntimeError("I1: a C-T chi bond does not pair")
+    if not _pairs(_leg(T, "D2"), _leg(a, "u2")):
+        raise RuntimeError("I1: T.D2 does not pair with a.u2")
+    if not np.array_equal(s(C, "c_a"), s(C, "c_b")):
+        raise RuntimeError("I2: the legs of C carry different flow-weighted charges")
+    if not np.array_equal(s(T, "t_l"), s(T, "t_r")):
+        raise RuntimeError(
+            "I2: the chi legs of T carry different flow-weighted charges"
+        )
+    for X, label in ((C, "c_a"), (T, "t_l")):
+        charges = s(X, label)
+        for q in set(charges.tolist()):
+            qd = _dual_charge(sym, q)
+            if np.sum(charges == q) != np.sum(charges == qd):
+                raise RuntimeError(
+                    f"I2: leg {label} holds {int(np.sum(charges == q))} states "
+                    f"of charge {q} but {int(np.sum(charges == qd))} of its "
+                    f"mirror partner {qd}"
+                )
+    if not _pairs(_leg(_negate_charges(T), "D2"), _leg(a_B, "u2")):
+        raise RuntimeError("I3: negate(T).D2 does not pair with a_B.u2")
+
+
+def _c4v_staggered_sweep(
+    C: SymmetricTensor, T: SymmetricTensor, a: SymmetricTensor, chi: int
+) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """One step of the 2-sublattice C4v sweep; returns ``(C_new, T_new)``.
+
+    C_new = P^T Q P is the enlarged corner projected on both faces.  T·a is
+    the edge above a B-site; projected on both faces and negated, it is the
+    edge above an A-site again.  Both are normalised by ``max_abs``, as in
+    ``_c4v_sweep``.
+    """
+    Qf = _c4v_staggered_enlarged_corner(C, T, a)
+    P_left, P_right = _c4v_staggered_projectors(Qf, chi)
+    C_new = contract(contract(P_left, Qf), P_right)
+    C_new = C_new.relabels({"chi_new": "c_a", "chi_new_r": "c_b"})
+
+    T_with_a = contract(T.relabel("D2", "u2"), a)  # (t_l, t_r, d2, l2, r2)
+    Tg = _fuse_pair_by_label(T_with_a, "t_l", "l2", "fl", IN)
+    Tg = _fuse_pair_by_label(Tg, "t_r", "r2", "fr", OUT)  # (fl, d2, fr)
+    T_new = contract(P_left.relabel("fused", "fl"), Tg)  # (chi_new, d2, fr)
+    T_new = contract(T_new, P_right.relabel("col", "fr"))  # (chi_new, d2, chi_new_r)
+    T_new = _negate_charges(T_new).relabels(
+        {"chi_new": "t_l", "d2": "D2", "chi_new_r": "t_r"}
+    )
+
+    C_new = C_new * (1.0 / (C_new.max_abs() + 1e-15))
+    T_new = T_new * (1.0 / (T_new.max_abs() + 1e-15))
+    return C_new, T_new
