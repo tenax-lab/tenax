@@ -24,13 +24,18 @@ import jax
 import jax.numpy as jnp
 
 from tenax.algorithms import _ctm_graded as G
+from tenax.algorithms._ctm_c4v_charges import (
+    _is_charged_c4v,
+    _negate_charges,
+    _pairs,
+)
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     _build_double_layer_open_tensor,
     _build_double_layer_tensor,
 )
 from tenax.core import EPS
-from tenax.core.tensor import Tensor
+from tenax.core.tensor import SymmetricTensor, Tensor
 
 
 def _normalise_rdm(mat: jax.Array) -> jax.Array:
@@ -675,6 +680,57 @@ def _rdm1x2_tensor(A: Tensor, env: CTMTensorEnv) -> jax.Array:
     return rdm_mat.reshape(d, d, d, d)
 
 
+# The D² leg of each edge of a CTMTensorEnv, named by the face it meets.
+_C4V_D2_LEGS = (("T1", "u2"), ("T2", "r2"), ("T3", "d2"), ("T4", "l2"))
+
+
+def _check_charged_c4v_env(A: Tensor, env: CTMTensorEnv) -> None:
+    """Refuse an env that ``ctm_tensor_c4v`` did not build for this charged ``A``.
+
+    Index metadata only: every env tensor must be a ``SymmetricTensor``, and
+    each D² leg must pair with its face of the double layer of ``A``
+    (opposite flows, identical charges).  The faces come from
+    ``_build_double_layer_tensor``, the fusion rule of the CTM itself.
+    """
+    hint = (
+        "env was not built for this A; build it with ctm_tensor_c4v(A, ...). "
+        "The general ctm_tensor does not support charged C4v input (#1210)."
+    )
+    for name, field in env._asdict().items():
+        if not isinstance(field, SymmetricTensor):
+            raise ValueError(
+                f"compute_energy_ctm_tensor: A is charged C4v input but "
+                f"env.{name} is a {type(field).__name__}: {hint}"
+            )
+    faces = {idx.label: idx for idx in _build_double_layer_tensor(A).indices}
+    for name, label in _C4V_D2_LEGS:
+        field = getattr(env, name)
+        if not _pairs(field.indices[field.labels().index(label)], faces[label]):
+            raise ValueError(
+                f"compute_energy_ctm_tensor: {name}.{label} does not pair with "
+                f"the {label} face of the double layer of A: {hint}"
+            )
+
+
+def _charged_c4v_energy(
+    A: Tensor,
+    env: CTMTensorEnv,
+    hamiltonian_gate: Tensor | jax.Array,
+    d: int | None,
+) -> jax.Array:
+    """Energy per site of the 2-sublattice state ``(A, negate(A))`` on its env.
+
+    The B-sites carry ``negate(A)``, and their env is ``negate(env)``.  The
+    B-A bonds are the negation images of the A-B bonds, so the 2-site result
+    0.5 (E_hAB + E_hBA + E_vAB + E_vBA) equals E_h + E_v, the 1-site
+    normalisation.
+    """
+    _check_charged_c4v_env(A, env)
+    B = _negate_charges(A)
+    env_B = CTMTensorEnv(*(_negate_charges(t) for t in env))
+    return compute_energy_ctm_tensor_2site(A, B, env, env_B, hamiltonian_gate, d)
+
+
 def compute_energy_ctm_tensor(
     A: Tensor,
     env: CTMTensorEnv,
@@ -686,6 +742,16 @@ def compute_energy_ctm_tensor(
     Uses native Tensor contractions for the RDM computation, avoiding
     densification of the full chi-dimensional environment.
 
+    A charged C4v ``A`` (four faces with equal flow-weighted charges, and a
+    virtual charge that is not self-dual; see ``ctm_tensor_c4v``) describes
+    the 2-sublattice state ``(A, negate(A))``.  For such an ``A`` this
+    routine first checks that every env tensor is a ``SymmetricTensor`` and
+    that the four D² legs pair with the faces of the double layer of ``A``.
+    It then returns
+    ``compute_energy_ctm_tensor_2site(A, negate(A), env, negate(env), ...)``:
+    the energy per site of that state, with the normalisation of the 1-site
+    result.
+
     Args:
         A:                iPEPS site tensor with labels ``(u, d, l, r, phys)``.
         env:              Converged CTMTensorEnv.
@@ -694,7 +760,14 @@ def compute_energy_ctm_tensor(
 
     Returns:
         Scalar energy per site.
+
+    Raises:
+        ValueError: ``A`` is charged C4v input and ``env`` was not built for
+            it by ``ctm_tensor_c4v`` (for example, an env from the general
+            ``ctm_tensor``, #1210).
     """
+    if _is_charged_c4v(A):
+        return _charged_c4v_energy(A, env, hamiltonian_gate, d)
     if d is None:
         phys_idx = [i for i in A.indices if i.label == "phys"]
         d = phys_idx[0].dim if phys_idx else A.indices[-1].dim

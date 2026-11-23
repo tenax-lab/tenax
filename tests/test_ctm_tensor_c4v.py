@@ -9,11 +9,31 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
-from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
-from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
+from _c4v_staggered_fixtures import (
+    c4v_fixture,
+    charged_block_ratio,
+    corner_edge,
+    cut_gap,
+    norm_sv,
+    sv_gap,
+)
+
+from tenax.algorithms._ctm_c4v_charges import _negate_charges
+from tenax.algorithms._ctm_tensor_c4v import _c4v_sweep, ctm_tensor_c4v
+from tenax.algorithms._ctm_tensor_c4v_staggered import (
+    _c4v_staggered_enlarged_corner,
+    _c4v_staggered_sweep,
+    _check_c4v_staggered_invariants,
+)
+from tenax.algorithms._ctm_tensor_convergence import ctm_tensor, ctm_tensor_2site
+from tenax.algorithms._ctm_tensor_energy import (
+    compute_energy_ctm_tensor,
+    compute_energy_ctm_tensor_2site,
+)
+from tenax.algorithms._ctm_tensor_init import CTMTensorEnv, _build_double_layer_tensor
+from tenax.algorithms.ipeps import sublattice_rotate_gate
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import FermionParity, U1Symmetry
+from tenax.core.symmetry import FermionParity, U1Symmetry, ZnSymmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 # ------------------------------------------------------------------ #
@@ -190,16 +210,21 @@ class TestC4vCTM:
 
 @pytest.fixture
 def small_peps_u1():
-    """C4v-symmetric U(1) SymmetricTensor iPEPS with D=2, d=2.
+    """C4v-symmetric charged U(1) SymmetricTensor iPEPS with D=2, d=2.
 
-    Two independent constraints make this fixture fiddly; the previous version
-    satisfied neither, and each failure was silent.
+    The test fixture of the charged-C4v design (#762): its virtual charges
+    ``[0, 1]`` are not self-dual, so it describes the 2-sublattice state
+    ``(A, negate(A))``, and ``ctm_tensor_c4v`` runs the 2-sublattice sweep on
+    it.  It is a monomer-dimer state that converges slowly in chi.
+
+    Three constraints make this fixture fiddly; earlier versions violated
+    them, and each violation was silent.
 
     **1. It must be non-zero.**  It used ``vc = [-1, 1]`` with ``pc = [-1, 1]``,
     which admits no charge-conserving block at all: the four virtual legs
     contribute an even total (four odd charges, signed by flow) and the single
     odd physical charge cannot cancel it.  ``random_normal`` therefore returned
-    0 blocks and ``‖A‖ = 0``, so ``test_u1_energy_matches_dense`` compared
+    0 blocks and ``‖A‖ = 0``, so the energy test of that time compared
     ``0`` against ``0`` at ``atol=1e-4`` and passed no matter what the code did.
     ``vc`` must span BOTH parities; ``[0, 1]`` does, and keeps the physical
     spin-1/2 leg.
@@ -291,17 +316,6 @@ def small_peps_fermionic():
     return SymmetricTensor.random_normal(indices, key)
 
 
-class _EnergyGap762(Exception):
-    """The #762 symptom, raised only by the energy comparison below.
-
-    The xfail on ``test_u1_energy_matches_dense`` matches this class alone
-    (#797), so a crash in either path, a non-finite energy or a failed fixture
-    guard is a real failure.  The comparison does not use ``assert``: an
-    ``AssertionError`` also comes from the fixture guards and from bare
-    ``assert`` statements in the library.
-    """
-
-
 class TestC4vCTMSymmetric:
     def test_u1_converges(self, small_peps_u1):
         """C4v CTM converges with U(1) SymmetricTensor."""
@@ -311,50 +325,6 @@ class TestC4vCTMSymmetric:
         assert isinstance(env, CTMTensorEnv)
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
-
-    @pytest.mark.xfail(
-        strict=True,
-        raises=_EnergyGap762,
-        reason=(
-            "#762: C4v CTM energy is wrong for a charged U(1) state. The two "
-            "paths converge to the SAME environment — corner spectra agree to "
-            "1e-15 — yet the energies differ by ~2.7e-1, and the gap is FLAT "
-            "across chi=6/8/12/16, so it is not the charge-sector-allocated vs "
-            "unconstrained truncation difference. Localised to the block-sparse "
-            "RDM contraction: _c4v_to_full_env is byte-exact, but _rdm2x1_tensor "
-            "diverges from its dense equivalent on the same inputs, first at "
-            "UL_T4 where c1_d is contracted IN against IN. Invisible until the "
-            "fixture stopped being zero / non-C4v / a product state."
-        ),
-    )
-    def test_u1_energy_matches_dense(self, small_peps_u1, heisenberg_gate):
-        """U(1) C4v CTM energy matches DenseTensor path.
-
-        Only meaningful on a fixture that is C4v-symmetric *and* not a product
-        state.  On a non-C4v state the two paths converge to different
-        environments; on a product state they agree trivially.  Neither says
-        anything about the code.
-        """
-        from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
-
-        chi = 8
-        A_dense = DenseTensor(small_peps_u1.todense(), small_peps_u1.indices)
-
-        env_sym = ctm_tensor_c4v(small_peps_u1, chi=chi, max_iter=50, conv_tol=1e-10)
-        E_sym = float(
-            compute_energy_ctm_tensor(small_peps_u1, env_sym, heisenberg_gate, d=2)
-        )
-
-        env_dense = ctm_tensor_c4v(A_dense, chi=chi, max_iter=50, conv_tol=1e-10)
-        E_dense = float(
-            compute_energy_ctm_tensor(A_dense, env_dense, heisenberg_gate, d=2)
-        )
-
-        # Both paths must complete with a finite energy; only the gap between
-        # them is the expected #762 failure.
-        assert np.isfinite(E_sym) and np.isfinite(E_dense), (E_sym, E_dense)
-        if abs(E_sym - E_dense) > 1e-4:
-            raise _EnergyGap762(f"E_sym={E_sym!r}, E_dense={E_dense!r}")
 
 
 class TestC4vCTMFermionic:
@@ -391,3 +361,175 @@ class TestC4vCTMFermionic:
         env = ctm_tensor_c4v(small_peps_fermionic, chi=4, max_iter=50, conv_tol=1e-14)
         for field in env:
             assert jnp.all(jnp.isfinite(field.todense()))
+
+
+# ------------------------------------------------------------------ #
+# Charged C4v input (#762, #763)                                       #
+# ------------------------------------------------------------------ #
+
+
+class TestChargedC4v:
+    """Charged C4v input: the 2-sublattice sweep and its energy (#762, #763)."""
+
+    def test_guard_refuses_a_general_ctm_env(self, heisenberg_gate):
+        """An env from the general ctm_tensor was not built for charged C4v A (#1210)."""
+        A = c4v_fixture(U1Symmetry(), [-1, 1], [-2, 0])
+        env, _ = ctm_tensor(A, chi=4, max_iter=1)
+        with pytest.raises(ValueError, match="not built for this A"):
+            compute_energy_ctm_tensor(A, env, heisenberg_gate, d=2)
+
+    @pytest.mark.parametrize("chi", [8, 16])
+    def test_762_energy_matches_dense_c4v(self, chi, heisenberg_gate):
+        """#762: the energy and corner spectrum of dense C4v CTM on todense(A).
+
+        The same algorithm on the same state.  Where the cut splits no mirror
+        pair, the two sweeps keep the same space.  The regime is asserted
+        before the comparison.
+        """
+        A = c4v_fixture(U1Symmetry(), [-1, 1], [-2, 0])
+        Ad = DenseTensor(A.todense(), A.indices)
+        env = ctm_tensor_c4v(A, chi=chi, max_iter=200, conv_tol=1e-10)
+        env_d = ctm_tensor_c4v(Ad, chi=chi, max_iter=200, conv_tol=1e-10)
+
+        a, ad = _build_double_layer_tensor(A), _build_double_layer_tensor(Ad)
+        (C, T), (Cd, Td) = corner_edge(env), corner_edge(env_d)
+        sv, sv_d = norm_sv(C), norm_sv(Cd)
+        drift = sv_gap(norm_sv(_c4v_staggered_sweep(C, T, a, chi)[0]), sv)
+        drift_d = sv_gap(norm_sv(_c4v_sweep(Cd, Td, ad, chi, "eigh")[0]), sv_d)
+        assert drift < 1e-9 and drift_d < 1e-9, (drift, drift_d)  # converged
+        Q = _c4v_staggered_enlarged_corner(C, T, a)
+        Qd = _c4v_staggered_enlarged_corner(Cd, Td, ad)
+        gaps = (cut_gap(Q, chi), cut_gap(Qd, chi))
+        assert min(gaps) >= 0.05, gaps  # the cut splits no pair
+        assert charged_block_ratio(Q) >= 1e-3  # charged blocks carry weight
+        assert sv[1] / sv[0] > 0.1, sv[:2]  # not a product state
+
+        for gate in (heisenberg_gate, sublattice_rotate_gate(heisenberg_gate)):
+            E = float(compute_energy_ctm_tensor(A, env, gate, d=2))
+            E_d = float(compute_energy_ctm_tensor(Ad, env_d, gate, d=2))
+            assert abs(E - E_d) <= 1e-8, (E, E_d)
+        assert sv_gap(sv, sv_d) <= 1e-8
+
+        if chi == 16:  # at chi=8 the C4v and 2x2 truncations differ by 1.7e-5
+            env_g, _ = ctm_tensor(Ad, chi=16, max_iter=200, conv_tol=1e-10)
+            E_g = float(compute_energy_ctm_tensor(Ad, env_g, heisenberg_gate, d=2))
+            E = float(compute_energy_ctm_tensor(A, env, heisenberg_gate, d=2))
+            assert abs(E - E_g) <= 1e-8, (E, E_g)
+
+    @pytest.mark.parametrize(
+        ("vc", "pc", "chi"),
+        [
+            pytest.param([-1, 1], [-2, 0], 16, id="762-chi16"),
+            pytest.param([-1, 1], [-2, 0], 32, id="762-chi32"),
+            pytest.param([0, 1], [-1, 1], 16, id="polarised-chi16"),
+        ],
+    )
+    def test_763_charged_input_runs_at_large_chi(self, vc, pc, chi, heisenberg_gate):
+        """#763: these raised a size-mismatch ValueError in the energy call."""
+        A = c4v_fixture(U1Symmetry(), vc, pc)
+        env = ctm_tensor_c4v(A, chi=chi, max_iter=50, conv_tol=1e-10)
+        E = float(compute_energy_ctm_tensor(A, env, heisenberg_gate, d=2))
+        assert np.isfinite(E)
+        if pc == [-1, 1]:  # a polarised product state: exactly 2 x 0.25
+            assert abs(E - 0.5) < 1e-10, E
+
+    def test_monomer_dimer_fixture_runs_at_chi16(self, small_peps_u1):
+        """The test fixture at chi=16: a finite env, I1-I3, and whole pairs."""
+        A = small_peps_u1
+        env = ctm_tensor_c4v(A, chi=16, max_iter=200, conv_tol=1e-10)
+        for field in env:
+            assert jnp.all(jnp.isfinite(field.todense()))
+        C, T = corner_edge(env)
+        a = _build_double_layer_tensor(A)
+        a_B = _build_double_layer_tensor(_negate_charges(A))
+        _check_c4v_staggered_invariants(C, T, a, a_B)  # I2 counts the pairs
+
+    @pytest.mark.slow
+    def test_monomer_dimer_energy_matches_the_2site_ctm(
+        self, small_peps_u1, heisenberg_gate
+    ):
+        """Against the block-sparse 2-site CTM on (A, negate(A)); about 8 min.
+
+        chi=12, because there the sweep has one fixed point.  At chi=16 it
+        has two, E = 0.37474583 and 0.37478857: in the early sweeps a value
+        of the q=0 block equals the (-2, 2) pair value at the cut (relative
+        gap 2e-16), and roundoff decides which one stays.  macOS CI reached
+        the second, Linux the first, and 1e-12 noise on A reaches either.
+        Both fixed points converge, with gaps of 22% and 4% at the final cut,
+        so the final state does not flag this; chi was picked on the
+        trajectory.  At chi=12 no decision on the way comes closer than a
+        54% gap, the fixture and four noise seeds agree to 9e-13, and the
+        2-site CTM converges.  The two energies, and the dense ctm_tensor on
+        todense(A), then agree to 1e-12.
+        """
+        chi = 12
+        A = small_peps_u1
+        env = ctm_tensor_c4v(A, chi=chi, max_iter=200, conv_tol=1e-10)
+        a = _build_double_layer_tensor(A)
+        C, T = corner_edge(env)
+        sv = norm_sv(C)
+        drift = sv_gap(norm_sv(_c4v_staggered_sweep(C, T, a, chi)[0]), sv)
+        assert drift < 1e-9, drift  # converged
+        Q = _c4v_staggered_enlarged_corner(C, T, a)
+        assert cut_gap(Q, chi) >= 0.05, cut_gap(Q, chi)  # the cut splits no pair
+        assert charged_block_ratio(Q) >= 1e-3  # charged blocks carry weight
+        assert sv[1] / sv[0] > 0.1, sv[:2]  # not a product state
+
+        E = float(compute_energy_ctm_tensor(A, env, heisenberg_gate, d=2))
+        B = _negate_charges(A)
+        env_A, env_B = ctm_tensor_2site(
+            A, B, chi=chi, max_iter=200, conv_tol=1e-10, strict=True
+        )
+        E_2 = float(
+            compute_energy_ctm_tensor_2site(A, B, env_A, env_B, heisenberg_gate, d=2)
+        )
+        assert abs(E - E_2) <= 1e-8, (E, E_2)
+
+    def test_z2_self_dual_path_is_unchanged(self, heisenberg_gate):
+        """Z2 control: self-dual input keeps the old sweep, block-sparse = dense."""
+        A = c4v_fixture(ZnSymmetry(2), [0, 1], [0, 1])
+        Ad = DenseTensor(A.todense(), A.indices)
+        env = ctm_tensor_c4v(A, chi=4, max_iter=200, conv_tol=1e-10)
+        env_d = ctm_tensor_c4v(Ad, chi=4, max_iter=200, conv_tol=1e-10)
+        sv = norm_sv(corner_edge(env)[0])
+        assert sv[1] / sv[0] > 0.1, sv[:2]  # not a product state
+        E = float(compute_energy_ctm_tensor(A, env, heisenberg_gate, d=2))
+        E_d = float(compute_energy_ctm_tensor(Ad, env_d, heisenberg_gate, d=2))
+        assert abs(E - E_d) <= 1e-12, (E, E_d)
+
+    @pytest.mark.parametrize("chi", [7, 10])
+    def test_z4_self_partner_charge_next_to_pairs(self, chi, heisenberg_gate):
+        """Z4: the self-partner charge 2 is kept next to the pairs (1, 3)."""
+        A = c4v_fixture(ZnSymmetry(4), [0, 1], [0, 1])
+        Ad = DenseTensor(A.todense(), A.indices)
+        env = ctm_tensor_c4v(A, chi=chi, max_iter=200, conv_tol=1e-10)
+        env_d = ctm_tensor_c4v(Ad, chi=chi, max_iter=200, conv_tol=1e-10)
+        a = _build_double_layer_tensor(A)
+        C, T = corner_edge(env)
+        charges = np.asarray(C.indices[C.labels().index("c_a")].charges).tolist()
+        assert 2 in charges, f"vacuous: no state of charge 2 in {charges}"
+        sv = norm_sv(C)
+        assert sv_gap(norm_sv(_c4v_staggered_sweep(C, T, a, chi)[0]), sv) < 1e-9
+        assert cut_gap(_c4v_staggered_enlarged_corner(C, T, a), chi) >= 0.05
+        assert sv[1] / sv[0] > 0.1, sv[:2]
+        E = float(compute_energy_ctm_tensor(A, env, heisenberg_gate, d=2))
+        E_d = float(compute_energy_ctm_tensor(Ad, env_d, heisenberg_gate, d=2))
+        assert abs(E - E_d) <= 1e-8, (E, E_d)
+
+    def test_d3_chi_below_d_squared(self, heisenberg_gate):
+        """D=3 at chi=6 < D^2 = 9: against dense C4v."""
+        A = c4v_fixture(U1Symmetry(), [-1, 0, 1], [0, 1])
+        Ad = DenseTensor(A.todense(), A.indices)
+        chi = 6
+        env = ctm_tensor_c4v(A, chi=chi, max_iter=200, conv_tol=1e-10)
+        env_d = ctm_tensor_c4v(Ad, chi=chi, max_iter=200, conv_tol=1e-10)
+        a = _build_double_layer_tensor(A)
+        C, T = corner_edge(env)
+        sv = norm_sv(C)
+        assert sv_gap(norm_sv(_c4v_staggered_sweep(C, T, a, chi)[0]), sv) < 1e-9
+        Q = _c4v_staggered_enlarged_corner(C, T, a)
+        assert cut_gap(Q, chi) >= 0.05 and charged_block_ratio(Q) >= 1e-3
+        assert sv[1] / sv[0] > 0.1, sv[:2]
+        E = float(compute_energy_ctm_tensor(A, env, heisenberg_gate, d=2))
+        E_d = float(compute_energy_ctm_tensor(Ad, env_d, heisenberg_gate, d=2))
+        assert abs(E - E_d) <= 1e-8, (E, E_d)

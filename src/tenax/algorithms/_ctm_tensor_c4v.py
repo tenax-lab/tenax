@@ -5,6 +5,11 @@ point-group symmetry of the square lattice iPEPS.  One sweep performs
 a single "down" move instead of four directional moves, which avoids
 the charge-sector mismatch problem that arises when independent
 projectors produce chi legs with different block structures.
+
+Charged input (a bosonic ``SymmetricTensor`` with a virtual charge that is
+not self-dual) describes a 2-sublattice state.  ``ctm_tensor_c4v`` sends it
+to ``_ctm_tensor_c4v_staggered`` (#762, #763); ``_c4v_sweep`` and
+``_c4v_to_full_env`` serve dense and self-dual input only.
 """
 
 from __future__ import annotations
@@ -16,7 +21,15 @@ __all__ = [
 ]
 
 
+import jax.numpy as jnp
+
+from tenax.algorithms._ctm_c4v_charges import (
+    _C4V_FACES,
+    _first_unequal_c4v_face,
+    _is_charged_c4v,
+)
 from tenax.algorithms._ctm_projector import _compute_projector_tensor
+from tenax.algorithms._ctm_tensor_c4v_staggered import _ctm_tensor_c4v_staggered
 from tenax.algorithms._ctm_tensor_convergence import (
     _ctm_sv_diff,
     _forced_corner_rank,
@@ -142,6 +155,11 @@ def _c4v_to_full_env(C: Tensor, T: Tensor) -> CTMTensorEnv:
     function has NOT been ported to the #905 convention; do not read the list
     below as the environment convention, only as what this function emits.
 
+    Charged C4v input never comes here: ``ctm_tensor_c4v`` sends it to
+    ``_c4v_staggered_to_full_env``, which uses the #905 flows.  The note above
+    holds for dense and self-dual input, where every charge is its own dual,
+    so the same-flow bonds still join the right states.
+
     C has labels ``(c_a=IN, c_b=OUT)``.
     T has labels ``(t_l=IN, D2=IN, t_r=OUT)``.
 
@@ -198,6 +216,33 @@ def _c4v_to_full_env(C: Tensor, T: Tensor) -> CTMTensorEnv:
     return CTMTensorEnv(C1=C1, C2=C2, C3=C3, C4=C4, T1=T1, T2=T2, T3=T3, T4=T4)
 
 
+def _check_c4v_faces(A: SymmetricTensor) -> None:
+    """Refuse a bosonic ``SymmetricTensor`` that is not C4v input.
+
+    The labels u, d, l, r and phys must exist, and the four faces must carry
+    the same flow-weighted charge at each position (u, l OUT with charges q;
+    d, r IN with ``sym.dual(q)``): only then does ``symmetrize_c4v`` keep the
+    block structure.  Index metadata only; the C4v data is not checked.
+    """
+    labels = set(A.labels())
+    missing = [label for label in (*_C4V_FACES, "phys") if label not in labels]
+    if missing:
+        raise ValueError(
+            "ctm_tensor_c4v: A has no leg labelled "
+            f"{', '.join(repr(label) for label in missing)}; expected the labels "
+            "('u', 'd', 'l', 'r', 'phys')."
+        )
+    face = _first_unequal_c4v_face(A)
+    if face is not None:
+        raise ValueError(
+            f"ctm_tensor_c4v: face {face!r} of A carries different flow-weighted "
+            "charges than face 'u'. C4v input needs the same flow-weighted charge "
+            "on all four faces at each position: u, l OUT with charges q, and "
+            "d, r IN with sym.dual(q). A tensor that conserves the uniform U(1) "
+            "(d IN with the charges of u) is not C4v input; use ctm_tensor."
+        )
+
+
 def ctm_tensor_c4v(
     A: Tensor,
     chi: int,
@@ -212,16 +257,54 @@ def ctm_tensor_c4v(
     to maintain identical charge-sector structure across all environment
     tensors.
 
+    **Charged input.**  A bosonic ``SymmetricTensor`` is C4v input only when
+    its four faces carry the same flow-weighted charge at each position:
+    ``u``, ``l`` OUT with charges q, and ``d``, ``r`` IN with
+    ``sym.dual(q)``.  If a virtual charge q is not self-dual
+    (``q != sym.dual(q)``, as for U(1) ``[-1, 1]`` or Z3 charge 1), the bonds
+    conserve the staggered U(1), and ``A`` describes the 2-sublattice state
+    ``(A, negate(A))``: ``A`` on the sites with x + y even, and ``A`` with
+    every charge replaced by its dual on the others.  The data is the same,
+    so this is the uniform state of ``A.todense()``.  peps-torch builds its
+    U(1) C4v state the same way (``IPEPS_ABELIAN_C4V.get_bipartite_state``;
+    Hasik, Poilblanc and Becca, SciPost Phys. 10, 012 (2021)).  The env that
+    comes back is that of an A-site; measure it with
+    ``compute_energy_ctm_tensor(A, env, gate, d)`` and the same ``A``.
+
+    Routing:
+
+    - ``DenseTensor``: ``_c4v_sweep``.
+    - Fermionic ``SymmetricTensor``: densified, then ``_c4v_sweep``.
+    - Bosonic ``SymmetricTensor`` with self-dual virtual charges (Z2,
+      all-zero U(1), Z4 charge 2): ``_c4v_sweep``.
+    - Bosonic ``SymmetricTensor`` with a charge that is not self-dual: the
+      2-sublattice sweep of ``_ctm_tensor_c4v_staggered`` (#762, #763).
+
     Args:
         A:                 iPEPS site tensor with 5 legs ``(u, d, l, r, phys)``.
         chi:               Environment bond dimension.
         max_iter:          Maximum CTM iterations.
         conv_tol:          Convergence tolerance on corner singular values.
         renormalize:       (unused, kept for API compatibility).
-        projector_method:  ``"eigh"`` or ``"qr"``.
+        projector_method:  ``"eigh"`` or ``"qr"``.  Charged input takes
+                           ``"eigh"`` only (the 2-sublattice block projector).
 
     Returns:
-        Converged CTMTensorEnv (full 8-tensor environment).
+        Converged CTMTensorEnv (full 8-tensor environment).  On charged
+        input the chi legs can carry fewer than ``chi`` states: the block
+        projector keeps each mirror pair (q, ``sym.dual(q)``) whole, so a
+        cut that falls inside a pair drops that pair, and the env is the env
+        of the smaller chi.  Read the kept dimension from ``env.C1`` when
+        you scan chi.
+
+    Raises:
+        ValueError: ``A`` is a bosonic ``SymmetricTensor`` without the labels
+            u, d, l, r and phys, or with a face whose flow-weighted charges
+            differ from those of ``u`` at some position (the message names
+            the face).
+        NotImplementedError: charged input with a ``projector_method`` other
+            than ``"eigh"``, or with complex data (the mirror pairing of the
+            2-sublattice sweep holds for real data only).
     """
     # Fermionic SymmetricTensors: densify before running C4v CTM.
     # The C4v expansion (_c4v_to_full_env) flips flows on C2/C4 corners,
@@ -235,6 +318,23 @@ def ctm_tensor_c4v(
 
         if A.indices[0].symmetry.braiding_style == BraidingStyle.FERMIONIC:
             A = DenseTensor(A.todense(), A.indices)
+        else:
+            _check_c4v_faces(A)
+            if _is_charged_c4v(A):
+                if projector_method != "eigh":
+                    raise NotImplementedError(
+                        f"ctm_tensor_c4v: projector_method={projector_method!r} "
+                        "is not supported on charged input; the 2-sublattice "
+                        "sweep has only its block projector "
+                        "(projector_method='eigh')."
+                    )
+                if jnp.issubdtype(A.dtype, jnp.complexfloating):
+                    raise NotImplementedError(
+                        "ctm_tensor_c4v: complex data is not supported on "
+                        "charged input; the mirror pairing of the 2-sublattice "
+                        "sweep holds only for real data."
+                    )
+                return _ctm_tensor_c4v_staggered(A, chi, max_iter, conv_tol)
 
     a = _build_double_layer_tensor(A)
     env = initialize_ctm_tensor_env(A, chi)
