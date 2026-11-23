@@ -448,20 +448,42 @@ class TestChargedC4v:
     def test_monomer_dimer_energy_matches_the_2site_ctm(
         self, small_peps_u1, heisenberg_gate
     ):
-        """Against the block-sparse 2-site CTM on (A, negate(A)); about 9 min.
+        """Against the block-sparse 2-site CTM on (A, negate(A)); about 8 min.
 
-        The tolerance is 1e-5, from the 2.4e-6 spread between the dense
-        ctm_tensor and the block-sparse ctm_tensor_2site at chi=16.
+        chi=12, because there the sweep has one fixed point.  At chi=16 it
+        has two, E = 0.37474583 and 0.37478857: in the early sweeps a value
+        of the q=0 block equals the (-2, 2) pair value at the cut (relative
+        gap 2e-16), and roundoff decides which one stays.  macOS CI reached
+        the second, Linux the first, and 1e-12 noise on A reaches either.
+        Both fixed points converge, with gaps of 22% and 4% at the final cut,
+        so the final state does not flag this; chi was picked on the
+        trajectory.  At chi=12 no decision on the way comes closer than a
+        54% gap, the fixture and four noise seeds agree to 9e-13, and the
+        2-site CTM converges.  The two energies, and the dense ctm_tensor on
+        todense(A), then agree to 1e-12.
         """
+        chi = 12
         A = small_peps_u1
-        B = _negate_charges(A)
-        env = ctm_tensor_c4v(A, chi=16, max_iter=200, conv_tol=1e-10)
+        env = ctm_tensor_c4v(A, chi=chi, max_iter=200, conv_tol=1e-10)
+        a = _build_double_layer_tensor(A)
+        C, T = corner_edge(env)
+        sv = norm_sv(C)
+        drift = sv_gap(norm_sv(_c4v_staggered_sweep(C, T, a, chi)[0]), sv)
+        assert drift < 1e-9, drift  # converged
+        Q = _c4v_staggered_enlarged_corner(C, T, a)
+        assert cut_gap(Q, chi) >= 0.05, cut_gap(Q, chi)  # the cut splits no pair
+        assert charged_block_ratio(Q) >= 1e-3  # charged blocks carry weight
+        assert sv[1] / sv[0] > 0.1, sv[:2]  # not a product state
+
         E = float(compute_energy_ctm_tensor(A, env, heisenberg_gate, d=2))
-        env_A, env_B = ctm_tensor_2site(A, B, chi=16, max_iter=200, conv_tol=1e-10)
+        B = _negate_charges(A)
+        env_A, env_B = ctm_tensor_2site(
+            A, B, chi=chi, max_iter=200, conv_tol=1e-10, strict=True
+        )
         E_2 = float(
             compute_energy_ctm_tensor_2site(A, B, env_A, env_B, heisenberg_gate, d=2)
         )
-        assert abs(E - E_2) <= 1e-5, (E, E_2)
+        assert abs(E - E_2) <= 1e-8, (E, E_2)
 
     def test_z2_self_dual_path_is_unchanged(self, heisenberg_gate):
         """Z2 control: self-dual input keeps the old sweep, block-sparse = dense."""
