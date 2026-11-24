@@ -28,7 +28,13 @@ from _c4v_staggered_fixtures import (
     with_data,
 )
 
-from tenax import CTMConfig, heisenberg_gate, iPEPSConfig, sublattice_rotate_gate
+from tenax import (
+    CTMConfig,
+    heisenberg_gate,
+    iPEPSConfig,
+    optimize_gs_ad,
+    sublattice_rotate_gate,
+)
 from tenax.algorithms import _ctm_tensor_c4v_charged_ad as ad
 from tenax.algorithms import ipeps_optimize_c4v_charged as opt
 from tenax.algorithms._ctm_convergence_policy import (
@@ -47,8 +53,9 @@ from tenax.algorithms._ctm_tensor_c4v_staggered import (
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
 from tenax.algorithms.ipeps import symmetrize_c4v
+from tenax.algorithms.ipeps_ad_policy import use_charged_c4v_path
 from tenax.core.symmetry import U1Symmetry, ZnSymmetry
-from tenax.core.tensor import SymmetricTensor
+from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 _NAMES = ("d2_off", "762", "z4")
 
@@ -609,3 +616,73 @@ def test_layout_mismatch_is_recorded(monkeypatch):
         "layout",
         "layout_mismatch_steps",
     }
+
+
+# ------------------------------------------------------------------ #
+# Dispatch (spec 2, section 5)                                        #
+# ------------------------------------------------------------------ #
+
+
+def test_dispatch_reaches_the_charged_loop(monkeypatch):
+    """Charged input reaches the new branch and is not densified."""
+    seen = {}
+
+    def fake(gate, A_init, config):
+        seen["A"] = A_init
+        return "charged"
+
+    monkeypatch.setattr(opt, "optimize_gs_ad_c4v_charged", fake)
+    A = _site("d2_off")
+    assert optimize_gs_ad(GATE, A, _config()) == "charged"
+    assert seen["A"] is A
+
+
+@pytest.mark.parametrize(
+    ("kw", "ctm", "expected"),
+    [
+        ({}, None, True),
+        ({"unit_cell": "2site"}, None, False),
+        ({"gs_c4v": False}, None, False),
+        ({}, {"ctm_ad_mode": "c4v_reference"}, False),
+        ({}, {"ctm_ad_mode": "root_implicit_symmetric"}, False),
+    ],
+)
+def test_charged_gate_reads_the_config(kw, ctm, expected):
+    assert use_charged_c4v_path(_config(ctm, **kw), _site("d2_off")) is expected
+
+
+def test_charged_gate_reads_the_input():
+    """Only a charged C4v SymmetricTensor takes the branch."""
+    config, A = _config(), _site("d2_off")
+    assert not use_charged_c4v_path(config, DenseTensor(A.todense(), A.indices))
+    assert not use_charged_c4v_path(config, None)
+    self_dual = c4v_fixture(ZnSymmetry(2), [0, 1], [0, 1])
+    assert not use_charged_c4v_path(config, self_dual)
+
+
+@pytest.mark.parametrize("pair", [False, True])
+def test_two_site_charged_c4v_is_refused(pair):
+    A = _site("d2_off")
+    with pytest.raises(ValueError, match="charged C4v input with unit_cell='2site'"):
+        optimize_gs_ad(GATE, (A, A) if pair else A, _config(unit_cell="2site"))
+
+
+def test_checkpoint_is_refused_on_the_charged_path(tmp_path):
+    config = _config(gs_checkpoint_path=str(tmp_path / "run.npz"))
+    with pytest.raises(NotImplementedError, match="charged C4v path"):
+        optimize_gs_ad(GATE, _site("d2_off"), config)
+
+
+def test_recipe_1x1_is_refused_on_the_charged_path():
+    """The #938 check runs ahead of the charged branch, whose loop reads no
+    gs_recipe: past it, a '1x1' run would report a 2x2 energy."""
+    with pytest.warns(DeprecationWarning, match="gs_recipe='1x1'"):  # #911
+        config = _config(gs_recipe="1x1", gs_num_steps=0)
+    with pytest.raises(ValueError, match="gs_recipe='1x1' is only supported"):
+        optimize_gs_ad(GATE, _site("d2_off"), config)
+
+
+def test_dispatch_skips_the_fused_projector_check():
+    """Ruling 16: the fused-path check refuses "eigh"; the charged loop takes it."""
+    config = _config({"projector_method": "eigh"}, gs_num_steps=0)
+    assert np.isfinite(optimize_gs_ad(GATE, _site("d2_off"), config)[2])

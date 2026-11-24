@@ -51,6 +51,7 @@ from tenax.algorithms._ipeps_optimize_shared import (  # noqa: F401
 from tenax.algorithms.ipeps_ad_policy import (
     build_ad_ctm_config,
     resolve_projector_backward,
+    use_charged_c4v_path,
     use_reference_c4v_path,
     use_root_implicit_path,
 )
@@ -1224,6 +1225,28 @@ def optimize_gs_ad(
     ``jax.Array`` or Tensor-protocol objects (``DenseTensor``,
     ``SymmetricTensor``).
 
+    A charged C4v ``SymmetricTensor`` (a virtual charge q with
+    ``q != dual(q)``, which ``ctm_tensor_c4v`` runs as the 2-sublattice
+    state (A, negate(A)), #1211) with ``unit_cell="1x1"``, ``gs_c4v=True``
+    and no ``ctm_ad_mode`` takes its own loop: implicit AD through the #1211
+    sweep at the layout of its cold start, on the block data, with L-BFGS
+    and the configured line search.  That loop refuses
+    ``gs_implicit_ad=False``, complex data, ``projector_method="qr"``, a
+    ``forward_gauge`` other than ``"auto"`` or ``"bond_phase"``,
+    ``ctm_conv_method="sv"``, ``projector_backward`` ``"standard"`` or
+    ``"lorentzian"``, ``on_unconverged="warn"``, ``chi_ramp``,
+    ``chi_auto_bump``, ``ctmrg_heuristic_increase_chi``, the
+    ``gs_chi_schedule_steps`` and ``gs_ctm_*`` / ``gs_plateau_*``
+    schedules, ``gs_stall_recovery="noise"``, ``gs_checkpoint_path``,
+    ``cg_gates``, ``fuse_virtual_legs=False``, a ``gs_optimizer`` other
+    than ``"lbfgs"``, ``gs_line_search=False``, ``ctm_mixing`` and
+    ``device_mesh``.  It does not apply ``gs_metric_precond``,
+    ``gs_reject_energy_rise``, ``gs_grad_spike_ratio``, ``gs_log_interval``
+    or ``gs_log_probes``, and it does not read ``adjoint_solver``,
+    ``adjoint_method`` or ``adjoint_arnoldi_precheck``.  A charged C4v site
+    with ``unit_cell="2site"`` and ``gs_c4v=True`` is refused.  See Path 4b
+    in ``docs/guide/algorithms/ipeps_ad_paths.md``.
+
     Args:
         hamiltonian_gate: 2-site Hamiltonian of shape ``(d, d, d, d)``.
         A_init:           Initial site tensor ``(D, D, D, D, d)`` for 1-site,
@@ -1357,7 +1380,13 @@ def optimize_gs_ad(
     # No silent gauge promotion either way -- explicit user choices are
     # preserved on every path.  See
     # docs/plans/2026-04-13-multisite-c4v-reference-ad-plan.md Task 8.
-    if not (use_root_implicit_path(config) or _use_reference_c4v_path(config)):
+    # The charged C4v loop checks its own settings (spec 2) and accepts the
+    # "eigh" projector that this check refuses.
+    if not (
+        use_root_implicit_path(config)
+        or _use_reference_c4v_path(config)
+        or use_charged_c4v_path(config, A_init)
+    ):
         config = _resolve_projector_backward(config)
 
     # Checkpointing is wired for the 2-site and 1-site (incl. coarse-grained
@@ -1366,13 +1395,16 @@ def optimize_gs_ad(
     # (_optimize_gs_ad_tensor_reference_c4v) are NOT wired — block them
     # explicitly so gs_checkpoint_path is never silently ignored (#497).
     if config.gs_checkpoint_path is not None and (
-        isinstance(config.unit_cell, Lattice) or _use_reference_c4v_path(config)
+        isinstance(config.unit_cell, Lattice)
+        or _use_reference_c4v_path(config)
+        or use_charged_c4v_path(config, A_init)
     ):
         raise NotImplementedError(
             "iPEPSConfig.gs_checkpoint_path is not yet supported for generic "
             "Lattice multisite unit cells or the dense C4v-reference path; use "
             "unit_cell='2site' or '1x1' (non-C4v-reference, incl. cg_gates). "
-            "Multisite / C4v-reference checkpoint wiring is a follow-up (#497)."
+            "Multisite / C4v-reference checkpoint wiring is a follow-up (#497). "
+            "The charged C4v path (spec 2) is not wired either."
         )
 
     # gs_recipe='1x1' is wired end-to-end only on the single-site split-CTM
@@ -1414,11 +1446,20 @@ def optimize_gs_ad(
         return _optimize_gs_ad_multisite(hamiltonian_gate, A_init, config)
 
     if config.unit_cell == "2site":
+        _refuse_charged_c4v_2site(A_init, config)
         return _optimize_gs_ad_2site(
             hamiltonian_gate, A_init, config, envs_init=envs_init
         )
     if _use_reference_c4v_path(config):
         return _optimize_gs_ad_tensor_reference_c4v(hamiltonian_gate, A_init, config)
+    if use_charged_c4v_path(config, A_init):
+        # A charged C4v SymmetricTensor (spec 2): implicit AD through the #1211
+        # 2-sublattice sweep on the block data, with no densification.
+        from tenax.algorithms.ipeps_optimize_c4v_charged import (
+            optimize_gs_ad_c4v_charged,
+        )
+
+        return optimize_gs_ad_c4v_charged(hamiltonian_gate, A_init, config)
 
     # CG-with-map_fn: optimizer params are a tuple of raw site arrays.
     # The user can pass that tuple directly as A_init for warm-start /
@@ -1594,6 +1635,26 @@ def _drop_metric_precond_for_fermions(
         stacklevel=3,
     )
     return replace(config, gs_metric_precond=False)
+
+
+def _refuse_charged_c4v_2site(A_init, config) -> None:
+    """Refuse a charged C4v site on the 2-site C4v path (spec 2, section 5).
+
+    The 1x1 charged C4v ansatz is already the 2-sublattice state
+    (A, negate(A)) (#1211).  With ``gs_c4v=False`` the general symmetric
+    2-site path runs as before.
+    """
+    if not config.gs_c4v:
+        return
+    from tenax.algorithms._ctm_c4v_charges import _is_charged_c4v
+
+    sites = A_init if isinstance(A_init, tuple) else (A_init,)
+    if any(_is_charged_c4v(site) for site in sites):
+        raise ValueError(
+            "charged C4v input with unit_cell='2site' and gs_c4v=True is not "
+            "supported: the 1x1 charged C4v ansatz is already the 2-sublattice "
+            "state (A, negate(A)); use unit_cell='1x1'"
+        )
 
 
 def _reject_mislabelled_1x1(config: iPEPSConfig) -> None:

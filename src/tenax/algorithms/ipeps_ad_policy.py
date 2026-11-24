@@ -174,6 +174,24 @@ def use_root_implicit_path(config: iPEPSConfig) -> bool:
     )
 
 
+def use_charged_c4v_path(config: iPEPSConfig, A_init) -> bool:
+    """Return ``True`` when ``A_init`` takes the charged C4v loop (spec 2).
+
+    The gate: ``unit_cell="1x1"``, ``gs_c4v=True``, no ``ctm_ad_mode``, and a
+    charged C4v ``SymmetricTensor`` (a virtual charge q with
+    ``q != dual(q)``, see ``_is_charged_c4v``).  It reads index metadata
+    only.
+    """
+    from tenax.algorithms._ctm_c4v_charges import _is_charged_c4v
+
+    return (
+        config.unit_cell == "1x1"
+        and config.gs_c4v
+        and getattr(config.ctm, "ctm_ad_mode", None) is None
+        and _is_charged_c4v(A_init)
+    )
+
+
 def build_ad_ctm_config(config: iPEPSConfig) -> CTMConfig:
     """Return the effective CTMConfig used by iPEPS AD optimizers.
 
