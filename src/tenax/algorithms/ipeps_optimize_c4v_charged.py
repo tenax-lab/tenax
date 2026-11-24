@@ -32,11 +32,17 @@ from tenax.algorithms._ctm_tensor_c4v_staggered import (
 from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
 from tenax.algorithms._ipeps_optimize_shared import (
+    _backtracking_line_search,
     _converged_outer,
     _euclidean_grads,
     _grad_l2_norm,
+    _is_real_decrease,
     _log_ad_converged,
+    _log_ad_step,
+    _log_ctm_not_converged_reset,
     _normalize_params,
+    _normalize_stall_recovery,
+    _resolve_line_search_method,
     _should_accept_best,
 )
 from tenax.algorithms._line_search import LineSearchAborted, hager_zhang_line_search
@@ -191,15 +197,6 @@ def optimize_gs_ad_c4v_charged(hamiltonian_gate, A_init, config):
         CTMNotConvergedError: a forward with no fixed point and no reset left.
         RuntimeError: a failed adjoint solve at an evaluated point.
     """
-    from tenax.algorithms.ipeps_optimize import (
-        _backtracking_line_search,
-        _is_real_decrease,
-        _log_ad_step,
-        _log_ctm_not_converged_reset,
-        _normalize_stall_recovery,
-        _resolve_line_search_method,
-    )
-
     ctm = config.ctm
     if config.gs_projector_method is not None:
         ctm = dataclasses.replace(ctm, projector_method=config.gs_projector_method)

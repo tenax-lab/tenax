@@ -11,6 +11,14 @@ cycle: ``tests/test_architecture_imports.py`` walks the full AST, so a
 function-local import is an edge like any other.  Hoisting the shared leaves
 into a module that imports neither is what actually breaks it.
 
+The line-search and logging helpers (``_backtracking_line_search``,
+``_is_real_decrease``, ``_normalize_stall_recovery``,
+``_resolve_line_search_method``, ``_log_ad_step``,
+``_log_ctm_not_converged_reset`` and the ``_tree_*`` leaves they use) moved
+here for the same reason, with the same cycle shape: ``ipeps_optimize``
+dispatches *into* ``ipeps_optimize_c4v_charged``, which needs them.  The
+charged loop imports them from here and never from ``ipeps_optimize``.
+
 ``ipeps_optimize`` re-exports every name defined here, so
 ``from tenax.algorithms.ipeps_optimize import _wrap_as_dense_tensor`` keeps
 working for the tests and benchmarks that already use that path.
@@ -18,29 +26,43 @@ working for the tests and benchmarks that already use that path.
 
 from __future__ import annotations
 
+import logging
 import math
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tenax.algorithms.ipeps_config import iPEPSConfig
+from tenax.algorithms.ipeps_config import CTMConfig, iPEPSConfig
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import U1Symmetry
 from tenax.core.tensor import DenseTensor
 
 __all__ = [
+    "_STALL_NOISE_FLOOR",
+    "_backtracking_line_search",
     "_build_optimizer",
     "_converged_outer",
     "_euclidean_grads",
     "_grad_l2_norm",
+    "_is_real_decrease",
     "_log_ad_converged",
+    "_log_ad_step",
+    "_log_ctm_not_converged_reset",
     "_normalize_params",
+    "_normalize_stall_recovery",
+    "_resolve_line_search_method",
     "_should_accept_best",
+    "_tree_add",
+    "_tree_dot",
+    "_tree_scale",
     "_use_line_search",
     "_warn_implicit_ad_variational_caveat",
     "_wrap_as_dense_tensor",
 ]
+
+# The reset warning keeps the logger name of its old home, which users filter on.
+_logger = logging.getLogger("tenax.algorithms.ipeps_optimize")
 
 
 def _warn_implicit_ad_variational_caveat(config: iPEPSConfig, *, path: str) -> None:
@@ -308,3 +330,228 @@ def _su_start_guard_armed(init_from_su: bool, start_step: int) -> bool:
     warm start and converges at once, and so does a checkpoint resume.
     """
     return init_from_su and start_step == 0
+
+
+_STALL_NOISE_FLOOR: float = 1e-12
+"""Absolute energy decrease below which a step is treated as numerical noise
+rather than real progress.  See ``_is_real_decrease`` and issue #510.
+
+Tied to the J=1 spin-Hamiltonian convention (energies are O(1)) so a 1e-12
+threshold sits 4 orders of magnitude above double-precision round-off on a
+typical -0.6 energy.  Not exposed as config: the existing
+``gs_stall_count_threshold`` / ``gs_stall_recovery_retries`` knobs control
+how the trigger interacts with recovery — the floor itself is a noise level,
+not a tuning parameter.
+"""
+
+
+def _is_real_decrease(
+    new_energy: float, old_energy: float, *, noise: float = _STALL_NOISE_FLOOR
+) -> bool:
+    """Return True iff ``new_energy`` is strictly below ``old_energy`` by more
+    than ``noise``.
+
+    Defends the stall safety-net against α-collapse line searches that
+    return a step at α≈1e-14 with a floating-point-noise energy decrease.
+    Without this guard the strict ``new < old`` comparison would reset
+    ``stall_count`` on jitter alone and the optimizer could grind for
+    hours without real progress (issue #510, v8b evidence).
+    """
+    if not math.isfinite(new_energy) or not math.isfinite(old_energy):
+        return False
+    return new_energy < old_energy - noise
+
+
+def _normalize_stall_recovery(config, *, unit_cell: str):
+    """Resolve an unset ``gs_stall_recovery`` to ``"reset"`` on every unit cell.
+
+    ``"reset"`` rolls back to ``best_params`` and clears the L-BFGS / CG
+    state; ``"noise"`` kicks the *current* params by ``gs_noise_amplitude``
+    (10 % Frobenius) with no rollback.  The 1-site default used to be
+    ``"noise"``, to break the 1-site C4v run off an SU-init plateau with
+    gradient norms ~1e-10.  That plateau no longer reproduces: Heisenberg
+    1x1 from the default SU start has |g| = 0.30 at D=2 chi=8 and 0.54 at
+    D=3 chi=9, with and without ``gs_c4v``, and at D=2 ``"noise"`` and
+    ``"reset"`` reach the same energy to 1e-10.  The kick is destructive near
+    a settled energy instead: on D=3 chi=16
+    Heisenberg (``forward_gauge="bond_phase"``, ``projector_backward="flow"``)
+    a stall at E=-0.66819 -- fired by a Hager-Zhang approximate-Wolfe step
+    that does not lower E by more than ``_STALL_NOISE_FLOOR`` -- kicked the
+    state to E=-0.033, after which the CTM adjoint diverged (residual up to
+    1e46) and the run never returned to its best energy; the same kick took
+    the 1-site C4v D=3 run from -0.6668 to -0.50.  The 2-site default has
+    been ``"reset"`` since #520 for the same reason.  ``unit_cell`` is kept
+    for the call sites; an explicit user setting is never overridden.
+    Should an SU start be stationary anyway, ``_su_start_guard_armed``
+    keeps the ``"grad_norm"`` test from accepting it before the first
+    optimizer step.
+    """
+    from dataclasses import replace
+
+    if config.gs_stall_recovery is not None:
+        return config
+    del unit_cell
+    return replace(config, gs_stall_recovery="reset")
+
+
+def _resolve_line_search_method(config: iPEPSConfig, ctm_cfg: CTMConfig) -> str:
+    """Return the concrete line-search method ("armijo" or "hager_zhang").
+
+    Honours ``config.gs_line_search_method``:
+
+    * ``"armijo"`` / ``"hager_zhang"`` — returned as-is.
+    * ``"auto"`` (#509) — picks Armijo backtracking when
+      ``ctm_cfg.chi < config.gs_line_search_hz_chi_threshold`` and
+      Hager-Zhang otherwise.  Rationale: iPEPS-AD's gradient at small chi
+      carries CTM truncation noise of order ε_T that frequently exceeds
+      HZ's strong-Wolfe curvature tolerance (σ ≈ 0.9); Armijo only checks
+      sufficient decrease and dodges this entirely at ~5-10× lower
+      per-probe cost.
+
+    Each iPEPS optimizer (1-site / 2-site / multisite) calls this helper
+    exactly once after ``ctm_cfg`` is built and caches the result in
+    ``line_search_method``; the dispatch sites inside the optimizer loop
+    consult the cached value, not this function.  That keeps the method
+    stable when ``ctm_cfg.chi`` shifts mid-run under legacy ``chi_ramp``
+    or ``chi_auto_bump`` paths (both deprecated by #512, but still
+    functional — without caching, an "auto" run could silently flip
+    Armijo↔HZ after a bump).  Users wanting stage-specific behaviour
+    should wrap ``optimize_gs_ad`` per chi stage with an explicit method.
+    """
+    method = config.gs_line_search_method
+    if method == "auto":
+        if ctm_cfg.chi < config.gs_line_search_hz_chi_threshold:
+            return "armijo"
+        return "hager_zhang"
+    return method
+
+
+def _tree_dot(a, b) -> float:
+    """Compute real dot product between two pytrees of arrays.
+
+    Returns ``Re(sum_leaves <conj(a_leaf), b_leaf>)`` as a Python float.
+
+    Implementation note: routes through host NumPy rather than JAX. The
+    function is called by Python-level optimizer plumbing (L-BFGS slope
+    queries, CG beta numerators, Hager-Zhang ``dphi`` callbacks), where
+    every call already terminates in ``float(...)`` and so must materialise
+    to host anyway. The previous JAX path issued ~3 XLA dispatches per
+    leaf plus a ``block_until_ready`` for the final ``float()``; that
+    dispatch overhead (~100-300 µs each on CPU JAX) showed up at 62 % of
+    AD wall-clock in cProfile (``project_f3_landed_line_search_next.md``).
+    Materialising via ``np.asarray`` consolidates the host transfer into
+    a single per-leaf step and lets NumPy do the scalar reduction.
+    """
+    leaves_a = jax.tree.leaves(a)
+    leaves_b = jax.tree.leaves(b)
+    if not leaves_a:
+        return 0.0
+    total = 0.0
+    for la, lb in zip(leaves_a, leaves_b):
+        a_np = np.asarray(la).ravel()
+        b_np = np.asarray(lb).ravel()
+        # ``np.vdot`` already takes conj of the first argument and returns
+        # a NumPy scalar; ``.real`` gives the real part as a Python float.
+        total += np.vdot(a_np, b_np).real
+    return float(total)
+
+
+def _tree_scale(tree, alpha: float):
+    """Scale all leaves in a pytree by a scalar."""
+    return jax.tree.map(lambda x: x * alpha, tree)
+
+
+def _tree_add(a, b):
+    """Add two pytrees element-wise."""
+    return jax.tree.map(lambda x, y: x + y, a, b)
+
+
+def _backtracking_line_search(
+    params,
+    direction,
+    grad,
+    energy,
+    loss_fn_fwd,
+    c1=1e-4,
+    rho=0.5,
+    max_steps=8,
+):
+    """Armijo backtracking line search (Python-level, not JIT-traced).
+
+    Args:
+        params: current parameters (pytree)
+        direction: search direction (pytree, same structure as params)
+        grad: gradient at current params (pytree)
+        energy: loss value at current params
+        loss_fn_fwd: forward-only loss function params -> scalar
+        c1: sufficient decrease parameter
+        rho: backtracking factor
+        max_steps: maximum number of backtracks
+
+    Returns:
+        (new_params, new_energy, step_size)
+    """
+    slope = _tree_dot(grad, direction)
+    if slope >= 0:
+        # Direction is not a descent direction; fall back to negative gradient
+        direction = jax.tree.map(lambda g: -g, grad)
+        slope = -_tree_dot(grad, grad)
+
+    # Scale initial step so ||alpha * d|| ~ 0.1 * ||params||
+    dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
+    param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
+    alpha = min(1.0, 0.1 * param_norm / dir_norm)
+
+    best_trial, best_f, best_alpha = params, energy, 0.0
+    for _ in range(max_steps):
+        trial = _normalize_params(_tree_add(params, _tree_scale(direction, alpha)))
+        f_trial = loss_fn_fwd(trial)
+        if f_trial < best_f:
+            best_trial, best_f, best_alpha = trial, f_trial, alpha
+        if f_trial <= energy + c1 * alpha * slope:
+            return trial, f_trial, alpha
+        alpha *= rho
+
+    # Return best trial seen (stays at current params if nothing improved)
+    return best_trial, best_f, best_alpha
+
+
+def _log_ad_step(
+    backend: str,
+    step: int,
+    num_steps: int,
+    energy: float,
+    delta_energy: float,
+    best_energy: float,
+    *,
+    grad_norm: float | None = None,
+) -> None:
+    delta_str = "N/A" if not math.isfinite(delta_energy) else f"{delta_energy:.3e}"
+    grad_str = "" if grad_norm is None else f" |g|={grad_norm:.3e}"
+    print(
+        f"[iPEPS-AD:{backend}] step {step + 1}/{num_steps} "
+        f"E={energy:.10f} dE={delta_str}{grad_str} E_best={best_energy:.10f}",
+        flush=True,
+    )
+
+
+def _log_ctm_not_converged_reset(
+    exc, *, conv_tol, n_reset: int, retries: int, verbose: bool
+) -> None:
+    """Spec section 3 reset log line (logger always; stdout when verbose)."""
+    from tenax.algorithms._ctm_convergence_policy import (
+        _fmt,
+        format_step_multiplier,
+    )
+
+    info = exc.info
+    msg = (
+        f"[iPEPS-AD] CTM forward not converged at step {exc.step} "
+        f"(sweeps {_fmt(getattr(info, 'iterations', None), 'd')}, sv_diff "
+        f"{_fmt(getattr(info, 'sv_diff', None), '.3g')} vs tol "
+        f"{_fmt(conv_tol, 'g')}, step multiplier {format_step_multiplier(info)}) "
+        f"— reset to best (#{n_reset}/{retries})"
+    )
+    _logger.warning(msg)
+    if verbose:
+        print(msg, flush=True)
