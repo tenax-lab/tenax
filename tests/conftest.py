@@ -552,6 +552,10 @@ _FILE_MARKERS = {
     # joins, the energy routing and the input validation.  No converged CTM;
     # the CTM and energy tests are in test_ctm_tensor_c4v.py.
     "test_c4v_staggered.py": "core",
+    # Charged C4v AD (spec 2): mechanism tests of the AD path at chi <= 6 --
+    # the alignment, the element-wise phase, the custom_vjp gates, the
+    # one-sweep VJP, the config refusals, the loop mocks and the dispatch.
+    "test_c4v_charged_ad.py": "core",
     # Root implicit AD for C4v CTMRG (#715 Phase 0): each parity test runs a
     # full CTM convergence plus finite-difference reruns.
     "test_ctm_c4v_root_implicit.py": "algorithm",
