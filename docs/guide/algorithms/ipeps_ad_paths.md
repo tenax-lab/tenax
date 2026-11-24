@@ -563,6 +563,155 @@ config = iPEPSConfig(
   `ctm.ctm_ad_mode="c4v_reference"`,
 - supports `gs_num_steps>0` optimization with implicit gradients.
 
+### Path 4b: Charged C4v Symmetric Input
+
+A charged C4v `SymmetricTensor` has a virtual charge q with `q != dual(q)`:
+for U(1) any q ≠ 0, for Z_n any q other than 0 and n/2. `ctm_tensor_c4v`
+runs it as the 2-sublattice state (A, negate(A)) (#1211). With
+`unit_cell="1x1"` and `gs_c4v=True`, `optimize_gs_ad` optimises it on the
+block data, with no densification:
+
+```
+Cold start:  the #1211 sweep to sv-convergence; its layout L is frozen
+Forward:     e <- align(F_L(e; A), e) to an element-wise fixed point
+Backward:    (I - J^T + tau I) lambda = g by gmres_eager (restart 30),
+             then dA = (dF/dA)^T lambda
+Optimiser:   L-BFGS (memory 10) with the Hager-Zhang or Armijo line search
+```
+
+F_L is the sweep with its projector built at the frozen layout L (the
+number of kept states per charge). `align` fixes the one free sign of each
+chi index against the previous iterate, so the iteration converges
+element-wise and the implicit function theorem applies.
+
+**Enable it with:**
+
+```python
+from tenax import (CTMConfig, iPEPSConfig, heisenberg_gate, optimize_gs_ad,
+                   sublattice_rotate_gate)
+
+config = iPEPSConfig(
+    unit_cell="1x1",
+    gs_c4v=True,
+    su_init=False,
+    ctm=CTMConfig(chi=16, max_iter=500, conv_tol=1e-10),
+)
+# A_charged: a SymmetricTensor with labels u, d, l, r, phys whose four
+# virtual faces carry equal flow-weighted charges, at least one of them
+# not self-dual.
+A, env, E = optimize_gs_ad(sublattice_rotate_gate(heisenberg_gate()),
+                           A_charged, config)
+```
+
+**Options and caveats:**
+- The start is projected to C4v and rebuilt with every block its charges
+  allow; it need not be C4v.
+- The layout L stays frozen for the run. After each evaluation a free
+  ranking runs at the fixed point; a different layout is logged once and
+  listed in `history["layout_mismatch_steps"]` (with `return_history=True`),
+  and the run keeps L.
+- A random start can freeze a layout that the free ranking rejects at every
+  later step. At D=3, χ=36 (below) the random start froze
+  `((-2, 7), (0, 22), (2, 7))` (kept states per charge), and at its 200-step
+  end state the frozen-layout E is 1.6e-8 above the eager free-layout E. A
+  restart from the returned tensor runs a new cold start and freezes the
+  layout found there: from that end state it froze
+  `((-4, 1), (-2, 9), (0, 16), (2, 9), (4, 1))`, and 50 more steps logged no
+  mismatch.
+- The solve reads `adjoint_tol` (default 1e-8), `adjoint_maxiter` (default
+  50) and `adjoint_tikhonov` (default 1e-6). `adjoint_maxiter` counts GMRES
+  restarts: after one initial residual, each restart costs 31 matvecs (30
+  Krylov steps and one residual). `history["adjoint_matvecs"]` lists the
+  matvecs of each step's solve; one gradient took 32 (one restart) at D=2,
+  χ=6 and at D=3, χ=36. The solve fails closed: a relative residual above
+  max(10·`adjoint_tol`, 1e-12) raises `RuntimeError`. The Tikhonov term
+  biases the gradient by about τ/(1 − ρ) relative, with ρ the spectral
+  radius of the sweep Jacobian; set `adjoint_tikhonov=0.0` for an exact
+  gradient (the FD tests do).
+- A forward with no element-wise fixed point raises `CTMNotConvergedError`;
+  the loop resets to the best point within `gs_stall_recovery_retries`. A
+  line-search trial without a fixed point is a bad point.
+- The loop keeps an L-BFGS pair (s, y) when s·y > 1e-8 |s||y|. An absolute
+  floor, s·y > 1e-10, dropped every pair after step 2 at D=3, χ=36 and held
+  a run in a 2-cycle.
+- At D=3, χ=36 the default stop, |g| < `gs_grad_norm_tol` = 1e-5, does not
+  mean that the energy has converged (see Measured, below).
+- With `return_history=True` the history holds `ctm_converged` (one `True`
+  per recorded step) and none of the 1x1 path's other `ctm_*` lists
+  (`ctm_sv_diff`, `ctm_step_multiplier`, `ctm_stationarity`). It adds the
+  per-step lists `forward_sweeps`, `adjoint_matvecs` and `adjoint_residual`,
+  and `layout` and `layout_mismatch_steps`. It has no `jit_compile_time`:
+  `step_times` has one entry per recorded step, as many as `energies` (the
+  dense 1x1 path records one fewer and puts the first step in
+  `jit_compile_time`), so `step_times[0]` includes the first step's compile.
+- Refused: `gs_implicit_ad=False`, complex data, `projector_method="qr"`
+  (`"svd"` and `"eigh"` both select the #1211 block projector), a
+  `forward_gauge` other than `"auto"`/`"bond_phase"`,
+  `ctm_conv_method="sv"`, `projector_backward` `"standard"` or
+  `"lorentzian"`, `on_unconverged="warn"`, the χ-changing knobs and
+  schedules, `gs_stall_recovery="noise"`, `gs_checkpoint_path`,
+  `gs_recipe="1x1"`, `cg_gates`, `fuse_virtual_legs=False`, `gs_optimizer`
+  other than `"lbfgs"`, `gs_line_search=False`, `ctm_mixing` and
+  `device_mesh`.
+- Not applied: `gs_metric_precond`, `gs_reject_energy_rise`,
+  `gs_grad_spike_ratio`, `gs_log_interval` and `gs_log_probes`. Not read:
+  `adjoint_solver`, `adjoint_method`, `adjoint_arnoldi_precheck`.
+- A charged C4v site with `unit_cell="2site"` and `gs_c4v=True` is refused:
+  the 1x1 charged ansatz is already the 2-sublattice state.
+- `jax.grad` through `ctm_tensor_c4v` itself still raises on charged
+  input; the AD runs through this path only.
+- The dense 1x1 C4v optimiser cannot start from an exact-U(1) state: its
+  dense CTM 2-cycles at step 1. That is one reason for this path.
+
+**Measured** (CPU, float64, Heisenberg J1, sublattice-rotated gate):
+
+| D | χ | Start | E | ‖g‖ | Steps | Reference |
+|---|---|---|---|---|---|---|
+| 2 | 16 | exact_u1_d2 at 1.15·t | −0.660231093468 | 9.34e-06 | 14 | −0.66023109348 (peps-torch) |
+| 2 | 16 | random U(1) C4v | −0.582762987478 | 8.95e-06 | 22 | −0.582762987484 (a second local minimum, see below) |
+| 3 | 36 | Hasik, perturbed | −0.6646015169325314 | 9.36e-06 | 60 | −0.6646014335147759 (tenax energy of Hasik's state) |
+| 3 | 36 | random U(1) C4v | −0.6646013793235275 | 3.05e-04 | 100, not converged | −0.6646014335147759 |
+| 3 | 36 | random U(1) C4v, `--steps 200` | −0.6646024915789478 | 9.90e-06 | 185 | −0.6646014335147759 |
+
+E is the energy that the loop returns, at the frozen layout. Both D=2 starts
+lie in the one-parameter D=2 U(1) C4v family A[0000, 0] = 1,
+A[e_k, 1] = t, of which `exact_u1_d2` (peps-torch) is one point; the first
+start scales its t by 1.15. The random start (t = 1.549) lies on the outer
+flank of a second local minimum of the family, at t = 1.131, and the run
+ends there.
+
+Converged FD at χ=6 (4 checks on two U(1) fixtures and one Z4 fixture,
+τ = 0): grad_err ≤ 0.19·fd_unc. fd_unc is the largest difference between
+neighbouring central differences around the plateau pair, for h from 1e-2
+to 1e-6. Dense parity at χ=16: |E − E_dense| = 1.11e-16 against the dense
+`ctm_tensor` energy of the returned tensor, and 5.64e-10 against the dense
+1x1 C4v optimiser. The dense optimiser starts from the same D=2 start plus
+a 1e-3 C4v kick, because its CTM 2-cycles on the exact-U(1) start (above).
+
+D=3, χ=36, Hasik's U(1)-C4v state (`benchmarks/ipeps_c4v_charged_ad.py`):
+the first gradient, with its compile, takes 117.9 s; the median later step
+takes 10.63 s (perturbed start) and 7.96 s (random start); the peak RSS is
+5669 MiB. The FD check in 3 directions at a perturbed state gives
+grad_err ≤ 0.79·fd_unc. The tenax energy of Hasik's state differs from his
+`.dat` value (tenax minus `.dat`) by 2.35e-11 at χ=36, 2.37e-13 at χ=54
+(where tenax keeps 53 states) and −2.32e-14 at χ=72.
+
+The perturbed start (a C4v kick of relative size 0.05 off Hasik's state)
+stops at step 60, 8.3e-8 below the tenax energy of Hasik's state. The
+random start has not converged after the benchmark's 100 steps (5.42e-8
+above it). With `--steps 200` it reaches the default stop at step 185, and
+its eager free-layout energy is 1.0742e-6 below the tenax energy of Hasik's
+state at χ = 36, 54 and 72. Continued at `gs_grad_norm_tol=1e-7`, the
+perturbed end state and the random 200-step end state differ in eager
+energy by 7.3e-11 at each of χ = 36, 54 and 72, with the same eager
+layouts, and both are 1.080e-6 below the tenax energy of Hasik's state at
+every χ (the perturbed one is −0.6646025135693818 at χ=72).
+Neither continuation reached |g| < 1e-7. So the default stop (|g| < 1e-5)
+ended the perturbed run at step 60, 9.97e-7 above the energy that its own
+continuation reached. The tenax C4v subspace has 12 parameters here, as
+many as Hasik's elementary tensors; whether the two span the same space was
+not checked.
+
 (root-implicit-ad)=
 ### Path 5: Root Implicit AD (Opt-In; dense 1×1 and 2-site checkerboard)
 

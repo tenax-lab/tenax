@@ -1230,7 +1230,7 @@ def optimize_gs_ad(
     state (A, negate(A)), #1211) with ``unit_cell="1x1"``, ``gs_c4v=True``
     and no ``ctm_ad_mode`` takes its own loop: implicit AD through the #1211
     sweep at the layout of its cold start, on the block data, with L-BFGS
-    and the configured line search.  That loop refuses
+    and the configured line search.  This path refuses
     ``gs_implicit_ad=False``, complex data, ``projector_method="qr"``, a
     ``forward_gauge`` other than ``"auto"`` or ``"bond_phase"``,
     ``ctm_conv_method="sv"``, ``projector_backward`` ``"standard"`` or
@@ -1238,14 +1238,15 @@ def optimize_gs_ad(
     ``chi_auto_bump``, ``ctmrg_heuristic_increase_chi``, the
     ``gs_chi_schedule_steps`` and ``gs_ctm_*`` / ``gs_plateau_*``
     schedules, ``gs_stall_recovery="noise"``, ``gs_checkpoint_path``,
-    ``cg_gates``, ``fuse_virtual_legs=False``, a ``gs_optimizer`` other
-    than ``"lbfgs"``, ``gs_line_search=False``, ``ctm_mixing`` and
-    ``device_mesh``.  It does not apply ``gs_metric_precond``,
-    ``gs_reject_energy_rise``, ``gs_grad_spike_ratio``, ``gs_log_interval``
-    or ``gs_log_probes``, and it does not read ``adjoint_solver``,
-    ``adjoint_method`` or ``adjoint_arnoldi_precheck``.  A charged C4v site
-    with ``unit_cell="2site"`` and ``gs_c4v=True`` is refused.  See Path 4b
-    in ``docs/guide/algorithms/ipeps_ad_paths.md``.
+    ``gs_recipe="1x1"``, ``cg_gates``, ``fuse_virtual_legs=False``, a
+    ``gs_optimizer`` other than ``"lbfgs"``, ``gs_line_search=False``,
+    ``ctm_mixing`` and ``device_mesh``.  It does not apply
+    ``gs_metric_precond``, ``gs_reject_energy_rise``,
+    ``gs_grad_spike_ratio``, ``gs_log_interval`` or ``gs_log_probes``, and
+    it does not read ``adjoint_solver``, ``adjoint_method`` or
+    ``adjoint_arnoldi_precheck``.  A charged C4v site with
+    ``unit_cell="2site"`` and ``gs_c4v=True`` is refused.  See Path 4b in
+    ``docs/guide/algorithms/ipeps_ad_paths.md``.
 
     Args:
         hamiltonian_gate: 2-site Hamiltonian of shape ``(d, d, d, d)``.
@@ -1324,7 +1325,10 @@ def optimize_gs_ad(
         the last element.  Besides ``energies``, ``step_times`` and the
         ``ctm_*`` per-step lists, it holds ``ctm_warnings_suppressed`` (int):
         how many repeated unconverged-CTM warnings ``on_unconverged="warn"``
-        swallowed (one warning is kept per site and step, #1083).
+        swallowed (one warning is kept per site and step, #1083).  On the
+        charged C4v path the only ``ctm_*`` list is ``ctm_converged``, and
+        the path adds the per-step lists ``forward_sweeps``,
+        ``adjoint_matvecs`` and ``adjoint_residual``.
     """
     # First, ahead of the root-implicit dispatch (which refuses every Lattice
     # for its own reason) and of every warning: the multisite energy sums the
