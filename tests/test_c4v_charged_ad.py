@@ -14,6 +14,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.flatten_util import ravel_pytree
 
 jax.config.update("jax_enable_x64", True)
 
@@ -274,6 +275,50 @@ def test_one_sweep_vjp_matches_fd():
         f"vacuous: |g.v|={abs(slope):.1e}, fd_unc={fd_unc:.1e}"
     )
     assert abs(slope - frozen) > 10 * fd_unc, "vacuous: dP/dA is in the FD noise"
+
+
+def test_one_sweep_adjoint_matches_fd():
+    """Catches a frozen projector in J^T, the operator of the adjoint solve:
+    FD of <w, F~(e0 + h v)> from a fixed start e0 (spec 2, section 6), against
+    the solve's own ``_adjoint_matvec``; w has no radial part (ruling 5)."""
+    A, C, T, layout = _cold("d2_off")
+    f = jax.jit(lambda e: ad._align(*ad._sweep_at(A, *e, layout), T))
+    C1, T1 = f((C, T))
+    w = (
+        with_data(C1, _orthogonal_to(C1._data, jax.random.PRNGKey(1))),
+        with_data(T1, _orthogonal_to(T1._data, jax.random.PRNGKey(2))),
+    )
+    vC = jax.random.normal(jax.random.PRNGKey(4), C._data.shape)
+    vT = jax.random.normal(jax.random.PRNGKey(5), T._data.shape)
+    norm = jnp.sqrt(jnp.vdot(vC, vC) + jnp.vdot(vT, vT))
+    vC, vT = vC / norm, vT / norm
+
+    def phi(eps):
+        e = (with_data(C, C._data + eps * vC), with_data(T, T._data + eps * vT))
+        Ce, Te = f(e)
+        return float(jnp.vdot(w[0]._data, Ce._data) + jnp.vdot(w[1]._data, Te._data))
+
+    # The flat vectors in the (C, T) order of the engine's ravel_pytree.
+    w_flat = ravel_pytree(w)[0]
+    v_flat = ravel_pytree((with_data(C, vC), with_data(T, vT)))[0]
+
+    def jt_slope():
+        """<J^T w, v>, with J^T w read off the matvec of the solve at tau = 0."""
+        jt_w = w_flat - ad._adjoint_matvec(w_flat, A, C, T, layout, 0.0)
+        return float(jnp.vdot(jt_w, v_flat))
+
+    slope = jt_slope()
+    fd, fd_unc = fd_plateau(phi)
+    with frozen_projectors():
+        frozen = jt_slope()
+    print(
+        f"one-sweep e-direction: |g.v|={abs(slope):.3e} fd_unc={fd_unc:.1e} "
+        f"grad_err={abs(slope - fd):.1e} flow-frozen={abs(slope - frozen):.1e}"
+    )
+    # grad_err first: a mutant must fail here, not on a regime assert.
+    assert abs(slope - fd) <= 3 * fd_unc + 1e-12, (slope, fd, fd_unc)
+    assert abs(slope) > 100 * fd_unc, "vacuous: |g.v| is at the FD floor"
+    assert abs(slope - frozen) > 10 * fd_unc, "vacuous: dP/de is in the FD noise"
 
 
 @pytest.mark.parametrize("which", ["C", "T"])
