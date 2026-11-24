@@ -556,6 +556,10 @@ _FILE_MARKERS = {
     # the alignment, the element-wise phase, the custom_vjp gates, the
     # one-sweep VJP, the config refusals, the loop mocks and the dispatch.
     "test_c4v_charged_ad.py": "core",
+    # Charged C4v AD (spec 2), physics: the converged FD with an h scan (each
+    # check re-converges the CTM element-wise at 18 sample points), the D=2
+    # optimum and the dense parity.
+    "test_c4v_charged_ad_physics.py": "algorithm",
     # Root implicit AD for C4v CTMRG (#715 Phase 0): each parity test runs a
     # full CTM convergence plus finite-difference reruns.
     "test_ctm_c4v_root_implicit.py": "algorithm",

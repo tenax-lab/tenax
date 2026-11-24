@@ -17,7 +17,15 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from _c4v_staggered_fixtures import T_EXACT, c4v_fixture, charged_d2, leg
+from _c4v_staggered_fixtures import (
+    T_EXACT,
+    c4v_fixture,
+    charged_d2,
+    fd_plateau,
+    frozen_projectors,
+    leg,
+    with_data,
+)
 
 from tenax import CTMConfig
 from tenax.algorithms import _ctm_tensor_c4v_charged_ad as ad
@@ -220,3 +228,71 @@ def test_programs_compile_once_per_layout():
     }
     assert record["adjoint_residual"] <= max(10 * CTM6.adjoint_tol, 1e-12)
     assert record["adjoint_matvecs"] >= 1
+
+
+# ------------------------------------------------------------------ #
+# One-sweep gradient checks (spec 2, section 6)                       #
+# ------------------------------------------------------------------ #
+
+
+def _one_sweep(C, T, layout):
+    """A_ -> F~((C, T); A_, ref=T): the map whose VJP is (dF~/dA)^T."""
+    return lambda A_: ad._align(*ad._sweep_at(A_, C, T, layout), T)
+
+
+def _orthogonal_to(x, key):
+    """A random vector with no component along x."""
+    w = jax.random.normal(key, x.shape)
+    return w - jnp.vdot(x, w) / jnp.vdot(x, x) * x
+
+
+def test_one_sweep_vjp_matches_fd():
+    """Catches a frozen projector; the cotangent has no radial part (ruling 5)."""
+    A, C, T, layout = _cold("d2_off")
+    f = _one_sweep(C, T, layout)
+    C1, T1 = f(A)
+    w = (
+        with_data(C1, _orthogonal_to(C1._data, jax.random.PRNGKey(1))),
+        with_data(T1, _orthogonal_to(T1._data, jax.random.PRNGKey(2))),
+    )
+    v = jax.random.normal(jax.random.PRNGKey(3), A._data.shape)
+    v = v / jnp.linalg.norm(v)
+
+    def phi(eps):
+        Ce, Te = f(with_data(A, A._data + eps * v))
+        return float(jnp.vdot(w[0]._data, Ce._data) + jnp.vdot(w[1]._data, Te._data))
+
+    (dA,) = jax.vjp(f, A)[1](w)
+    slope = float(jnp.vdot(dA._data, v))
+    fd, fd_unc = fd_plateau(phi)
+    with frozen_projectors():
+        (dA_frozen,) = jax.vjp(f, A)[1](w)
+    frozen = float(jnp.vdot(dA_frozen._data, v))
+    # grad_err first: a mutant must fail here, not on a regime assert.
+    assert abs(slope - fd) <= 3 * fd_unc + 1e-12, (slope, fd, fd_unc)
+    assert abs(slope) > 100 * fd_unc, (
+        f"vacuous: |g.v|={abs(slope):.1e}, fd_unc={fd_unc:.1e}"
+    )
+    assert abs(slope - frozen) > 10 * fd_unc, "vacuous: dP/dA is in the FD noise"
+
+
+@pytest.mark.parametrize("which", ["C", "T"])
+def test_a_radial_cotangent_has_zero_vjp(which):
+    """Catches the plain max_abs() in F_L (ruling 4): only the smooth scale
+    gives a cotangent along the output a zero VJP."""
+    A, C, T, layout = _cold("d2_off")
+    f = _one_sweep(C, T, layout)
+    C1, T1 = f(A)
+    X = C1 if which == "C" else T1
+    r = jax.random.normal(jax.random.PRNGKey(4), X._data.shape)
+    r = r * (jnp.linalg.norm(X._data) / jnp.linalg.norm(r))
+    zero_C = jax.tree_util.tree_map(jnp.zeros_like, C1)
+    zero_T = jax.tree_util.tree_map(jnp.zeros_like, T1)
+    radial = (C1, zero_T) if which == "C" else (zero_C, T1)
+    rnd = (with_data(C1, r), zero_T) if which == "C" else (zero_C, with_data(T1, r))
+    vjp = jax.vjp(f, A)[1]
+    (d_radial,) = vjp(radial)
+    (d_random,) = vjp(rnd)
+    n_random = float(jnp.linalg.norm(d_random._data))
+    assert n_random > 1e-3, "vacuous: the random cotangent has no VJP"
+    assert float(jnp.linalg.norm(d_radial._data)) <= 1e-10 * n_random
