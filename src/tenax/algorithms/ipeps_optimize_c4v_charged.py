@@ -374,11 +374,12 @@ def optimize_gs_ad_c4v_charged(hamiltonian_gate, A_init, config):
 
         # The L-BFGS direction, identity H0.  The pair rule is relative
         # (_keep_lbfgs_pair).  The absolute floor s.y > 1e-10 of the dense
-        # 1x1 loop drops every pair once |s| |y| ~ 1e-9.  At D=3, chi=36 it
-        # kept the step-2 pair (s.y = 1.08e-10) and dropped steps 3-16
-        # (s.y = 6.5e-11, cos(s, y) = 0.07-0.08).  The loop then sat in a
-        # 2-cycle on that one stale pair: |g| alternated 8.6e-6 / 2.2e-5,
-        # and E fell 3.3e-10 per step.
+        # 1x1 loop drops every pair once |s| |y| ~ 1e-9.  At D=3, chi=36, in
+        # a 16-step restart from a run's end state, it kept the step-2 pair
+        # (s.y = 1.08e-10) and dropped steps 3-16 (s.y = 6.5e-11,
+        # cos(s, y) = 0.07-0.08).  The loop then sat in a 2-cycle on that one
+        # stale pair: |g| alternated 8.6e-6 / 2.2e-5, and E fell 3.3e-10 per
+        # step.
         if prev_x is not None:
             s, y = x - prev_x, g - prev_g
             if _keep_lbfgs_pair(s, y):

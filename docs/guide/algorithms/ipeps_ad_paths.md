@@ -568,8 +568,8 @@ config = iPEPSConfig(
 A charged C4v `SymmetricTensor` has a virtual charge q with `q != dual(q)`:
 for U(1) any q ≠ 0, for Z_n any q other than 0 and n/2. `ctm_tensor_c4v`
 runs it as the 2-sublattice state (A, negate(A)) (#1211). With
-`unit_cell="1x1"` and `gs_c4v=True`, `optimize_gs_ad` optimises it on the
-block data, with no densification:
+`unit_cell="1x1"`, `gs_c4v=True` and no `ctm_ad_mode`, `optimize_gs_ad`
+optimises it on the block data, with no densified environment:
 
 ```
 Cold start:  the #1211 sweep to sv-convergence; its layout L is frozen
@@ -631,9 +631,11 @@ A, env, E = optimize_gs_ad(sublattice_rotate_gate(heisenberg_gate()),
 - A forward with no element-wise fixed point raises `CTMNotConvergedError`;
   the loop resets to the best point within `gs_stall_recovery_retries`. A
   line-search trial without a fixed point is a bad point.
-- The loop keeps an L-BFGS pair (s, y) when s·y > 1e-8 |s||y|. An absolute
-  floor, s·y > 1e-10, dropped every pair after step 2 at D=3, χ=36 and held
-  a run in a 2-cycle.
+- The loop keeps an L-BFGS pair (s, y) when s·y > 1e-8 |s||y|. At D=3,
+  χ=36, once |s||y| fell to about 1e-9, an absolute floor s·y > 1e-10
+  stopped keeping pairs: in a 16-step restart from a run's end state it kept
+  the first pair and dropped the next 14, and |g| alternated between about
+  8.6e-6 and 2.2e-5.
 - At D=3, χ=36 the default stop, |g| < `gs_grad_norm_tol` = 1e-5, does not
   mean that the energy has converged (see Measured, below).
 - With `return_history=True` the history holds `ctm_converged` (one `True`
@@ -651,11 +653,13 @@ A, env, E = optimize_gs_ad(sublattice_rotate_gate(heisenberg_gate()),
   `"lorentzian"`, `on_unconverged="warn"`, the χ-changing knobs and
   schedules, `gs_stall_recovery="noise"`, `gs_checkpoint_path`,
   `gs_recipe="1x1"`, `cg_gates`, `fuse_virtual_legs=False`, `gs_optimizer`
-  other than `"lbfgs"`, `gs_line_search=False`, `ctm_mixing` and
-  `device_mesh`.
-- Not applied: `gs_metric_precond`, `gs_reject_energy_rise`,
-  `gs_grad_spike_ratio`, `gs_log_interval` and `gs_log_probes`. Not read:
-  `adjoint_solver`, `adjoint_method`, `adjoint_arnoldi_precheck`.
+  other than `"lbfgs"`, `gs_line_search=False`, `ctm_mixing > 0` and a
+  `device_mesh` that is not `None`.
+- Not applied: `gs_metric_precond`, `gs_max_grad_norm`,
+  `gs_reject_energy_rise`, `gs_grad_spike_ratio`, `gs_log_interval` and
+  `gs_log_probes`. Not read: `adjoint_solver`, `adjoint_method`,
+  `adjoint_chain_rule`, `adjoint_degen_tol`, `adjoint_diag_shift`,
+  `adjoint_arnoldi_precheck`, `adjoint_arnoldi_threshold`.
 - A charged C4v site with `unit_cell="2site"` and `gs_c4v=True` is refused:
   the 1x1 charged ansatz is already the 2-sublattice state.
 - `jax.grad` through `ctm_tensor_c4v` itself still raises on charged
@@ -681,7 +685,7 @@ flank of a second local minimum of the family, at t = 1.131, and the run
 ends there.
 
 Converged FD at χ=6 (4 checks on two U(1) fixtures and one Z4 fixture,
-τ = 0): grad_err ≤ 0.19·fd_unc. fd_unc is the largest difference between
+τ = 0): grad_err < 0.2·fd_unc. fd_unc is the largest difference between
 neighbouring central differences around the plateau pair, for h from 1e-2
 to 1e-6. Dense parity at χ=16: |E − E_dense| = 1.11e-16 against the dense
 `ctm_tensor` energy of the returned tensor, and 5.64e-10 against the dense

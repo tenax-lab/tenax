@@ -1240,11 +1240,13 @@ def optimize_gs_ad(
     schedules, ``gs_stall_recovery="noise"``, ``gs_checkpoint_path``,
     ``gs_recipe="1x1"``, ``cg_gates``, ``fuse_virtual_legs=False``, a
     ``gs_optimizer`` other than ``"lbfgs"``, ``gs_line_search=False``,
-    ``ctm_mixing`` and ``device_mesh``.  It does not apply
-    ``gs_metric_precond``, ``gs_reject_energy_rise``,
-    ``gs_grad_spike_ratio``, ``gs_log_interval`` or ``gs_log_probes``, and
-    it does not read ``adjoint_solver``, ``adjoint_method`` or
-    ``adjoint_arnoldi_precheck``.  A charged C4v site with
+    ``ctm_mixing > 0`` and a ``device_mesh`` that is not ``None``.  It does
+    not apply ``gs_metric_precond``, ``gs_max_grad_norm``,
+    ``gs_reject_energy_rise``, ``gs_grad_spike_ratio``, ``gs_log_interval``
+    or ``gs_log_probes``, and it does not read ``adjoint_solver``,
+    ``adjoint_method``, ``adjoint_chain_rule``, ``adjoint_degen_tol``,
+    ``adjoint_diag_shift``, ``adjoint_arnoldi_precheck`` or
+    ``adjoint_arnoldi_threshold``.  A charged C4v site with
     ``unit_cell="2site"`` and ``gs_c4v=True`` is refused.  See Path 4b in
     ``docs/guide/algorithms/ipeps_ad_paths.md``.
 
