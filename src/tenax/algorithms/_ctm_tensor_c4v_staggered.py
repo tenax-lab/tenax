@@ -18,14 +18,27 @@ block projector (an SVD per mirror pair of blocks, an eigh per self-partner
 block, one ranking that never splits a pair), and sets ``C_new = P^T Q P``
 and ``T_new = negate(P^T (T a) P)``, which is again the edge above an
 A-site.  Design: ``docs/superpowers/specs/2026-11-22-c4v-charged-u1-design.md``.
+
+Spec 2 (``docs/superpowers/specs/2026-11-23-c4v-charged-ad-design.md``)
+differentiates the sweep at a frozen layout.  So the projector is split
+into the eager ranking (``_c4v_staggered_rank``, ``_c4v_staggered_layout``)
+and the assembly of P from its columns (``_c4v_staggered_assemble``), which
+the traced builder ``_c4v_staggered_projectors_at`` shares.  The eager
+outputs do not change.
 """
 
 from __future__ import annotations
 
 __all__ = [
+    "_c4v_staggered_assemble",
+    "_c4v_staggered_blocks",
     "_c4v_staggered_enlarged_corner",
     "_c4v_staggered_initial_state",
+    "_c4v_staggered_layout",
+    "_c4v_staggered_loop",
+    "_c4v_staggered_project",
     "_c4v_staggered_projectors",
+    "_c4v_staggered_rank",
     "_c4v_staggered_sweep",
     "_c4v_staggered_to_full_env",
     "_check_c4v_staggered_invariants",
@@ -41,7 +54,9 @@ from tenax.algorithms._ctm_c4v_charges import (
     _negate_charges,
     _pairs,
 )
+from tenax.algorithms._ctm_convergence_policy import CTMConvergeInfo
 from tenax.algorithms._ctm_env_dense import _in_documented_leg_order
+from tenax.algorithms._ctm_root_implicit_sym_sectors import BondLayout
 from tenax.algorithms._ctm_tensor_convergence import (
     _ctm_sv_diff,
     _forced_corner_rank,
@@ -101,6 +116,29 @@ def _c4v_staggered_projectors(
         ValueError: nothing survives the cutoff (a zero corner), or chi = 1
             and the largest value belongs to a mirror pair.
     """
+    sym, fused, col, mats = _c4v_staggered_blocks(Qf)
+    decomp, keep = _c4v_staggered_rank(sym, mats, chi)
+    cols = {}
+    for q in sorted(keep):
+        kind, U, V = decomp[q]
+        ns = sorted(keep[q])
+        cols[q] = U[:, ns]
+        if kind == "pair":
+            cols[_dual_charge(sym, q)] = V[:, ns]
+    return _c4v_staggered_assemble(sym, fused, col, cols)
+
+
+def _c4v_staggered_blocks(Qf: SymmetricTensor):
+    """The faces of the enlarged corner and its blocks: ``(sym, fused, col, mats)``.
+
+    ``mats[q]`` is block (q, q): the fused states of charge q are its rows,
+    the col states of charge q (the fused states of charge ``dual(q)``) its
+    columns.  Metadata decides everything here, so it is safe under tracing.
+
+    Raises:
+        RuntimeError: the two faces of ``Qf`` do not carry the same
+            flow-weighted charges (not a 2-sublattice corner).
+    """
     labels = Qf.labels()
     fpos, cpos = labels.index("fused"), labels.index("col")
     fused, col = Qf.indices[fpos], Qf.indices[cpos]
@@ -117,7 +155,22 @@ def _c4v_staggered_projectors(
         int(key[fpos]): (block if fpos < cpos else block.T)
         for key, block in Qf.blocks.items()
     }
+    return sym, fused, col, mats
 
+
+def _c4v_staggered_rank(sym, mats, chi: int):
+    """Decompose every block and rank all values together: ``(decomp, keep)``.
+
+    Eager: the ranking reads the values on the host.  ``decomp[q]`` is
+    ``("self", W, None)`` for a self-partner block and ``("pair", U, V)``
+    for a mirror pair, keyed by the first charge of the pair in sorted
+    order.  ``keep[q]`` lists the kept columns.  The ranking is the one
+    described in ``_c4v_staggered_projectors``.
+
+    Raises:
+        ValueError: nothing survives the cutoff (a zero corner), or chi = 1
+            and the largest value belongs to a mirror pair.
+    """
     decomp, cands, done = {}, [], set()
     for q in sorted(mats):
         if q in done:
@@ -164,17 +217,17 @@ def _c4v_staggered_projectors(
             "corner. Its largest value belongs to a mirror pair (q, dual(q)), "
             "which needs two states. Use chi >= 2."
         )
+    return decomp, keep
 
-    cols = {}
-    for q in sorted(keep):
-        kind, U, V = decomp[q]
-        ns = sorted(keep[q])
-        cols[q] = U[:, ns]
-        if kind == "pair":
-            cols[_dual_charge(sym, q)] = V[:, ns]
 
-    # One array per sector on both faces.  On the col face, the states of
-    # fused charge x have col charge dual(x), and so does their chi_new_r leg.
+def _c4v_staggered_assemble(sym, fused, col, cols):
+    """``(P_left, P_right)`` from one column block per kept charge.
+
+    One array per sector on both faces.  On the col face, the states of
+    fused charge x have col charge dual(x), and so does their chi_new_r leg.
+    The chi index lists the kept charges in sorted order, each with
+    ``cols[x].shape[1]`` states.
+    """
     left, right, chi_charges = {}, {}, []
     for x in sorted(cols):
         xd = _dual_charge(sym, x)
@@ -199,6 +252,24 @@ def _c4v_staggered_projectors(
         ),
     )
     return P_left, P_right
+
+
+def _c4v_staggered_layout(Qf: SymmetricTensor, chi: int) -> BondLayout:
+    """The kept states per chi charge under the free ranking (eager).
+
+    The layout that ``_c4v_staggered_projectors(Qf, chi)`` builds: a mirror
+    pair keeps the same count in q and in ``dual(q)``.  Spec 2 freezes it
+    for an AD run (``_c4v_staggered_projectors_at``) and re-runs it at each
+    step to check the frozen layout.
+    """
+    sym, _fused, _col, mats = _c4v_staggered_blocks(Qf)
+    decomp, keep = _c4v_staggered_rank(sym, mats, chi)
+    dims = {}
+    for q, ns in keep.items():
+        dims[q] = len(ns)
+        if decomp[q][0] == "pair":
+            dims[_dual_charge(sym, q)] = len(ns)
+    return BondLayout.from_dims(dims)
 
 
 def _leg(T: Tensor, label: str) -> TensorIndex:
@@ -312,18 +383,20 @@ def _check_c4v_staggered_invariants(
         raise RuntimeError("I3: negate(T).D2 does not pair with a_B.u2")
 
 
-def _c4v_staggered_sweep(
-    C: SymmetricTensor, T: SymmetricTensor, a: SymmetricTensor, chi: int
+def _c4v_staggered_project(
+    Qf: SymmetricTensor,
+    T: SymmetricTensor,
+    a: SymmetricTensor,
+    P_left: SymmetricTensor,
+    P_right: SymmetricTensor,
 ) -> tuple[SymmetricTensor, SymmetricTensor]:
-    """One step of the 2-sublattice C4v sweep; returns ``(C_new, T_new)``.
+    """``(C_new, T_new)`` from a projector, before the normalisation.
 
     C_new = P^T Q P is the enlarged corner projected on both faces.  T·a is
     the edge above a B-site; projected on both faces and negated, it is the
-    edge above an A-site again.  Both are normalised by ``max_abs``, as in
-    ``_c4v_sweep``.
+    edge above an A-site again.  Traceable: the AD sweep calls it with the
+    traced projector.
     """
-    Qf = _c4v_staggered_enlarged_corner(C, T, a)
-    P_left, P_right = _c4v_staggered_projectors(Qf, chi)
     C_new = contract(contract(P_left, Qf), P_right)
     C_new = C_new.relabels({"chi_new": "c_a", "chi_new_r": "c_b"})
 
@@ -335,7 +408,20 @@ def _c4v_staggered_sweep(
     T_new = _negate_charges(T_new).relabels(
         {"chi_new": "t_l", "d2": "D2", "chi_new_r": "t_r"}
     )
+    return C_new, T_new
 
+
+def _c4v_staggered_sweep(
+    C: SymmetricTensor, T: SymmetricTensor, a: SymmetricTensor, chi: int
+) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """One step of the 2-sublattice C4v sweep; returns ``(C_new, T_new)``.
+
+    ``_c4v_staggered_project`` with the eager projector; both outputs are
+    normalised by ``max_abs``, as in ``_c4v_sweep``.
+    """
+    Qf = _c4v_staggered_enlarged_corner(C, T, a)
+    P_left, P_right = _c4v_staggered_projectors(Qf, chi)
+    C_new, T_new = _c4v_staggered_project(Qf, T, a, P_left, P_right)
     C_new = C_new * (1.0 / (C_new.max_abs() + 1e-15))
     T_new = T_new * (1.0 / (T_new.max_abs() + 1e-15))
     return C_new, T_new
@@ -371,28 +457,49 @@ def _c4v_staggered_to_full_env(C: SymmetricTensor, T: SymmetricTensor) -> CTMTen
     return _in_documented_leg_order(env)
 
 
-def _ctm_tensor_c4v_staggered(
+def _c4v_staggered_loop(
     A: SymmetricTensor, chi: int, max_iter: int, conv_tol: float
-) -> CTMTensorEnv:
-    """Run the 2-sublattice C4v CTM; return the env of an A-site.
+) -> tuple[SymmetricTensor, SymmetricTensor, SymmetricTensor, CTMConvergeInfo]:
+    """The loop of ``ctm_tensor_c4v``: ``(C, T, a, info)``.
 
-    The loop of ``ctm_tensor_c4v``: start from the trace boundary, check
-    I1-I3 on it, and sweep until the corner singular values change by less
-    than ``conv_tol`` (``_ctm_sv_diff`` with the forced-rank floor of #903),
-    or for ``max_iter`` sweeps.  ``ctm_tensor_c4v`` validates ``A`` first.
+    Start from the trace boundary, check I1-I3 on it, and sweep until the
+    corner singular values change by less than ``conv_tol``
+    (``_ctm_sv_diff`` with the forced-rank floor of #903), or for
+    ``max_iter`` sweeps.  ``info.converged`` says which; ``info.sv_diff`` is
+    the last sv change (inf before the second sweep).
     """
     a = _build_double_layer_tensor(A)
     a_B = _build_double_layer_tensor(_negate_charges(A))
     C, T = _c4v_staggered_initial_state(a)
     _check_c4v_staggered_invariants(C, T, a, a_B)
     max_rank = _forced_corner_rank(_max_virtual_bond_dim(a))
-    prev_sv = None
-    for _ in range(max_iter):
+    prev_sv, diff, converged, iterations = None, float("inf"), False, 0
+    for iterations in range(1, max_iter + 1):
         C, T = _c4v_staggered_sweep(C, T, a, chi)
         current_sv = _dense_svd(C.todense(), compute_uv=False)  # chi x chi
         if prev_sv is not None:
-            diff = _ctm_sv_diff(current_sv, prev_sv, max_rank=max_rank)
-            if float(diff) < conv_tol:
+            diff = float(_ctm_sv_diff(current_sv, prev_sv, max_rank=max_rank))
+            if diff < conv_tol:
+                converged = True
                 break
         prev_sv = current_sv
+    info = CTMConvergeInfo(
+        converged=converged,
+        iterations=iterations,
+        sv_diff=diff,
+        best_iteration=iterations,
+        step_multiplier=float("nan"),
+    )
+    return C, T, a, info
+
+
+def _ctm_tensor_c4v_staggered(
+    A: SymmetricTensor, chi: int, max_iter: int, conv_tol: float
+) -> CTMTensorEnv:
+    """Run the 2-sublattice C4v CTM; return the env of an A-site.
+
+    ``_c4v_staggered_loop``, expanded to the eight env tensors.
+    ``ctm_tensor_c4v`` validates ``A`` first.
+    """
+    C, T, _a, _info = _c4v_staggered_loop(A, chi, max_iter, conv_tol)
     return _c4v_staggered_to_full_env(C, T)
