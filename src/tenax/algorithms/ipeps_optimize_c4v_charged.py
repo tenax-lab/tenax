@@ -54,6 +54,7 @@ __all__ = [
     "_c4v_projector_matrix",
     "_check_charged_c4v_config",
     "_free_layout",
+    "_keep_lbfgs_pair",
     "_trial_energy",
     "optimize_gs_ad_c4v_charged",
 ]
@@ -61,6 +62,7 @@ __all__ = [
 _logger = logging.getLogger(__name__)
 _BACKEND = "1site-c4v-charged"
 _LBFGS_MEMORY = 10  # curvature pairs kept, as in the 1x1 loop
+_PAIR_RTOL = 1e-8  # a pair enters when s.y > _PAIR_RTOL |s| |y| (_keep_lbfgs_pair)
 
 
 def _check_charged_c4v_config(config, ctm, A_init) -> None:
@@ -165,6 +167,17 @@ def _trial_energy(A, warm, layout, ctm, gate, d) -> float:
     env = _c4v_staggered_to_full_env(C, T)
     E = float(compute_energy_ctm_tensor(A, env, gate, d=d))
     return E if math.isfinite(E) else float("inf")
+
+
+def _keep_lbfgs_pair(s, y) -> bool:
+    """Whether the curvature pair (s, y) enters the L-BFGS history.
+
+    Yes when s.y > ``_PAIR_RTOL`` |s| |y|: the angle of s and y decides,
+    not their size.  A negative, a zero or a nearly orthogonal pair is
+    dropped.
+    """
+    sy = float(jnp.vdot(s, y))
+    return sy > _PAIR_RTOL * float(jnp.linalg.norm(s)) * float(jnp.linalg.norm(y))
 
 
 def _free_layout(A, C, T, chi) -> BondLayout | None:
@@ -359,12 +372,17 @@ def optimize_gs_ad_c4v_charged(hamiltonian_gate, A_init, config):
             hist["step_times"].append(time.perf_counter() - t0)
             break
 
-        # The L-BFGS direction, identity H0, as on the 1x1 C4v path.
+        # The L-BFGS direction, identity H0.  The pair rule is relative
+        # (_keep_lbfgs_pair).  The absolute floor s.y > 1e-10 of the dense
+        # 1x1 loop drops every pair once |s| |y| ~ 1e-9.  At D=3, chi=36 it
+        # kept the step-2 pair (s.y = 1.08e-10) and dropped steps 3-16
+        # (s.y = 6.5e-11, cos(s, y) = 0.07-0.08).  The loop then sat in a
+        # 2-cycle on that one stale pair: |g| alternated 8.6e-6 / 2.2e-5,
+        # and E fell 3.3e-10 per step.
         if prev_x is not None:
             s, y = x - prev_x, g - prev_g
-            sy = float(jnp.vdot(s, y))
-            if sy > 1e-10:
-                lbfgs_history.append((s, y, 1.0 / sy))
+            if _keep_lbfgs_pair(s, y):
+                lbfgs_history.append((s, y, 1.0 / float(jnp.vdot(s, y))))
                 if len(lbfgs_history) > _LBFGS_MEMORY:
                     lbfgs_history.pop(0)
         prev_x, prev_g = x, g

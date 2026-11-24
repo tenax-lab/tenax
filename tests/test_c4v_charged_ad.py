@@ -618,6 +618,71 @@ def test_layout_mismatch_is_recorded(monkeypatch):
     }
 
 
+def _pair(s_norm, y_norm, cos):
+    """Vectors s, y with these norms and this cosine."""
+    s = jnp.array([s_norm, 0.0])
+    y = y_norm * jnp.array([cos, np.sqrt(1.0 - cos**2)])
+    return s, y
+
+
+def test_lbfgs_pair_rule_is_relative():
+    """A curvature pair enters the history when s.y > 1e-8 |s| |y|.
+
+    The kept pair is the one measured at D=3, chi=36: |s| = 3.6e-5,
+    |y| = 2.2e-5, cos(s, y) = 0.082, so s.y = 6.5e-11, below the absolute
+    floor s.y > 1e-10 that dropped it.
+    """
+    s, y = _pair(3.6e-5, 2.2e-5, 0.082)
+    assert float(jnp.vdot(s, y)) < 1e-10, "vacuous: the old floor keeps the pair"
+    assert opt._keep_lbfgs_pair(s, y)
+    assert opt._keep_lbfgs_pair(1e-6 * s, 1e-6 * y)  # the angle decides, not the size
+    for cos in (-0.5, 0.0, 1e-9):
+        assert not opt._keep_lbfgs_pair(*_pair(3.6e-5, 2.2e-5, cos)), cos
+    assert not opt._keep_lbfgs_pair(jnp.zeros(2), jnp.zeros(2))
+
+
+# The mock energy scale: the first step is ~4e-5 with s.y ~ 1e-12 < 1e-10.
+_PAIR_EPS = 3e-4
+
+
+@pytest.mark.parametrize("rule", ["relative", "drop_all"])
+def test_the_loop_keeps_a_small_positive_pair(monkeypatch, rule):
+    """The loop puts a pair in the L-BFGS history by ``_keep_lbfgs_pair``.
+
+    The engine and the energy are mocks: E = _PAIR_EPS |a - a*|^2 on the
+    site buffer a, with a* the D=2 exact state.  The first pair has
+    positive curvature and s.y < 1e-10.  The relative rule keeps it; the
+    absolute floor s.y > 1e-10 drops it.  With the rule stubbed to False,
+    no pair enters.
+    """
+    target = charged_d2(T_EXACT)._data
+
+    def energy(A, *args, **kw):
+        return _PAIR_EPS * jnp.sum((A._data - target) ** 2)
+
+    monkeypatch.setattr(ad, "charged_c4v_converge", lambda A, warm, *args: warm)
+    monkeypatch.setattr(opt, "compute_energy_ctm_tensor", energy)
+    monkeypatch.setattr(opt, "_trial_energy", lambda A, *args: float(energy(A)))
+    if rule == "drop_all":
+        monkeypatch.setattr(opt, "_keep_lbfgs_pair", lambda s, y: False)
+    real_two_loop, seen = opt.lbfgs_two_loop, []
+
+    def two_loop(g, history, h0):
+        seen.append([float(1.0 / rho) for _s, _y, rho in history])  # the s.y kept
+        return real_two_loop(g, history, h0)
+
+    monkeypatch.setattr(opt, "lbfgs_two_loop", two_loop)
+    _A, _env, _E, hist = opt.optimize_gs_ad_c4v_charged(
+        GATE, _site("d2_off"), _config(gs_grad_norm_tol=1e-30, return_history=True)
+    )
+    assert len(seen) >= 2, f"vacuous: no second direction ({hist['energies']})"
+    if rule == "drop_all":
+        assert seen == [[]] * len(seen), seen
+        return
+    small = [sy for kept in seen for sy in kept if 0.0 < sy < 1e-10]
+    assert small, f"no pair with 0 < s.y < 1e-10 was kept: {seen}"
+
+
 # ------------------------------------------------------------------ #
 # Dispatch (spec 2, section 5)                                        #
 # ------------------------------------------------------------------ #
