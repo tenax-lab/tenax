@@ -7,6 +7,7 @@ The converged FD checks, the D=2 optimum and the dense parity are in
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 
 import jax
@@ -18,9 +19,13 @@ jax.config.update("jax_enable_x64", True)
 
 from _c4v_staggered_fixtures import T_EXACT, c4v_fixture, charged_d2, leg
 
+from tenax import CTMConfig
 from tenax.algorithms import _ctm_tensor_c4v_charged_ad as ad
+from tenax.algorithms._ctm_convergence_policy import CTMNotConvergedError
 from tenax.algorithms._ctm_root_implicit_sym_sectors import BondLayout
 from tenax.algorithms._ctm_tensor_c4v_staggered import (
+    _c4v_staggered_enlarged_corner,
+    _c4v_staggered_layout,
     _c4v_staggered_loop,
     _c4v_staggered_sweep,
 )
@@ -103,3 +108,115 @@ def test_step_compiles_once_and_matches_eager():
     np.testing.assert_allclose(np.asarray(C1._data), np.asarray(C_e._data), atol=1e-13)
     np.testing.assert_allclose(np.asarray(T1._data), np.asarray(T_e._data), atol=1e-13)
     assert abs(float(r1) - float(r_e)) < 1e-13
+
+
+# ------------------------------------------------------------------ #
+# The forward phases and the custom_vjp (spec 2, sections 2-3)        #
+# ------------------------------------------------------------------ #
+
+CTM6 = CTMConfig(chi=6, max_iter=200, conv_tol=1e-10)
+
+
+def _loss_through_converge(C, T, layout, record):
+    """A_ -> <w, T*(A_)> through ``charged_c4v_converge``, w fixed and random."""
+    w = jax.random.normal(jax.random.PRNGKey(3), T._data.shape)
+
+    def loss(A_):
+        _C1, T1 = ad.charged_c4v_converge(A_, (C, T), layout, CTM6, record)
+        return jnp.sum(w * T1._data)
+
+    return loss
+
+
+def test_cold_start_freezes_the_last_layout():
+    A, C, T, layout = _cold("d2_off")
+    C1, T1, layout1 = ad.charged_c4v_cold_start(A, CTM6)
+    assert layout1 == layout
+    np.testing.assert_array_equal(np.asarray(C1._data), np.asarray(C._data))
+    a = _build_double_layer_tensor(A)
+    assert _c4v_staggered_layout(_c4v_staggered_enlarged_corner(C1, T1, a), 6) == layout
+
+
+def test_cold_start_raises_when_the_sweep_does_not_converge():
+    ctm = dataclasses.replace(CTM6, max_iter=3, conv_tol=1e-300)
+    with pytest.raises(CTMNotConvergedError, match="cold start"):
+        ad.charged_c4v_cold_start(_site("d2_off"), ctm)
+
+
+def test_elementwise_phase_raises_at_max_iter():
+    A, C, T, layout = _cold("d2_off")
+    ctm = dataclasses.replace(CTM6, max_iter=2, conv_tol=1e-300)
+    with pytest.raises(CTMNotConvergedError, match="element-wise"):
+        ad._elementwise_phase(A, (C, T), layout, ctm, {})
+
+
+def test_converge_returns_a_fixed_point():
+    A, C, T, layout = _cold("d2_off")
+    record = {}
+    C1, T1 = ad.charged_c4v_converge(A, (C, T), layout, CTM6, record)
+    _C2, _T2, res = ad._step(A, C1, T1, layout)
+    assert float(res) < CTM6.conv_tol
+    assert record["forward_sweeps"] >= 1
+    assert record["forward_residual"] < CTM6.conv_tol
+
+
+def test_elementwise_phase_needs_the_alignment(monkeypatch):
+    A, C, T, layout = _cold("d2_off")
+    ctm = dataclasses.replace(CTM6, conv_tol=1e-12, max_iter=60)
+    flip = jnp.asarray(np.r_[-1.0, np.ones(leg(T, "t_l").dim - 1)])
+    assert float(ad._rel_change(ad._scale_chi(T, flip, ("t_l", "t_r")), T)) > 0.1, (
+        "vacuous: the flip leaves T as it is"
+    )
+    sweep, calls = ad._sweep_at, [0]
+
+    def flipping_sweep(A_, C_, T_, layout_):
+        C1, T1 = sweep(A_, C_, T_, layout_)
+        calls[0] += 1
+        if calls[0] % 2 == 0:  # a pure gauge: chi index 0 changes sign
+            C1 = ad._scale_chi(C1, flip, ("c_a", "c_b"))
+            T1 = ad._scale_chi(T1, flip, ("t_l", "t_r"))
+        return C1, T1
+
+    monkeypatch.setattr(ad, "_step", ad._step_impl)  # eager, so the patches act
+    monkeypatch.setattr(ad, "_sweep_at", flipping_sweep)
+    ad._elementwise_phase(A, (C, T), layout, ctm, {})
+    assert calls[0] >= 2, "vacuous: no sweep was flipped"
+    monkeypatch.setattr(ad, "_align", lambda C_new, T_new, T_ref: (C_new, T_new))
+    with pytest.raises(CTMNotConvergedError, match="element-wise"):
+        ad._elementwise_phase(A, (C, T), layout, ctm, {})
+
+
+def test_backward_refuses_an_unsolved_adjoint(monkeypatch):
+    A, C, T, layout = _cold("d2_off")
+    monkeypatch.setattr(ad, "gmres_eager", lambda matvec, b, **kw: (b, 1.0))
+    with pytest.raises(RuntimeError, match="relative residual"):
+        jax.grad(_loss_through_converge(C, T, layout, {}))(A)
+
+
+def test_backward_refuses_a_non_finite_adjoint(monkeypatch):
+    A, C, T, layout = _cold("d2_off")
+    monkeypatch.setattr(ad, "gmres_eager", lambda matvec, b, **kw: (b * jnp.nan, 0.0))
+    with pytest.raises(RuntimeError, match="not finite"):
+        jax.grad(_loss_through_converge(C, T, layout, {}))(A)
+
+
+def test_programs_compile_once_per_layout():
+    _A, C, T, layout = _cold("d2_off")
+    jax.clear_caches()
+    record = {}
+    for t in (1.15 * T_EXACT, 1.1 * T_EXACT):
+        A_t = charged_d2(t)
+        g = jax.grad(_loss_through_converge(C, T, layout, record))(A_t)
+        assert bool(jnp.all(jnp.isfinite(g._data)))
+    assert ad._step._cache_size() == 1
+    assert ad._adjoint_matvec._cache_size() == 1
+    assert ad._site_vjp._cache_size() == 1
+    assert set(record) == {
+        "forward_sweeps",
+        "forward_residual",
+        "forward_rate",
+        "adjoint_matvecs",
+        "adjoint_residual",
+    }
+    assert record["adjoint_residual"] <= max(10 * CTM6.adjoint_tol, 1e-12)
+    assert record["adjoint_matvecs"] >= 1
