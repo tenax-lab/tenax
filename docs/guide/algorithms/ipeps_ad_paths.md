@@ -659,7 +659,18 @@ A, env, E = optimize_gs_ad(sublattice_rotate_gate(heisenberg_gate()),
   `gs_reject_energy_rise`, `gs_grad_spike_ratio`, `gs_log_interval` and
   `gs_log_probes`. Not read: `adjoint_solver`, `adjoint_method`,
   `adjoint_chain_rule`, `adjoint_degen_tol`, `adjoint_diag_shift`,
-  `adjoint_arnoldi_precheck`, `adjoint_arnoldi_threshold`.
+  `adjoint_arnoldi_precheck`, `adjoint_arnoldi_threshold`,
+  `ad_backward_method`, `gmres_tol`, `gmres_restart`, `gmres_maxiter`,
+  `gmres_precondition`, `ad_regularize_svd`, `min_iter`, `renormalize`,
+  `plateau_patience`, `probe_max_iter`, `probe_conv_tol`. The GMRES
+  restart length is fixed at 30, the SVD and eigh backwards are always
+  Lorentzian-regularized, the forwards always normalise and have no
+  minimum sweep count and no plateau exit (a forward that does not reach
+  `conv_tol` raises after `max_iter` sweeps), and each line-search trial
+  runs with `max_iter` and `conv_tol`. The settings that act only through
+  a refused setting or on another engine are not read either: the
+  `chi_auto_bump_*` and `ctmrg_heuristic_increase_chi_*` sub-settings,
+  `chi_max`, `qr_warmup_steps`, `chi_I`, `rel_floor` and `ctm_chunk_size`.
 - A charged C4v site with `unit_cell="2site"` and `gs_c4v=True` is refused:
   the 1x1 charged ansatz is already the 2-sublattice state.
 - `jax.grad` through `ctm_tensor_c4v` itself still raises on charged

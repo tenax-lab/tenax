@@ -1245,8 +1245,15 @@ def optimize_gs_ad(
     ``gs_reject_energy_rise``, ``gs_grad_spike_ratio``, ``gs_log_interval``
     or ``gs_log_probes``, and it does not read ``adjoint_solver``,
     ``adjoint_method``, ``adjoint_chain_rule``, ``adjoint_degen_tol``,
-    ``adjoint_diag_shift``, ``adjoint_arnoldi_precheck`` or
-    ``adjoint_arnoldi_threshold``.  A charged C4v site with
+    ``adjoint_diag_shift``, ``adjoint_arnoldi_precheck``,
+    ``adjoint_arnoldi_threshold``, ``ad_backward_method``, ``gmres_tol``,
+    ``gmres_restart``, ``gmres_maxiter``, ``gmres_precondition``,
+    ``ad_regularize_svd``, ``min_iter``, ``renormalize``,
+    ``plateau_patience``, ``probe_max_iter`` or ``probe_conv_tol``, nor the
+    settings that act only through a refused setting or on another engine
+    (the ``chi_auto_bump_*`` and ``ctmrg_heuristic_increase_chi_*``
+    sub-settings, ``chi_max``, ``qr_warmup_steps``, ``chi_I``,
+    ``rel_floor`` and ``ctm_chunk_size``).  A charged C4v site with
     ``unit_cell="2site"`` and ``gs_c4v=True`` is refused.  See Path 4b in
     ``docs/guide/algorithms/ipeps_ad_paths.md``.
 

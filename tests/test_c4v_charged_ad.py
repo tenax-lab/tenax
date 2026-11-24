@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import itertools
+import re
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -438,6 +441,61 @@ def test_complex_data_is_refused():
     A_complex = with_data(A, A._data.astype(jnp.complex128))
     with pytest.raises(ValueError, match="charged C4v AD: complex data"):
         opt.optimize_gs_ad_c4v_charged(GATE, A_complex, _config())
+
+
+_GUIDE = (
+    Path(__file__).resolve().parents[1]
+    / "docs"
+    / "guide"
+    / "algorithms"
+    / "ipeps_ad_paths.md"
+)
+
+
+def _guide_section(heading):
+    """The guide's lines from ``heading`` up to the next heading.  A line in a
+    code fence is not a heading (the Path 4b example has ``# ...`` lines)."""
+    lines = _GUIDE.read_text(encoding="utf-8").splitlines()
+    assert lines.count(heading) == 1, f"{heading!r} is not one line of {_GUIDE}"
+    start, fenced = lines.index(heading), False
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("```"):
+            fenced = not fenced
+        elif not fenced and re.match(r"#{1,6} ", lines[i]):
+            # An unclosed fence would carry the section into the next one.
+            inner = [
+                ln for ln in lines[start + 1 : i] if ln.startswith(("## ", "### "))
+            ]
+            assert not inner, f"the section runs into {inner}"
+            return "\n".join(lines[start:i])
+    raise AssertionError(f"no heading after {heading!r}")
+
+
+def test_every_ctm_setting_has_a_disposition_on_the_charged_path():
+    """Each CTMConfig field is read, checked, ignored or implied on this path,
+    and both docs name each ignored one: the charged paragraph of the
+    docstring, and Path 4b of the guide up to the next heading."""
+    sets = {
+        "read": opt._CTM_READ,
+        "checked": opt._CTM_CHECKED,
+        "ignored": opt._CTM_IGNORED,
+        "implied": opt._CTM_IMPLIED,
+    }
+    for (a, x), (b, y) in itertools.combinations(sets.items(), 2):
+        assert not x & y, f"{a} and {b} share {sorted(x & y)}"
+    names = {f.name for f in dataclasses.fields(CTMConfig)}
+    union = set().union(*sets.values())
+    assert union == names, f"no disposition, or not a field: {sorted(union ^ names)}"
+    doc = optimize_gs_ad.__doc__
+    start, end = "A charged C4v ``SymmetricTensor``", "See Path 4b"
+    assert doc.count(start) == 1 and doc.count(end) == 1, "the charged paragraph moved"
+    doc = doc[doc.index(start) : doc.index(end)]
+    guide = _guide_section("### Path 4b: Charged C4v Symmetric Input")
+    unnamed = {
+        "docstring": sorted(n for n in opt._CTM_IGNORED if f"``{n}``" not in doc),
+        "guide": sorted(n for n in opt._CTM_IGNORED if f"`{n}`" not in guide),
+    }
+    assert unnamed == {"docstring": [], "guide": []}, f"not named: {unnamed}"
 
 
 def test_zero_steps_returns_the_converged_start():

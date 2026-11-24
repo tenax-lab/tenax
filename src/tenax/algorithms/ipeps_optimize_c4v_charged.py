@@ -51,6 +51,10 @@ from tenax.algorithms.ipeps import symmetrize_c4v
 from tenax.core.tensor import SymmetricTensor, Tensor
 
 __all__ = [
+    "_CTM_CHECKED",
+    "_CTM_IGNORED",
+    "_CTM_IMPLIED",
+    "_CTM_READ",
     "_c4v_projector_matrix",
     "_check_charged_c4v_config",
     "_free_layout",
@@ -63,6 +67,82 @@ _logger = logging.getLogger(__name__)
 _BACKEND = "1site-c4v-charged"
 _LBFGS_MEMORY = 10  # curvature pairs kept, as in the 1x1 loop
 _PAIR_RTOL = 1e-8  # a pair enters when s.y > _PAIR_RTOL |s| |y| (_keep_lbfgs_pair)
+
+# What this path does with each CTMConfig field, so that no setting is ignored
+# without a name in the docs.  Data only: no code reads these sets.  A test in
+# tests/test_c4v_charged_ad.py keeps them complete: they are disjoint, their
+# union is every field, and each _CTM_IGNORED name is in the optimize_gs_ad
+# docstring and in Path 4b of docs/guide/algorithms/ipeps_ad_paths.md.
+#
+# Read by the cold start, the element-wise phase, the adjoint solve or the loop.
+_CTM_READ = frozenset(
+    {
+        "chi",
+        "max_iter",
+        "conv_tol",
+        "adjoint_tol",
+        "adjoint_maxiter",
+        "adjoint_tikhonov",
+    }
+)
+# Refused or validated by _check_charged_c4v_config; use_charged_c4v_path
+# takes the path only with ctm_ad_mode=None.
+_CTM_CHECKED = frozenset(
+    {
+        "projector_method",
+        "forward_gauge",
+        "ctm_conv_method",
+        "projector_backward",
+        "on_unconverged",
+        "chi_ramp",
+        "chi_auto_bump",
+        "ctmrg_heuristic_increase_chi",
+        "fuse_virtual_legs",
+        "ctm_mixing",
+        "device_mesh",
+        "ctm_ad_mode",
+    }
+)
+# A user can set these for this path, and the path does not read them.  The
+# docstring and the guide name each one.
+_CTM_IGNORED = frozenset(
+    {
+        "adjoint_solver",
+        "adjoint_method",
+        "adjoint_chain_rule",
+        "adjoint_degen_tol",
+        "adjoint_diag_shift",
+        "adjoint_arnoldi_precheck",
+        "adjoint_arnoldi_threshold",
+        "ad_backward_method",
+        "gmres_tol",
+        "gmres_restart",
+        "gmres_maxiter",
+        "gmres_precondition",
+        "ad_regularize_svd",
+        "min_iter",
+        "renormalize",
+        "plateau_patience",
+        "probe_max_iter",
+        "probe_conv_tol",
+    }
+)
+# These act only through a refused setting or on another engine; one clause
+# of the docs covers them.  The comment names the setting or the engine.
+_CTM_IMPLIED = frozenset(
+    {
+        "chi_auto_bump_eps",  # chi_auto_bump
+        "chi_auto_bump_step",  # chi_auto_bump
+        "chi_auto_bump_metric",  # chi_auto_bump
+        "ctmrg_heuristic_increase_chi_threshold",  # ctmrg_heuristic_increase_chi
+        "ctmrg_heuristic_increase_chi_step_size",  # ctmrg_heuristic_increase_chi
+        "chi_max",  # chi_auto_bump, ctmrg_heuristic_increase_chi
+        "qr_warmup_steps",  # projector_method="qr"
+        "chi_I",  # fuse_virtual_legs=False (the split CTM)
+        "rel_floor",  # engine: ctm_ad_mode="root_implicit"
+        "ctm_chunk_size",  # engine: the dense fused 1x1 forward
+    }
+)
 
 
 def _check_charged_c4v_config(config, ctm, A_init) -> None:
