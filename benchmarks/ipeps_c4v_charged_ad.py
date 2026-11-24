@@ -230,7 +230,12 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--mode", choices=("load", "energy", "fd", "opt", "all"), default="all"
     )
-    parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=100,
+        help="opt mode: the step budget of each of the two runs (default: %(default)s)",
+    )
     parser.add_argument("--out", type=pathlib.Path)
     args = parser.parse_args(argv)
 
@@ -279,7 +284,12 @@ def main(argv=None) -> int:
                 and row["grad_norm"] is not None
                 and row["grad_norm"] < 1e-5
             )
-        report["opt"] = {"chi": chi, "E_ref": E_ref, "runs": runs}
+        report["opt"] = {
+            "chi": chi,
+            "max_steps": args.steps,
+            "E_ref": E_ref,
+            "runs": runs,
+        }
         print(
             f"opt targets (E <= {E_ref:.12f} + 1e-9, |g| < 1e-5): "
             f"{[row['target_met'] for row in runs]}",
