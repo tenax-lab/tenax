@@ -259,7 +259,7 @@ def _orthogonal_to(x, key):
 def test_one_sweep_vjp_matches_fd():
     """Catches a frozen projector; the cotangent has no radial part (ruling 5)."""
     A, C, T, layout = _cold("d2_off")
-    f = _one_sweep(C, T, layout)
+    f = jax.jit(_one_sweep(C, T, layout))
     C1, T1 = f(A)
     w = (
         with_data(C1, _orthogonal_to(C1._data, jax.random.PRNGKey(1))),
@@ -448,6 +448,10 @@ def test_zero_steps_returns_the_converged_start():
     assert hist["layout"] == BondLayout.from_dims({-1: 2, 0: 2, 1: 2}).dims
 
 
+# The four tests below marked slow evaluate a gradient and share a ~22 s compile
+# of the gradient programs.  The conftest keeps ``core`` off a test marked
+# ``slow`` (#731), so they run in the full matrix, not in the required gate.
+@pytest.mark.slow
 def test_a_non_c4v_start_is_projected():
     """Review Focus 1: a charged start with raw (non-C4v) blocks is projected,
     and the run stays C4v after an accepted step."""
@@ -507,6 +511,7 @@ def test_trial_energy_is_inf_without_a_fixed_point():
     assert np.isfinite(opt._trial_energy(A, (C, T), layout, CTM6, gate, 2))
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("method", ["armijo", "hager_zhang"])
 def test_an_unconverged_trial_is_a_bad_point(monkeypatch, method):
     """Review Focus 3: a trial with no fixed point is +inf; the run spends its
@@ -521,6 +526,7 @@ def test_an_unconverged_trial_is_a_bad_point(monkeypatch, method):
     assert E == min(hist["energies"])
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(("retries", "raises"), [(1, False), (0, True)])
 def test_reset_on_an_unconverged_forward(monkeypatch, retries, raises):
     """A forward with no fixed point at step 2 resets to the best point; with
@@ -555,6 +561,7 @@ def test_reset_on_an_unconverged_forward(monkeypatch, retries, raises):
     assert abs(hist["energies"][1] - hist["energies"][0]) < 1e-9
 
 
+@pytest.mark.slow
 def test_layout_mismatch_is_recorded(monkeypatch):
     """A free ranking that keeps another layout at step 2 is recorded once;
     the run keeps the frozen layout."""
