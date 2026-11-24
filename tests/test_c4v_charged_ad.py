@@ -741,6 +741,118 @@ def test_the_loop_keeps_a_small_positive_pair(monkeypatch, rule):
     assert small, f"no pair with 0 < s.y < 1e-10 was kept: {seen}"
 
 
+# The three tests below pin, in the required gate, what the slow tests
+# test_a_non_c4v_start_is_projected, test_reset_on_an_unconverged_forward and
+# test_layout_mismatch_is_recorded pin with the real engine.  The engine and
+# the energy are mocks, so no gradient program compiles.
+
+
+def _mock_engine(monkeypatch, target, converge=None):
+    """E = _PAIR_EPS |a - target|^2 on the site buffer a, and no CTM.
+
+    ``charged_c4v_converge`` returns its warm env, or calls ``converge``.
+    Returns the list of the line-search trial energies, in call order.
+    """
+    trials = []
+
+    def energy(A, *args, **kw):
+        return _PAIR_EPS * jnp.sum((A._data - target) ** 2)
+
+    def trial_energy(A, *args):
+        trials.append(float(energy(A)))
+        return trials[-1]
+
+    def warm_env(A, warm, *args):
+        return warm
+
+    monkeypatch.setattr(ad, "charged_c4v_converge", converge or warm_env)
+    monkeypatch.setattr(opt, "compute_energy_ctm_tensor", energy)
+    monkeypatch.setattr(opt, "_trial_energy", trial_energy)
+    return trials
+
+
+def test_site_projects_in_the_required_gate(monkeypatch):
+    """Review Focus 1: ``site`` projects every iterate to C4v.
+
+    The target is not C4v, so without P in ``site`` the iterates leave the
+    C4v subspace at step 1.  With a C4v target the gradient at a C4v point
+    is C4v, the iterates stay in the subspace, and the test cannot fail.
+    """
+    indices = _site("d2_off").indices
+    raw = SymmetricTensor.random_normal(indices, jax.random.PRNGKey(5))
+    target = SymmetricTensor.random_normal(indices, jax.random.PRNGKey(6))._data
+    assert _c4v_error(raw) > 0.1, "vacuous: the raw start is C4v"
+    assert _c4v_error(with_data(raw, target)) > 0.1, "vacuous: the target is C4v"
+    _mock_engine(monkeypatch, target)
+    A, _env, _E, hist = opt.optimize_gs_ad_c4v_charged(
+        GATE, raw, _config(gs_grad_norm_tol=1e-30, return_history=True)
+    )
+    assert hist["energies"][-1] < hist["energies"][0] - 1e-12, "vacuous: no step"
+    assert _c4v_error(A) < 1e-12
+
+
+@pytest.mark.parametrize(("retries", "raises"), [(1, False), (0, True)])
+def test_reset_in_the_required_gate(monkeypatch, retries, raises):
+    """The 1-site rule (#1059): call 2 of ``charged_c4v_converge`` raises.
+    Armijo trials do not call it, so call 2 is the evaluation of step 2.
+    With a retry left, the loop resets to the best point, the step-1 point,
+    and step 3 evaluates it again.  With no retry left, it re-raises."""
+    calls = [0]
+
+    def flaky(A, warm, *args):
+        calls[0] += 1
+        if calls[0] == 2:
+            info = CTMConvergeInfo(
+                converged=False,
+                iterations=1,
+                sv_diff=1.0,
+                best_iteration=1,
+                step_multiplier=float("nan"),
+            )
+            raise CTMNotConvergedError(
+                info, site="gradient", conv_tol=1e-10, chi=6, detail="mock"
+            )
+        return warm
+
+    trials = _mock_engine(monkeypatch, charged_d2(T_EXACT)._data, converge=flaky)
+    config = _config(
+        gs_stall_recovery_retries=retries, gs_grad_norm_tol=1e-30, return_history=True
+    )
+    if raises:
+        with pytest.raises(CTMNotConvergedError, match="mock"):
+            opt.optimize_gs_ad_c4v_charged(GATE, _site("d2_off"), config)
+        assert calls[0] == 2
+        return
+    _A, _env, _E, hist = opt.optimize_gs_ad_c4v_charged(GATE, _site("d2_off"), config)
+    assert calls[0] == 3, f"vacuous: {calls[0]} evaluations, not 3"
+    assert min(trials) < hist["energies"][0] - 1e-12, "vacuous: step 1 did not move"
+    # Step 3 evaluates the step-1 point again, not the point that step 1 found.
+    assert hist["energies"][1] == hist["energies"][0]
+    # The 1x1 shapes: one entry per recorded step; the reset step has none.
+    assert hist["num_steps"] == len(hist["energies"]) == 2
+
+
+def test_layout_record_in_the_required_gate(monkeypatch):
+    """A free ranking that keeps another layout at step 2 is recorded once.
+    The check calls ``_free_layout``, which calls the loop module's
+    ``_c4v_staggered_layout``."""
+    _mock_engine(monkeypatch, charged_d2(T_EXACT)._data)
+    real, calls = opt._c4v_staggered_layout, [0]
+    other = BondLayout.from_dims({0: 6})
+
+    def ranking(Qf, chi):
+        calls[0] += 1
+        return other if calls[0] == 2 else real(Qf, chi)
+
+    monkeypatch.setattr(opt, "_c4v_staggered_layout", ranking)
+    _A, _env, _E, hist = opt.optimize_gs_ad_c4v_charged(
+        GATE, _site("d2_off"), _config(gs_grad_norm_tol=1e-30, return_history=True)
+    )
+    assert calls[0] >= 2, "vacuous: the check of step 2 did not run"
+    assert hist["layout_mismatch_steps"] == [2]
+    assert hist["layout"] == BondLayout.from_dims({-1: 2, 0: 2, 1: 2}).dims
+
+
 # ------------------------------------------------------------------ #
 # Dispatch (spec 2, section 5)                                        #
 # ------------------------------------------------------------------ #
