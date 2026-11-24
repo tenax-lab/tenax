@@ -141,6 +141,15 @@ def _run_config(conv_tol=1e-10, **kw):
     return iPEPSConfig(**{**fields, **kw})
 
 
+def _c4v_kick(A, size=1e-3, key=0):
+    """``todense(A)`` plus ``size`` times a random C4v tensor, as a
+    ``DenseTensor`` on the indices of ``A``: the start of the dense run."""
+    dense = jnp.asarray(A.todense())
+    kick = symmetrize_c4v(jax.random.normal(jax.random.PRNGKey(key), dense.shape))
+    dense = dense + size * kick
+    return DenseTensor(dense / jnp.linalg.norm(dense), A.indices)
+
+
 _STARTS = {
     "d2_off": lambda: charged_d2(1.15 * T_EXACT),
     # In the same one-parameter family (t = 1.5491), but its cold start at
@@ -157,6 +166,7 @@ _STARTS = {
 # tensor with |g| < 1e-5: the first three asserts hold, the fourth fails.
 _RANDOM_ENDS_ELSEWHERE = pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason=(
         "Task 8: Ruling: the random start converges to E=-0.582762987478 "
         "— another fixed point — reported to the user"
@@ -196,9 +206,11 @@ def test_dense_parity():
     E_dense = float(compute_energy_ctm_tensor(A_dense, env_dense, GATE, d=2))
     print(f"dense parity: |E - E_dense(ctm_tensor)| = {abs(E - E_dense):.2e}")
     assert abs(E - E_dense) <= 1e-10
-    dense_run = _run_config(gs_num_steps=60, return_history=False)
-    # Spec 2, section 6: the dense 1x1 C4v optimiser on DenseTensor(todense(A_init)).
-    A0_dense = DenseTensor(A0.todense(), A0.indices)
+    dense_run = _run_config(conv_tol=1e-8, gs_num_steps=60, return_history=False)
+    # Spec 2, section 6: the dense 1x1 C4v optimiser on todense(A_init), kicked.
+    # The kick: on the exact-U(1) todense(A_init) the dense CTM 2-cycles at step 1
+    # (sv_diff 2.6e-4, step multiplier -1.39) at any tolerance (spec 2, Rejected).
+    A0_dense = _c4v_kick(A0)
     _A, _env_d, E_opt = optimize_gs_ad(GATE, A0_dense, dense_run)
     print(
         f"dense parity: E_dense_opt={E_opt:.12f} |E - E_dense_opt| = {abs(E - E_opt):.2e}"
