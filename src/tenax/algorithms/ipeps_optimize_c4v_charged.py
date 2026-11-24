@@ -245,7 +245,7 @@ def optimize_gs_ad_c4v_charged(hamiltonian_gate, A_init, config):
     )
     hist: dict = {key: [] for key in per_step}
     mismatch_steps: list[int] = []
-    state = {"num_steps": 0, "converged": False}
+    state = {"converged": False}
 
     def finish(x_, warm_, E_):
         A_ = site(x_)
@@ -255,7 +255,10 @@ def optimize_gs_ad_c4v_charged(hamiltonian_gate, A_init, config):
         history = {
             **hist,
             **state,
-            "ctm_converged": True,  # every unconverged forward raised
+            "num_steps": len(hist["energies"]),
+            # Every recorded step had a converged forward: an unconverged
+            # forward records nothing (it resets or raises).
+            "ctm_converged": [True] * len(hist["energies"]),
             "layout": layout.dims,
             "layout_mismatch_steps": mismatch_steps,
         }
@@ -276,7 +279,6 @@ def optimize_gs_ad_c4v_charged(hamiltonian_gate, A_init, config):
 
     for step in range(config.gs_num_steps):
         t0 = time.perf_counter()
-        state["num_steps"] = step + 1
         try:
             (E_val, e_star), g = value_and_grad(x, warm)
         except CTMNotConvergedError as exc:

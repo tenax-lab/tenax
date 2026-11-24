@@ -445,7 +445,21 @@ def test_zero_steps_returns_the_converged_start():
     env_cold = _c4v_staggered_to_full_env(C, T)
     assert abs(E - float(compute_energy_ctm_tensor(A, env_cold, GATE, d=2))) < 1e-9
     assert hist["num_steps"] == 0 and hist["energies"] == []
+    assert hist["ctm_converged"] == []
     assert hist["layout"] == BondLayout.from_dims({-1: 2, 0: 2, 1: 2}).dims
+    assert set(hist) == {
+        "energies",
+        "grad_norms",
+        "step_times",
+        "num_steps",
+        "converged",
+        "ctm_converged",
+        "forward_sweeps",
+        "adjoint_matvecs",
+        "adjoint_residual",
+        "layout",
+        "layout_mismatch_steps",
+    }
 
 
 # The four tests below marked slow evaluate a gradient and share a ~22 s compile
@@ -559,6 +573,9 @@ def test_reset_on_an_unconverged_forward(monkeypatch, retries, raises):
     assert calls[0] >= 3
     # Step 3 evaluates the best point again: the step-1 point.
     assert abs(hist["energies"][1] - hist["energies"][0]) < 1e-9
+    # The 1x1 shapes: one entry per recorded step; the reset iteration has none.
+    assert hist["num_steps"] == len(hist["energies"])
+    assert hist["ctm_converged"] == [True] * len(hist["energies"])
 
 
 @pytest.mark.slow
