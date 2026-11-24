@@ -34,6 +34,7 @@ from tenax.algorithms._ctm_tensor_c4v_staggered import (
     _c4v_staggered_layout,
     _c4v_staggered_loop,
     _c4v_staggered_projectors,
+    _c4v_staggered_projectors_at,
     _c4v_staggered_sweep,
     _c4v_staggered_to_full_env,
     _check_c4v_staggered_invariants,
@@ -572,3 +573,70 @@ def test_loop_reports_convergence():
             np.asarray(jax.tree_util.tree_leaves(getattr(full, field))[0]),
             np.asarray(jax.tree_util.tree_leaves(getattr(env, field))[0]),
         )
+
+
+def _swept_corner(name, chi):
+    """The enlarged corner after the three ``_swept`` steps at this chi, and its layout."""
+    _A, a, _a_B, states = _swept(name, chi=chi)
+    C, T = states[-1]
+    Qf = _c4v_staggered_enlarged_corner(C, T, a)
+    return Qf, _c4v_staggered_layout(Qf, chi)
+
+
+@pytest.mark.parametrize(("name", "chi"), [("762", 4), ("z4", 4), ("test", 6)])
+def test_projectors_at_match_the_eager_projector_up_to_signs(name, chi):
+    Qf, layout = _swept_corner(name, chi)
+    sym = leg(Qf, "fused").symmetry
+    kinds = {int(sym.dual(np.asarray([q]))[0]) == q for q in layout.sectors}
+    assert kinds == {True, False}, f"vacuous: layout {layout.dims}"
+    eager = _c4v_staggered_projectors(Qf, chi)
+    traced = _c4v_staggered_projectors_at(Qf, layout)
+    for P_e, P_t in zip(eager, traced):
+        assert P_t.indices == P_e.indices
+        assert set(P_t.blocks) == set(P_e.blocks)
+        for key, block in P_e.blocks.items():
+            overlap = np.sum(np.asarray(block) * np.asarray(P_t.blocks[key]), axis=0)
+            np.testing.assert_allclose(np.abs(overlap), 1.0, atol=1e-10)
+
+
+def test_projectors_at_keep_the_layout_values():
+    Qf = _synthetic_q(U1Symmetry(), **_U1_Q)
+    expected = {5: [3.0, 3.0, 2.0, 1.0, 1.0], 3: [3.0, 3.0, 2.0], 2: [3.0, 3.0]}
+    for chi, values in expected.items():
+        layout = _c4v_staggered_layout(Qf, chi)
+        P_left, P_right = _c4v_staggered_projectors_at(Qf, layout)
+        kept = Counter(np.asarray(leg(P_left, "chi_new").charges).tolist())
+        assert BondLayout.from_dims(kept) == layout
+        C = contract(contract(P_left, Qf), P_right)
+        diag = [
+            abs(float(v)) for b in C.blocks.values() for v in np.diag(np.asarray(b))
+        ]
+        assert sorted(diag, reverse=True) == pytest.approx(values)
+
+
+def test_projectors_at_trace_under_jit_and_grad():
+    Qf, layout = _swept_corner("762", 4)
+    (data,), treedef = jax.tree_util.tree_flatten(Qf)
+
+    def leaves(x):
+        Q = jax.tree_util.tree_unflatten(treedef, [x])
+        P_left, P_right = _c4v_staggered_projectors_at(Q, layout)
+        return P_left._data, P_right._data
+
+    eager = leaves(data)
+    for e, j in zip(eager, jax.jit(leaves)(data)):
+        np.testing.assert_allclose(
+            np.abs(np.asarray(j)), np.abs(np.asarray(e)), atol=1e-12
+        )
+    weights = jax.random.normal(jax.random.PRNGKey(1), eager[0].shape)
+    grad = jax.grad(lambda x: jnp.sum(weights * leaves(x)[0]))(data)
+    assert bool(jnp.all(jnp.isfinite(grad)))
+    assert float(jnp.max(jnp.abs(grad))) > 0.0
+
+
+def test_projectors_at_refuse_a_layout_the_corner_cannot_hold():
+    Qf = _synthetic_q(U1Symmetry(), **_U1_Q)
+    with pytest.raises(ValueError, match="of charge 7"):
+        _c4v_staggered_projectors_at(Qf, BondLayout.from_dims({7: 1}))
+    with pytest.raises(ValueError, match="keeps 3 states of charge 0"):
+        _c4v_staggered_projectors_at(Qf, BondLayout.from_dims({0: 3}))

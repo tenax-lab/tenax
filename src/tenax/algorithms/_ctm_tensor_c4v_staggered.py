@@ -38,6 +38,7 @@ __all__ = [
     "_c4v_staggered_loop",
     "_c4v_staggered_project",
     "_c4v_staggered_projectors",
+    "_c4v_staggered_projectors_at",
     "_c4v_staggered_rank",
     "_c4v_staggered_sweep",
     "_c4v_staggered_to_full_env",
@@ -48,6 +49,7 @@ __all__ = [
 import jax.numpy as jnp
 import numpy as np
 
+from tenax.algorithms._ad_primitives import regularized_eigh, truncated_svd_ad
 from tenax.algorithms._ctm_c4v_charges import (
     _dual,
     _dual_charge,
@@ -270,6 +272,59 @@ def _c4v_staggered_layout(Qf: SymmetricTensor, chi: int) -> BondLayout:
         if decomp[q][0] == "pair":
             dims[_dual_charge(sym, q)] = len(ns)
     return BondLayout.from_dims(dims)
+
+
+def _c4v_staggered_projectors_at(
+    Qf: SymmetricTensor, layout: BondLayout
+) -> tuple[SymmetricTensor, SymmetricTensor]:
+    """The block projector at a frozen layout, traceable (spec 2, section 2).
+
+    The keys, flows and column order of ``_c4v_staggered_projectors`` for
+    the layout that the free ranking chose, with differentiable
+    decompositions:
+
+    - A mirror pair (q, dual(q)), q the first of the two in sorted order:
+      ``truncated_svd_ad(M_q, k_q)``.  U goes to sector q, V to sector
+      dual(q).  Both copies of a pair value come from one SVD, so no
+      backward term divides by their zero gap (#1178).
+    - A self-partner block: ``regularized_eigh`` of 0.5 (M + M^T), and the
+      k_q largest |lambda| in ascending index order (a stable argsort with
+      a static k: the eager tie-break).
+    - A charge with k_q = 0 gets no decomposition.
+
+    The column signs may differ from the eager projector's
+    (``truncated_svd_ad`` fixes them with ``_fix_svd_signs``); the AD sweep
+    aligns them.
+
+    Raises:
+        RuntimeError: as ``_c4v_staggered_blocks``.
+        ValueError: the layout keeps a charge that has no block, or more
+            states than its block has.
+    """
+    sym, fused, col, mats = _c4v_staggered_blocks(Qf)
+    for q, k in layout.dims:
+        if q not in mats or k > min(mats[q].shape):
+            shape = tuple(mats[q].shape) if q in mats else None
+            raise ValueError(
+                f"charged C4v projector: the layout keeps {k} states of charge "
+                f"{q}, but the enlarged corner's block of that charge has shape "
+                f"{shape}"
+            )
+    cols = {}
+    for q in sorted(mats):
+        k = layout.dim_of(q)
+        if k == 0 or q in cols:
+            continue
+        qd = _dual_charge(sym, q)
+        M = mats[q]
+        if qd == q:
+            lam, W = regularized_eigh(0.5 * (M + M.T))
+            cols[q] = W[:, jnp.sort(jnp.argsort(-jnp.abs(lam))[:k])]
+        else:
+            U, _s, Vh = truncated_svd_ad(M, k)
+            cols[q] = U
+            cols[qd] = Vh.T
+    return _c4v_staggered_assemble(sym, fused, col, cols)
 
 
 def _leg(T: Tensor, label: str) -> TensorIndex:
