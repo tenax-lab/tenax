@@ -28,18 +28,27 @@ from _c4v_staggered_fixtures import (
     with_data,
 )
 
-from tenax import CTMConfig
+from tenax import CTMConfig, heisenberg_gate, iPEPSConfig, sublattice_rotate_gate
 from tenax.algorithms import _ctm_tensor_c4v_charged_ad as ad
-from tenax.algorithms._ctm_convergence_policy import CTMNotConvergedError
+from tenax.algorithms import ipeps_optimize_c4v_charged as opt
+from tenax.algorithms._ctm_convergence_policy import (
+    CTMConvergeInfo,
+    CTMNotConvergedError,
+)
 from tenax.algorithms._ctm_root_implicit_sym_sectors import BondLayout
+from tenax.algorithms._ctm_tensor_c4v import ctm_tensor_c4v
 from tenax.algorithms._ctm_tensor_c4v_staggered import (
     _c4v_staggered_enlarged_corner,
     _c4v_staggered_layout,
     _c4v_staggered_loop,
     _c4v_staggered_sweep,
+    _c4v_staggered_to_full_env,
 )
+from tenax.algorithms._ctm_tensor_energy import compute_energy_ctm_tensor
 from tenax.algorithms._ctm_tensor_init import _build_double_layer_tensor
+from tenax.algorithms.ipeps import symmetrize_c4v
 from tenax.core.symmetry import U1Symmetry, ZnSymmetry
+from tenax.core.tensor import SymmetricTensor
 
 _NAMES = ("d2_off", "762", "z4")
 
@@ -341,3 +350,238 @@ def test_a_radial_cotangent_has_zero_vjp(which):
     n_random = float(jnp.linalg.norm(d_random._data))
     assert n_random > 1e-3, "vacuous: the random cotangent has no VJP"
     assert float(jnp.linalg.norm(d_radial._data)) <= 1e-10 * n_random
+
+
+# ------------------------------------------------------------------ #
+# The optimiser loop (spec 2, section 5)                              #
+# ------------------------------------------------------------------ #
+
+GATE = sublattice_rotate_gate(heisenberg_gate())
+_MESH = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("x",))
+
+
+def _config(ctm=None, **kw):
+    """A charged C4v config at chi=6: three Armijo steps, then ``kw``."""
+    ctm_fields = {"chi": 6, "max_iter": 200, "conv_tol": 1e-10, **(ctm or {})}
+    fields = {
+        "max_bond_dim": 2,
+        "gs_c4v": True,
+        "su_init": False,
+        "gs_num_steps": 3,
+        "gs_line_search_method": "armijo",
+        "ctm": CTMConfig(**ctm_fields),
+    }
+    return iPEPSConfig(**{**fields, **kw})
+
+
+def _c4v_error(A):
+    """max |symmetrize_c4v(todense(A)) - todense(A)|."""
+    dense = np.asarray(A.todense())
+    return float(np.max(np.abs(np.asarray(symmetrize_c4v(jnp.asarray(dense))) - dense)))
+
+
+_REFUSED = [
+    ({"gs_implicit_ad": False}, None, "gs_implicit_ad"),
+    ({}, {"projector_method": "qr"}, "projector_method"),
+    ({}, {"forward_gauge": "phase"}, "forward_gauge"),
+    ({}, {"ctm_conv_method": "sv"}, "ctm_conv_method"),
+    ({}, {"projector_backward": "standard"}, "projector_backward"),
+    ({}, {"projector_backward": "lorentzian"}, "projector_backward"),
+    ({}, {"on_unconverged": "warn"}, "on_unconverged"),
+    ({}, {"chi_ramp": [(4, 2)]}, "chi_ramp"),
+    ({}, {"chi_auto_bump": True}, "chi_auto_bump"),
+    (
+        {},
+        {"ctmrg_heuristic_increase_chi": True, "chi_max": 8},
+        "ctmrg_heuristic_increase_chi",
+    ),
+    ({}, {"fuse_virtual_legs": False}, "fuse_virtual_legs"),
+    ({}, {"ctm_mixing": 0.5}, "ctm_mixing"),
+    ({}, {"device_mesh": _MESH}, "device_mesh"),
+    ({"gs_stall_recovery": "noise"}, None, "gs_stall_recovery"),
+    ({"cg_gates": object()}, None, "cg_gates"),
+    ({"gs_optimizer": "adam"}, None, "gs_optimizer"),
+    ({"gs_line_search": False}, None, "gs_line_search"),
+    ({"gs_chi_schedule_steps": [(4, 2)]}, None, "gs_chi_schedule_steps"),
+    ({"gs_ctm_conv_tol_schedule": [(0.5, 1e-8)]}, None, "gs_ctm_conv_tol_schedule"),
+    ({"gs_ctm_max_iter_schedule": [(0.5, 50)]}, None, "gs_ctm_max_iter_schedule"),
+    (
+        {"gs_plateau_patience_schedule": [(0.5, 10)]},
+        None,
+        "gs_plateau_patience_schedule",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("kw", "ctm", "match"),
+    [
+        pytest.param(kw, ctm, match, id=f"{match}-{i}")
+        for i, (kw, ctm, match) in enumerate(_REFUSED)
+    ],
+)
+def test_refusals(kw, ctm, match):
+    """Each refused setting of spec 2, section 5 and ruling 8 raises first."""
+    with pytest.raises(ValueError, match=f"charged C4v AD: {match}"):
+        opt.optimize_gs_ad_c4v_charged(GATE, _site("d2_off"), _config(ctm, **kw))
+
+
+def test_complex_data_is_refused():
+    A = _site("d2_off")
+    A_complex = with_data(A, A._data.astype(jnp.complex128))
+    with pytest.raises(ValueError, match="charged C4v AD: complex data"):
+        opt.optimize_gs_ad_c4v_charged(GATE, A_complex, _config())
+
+
+def test_zero_steps_returns_the_converged_start():
+    """gs_num_steps=0: the projected start, its converged env, its energy."""
+    A = _site("d2_off")
+    A_out, env, E, hist = opt.optimize_gs_ad_c4v_charged(
+        GATE, A, _config(gs_num_steps=0, return_history=True)
+    )
+    np.testing.assert_allclose(np.asarray(A_out._data), np.asarray(A._data), atol=1e-12)
+    assert abs(E - float(compute_energy_ctm_tensor(A_out, env, GATE, d=2))) < 1e-12
+    _A, C, T, _layout = _cold("d2_off")
+    env_cold = _c4v_staggered_to_full_env(C, T)
+    assert abs(E - float(compute_energy_ctm_tensor(A, env_cold, GATE, d=2))) < 1e-9
+    assert hist["num_steps"] == 0 and hist["energies"] == []
+    assert hist["layout"] == BondLayout.from_dims({-1: 2, 0: 2, 1: 2}).dims
+
+
+def test_a_non_c4v_start_is_projected():
+    """Review Focus 1: a charged start with raw (non-C4v) blocks is projected,
+    and the run stays C4v after an accepted step."""
+    raw = SymmetricTensor.random_normal(_site("d2_off").indices, jax.random.PRNGKey(5))
+    assert _c4v_error(raw) > 0.1, "vacuous: the raw start is C4v"
+    A, _env, E, hist = opt.optimize_gs_ad_c4v_charged(
+        GATE, raw, _config(gs_num_steps=2, return_history=True)
+    )
+    assert hist["energies"][1] < hist["energies"][0] - 1e-12, "vacuous: no step"
+    assert _c4v_error(A) < 1e-12
+    assert np.isfinite(E)
+
+
+def test_gs_projector_method_overrides_before_the_check():
+    """Review Focus 2: gs_projector_method replaces ctm.projector_method first."""
+    A = _site("d2_off")
+    run = _config({"projector_method": "qr"}, gs_projector_method="svd", gs_num_steps=0)
+    assert np.isfinite(opt.optimize_gs_ad_c4v_charged(GATE, A, run)[2])
+    refused = _config(
+        {"projector_method": "svd"}, gs_projector_method="qr", gs_num_steps=0
+    )
+    with pytest.raises(ValueError, match="charged C4v AD: projector_method='qr'"):
+        opt.optimize_gs_ad_c4v_charged(GATE, A, refused)
+
+
+def test_a_missing_block_is_canonicalised():
+    """Review Focus 4: an A_init that stores fewer blocks than its charges allow."""
+    A = _site("d2_off")
+    blocks = dict(A.blocks)
+    del blocks[next(iter(blocks))]
+    A_missing = SymmetricTensor(blocks, A.indices)
+    assert A_missing._data.size < A._data.size, "vacuous: no block is missing"
+    A_out, _env, E = opt.optimize_gs_ad_c4v_charged(
+        GATE, A_missing, _config(gs_num_steps=0)
+    )
+    assert A_out._data.size == A._data.size
+    assert _c4v_error(A_out) < 1e-12 and np.isfinite(E)
+
+
+def test_two_chi_in_one_process():
+    """Review Focus 5: each chi gets its own programs; no stale one serves a run."""
+    A = _site("d2_off")
+    for chi in (4, 6, 4):
+        _A, _env, E = opt.optimize_gs_ad_c4v_charged(
+            GATE, A, _config({"chi": chi}, gs_num_steps=0)
+        )
+        env = ctm_tensor_c4v(A, chi, max_iter=200, conv_tol=1e-10)
+        E_eager = float(compute_energy_ctm_tensor(A, env, GATE, d=2))
+        assert abs(E - E_eager) < 1e-9, (chi, E, E_eager)
+
+
+def test_trial_energy_is_inf_without_a_fixed_point():
+    A, C, T, layout = _cold("d2_off")
+    gate = GATE.todense()
+    no_budget = dataclasses.replace(CTM6, max_iter=1, conv_tol=1e-300)
+    assert opt._trial_energy(A, (C, T), layout, no_budget, gate, 2) == float("inf")
+    assert np.isfinite(opt._trial_energy(A, (C, T), layout, CTM6, gate, 2))
+
+
+@pytest.mark.parametrize("method", ["armijo", "hager_zhang"])
+def test_an_unconverged_trial_is_a_bad_point(monkeypatch, method):
+    """Review Focus 3: a trial with no fixed point is +inf; the run spends its
+    stall budget instead of raising."""
+    monkeypatch.setattr(opt, "_trial_energy", lambda *args: float("inf"))
+    config = _config(
+        gs_line_search_method=method, gs_stall_recovery_retries=1, return_history=True
+    )
+    _A, _env, E, hist = opt.optimize_gs_ad_c4v_charged(GATE, _site("d2_off"), config)
+    assert hist["num_steps"] == 2  # two failed searches spend one reset
+    assert abs(hist["energies"][1] - hist["energies"][0]) < 1e-9
+    assert E == min(hist["energies"])
+
+
+@pytest.mark.parametrize(("retries", "raises"), [(1, False), (0, True)])
+def test_reset_on_an_unconverged_forward(monkeypatch, retries, raises):
+    """A forward with no fixed point at step 2 resets to the best point; with
+    no retry left it re-raises (the 1-site rule, #1059).  Armijo trials do not
+    call charged_c4v_converge, so call 2 is the second step's evaluation."""
+    real, calls = ad.charged_c4v_converge, [0]
+
+    def flaky(*args):
+        calls[0] += 1
+        if calls[0] == 2:
+            info = CTMConvergeInfo(
+                converged=False,
+                iterations=1,
+                sv_diff=1.0,
+                best_iteration=1,
+                step_multiplier=float("nan"),
+            )
+            raise CTMNotConvergedError(
+                info, site="gradient", conv_tol=1e-10, chi=6, detail="mock"
+            )
+        return real(*args)
+
+    monkeypatch.setattr(ad, "charged_c4v_converge", flaky)
+    config = _config(gs_stall_recovery_retries=retries, return_history=True)
+    if raises:
+        with pytest.raises(CTMNotConvergedError):
+            opt.optimize_gs_ad_c4v_charged(GATE, _site("d2_off"), config)
+        return
+    _A, _env, _E, hist = opt.optimize_gs_ad_c4v_charged(GATE, _site("d2_off"), config)
+    assert calls[0] >= 3
+    # Step 3 evaluates the best point again: the step-1 point.
+    assert abs(hist["energies"][1] - hist["energies"][0]) < 1e-9
+
+
+def test_layout_mismatch_is_recorded(monkeypatch):
+    """A free ranking that keeps another layout at step 2 is recorded once;
+    the run keeps the frozen layout."""
+    real, calls = opt._c4v_staggered_layout, [0]
+    other = BondLayout.from_dims({0: 6})
+
+    def ranking(Qf, chi):
+        calls[0] += 1
+        return other if calls[0] == 2 else real(Qf, chi)
+
+    monkeypatch.setattr(opt, "_c4v_staggered_layout", ranking)
+    _A, _env, _E, hist = opt.optimize_gs_ad_c4v_charged(
+        GATE, _site("d2_off"), _config(return_history=True)
+    )
+    assert calls[0] >= 2, "vacuous: the second check did not run"
+    assert hist["layout_mismatch_steps"] == [2]
+    assert hist["layout"] == BondLayout.from_dims({-1: 2, 0: 2, 1: 2}).dims
+    assert set(hist) == {
+        "energies",
+        "grad_norms",
+        "step_times",
+        "num_steps",
+        "converged",
+        "ctm_converged",
+        "forward_sweeps",
+        "adjoint_matvecs",
+        "adjoint_residual",
+        "layout",
+        "layout_mismatch_steps",
+    }
