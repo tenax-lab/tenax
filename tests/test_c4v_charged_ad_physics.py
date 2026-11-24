@@ -152,9 +152,9 @@ _STARTS = {
 # Plan ruling 21 (Task 8): the "random" start does not reach the optimum, and
 # the energy assert is not loosened.  From t = 1.5491 the energy falls to a
 # second local minimum of the family at t = 1.13071 (eager E(t), Brent, chi=16:
-# E = -0.582762987484, E'' = 0.39); a maximum near t = 0.83 (E = -0.5689)
+# E = -0.582762987484, E'' = 0.39); a maximum at t = 0.813 (E = -0.56887)
 # separates it from the optimum at t = 0.42102.  The run ends there, on a C4v
-# tensor with |g| < 1e-5: the first three asserts hold, the energy asserts fail.
+# tensor with |g| < 1e-5: the first three asserts hold, the fourth fails.
 _RANDOM_ENDS_ELSEWHERE = pytest.mark.xfail(
     strict=True,
     reason=(
