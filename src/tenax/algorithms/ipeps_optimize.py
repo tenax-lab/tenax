@@ -26,14 +26,24 @@ from tenax.algorithms._ctm_energy_ad import invalidate_implicit_ad_warm_start
 from tenax.algorithms._ctm_env_pad import pad_dense_env_chi
 from tenax.algorithms._ctm_tensor_init import CTMTensorEnv
 from tenax.algorithms._ipeps_optimize_shared import (  # noqa: F401
+    _STALL_NOISE_FLOOR,
+    _backtracking_line_search,
     _build_optimizer,
     _converged_outer,
     _euclidean_grads,
     _grad_l2_norm,
+    _is_real_decrease,
     _log_ad_converged,
+    _log_ad_step,
+    _log_ctm_not_converged_reset,
     _normalize_params,
+    _normalize_stall_recovery,
+    _resolve_line_search_method,
     _should_accept_best,
     _su_start_guard_armed,
+    _tree_add,
+    _tree_dot,
+    _tree_scale,
     _use_line_search,
     _warn_implicit_ad_variational_caveat,
     _wrap_as_dense_tensor,
@@ -41,6 +51,7 @@ from tenax.algorithms._ipeps_optimize_shared import (  # noqa: F401
 from tenax.algorithms.ipeps_ad_policy import (
     build_ad_ctm_config,
     resolve_projector_backward,
+    use_charged_c4v_path,
     use_reference_c4v_path,
     use_root_implicit_path,
 )
@@ -557,28 +568,6 @@ def _probe_forward_rejected(diag: dict, ctm_cfg) -> bool:
     return False
 
 
-def _log_ctm_not_converged_reset(
-    exc, *, conv_tol, n_reset: int, retries: int, verbose: bool
-) -> None:
-    """Spec section 3 reset log line (logger always; stdout when verbose)."""
-    from tenax.algorithms._ctm_convergence_policy import (
-        _fmt,
-        format_step_multiplier,
-    )
-
-    info = exc.info
-    msg = (
-        f"[iPEPS-AD] CTM forward not converged at step {exc.step} "
-        f"(sweeps {_fmt(getattr(info, 'iterations', None), 'd')}, sv_diff "
-        f"{_fmt(getattr(info, 'sv_diff', None), '.3g')} vs tol "
-        f"{_fmt(conv_tol, 'g')}, step multiplier {format_step_multiplier(info)}) "
-        f"— reset to best (#{n_reset}/{retries})"
-    )
-    _logger.warning(msg)
-    if verbose:
-        print(msg, flush=True)
-
-
 class _AcceptedProbeEval:
     """Hand the HZ ``dφ`` probe's ``value_and_grad`` to the next step.
 
@@ -974,68 +963,6 @@ def _resolve_projector_backward(config: iPEPSConfig) -> iPEPSConfig:
     return resolve_projector_backward(config, logger=_logger)
 
 
-def _normalize_stall_recovery(config, *, unit_cell: str):
-    """Resolve an unset ``gs_stall_recovery`` to ``"reset"`` on every unit cell.
-
-    ``"reset"`` rolls back to ``best_params`` and clears the L-BFGS / CG
-    state; ``"noise"`` kicks the *current* params by ``gs_noise_amplitude``
-    (10 % Frobenius) with no rollback.  The 1-site default used to be
-    ``"noise"``, to break the 1-site C4v run off an SU-init plateau with
-    gradient norms ~1e-10.  That plateau no longer reproduces: Heisenberg
-    1x1 from the default SU start has |g| = 0.30 at D=2 chi=8 and 0.54 at
-    D=3 chi=9, with and without ``gs_c4v``, and at D=2 ``"noise"`` and
-    ``"reset"`` reach the same energy to 1e-10.  The kick is destructive near
-    a settled energy instead: on D=3 chi=16
-    Heisenberg (``forward_gauge="bond_phase"``, ``projector_backward="flow"``)
-    a stall at E=-0.66819 -- fired by a Hager-Zhang approximate-Wolfe step
-    that does not lower E by more than ``_STALL_NOISE_FLOOR`` -- kicked the
-    state to E=-0.033, after which the CTM adjoint diverged (residual up to
-    1e46) and the run never returned to its best energy; the same kick took
-    the 1-site C4v D=3 run from -0.6668 to -0.50.  The 2-site default has
-    been ``"reset"`` since #520 for the same reason.  ``unit_cell`` is kept
-    for the call sites; an explicit user setting is never overridden.
-    Should an SU start be stationary anyway, ``_su_start_guard_armed``
-    keeps the ``"grad_norm"`` test from accepting it before the first
-    optimizer step.
-    """
-    from dataclasses import replace
-
-    if config.gs_stall_recovery is not None:
-        return config
-    del unit_cell
-    return replace(config, gs_stall_recovery="reset")
-
-
-_STALL_NOISE_FLOOR: float = 1e-12
-"""Absolute energy decrease below which a step is treated as numerical noise
-rather than real progress.  See ``_is_real_decrease`` and issue #510.
-
-Tied to the J=1 spin-Hamiltonian convention (energies are O(1)) so a 1e-12
-threshold sits 4 orders of magnitude above double-precision round-off on a
-typical -0.6 energy.  Not exposed as config: the existing
-``gs_stall_count_threshold`` / ``gs_stall_recovery_retries`` knobs control
-how the trigger interacts with recovery — the floor itself is a noise level,
-not a tuning parameter.
-"""
-
-
-def _is_real_decrease(
-    new_energy: float, old_energy: float, *, noise: float = _STALL_NOISE_FLOOR
-) -> bool:
-    """Return True iff ``new_energy`` is strictly below ``old_energy`` by more
-    than ``noise``.
-
-    Defends the stall safety-net against α-collapse line searches that
-    return a step at α≈1e-14 with a floating-point-noise energy decrease.
-    Without this guard the strict ``new < old`` comparison would reset
-    ``stall_count`` on jitter alone and the optimizer could grind for
-    hours without real progress (issue #510, v8b evidence).
-    """
-    if not math.isfinite(new_energy) or not math.isfinite(old_energy):
-        return False
-    return new_energy < old_energy - noise
-
-
 def _rise_chi(ctm_cfg, envs) -> int | None:
     """The χ that keys a ``gs_reject_energy_rise`` comparison.
 
@@ -1106,78 +1033,6 @@ def _log_energy_rise_reject(
         print(msg, flush=True)
 
 
-def _resolve_line_search_method(config: iPEPSConfig, ctm_cfg: CTMConfig) -> str:
-    """Return the concrete line-search method ("armijo" or "hager_zhang").
-
-    Honours ``config.gs_line_search_method``:
-
-    * ``"armijo"`` / ``"hager_zhang"`` — returned as-is.
-    * ``"auto"`` (#509) — picks Armijo backtracking when
-      ``ctm_cfg.chi < config.gs_line_search_hz_chi_threshold`` and
-      Hager-Zhang otherwise.  Rationale: iPEPS-AD's gradient at small chi
-      carries CTM truncation noise of order ε_T that frequently exceeds
-      HZ's strong-Wolfe curvature tolerance (σ ≈ 0.9); Armijo only checks
-      sufficient decrease and dodges this entirely at ~5-10× lower
-      per-probe cost.
-
-    Each iPEPS optimizer (1-site / 2-site / multisite) calls this helper
-    exactly once after ``ctm_cfg`` is built and caches the result in
-    ``line_search_method``; the dispatch sites inside the optimizer loop
-    consult the cached value, not this function.  That keeps the method
-    stable when ``ctm_cfg.chi`` shifts mid-run under legacy ``chi_ramp``
-    or ``chi_auto_bump`` paths (both deprecated by #512, but still
-    functional — without caching, an "auto" run could silently flip
-    Armijo↔HZ after a bump).  Users wanting stage-specific behaviour
-    should wrap ``optimize_gs_ad`` per chi stage with an explicit method.
-    """
-    method = config.gs_line_search_method
-    if method == "auto":
-        if ctm_cfg.chi < config.gs_line_search_hz_chi_threshold:
-            return "armijo"
-        return "hager_zhang"
-    return method
-
-
-def _tree_dot(a, b) -> float:
-    """Compute real dot product between two pytrees of arrays.
-
-    Returns ``Re(sum_leaves <conj(a_leaf), b_leaf>)`` as a Python float.
-
-    Implementation note: routes through host NumPy rather than JAX. The
-    function is called by Python-level optimizer plumbing (L-BFGS slope
-    queries, CG beta numerators, Hager-Zhang ``dphi`` callbacks), where
-    every call already terminates in ``float(...)`` and so must materialise
-    to host anyway. The previous JAX path issued ~3 XLA dispatches per
-    leaf plus a ``block_until_ready`` for the final ``float()``; that
-    dispatch overhead (~100-300 µs each on CPU JAX) showed up at 62 % of
-    AD wall-clock in cProfile (``project_f3_landed_line_search_next.md``).
-    Materialising via ``np.asarray`` consolidates the host transfer into
-    a single per-leaf step and lets NumPy do the scalar reduction.
-    """
-    leaves_a = jax.tree.leaves(a)
-    leaves_b = jax.tree.leaves(b)
-    if not leaves_a:
-        return 0.0
-    total = 0.0
-    for la, lb in zip(leaves_a, leaves_b):
-        a_np = np.asarray(la).ravel()
-        b_np = np.asarray(lb).ravel()
-        # ``np.vdot`` already takes conj of the first argument and returns
-        # a NumPy scalar; ``.real`` gives the real part as a Python float.
-        total += np.vdot(a_np, b_np).real
-    return float(total)
-
-
-def _tree_scale(tree, alpha: float):
-    """Scale all leaves in a pytree by a scalar."""
-    return jax.tree.map(lambda x: x * alpha, tree)
-
-
-def _tree_add(a, b):
-    """Add two pytrees element-wise."""
-    return jax.tree.map(lambda x, y: x + y, a, b)
-
-
 def _random_noise(key, shape, dtype):
     """Generate noise matching the dtype of the parameter (real or complex)."""
     if jnp.issubdtype(dtype, jnp.complexfloating):
@@ -1221,56 +1076,6 @@ def _tangent_project_unit(direction, params):
     return direction - coef * params
 
 
-def _backtracking_line_search(
-    params,
-    direction,
-    grad,
-    energy,
-    loss_fn_fwd,
-    c1=1e-4,
-    rho=0.5,
-    max_steps=8,
-):
-    """Armijo backtracking line search (Python-level, not JIT-traced).
-
-    Args:
-        params: current parameters (pytree)
-        direction: search direction (pytree, same structure as params)
-        grad: gradient at current params (pytree)
-        energy: loss value at current params
-        loss_fn_fwd: forward-only loss function params -> scalar
-        c1: sufficient decrease parameter
-        rho: backtracking factor
-        max_steps: maximum number of backtracks
-
-    Returns:
-        (new_params, new_energy, step_size)
-    """
-    slope = _tree_dot(grad, direction)
-    if slope >= 0:
-        # Direction is not a descent direction; fall back to negative gradient
-        direction = jax.tree.map(lambda g: -g, grad)
-        slope = -_tree_dot(grad, grad)
-
-    # Scale initial step so ||alpha * d|| ~ 0.1 * ||params||
-    dir_norm = math.sqrt(max(_tree_dot(direction, direction), 1e-30))
-    param_norm = math.sqrt(max(_tree_dot(params, params), 1e-30))
-    alpha = min(1.0, 0.1 * param_norm / dir_norm)
-
-    best_trial, best_f, best_alpha = params, energy, 0.0
-    for _ in range(max_steps):
-        trial = _normalize_params(_tree_add(params, _tree_scale(direction, alpha)))
-        f_trial = loss_fn_fwd(trial)
-        if f_trial < best_f:
-            best_trial, best_f, best_alpha = trial, f_trial, alpha
-        if f_trial <= energy + c1 * alpha * slope:
-            return trial, f_trial, alpha
-        alpha *= rho
-
-    # Return best trial seen (stays at current params if nothing improved)
-    return best_trial, best_f, best_alpha
-
-
 def _cg_beta_pr(grad_new, grad_old):
     """Polak-Ribiere+ beta for conjugate gradient."""
     # beta = max(0, g_new . (g_new - g_old) / (g_old . g_old))
@@ -1286,25 +1091,6 @@ def _should_log_step(step: int, num_steps: int, interval: int) -> bool:
     if step == 0 or step == num_steps - 1:
         return True
     return (step + 1) % interval == 0
-
-
-def _log_ad_step(
-    backend: str,
-    step: int,
-    num_steps: int,
-    energy: float,
-    delta_energy: float,
-    best_energy: float,
-    *,
-    grad_norm: float | None = None,
-) -> None:
-    delta_str = "N/A" if not math.isfinite(delta_energy) else f"{delta_energy:.3e}"
-    grad_str = "" if grad_norm is None else f" |g|={grad_norm:.3e}"
-    print(
-        f"[iPEPS-AD:{backend}] step {step + 1}/{num_steps} "
-        f"E={energy:.10f} dE={delta_str}{grad_str} E_best={best_energy:.10f}",
-        flush=True,
-    )
 
 
 def optimize_gs_ad_chi_schedule(
@@ -1439,6 +1225,38 @@ def optimize_gs_ad(
     ``jax.Array`` or Tensor-protocol objects (``DenseTensor``,
     ``SymmetricTensor``).
 
+    A charged C4v ``SymmetricTensor`` (a virtual charge q with
+    ``q != dual(q)``, which ``ctm_tensor_c4v`` runs as the 2-sublattice
+    state (A, negate(A)), #1211) with ``unit_cell="1x1"``, ``gs_c4v=True``
+    and no ``ctm_ad_mode`` takes its own loop: implicit AD through the #1211
+    sweep at the layout of its cold start, on the block data, with L-BFGS
+    and the configured line search.  This path refuses
+    ``gs_implicit_ad=False``, complex data, ``projector_method="qr"``, a
+    ``forward_gauge`` other than ``"auto"`` or ``"bond_phase"``,
+    ``ctm_conv_method="sv"``, ``projector_backward`` ``"standard"`` or
+    ``"lorentzian"``, ``on_unconverged="warn"``, ``chi_ramp``,
+    ``chi_auto_bump``, ``ctmrg_heuristic_increase_chi``, the
+    ``gs_chi_schedule_steps`` and ``gs_ctm_*`` / ``gs_plateau_*``
+    schedules, ``gs_stall_recovery="noise"``, ``gs_checkpoint_path``,
+    ``gs_recipe="1x1"``, ``cg_gates``, ``fuse_virtual_legs=False``, a
+    ``gs_optimizer`` other than ``"lbfgs"``, ``gs_line_search=False``,
+    ``ctm_mixing > 0`` and a ``device_mesh`` that is not ``None``.  It does
+    not apply ``gs_metric_precond``, ``gs_max_grad_norm``,
+    ``gs_reject_energy_rise``, ``gs_grad_spike_ratio``, ``gs_log_interval``
+    or ``gs_log_probes``, and it does not read ``adjoint_solver``,
+    ``adjoint_method``, ``adjoint_chain_rule``, ``adjoint_degen_tol``,
+    ``adjoint_diag_shift``, ``adjoint_arnoldi_precheck``,
+    ``adjoint_arnoldi_threshold``, ``ad_backward_method``, ``gmres_tol``,
+    ``gmres_restart``, ``gmres_maxiter``, ``gmres_precondition``,
+    ``ad_regularize_svd``, ``min_iter``, ``renormalize``,
+    ``plateau_patience``, ``probe_max_iter`` or ``probe_conv_tol``, nor the
+    settings that act only through a refused setting or on another engine
+    (the ``chi_auto_bump_*`` and ``ctmrg_heuristic_increase_chi_*``
+    sub-settings, ``chi_max``, ``qr_warmup_steps``, ``chi_I``,
+    ``rel_floor`` and ``ctm_chunk_size``).  A charged C4v site with
+    ``unit_cell="2site"`` and ``gs_c4v=True`` is refused.  See Path 4b in
+    ``docs/guide/algorithms/ipeps_ad_paths.md``.
+
     Args:
         hamiltonian_gate: 2-site Hamiltonian of shape ``(d, d, d, d)``.
         A_init:           Initial site tensor ``(D, D, D, D, d)`` for 1-site,
@@ -1516,7 +1334,10 @@ def optimize_gs_ad(
         the last element.  Besides ``energies``, ``step_times`` and the
         ``ctm_*`` per-step lists, it holds ``ctm_warnings_suppressed`` (int):
         how many repeated unconverged-CTM warnings ``on_unconverged="warn"``
-        swallowed (one warning is kept per site and step, #1083).
+        swallowed (one warning is kept per site and step, #1083).  On the
+        charged C4v path the only ``ctm_*`` list is ``ctm_converged``, and
+        the path adds the per-step lists ``forward_sweeps``,
+        ``adjoint_matvecs`` and ``adjoint_residual``.
     """
     # First, ahead of the root-implicit dispatch (which refuses every Lattice
     # for its own reason) and of every warning: the multisite energy sums the
@@ -1572,7 +1393,13 @@ def optimize_gs_ad(
     # No silent gauge promotion either way -- explicit user choices are
     # preserved on every path.  See
     # docs/plans/2026-04-13-multisite-c4v-reference-ad-plan.md Task 8.
-    if not (use_root_implicit_path(config) or _use_reference_c4v_path(config)):
+    # The charged C4v loop checks its own settings (spec 2) and accepts the
+    # "eigh" projector that this check refuses.
+    if not (
+        use_root_implicit_path(config)
+        or _use_reference_c4v_path(config)
+        or use_charged_c4v_path(config, A_init)
+    ):
         config = _resolve_projector_backward(config)
 
     # Checkpointing is wired for the 2-site and 1-site (incl. coarse-grained
@@ -1581,13 +1408,16 @@ def optimize_gs_ad(
     # (_optimize_gs_ad_tensor_reference_c4v) are NOT wired — block them
     # explicitly so gs_checkpoint_path is never silently ignored (#497).
     if config.gs_checkpoint_path is not None and (
-        isinstance(config.unit_cell, Lattice) or _use_reference_c4v_path(config)
+        isinstance(config.unit_cell, Lattice)
+        or _use_reference_c4v_path(config)
+        or use_charged_c4v_path(config, A_init)
     ):
         raise NotImplementedError(
             "iPEPSConfig.gs_checkpoint_path is not yet supported for generic "
             "Lattice multisite unit cells or the dense C4v-reference path; use "
             "unit_cell='2site' or '1x1' (non-C4v-reference, incl. cg_gates). "
-            "Multisite / C4v-reference checkpoint wiring is a follow-up (#497)."
+            "Multisite / C4v-reference checkpoint wiring is a follow-up (#497). "
+            "The charged C4v path (spec 2) is not wired either."
         )
 
     # gs_recipe='1x1' is wired end-to-end only on the single-site split-CTM
@@ -1629,11 +1459,20 @@ def optimize_gs_ad(
         return _optimize_gs_ad_multisite(hamiltonian_gate, A_init, config)
 
     if config.unit_cell == "2site":
+        _refuse_charged_c4v_2site(A_init, config)
         return _optimize_gs_ad_2site(
             hamiltonian_gate, A_init, config, envs_init=envs_init
         )
     if _use_reference_c4v_path(config):
         return _optimize_gs_ad_tensor_reference_c4v(hamiltonian_gate, A_init, config)
+    if use_charged_c4v_path(config, A_init):
+        # A charged C4v SymmetricTensor (spec 2): implicit AD through the #1211
+        # 2-sublattice sweep on the block data, with no densification.
+        from tenax.algorithms.ipeps_optimize_c4v_charged import (
+            optimize_gs_ad_c4v_charged,
+        )
+
+        return optimize_gs_ad_c4v_charged(hamiltonian_gate, A_init, config)
 
     # CG-with-map_fn: optimizer params are a tuple of raw site arrays.
     # The user can pass that tuple directly as A_init for warm-start /
@@ -1809,6 +1648,26 @@ def _drop_metric_precond_for_fermions(
         stacklevel=3,
     )
     return replace(config, gs_metric_precond=False)
+
+
+def _refuse_charged_c4v_2site(A_init, config) -> None:
+    """Refuse a charged C4v site on the 2-site C4v path (spec 2, section 5).
+
+    The 1x1 charged C4v ansatz is already the 2-sublattice state
+    (A, negate(A)) (#1211).  With ``gs_c4v=False`` the general symmetric
+    2-site path runs as before.
+    """
+    if not config.gs_c4v:
+        return
+    from tenax.algorithms._ctm_c4v_charges import _is_charged_c4v
+
+    sites = A_init if isinstance(A_init, tuple) else (A_init,)
+    if any(_is_charged_c4v(site) for site in sites):
+        raise ValueError(
+            "charged C4v input with unit_cell='2site' and gs_c4v=True is not "
+            "supported: the 1x1 charged C4v ansatz is already the 2-sublattice "
+            "state (A, negate(A)); use unit_cell='1x1'"
+        )
 
 
 def _reject_mislabelled_1x1(config: iPEPSConfig) -> None:
