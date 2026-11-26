@@ -605,7 +605,7 @@ def test_the_start_is_read_by_label(axes):
 def test_the_projection_of_a_d16_site_reads_blocks_only(monkeypatch):
     """At D=16 (n = 20480 block entries) the canonical start and the C4v
     permutations come from the blocks, with no todense.  An n x n projector
-    would hold 3.2 GB.  Each face holds charges 0 and 1 eight times, so the
+    would hold 3.4 GB.  Each face holds charges 0 and 1 eight times, so the
     permutations transpose the entries inside each block."""
     indices = c4v_indices(U1Symmetry(), [0] * 8 + [1] * 8, [0, 1])
     raw = SymmetricTensor.random_normal(indices, jax.random.PRNGKey(7))
