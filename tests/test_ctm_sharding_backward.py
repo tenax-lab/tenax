@@ -12,13 +12,21 @@ import os
 import subprocess
 import sys
 
-# The fake devices of one process share a host thread pool, so on a loaded
-# 4-vCPU CI runner a device can reach a collective long after its peers.  XLA's
-# CPU collectives give up after 40 s and abort the child (SIGABRT, "Expected 4
-# threads to join the rendezvous, but only 2 of them arrived"), which is a
-# scheduling stall, not a gradient mismatch: it hit main and #1157 on
-# 2026-10-27 and passes locally in ~2 min.  The subprocess timeout below still
-# bounds a real hang.
+# The fake devices of one process share one host thread pool.  Before jaxlib
+# 0.12 (CI runs 0.10.2), that pool runs both the per-device launch of each
+# computation and the device programs, with max(nproc, n_dev) threads: 4 on a
+# 4-vCPU runner.  Eager ops in the forward CTM queue launches until a launch
+# blocks on the per-device in-flight cap while it holds a thread, and the
+# programs on the other threads wait in an all-gather for a peer that gets no
+# thread.  This deadlock is logged as "This thread has been waiting for `all
+# gather ...`", and XLA aborts the child at the collective timeout.
+# ``PJRT_NPROC`` sets the pool size.  At 16 (four threads per fake device) the
+# gradient child hung in 0 of 60 runs pinned to 4 CPUs, against 14 of 78 at
+# the default.
+_PJRT_NPROC = "16"
+# #1159 raised XLA's 40 s CPU collective timeouts to 600 s for this deadlock
+# before its cause was known; they do no harm on a run that passes.  The
+# subprocess timeout below still bounds a hang.
 _COLLECTIVE_TIMEOUT_FLAGS = (
     "--xla_cpu_collective_call_terminate_timeout_seconds=600"
     " --xla_cpu_collective_timeout_seconds=600"
@@ -61,6 +69,7 @@ def test_sharded_backward_grad_matches_single_device():
         os.environ,
         XLA_FLAGS=_xla_flags(4),
         JAX_PLATFORMS="cpu",
+        PJRT_NPROC=_PJRT_NPROC,
     )
     r = subprocess.run(
         [sys.executable, "tests/_rung2_grad_parity_subproc.py", "4", "8", "1e-5"],
@@ -83,6 +92,7 @@ def test_sharded_optimize_gs_ad_matches_single_device():
         os.environ,
         XLA_FLAGS=_xla_flags(4),
         JAX_PLATFORMS="cpu",
+        PJRT_NPROC=_PJRT_NPROC,
     )
     r = subprocess.run(
         [sys.executable, "tests/_rung2_optimize_parity_subproc.py", "2", "8"],
