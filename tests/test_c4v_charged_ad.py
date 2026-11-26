@@ -24,6 +24,7 @@ jax.config.update("jax_enable_x64", True)
 from _c4v_staggered_fixtures import (
     T_EXACT,
     c4v_fixture,
+    c4v_indices,
     charged_d2,
     fd_plateau,
     frozen_projectors,
@@ -72,6 +73,8 @@ def _site(name):
         return c4v_fixture(U1Symmetry(), [-1, 1], [-2, 0])
     if name == "z4":  # Z4: the pair (1, 3) and the self-partner charge 2
         return c4v_fixture(ZnSymmetry(4), [0, 1], [0, 1])
+    if name == "u1_d3":  # the layout of Hasik's D=3 state: charge 0 twice per face
+        return c4v_fixture(U1Symmetry(), [0, 2, 0], [0, 2])
     raise KeyError(name)
 
 
@@ -568,6 +571,56 @@ def test_a_missing_block_is_canonicalised():
     )
     assert A_out._data.size == A._data.size
     assert _c4v_error(A_out) < 1e-12 and np.isfinite(E)
+
+
+@pytest.mark.parametrize("name", [*_NAMES, "u1_d3"])
+def test_the_c4v_permutations_project_as_symmetrize_c4v(name):
+    """The mean of a buffer x over the 8 permutations is the buffer of
+    symmetrize_c4v(todense(A(x))).  In "u1_d3" each face holds charge 0
+    twice, so the permutations transpose the entries inside a block."""
+    A = _site(name)
+    perms = np.asarray(opt._c4v_permutations(A))
+    x = np.random.default_rng(0).standard_normal(A._data.size)
+    dense = with_data(A, jnp.asarray(x)).todense()
+    want = SymmetricTensor.from_dense(symmetrize_c4v(dense), A.indices)._data
+    np.testing.assert_allclose(x[perms].mean(axis=0), np.asarray(want), atol=1e-14)
+
+
+@pytest.mark.parametrize("axes", [(0, 2, 1, 3, 4), (4, 3, 2, 1, 0)])
+def test_the_start_is_read_by_label(axes):
+    """The C4v group acts on the legs by label, not by position.  A C4v start
+    with its legs in another order is kept as it is, and it has the energy
+    of the same start in the order u, d, l, r, phys."""
+    A = _site("762").transpose(axes)
+    assert A.labels() != _site("762").labels(), "vacuous: same leg order"
+    A_out, _env, E = opt.optimize_gs_ad_c4v_charged(GATE, A, _config(gs_num_steps=0))
+    assert A_out.labels() == A.labels()
+    want = A._data / jnp.linalg.norm(A._data)
+    np.testing.assert_allclose(np.asarray(A_out._data), np.asarray(want), atol=1e-12)
+    A_ref, C, T, _layout = _cold("762")
+    env_ref = _c4v_staggered_to_full_env(C, T)
+    assert abs(E - float(compute_energy_ctm_tensor(A_ref, env_ref, GATE, d=2))) < 1e-9
+
+
+def test_the_projection_of_a_d16_site_reads_blocks_only(monkeypatch):
+    """At D=16 (n = 20480 block entries) the canonical start and the C4v
+    permutations come from the blocks, with no todense.  An n x n projector
+    would hold 3.2 GB.  Each face holds charges 0 and 1 eight times, so the
+    permutations transpose the entries inside each block."""
+    indices = c4v_indices(U1Symmetry(), [0] * 8 + [1] * 8, [0, 1])
+    raw = SymmetricTensor.random_normal(indices, jax.random.PRNGKey(7))
+
+    def refuse(self):
+        raise AssertionError("todense on the charged C4v path")
+
+    with monkeypatch.context() as m:
+        m.setattr(SymmetricTensor, "todense", refuse)
+        A0 = opt._with_every_block(raw)
+        perms = np.asarray(opt._c4v_permutations(A0))
+    x = np.asarray(A0._data)
+    assert x.size == 20480
+    want = SymmetricTensor.from_dense(symmetrize_c4v(raw.todense()), indices)._data
+    np.testing.assert_allclose(x[perms].mean(axis=0), np.asarray(want), atol=1e-14)
 
 
 def test_two_chi_in_one_process():

@@ -8,7 +8,8 @@ L-BFGS and the line searches of the 1x1 loop.  The gradient comes from
 ``charged_c4v_converge``: implicit AD through the #1211 sweep at the layout
 of the cold start, which stays frozen for the run.  The parameter x is A's
 flat block buffer; the site is A(x) = P x / |P x|, with P the C4v
-projection of the buffer.
+projection of the buffer: the mean of x over the 8 permutations of the
+buffer that the C4v elements make (``_c4v_permutations``).
 """
 
 from __future__ import annotations
@@ -20,8 +21,10 @@ import time
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tenax.algorithms import _ctm_tensor_c4v_charged_ad as _engine
+from tenax.algorithms._ctm_c4v_charges import _dual_charge
 from tenax.algorithms._ctm_convergence_policy import CTMNotConvergedError
 from tenax.algorithms._ctm_root_implicit_sym_sectors import BondLayout
 from tenax.algorithms._ctm_tensor_c4v_staggered import (
@@ -47,7 +50,6 @@ from tenax.algorithms._ipeps_optimize_shared import (
 )
 from tenax.algorithms._line_search import LineSearchAborted, hager_zhang_line_search
 from tenax.algorithms._metric_precond import lbfgs_two_loop
-from tenax.algorithms.ipeps import symmetrize_c4v
 from tenax.core.tensor import SymmetricTensor, Tensor
 
 __all__ = [
@@ -55,11 +57,12 @@ __all__ = [
     "_CTM_IGNORED",
     "_CTM_IMPLIED",
     "_CTM_READ",
-    "_c4v_projector_matrix",
+    "_c4v_permutations",
     "_check_charged_c4v_config",
     "_free_layout",
     "_keep_lbfgs_pair",
     "_trial_energy",
+    "_with_every_block",
     "optimize_gs_ad_c4v_charged",
 ]
 
@@ -217,21 +220,64 @@ def _check_charged_c4v_config(config, ctm, A_init) -> None:
             refuse(name, "the loop runs one CTMConfig for the whole run")
 
 
-def _c4v_projector_matrix(A) -> jax.Array:
-    """The C4v projection of A's flat block buffer, as an n x n matrix P.
+# The 8 elements of C4v, in the order of ``symmetrize_c4v``.  Each maps a face
+# to the face whose leg it takes: C4 there, transpose (3, 2, 0, 1, 4), is
+# {u: r, d: l, l: u, r: d} here.
+_C4V_ELEMENTS = (
+    {"u": "u", "d": "d", "l": "l", "r": "r"},  # E
+    {"u": "r", "d": "l", "l": "u", "r": "d"},  # C4
+    {"u": "d", "d": "u", "l": "r", "r": "l"},  # C2
+    {"u": "l", "d": "r", "l": "d", "r": "u"},  # C4^-1
+    {"u": "u", "d": "d", "l": "r", "r": "l"},  # sigma_v
+    {"u": "d", "d": "u", "l": "l", "r": "r"},  # sigma_h
+    {"u": "r", "d": "l", "l": "d", "r": "u"},  # sigma_d
+    {"u": "l", "d": "r", "l": "u", "r": "d"},  # sigma_d'
+)
 
-    P is the Jacobian of the linear map
-    x -> buffer(from_dense(symmetrize_c4v(todense(A(x))))).  It is symmetric
-    and idempotent.  A must hold every block that its charges allow, or P
-    is not square.
+
+def _with_every_block(A: SymmetricTensor) -> SymmetricTensor:
+    """A with every block that its charges allow; a block A lacks is zero.
+
+    Reads the blocks only: no ``todense()``.
     """
+    stored = A.blocks
+    zeros = SymmetricTensor.zeros(A.indices, dtype=A.dtype).blocks
+    return SymmetricTensor(
+        {key: stored.get(key, zero) for key, zero in zeros.items()}, A.indices
+    )
+
+
+def _c4v_permutations(A: SymmetricTensor) -> np.ndarray:
+    """The 8 elements of C4v as permutations of A's flat block buffer.
+
+    Row g of the (8, n) result gives, for each entry of the buffer of g(A),
+    the entry of A's buffer that it holds.  The C4v projection P of a buffer
+    x is then ``x[perms].mean(axis=0)``, and P is never formed as a matrix.
+    An element moves each block to the key of its permuted legs, with a
+    charge dualised where the two legs have different flows, and transposes
+    the block.  The legs are found by label, so any leg order works.  Cost
+    O(n), with no ``todense()``.  A must hold every block that its charges
+    allow (``_with_every_block``), and its four faces must carry equal
+    flow-weighted charges at each position (``_is_charged_c4v``).
+    """
+    labels = A.labels()
+    flows = [idx.flow for idx in A.indices]
+    sym = A.indices[0].symmetry
     treedef = jax.tree_util.tree_structure(A)
-
-    def project(x):
-        dense = jax.tree_util.tree_unflatten(treedef, [x]).todense()
-        return SymmetricTensor.from_dense(symmetrize_c4v(dense), A.indices)._data
-
-    return jax.jacfwd(project)(A._data)
+    # The blocks of a buffer that holds the position of each entry.
+    position = jax.tree_util.tree_unflatten(treedef, [np.arange(A._data.size)])
+    rows = []
+    for element in _C4V_ELEMENTS:
+        axes = [labels.index(element.get(label, label)) for label in labels]
+        moved = {}
+        for key, block in position.blocks.items():
+            new_key = tuple(
+                key[a] if flows[a] == flows[i] else _dual_charge(sym, key[a])
+                for i, a in enumerate(axes)
+            )
+            moved[new_key] = np.transpose(block, axes)
+        rows.append(np.concatenate([moved[key].ravel() for key in position.blocks]))
+    return np.stack(rows)
 
 
 def _trial_energy(A, warm, layout, ctm, gate, d) -> float:
@@ -274,9 +320,9 @@ def optimize_gs_ad_c4v_charged(hamiltonian_gate, A_init, config):
 
     Args:
         hamiltonian_gate: the 2-site gate, shape ``(d, d, d, d)``.
-        A_init: a charged C4v ``SymmetricTensor``.  It need not be C4v or
-            hold every block: the loop rebuilds it with every valid block
-            and projects it to C4v.
+        A_init: a charged C4v ``SymmetricTensor``, its legs in any order.
+            It need not be C4v or hold every block: the loop rebuilds it
+            with every valid block and projects it to C4v.
         config: an ``iPEPSConfig`` that ``_check_charged_c4v_config`` accepts.
 
     Returns:
@@ -302,18 +348,19 @@ def optimize_gs_ad_c4v_charged(hamiltonian_gate, A_init, config):
     )
     d = gate.shape[0]
 
-    # Rebuild with every valid block, so P is square (Review Focus 4).
-    A0 = SymmetricTensor.from_dense(A_init.todense(), A_init.indices)
+    # Rebuild with every valid block, so that each C4v element permutes the
+    # buffer (Review Focus 4).
+    A0 = _with_every_block(A_init)
     treedef = jax.tree_util.tree_structure(A0)
-    P = _c4v_projector_matrix(A0)
-    x = P @ A0._data
+    perms = jnp.asarray(_c4v_permutations(A0))
+    x = jnp.mean(A0._data[perms], axis=0)
     x_norm = float(jnp.linalg.norm(x))
     if x_norm == 0.0:
         raise ValueError("charged C4v AD: A_init has no C4v component")
     x = x / x_norm
 
     def site(x_):
-        y = P @ x_
+        y = jnp.mean(x_[perms], axis=0)
         return jax.tree_util.tree_unflatten(treedef, [y / jnp.linalg.norm(y)])
 
     record: dict = {}

@@ -605,7 +605,8 @@ A, env, E = optimize_gs_ad(sublattice_rotate_gate(heisenberg_gate()),
 
 **Options and caveats:**
 - The start is projected to C4v and rebuilt with every block its charges
-  allow; it need not be C4v.
+  allow; it need not be C4v. Its legs can be in any order: the projection
+  finds them by label.
 - The layout L stays frozen for the run. After each evaluation a free
   ranking runs at the fixed point; a different layout is logged once and
   listed in `history["layout_mismatch_steps"]` (with `return_history=True`),
