@@ -372,9 +372,13 @@ class TestChargedC4v:
     """Charged C4v input: the 2-sublattice sweep and its energy (#762, #763)."""
 
     def test_guard_refuses_a_general_ctm_env(self, heisenberg_gate):
-        """An env from the general ctm_tensor was not built for charged C4v A (#1210)."""
+        """The general ctm_tensor env of todense(A) is not an env of charged C4v A.
+
+        The general ``ctm_tensor`` refuses the charged ``A`` itself (#1210), so
+        the env comes from the dense tensor, as a user would get one.
+        """
         A = c4v_fixture(U1Symmetry(), [-1, 1], [-2, 0])
-        env, _ = ctm_tensor(A, chi=4, max_iter=1)
+        env, _ = ctm_tensor(DenseTensor(A.todense(), A.indices), chi=4, max_iter=1)
         with pytest.raises(ValueError, match="not built for this A"):
             compute_energy_ctm_tensor(A, env, heisenberg_gate, d=2)
 

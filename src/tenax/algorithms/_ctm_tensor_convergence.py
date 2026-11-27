@@ -35,6 +35,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from tenax.algorithms import _ctm_eager_jit as _ej
+from tenax.algorithms._ctm_c4v_charges import _dual, _is_charged_c4v, _pairs
 from tenax.algorithms._ctm_hold import (
     DEFAULT_HOLD_DIRECTIONS,
     DEFAULT_HOLD_EXTENSION,
@@ -1149,6 +1150,63 @@ def _check_min_iter(min_iter) -> None:
         raise ValueError(f"min_iter must be non-negative; got {min_iter}.")
 
 
+# The two bonds of a 1-site cell.  A bond joins a leg to the opposite face of
+# the neighbour, which on a 1-site cell is the same tensor.
+_CELL_BONDS = (("horizontal", "r", "l"), ("vertical", "d", "u"))
+
+
+def _check_cell_bonds(A: Tensor) -> None:
+    """Refuse a 1-site ``SymmetricTensor`` cell with a bond that does not contract.
+
+    The block-sparse contraction pairs blocks by charge value, so the two legs
+    of a bond need opposite flows and identical charges (#834).  On bonds whose
+    legs carry negated charges, the CTM returned an energy above the physical
+    bound, or an env that the energy could not contract (#1210).  A
+    ``DenseTensor`` pairs legs by position and is not checked.  Index metadata
+    only.
+
+    Raises:
+        ValueError: a bond does not contract.  When every bond pairs negated
+            charges, the message points to the 2-sublattice state
+            ``(A, negate(A))``.
+    """
+    if not isinstance(A, SymmetricTensor):
+        return
+    legs = {idx.label: idx for idx in A.indices}
+    if not {"u", "d", "l", "r"} <= set(legs):
+        return
+    sym = A.indices[0].symmetry
+    for name, x, y in _CELL_BONDS:
+        if _pairs(legs[x], legs[y]):
+            continue
+        msg = (
+            f"ctm_tensor: the {name} bond ({x} of one site, {y} of the next) "
+            f"does not contract: {x} is {legs[x].flow.name} with charges "
+            f"{legs[x].charges.tolist()}, and {y} is {legs[y].flow.name} with "
+            f"charges {legs[y].charges.tolist()}.  The two legs of a bond need "
+            "opposite flows and identical charges (#1210)."
+        )
+        negated = not sym.is_fermionic and all(
+            legs[p].flow != legs[q].flow
+            and np.array_equal(legs[p].charges, _dual(sym, legs[q].charges))
+            for _, p, q in _CELL_BONDS
+        )
+        if negated:
+            c4v = (
+                ", or, for a C4v-symmetric A, ctm_tensor_c4v(A)"
+                if _is_charged_c4v(A)
+                else ""
+            )
+            msg += (
+                "  Every bond pairs negated charges, so A describes the "
+                "2-sublattice state (A, negate(A)): negate(A) replaces every "
+                "charge q of A with sym.dual(q) and keeps the data "
+                "(_negate_charges in tenax.algorithms._ctm_c4v_charges).  Run "
+                f"it with ctm_tensor_2site(A, negate(A)){c4v}."
+            )
+        raise ValueError(msg)
+
+
 def ctm_tensor(
     A: Tensor,
     chi: int,
@@ -1171,7 +1229,12 @@ def ctm_tensor(
 
     Args:
         A:                 iPEPS site tensor (DenseTensor or SymmetricTensor)
-                           with 5 legs ``(u, d, l, r, phys)``.
+                           with 5 legs ``(u, d, l, r, phys)``.  The bonds of a
+                           ``SymmetricTensor`` cell must contract: ``r`` with
+                           ``l`` and ``d`` with ``u``, each with opposite flows
+                           and identical charges.  Otherwise ``ValueError``,
+                           which names the bond (#1210).  Charged C4v input
+                           fails this check; run it with :func:`ctm_tensor_c4v`.
         chi:               Environment bond dimension.
         max_iter:          Maximum CTM iterations.
         conv_tol:          Convergence tolerance on corner singular values.
@@ -1331,6 +1394,9 @@ def ctm_tensor(
         ``test_eps_t_blindness_727.py`` pins the table.
     """
     _check_min_iter(min_iter)
+    # Before the densify fallback below, which would hide a bond that does
+    # not contract (#1210).
+    _check_cell_bonds(A)
     # Determine sweep function: use paired moves for SymmetricTensors
     # with non-trivial virtual charges (fixes charge-sector mismatch
     # from independent projectors in standard 4-move CTM).  When virtual
