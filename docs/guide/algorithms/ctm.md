@@ -21,6 +21,13 @@ The general-purpose CTM using the Tensor protocol (works with both
 - For fermionic ``SymmetricTensor``, automatically uses paired moves
   (``_ctm_tensor_paired_moves``) to prevent charge-sector divergence.
   Falls back to ``DenseTensor`` when paired moves cannot be applied.
+- The bonds of a ``SymmetricTensor`` cell must contract: ``r`` with ``l`` and
+  ``d`` with ``u``, each with opposite flows and identical charges. Otherwise
+  ``ctm_tensor`` raises ``ValueError`` and names the bond (#1210). A
+  ``DenseTensor`` pairs legs by position, so it is not checked. Charged C4v
+  input (below) fails this check: its bonds pair negated charges, so ``A``
+  describes the 2-sublattice state ``(A, negate(A))``. Run it with
+  ``ctm_tensor_c4v`` or ``ctm_tensor_2site(A, negate(A))``.
 
 ### C4v CTM (``ctm_tensor_c4v``)
 
@@ -65,8 +72,9 @@ Poilblanc and Becca, SciPost Phys. 10, 012 (2021)). ``ctm_tensor_c4v`` runs a
   states and give the energies of chi=2, 6 and 8. Read the kept dimension
   from ``env.C1`` when you scan chi.
 - ``compute_energy_ctm_tensor`` raises ``ValueError`` for a charged ``A`` with
-  an env that was not built for it. An example is an env from the general
-  ``ctm_tensor``, which does not support charged C4v input yet (#1210).
+  an env that was not built for it. An example is the env of the general
+  ``ctm_tensor`` on ``todense(A)``. The general ``ctm_tensor`` refuses the
+  charged ``A`` itself and names the bond (#1210).
 - Cost, on a charged D=2 U(1) state (the #762 fixture, CPU,
   ``conv_tol=1e-10``): the 2-sublattice sweep took 12 s at chi=8 (54 sweeps)
   and 30 s at chi=16 (164 sweeps). ``ctm_tensor_c4v`` on ``todense(A)`` took
@@ -221,8 +229,8 @@ See {doc}`ipeps_ad_paths` for the complete recommended configuration.
 from tenax import ctm_tensor, ctm_tensor_c4v, compute_energy_ctm_tensor
 
 # A is an iPEPS site tensor (DenseTensor or SymmetricTensor)
-# with 5 legs (u, d, l, r, phys).  ctm_tensor does not support a charged C4v
-# SymmetricTensor yet (#1210); ctm_tensor_c4v does.
+# with 5 legs (u, d, l, r, phys).  ctm_tensor refuses a charged C4v
+# SymmetricTensor with a ValueError (#1210); ctm_tensor_c4v runs it.
 env, _ = ctm_tensor(A, chi=32, max_iter=100, conv_tol=1e-10)  # (env, max truncation error)
 E = compute_energy_ctm_tensor(A, env, hamiltonian_gate, d=2)
 

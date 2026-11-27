@@ -40,6 +40,7 @@ from tenax.algorithms._ctm_tensor_c4v_staggered import (
     _check_c4v_staggered_invariants,
     _ctm_tensor_c4v_staggered,
 )
+from tenax.algorithms._ctm_tensor_convergence import ctm_tensor
 from tenax.algorithms._ctm_tensor_init import (
     CTMTensorEnv,
     _build_double_layer_tensor,
@@ -48,7 +49,7 @@ from tenax.algorithms._ctm_tensor_init import (
 from tenax.algorithms._ctm_tensor_moves import _flip_leg_flow
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import FermionParity, U1Symmetry, ZnSymmetry
+from tenax.core.symmetry import FermionicU1, FermionParity, U1Symmetry, ZnSymmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 IN, OUT = FlowDirection.IN, FlowDirection.OUT
@@ -640,3 +641,79 @@ def test_projectors_at_refuse_a_layout_the_corner_cannot_hold():
         _c4v_staggered_projectors_at(Qf, BondLayout.from_dims({7: 1}))
     with pytest.raises(ValueError, match="keeps 3 states of charge 0"):
         _c4v_staggered_projectors_at(Qf, BondLayout.from_dims({0: 3}))
+
+
+# ------------------------------------------------------------------ #
+# The general ctm_tensor refuses a bond that does not contract (#1210) #
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.parametrize("name", ["762", "test", "z3", "z4"])
+def test_ctm_tensor_refuses_charged_c4v_input(name):
+    """The bonds of charged C4v input pair negated charges (#1210).
+
+    On the #762 site the general ``ctm_tensor`` returned an energy above the
+    bound 0.5, and on the ``small_peps_u1`` site (``"test"``) it densified
+    ``A`` and returned an env that the energy then could not contract.
+    """
+    with pytest.raises(ValueError, match=r"the horizontal bond \(r of") as exc:
+        ctm_tensor(_site(name), chi=4, max_iter=1)
+    msg = str(exc.value)
+    assert "ctm_tensor_2site(A, negate(A))" in msg
+    assert "ctm_tensor_c4v(A)" in msg
+
+
+def test_ctm_tensor_refuses_negated_bonds_of_a_cell_that_is_not_c4v():
+    """Every bond pairs negated charges, but the faces differ: no C4v hint."""
+    faces = (
+        ("u", OUT, [-1, 1]),
+        ("d", IN, [1, -1]),
+        ("l", OUT, [0, 2]),
+        ("r", IN, [0, -2]),
+    )
+    with pytest.raises(ValueError, match="horizontal bond") as exc:
+        ctm_tensor(_layout(U1Symmetry(), faces, [-2, 0]), chi=4, max_iter=1)
+    msg = str(exc.value)
+    assert "ctm_tensor_2site(A, negate(A))" in msg
+    assert "ctm_tensor_c4v" not in msg
+
+
+def test_ctm_tensor_names_the_vertical_bond_of_a_stripe():
+    """Only the vertical bond pairs negated charges: (A, negate(A)) is wrong."""
+    q, qd = [-1, 1], [1, -1]
+    faces = (("u", OUT, q), ("d", IN, qd), ("l", OUT, q), ("r", IN, q))
+    with pytest.raises(ValueError, match="vertical bond") as exc:
+        ctm_tensor(_layout(U1Symmetry(), faces, [-2, 0]), chi=4, max_iter=1)
+    assert "negate" not in str(exc.value)
+
+
+def test_ctm_tensor_names_a_bond_whose_legs_share_a_flow():
+    """Identical charges are not enough: the two legs need opposite flows."""
+    f = [0, 1]
+    faces = (("u", OUT, f), ("d", OUT, f), ("l", OUT, f), ("r", IN, f))
+    with pytest.raises(ValueError, match="vertical bond") as exc:
+        ctm_tensor(_layout(ZnSymmetry(2), faces, f), chi=4, max_iter=1)
+    assert "negate" not in str(exc.value)
+
+
+def test_ctm_tensor_points_no_fermionic_cell_to_negate():
+    """``_negate_charges`` refuses fermions, so the message must not name it."""
+    q, qd = [-1, 1], [1, -1]
+    faces = (("u", OUT, q), ("d", IN, qd), ("l", OUT, q), ("r", IN, qd))
+    with pytest.raises(ValueError, match="horizontal bond") as exc:
+        ctm_tensor(_layout(FermionicU1(), faces, [-2, 0]), chi=4, max_iter=1)
+    assert "negate" not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["z2", "z4_self_dual", "uniform_u1", "multiset_equal", "dense_762", "fermionic"],
+)
+def test_ctm_tensor_accepts_bonds_that_contract(name):
+    """Self-dual charges, the uniform U(1), fermions and dense input still run.
+
+    ``dense_762`` keeps the charged index metadata, but a ``DenseTensor`` pairs
+    the legs by position, so its bonds are not checked.
+    """
+    env, _ = ctm_tensor(_site(name), chi=4, max_iter=1)
+    assert isinstance(env, CTMTensorEnv)
