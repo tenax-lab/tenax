@@ -144,12 +144,27 @@ def test_negate_refuses_fermionic_and_dense_input():
         _negate_charges(_site("dense_762"))
 
 
-def _split_all(T):
-    """``T`` with every fused leg split, depth first, until no leg has ``fuse_info``."""
-    for axis, idx in enumerate(T.indices):
-        if idx.fuse_info is not None:
-            return _split_all(split_index(T, axis))
-    return T
+def _check_split(T, B, axes):
+    """Each fused leg of ``B = negate(T)`` in ``axes`` splits as that leg of ``T``.
+
+    One leg at a time: under a ket-bra swap on every leg at once, the real
+    double layer does not change, so splitting all legs first would hide a
+    split that swaps them.  Recurses into the two parents of each split leg.
+    """
+    sym = T.indices[0].symmetry
+    for axis in axes:
+        if T.indices[axis].fuse_info is None:
+            continue
+        ref, got = split_index(T, axis), split_index(B, axis)
+        assert [(i.label, i.flow) for i in got.indices] == [
+            (i.label, i.flow) for i in ref.indices
+        ]
+        for g, r in zip(got.indices, ref.indices):
+            np.testing.assert_array_equal(g.charges, sym.dual(r.charges))
+        np.testing.assert_array_equal(
+            np.asarray(got.todense()), np.asarray(ref.todense())
+        )
+        _check_split(ref, got, (axis, axis + 1))
 
 
 @pytest.mark.parametrize("case", ["double_layer", "nested", "bar"])
@@ -168,15 +183,7 @@ def test_negate_keeps_fused_legs_splittable(name, case):
         "nested": fuse_indices(a, 0, 1, "ud2", IN),
         "bar": a.bar(),
     }[case]
-    sym = T.indices[0].symmetry
-    ref = _split_all(T)
-    got = _split_all(_negate_charges(T))
-    assert [(i.label, i.flow) for i in got.indices] == [
-        (i.label, i.flow) for i in ref.indices
-    ]
-    for g, r in zip(got.indices, ref.indices):
-        np.testing.assert_array_equal(g.charges, sym.dual(r.charges))
-    np.testing.assert_array_equal(np.asarray(got.todense()), np.asarray(ref.todense()))
+    _check_split(T, _negate_charges(T), range(T.ndim))
 
 
 @pytest.mark.parametrize("name", ["z2", "762", "z3"])
