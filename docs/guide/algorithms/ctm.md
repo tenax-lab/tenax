@@ -42,9 +42,9 @@ OUT with charges ``q``, and ``d``, ``r`` IN with ``sym.dual(q)``. Any other
 layout raises ``ValueError``. A tensor that conserves the uniform U(1) (``d``
 IN with the charges of ``u``) is not C4v input; use ``ctm_tensor``. If a
 virtual charge is not self-dual (U(1) ``[-1, 1]``, or Z3 charge 1), the bonds
-conserve the staggered U(1), and ``A`` describes the 2-sublattice state
-``(A, negate(A))``. ``negate`` replaces each charge ``q`` with
-``sym.dual(q)`` and keeps the data, so this is the uniform state of
+conserve the staggered U(1) (staggered Z_n for Z_n input), and ``A`` describes
+the 2-sublattice state ``(A, negate(A))``. ``negate`` replaces each charge
+``q`` with ``sym.dual(q)`` and keeps the data, so this is the uniform state of
 ``todense(A)``. peps-torch builds its U(1) C4v state the same way (Hasik,
 Poilblanc and Becca, SciPost Phys. 10, 012 (2021)). ``ctm_tensor_c4v`` runs a
 2-sublattice sweep on such input (#762, #763), and
@@ -199,9 +199,12 @@ full rank but limit-cycles, with the energy ranging over 3.4e-3--4.9e-3 across
 the last 40 of 240 sweeps.
 
 For ``qr`` or ``eigh`` on a C4v-symmetric state, use ``ctm_tensor_c4v`` -- a
-different function that calls the same projector, runs all three methods at full
-rank, and agrees with ``recipe="2x2"`` to 1e-12. The SymmetricTensor/block-sparse
-``"qr"`` path is a later phase.
+different function that calls the same projector and runs all three methods at
+full rank. It does not always reach the fixed point of ``recipe="2x2"`` (#833).
+On 6 random C4v-symmetric D=3 states at chi=12, 4 agree with ``2x2`` to 1e-14.
+On the other 2, both runs converge, and the energies differ by 7.6e-4 and
+1.7e-3 (relative). It is not known which fixed point is correct. The
+SymmetricTensor/block-sparse ``"qr"`` path is a later phase.
 ```
 
 ### AD backward method
