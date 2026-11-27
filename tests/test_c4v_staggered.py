@@ -49,7 +49,7 @@ from tenax.algorithms._ctm_tensor_init import (
 from tenax.algorithms._ctm_tensor_moves import _flip_leg_flow
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
-from tenax.core.symmetry import FermionParity, U1Symmetry, ZnSymmetry
+from tenax.core.symmetry import FermionicU1, FermionParity, U1Symmetry, ZnSymmetry
 from tenax.core.tensor import DenseTensor, SymmetricTensor
 
 IN, OUT = FlowDirection.IN, FlowDirection.OUT
@@ -693,6 +693,15 @@ def test_ctm_tensor_names_a_bond_whose_legs_share_a_flow():
     faces = (("u", OUT, f), ("d", OUT, f), ("l", OUT, f), ("r", IN, f))
     with pytest.raises(ValueError, match="vertical bond") as exc:
         ctm_tensor(_layout(ZnSymmetry(2), faces, f), chi=4, max_iter=1)
+    assert "negate" not in str(exc.value)
+
+
+def test_ctm_tensor_points_no_fermionic_cell_to_negate():
+    """``_negate_charges`` refuses fermions, so the message must not name it."""
+    q, qd = [-1, 1], [1, -1]
+    faces = (("u", OUT, q), ("d", IN, qd), ("l", OUT, q), ("r", IN, qd))
+    with pytest.raises(ValueError, match="horizontal bond") as exc:
+        ctm_tensor(_layout(FermionicU1(), faces, [-2, 0]), chi=4, max_iter=1)
     assert "negate" not in str(exc.value)
 
 
