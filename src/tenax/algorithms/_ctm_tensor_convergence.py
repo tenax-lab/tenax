@@ -1032,7 +1032,8 @@ _RECIPE_1X1_DEPRECATION = (
     "on the same states. If you specifically need projector_method='qr' or "
     "'eigh' -- which '2x2' ignores, since it hardcodes Fishman SVD -- and your "
     "state is C4v-symmetric, use ctm_tensor_c4v(), a different function that "
-    "runs all three methods correctly and agrees with '2x2' to 1e-12. "
+    "runs all three methods at full rank; on some D=3 states it converges to a "
+    "different fixed point than '2x2' (#833). "
     "Note C4v symmetrization of the *state* does not rescue this recipe; only "
     "changing the recipe or the engine does."
 )

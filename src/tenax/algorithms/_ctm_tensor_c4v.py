@@ -262,14 +262,15 @@ def ctm_tensor_c4v(
     ``u``, ``l`` OUT with charges q, and ``d``, ``r`` IN with
     ``sym.dual(q)``.  If a virtual charge q is not self-dual
     (``q != sym.dual(q)``, as for U(1) ``[-1, 1]`` or Z3 charge 1), the bonds
-    conserve the staggered U(1), and ``A`` describes the 2-sublattice state
-    ``(A, negate(A))``: ``A`` on the sites with x + y even, and ``A`` with
-    every charge replaced by its dual on the others.  The data is the same,
-    so this is the uniform state of ``A.todense()``.  peps-torch builds its
-    U(1) C4v state the same way (``IPEPS_ABELIAN_C4V.get_bipartite_state``;
-    Hasik, Poilblanc and Becca, SciPost Phys. 10, 012 (2021)).  The env that
-    comes back is that of an A-site; measure it with
-    ``compute_energy_ctm_tensor(A, env, gate, d)`` and the same ``A``.
+    conserve the staggered U(1) (staggered Z_n for Z_n input), and ``A``
+    describes the 2-sublattice state ``(A, negate(A))``: ``A`` on the sites
+    with x + y even, and ``A`` with every charge replaced by its dual on the
+    others.  The data is the same, so this is the uniform state of
+    ``A.todense()``.  peps-torch builds its U(1) C4v state the same way
+    (``IPEPS_ABELIAN_C4V.get_bipartite_state``; Hasik, Poilblanc and Becca,
+    SciPost Phys. 10, 012 (2021)).  The env that comes back is that of an
+    A-site; measure it with ``compute_energy_ctm_tensor(A, env, gate, d)``
+    and the same ``A``.
 
     Routing:
 
