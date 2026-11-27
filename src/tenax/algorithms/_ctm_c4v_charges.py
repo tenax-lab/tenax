@@ -23,12 +23,13 @@ __all__ = [
     "_first_unequal_c4v_face",
     "_is_charged_c4v",
     "_negate_charges",
+    "_negate_index",
     "_pairs",
 ]
 
 import numpy as np
 
-from tenax.core.index import TensorIndex
+from tenax.core.index import FuseInfo, TensorIndex
 from tenax.core.symmetry import BaseSymmetry
 from tenax.core.tensor import SymmetricTensor, Tensor
 
@@ -51,13 +52,44 @@ def _pairs(x: TensorIndex, y: TensorIndex) -> bool:
     return x.flow != y.flow and np.array_equal(x.charges, y.charges)
 
 
+def _negate_index(sym: BaseSymmetry, idx: TensorIndex) -> TensorIndex:
+    """``idx`` with every charge q replaced by ``sym.dual(q)``, at every depth.
+
+    A fused leg keeps its ``fuse_info``, with the parents negated the same way
+    and the fused flow kept, so ``split_index`` gives the negated parents.  The
+    split is correct because ``_fuse_layout`` orders a fused block by the flat
+    position ``i * db + j`` of its basis states, and negation moves none.
+    """
+    neg = TensorIndex.from_charges(
+        sym, _dual(sym, idx.charges), idx.flow, label=idx.label
+    )
+    if idx.fuse_info is None:
+        return neg
+    out = TensorIndex(
+        symmetry=sym,
+        sectors=neg.sectors,
+        multiplicities=neg.multiplicities,
+        flow=neg.flow,
+        label=neg.label,
+        fuse_info=FuseInfo(
+            parent_indices=tuple(
+                _negate_index(sym, p) for p in idx.fuse_info.parent_indices
+            ),
+            fused_flow=idx.fuse_info.fused_flow,
+        ),
+    )
+    object.__setattr__(out, "_charges_cache", neg.charges)
+    return out
+
+
 def _negate_charges(T: Tensor) -> SymmetricTensor:
     """Replace every charge q of ``T`` by ``sym.dual(q)``: index charges and block keys.
 
     Flows, labels and block data are kept, so ``todense()`` does not change.
     ``_negate_charges(A)`` is the tensor on the other sublattice of a charged
-    C4v state.  Cost O(blocks), no ``todense()``.  The new indices are plain:
-    the fusion metadata of fused legs is dropped.
+    C4v state.  Cost O(blocks), no ``todense()``.  A fused leg keeps its
+    fusion metadata, with negated parents (``_negate_index``), so
+    ``split_index`` works on it.
 
     Raises:
         TypeError: ``T`` is not a ``SymmetricTensor``.
@@ -73,12 +105,7 @@ def _negate_charges(T: Tensor) -> SymmetricTensor:
         raise NotImplementedError(
             "_negate_charges: fermionic symmetries are not supported"
         )
-    indices = tuple(
-        TensorIndex.from_charges(
-            sym, _dual(sym, idx.charges), idx.flow, label=idx.label
-        )
-        for idx in T.indices
-    )
+    indices = tuple(_negate_index(sym, idx) for idx in T.indices)
     blocks = {
         tuple(int(q) for q in _dual(sym, key)): block for key, block in T.blocks.items()
     }
