@@ -46,6 +46,7 @@ from tenax.algorithms._ctm_tensor_init import (
     initialize_ctm_tensor_env,
 )
 from tenax.algorithms._ctm_tensor_moves import _flip_leg_flow
+from tenax.algorithms._tensor_utils import fuse_indices, split_index
 from tenax.contraction.contractor import contract
 from tenax.core.index import FlowDirection, TensorIndex
 from tenax.core.symmetry import FermionParity, U1Symmetry, ZnSymmetry
@@ -141,6 +142,68 @@ def test_negate_refuses_fermionic_and_dense_input():
         _negate_charges(_site("fermionic"))
     with pytest.raises(TypeError, match="SymmetricTensor"):
         _negate_charges(_site("dense_762"))
+
+
+def _check_split(T, B, axes):
+    """Each fused leg of ``B = negate(T)`` in ``axes`` splits as that leg of ``T``.
+
+    One leg at a time: under a ket-bra swap on every leg at once, the real
+    double layer does not change, so splitting all legs first would hide a
+    split that swaps them.  Recurses into the two parents of each split leg.
+    """
+    sym = T.indices[0].symmetry
+    for axis in axes:
+        if T.indices[axis].fuse_info is None:
+            continue
+        ref, got = split_index(T, axis), split_index(B, axis)
+        assert [(i.label, i.flow) for i in got.indices] == [
+            (i.label, i.flow) for i in ref.indices
+        ]
+        for g, r in zip(got.indices, ref.indices):
+            np.testing.assert_array_equal(g.charges, sym.dual(r.charges))
+        np.testing.assert_array_equal(
+            np.asarray(got.todense()), np.asarray(ref.todense())
+        )
+        _check_split(ref, got, (axis, axis + 1))
+
+
+@pytest.mark.parametrize("case", ["double_layer", "nested", "bar"])
+@pytest.mark.parametrize("name", ["762", "z3"])
+def test_negate_keeps_fused_legs_splittable(name, case):
+    """Splitting ``negate(T)`` gives the split of ``T`` with dual charges.
+
+    ``_negate_charges`` dropped ``fuse_info``, so ``split_index`` raised on the
+    D2 legs of a charged env (a review minor of #1211).  ``nested`` fuses two D2
+    legs, so the parents must be negated at every depth.  ``bar`` flips the
+    fused flows, so the flow recorded at fusion time must be kept.
+    """
+    a = _build_double_layer_tensor(_site(name))
+    T = {
+        "double_layer": a,
+        "nested": fuse_indices(a, 0, 1, "ud2", IN),
+        "bar": a.bar(),
+    }[case]
+    _check_split(T, _negate_charges(T), range(T.ndim))
+
+
+@pytest.mark.parametrize("name", ["z2", "762", "z3"])
+def test_split_index_takes_the_t1_and_t4_d2_legs_of_a_c4v_env(name):
+    """``split_index`` on T1.u2 and T4.l2 works for charged input as for Z2.
+
+    T2 and T3 dual their D2 leg (``_flip_leg_flow``), and ``TensorIndex.dual``
+    builds an index with no ``fuse_info``, so those do not split for any input.
+    """
+    A = _site(name)
+    sym, D = A.indices[0].symmetry, A.indices[0].dim
+    env = c4v.ctm_tensor_c4v(A, chi=4, max_iter=2)
+    for field, label in (("T1", "u2"), ("T4", "l2")):
+        t = getattr(env, field)
+        axis = list(t.labels()).index(label)
+        got = split_index(t, axis)
+        assert all(_conserves(sym, key, got.indices) for key in got.blocks)
+        dense = np.asarray(t.todense())
+        shape = dense.shape[:axis] + (D, D) + dense.shape[axis + 1 :]
+        np.testing.assert_array_equal(np.asarray(got.todense()), dense.reshape(shape))
 
 
 def test_pairs_needs_opposite_flows_and_equal_charges():
